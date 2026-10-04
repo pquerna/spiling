@@ -8,7 +8,7 @@ Licensed under the Open Software License version 3.0
 
 ## Canonical license and scope
 
-Original Spiling code and documentation are licensed under the **Open Software License version 3.0**, SPDX identifier **`OSL-3.0`**. [Root LICENSE.md](../LICENSE.md) is the canonical repository copy. Its fenced text is the unmodified license, not a summary or a project-specific license variant.
+Original Spiling code and documentation are licensed under the **Open Software License version 3.0**, SPDX identifier **`OSL-3.0`**. [Root LICENSE.md](../LICENSE.md) is the canonical repository copy. It presents the official legal wording as native Markdown headings, paragraphs, a notice blockquote, and subclause bullets; formatting does not change the license text. It is not a summary or a project-specific license variant.
 
 Official references:
 
