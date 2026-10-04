@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+Cargo.lock
+pnpm-lock.yaml
+LICENSE.md
+docs/reserach/
+node_modules/
+target/
+artifacts/
+.cache/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/binaries/
+**/dist/
+packages/protocol/src/generated.ts

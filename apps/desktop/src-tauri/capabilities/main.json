@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Local Spiling workbench engine supervision and runtime diagnostics only",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "allow-engine-start",
+    "allow-engine-status",
+    "allow-engine-stop",
+    "allow-engine-restart",
+    "allow-engine-triangle",
+    "allow-engine-interrupt",
+    "allow-runtime-info"
+  ]
+}

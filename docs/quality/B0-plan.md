@@ -20,7 +20,7 @@ B0 delivers a packaged Tauri 3/CEF workbench, a supervised Rust sidecar, a CLI u
 - `packages/viewport`: Three.js WebGPU rendering and resource disposal; no Tauri dependency.
 - `tools`: reproducible bootstrap, generation/drift checks, verification and packaging.
 
-Each owning area receives current AGENT-RULES.md and AGENT-VISION.md. Source and manifests use OSL-3.0 notices. Research stays ignored. No empty future domain crates.
+Each owning area receives current AGENT-RULES.md and AGENT-VISION.md. Source and manifests use OSL-3.0 notices. Private research lives in the separate `/root/spiling-brain` repository, not this checkout. No empty future domain crates.
 
 ## Dependency order
 

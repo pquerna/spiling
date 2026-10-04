@@ -12,7 +12,7 @@ This file defines repository-wide working rules and architectural boundaries. Re
 
 ## 1. Status and scope
 
-The repository is at the documentation-first stage. The layout and stack below are the implementation direction, not a claim that those components exist or have passed acceptance gates. Do not create code or placeholder workspaces as part of documentation work.
+The repository implements B0 runtime bootstrap: engine/CLI diagnostics, a CEF shell, generated contracts, and a WebGPU synthetic triangle. Geometry import, project authoring, and manufacturing remain planned, not implemented. [B0 evidence](docs/quality/B0-evidence.md) governs acceptance claims; source layout or CI targets alone do not establish platform support. Do not create placeholder workspaces as part of documentation work.
 
 Initial implementation direction:
 
@@ -82,25 +82,30 @@ A change is incomplete if the documentation describes a different system. Read b
 
 Keep historical rationale in `docs/adr/`, measured milestone evidence in `docs/quality/`, and chronological changes in version control or a project changelog when present. An ADR records a decision and evidence; the agent files state the resulting current rules and vision. Link history only when it helps explain a current constraint. Do not require the session paste or a private external conversation to understand binding rules.
 
+Private research, planning, ideas, Markdown, and agent knowledge live in the separate `/root/spiling-brain` checkout (`pquerna/spiling-brain`), not this repository's `docs/reserach/`. Read its own agent guide before changing it; every brain change must be committed and safely pushed to main, fetching/rebasing concurrent updates without force-pushing. Brain proposals do not override implementation contracts. Adopt accepted constraints into the relevant public canonical documents without exposing private material or requiring private-repository access to understand the code.
+
 ## 3. Repository shape and dependency boundaries
 
 Use directories to express ownership first. Create a separate crate only for justified dependency isolation, separate compilation, or another consumer—not for every conceptual subsystem.
 
-| Planned area | Ownership |
-| --- | --- |
-| `apps/desktop/src/` | Workbench features and transient UI state |
-| `apps/desktop/src-tauri/` | Shell, engine supervision, native dialogs, binary bridge, packaging |
-| `apps/engine/` | Sidecar entry point and composition of native services |
-| `apps/cli/` | Client commands using the same protocol and services; no alternate planner |
-| `crates/contracts/` | IDs, revisions, commands, events, errors, manifest schemas |
-| `crates/core/` | Project transactions, undo, persistence/recovery, artifacts, jobs |
-| `crates/geometry/` | Kernel adapter, import, tessellation, sections, capability contract |
-| `crates/manufacturing/` | Planning, operations/resources, backend, packaging, emitted-program verification |
-| `packages/protocol/` | Generated TypeScript contracts and binary decoder; no UI dependencies |
-| `packages/viewport/` | Scene, picking, GPU resources, mesh/toolpath rendering |
-| `fixtures/`, `bench/` | Redistributable correctness corpus and reproducible workloads |
-| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence |
-| `tools/` | Bootstrap, generation, and release tooling |
+B0 establishes contracts and a shared `crates/engine-client` used by the CLI and shell; that second crate is justified by two consumers. The domain areas below describe ownership as they are introduced, not a requirement to create empty future crates.
+
+| Planned area                                   | Ownership                                                                        |
+| ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| `apps/desktop/src/`                            | Workbench features and transient UI state                                        |
+| `apps/desktop/src-tauri/`                      | Shell, engine supervision, native dialogs, binary bridge, packaging              |
+| `apps/engine/`                                 | Sidecar entry point and composition of native services                           |
+| `apps/cli/`                                    | Client commands using the same protocol and services; no alternate planner       |
+| `crates/contracts/`                            | IDs, revisions, commands, events, errors, manifest schemas                       |
+| `crates/engine-client/`                        | Shared protocol client, child-process lifecycle, request deadlines               |
+| `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                |
+| `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract              |
+| `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification |
+| `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies            |
+| `packages/viewport/`                           | Scene, picking, GPU resources, mesh/toolpath rendering                           |
+| `fixtures/`, `bench/`                          | Redistributable correctness corpus and reproducible workloads                    |
+| `docs/adr/`, `docs/protocol/`, `docs/quality/` | Decisions, wire specifications, support and evidence                             |
+| `tools/`                                       | Bootstrap, generation, and release tooling                                       |
 
 Dependencies flow inward:
 
@@ -139,6 +144,7 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 ### Manufacturing and safety
 
 - Keep authoring requirements, normalized plans, machine realization, export bundles, and verification logically distinct.
+- General manufacturing interfaces share geometry and intent but allow process-specific planners and distinct operation kinds: paths, poses, exposure/raster maps, and process cycles. A toolpath is not every manufacturing operation, and G-code is not every output format. Keep provenance, error budgets, calibrated process inputs, and machine capabilities explicit across boundaries without expanding current process support.
 - Unsupported geometry, requirements, commands, and machine behavior produce explicit diagnostics; do not invent successful fallbacks.
 - Verification decodes the emitted machine program independently of the planner preview. Share primitive types where useful, not assumptions that conceal planner errors.
 - Report verification coverage and provenance to the operator. A recorded load annotation is not an enforced load constraint until the mechanical gate passes.
@@ -179,6 +185,6 @@ Numerical targets from the implementation RFC are proposed until frozen for a ga
 
 Keep evidence sufficient to reproduce the result: commit and dependency versions, environment, fixtures, procedure, correctness outcomes, cold/warm timing and memory/transfer data, plus physical setup and measurements when manufacturing is involved. Review the complete operator workflow, not just microbenchmarks.
 
-When tooling is introduced, expose documented bootstrap, development, checks, tests, smoke benchmarks, and packaging commands across supported development platforms. Until those commands exist, do not claim they ran or prescribe invented commands in local rules.
+Root commands are `pnpm bootstrap`, `pnpm dev`, `pnpm contracts`, `pnpm check`, `pnpm test`, `pnpm bench:smoke`, and `pnpm package`; real-surface smoke runners are documented in [development.md](docs/quality/development.md). Keep commands consistent with tools/run.mjs and report only commands actually exercised. Native runtime/toolchain pins and dependency lockfiles are repository contracts.
 
 Finish a change only when affected callers and contracts agree, relevant behavior is exercised, and the canonical rules and vision still describe the current system. Report observed results and remaining support limits plainly.

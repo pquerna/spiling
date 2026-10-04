@@ -1,0 +1,15 @@
+{
+  "name": "@spiling/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "license": "OSL-3.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

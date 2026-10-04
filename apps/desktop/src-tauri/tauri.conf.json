@@ -1,0 +1,50 @@
+{
+  "$schema": "./gen/schemas/desktop-schema.json",
+  "productName": "Spiling",
+  "version": "0.1.0",
+  "identifier": "com.spiling.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Spiling — native workbench",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "capabilities": ["main"],
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:1420; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Native manufacturing workbench bootstrap",
+    "license": "OSL-3.0",
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "externalBin": ["binaries/spiling-engine"],
+    "resources": {
+      "../../../LICENSE.md": "LICENSE.md",
+      "../../../NOTICE.md": "NOTICE.md",
+      "../../../docs/license.md": "docs/license.md",
+      "../../../docs/quality/SOURCE.md": "docs/quality/SOURCE.md",
+      "../../../.cache/release/": "notices/",
+      "tauri.conf.json.license": "notices/tauri.conf.json.license",
+      "capabilities/main.json.license": "notices/capabilities/main.json.license",
+      "icons/icon.png.license": "notices/icons/icon.png.license",
+      "icons/icon.ico.license": "notices/icons/icon.ico.license",
+      "icons/icon.icns.license": "notices/icons/icon.icns.license"
+    }
+  }
+}

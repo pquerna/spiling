@@ -1,0 +1,10 @@
+<!--
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#101827" />
+  <path d="M256 96 L424 400 H88 Z" fill="#38bdf8" />
+  <path d="M256 168 L360 356 H152 Z" fill="#101827" />
+</svg>

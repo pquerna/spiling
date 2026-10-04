@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: OSL-3.0
 # Licensed under the Open Software License version 3.0
 
+# Legacy research location stays excluded; current private research is in spiling-brain.
 /docs/reserach/
 /target/
 node_modules/

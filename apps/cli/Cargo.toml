@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+[package]
+name = "spiling-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+spiling-engine-client.workspace = true
+spiling-contracts.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
