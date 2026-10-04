@@ -24,6 +24,17 @@ The native CEF runtime is a substantial download. `tauri-runtime-cef` pins CEF *
 
 Root tools use ignored `.cache/cef` for the shared build/package distribution and default to four Cargo build jobs; `CARGO_BUILD_JOBS` can explicitly override concurrency. Native archive integrity metadata is retained in provenance. The upstream downloader verifies the CDN archive SHA-1; this is not signature authentication. Cargo and pnpm lockfiles independently pin their package integrity.
 
+## Running the development shell
+
+After checking out the source and installing the prerequisites:
+
+```sh
+pnpm bootstrap
+pnpm dev
+```
+
+This launches the unfinished runtime diagnostic, not a functional CAD or manufacturing product. The desktop displays the complete OSL license offline and requires assent before entering the shell. WebGPU initialization gates engine startup; there is no WebGL or system-webview fallback.
+
 ## Root commands
 
 ```sh
@@ -50,6 +61,12 @@ Run `pnpm check && pnpm test` locally before merging or preparing release eviden
 Native packaging is opt-in through the workflow's `platform` input (`linux`, `macos`, `windows`, or explicit `all`; default Linux). For example, `gh workflow run build.yml -f platform=windows` requests Windows distribution evidence. Each selected platform compiles release once, without repeating debug bootstrap or deep workspace checks.
 
 Automatic checks have a 10-minute cap; manual packaging has a 30-minute cap. Cache keys follow the pinned Rust toolchain and lockfile, not each commit. Automatic CI caches lean Rust build artifacts and downloads; packaging caches downloads only, avoiding large CEF distributions and native build trees. Development package uploads expire after three days. CI packages are neither signed releases nor physical hardware certification.
+
+## Architecture and contributing
+
+The [bootstrap architecture](B0-plan.md#build-boundaries) describes current module responsibilities and dependency boundaries. The [control protocol](../protocol/control.md) defines the engine/client wire contract; [acceptance evidence](B0-evidence.md) separates implemented code from verified behavior.
+
+Before changing an area, read the [repository guide](../../AGENTS.md), then its `AGENT-RULES.md` and `AGENT-VISION.md` along the directory ancestry. Update affected contracts, consumers, and canonical rules together. Keep development history in version control and measured milestone evidence, not the README or area rules/vision.
 
 ## Packaged desktop diagnostics
 
