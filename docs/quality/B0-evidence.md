@@ -58,6 +58,8 @@ This browser check proves the admission/rejection UI only; it does not prove pac
 
 Executed `pnpm package` and extracted `target/release/bundle/deb/Spiling_0.1.0_amd64.deb`. Inspected the native CEF library, graphics libraries, sandbox helper, locales/resources, sidecar, offline OSL/NOTICE, source information, and generated dependency notices. The extracted package used existing host libraries; this is not fresh-machine installation proof.
 
+Rebuilt from clean source `4642e0e3bd66618e3701bc68a89abcc0eccb4f55`; the packaged provenance records that commit with `dirty: false`. The Debian artifact was **139.81 MiB**. Verified native legal bytes directly inside the Debian archive against the upstream distribution: CEF LICENSE.txt SHA-256 `058c3827ffb827ff3edda471ae7e1bb1d1aa5931985f0126043ccd33409e792f`; Chromium CREDITS.html SHA-256 `c8563b78af9d71ccd5b9ecf0f56e789d3e3fb426e1389f82771a05c75c0188ea`. Repeated the packaged GPU-unavailable/native-close smoke successfully on this artifact.
+
 CEF's Debian bundle places the real desktop in `usr/share/Spiling` and its launcher/sidecar in `usr/bin`. The initial native start failed by looking for the sidecar in `share/Spiling`; after correcting installation-prefix resolution, actual packaged invokes negotiated protocol 1 and returned the engine's raw 64-byte triangle, decoded successfully by TypeScript.
 
 Direct opt-in CDP/native bridge diagnostics exercised actual start/status, external SIGKILL detection, fresh-PID restart, intentional shutdown, diagnostic interruption, and native window close while an engine was live. All stopped/replaced engine PIDs were reaped; the desktop exited with code 0 after native close. A separate packaged run with protocol 2 rejected startup with an upgrade-required mismatch and no negotiated session. These bridge checks deliberately bypassed the unavailable-GPU admission gate; they do not prove the full UI/rendering path.
@@ -66,14 +68,16 @@ Executed the packaged `gpu-unavailable` smoke under Xvfb with the CEF sandbox ex
 
 The normal SwiftShader smoke did **not** pass: CEF GPU subprocesses exited with code 11, followed by a timeout waiting for the engine-running UI. Corrected the diagnostic switches to include `--`; upstream treats valueless arguments without that prefix as positional arguments. A separate Chromium 150 software-WebGPU attempt obtained an adapter and exercised shared repeated-disposal completion, but produced a black capture, `OperationError: Instance dropped in popErrorScope`, and no adapter on replacement. No visible triangle or successful GPU replacement is claimed.
 
+A further native development-mode comparison used the installed llvmpipe Vulkan ICD, explicit Vulkan/unsafe-WebGPU flags, and the unstripped CEF distribution. The real UI reached `Running` and reported the engine's 64-byte transfer, but its diagnostic triangle canvas remained white in both CDP and independent X11 root-framebuffer captures (`artifacts/cef-mesa-view.png` and `artifacts/cef-mesa-x11.png`). A standalone WebGPU clear, independent of Three and triangle data, read back the expected RGBA `[255, 64, 0, 255]`. That establishes GPU execution, not successful presentation of the diagnostic triangle. SwiftShader comparisons with alternate argument combinations also produced GPU-process exit code 11. These additional CEF comparison windows were closed through the native path; the Vulkan comparison's live engine child was reaped.
+
 ### Platform CI
 
 [Run 37175500953](https://github.com/pquerna/spiling/actions/runs/37175500953), at `70cdd18`, completed bootstrap, source/protocol checks, and distributable builds on Ubuntu 24.04 and macOS 14. Windows 2022 completed native bootstrap and Clippy/TypeScript checks but failed repository formatting after CRLF checkout. Added `.gitattributes` to require LF text checkout; attribute resolution was checked locally. The corrected Windows run must pass before claiming three-platform CI success. No CI runner result establishes physical GPU acceptance.
 
 ## Remaining acceptance prerequisites
 
-- Full packaged engine-delivered WebGPU rendering, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver.
-- Final native CEF/Chromium legal-notice inspection and corrected three-platform CI completion.
+- Full packaged engine-delivered WebGPU presentation, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver/runtime presentation path.
+- Corrected three-platform CI completion.
 - Windows/macOS packaged installation and actual GPU/lifecycle runs on declared reference machines.
 - Physical Linux GPU/reference-machine run; software/CPU rendering is diagnostic-only.
 - Fresh-machine reproduction, release signing/distribution/licensing review, source access and recipient-assent review appropriate to release channels.
