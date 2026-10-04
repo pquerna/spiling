@@ -76,10 +76,16 @@ A further native development-mode comparison used the installed llvmpipe Vulkan 
 
 [Run 37177432853](https://github.com/pquerna/spiling/actions/runs/37177432853), at `4642e0e`, passed the complete Ubuntu build and package path. macOS passed bootstrap and source checks, then rejected the smoke fixture's invalid-UTF-8 filename with `EILSEQ` before invoking the CLI. Restricted that fixture to Linux, where byte filenames are valid; the cross-platform handshake, transfer, mismatch, and cleanup checks remain unchanged. The corrected Linux CLI smoke passed locally. Windows was cancelled during bootstrap by the superseding push, so it supplies no corrected acceptance result.
 
+The completed Windows log identifies the cancelled bootstrap's actual stall: native debug compilation finished, then selective CEF `LICENSE.txt` extraction remained in host `tar` for more than 38 minutes. Added early-stop extraction (`--fast-read` on BSD tar, `--occurrence=1` on GNU tar). A local smoke with both tar implementations recovered the identical 1,662-byte license and SHA-256 `058c3827ffb827ff3edda471ae7e1bb1d1aa5931985f0126043ccd33409e792f`; BSD tar completed in approximately 0.4 seconds on this Linux host. This is not a Windows rerun.
+
+Cancelled the superseding matrix run at the user's cost-policy request. Automatic CI now checks material source/configuration changes in one Linux job without CEF compilation or Clippy; selected-platform native packaging is explicitly dispatched. Full checks remain local. The complete lean command sequence passed locally: frozen install, contract drift, TypeScript, 18 selected Rust behavior tests, real CLI interoperability, and 14 TypeScript decoder tests. Actionlint 1.7.12 accepted the workflow. No further native GitHub matrix was dispatched.
+
+Exercised the revised `pnpm package` path locally: Tauri compiled release with `--no-bundle`, notices were collected after native CEF availability, and `tauri bundle` produced the 139.81 MiB Debian artifact without another compilation. Extracted CEF license/credits hashes matched the values above. The extracted package passed the injected GPU-unavailable/native-close smoke under unsandboxed Xvfb. This diagnostic artifact records base commit `37a4ba7` with `dirty: true`; it is not a release candidate. Full `pnpm check && pnpm test` also passed locally after the cost-focused implementation.
+
 ## Remaining acceptance prerequisites
 
 - Full packaged engine-delivered WebGPU presentation, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver/runtime presentation path.
-- Corrected three-platform CI completion.
+- Corrected Windows/macOS native distribution evidence, requested explicitly rather than inferred from automatic Linux checks.
 - Windows/macOS packaged installation and actual GPU/lifecycle runs on declared reference machines.
 - Physical Linux GPU/reference-machine run; software/CPU rendering is diagnostic-only.
 - Fresh-machine reproduction, release signing/distribution/licensing review, source access and recipient-assent review appropriate to release channels.

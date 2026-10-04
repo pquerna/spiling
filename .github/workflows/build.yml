@@ -2,45 +2,123 @@
 # SPDX-License-Identifier: OSL-3.0
 # Licensed under the Open Software License version 3.0
 
-name: B0 build and protocol acceptance
+name: Material checks and opt-in packaging
 on:
   push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "packages/**"
+      - "tools/**"
+      - ".github/workflows/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - "*.json"
+      - "pnpm-*.yaml"
+      - ".gitattributes"
+      - "!**/*.md"
   pull_request:
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "packages/**"
+      - "tools/**"
+      - ".github/workflows/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - "*.json"
+      - "pnpm-*.yaml"
+      - ".gitattributes"
+      - "!**/*.md"
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native packaging evidence (all spends three platform builds)
+        type: choice
+        default: linux
+        options: [linux, macos, windows, all]
 permissions:
   contents: read
 concurrency:
-  group: b0-${{ github.workflow }}-${{ github.ref }}
+  group: material-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'checks' }}
   cancel-in-progress: true
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+  checks:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "24.15.0"
-      - name: Install pnpm
-        run: npm install --global pnpm@10.32.1
-      - name: Install Rust
-        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Install pinned tools
+        run: |
+          npm install --global pnpm@10.32.1
+          rustup toolchain install 1.99.0 --profile minimal
+      - name: Restore lean Rust build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: checks-${{ runner.os }}-rust-1.99.0-${{ hashFiles('Cargo.lock') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Check Rust-owned contract drift
+        run: pnpm contracts --check
+      - name: Check TypeScript consumers
+        run: pnpm -r --if-present check
+      - name: Exercise engine and protocol behavior without CEF
+        run: |
+          cargo build --locked -p spiling-engine -p spiling-cli
+          cargo test --locked -p spiling-contracts -p spiling-engine-client -p spiling-engine -p spiling-cli
+          node --import tsx tools/smoke-cli.mjs
+          pnpm --filter @spiling/protocol test
+  package:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.platform == 'all' && '["ubuntu-24.04","macos-14","windows-2022"]' || inputs.platform == 'macos' && '["macos-14"]' || inputs.platform == 'windows' && '["windows-2022"]' || '["ubuntu-24.04"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.15.0"
+      - name: Install pinned tools
+        run: |
+          npm install --global pnpm@10.32.1
+          rustup toolchain install 1.99.0 --profile minimal
+      - name: Restore dependency downloads only
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: package-downloads-${{ runner.os }}-rust-1.99.0-${{ hashFiles('Cargo.lock') }}
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libx11-dev libxrandr-dev libxcomposite-dev libxdamage-dev libnss3-dev libasound2-dev libgbm-dev libsecret-1-dev libssl-dev patchelf desktop-file-utils xvfb xauth dbus-x11
-      - name: Bootstrap actual CEF runtime
-        run: pnpm bootstrap
-      - name: Check contracts and source
-        run: pnpm check
-      - name: Exercise protocol and actual engine
-        run: pnpm test
-      - name: Build platform distributable
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libx11-dev libxrandr-dev libxcomposite-dev libxdamage-dev libnss3-dev libasound2-dev libgbm-dev libsecret-1-dev libssl-dev patchelf desktop-file-utils
+      - run: pnpm install --frozen-lockfile
+      - name: Check contract drift before packaging
+        run: pnpm contracts --check
+      - name: Build release once and bundle selected platform
         run: pnpm package
-      - name: Upload package and provenance
+      - name: Upload development package and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: spiling-b0-${{ runner.os }}
@@ -48,6 +126,8 @@ jobs:
             target/release/bundle/
             .cache/release/provenance.json
           if-no-files-found: error
+          retention-days: 3
 
-# Packaged WebGPU on physical reference hardware is a separate acceptance gate.
-# CI build success must not be advertised as a hardware support certification.
+# Full formatting/Clippy/workspace checks run locally via pnpm check && pnpm test.
+# Native packaging is deliberate evidence, not a per-push three-platform rebuild.
+# Neither job establishes physical GPU support or signed release acceptance.

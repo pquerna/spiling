@@ -137,11 +137,12 @@ async function cefArchiveRecords(directory = environment.CEF_PATH, depth = 0) {
       const record = JSON.parse(await readFile(path, "utf8"));
       const license = join(directory, "LICENSE.txt");
       if (!existsSync(license)) {
-        // Upstream flattens the binary distribution but omits its CEF license.
-        // Extract the original bytes once; tar is available on our build hosts.
+        // Stop after the requested member instead of decompressing the entire
+        // CEF distribution. Linux uses GNU tar; Windows/macOS use BSD tar.
         await run("tar", [
           "-xf",
           join(dirname(directory), record.name),
+          process.platform === "linux" ? "--occurrence=1" : "--fast-read",
           "--strip-components=1",
           "-C",
           directory,
@@ -342,7 +343,11 @@ async function main() {
       await prepare(true);
       const bundles =
         process.platform === "linux" ? "deb" : process.platform === "darwin" ? "app" : "nsis";
-      await run("pnpm", ["exec", "tauri", "build", "--bundles", bundles], { cwd: desktop });
+      await run("pnpm", ["exec", "tauri", "build", "--no-bundle"], { cwd: desktop });
+      // The first native build downloads CEF. Collect its notices before bundling,
+      // without a second debug/release compilation solely to warm the cache.
+      await provenance();
+      await run("pnpm", ["exec", "tauri", "bundle", "--bundles", bundles], { cwd: desktop });
       break;
     }
     case "check":
