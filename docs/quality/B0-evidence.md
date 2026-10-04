@@ -23,6 +23,14 @@ Implementation/evidence integration owner: automated coding assistant. Final evi
 
 ## Executed checks
 
+### Bootstrap and source checks
+
+Executed `pnpm bootstrap`: locked dependencies, Rust-owned contract generation, staged sidecar, production frontend, native Tauri/CEF compilation, and collected dependency provenance. The actual CEF application compiled successfully; native compilation took 2 minutes 41 seconds on this environment.
+
+Executed `pnpm check`: generated-contract drift, Rust formatting, workspace/all-target Clippy with warnings denied, all package TypeScript checks, and repository formatting passed. Executed the complete root `pnpm test` command, including the actual CLI smoke and 14 decoder tests.
+
+The downloaded native distribution is `cef_binary_152.0.6+g708dc14+chromium-152.0.7977.83_linux64_minimal.tar.bz2`, with upstream archive SHA-1 `9711b86c105fb590da576fe5a829802f1a79d520`, recorded in `archive.json` and generated provenance. The checksum is upstream download integrity metadata, not a claim of signature authentication.
+
 ### Native engine and cross-language protocol
 
 Executed `pnpm smoke:cli` against the actual compiled Rust engine and CLI, not fixtures replacing the process:
@@ -34,6 +42,8 @@ Executed `pnpm smoke:cli` against the actual compiled Rust engine and CLI, not f
 - Protocol-version 2 produced a nonzero CLI exit with an upgrade-required/mismatch diagnostic.
 
 Executed native Rust behavior suites: **18 tests passed** across framing, strict handshake, request correlation, real-child lifecycle, timeout/cancellation/drop cleanup and engine errors. Executed TypeScript decoder suite: **14 tests passed** using the native-owned hex fixture and corruption boundaries.
+
+Executed `pnpm bench:smoke`: ten fresh debug-engine process/handshake/64-byte-transfer/shutdown runs. End-to-end wall-clock p50 was **2.731 ms**, p95 **3.330 ms**; sorted samples in milliseconds: 2.676895, 2.677884, 2.715217, 2.717012, 2.730812, 2.780190, 2.784749, 2.833022, 2.849337, 3.329972. This is a bootstrap diagnostic on warmed OS caches, not cold/warm geometry performance or a GPU benchmark.
 
 ### Frontend and browser admission
 

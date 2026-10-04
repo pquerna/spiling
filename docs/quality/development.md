@@ -22,6 +22,8 @@ For headless Linux diagnostics also install `xvfb xauth dbus-x11 mesa-vulkan-dri
 
 The native CEF runtime is a substantial download. `tauri-runtime-cef` pins CEF **152.3.0**; its build utility obtains the matching native distribution, and Tauri's CLI detects the dependency and bundles CEF rather than a system webview. Exact dependency resolution lives in Cargo.lock. See the upstream [CEF example](https://github.com/tauri-apps/tauri/tree/tauri-v3.0.0-alpha.4/examples/cef) for the runtime/packaging mechanism. Do not set an arbitrary `CEF_PATH` without matching the pinned distribution and recording its checksum/provenance.
 
+Root tools use ignored `.cache/cef` for the shared build/package distribution and default to four Cargo build jobs; `CARGO_BUILD_JOBS` can explicitly override concurrency. Native archive integrity metadata is retained in provenance. The upstream downloader verifies the CDN archive SHA-1; this is not signature authentication. Cargo and pnpm lockfiles independently pin their package integrity.
+
 ## Root commands
 
 ```sh

@@ -18,6 +18,7 @@ const environment = {
   ...process.env,
   PATH: `${join(homedir(), ".cargo", "bin")}${delimiter}${process.env.PATH}`,
   CEF_PATH: process.env.CEF_PATH ?? join(root, ".cache", "cef"),
+  CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "4",
 };
 const children = new Set();
 let stopping = false;
@@ -149,9 +150,23 @@ async function provenance() {
   const nodeLicenses = JSON.parse(
     await run("pnpm", ["licenses", "list", "--json"], { capture: true }),
   );
-  const npmPackages = Object.values(nodeLicenses).flatMap((value) =>
-    Array.isArray(value) ? value : [],
-  );
+  const npmPackages = [];
+  for (const group of Object.values(nodeLicenses)) {
+    if (!Array.isArray(group)) throw new Error("Unsupported pnpm license record schema");
+    for (const dependency of group) {
+      if (!Array.isArray(dependency.paths)) throw new Error("Missing pnpm dependency paths");
+      for (const path of dependency.paths) {
+        const pkg = JSON.parse(await readFile(join(path, "package.json"), "utf8"));
+        npmPackages.push({
+          name: pkg.name,
+          version: pkg.version,
+          license: pkg.license ?? dependency.license,
+          repository: pkg.repository,
+          path,
+        });
+      }
+    }
+  }
   for (const pkg of rustPackages) {
     await copyNotices(
       dirname(pkg.manifest_path),
@@ -159,12 +174,10 @@ async function provenance() {
     );
   }
   for (const pkg of npmPackages) {
-    if (pkg.path && existsSync(pkg.path)) {
-      await copyNotices(
-        pkg.path,
-        join(directory, "third-party", "npm", `${pkg.name.replaceAll("/", "_")}-${pkg.version}`),
-      );
-    }
+    await copyNotices(
+      pkg.path,
+      join(directory, "third-party", "npm", `${pkg.name.replaceAll("/", "_")}-${pkg.version}`),
+    );
   }
   const commit = await run("git", ["rev-parse", "HEAD"], { capture: true });
   const dirty = (await run("git", ["status", "--porcelain"], { capture: true })).length > 0;

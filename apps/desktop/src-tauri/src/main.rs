@@ -45,15 +45,14 @@ fn main() {
                     close_after_engine_cleanup(app, 0);
                 }
             }
-            RunEvent::ExitRequested { api, code, .. } => {
+            RunEvent::ExitRequested { api, code, .. }
                 if !app
                     .state::<EngineState>()
                     .exit_ready
-                    .load(Ordering::Acquire)
-                {
-                    api.prevent_exit();
-                    close_after_engine_cleanup(app, code.unwrap_or(0));
-                }
+                    .load(Ordering::Acquire) =>
+            {
+                api.prevent_exit();
+                close_after_engine_cleanup(app, code.unwrap_or(0));
             }
             _ => {}
         });

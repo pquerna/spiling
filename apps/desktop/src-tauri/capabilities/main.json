@@ -5,6 +5,7 @@
   "local": true,
   "windows": ["main"],
   "permissions": [
+    "core:window:allow-close",
     "allow-engine-start",
     "allow-engine-status",
     "allow-engine-stop",
