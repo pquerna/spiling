@@ -16,3 +16,5 @@ Canonical license: LICENSE.md
 Source retrieval and distribution procedure: docs/quality/SOURCE.md
 
 Packaged dependency provenance and collected third-party license texts are under `notices/`. CEF and Chromium notices supplied by the native distribution remain applicable and must be retained. This notice does not relicense dependencies or assert legal compatibility merely from their SPDX identifiers.
+
+CEF native redistributions include their original BSD license and Chromium third-party credits under `notices/third-party/cef/`. These upstream files are not relicensed under OSL-3.0. Cargo crate notices alone do not replace the native CEF/Chromium notices.

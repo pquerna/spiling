@@ -159,11 +159,24 @@ fn engine_path() -> Result<PathBuf, String> {
     let directory = executable
         .parent()
         .ok_or("installed desktop executable has no parent directory")?;
-    Ok(directory.join(if cfg!(windows) {
+    let name = if cfg!(windows) {
         "spiling-engine.exe"
     } else {
         "spiling-engine"
-    }))
+    };
+    let adjacent = directory.join(name);
+    // CEF's Debian bundle relocates the desktop to share/Spiling while the
+    // external binary remains in bin under the same installation prefix.
+    if cfg!(target_os = "linux")
+        && !adjacent.is_file()
+        && directory.file_name() == Some(std::ffi::OsStr::new("Spiling"))
+        && let Some(share) = directory.parent()
+        && share.file_name() == Some(std::ffi::OsStr::new("share"))
+        && let Some(prefix) = share.parent()
+    {
+        return Ok(prefix.join("bin").join(name));
+    }
+    Ok(adjacent)
 }
 
 fn protocol_version() -> Result<u16, String> {

@@ -66,6 +66,7 @@ export async function createDiagnosticViewport(
   let failed = false;
   let renderPending = false;
   let renderPromise: Promise<void> | null = null;
+  let disposal: Promise<void> | null = null;
   const scene = new Scene();
   scene.background = new Color("#101b22");
   const camera = new OrthographicCamera(-1.6, 1.6, 1.3, -1.3, 0.1, 20);
@@ -114,23 +115,26 @@ export async function createDiagnosticViewport(
     if (!disposed)
       void redraw().catch((error: unknown) => fail(`Rendering failed: ${String(error)}`));
   };
-  async function dispose(): Promise<void> {
-    if (disposed) return;
+  function dispose(): Promise<void> {
+    if (disposal) return disposal;
     disposed = true;
     observer?.disconnect();
     device.removeEventListener("uncapturederror", uncaptured);
-    // No frame continues using buffers after they are released.
-    await renderPromise?.catch(() => undefined);
-    clear();
-    material.dispose();
-    grid.geometry.dispose();
-    if (Array.isArray(grid.material)) grid.material.forEach((entry) => entry.dispose());
-    else grid.material.dispose();
-    try {
-      await renderer.dispose();
-    } finally {
-      device.destroy();
-    }
+    disposal = (async () => {
+      // No frame continues using buffers after they are released.
+      await renderPromise?.catch(() => undefined);
+      clear();
+      material.dispose();
+      grid.geometry.dispose();
+      if (Array.isArray(grid.material)) grid.material.forEach((entry) => entry.dispose());
+      else grid.material.dispose();
+      try {
+        await renderer.dispose();
+      } finally {
+        device.destroy();
+      }
+    })();
+    return disposal;
   }
 
   try {

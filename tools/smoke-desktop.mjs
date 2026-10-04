@@ -158,6 +158,9 @@ try {
       !/\bRunning\b/.test(await text("engine-status")),
       "No engine session on unsupported GPU",
     );
+    const status = await evaluate('window.__TAURI_INTERNALS__.invoke("engine_status")');
+    assert.equal(status.state, "stopped", "GPU admission must leave the native engine stopped");
+    assert.equal(status.hello, null, "GPU admission must not negotiate an engine session");
     await screenshot("b0-gpu-unavailable");
     console.log(
       JSON.stringify(
@@ -165,6 +168,7 @@ try {
           result: "pass",
           scenario,
           diagnostic: body,
+          nativeStatus: status,
           qualification:
             "GPU-unavailable branch injected before page startup; not hardware acceptance",
         },
@@ -227,7 +231,10 @@ try {
       ),
     );
   }
-  await evaluate('window.__TAURI_INTERNALS__.invoke("plugin:window|close", {label:"main"})');
+  // Do not await an IPC promise whose page is deliberately being destroyed.
+  await evaluate(
+    '(window.__TAURI_INTERNALS__.invoke("plugin:window|close", {label:"main"}), true)',
+  );
   const closedAt = Date.now();
   while (!childExited && Date.now() - closedAt < 15000) await delay(100);
   assert.equal(childExited, true, "Native window close terminates desktop");

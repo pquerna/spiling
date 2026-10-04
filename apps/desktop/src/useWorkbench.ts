@@ -55,11 +55,20 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
   const inCommand = useRef(false);
   const polling = useRef(false);
   const viewport = useRef<DiagnosticViewport | null>(null);
+  const viewportDisposal = useRef<Promise<void> | null>(null);
 
-  const disposeViewport = useCallback(async () => {
+  const disposeViewport = useCallback(() => {
     const previous = viewport.current;
     viewport.current = null;
-    await previous?.dispose();
+    if (previous) {
+      const pending = (viewportDisposal.current ?? Promise.resolve())
+        .then(() => previous.dispose())
+        .finally(() => {
+          if (viewportDisposal.current === pending) viewportDisposal.current = null;
+        });
+      viewportDisposal.current = pending;
+    }
+    return viewportDisposal.current ?? Promise.resolve();
   }, []);
 
   const execute = useCallback(
@@ -89,7 +98,7 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
             )
               return;
             const lostGeneration = ++generation.current;
-            viewport.current = null;
+            void disposeViewport().catch(() => undefined);
             setState((previous) => ({
               ...previous,
               phase: "unsupported",
@@ -219,8 +228,6 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
           if (!active || !mounted.current || token !== generation.current) return;
           if (status.state !== "running") {
             const stoppedGeneration = ++generation.current;
-            await disposeViewport();
-            if (!active || !mounted.current || generation.current !== stoppedGeneration) return;
             setState((previous) => ({
               ...previous,
               phase: status.state,
@@ -232,19 +239,31 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
                   ? "The engine exited unexpectedly. Restart to create a new session."
                   : "The engine is stopped."),
             }));
+            await disposeViewport().catch((error: unknown) => {
+              if (mounted.current && generation.current === stoppedGeneration)
+                setState((previous) => ({
+                  ...previous,
+                  message: `${previous.message} GPU cleanup failed: ${errorText(error)}`,
+                }));
+            });
           }
         } catch (error) {
           if (active && mounted.current && token === generation.current) {
             const failedGeneration = ++generation.current;
-            await disposeViewport().catch(() => undefined);
-            if (active && mounted.current && generation.current === failedGeneration)
-              setState((previous) => ({
-                ...previous,
-                phase: "interrupted",
-                gpu: null,
-                transfer: null,
-                message: `Engine supervision failed: ${errorText(error)}`,
-              }));
+            setState((previous) => ({
+              ...previous,
+              phase: "interrupted",
+              gpu: null,
+              transfer: null,
+              message: `Engine supervision failed: ${errorText(error)}`,
+            }));
+            await disposeViewport().catch((cleanupError: unknown) => {
+              if (mounted.current && generation.current === failedGeneration)
+                setState((previous) => ({
+                  ...previous,
+                  message: `${previous.message} GPU cleanup failed: ${errorText(cleanupError)}`,
+                }));
+            });
           }
         } finally {
           polling.current = false;

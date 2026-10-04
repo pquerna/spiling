@@ -26,11 +26,11 @@ pub fn configuration() -> Result<Cef, String> {
     if std::env::var_os("SPILING_CEF_SOFTWARE_GPU").as_deref() == Some(std::ffi::OsStr::new("1")) {
         eprintln!("Spiling diagnostic: SwiftShader software GPU explicitly enabled for this run");
         cef = cef.command_line_args([
-            ("use-angle", Some("swiftshader")),
-            ("use-vulkan", Some("swiftshader")),
-            ("enable-unsafe-swiftshader", None),
-            ("use-webgpu-adapter", Some("swiftshader")),
-            ("enable-unsafe-webgpu", None),
+            ("--use-angle", Some("swiftshader")),
+            ("--use-vulkan", Some("swiftshader")),
+            ("--enable-unsafe-swiftshader", None),
+            ("--use-webgpu-adapter", Some("swiftshader")),
+            ("--enable-unsafe-webgpu", None),
         ]);
     }
     Ok(cef)

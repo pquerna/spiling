@@ -76,7 +76,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         if options.command == "diagnose" {
             client.ping().await?;
             Ok(serde_json::json!({
-                "command": "diagnose", "engine": options.engine, "hello": client.hello(),
+                "command": "diagnose", "engine": options.engine.to_string_lossy(), "hello": client.hello(),
                 "ping": "pong", "handshake_us": handshake_us,
                 "ping_us": transfer.elapsed().as_micros()
             }))
@@ -89,7 +89,7 @@ async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             Ok(serde_json::json!({
                 "command": "triangle", "synthetic": true, "bytes": payload.len(),
                 "transfer_us": transfer_us, "handshake_us": handshake_us,
-                "output": options.output, "pid": client.hello().pid
+                "output": options.output.as_ref().map(|path| path.to_string_lossy()), "pid": client.hello().pid
             }))
         }
     }

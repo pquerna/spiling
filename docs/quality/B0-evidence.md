@@ -8,7 +8,7 @@ Licensed under the Open Software License version 3.0
 
 ## Gate status
 
-**B0 acceptance is not yet closed.** Native protocol/CLI and frontend checks below are executed results. Packaged CEF checks and physical Windows/macOS/Linux GPU acceptance must be recorded separately; source implementation and CI targets are not equivalent to those checks.
+**B0 acceptance is not yet closed.** Native protocol/CLI, source checks, installed Linux CEF bridge lifecycle, and GPU-unavailable admission checks below are executed results. Engine-delivered WebGPU rendering and physical Windows/macOS/Linux GPU acceptance remain separate unmet gates; source implementation and CI packages are not equivalent to those checks.
 
 Implementation/evidence integration owner: automated coding assistant. Final evidence reviewer: unassigned; assignment remains a milestone acceptance prerequisite.
 
@@ -40,6 +40,7 @@ Executed `pnpm smoke:cli` against the actual compiled Rust engine and CLI, not f
 - Engine emitted the 64-byte synthetic triangle and TypeScript decoded its positions and indices.
 - Decoder rejected truncated/oversized payloads, unsupported schema, nonzero reserved field, count overflow, out-of-range indices and nonfinite coordinates.
 - Protocol-version 2 produced a nonzero CLI exit with an upgrade-required/mismatch diagnostic.
+- Valid non-UTF-8 Unix engine/output paths originally panicked during JSON success reporting. After the explicit display-encoding fix, both commands passed, the output matched the native 64-byte payload, and the child PID was gone before reporting success. The root CLI smoke retains this regression on Unix.
 
 Executed native Rust behavior suites: **18 tests passed** across framing, strict handshake, request correlation, real-child lifecycle, timeout/cancellation/drop cleanup and engine errors. Executed TypeScript decoder suite: **14 tests passed** using the native-owned hex fixture and corruption boundaries.
 
@@ -53,10 +54,26 @@ Opened the actual React frontend in a real headless browser through Vite at 127.
 
 This browser check proves the admission/rejection UI only; it does not prove packaged CEF, a native GPU, or manufacturing functionality.
 
+### Packaged Linux CEF and native lifecycle
+
+Executed `pnpm package` and extracted `target/release/bundle/deb/Spiling_0.1.0_amd64.deb`. Inspected the native CEF library, graphics libraries, sandbox helper, locales/resources, sidecar, offline OSL/NOTICE, source information, and generated dependency notices. The extracted package used existing host libraries; this is not fresh-machine installation proof.
+
+CEF's Debian bundle places the real desktop in `usr/share/Spiling` and its launcher/sidecar in `usr/bin`. The initial native start failed by looking for the sidecar in `share/Spiling`; after correcting installation-prefix resolution, actual packaged invokes negotiated protocol 1 and returned the engine's raw 64-byte triangle, decoded successfully by TypeScript.
+
+Direct opt-in CDP/native bridge diagnostics exercised actual start/status, external SIGKILL detection, fresh-PID restart, intentional shutdown, diagnostic interruption, and native window close while an engine was live. All stopped/replaced engine PIDs were reaped; the desktop exited with code 0 after native close. A separate packaged run with protocol 2 rejected startup with an upgrade-required mismatch and no negotiated session. These bridge checks deliberately bypassed the unavailable-GPU admission gate; they do not prove the full UI/rendering path.
+
+Executed the packaged `gpu-unavailable` smoke under Xvfb with the CEF sandbox explicitly disabled. The injected missing-GPU branch displayed the unsupported diagnostic, native status remained `stopped` with no handshake, screenshots were captured, and native window close exited successfully. Injection and unsandboxed execution are diagnostic qualifications, not production sandbox/hardware acceptance.
+
+The normal SwiftShader smoke did **not** pass: CEF GPU subprocesses exited with code 11, followed by a timeout waiting for the engine-running UI. Corrected the diagnostic switches to include `--`; upstream treats valueless arguments without that prefix as positional arguments. A separate Chromium 150 software-WebGPU attempt obtained an adapter and exercised shared repeated-disposal completion, but produced a black capture, `OperationError: Instance dropped in popErrorScope`, and no adapter on replacement. No visible triangle or successful GPU replacement is claimed.
+
+### Platform CI
+
+[Run 37175500953](https://github.com/pquerna/spiling/actions/runs/37175500953), at `70cdd18`, completed bootstrap, source/protocol checks, and distributable builds on Ubuntu 24.04 and macOS 14. Windows 2022 completed native bootstrap and Clippy/TypeScript checks but failed repository formatting after CRLF checkout. Added `.gitattributes` to require LF text checkout; attribute resolution was checked locally. The corrected Windows run must pass before claiming three-platform CI success. No CI runner result establishes physical GPU acceptance.
+
 ## Remaining acceptance prerequisites
 
-- Actual packaged CEF application startup, engine-delivered WebGPU rendering, real interruption/restart/stop, protocol mismatch, GPU-unavailable gating and native-close cleanup.
-- Package inspection for CEF native libraries/helpers, sidecar, OSL text, source information and dependency notices.
+- Full packaged engine-delivered WebGPU rendering, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver.
+- Final native CEF/Chromium legal-notice inspection and corrected three-platform CI completion.
 - Windows/macOS packaged installation and actual GPU/lifecycle runs on declared reference machines.
 - Physical Linux GPU/reference-machine run; software/CPU rendering is diagnostic-only.
 - Fresh-machine reproduction, release signing/distribution/licensing review, source access and recipient-assent review appropriate to release channels.

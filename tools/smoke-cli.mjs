@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { decodeTriangle } from "../packages/protocol/src/index.ts";
@@ -59,6 +59,46 @@ try {
   const mismatch = invoke(["diagnose", "--engine", engine, "--protocol-version", "2"]);
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /upgrade|required|protocol|mismatch/i);
+  if (process.platform !== "win32") {
+    // A shell expands the controlled glob as native bytes; Node argv strings
+    // cannot represent these otherwise-valid Unix filesystem paths.
+    const engineBytes = Buffer.concat([
+      Buffer.from(join(directory, "engine-")),
+      Buffer.from([255]),
+    ]);
+    const outputBytes = Buffer.concat([
+      Buffer.from(join(directory, "output-")),
+      Buffer.from([255]),
+    ]);
+    await symlink(engine, engineBytes);
+    await writeFile(outputBytes, new Uint8Array());
+    for (const [command, outputArgs] of [
+      ["diagnose", ""],
+      ["triangle", ' --output "$2"/output-*'],
+    ]) {
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          `"$1" ${command} --engine "$2"/engine-*${outputArgs}`,
+          "spiling-smoke",
+          cli,
+          directory,
+        ],
+        { encoding: "utf8", timeout: 15000 },
+      );
+      if (result.error) throw result.error;
+      assert.equal(result.status, 0, result.stderr);
+      const nonUtf = JSON.parse(result.stdout);
+      assert.match(nonUtf.engine ?? nonUtf.output, /\uFFFD$/);
+      assert.throws(
+        () => process.kill(nonUtf.hello?.pid ?? nonUtf.pid, 0),
+        { code: "ESRCH" },
+        "successful reporting must follow child shutdown",
+      );
+    }
+    assert.deepEqual(await readFile(outputBytes), bytes);
+  }
   console.log(
     JSON.stringify(
       {
@@ -68,6 +108,10 @@ try {
         decoder:
           "cross-language native transfer; truncation, oversized allocation, schema, reserved, count overflow, index bounds, nonfinite rejected",
         mismatch: "nonzero exit with classified protocol diagnostic",
+        nonUtfPaths:
+          process.platform === "win32"
+            ? "Unix-only boundary"
+            : "JSON reports and child cleanup passed",
       },
       null,
       2,

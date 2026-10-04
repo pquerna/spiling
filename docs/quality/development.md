@@ -59,7 +59,7 @@ Root/headless containers cannot establish normal sandbox or hardware acceptance.
 SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 xvfb-run -a pnpm smoke:desktop --executable /path/to/packaged/spiling
 ```
 
-Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_PROTOCOL_VERSION=2` deliberately exercises an upgrade-required mismatch. `SPILING_ENGINE_PATH` is an explicit development override; installed packages resolve their bundled engine beside the application executable.
+Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_PROTOCOL_VERSION=2` deliberately exercises an upgrade-required mismatch. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
 
 ## Release evidence
 

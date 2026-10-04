@@ -4,7 +4,7 @@
  * Licensed under the Open Software License version 3.0
  */
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve, delimiter } from "node:path";
@@ -134,7 +134,25 @@ async function cefArchiveRecords(directory = environment.CEF_PATH, depth = 0) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) records.push(...(await cefArchiveRecords(path, depth + 1)));
     else if (entry.isFile() && entry.name === "archive.json") {
-      records.push(JSON.parse(await readFile(path, "utf8")));
+      const record = JSON.parse(await readFile(path, "utf8"));
+      const license = join(directory, "LICENSE.txt");
+      if (!existsSync(license)) {
+        // Upstream flattens the binary distribution but omits its CEF license.
+        // Extract the original bytes once; tar is available on our build hosts.
+        await run("tar", [
+          "-xf",
+          join(dirname(directory), record.name),
+          "--strip-components=1",
+          "-C",
+          directory,
+          `${record.name.replace(/\.tar\.bz2$/, "")}/LICENSE.txt`,
+        ]);
+      }
+      const notices = join(root, ".cache", "release", "third-party", "cef", record.name);
+      await mkdir(notices, { recursive: true });
+      await copyFile(license, join(notices, "LICENSE.txt"));
+      await copyFile(join(directory, "CREDITS.html"), join(notices, "CREDITS.html"));
+      records.push(record);
     }
   }
   return records;
@@ -142,6 +160,7 @@ async function cefArchiveRecords(directory = environment.CEF_PATH, depth = 0) {
 
 async function provenance() {
   const directory = join(root, ".cache", "release");
+  await rm(directory, { recursive: true, force: true });
   await mkdir(directory, { recursive: true });
   const metadata = JSON.parse(
     await run("cargo", ["metadata", "--locked", "--format-version", "1"], { capture: true }),
