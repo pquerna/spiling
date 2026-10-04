@@ -74,6 +74,8 @@ A further native development-mode comparison used the installed llvmpipe Vulkan 
 
 [Run 37175500953](https://github.com/pquerna/spiling/actions/runs/37175500953), at `70cdd18`, completed bootstrap, source/protocol checks, and distributable builds on Ubuntu 24.04 and macOS 14. Windows 2022 completed native bootstrap and Clippy/TypeScript checks but failed repository formatting after CRLF checkout. Added `.gitattributes` to require LF text checkout; attribute resolution was checked locally. The corrected Windows run must pass before claiming three-platform CI success. No CI runner result establishes physical GPU acceptance.
 
+[Run 37177432853](https://github.com/pquerna/spiling/actions/runs/37177432853), at `4642e0e`, passed the complete Ubuntu build and package path. macOS passed bootstrap and source checks, then rejected the smoke fixture's invalid-UTF-8 filename with `EILSEQ` before invoking the CLI. Restricted that fixture to Linux, where byte filenames are valid; the cross-platform handshake, transfer, mismatch, and cleanup checks remain unchanged. The corrected Linux CLI smoke passed locally. Windows was cancelled during bootstrap by the superseding push, so it supplies no corrected acceptance result.
+
 ## Remaining acceptance prerequisites
 
 - Full packaged engine-delivered WebGPU presentation, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver/runtime presentation path.

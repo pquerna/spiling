@@ -59,9 +59,9 @@ try {
   const mismatch = invoke(["diagnose", "--engine", engine, "--protocol-version", "2"]);
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /upgrade|required|protocol|mismatch/i);
-  if (process.platform !== "win32") {
-    // A shell expands the controlled glob as native bytes; Node argv strings
-    // cannot represent these otherwise-valid Unix filesystem paths.
+  if (process.platform === "linux") {
+    // Linux permits invalid UTF-8 filenames; macOS rejects this fixture with EILSEQ.
+    // A shell expands the controlled glob as native bytes, unlike Node argv strings.
     const engineBytes = Buffer.concat([
       Buffer.from(join(directory, "engine-")),
       Buffer.from([255]),
@@ -109,9 +109,9 @@ try {
           "cross-language native transfer; truncation, oversized allocation, schema, reserved, count overflow, index bounds, nonfinite rejected",
         mismatch: "nonzero exit with classified protocol diagnostic",
         nonUtfPaths:
-          process.platform === "win32"
-            ? "Unix-only boundary"
-            : "JSON reports and child cleanup passed",
+          process.platform === "linux"
+            ? "JSON reports and child cleanup passed"
+            : "Not exercised: Linux byte-path boundary",
       },
       null,
       2,
