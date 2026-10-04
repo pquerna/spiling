@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+/docs/reserach/
+/target/
+node_modules/
+dist/
+/.cache/
+/artifacts/
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/gen/
+*.log
