@@ -12,6 +12,10 @@
     "allow-engine-restart",
     "allow-engine-triangle",
     "allow-engine-interrupt",
-    "allow-runtime-info"
+    "allow-runtime-info",
+    "allow-engine-run-diagnostic",
+    "allow-engine-get-operation",
+    "allow-engine-cancel-operation",
+    "allow-engine-read-artifact"
   ]
 }

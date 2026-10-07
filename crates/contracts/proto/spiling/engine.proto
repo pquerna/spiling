@@ -1,0 +1,84 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+syntax = "proto3";
+package spiling.engine;
+
+import "google/longrunning/operations.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// Engine and clients ship together. No cross-version negotiation or shims.
+service Engine {
+  rpc GetEngineInfo(google.protobuf.Empty) returns (EngineInfo);
+  rpc Shutdown(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc RunDiagnostic(RunDiagnosticRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = {
+      response_type: "DiagnosticResult"
+      metadata_type: "DiagnosticMetadata"
+    };
+  }
+  // Complete coalesced snapshots, not a replayable event log.
+  rpc WatchOperation(WatchOperationRequest) returns (stream google.longrunning.Operation);
+}
+
+service Artifacts {
+  rpc GetArtifact(GetArtifactRequest) returns (Artifact);
+}
+
+message EngineInfo {
+  string instance_id = 1;
+  string engine_build = 2;
+  uint32 pid = 3;
+  string kernel = 4;
+  repeated string geometry_capabilities = 5;
+  uint32 max_message_bytes = 6;
+  uint32 max_artifact_bytes = 7;
+}
+
+message RunDiagnosticRequest {
+  // Diagnostic namespace only; this does not create an authoring project.
+  string parent = 1;
+  string request_id = 2; // Optional nonzero UUID (AIP-155); deduplicated while retained.
+  uint32 chunk_count = 3;
+  uint32 delay_ms = 4;
+  uint32 chunk_bytes = 5;
+  string input_revision = 6;
+}
+
+enum DiagnosticState {
+  DIAGNOSTIC_STATE_UNSPECIFIED = 0;
+  QUEUED = 1;
+  RUNNING = 2;
+  CANCELLING = 3;
+  SUCCEEDED = 4;
+  FAILED = 5;
+  CANCELLED = 6;
+  INTERRUPTED = 7;
+}
+
+message DiagnosticMetadata {
+  DiagnosticState state = 1;
+  uint64 state_version = 2;
+  string phase = 3;
+  uint32 completed_units = 4;
+  uint32 total_units = 5;
+  string input_revision = 6;
+  string input_digest = 7;
+  // Append-only, complete immutable artifacts. Bounded to 64 entries.
+  repeated Artifact outputs = 8;
+  google.protobuf.Timestamp create_time = 9;
+  google.protobuf.Timestamp update_time = 10;
+  google.protobuf.Timestamp end_time = 11;
+}
+
+message DiagnosticResult { repeated Artifact artifacts = 1; }
+message WatchOperationRequest { string name = 1; }
+message GetArtifactRequest { string name = 1; }
+message Artifact {
+  string name = 1;
+  uint64 size_bytes = 2;
+  string sha256 = 3;
+  string media_type = 4;
+}

@@ -5,7 +5,6 @@
  */
 import { useEffect, useRef, useState } from "react";
 import licenseDocument from "../../../LICENSE.md?raw";
-import { PROTOCOL_VERSION } from "@spiling/protocol";
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
 
 const licenseText = licenseDocument;
@@ -44,7 +43,7 @@ function LicenseDialog({ onClose }: { onClose: () => void }) {
 
 function Workbench() {
   const canvas = useRef<HTMLCanvasElement>(null);
-  const { state, execute } = useWorkbench(canvas);
+  const { state, execute, cancelOperation } = useWorkbench(canvas);
   const running = state.phase === "running";
   const blocked = state.phase === "desktop-required";
   const unavailable = !running;
@@ -195,17 +194,37 @@ function Workbench() {
             Graceful stop
           </button>
         </div>
+        {state.operation && (
+          <section
+            aria-label="Diagnostic progress"
+            data-testid="operation-progress"
+            data-done={state.operation.done}
+            data-completed={state.operation.completed_units}
+          >
+            <p>
+              {state.operation.phase}: {state.operation.completed_units} /{" "}
+              {state.operation.total_units} chunks
+            </p>
+            <progress max={state.operation.total_units} value={state.operation.completed_units} />
+            <button
+              data-testid="cancel-operation"
+              disabled={state.operation.done}
+              onClick={() => {
+                void cancelOperation();
+              }}
+            >
+              Cancel diagnostic
+            </button>
+          </section>
+        )}
         <dl className="session-facts">
           <div>
             <dt>{running ? "Engine PID" : "Last engine PID"}</dt>
             <dd data-testid="engine-pid">{greeting?.pid ?? "—"}</dd>
           </div>
           <div>
-            <dt>Protocol</dt>
-            <dd>
-              {greeting?.protocol_version ?? PROTOCOL_VERSION}{" "}
-              <span className="quiet">/ client {PROTOCOL_VERSION}</span>
-            </dd>
+            <dt>Engine instance</dt>
+            <dd>{greeting?.instance_id ?? "No session"}</dd>
           </div>
           <div>
             <dt>Engine build</dt>

@@ -9,6 +9,10 @@ fn main() {
         "engine_stop",
         "engine_restart",
         "engine_triangle",
+        "engine_run_diagnostic",
+        "engine_get_operation",
+        "engine_cancel_operation",
+        "engine_read_artifact",
         "engine_interrupt",
         "runtime_info",
     ]);

@@ -26,7 +26,7 @@ try {
   const diagnostic = invoke(["diagnose", "--engine", engine]);
   assert.equal(diagnostic.status, 0, diagnostic.stderr);
   const report = JSON.parse(diagnostic.stdout);
-  assert.equal(report.hello.protocol_version, 1);
+  assert.match(report.hello.instance_id, /^[0-9a-f-]{36}$/);
   assert.equal(report.hello.kernel, "monstertruck");
   assert.deepEqual(report.hello.geometry_capabilities, []);
   assert.ok(report.hello.pid > 0);
@@ -56,9 +56,13 @@ try {
   const nonfinite = payload.slice(0);
   new DataView(nonfinite).setFloat32(16, Number.NaN, true);
   rejects(nonfinite);
-  const mismatch = invoke(["diagnose", "--engine", engine, "--protocol-version", "2"]);
-  assert.notEqual(mismatch.status, 0);
-  assert.match(mismatch.stderr, /upgrade|required|protocol|mismatch/i);
+  const job = invoke(["job", "--engine", engine, "--chunks", "4", "--delay-ms", "150"]);
+  assert.equal(job.status, 0, job.stderr);
+  const jobReport = JSON.parse(job.stdout);
+  assert.equal(jobReport.operation.done, true);
+  assert.equal(jobReport.operation.state, "succeeded");
+  assert.equal(jobReport.bytes, 256);
+  assert.ok(jobReport.partial_updates > 0, "real partial output must arrive before completion");
   if (process.platform === "linux") {
     // Linux permits invalid UTF-8 filenames; macOS rejects this fixture with EILSEQ.
     // A shell expands the controlled glob as native bytes, unlike Node argv strings.
@@ -107,7 +111,7 @@ try {
         binaryBytes: payload.byteLength,
         decoder:
           "cross-language native transfer; truncation, oversized allocation, schema, reserved, count overflow, index bounds, nonfinite rejected",
-        mismatch: "nonzero exit with classified protocol diagnostic",
+        operations: jobReport,
         nonUtfPaths:
           process.platform === "linux"
             ? "JSON reports and child cleanup passed"

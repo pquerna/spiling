@@ -4,6 +4,6 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# CLI diagnostic consumer vision
+# CLI engine consumer vision
 
-Serve operators and automated smoke/transfer measurements through the same native engine client as the desktop shell. B0 exposes useful handshake metadata and synthetic payload size/timing, not CAD import, planning, or manufacturing commands.
+Serve headless readiness, incremental diagnostic work and binary interoperability through the same API as the shell. These commands do not import CAD or compile manufacturing programs.

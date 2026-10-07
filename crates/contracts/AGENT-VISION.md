@@ -4,6 +4,6 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Runtime-independent wire authority vision
+# Engine API authority vision
 
-Own the bounded B0 control contract and packed synthetic diagnostic layout consumed by native clients and generated TypeScript. The crate is not an engine, planner, CAD implementation, or transport runtime. B0 geometry capabilities remain empty; the triangle is explicitly synthetic.
+Own the generated gRPC engine contract, standard long-running operation types, bounded shell metadata views and packed synthetic triangle layout. This is not a scheduler or geometry implementation. The native transport has generated types; the webview receives generated Rust adapter views and raw binary responses.

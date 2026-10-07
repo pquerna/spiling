@@ -13,7 +13,16 @@ publish = false
 [dependencies]
 spiling-contracts.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tokio-stream.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+fs2 = "=0.4.3"
 
 [dev-dependencies]
 spiling-engine-client.workspace = true
-tokio.workspace = true
+tempfile.workspace = true

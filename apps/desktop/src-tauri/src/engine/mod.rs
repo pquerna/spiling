@@ -8,9 +8,9 @@ use std::{
 };
 
 use serde::Serialize;
-use spiling_contracts::{Hello, PROTOCOL_VERSION};
-use spiling_engine_client::EngineClient;
-use tauri::State;
+use spiling_contracts::{Hello, OperationView, operation_view, rpc::RunDiagnosticRequest};
+use spiling_engine_client::{EngineClient, EngineRpc};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::{Mutex, MutexGuard};
 
 #[derive(Default)]
@@ -86,15 +86,14 @@ impl Supervisor {
         reason
     }
 
-    async fn start(&mut self) -> Result<Hello, String> {
+    async fn start(&mut self, store: &std::path::Path) -> Result<Hello, String> {
         self.refresh().await;
         if let Some(client) = &self.client {
             return Ok(client.hello().clone());
         }
         let result = async {
             let path = engine_path()?;
-            let version = protocol_version()?;
-            EngineClient::spawn(&path, version)
+            EngineClient::spawn_in(&path, store)
                 .await
                 .map_err(|error| format!("could not start engine at {}: {error}", path.display()))
         }
@@ -179,19 +178,14 @@ fn engine_path() -> Result<PathBuf, String> {
     Ok(adjacent)
 }
 
-fn protocol_version() -> Result<u16, String> {
-    match std::env::var_os("SPILING_PROTOCOL_VERSION") {
-        Some(value) => value
-            .to_str()
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| "SPILING_PROTOCOL_VERSION must be an unsigned 16-bit integer".into()),
-        None => Ok(PROTOCOL_VERSION),
-    }
-}
-
 #[tauri::command]
-pub async fn engine_start(state: State<'_, EngineState>) -> Result<Hello, String> {
-    state.active().await?.start().await
+pub async fn engine_start(app: AppHandle, state: State<'_, EngineState>) -> Result<Hello, String> {
+    let store = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("engine-operations");
+    state.active().await?.start(&store).await
 }
 
 #[tauri::command]
@@ -207,25 +201,100 @@ pub async fn engine_stop(state: State<'_, EngineState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn engine_restart(state: State<'_, EngineState>) -> Result<Hello, String> {
+pub async fn engine_restart(
+    app: AppHandle,
+    state: State<'_, EngineState>,
+) -> Result<Hello, String> {
     let mut supervisor = state.active().await?;
     supervisor.stop().await?;
-    supervisor.start().await
+    let store = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("engine-operations");
+    supervisor.start(&store).await
+}
+
+async fn rpc(state: &EngineState) -> Result<EngineRpc, String> {
+    let mut supervisor = state.active().await?;
+    supervisor.refresh().await;
+    supervisor
+        .client
+        .as_ref()
+        .map(EngineClient::rpc)
+        .ok_or_else(|| "engine is not running".into())
 }
 
 #[tauri::command]
 pub async fn engine_triangle(
     state: State<'_, EngineState>,
 ) -> Result<tauri::ipc::Response, String> {
-    let mut supervisor = state.active().await?;
-    supervisor.refresh().await;
-    let client = supervisor.client.as_mut().ok_or("engine is not running")?;
-    match client.triangle().await {
-        Ok(bytes) => Ok(tauri::ipc::Response::new(bytes)),
-        Err(error) => Err(supervisor
-            .disconnect(format!("triangle transfer failed: {error}"))
-            .await),
-    }
+    let bytes = rpc(&state)
+        .await?
+        .triangle()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn engine_run_diagnostic(
+    state: State<'_, EngineState>,
+    request_id: String,
+) -> Result<OperationView, String> {
+    let op = rpc(&state)
+        .await?
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/desktop".into(),
+            request_id,
+            chunk_count: 4,
+            delay_ms: 250,
+            chunk_bytes: 64,
+            input_revision: "diagnostic".into(),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    operation_view(&op)
+}
+
+#[tauri::command]
+pub async fn engine_get_operation(
+    state: State<'_, EngineState>,
+    name: String,
+) -> Result<OperationView, String> {
+    operation_view(
+        &rpc(&state)
+            .await?
+            .get_operation(name)
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+}
+
+#[tauri::command]
+pub async fn engine_cancel_operation(
+    state: State<'_, EngineState>,
+    name: String,
+) -> Result<(), String> {
+    rpc(&state)
+        .await?
+        .cancel_operation(name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn engine_read_artifact(
+    state: State<'_, EngineState>,
+    name: String,
+) -> Result<tauri::ipc::Response, String> {
+    let rpc = rpc(&state).await?;
+    let artifact = rpc.get_artifact(name).await.map_err(|e| e.to_string())?;
+    let bytes = rpc
+        .read_artifact(&artifact)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]

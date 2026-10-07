@@ -4,7 +4,7 @@
  * Licensed under the Open Software License version 3.0
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { decodeTriangle, PROTOCOL_VERSION, type Hello } from "@spiling/protocol";
+import { decodeTriangle, type Hello, type OperationView } from "@spiling/protocol";
 import {
   createDiagnosticViewport,
   WebGPUUnavailableError,
@@ -36,6 +36,7 @@ export interface WorkbenchState {
   runtime: RuntimeInfo | null;
   hello: Hello | null;
   transfer: Transfer | null;
+  operation: OperationView | null;
 }
 type Action = "start" | "restart" | "stop" | "interrupt" | "transfer";
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -49,7 +50,9 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
     runtime: null,
     hello: null,
     transfer: null,
+    operation: null,
   });
+  const activeOperation = useRef<string | null>(null);
   const mounted = useRef(false);
   const generation = useRef(0);
   const inCommand = useRef(false);
@@ -78,6 +81,7 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
       const token = ++generation.current;
       const current = () => mounted.current && generation.current === token;
       setState((previous) => ({ ...previous, busy: true, message: "" }));
+      let engineEstablished = action === "transfer";
       try {
         if (action === "start" || action === "restart") {
           await disposeViewport();
@@ -128,12 +132,8 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
           // Never launch a sidecar until BOTH the WebGPU probe and renderer init succeed.
           const hello = await (action === "restart" ? native.restart() : native.start());
           if (!current()) return;
-          if (hello.protocol_version !== PROTOCOL_VERSION) {
-            throw new Error(
-              `Upgrade required: client protocol ${PROTOCOL_VERSION}, engine protocol ${hello.protocol_version}.`,
-            );
-          }
-          setState((previous) => ({ ...previous, hello }));
+          engineEstablished = true;
+          setState((previous) => ({ ...previous, hello, operation: null }));
         }
         if (action === "stop" || action === "interrupt") {
           await (action === "stop" ? native.stop() : native.interrupt());
@@ -156,29 +156,66 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
         if (!activeViewport)
           throw new Error("A ready WebGPU viewport is required before requesting display data.");
         const began = performance.now();
-        const binary = await native.triangle();
-        const received = performance.now();
-        if (!current()) return;
-        const triangle = decodeTriangle(binary);
-        const decoded = performance.now();
-        await activeViewport.showTriangle(triangle);
-        const rendered = performance.now();
-        if (!current()) return;
-        setState((previous) => ({
-          ...previous,
-          phase: "running",
-          message: "",
-          transfer: {
-            bytes: triangle.byteLength,
-            requestMs: received - began,
-            decodeMs: decoded - received,
-            renderMs: rendered - decoded,
-            totalMs: rendered - began,
-          },
-        }));
+        let operation = await native.runDiagnostic(crypto.randomUUID());
+        activeOperation.current = operation.name;
+        let displayed = 0;
+        while (current()) {
+          setState((previous) => ({ ...previous, operation }));
+          if (operation.outputs.length > displayed) {
+            // Pull one complete output at a time; fetch again only after GPU consumption.
+            const artifact = operation.outputs[operation.outputs.length - 1];
+            if (!artifact) throw new Error("Published diagnostic artifact missing.");
+            const binary = await native.readArtifact(artifact.name);
+            const received = performance.now();
+            if (!current()) return;
+            const triangle = decodeTriangle(binary);
+            const decoded = performance.now();
+            await activeViewport.showTriangle(triangle);
+            const rendered = performance.now();
+            if (!current()) return;
+            displayed = operation.outputs.length;
+            setState((previous) => ({
+              ...previous,
+              phase: "running",
+              transfer: {
+                bytes: triangle.byteLength,
+                requestMs: received - began,
+                decodeMs: decoded - received,
+                renderMs: rendered - decoded,
+                totalMs: rendered - began,
+              },
+            }));
+          }
+          if (operation.done) {
+            if (operation.error_code !== null && operation.state !== "cancelled")
+              throw new Error(operation.error_message ?? "Diagnostic operation failed.");
+            if (current())
+              setState((previous) => ({
+                ...previous,
+                phase: "running",
+                message:
+                  operation.state === "cancelled"
+                    ? "Diagnostic cancelled. Completed partial output remains inspectable."
+                    : "",
+              }));
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (!current()) return;
+          operation = await native.getOperation(operation.name);
+        }
       } catch (error) {
         if (!current()) return;
         let message = errorText(error);
+        if (engineEstablished && viewport.current && !(error instanceof WebGPUUnavailableError)) {
+          // Domain/RPC failure does not own the engine. OS status polling detects a dead child.
+          setState((previous) => ({
+            ...previous,
+            phase: "running",
+            message: `Diagnostic failed: ${message}`,
+          }));
+          return;
+        }
         try {
           await native.stop();
         } catch (cleanupError) {
@@ -196,6 +233,7 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
           message,
         }));
       } finally {
+        activeOperation.current = null;
         inCommand.current = false;
         if (mounted.current) setState((previous) => ({ ...previous, busy: false }));
       }
@@ -283,5 +321,15 @@ export function useWorkbench(canvas: RefObject<HTMLCanvasElement | null>) {
     };
   }, [state.phase, state.busy, disposeViewport]);
 
-  return { state, execute };
+  const cancelOperation = useCallback(async () => {
+    const name = activeOperation.current;
+    if (!name) return;
+    try {
+      await native.cancelOperation(name);
+    } catch (error) {
+      if (mounted.current && activeOperation.current === name)
+        setState((previous) => ({ ...previous, message: errorText(error) }));
+    }
+  }, []);
+  return { state, execute, cancelOperation };
 }

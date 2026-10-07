@@ -4,86 +4,88 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# B0 local-pipe control protocol
+# Native engine operations and artifacts
 
-Rust `spiling-contracts` is the executable schema authority. Its ts-rs generator produces `packages/protocol/src/generated.ts`, including protocol, framing limits, and triangle metadata constants. Generate with `cargo run -p spiling-contracts --bin generate`; append `-- --check` to reject byte drift. Generated output is not independently formatted or hand-maintained.
+`crates/contracts/proto/spiling/engine.proto` is the native API authority. Google Operations, Status and ByteStream schemas are vendored unmodified with Apache-2.0 provenance. Pinned tonic/prost and vendored protoc generate native services/clients at build time. Rust adapters generate the webview view types; `pnpm contracts --check` rejects drift. Engine and shell ship together: there is no cross-version negotiation, alternate transport or compatibility shim.
 
-B0 uses inherited stdin/stdout pipes. Engine stdout contains **only** frames; stderr contains UTF-8 JSON-line diagnostics with `level`, `event`, and `message`. No network listener, CAD import, kernel execution, planner, or printable artifact is implemented. `kernel: "monstertruck"` identifies the configured future default, not a loaded CAD kernel; `geometry_capabilities` is empty.
+## Process ownership and readiness
 
-## Framing
+The shared Rust client launches `spiling-engine --store PATH`. The parent sends a random 64-hex-character launch capability plus newline on inherited stdin and keeps that pipe open for ownership liveness. The child binds ephemeral IPv4 loopback and writes one bounded JSON startup record on stdout containing endpoint, instance UUID and PID. No capability is returned in stdout or persisted. The client validates a loopback endpoint, child PID, instance identity and message limits, then calls authenticated `GetEngineInfo`.
 
-All multi-byte fields are unsigned little-endian integers. The header is exactly 16 bytes:
+All RPCs require the capability in authorization metadata. This is local plaintext HTTP/2 under a trusted-host assumption, not remote access or protection against a privileged local observer. The native Rust client connects directly without HTTP proxy routing. Only the native shell/CLI connect; the webview uses narrow Tauri invokes. The parent never discovers engines by fixed port or adopts an unrelated process.
 
-| Offset | Bytes | Meaning                                 |
-| ------ | ----- | --------------------------------------- |
-| 0      | 4     | ASCII `SPLG`                            |
-| 4      | 2     | Frame protocol version, currently 1     |
-| 6      | 2     | Kind: 1 JSON control, 2 binary triangle |
-| 8      | 4     | Nonzero request ID                      |
-| 12     | 4     | Payload byte length, excluding header   |
+Unary calls have five-second deadlines; watches are explicitly long-lived. Expiring/dropping an RPC or watcher does not kill the engine or cancel accepted work. Shutdown/owner EOF interrupt remaining work and bound server drain to two seconds. The process owner waits for observed exit, can explicitly terminate, and uses kill-on-drop. Logs go to stderr; stdout is not a custom frame transport.
 
-Control payloads are limited to 65,536 bytes; binary payloads to 4,194,304 bytes, inclusive. Validate the complete header and bounds **before** allocating or reading the payload. Unknown magic, versions, kinds, zero IDs, oversized lengths, and truncation are errors. EOF between frames is a clean disconnect; EOF inside a header/payload is malformed. An in-memory frame decoder also rejects trailing bytes. The stream decoder consumes one frame at a time.
+## Services and Google API patterns
 
-Only control frames are valid engine requests. The client uses strictly increasing IDs starting at 1, refuses integer wraparound, and permits one in-flight request. The engine also enforces strictly increasing IDs. Every response carries exactly the initiating request ID; the client rejects mismatches before reading a response payload. B0 has no unsolicited frames, event stream, or concurrent request queues.
+- `Engine.GetEngineInfo`, `Shutdown`, `RunDiagnostic`, `WatchOperation`.
+- Standard `google.longrunning.Operations.GetOperation`, `ListOperations`, `CancelOperation`, `WaitOperation`.
+- `Artifacts.GetArtifact` returns metadata; standard `google.bytestream.ByteStream.Read` streams bytes.
+- Standard optional DeleteOperation, ByteStream Write and QueryWriteStatus explicitly return UNIMPLEMENTED. List filters, wildcard parents and partial-success listing are unsupported.
 
-## Control messages
+RunDiagnostic is a typed long-running action following [AIP-151](https://google.aip.dev/151). Its result is a standard Operation with typed DiagnosticMetadata in `metadata` and exactly one terminal `response` or `error`. The schema declares operation_info. Operations have names `diagnostics/{id}/operations/{uuid}`; this namespace does not create an authoring project.
 
-Control JSON is UTF-8, with a flat internally tagged enum and snake_case `type`. There is no `content` envelope. Unknown fields/types, missing required fields, and malformed JSON are rejected.
+An optional nonzero UUID `request_id` follows [AIP-155](https://google.aip.dev/155). A supplied ID deduplicates equivalent normalized requests within its parent while the operation is retained. Different parameters with the same ID fail ALREADY_EXISTS. Omission creates independent work on every call. Admission/deduplication is committed before acknowledgement and scheduling belongs to the engine even when its caller drops the acceptance RPC. This is deduplicated admission, not a claim of exactly-once physical execution.
 
-Requests:
+List uses bounded keyset pagination with parent-bound opaque tokens and default 20/max 50 items, following [AIP-158](https://google.aip.dev/158). A token is not a fixed historical snapshot: newly inserted operations can alter subsequent pages. Negative page sizes or wrong-parent tokens fail. Request parameters other than the token/page size must remain consistent.
 
-```json
-{"type":"hello","protocol_version":1,"client_build":"0.1.0"}
-{"type":"ping"}
-{"type":"triangle"}
-{"type":"shutdown"}
+## Lifecycle, progress and cancellation
+
+```text
+queued -> running -> succeeded | failed
+queued | running -> cancelling -> cancelled
+cancelling -> succeeded | failed if completion won the race
+unfinished -> interrupted on shutdown or recovery after engine failure
 ```
 
-Responses:
+Terminal outcomes never change. Cancellation acknowledgement records intent; it does not certify that computation has stopped. Repeated cancellation is idempotent. Successful cancellation is a terminal Operation error with canonical CANCELLED status. Recovery/intentional shutdown interruption uses ABORTED. Worker/publication transitions serialize against cancellation; completion may legitimately win.
 
-```json
-{"type":"hello","protocol_version":1,"engine_build":"0.1.0","kernel":"monstertruck","geometry_capabilities":[],"max_control_bytes":65536,"max_binary_bytes":4194304,"pid":1234}
-{"type":"pong"}
-{"type":"bye"}
-{"type":"error","code":"upgrade_required","message":"protocol mismatch: client 2, engine 1; upgrade required"}
-```
+Metadata contains state/version, phase, completed/total units, input revision/digest and available complete output descriptors. The diagnostic total is known; it reports chunk counts rather than invented phase percentages. WatchOperation immediately returns a current snapshot, then coalesces newer complete snapshots through bounded storage. Intermediate versions may be skipped. Registration/publication cannot lose an update; reconnect by obtaining current state rather than replaying percentage events. WaitOperation returns current state after completion or its bounded timeout, not a guaranteed terminal result.
 
-`Hello` is also exported as a dedicated Rust/TypeScript struct without the enum tag, for desktop invoke responses. `Response::Hello(Hello)` adds `type: "hello"` on the wire without nesting the struct. Build strings are package versions; PID is the actual engine process ID. The client validates negotiated version/limits and verifies PID against its spawned child.
+Input revision is retained provenance only in this diagnostic. There is no implemented authoring project, current-plan attachment or topology identity. These jobs never mutate a project. Future authoring must add engine-side revision/dependency validation before publishing results as current.
 
-## Negotiation and failure
+## Durable publication and limits
 
-Hello is mandatory and may occur only once per process. The first request must be hello; other requests fail with `handshake_required`. A hello payload version mismatch produces `upgrade_required`, logs stderr diagnostics, and exits nonzero without executing queued commands. Frames themselves always use the current framing version; the CLI's `--protocol-version` overrides the negotiation payload so incompatibility can be diagnosed using the known framing envelope. An unrecognized **frame** version is a framing error and exits without a response.
+An exclusive file lock permits one engine per store. SQLite WAL with FULL synchronization atomically commits operation admission, complete artifact blobs and output/state references. On reopen, unfinished operations become interrupted; they are never automatically replayed. Complete outputs remain retrievable after failure/cancellation/restart. Tests establish process-kill recovery, not a physical power-loss certification.
 
-After negotiation, ping returns pong; triangle returns one kind-2 frame; shutdown returns bye and exits successfully. Error codes for other fatal control failures are `invalid_request`, `invalid_request_id`, and `already_negotiated`. B0 treats protocol misuse as fatal instead of attempting resynchronization. Invalid framing has no trustworthy correlation envelope, so the engine emits only stderr diagnostics and exits nonzero. Diagnostic messages do not echo an arbitrary untrusted request body.
+Current bounds are 128 retained operations, eight unfinished admitted operations, one cooperative worker, 32 MiB of conservative reserved output capacity, at most 64 chunks per operation and 256 KiB per artifact. Slots/reservations remain retained; no deletion/GC API is implemented yet. Capacity exhaustion is explicit RESOURCE_EXHAUSTED, never silent eviction or a successful truncated result. The UI store is application-local persistent storage; CLI defaults to temporary storage unless `--store` is supplied.
 
-The shared asynchronous EngineClient gives each complete write/read exchange five seconds and requires exact response IDs/kinds/control variants. It kills and reaps a child after request failures, validates clean shutdown acknowledgement and successful observed exit within five seconds, and exposes OS-observed running status. Explicit terminate sends a kill and waits for exit. Dropping the client enables Tokio kill-on-drop; cancelled in-flight operations also initiate kill. The client inherits engine stderr and exposes no unbounded queues. Unexpected process exits are errors, never successful cached status. The standalone TypeScript triangle decoder validates packed data independently before typed views/upload.
+Watch/Wait share a global budget of 16 observers; binary downloads have eight slots and two queued 16 KiB fragments per stream. Individual gRPC messages are capped at 64 KiB; HTTP/2 permits 32 streams per connection, leaving room for control when subscription/download limits are reached. SQLite accesses use blocking tasks with short serialized transactions, not an async runtime lock held across transfer waits.
 
-## Synthetic triangle payload
+This worker generates synthetic triangle chunks, with optional explicitly synthetic padding for transfer tests. It is not kernel worker isolation or non-cooperative native cancellation. No CAD, STEP, sectioning, manufacturing or machine execution capability is advertised.
 
-This is a diagnostic display triangle, **not** a BREP or manufacturing artifact. The 64-byte payload has a 16-byte header:
+## Incremental artifacts and binary reads
 
-| Offset | Bytes | Meaning                                        |
-| ------ | ----- | ---------------------------------------------- |
-| 0      | 4     | ASCII `SPLT`                                   |
-| 4      | 2     | Schema version 1                               |
-| 6      | 2     | Reserved, exactly 0                            |
-| 8      | 4     | Vertex count 3                                 |
-| 12     | 4     | Index count 3                                  |
-| 16     | 36    | Nine little-endian float32 position components |
-| 52     | 12    | Three little-endian u32 indices                |
+Each available descriptor names complete immutable bytes as `artifacts/{sha256}`, with size, checksum and media type. Availability is published in the same SQLite transaction as its bytes. Append-only descriptors are bounded to 64; repeated identical outputs may share content. Overall success is distinct from partial availability. An incomplete manufacturing program could not be exported as a verified build using this contract.
 
-Positions are `[-0.75, -0.6, 0, 0.75, -0.6, 0, 0, 0.75, 0]`; indices are `[0, 1, 2]`. Validate magic, schema, reserved bits, configured count limits, exact size using checked arithmetic, finite coordinates, triangle index count, and every index against vertex count before constructing views or GPU buffers. The canonical hex fixture is [`fixtures/protocol/triangle.json`](../../fixtures/protocol/triangle.json); its adjacent license sidecar records original authorship.
+ByteStream Read uses its standard resource_name, read_offset and read_limit: zero limit reads to end; negative offsets/offsets beyond end fail OUT_OF_RANGE; negative limits fail INVALID_ARGUMENT. Stream messages carry byte fragments, not JSON/base64. Full client reads enforce the allocation bound, exact length and SHA-256. Partial-range callers must validate their range separately; a range does not redefine the artifact checksum.
 
-## Real operator smoke
+The shell returns bounded bytes as raw Tauri responses. React pulls one complete artifact at a time, validates SPLT, renders it and only then requests more. Metadata polling is nonoverlapping; generation guards prevent an old session's response from replacing a new session. Cancellation can run independently of the display command. Partial output is labelled diagnostic; progressive geometric refinement/atomic replacement sets are not implemented.
 
-Build both native executables, then run:
+## SPLT synthetic triangle
+
+The original 64-byte packed display format remains independent of gRPC. All fields are little-endian:
+
+| Offset | Bytes | Value                       |
+| ------ | ----- | --------------------------- |
+| 0      | 4     | ASCII SPLT                  |
+| 4      | 2     | Schema 1                    |
+| 6      | 2     | Reserved zero               |
+| 8      | 4     | Vertex count 3              |
+| 12     | 4     | Index count 3               |
+| 16     | 36    | Nine float32 XYZ components |
+| 52     | 12    | Three uint32 indices        |
+
+Positions are `[-0.75,-0.6,0, 0.75,-0.6,0, 0,0.75,0]`; indices are `[0,1,2]`. TypeScript validates magic, schema, counts, exact size, alignment, finite coordinates and index bounds before typed views or GPU upload. The native-owned [golden fixture](../../fixtures/protocol/triangle.json) is retained. The optional padded diagnostic media type contains this payload followed by synthetic bytes and is not accepted directly by the triangle decoder.
+
+## Exercising the actual services
 
 ```sh
-spiling-cli diagnose --engine /path/to/spiling-engine
-spiling-cli triangle --engine /path/to/spiling-engine --output triangle.bin
-spiling-cli diagnose --engine /path/to/spiling-engine --protocol-version 2
+cargo build --locked -p spiling-engine -p spiling-cli
+cargo test --locked -p spiling-engine
+node --import tsx tools/smoke-cli.mjs
+spiling-cli job --engine /absolute/path/spiling-engine --chunks 4 --delay-ms 250
+spiling-cli job --engine /absolute/path/spiling-engine --store /absolute/path/store --request-id UUID
 ```
 
-Options can appear before or after the command. Without `--engine`, the CLI resolves `spiling-engine` (with the platform executable suffix) beside its own executable. Diagnose prints a JSON object containing `hello`, `ping: "pong"`, `handshake_us`, and `ping_us`. Triangle writes the unframed 64-byte payload when `--output` is given and reports `bytes`, `transfer_us`, `handshake_us`, `synthetic: true`, and PID. Timing uses monotonic elapsed microseconds; transfer timing excludes file output. Reports appear only after successful engine shutdown. Mismatch and file/process errors print stderr JSON and return nonzero.
-
-Run `cargo test -p spiling-contracts -p spiling-engine-client -p spiling-engine` for deterministic boundary/error and actual-child regressions. Linux additionally exercises process disappearance after dropping a client, five-second request timeout cleanup, and cancellation cleanup using an actual stopped engine process (`kill -STOP`). Unit tests do not establish packaged desktop support; the parent integration checks cross-language decoding and real CLI smoke separately.
+CLI progress goes to stderr; final JSON follows child cleanup. The standard Operation terminal status is separate from RPC transport errors. Shell/CLI/native tests exercise the same generated API, not an alternate in-process engine. CEF presentation and physical GPU support require separate evidence.

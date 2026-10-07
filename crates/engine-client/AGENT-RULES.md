@@ -4,10 +4,11 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Supervised native client rules
+# Supervised native gRPC client rules
 
-- Share this client between CLI and desktop shell; do not duplicate pipe/protocol state machines in either consumer.
-- One mutable client permits one request at a time. Correlate response IDs strictly and bound reads before allocation. Five-second request/exit timeouts are part of the contract.
-- Spawn performs mandatory hello; observe OS process status. Failure/cancellation kills the child; explicit shutdown waits for acknowledgement and successful process exit. Drop uses Tokio kill-on-drop.
-- Stderr is inherited; stdout is reserved for frames. No Tauri or domain/planner dependencies.
-- Run `cargo test -p spiling-engine-client` and `cargo test -p spiling-engine` for actual child lifecycle coverage. See [control protocol](../../docs/protocol/control.md).
+- Share EngineRpc between CLI and shell. Cloneable RPC access does not own the process; EngineClient exclusively owns child lifetime and the stdin liveness pipe.
+- Authenticate with a per-launch capability delivered on inherited stdin, never arguments/logs/files. Validate bounded startup metadata, IPv4 loopback endpoint, OS child PID and instance identity.
+- Unary exchanges have five-second deadlines; watchers are long-lived. Dropping/expiring a call never cancels accepted work or kills the child. CancelOperation explicitly requests cancellation.
+- Binary reads enforce allocation limits, exact total length and SHA-256. Consume the standard ByteStream API; no base64 or second framing implementation.
+- Shutdown waits for clean observed exit; terminate and owner Drop kill/reap the owned child. Temporary diagnostic stores last only for the owner; spawn_in uses explicit retained storage.
+- Exercise real child lifecycle, retries, cancellation, recovery and streaming via cargo test -p spiling-engine.

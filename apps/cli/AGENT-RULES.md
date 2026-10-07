@@ -4,9 +4,9 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# CLI diagnostic consumer rules
+# CLI engine consumer rules
 
-- Use EngineClient for all engine operations; do not implement a second handshake/transport or geometry path.
-- Support diagnose and triangle, engine path override, protocol version override, and triangle output. stdout reports machine-readable JSON only after successful shutdown; errors are stderr JSON and nonzero exit.
-- With no override, resolve the engine beside the CLI executable. File-output failures must clean up the child. Preserve native path bytes for process/file operations; JSON path labels use explicit lossy UTF-8 display encoding so valid non-UTF-8 Unix paths cannot panic during success reporting.
-- Exercise real CLI against a built engine: `spiling-cli diagnose --engine PATH`, `spiling-cli triangle --engine PATH --output FILE`, and mismatch with `--protocol-version 2`. See [control protocol](../../docs/protocol/control.md).
+- Use the shared generated client exclusively. Diagnose observes engine readiness; triangle downloads the real diagnostic artifact; job watches a long-running operation and incrementally fetches its outputs.
+- Optional --store retains operations across runs; default storage is temporary. --request-id follows AIP-155; do not invent automatic retry with a new ID.
+- stdout is final machine-readable JSON after successful child shutdown. Progress/errors go to stderr. Failed output writes clean up the child. Native paths retain OS bytes; JSON labels use explicit display encoding.
+- Run node --import tsx tools/smoke-cli.mjs against built binaries, plus real engine integration tests.

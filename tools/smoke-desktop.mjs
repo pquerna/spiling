@@ -19,15 +19,14 @@ const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|mismatch|gpu-unavailable]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|gpu-unavailable|engine-operations]; provide DISPLAY on Linux or launch under xvfb-run",
   );
-if (!["normal", "mismatch", "gpu-unavailable"].includes(scenario))
+if (!["normal", "gpu-unavailable", "engine-operations"].includes(scenario))
   throw new Error("Unknown smoke scenario");
 const child = spawn(resolve(executable), [], {
   env: {
     ...process.env,
     SPILING_CEF_DEBUG_PORT: String(port),
-    ...(scenario === "mismatch" ? { SPILING_PROTOCOL_VERSION: "2" } : {}),
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -135,7 +134,7 @@ try {
   });
   await cdp("Page.enable");
   await cdp("Runtime.enable");
-  if (scenario === "gpu-unavailable") {
+  if (scenario !== "normal") {
     await cdp("Page.addScriptToEvaluateOnNewDocument", {
       source: "Object.defineProperty(navigator, 'gpu', {value: undefined, configurable: true});",
     });
@@ -176,14 +175,75 @@ try {
         2,
       ),
     );
-  } else if (scenario === "mismatch") {
-    const body = await until(async () => {
-      const value = await evaluate("document.body.innerText");
-      return /upgrade|mismatch/i.test(value) ? value : false;
-    }, "protocol mismatch diagnostic");
-    await screenshot("b0-protocol-mismatch");
-    console.log(JSON.stringify({ result: "pass", scenario, diagnostic: body }, null, 2));
+  } else if (scenario === "engine-operations") {
+    // Explicit native bridge diagnostic, bypassing GPU admission; no rendering claim.
+    await until(async () => /unsupported/i.test(await text("engine-status")), "GPU gate settled");
+    const invoke = (command, parameters = {}) =>
+      evaluate(
+        `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(parameters)})`,
+      );
+    const hello = await invoke("engine_start");
+    enginePid = hello.pid;
+    const operation = await invoke("engine_run_diagnostic", { requestId: crypto.randomUUID() });
+    const partial = await until(async () => {
+      const current = await invoke("engine_get_operation", { name: operation.name });
+      return current.outputs.length > 0 && !current.done ? current : false;
+    }, "native partial output");
+    const bytes = await evaluate(
+      `window.__TAURI_INTERNALS__.invoke("engine_read_artifact", {name:${JSON.stringify(partial.outputs[0].name)}}).then(bytes => Array.from(new Uint8Array(bytes)))`,
+    );
+    assert.equal(bytes.length, 64);
+    assert.deepEqual(bytes.slice(0, 4), [83, 80, 76, 84]);
+    await invoke("engine_cancel_operation", { name: operation.name });
+    const terminal = await until(async () => {
+      const current = await invoke("engine_get_operation", { name: operation.name });
+      return current.done ? current : false;
+    }, "native terminal operation");
+    assert.equal(terminal.state, "cancelled");
+    assert.equal(terminal.error_code, 1);
+    const concurrent = await invoke("engine_status");
+    assert.equal(concurrent.state, "running", "cancelling work preserves engine");
+    const interrupted = await invoke("engine_run_diagnostic", { requestId: crypto.randomUUID() });
+    await invoke("engine_interrupt");
+    await until(async () => !alive(enginePid), "interrupted child reaped");
+    const restarted = await invoke("engine_restart");
+    assert.notEqual(restarted.pid, enginePid);
+    enginePid = restarted.pid;
+    const recovered = await invoke("engine_get_operation", { name: interrupted.name });
+    assert.equal(recovered.state, "interrupted");
+    assert.equal(recovered.error_code, 10);
+    console.log(
+      JSON.stringify(
+        {
+          result: "pass",
+          scenario,
+          partial,
+          terminal,
+          recovered,
+          qualification:
+            "Real CEF invoke/job/binary/cancellation/restart path; explicit GPU admission bypass, no rendering or hardware acceptance",
+        },
+        null,
+        2,
+      ),
+    );
   } else {
+    const partialUi = await until(
+      async () =>
+        evaluate(`(() => {
+      const p = document.querySelector('[data-testid="operation-progress"]');
+      return p && p.dataset.done === 'false' && Number(p.dataset.completed) > 0;
+    })()`),
+      "UI partial operation progress",
+    );
+    assert.equal(partialUi, true);
+    await until(
+      async () =>
+        evaluate(
+          `document.querySelector('[data-testid="operation-progress"]')?.dataset.done === 'true'`,
+        ),
+      "UI terminal progress",
+    );
     await until(async () => /running/i.test(await text("engine-status")), "engine running");
     enginePid = Number((await text("engine-pid")).match(/\d+/)?.[0]);
     assert.ok(Number.isSafeInteger(enginePid) && enginePid > 0, "Live engine PID");

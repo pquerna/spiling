@@ -2,144 +2,353 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod jobs;
+use jobs::Jobs;
 use spiling_contracts::{
-    Frame, FrameKind, Hello, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, PROTOCOL_VERSION, Request,
-    Response, synthetic_triangle,
+    MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo, TRANSFER_FRAGMENT_BYTES,
+    google::{bytestream::*, longrunning::*},
+    rpc::*,
 };
-use std::{io, process::ExitCode};
+use std::io::{BufRead, Read};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
-fn diagnostic(level: &str, event: &str, message: &str) {
-    eprintln!(
-        "{}",
-        serde_json::json!({"level": level, "event": event, "message": message})
-    );
+#[derive(Clone)]
+struct Service {
+    jobs: Jobs,
+    info: EngineInfo,
+    stop: watch::Sender<bool>,
+    observers: Arc<Semaphore>,
+    downloads: Arc<Semaphore>,
 }
-
-fn reject(
-    output: &mut impl io::Write,
-    request_id: u32,
-    code: &str,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    diagnostic("error", code, message);
-    Frame::control(
-        request_id,
-        &Response::Error {
-            code: code.into(),
-            message: message.into(),
-        },
-    )?
-    .write(output)?;
-    Err(message.into())
-}
-
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut input = stdin.lock();
-    let mut output = stdout.lock();
-    let mut negotiated = false;
-    let mut last_id = 0;
-    diagnostic("info", "started", "engine awaiting protocol handshake");
-    while let Some(frame) = Frame::read(&mut input)? {
-        let id = frame.header.request_id;
-        if id <= last_id {
-            return reject(
-                &mut output,
-                id,
-                "invalid_request_id",
-                "request IDs must increase strictly",
-            );
-        }
-        last_id = id;
-        if frame.header.kind != FrameKind::Control {
-            return reject(
-                &mut output,
-                id,
-                "invalid_request",
-                "engine accepts only control requests",
-            );
-        }
-        let request: Request = match serde_json::from_slice(&frame.payload) {
-            Ok(request) => request,
-            Err(_) => {
-                return reject(
-                    &mut output,
-                    id,
-                    "invalid_request",
-                    "malformed or unknown control request",
-                );
+#[tonic::async_trait]
+impl engine_server::Engine for Service {
+    async fn get_engine_info(&self, _: Request<()>) -> Result<Response<EngineInfo>, Status> {
+        Ok(Response::new(self.info.clone()))
+    }
+    async fn shutdown(&self, _: Request<()>) -> Result<Response<()>, Status> {
+        self.stop.send_replace(true);
+        Ok(Response::new(()))
+    }
+    async fn run_diagnostic(
+        &self,
+        req: Request<RunDiagnosticRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        Ok(Response::new(self.jobs.start(req.into_inner()).await?))
+    }
+    type WatchOperationStream = ReceiverStream<Result<Operation, Status>>;
+    async fn watch_operation(
+        &self,
+        req: Request<WatchOperationRequest>,
+    ) -> Result<Response<Self::WatchOperationStream>, Status> {
+        let permit = self
+            .observers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("observer limit"))?;
+        let mut watch = self.jobs.subscribe(req.into_inner().name).await?;
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _permit = permit;
+            loop {
+                let op = watch.borrow_and_update().clone();
+                let done = op.done;
+                if tx.send(Ok(op)).await.is_err() || done {
+                    break;
+                }
+                tokio::select! { _ = tx.closed() => break, changed = watch.changed() => if changed.is_err() { break; } }
             }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+#[tonic::async_trait]
+impl operations_server::Operations for Service {
+    async fn get_operation(
+        &self,
+        req: Request<GetOperationRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        Ok(Response::new(self.jobs.get(req.into_inner().name).await?))
+    }
+    async fn list_operations(
+        &self,
+        req: Request<ListOperationsRequest>,
+    ) -> Result<Response<ListOperationsResponse>, Status> {
+        let req = req.into_inner();
+        if !req.filter.is_empty() || req.return_partial_success {
+            return Err(Status::unimplemented(
+                "filters and wildcard parents are not supported",
+            ));
+        }
+        Ok(Response::new(
+            self.jobs
+                .list(req.name, req.page_size, req.page_token)
+                .await?,
+        ))
+    }
+    async fn delete_operation(
+        &self,
+        _: Request<DeleteOperationRequest>,
+    ) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented(
+            "retained operations cannot yet be deleted",
+        ))
+    }
+    async fn cancel_operation(
+        &self,
+        req: Request<CancelOperationRequest>,
+    ) -> Result<Response<()>, Status> {
+        self.jobs.cancel(req.into_inner().name).await?;
+        Ok(Response::new(()))
+    }
+    async fn wait_operation(
+        &self,
+        req: Request<WaitOperationRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let _permit = self
+            .observers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("observer limit"))?;
+        let req = req.into_inner();
+        let duration = match req.timeout {
+            Some(d) if d.seconds >= 0 && (0..1_000_000_000).contains(&d.nanos) => {
+                Duration::new(d.seconds as u64, d.nanos as u32).min(Duration::from_secs(30))
+            }
+            Some(_) => return Err(Status::invalid_argument("invalid wait timeout")),
+            None => Duration::from_secs(30),
         };
-        if !negotiated && !matches!(request, Request::Hello { .. }) {
-            return reject(
-                &mut output,
-                id,
-                "handshake_required",
-                "hello must precede commands",
-            );
+        let mut watch = self.jobs.subscribe(req.name).await?;
+        let _ = tokio::time::timeout(duration, async {
+            loop {
+                if watch.borrow().done {
+                    break;
+                }
+                if watch.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        Ok(Response::new(watch.borrow().clone()))
+    }
+}
+#[tonic::async_trait]
+impl artifacts_server::Artifacts for Service {
+    async fn get_artifact(
+        &self,
+        req: Request<GetArtifactRequest>,
+    ) -> Result<Response<Artifact>, Status> {
+        Ok(Response::new(
+            self.jobs.artifact(req.into_inner().name).await?,
+        ))
+    }
+}
+#[tonic::async_trait]
+impl byte_stream_server::ByteStream for Service {
+    type ReadStream = ReceiverStream<Result<ReadResponse, Status>>;
+    async fn write(
+        &self,
+        _: Request<tonic::Streaming<WriteRequest>>,
+    ) -> Result<Response<WriteResponse>, Status> {
+        Err(Status::unimplemented(
+            "artifacts are published by engine operations",
+        ))
+    }
+    async fn query_write_status(
+        &self,
+        _: Request<QueryWriteStatusRequest>,
+    ) -> Result<Response<QueryWriteStatusResponse>, Status> {
+        Err(Status::unimplemented(
+            "external artifact writes are not supported",
+        ))
+    }
+    async fn read(&self, req: Request<ReadRequest>) -> Result<Response<Self::ReadStream>, Status> {
+        let permit = self
+            .downloads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("download limit"))?;
+        let req = req.into_inner();
+        if req.read_offset < 0 {
+            return Err(Status::out_of_range("negative read offset"));
         }
-        match request {
-            Request::Hello {
-                protocol_version,
-                client_build: _,
-            } => {
-                if negotiated {
-                    return reject(
-                        &mut output,
-                        id,
-                        "already_negotiated",
-                        "hello may occur only once",
-                    );
+        if req.read_limit < 0 {
+            return Err(Status::invalid_argument("negative read limit"));
+        }
+        let info = self.jobs.artifact(req.resource_name.clone()).await?;
+        if req.read_offset as u64 > info.size_bytes {
+            return Err(Status::out_of_range("read_offset exceeds artifact size"));
+        }
+        let end = if req.read_limit == 0 {
+            info.size_bytes
+        } else {
+            (req.read_offset as u64)
+                .saturating_add(req.read_limit as u64)
+                .min(info.size_bytes)
+        };
+        let jobs = self.jobs.clone();
+        let (tx, rx) = mpsc::channel(2);
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut offset = req.read_offset as u64;
+            while offset < end {
+                if tx.is_closed() {
+                    break;
                 }
-                if protocol_version != PROTOCOL_VERSION {
-                    return reject(
-                        &mut output,
-                        id,
-                        "upgrade_required",
-                        &format!(
-                            "protocol mismatch: client {protocol_version}, engine {PROTOCOL_VERSION}; upgrade required"
-                        ),
-                    );
+                let count = ((end - offset) as usize).min(TRANSFER_FRAGMENT_BYTES);
+                let bytes = jobs
+                    .fragment(req.resource_name.clone(), offset, count)
+                    .await;
+                match bytes {
+                    Ok(data) => {
+                        let length = data.len() as u64;
+                        if length == 0 {
+                            let _ = tx.send(Err(Status::data_loss("artifact truncated"))).await;
+                            break;
+                        }
+                        if tx.send(Ok(ReadResponse { data })).await.is_err() {
+                            break;
+                        }
+                        offset += length;
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error)).await;
+                        break;
+                    }
                 }
-                let hello = Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    engine_build: env!("CARGO_PKG_VERSION").into(),
-                    kernel: "monstertruck".into(),
-                    geometry_capabilities: Vec::new(),
-                    max_control_bytes: MAX_CONTROL_BYTES,
-                    max_binary_bytes: MAX_BINARY_BYTES,
-                    pid: std::process::id(),
-                };
-                Frame::control(id, &Response::Hello(hello))?.write(&mut output)?;
-                negotiated = true;
-                diagnostic(
-                    "info",
-                    "negotiated",
-                    "protocol handshake accepted; geometry capabilities are empty",
-                );
             }
-            Request::Ping {} => Frame::control(id, &Response::Pong {})?.write(&mut output)?,
-            Request::Triangle {} => {
-                Frame::write_payload(FrameKind::Triangle, id, &synthetic_triangle(), &mut output)?;
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--store")) {
+        return Err("engine requires --store PATH".into());
+    }
+    let store = PathBuf::from(args.next().ok_or("store path missing")?);
+    if args.next().is_some() {
+        return Err("unexpected engine argument".into());
+    }
+    let (stop, mut stopping) = watch::channel(false);
+    let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
+    let eof = stop.clone();
+    // An ordinary detached reader thread does not prevent async-runtime shutdown.
+    // Tokio stdin uses a blocking pool read that cannot be cancelled while owner stdin is open.
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut input = std::io::BufReader::new(stdin.lock());
+        let mut capability = Vec::new();
+        let result = (&mut input).take(129).read_until(b'\n', &mut capability);
+        let _ = startup_tx.send(result.map(|_| capability));
+        let mut byte = [0];
+        let _ = input.read(&mut byte);
+        eof.send_replace(true);
+    });
+    let capability = tokio::time::timeout(Duration::from_secs(5), startup_rx).await???;
+    if capability.len() != 65
+        || capability.last() != Some(&b'\n')
+        || !capability[..64].iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err("invalid startup capability".into());
+    }
+    let capability = String::from_utf8(capability[..64].to_vec())?;
+    let jobs = Jobs::open(&store)?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let instance_id = Uuid::new_v4().to_string();
+    let info = EngineInfo {
+        instance_id: instance_id.clone(),
+        engine_build: env!("CARGO_PKG_VERSION").into(),
+        pid: std::process::id(),
+        kernel: "monstertruck".into(),
+        geometry_capabilities: vec![],
+        max_message_bytes: MAX_CONTROL_BYTES,
+        max_artifact_bytes: MAX_ARTIFACT_BYTES,
+    };
+    let startup = StartupInfo {
+        endpoint: format!("http://{}", listener.local_addr()?),
+        instance_id,
+        pid: info.pid,
+    };
+    println!("{}", serde_json::to_string(&startup)?);
+    let service = Service {
+        jobs,
+        info,
+        stop,
+        observers: Arc::new(Semaphore::new(16)),
+        downloads: Arc::new(Semaphore::new(8)),
+    };
+    let authenticate = move |request: Request<()>| -> Result<Request<()>, Status> {
+        if request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            != Some(capability.as_str())
+        {
+            return Err(Status::unauthenticated("invalid launch capability"));
+        }
+        Ok(request)
+    };
+    let shutdown_jobs = service.jobs.clone();
+    let mut drain_signal = stopping.clone();
+    let server = tonic::transport::Server::builder()
+        .max_concurrent_streams(32)
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            engine_server::EngineServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            operations_server::OperationsServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            byte_stream_server::ByteStreamServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            artifacts_server::ArtifactsServer::new(service)
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate,
+        ))
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+            if !*stopping.borrow() {
+                let _ = stopping.changed().await;
             }
-            Request::Shutdown {} => {
-                Frame::control(id, &Response::Bye {})?.write(&mut output)?;
-                diagnostic("info", "shutdown", "clean shutdown acknowledged");
-                return Ok(());
-            }
+        });
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        _ = drain_signal.changed() => {
+            shutdown_jobs.interrupt_all().await?;
+            // Bound drain time even when a consumer holds an unread stream.
+            if let Ok(result) = tokio::time::timeout(Duration::from_secs(2), &mut server).await { result?; }
         }
     }
-    diagnostic("info", "input_closed", "client pipe closed; exiting");
     Ok(())
 }
 
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
+#[tokio::main(worker_threads = 2)]
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            diagnostic("error", "engine_exit", &error.to_string());
-            ExitCode::FAILURE
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"error", "event":"engine_exit", "message":error.to_string()})
+            );
+            std::process::ExitCode::FAILURE
         }
     }
 }

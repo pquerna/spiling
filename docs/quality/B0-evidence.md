@@ -6,6 +6,10 @@ Licensed under the Open Software License version 3.0
 
 # B0 acceptance evidence
 
+## Applicability of these results
+
+The historical results below describe the B0 pipe transport. The current engine/CLI/shell have moved to gRPC operations and ByteStream without cross-version compatibility. They do not inherit protocol/lifecycle acceptance solely from these old runs; see [engine operation evidence](engine-operations.md). Existing unresolved CEF presentation/hardware gates remain unresolved.
+
 ## Gate status
 
 **B0 acceptance is not yet closed.** Native protocol/CLI, source checks, installed Linux CEF bridge lifecycle, and GPU-unavailable admission checks below are executed results. Engine-delivered WebGPU rendering and physical Windows/macOS/Linux GPU acceptance remain separate unmet gates; source implementation and CI packages are not equivalent to those checks.

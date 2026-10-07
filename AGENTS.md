@@ -12,7 +12,7 @@ This file defines repository-wide working rules and architectural boundaries. Re
 
 ## 1. Status and scope
 
-The repository implements B0 runtime bootstrap: engine/CLI diagnostics, a CEF shell, generated contracts, and a WebGPU synthetic triangle. Geometry import, project authoring, and manufacturing remain planned, not implemented. [B0 evidence](docs/quality/B0-evidence.md) governs acceptance claims; source layout or CI targets alone do not establish platform support. Do not create placeholder workspaces as part of documentation work.
+The repository implements native gRPC diagnostics with durable long-running operations and incremental artifacts, a CEF shell, generated contracts, and a WebGPU synthetic triangle. Geometry import, project authoring, and manufacturing remain planned, not implemented. [B0 evidence](docs/quality/B0-evidence.md) governs acceptance claims; source layout or CI targets alone do not establish platform support. Do not create placeholder workspaces as part of documentation work.
 
 Initial implementation direction:
 
@@ -20,7 +20,7 @@ Initial implementation direction:
 - A supervised Rust engine process, independent of the desktop runtime.
 - Tauri 3 with CEF, React/TypeScript/Vite, and a Three.js WebGPU viewport. Pin tested versions; packaged viability on declared Windows, macOS, and Linux reference machines is a gate, not an assumption.
 - [Monstertruck](https://github.com/virtualritz/monstertruck) is the default CAD/BREP kernel, behind a narrow, capability-aware geometry adapter. Pin a tested revision and validate required capabilities against the corpus. Do not introduce an alternate kernel or silent fallback without an explicit architecture decision.
-- Rust-defined typed control contracts, generated TypeScript, and separately specified packed binary payloads.
+- Protobuf-defined gRPC services, standard Google Operations/ByteStream, Rust-derived TypeScript shell views, and separately specified packed binary payloads.
 
 The first printable product imports a declared STEP subset, preserves face identity, supports editing and recovery, compiles a constrained planar print, previews the emitted program, and exports for one tested machine configuration. A viewer or attractive toolpath preview does not meet that scope.
 
@@ -132,8 +132,8 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 
 ### Protocol, resources, and display
 
-- Use versioned, bounded frames over inherited local pipes initially: typed JSON control messages and explicit binary bulk layouts. Reserve engine stdout for protocol bytes; logs go to stderr.
-- Negotiate protocol/build identity, capabilities, and limits. Mismatches fail with clear diagnostics.
+- Use authenticated gRPC on ephemeral IPv4 loopback, with standard Google Operations and ByteStream. Inherited pipes carry bounded startup metadata, the per-launch capability and owner liveness; logs go to stderr.
+- Engine and shell ship together. Validate child/instance identity and limits; evolve their API together without cross-version compatibility shims.
 - Bound queues by bytes; provide backpressure and cancellation that large transfers cannot starve. Release pending transfers and GPU resources on cancellation or closure.
 - Validate binary sizes, arithmetic overflow, alignment, finite coordinates, index bounds, versions, and allocation limits before views or GPU upload. Never serialize arbitrary Rust memory layouts.
 - Mesh chunks carry revision, source-face mapping, bounds, local origin, hash, and schema identity. Native precision queries own exact measurements; float32 display buffers do not.

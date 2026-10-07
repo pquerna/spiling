@@ -35,6 +35,19 @@ pnpm dev
 
 This launches the unfinished runtime diagnostic, not a functional CAD or manufacturing product. The desktop displays the complete OSL license offline and requires assent before entering the shell. WebGPU initialization gates engine startup; there is no WebGL or system-webview fallback.
 
+## Headless operation diagnostics
+
+The engine uses local authenticated gRPC with standard Google Operations and ByteStream. No separate protoc installation is needed: the build uses a pinned vendored binary. Engine and shell are built together; cross-version compatibility and protocol overrides are not supported.
+
+```sh
+cargo build --locked -p spiling-engine -p spiling-cli
+target/debug/spiling-cli job --chunks 4 --delay-ms 250
+# Retain operations across engine runs; retry with the same request ID/inputs:
+target/debug/spiling-cli job --store /absolute/path/store --request-id UUID
+```
+
+Progress is stderr JSON; the final stdout report follows orderly shutdown. The shell stores operation records in its application local-data directory and displays complete partial output as it arrives. Cancellation requests stop the job independently of observation/transfer calls. Stores currently retain up to 128 operations and conservative 32 MiB output reservations, with no deletion API; reaching capacity is reported explicitly. See [the protocol](../protocol/control.md) for semantics and implementation limits.
+
 ## Root commands
 
 ```sh
@@ -43,7 +56,7 @@ pnpm dev            # Tauri development application with engine stderr in the sa
 pnpm contracts      # regenerate Rust-owned TypeScript contracts
 pnpm check          # drift, Rust formatting/clippy, TypeScript and repository formatting
 pnpm test           # Rust behavior tests and real CLI / TypeScript binary interoperability
-pnpm smoke:cli      # real child handshake, triangle decode and protocol mismatch
+pnpm smoke:cli      # real child readiness, operation progress and triangle decode
 pnpm bench:smoke    # ten fresh-process diagnostic transfers; not a geometry benchmark
 pnpm package        # current-platform distributable with native sidecar and notices
 ```
@@ -54,7 +67,7 @@ macOS development must use Tauri CLI so it launches the CEF application bundle a
 
 ## CI cost policy
 
-Material source/configuration changes run one Linux job: generated-contract drift, TypeScript consumers, selected engine/protocol Rust tests, real CLI transfer/mismatch/cleanup and TypeScript binary tests. Markdown-only changes do not launch builds. Automatic CI does not compile the desktop/CEF, run Clippy, build installers or claim cross-platform support.
+Material source/configuration changes run one Linux job: generated-contract drift, TypeScript consumers, selected engine/protocol Rust tests, real CLI incremental transfer/cleanup and TypeScript binary tests. Markdown-only changes do not launch builds. Automatic CI does not compile the desktop/CEF, run Clippy, build installers or claim cross-platform support.
 
 Run `pnpm check && pnpm test` locally before merging or preparing release evidence. These retain full workspace formatting, Clippy and behavior checks; cheaper CI is not permission to skip them.
 
@@ -78,7 +91,7 @@ To exercise a built application automatically, pass its **packaged/installed exe
 pnpm smoke:desktop --executable /path/to/packaged/spiling
 ```
 
-The smoke opens opt-in CEF debugging, checks the real UI/engine, captures screenshots under ignored `artifacts/`, kills the real engine to exercise crash detection, restarts/stops it, and closes the native window to check cleanup. Additional scenarios are `--scenario mismatch` and `--scenario gpu-unavailable`; the latter injects GPU unavailability before frontend startup and does not prove physical hardware support.
+The smoke opens opt-in CEF debugging, checks the real UI/engine, captures screenshots under ignored `artifacts/`, kills the real engine to exercise crash detection, restarts/stops it, and closes the native window to check cleanup. An additional scenario is `--scenario gpu-unavailable`; it injects GPU unavailability before frontend startup and does not prove physical hardware support.
 
 Root/headless containers cannot establish normal sandbox or hardware acceptance. For a **diagnostic-only** software-rendered container run, explicitly opt in:
 
@@ -86,7 +99,7 @@ Root/headless containers cannot establish normal sandbox or hardware acceptance.
 SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 xvfb-run -a pnpm smoke:desktop --executable /path/to/packaged/spiling
 ```
 
-Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_PROTOCOL_VERSION=2` deliberately exercises an upgrade-required mismatch. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
+Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
 
 ## Release evidence
 

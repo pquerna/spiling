@@ -25,6 +25,10 @@ fn main() {
             engine::engine_stop,
             engine::engine_restart,
             engine::engine_triangle,
+            engine::engine_run_diagnostic,
+            engine::engine_get_operation,
+            engine::engine_cancel_operation,
+            engine::engine_read_artifact,
             engine::engine_interrupt,
             runtime::runtime_info,
         ])
