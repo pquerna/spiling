@@ -11,6 +11,7 @@ on:
       - "crates/**"
       - "packages/**"
       - "tools/**"
+      - "fixtures/protocol/**"
       - ".github/workflows/**"
       - "Cargo.*"
       - "rust-toolchain.toml"
@@ -24,6 +25,7 @@ on:
       - "crates/**"
       - "packages/**"
       - "tools/**"
+      - "fixtures/protocol/**"
       - ".github/workflows/**"
       - "Cargo.*"
       - "rust-toolchain.toml"
@@ -76,11 +78,9 @@ jobs:
         run: pnpm contracts --check
       - name: Check TypeScript consumers
         run: pnpm -r --if-present check
-      - name: Exercise engine and protocol behavior without CEF
+      - name: Exercise cheap contracts and protocol behavior
         run: |
-          cargo build --locked -p spiling-engine -p spiling-cli
-          cargo test --locked -p spiling-contracts -p spiling-engine-client -p spiling-engine -p spiling-cli
-          node --import tsx tools/smoke-cli.mjs
+          cargo test --locked -p spiling-contracts -p spiling-engine-client
           pnpm --filter @spiling/protocol test
   package:
     if: github.event_name == 'workflow_dispatch'

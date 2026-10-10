@@ -12,15 +12,16 @@ This file defines repository-wide working rules and architectural boundaries. Re
 
 ## 1. Status and scope
 
-The repository implements B0 runtime bootstrap: engine/CLI diagnostics, a CEF shell, generated contracts, and a WebGPU synthetic triangle. Geometry import, project authoring, and manufacturing remain planned, not implemented. [B0 evidence](docs/quality/B0-evidence.md) governs acceptance claims; source layout or CI targets alone do not establish platform support. Do not create placeholder workspaces as part of documentation work.
+The engine/CLI implements protocol-v4 source-backed project authoring and software-only planar manufacturing: declared-profile STEP import, shared rigid occurrences, bounded undo/redo, save/open/recovery, explicit printer/recipe intent, native-section compilation, independently replayed program and durable derived-bundle export. Core owns persistent state/storage; native geometry/display caches remain derived. Manufacturing is limited to declared vertical planar/cylindrical, integral fixed-height, solid-fill geometry; programs are **not machine ready** and establish no physical printer support or printability. The thin CEF/WebGPU workbench provides project/inspection controls, not manufacturing UI. Physical visible/pickable acceptance, platform durability and packaging remain open gates. Synthetic Triangle is an explicit diagnostic, never an import fallback. [B0 evidence](docs/quality/B0-evidence.md), [geometry evidence](docs/quality/geometry-evidence.md), [historical authoring evidence](docs/quality/authoring-evidence.md) and [software manufacturing evidence](docs/quality/manufacturing-evidence.md) govern claims. Source layout or CI targets alone do not establish support. Do not create placeholder workspaces as part of documentation work.
 
 Initial implementation direction:
 
 - One Cargo workspace and one pnpm workspace.
 - A supervised Rust engine process, independent of the desktop runtime.
 - Tauri 3 with CEF, React/TypeScript/Vite, and a Three.js WebGPU viewport. Pin tested versions; packaged viability on declared Windows, macOS, and Linux reference machines is a gate, not an assumption.
-- [Monstertruck](https://github.com/virtualritz/monstertruck) is the default CAD/BREP kernel, behind a narrow, capability-aware geometry adapter. Pin a tested revision and validate required capabilities against the corpus. Do not introduce an alternate kernel or silent fallback without an explicit architecture decision.
+- [Monstertruck](https://github.com/pquerna/monstertruck/tree/spiling-dev) is the default CAD/BREP kernel, behind a narrow, capability-aware geometry adapter. Spiling patches live on the public fork's `spiling-dev` branch, based on [upstream](https://github.com/virtualritz/monstertruck) `master` (its default branch). Pin all Monstertruck dependencies to the same tested exact fork commit, not the moving branch, and validate required capabilities against the corpus. Do not introduce an alternate kernel or silent fallback without an explicit architecture decision.
 - Rust-defined typed control contracts, generated TypeScript, and separately specified packed binary payloads.
+- Printer specifications are TypeScript-authored data against generated Rust-defined contracts: configuration, capabilities, coordinate frames, component shapes and process limits. Rust validates inert data and owns planning, backend execution and mandatory verification. Ordinary printer additions should be data; genuinely new behavior requires a reviewed Rust backend extension. Arbitrary TypeScript profile execution does not belong in the engine, and a declared capability does not establish machine support.
 
 The first printable product imports a declared STEP subset, preserves face identity, supports editing and recovery, compiles a constrained planar print, previews the emitted program, and exports for one tested machine configuration. A viewer or attractive toolpath preview does not meet that scope.
 
@@ -166,6 +167,8 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 ## 6. Working and acceptance discipline
 
 Before implementation, identify the owning area, read its pair, and state the boundary and acceptance behavior being changed. Reuse existing patterns. Do not introduce alternate protocols, planners, type definitions, or compatibility shims as shortcuts.
+
+Spiling is pre-alpha: backward compatibility is not a requirement for internal protocols, APIs, schemas or file formats unless explicitly requested. Prefer the intended architecture and coherent ownership/contracts over preserving existing structure or limiting work to incremental patches. Breaking changes and structural refactors are appropriate when they advance the vision; migrate all affected consumers, generated contracts, fixtures and documentation together, and remove obsolete paths rather than adding compatibility shims or parallel implementations. Version/build identity and explicit mismatch diagnostics still protect against accidentally mixing incompatible components; they do not imply support for older versions.
 
 Verify the changed behavior through the real surface: native engine/CLI operations, packaged desktop integration, geometry corpus, or emitted-program replay as appropriate. Unit tests alone do not establish end-to-end behavior. For documentation-only changes, check scope, consistency, and document references; no application smoke run is implied.
 

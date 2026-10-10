@@ -173,7 +173,7 @@ small {
   flex: 1;
   padding: 22px;
   display: grid;
-  grid-template-columns: 224px minmax(300px, 1fr) 284px;
+  grid-template-columns: 260px minmax(300px, 1fr) 320px;
   align-items: stretch;
   gap: 16px;
 }
@@ -813,4 +813,149 @@ button.text-button {
   button {
     transition: none;
   }
+}
+
+.geometry-controls {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.project-controls,
+.project-controls output {
+  display: grid;
+  gap: 8px;
+}
+.project-controls {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.project-controls h2 {
+  font-size: 14px;
+  margin: 0;
+}
+.project-controls input[type="checkbox"] {
+  width: auto;
+  margin-right: 6px;
+}
+.project-controls [role="alert"] {
+  color: #ffd49b;
+}
+.geometry-controls h3,
+.geometry-form h3 {
+  font-size: 12px;
+}
+.geometry-controls pre {
+  font-size: 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.geometry-controls select,
+.geometry-controls input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #42545f;
+  border-radius: 4px;
+  background: #101b22;
+  color: #dce6eb;
+  padding: 7px;
+}
+.geometry-buttons,
+.view-actions,
+.job-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.view-actions,
+.job-status {
+  padding: 10px 16px;
+  background: #17222a;
+  font-size: 11px;
+}
+.job-status {
+  border-top: 1px solid var(--line);
+}
+.job-status button {
+  margin-left: auto;
+}
+.geometry-form {
+  display: grid;
+  gap: 10px;
+}
+.geometry-form fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #344650;
+  padding: 8px;
+}
+.numeric-triple {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.numeric-triple label {
+  font-size: 10px;
+  display: grid;
+  gap: 5px;
+}
+.instance-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.instance-tree ul {
+  list-style: none;
+  padding-left: 12px;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.instance-tree small {
+  display: block;
+  margin-top: 4px;
+}
+.instance-tree button[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+.hash-value {
+  overflow-wrap: anywhere;
+}
+.face-inspection {
+  display: grid;
+  gap: 8px;
+}
+.stale-display {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: #392d26ee;
+  border: 1px solid #80634b;
+  font-size: 12px;
+}
+.geometry-debug {
+  display: grid;
+  gap: 8px;
+}
+.geometry-debug textarea {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  background: #101b22;
+  border: 1px solid #42545f;
+  color: #dce6eb;
+  font:
+    11px ui-monospace,
+    monospace;
+  padding: 8px;
 }

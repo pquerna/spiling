@@ -6,4 +6,4 @@ Licensed under the Open Software License version 3.0
 
 # Wire specifications vision
 
-Describe the concrete B0 local-pipe protocol and synthetic diagnostic binary layout precisely enough for independent decoding. Future CAD/artifact wire schemas belong here only when implemented, with revisions and provenance; B0 has no such schemas.
+Describe the concrete v4 local-pipe project/scene/job/manufacturing/artifact protocol, format-v2 durable project and schema-v1 diagnostic/display layouts precisely enough for independent clients. Generated Rust contracts remain executable wire authority; core owns storage/transactions. Manufacturing is software-only: explicit data, bounded planar compilation and independent replay, not physical printer certification. Durable, native, visual and platform acceptance are recorded separately.

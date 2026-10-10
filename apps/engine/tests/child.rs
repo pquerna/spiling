@@ -7,7 +7,11 @@ use spiling_contracts::{
 };
 use spiling_engine_client::{ClientError, EngineClient};
 use std::{io::Cursor, process::Stdio, time::Duration};
-use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    time::timeout,
+};
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_spiling-engine");
 
@@ -56,8 +60,6 @@ fn responses(bytes: &[u8]) -> Vec<Frame> {
 async fn actual_client_handshake_ping_triangle_shutdown() {
     let mut client = EngineClient::spawn(ENGINE, PROTOCOL_VERSION).await.unwrap();
     assert_eq!(Some(client.hello().pid), client.pid());
-    assert_eq!(client.hello().kernel, "monstertruck");
-    assert!(client.hello().geometry_capabilities.is_empty());
     assert!(client.status().await.unwrap());
     for _ in 0..3 {
         client.ping().await.unwrap();
@@ -74,13 +76,13 @@ async fn actual_client_handshake_ping_triangle_shutdown() {
 #[tokio::test]
 async fn mismatch_is_upgrade_required_and_never_runs_commands() {
     assert!(matches!(
-        EngineClient::spawn(ENGINE, 2).await,
+        EngineClient::spawn(ENGINE, PROTOCOL_VERSION + 1).await,
         Err(ClientError::UpgradeRequired(_))
     ));
     let mut input = encode(
         1,
         Request::Hello {
-            protocol_version: 2,
+            protocol_version: PROTOCOL_VERSION + 1,
             client_build: "test".into(),
         },
     );
@@ -92,6 +94,28 @@ async fn mismatch_is_upgrade_required_and_never_runs_commands() {
     assert!(
         matches!(serde_json::from_slice::<Response>(&frames[0].payload).unwrap(), Response::Error { code, .. } if code == "upgrade_required")
     );
+}
+
+#[tokio::test]
+async fn obsolete_control_and_frame_versions_are_rejected() {
+    for version in [1, 2] {
+        assert!(matches!(
+            EngineClient::spawn(ENGINE, version).await,
+            Err(ClientError::UpgradeRequired(_))
+        ));
+        let mut frame = encode(
+            1,
+            Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                client_build: "test".into(),
+            },
+        );
+        frame[4..6].copy_from_slice(&version.to_le_bytes());
+        let output = raw_child(&frame).await;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -205,4 +229,165 @@ async fn cancelled_actual_child_request_initiates_cleanup() {
         client.triangle().await,
         Err(ClientError::UnexpectedExit(_))
     ));
+}
+
+async fn raw_response(output: &mut tokio::process::ChildStdout) -> Response {
+    let mut header = [0; spiling_contracts::FRAME_HEADER_BYTES];
+    timeout(Duration::from_secs(5), output.read_exact(&mut header))
+        .await
+        .unwrap()
+        .unwrap();
+    let header = spiling_contracts::FrameHeader::decode(&header).unwrap();
+    assert_eq!(header.kind, FrameKind::Control);
+    let mut bytes = vec![0; header.payload_len as usize];
+    output.read_exact(&mut bytes).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn unchecked_pose_and_plane_values_are_recoverable_in_actual_engine() {
+    use spiling_contracts::geometry::*;
+    let mut child = Command::new(ENGINE)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = child.id().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    input
+        .write_all(&encode(
+            1,
+            Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                client_build: "raw-domain-test".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let Response::Hello(hello) = raw_response(&mut output).await else {
+        panic!("expected hello");
+    };
+    assert_eq!(hello.pid, pid);
+    let bad_pose = RigidPoseMm {
+        translation_mm: [0.0; 3],
+        rotation_xyzw: [0.0; 4],
+    };
+    input
+        .write_all(&encode(
+            2,
+            Request::Geometry {
+                command: GeometryCommand::AddInstance {
+                    session_id: hello.session_id.clone(),
+                    base_revision: SceneRevision::ZERO,
+                    definition_id: DefinitionId::parse("a".repeat(64)).unwrap(),
+                    pose: bad_pose,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(raw_response(&mut output).await,Response::Geometry { response: GeometryResponse::Error { error } } if error.code==GeometryErrorCode::InvalidPose)
+    );
+    input
+        .write_all(&encode(
+            3,
+            Request::Geometry {
+                command: GeometryCommand::StartSection {
+                    session_id: hello.session_id.clone(),
+                    base_revision: SceneRevision::ZERO,
+                    plane: PlaneMm {
+                        origin_mm: [0.0; 3],
+                        normal: [0.0; 3],
+                    },
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(raw_response(&mut output).await,Response::Geometry { response: GeometryResponse::Error { error } } if error.code==GeometryErrorCode::InvalidGeometry)
+    );
+    input.write_all(&encode(4, Request::Ping {})).await.unwrap();
+    assert!(matches!(raw_response(&mut output).await, Response::Pong {}));
+    input
+        .write_all(&encode(
+            5,
+            Request::Geometry {
+                command: GeometryCommand::GetScene {
+                    session_id: hello.session_id.clone(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(raw_response(&mut output).await,Response::Geometry { response: GeometryResponse::Scene { summary } } if summary.revision==SceneRevision::ZERO && summary.occurrence_count==0 && summary.session_id==hello.session_id)
+    );
+    input
+        .write_all(&encode(6, Request::Shutdown {}))
+        .await
+        .unwrap();
+    assert!(matches!(raw_response(&mut output).await, Response::Bye {}));
+    drop(input);
+    assert!(
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn unknown_fields_remain_fatal_even_with_a_domain_invalid_pose() {
+    use spiling_contracts::geometry::*;
+    let mut bytes = encode(
+        1,
+        Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_build: "strict-test".into(),
+        },
+    );
+    let value = serde_json::json!({
+        "type":"geometry","command":{
+            "op":"add_instance","session_id":SessionId::new(),"base_revision":0,
+            "definition_id":"a".repeat(64),"pose":{"translation_mm":[0,0,0],"rotation_xyzw":[0,0,0,0]},
+            "unexpected":true
+        }
+    });
+    Frame::control(2, &value)
+        .unwrap()
+        .write(&mut bytes)
+        .unwrap();
+    bytes.extend(encode(3, Request::Ping {}));
+    let output = raw_child(&bytes).await;
+    assert!(!output.status.success());
+    let frames = responses(&output.stdout);
+    assert_eq!(frames.len(), 2);
+    assert!(
+        matches!(serde_json::from_slice::<Response>(&frames[1].payload).unwrap(),Response::Error { code,.. } if code=="invalid_request")
+    );
+}
+
+#[tokio::test]
+async fn unknown_project_fault_is_rejected_before_handshake() {
+    let child = Command::new(ENGINE)
+        .env("SPILING_PROJECT_FAULT", "unknown")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let output = timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
 }

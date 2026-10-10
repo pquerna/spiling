@@ -8,11 +8,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { decodeTriangle } from "../packages/protocol/src/index.ts";
+import { decodeTriangle, PROTOCOL_VERSION } from "../packages/protocol/src/index.ts";
 
 const suffix = process.platform === "win32" ? ".exe" : "";
-const engine = resolve(`target/debug/spiling-engine${suffix}`);
-const cli = resolve(`target/debug/spiling-cli${suffix}`);
+const target = resolve(process.env.CARGO_TARGET_DIR ?? "target");
+const engine = resolve(target, `debug/spiling-engine${suffix}`);
+const cli = resolve(target, `debug/spiling-cli${suffix}`);
 const directory = await mkdtemp(join(tmpdir(), "spiling-protocol-"));
 function invoke(args) {
   const result = spawnSync(cli, args, { encoding: "utf8", timeout: 15000 });
@@ -26,9 +27,8 @@ try {
   const diagnostic = invoke(["diagnose", "--engine", engine]);
   assert.equal(diagnostic.status, 0, diagnostic.stderr);
   const report = JSON.parse(diagnostic.stdout);
-  assert.equal(report.hello.protocol_version, 1);
-  assert.equal(report.hello.kernel, "monstertruck");
-  assert.deepEqual(report.hello.geometry_capabilities, []);
+  assert.equal(report.hello.protocol_version, PROTOCOL_VERSION);
+  assert.equal(report.hello.kernel.name, "monstertruck");
   assert.ok(report.hello.pid > 0);
   const output = join(directory, "triangle.bin");
   const transfer = invoke(["triangle", "--engine", engine, "--output", output]);
@@ -56,7 +56,13 @@ try {
   const nonfinite = payload.slice(0);
   new DataView(nonfinite).setFloat32(16, Number.NaN, true);
   rejects(nonfinite);
-  const mismatch = invoke(["diagnose", "--engine", engine, "--protocol-version", "2"]);
+  const mismatch = invoke([
+    "diagnose",
+    "--engine",
+    engine,
+    "--protocol-version",
+    String(PROTOCOL_VERSION + 1),
+  ]);
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /upgrade|required|protocol|mismatch/i);
   if (process.platform === "linux") {

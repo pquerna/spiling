@@ -17,7 +17,8 @@
     "contracts": "node tools/run.mjs contracts",
     "build": "node tools/run.mjs build",
     "smoke:cli": "node tools/run.mjs smoke:cli",
-    "smoke:desktop": "node tools/run.mjs smoke:desktop"
+    "smoke:desktop": "node tools/run.mjs smoke:desktop",
+    "manufacturing:intent": "node --experimental-strip-types tools/compile-manufacturing-intent.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "3.0.0-alpha.4",

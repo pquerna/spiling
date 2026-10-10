@@ -1,0 +1,30 @@
+{
+  "SPDX-FileCopyrightText": "2026 Spiling contributors",
+  "SPDX-License-Identifier": "OSL-3.0",
+  "schema_version": 1,
+  "generator": "crates/geometry/examples/generate_corpus.rs",
+  "timestamp": "2026-01-01T00:00:00",
+  "valid_sources": [
+    "box-mm.step",
+    "box-inch.step",
+    "cylinder.step",
+    "through-hole.step",
+    "perforated-plate.step"
+  ],
+  "plate": {
+    "status": "frozen_source_geometry",
+    "sha256": "0c293704778df64793df3889a93891c7878525b5874b81080bb883e79f3922dd",
+    "packed_mesh_bytes": {
+      "min_exclusive": 4194304,
+      "max_inclusive": 67108864
+    },
+    "columns": 32,
+    "rows": 16,
+    "radius_mm": 20,
+    "pitch_mm": 50,
+    "thickness_mm": 20,
+    "exterior_margin_mm": 25,
+    "construction": "One planar outer wire plus 512 inner exact two-half-circle wires, extruded and analytically normalized before native STEP serialization."
+  },
+  "freeze": "STEP names/bytes/hashes are frozen. Post-freeze source changes require a new fixture name/version. Native packed workload measurements and kernel identity are recorded in geometry evidence; successful native packing does not establish engine transfer or desktop acceptance."
+}

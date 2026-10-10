@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/contracts", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri"]
-default-members = ["crates/contracts", "crates/engine-client", "apps/engine", "apps/cli"]
+members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri"]
+default-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/engine-client", "apps/engine", "apps/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,12 +15,24 @@ license = "OSL-3.0"
 repository = "https://github.com/pquerna/spiling"
 
 [workspace.dependencies]
-serde = { version = "=1.0.229", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
 serde_json = "=1.0.151"
 thiserror = "=2.0.21"
 tokio = { version = "=1.53.2", features = ["process", "io-util", "time", "sync", "rt-multi-thread", "macros"] }
 ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
+sha2 = "=0.10.9"
+geo = "=0.32.0"
+uuid = { version = "=1.27.0", features = ["v4"] }
+monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
+monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
+monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
+monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001", default-features = false, features = ["step"] }
+monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
+step-p21 = "=0.1.1"
+spiling-geometry = { path = "crates/geometry" }
 spiling-contracts = { path = "crates/contracts" }
+spiling-core = { path = "crates/core" }
+spiling-manufacturing = { path = "crates/manufacturing" }
 spiling-engine-client = { path = "crates/engine-client" }
 
 [profile.dev]

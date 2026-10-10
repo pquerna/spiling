@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+[package]
+name = "spiling-geometry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+spiling-contracts.workspace = true
+monstertruck-modeling.workspace = true
+monstertruck-meshing.workspace = true
+monstertruck-solid.workspace = true
+monstertruck-io.workspace = true
+monstertruck-topology.workspace = true
+step-p21.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

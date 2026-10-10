@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Runtime-independent B0 control framing and synthetic diagnostic data.
+//! Runtime-independent version-four project/manufacturing framing and diagnostics.
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub mod display;
+pub mod geometry;
+pub mod manufacturing;
+pub mod project;
+
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const FRAME_HEADER_BYTES: usize = 16;
 pub const MAX_CONTROL_BYTES: u32 = 65_536;
 pub const MAX_BINARY_BYTES: u32 = 4_194_304;
@@ -17,7 +22,7 @@ pub const TRIANGLE_HEADER_BYTES: usize = 16;
 pub const TRIANGLE_VERTEX_COUNT: u32 = 3;
 pub const TRIANGLE_INDEX_COUNT: u32 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Hello {
@@ -26,6 +31,15 @@ pub enum Request {
     },
     Ping {},
     Triangle {},
+    Geometry {
+        command: geometry::GeometryCommand,
+    },
+    Project {
+        command: project::ProjectCommand,
+    },
+    Manufacturing {
+        command: manufacturing::ManufacturingCommand,
+    },
     Shutdown {},
 }
 
@@ -34,21 +48,36 @@ pub enum Request {
 pub struct Hello {
     pub protocol_version: u16,
     pub engine_build: String,
-    /// Configured future default, not evidence of a linked kernel.
-    pub kernel: String,
+    pub kernel: geometry::KernelIdentity,
     pub geometry_capabilities: Vec<String>,
+    pub project_capabilities: Vec<String>,
+    pub manufacturing_capabilities: Vec<String>,
     pub max_control_bytes: u32,
     pub max_binary_bytes: u32,
     pub pid: u32,
+    pub session_id: geometry::SessionId,
+    pub geometry_limits: geometry::GeometryLimits,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
     Hello(Hello),
     Pong {},
     Bye {},
-    Error { code: String, message: String },
+    Geometry {
+        response: geometry::GeometryResponse,
+    },
+    Project {
+        response: project::ProjectResponse,
+    },
+    Manufacturing {
+        response: manufacturing::ManufacturingResponse,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +85,8 @@ pub enum Response {
 pub enum FrameKind {
     Control = 1,
     Triangle = 2,
+    GeometryChunk = 3,
+    ManufacturingChunk = 4,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +124,8 @@ impl FrameHeader {
         let limit = match kind {
             FrameKind::Control => MAX_CONTROL_BYTES,
             FrameKind::Triangle => MAX_BINARY_BYTES,
+            FrameKind::GeometryChunk => geometry::MAX_GEOMETRY_CHUNK_BYTES,
+            FrameKind::ManufacturingChunk => MAX_BINARY_BYTES,
         };
         if payload_len > limit as usize {
             return Err(WireError::Length {
@@ -119,6 +152,8 @@ impl FrameHeader {
         let kind = match u16::from_le_bytes([bytes[6], bytes[7]]) {
             1 => FrameKind::Control,
             2 => FrameKind::Triangle,
+            3 => FrameKind::GeometryChunk,
+            4 => FrameKind::ManufacturingChunk,
             value => return Err(WireError::Kind(value)),
         };
         let request_id = u32::from_le_bytes(bytes[8..12].try_into().unwrap());

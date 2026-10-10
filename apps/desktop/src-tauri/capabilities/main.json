@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Local Spiling workbench engine supervision and runtime diagnostics only",
+  "description": "Local Spiling workbench lifecycle and token-scoped native geometry inspection",
   "local": true,
   "windows": ["main"],
   "permissions": [
@@ -12,6 +12,17 @@
     "allow-engine-restart",
     "allow-engine-triangle",
     "allow-engine-interrupt",
+    "allow-geometry-select-sources",
+    "allow-geometry-import-source",
+    "allow-geometry-control",
+    "allow-geometry-chunk",
+    "allow-geometry-debug-select-sources",
+    "allow-project-select-path",
+    "allow-project-debug-select-path",
+    "allow-project-control",
+    "allow-project-open",
+    "allow-project-save",
+    "allow-project-reopen",
     "allow-runtime-info"
   ]
 }

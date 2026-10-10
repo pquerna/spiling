@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+use spiling_contracts::geometry::*;
 use spiling_contracts::*;
 use std::io::{self, Cursor};
 
@@ -10,11 +11,19 @@ fn flat_serde_shape_and_strict_requests() {
     let hello = Hello {
         protocol_version: PROTOCOL_VERSION,
         engine_build: "test".into(),
-        kernel: "monstertruck".into(),
+        kernel: KernelIdentity {
+            name: "monstertruck".into(),
+            version: "0.4.1".into(),
+            revision: "test".into(),
+        },
         geometry_capabilities: vec![],
+        project_capabilities: vec![],
+        manufacturing_capabilities: vec![],
         max_control_bytes: MAX_CONTROL_BYTES,
         max_binary_bytes: MAX_BINARY_BYTES,
         pid: 7,
+        session_id: SessionId::new(),
+        geometry_limits: GeometryLimits::FROZEN,
     };
     let value = serde_json::to_value(Response::Hello(hello.clone())).unwrap();
     assert_eq!(value["type"], "hello");
@@ -38,6 +47,8 @@ fn length_limits_are_inclusive_and_checked_before_payload() {
     for (kind, limit) in [
         (FrameKind::Control, MAX_CONTROL_BYTES),
         (FrameKind::Triangle, MAX_BINARY_BYTES),
+        (FrameKind::GeometryChunk, MAX_GEOMETRY_CHUNK_BYTES),
+        (FrameKind::ManufacturingChunk, MAX_BINARY_BYTES),
     ] {
         let header = FrameHeader::new(kind, 1, limit as usize).unwrap();
         assert_eq!(
@@ -72,16 +83,22 @@ fn invalid_header_fields_are_rejected() {
     bytes[0] = 0;
     assert!(matches!(FrameHeader::decode(&bytes), Err(WireError::Magic)));
     bytes = valid;
-    bytes[4..6].copy_from_slice(&2_u16.to_le_bytes());
+    bytes[4..6].copy_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
     assert!(matches!(
         FrameHeader::decode(&bytes),
-        Err(WireError::Version(2))
+        Err(WireError::Version(version)) if version == PROTOCOL_VERSION + 1
     ));
     bytes = valid;
-    bytes[6..8].copy_from_slice(&3_u16.to_le_bytes());
+    bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
     assert!(matches!(
         FrameHeader::decode(&bytes),
-        Err(WireError::Kind(3))
+        Err(WireError::Version(3))
+    ));
+    bytes = valid;
+    bytes[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert!(matches!(
+        FrameHeader::decode(&bytes),
+        Err(WireError::Kind(u16::MAX))
     ));
     bytes = valid;
     bytes[8..12].fill(0);
@@ -147,4 +164,46 @@ fn triangle_matches_cross_language_golden() {
         .collect();
     assert_eq!(decoded, synthetic_triangle());
     assert_eq!(decoded.len(), 64);
+}
+
+#[test]
+fn manufacturing_namespace_and_common_jobs_are_interoperable_and_strict() {
+    use spiling_contracts::manufacturing::*;
+    let session = SessionId::new();
+    let request = Request::Manufacturing {
+        command: ManufacturingCommand::Compile {
+            session_id: session.clone(),
+            base_revision: spiling_contracts::project::ProjectRevision(9),
+        },
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["type"], "manufacturing");
+    assert_eq!(value["command"]["op"], "compile");
+    assert_eq!(
+        serde_json::from_value::<Request>(value.clone()).unwrap(),
+        request
+    );
+    let mut invalid = value;
+    invalid["command"]["unknown"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<Request>(invalid).is_err());
+    let error: JobError = ManufacturingError::new(
+        ManufacturingErrorCode::VerificationFailed,
+        "tampered program",
+    )
+    .into();
+    let value = serde_json::to_value(&error).unwrap();
+    assert_eq!(value["domain"], "manufacturing");
+    assert_eq!(serde_json::from_value::<JobError>(value).unwrap(), error);
+    let frame = Frame::new(
+        FrameKind::ManufacturingChunk,
+        8,
+        b"{\"schema_version\":1}".to_vec(),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    frame.write(&mut bytes).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    let decoded = Frame::decode(&bytes).unwrap();
+    assert_eq!(decoded.header.kind, FrameKind::ManufacturingChunk);
+    assert_eq!(decoded.payload, frame.payload);
 }
