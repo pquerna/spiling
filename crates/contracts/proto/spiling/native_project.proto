@@ -1,0 +1,35 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+syntax = "proto3";
+package spiling.engine;
+import "google/longrunning/operations.proto";
+import "spiling/native_common.proto";
+import "spiling/native_geometry.proto";
+service Projects {
+ rpc Execute(ProjectRequest) returns (ProjectReply);
+ rpc Open(OpenProjectRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+ rpc Save(SaveProjectRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+}
+message ProjectRequest {
+ string parent = 1;
+ oneof command {
+  GetProjectRequest get = 2;
+  NewProjectRequest new = 3;
+  UndoProjectRequest undo = 4;
+  RedoProjectRequest redo = 5;
+ }
+}
+message GetProjectRequest {}
+message NewProjectRequest {uint32 base_revision = 1; bool discard_changes = 2;}
+message UndoProjectRequest {uint32 base_revision = 1;}
+message RedoProjectRequest {uint32 base_revision = 1;}
+message OpenProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath path = 4; bool read_only = 5; bool recover_previous = 6; bool discard_changes = 7;}
+message SaveProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath target = 4;}
+message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10;}
+message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
+message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2;}}

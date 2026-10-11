@@ -1,0 +1,19 @@
+<!--
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+-->
+
+# Native planar section queries rules
+
+Own definition-local native planar section queries, not artifact/session identities or occurrence placement. Reuse contracts' normalized canonical plane frame. Exact line/circle-arc witnesses establish signed extrema and vertex/contained-edge/tangent degeneracy at 1e-5 mm; source coplanar carriers are rejected before intersection. Strictly separated solids return empty loops without a boolean. Never substitute sampled extrema, vertex-only plane_cut or display meshes.
+
+Transform all eight certified AABB corners to the frame, pad X/Y and the positive-Z extent by max(1 mm, 100\*boolean tolerance), and keep the plane-side Z boundary exactly zero. Use public modeling cuboid/transformation and solid::and at 1e-5 mm; call release-active check_solid_boundary on every result shell. The pinned boolean preserves native input carriers when splitting: identify caps by the clipping plane's exact native carrier, then require parallelism within 1e-10 and coincidence within 1e-4 mm. This prevents a retained source face within the wider coincidence tolerance from becoming a false cap. Native curve sampling uses 0.005 mm chordal tolerance; intersection curves sample their native intersection, not the enum's optimized leader-only divider. Validate oriented endpoints, joints, closure and plane residual at 1e-4 mm.
+
+Native boolean face division must lift periodic carrier coordinates continuously before signed-area classification. Assign each negative loop to the smallest containing positive boundary, excluding its inverse twin by native edge IDs; retain every distinct loop. Intermediate failures retain tessellation, loop assembly, division, classification and conversion stage identity, not an invented empty intersection. Original analytic-cylinder/through-hole regressions invoke public `and` on unchanged generated STEP and preserve source geometry/face slots.
+
+Mesh interference points are boolean search seeds, not native boundary certificates. Repeated triangle collision events contribute one undirected endpoint pair in the existing quantized graph; preserve every distinct segment key and every native boundary edge. Curve/surface projection must evaluate the native curve and test its residual against the native surface, returning the native curve point; a seed-to-curve offset alone cannot force a tangent-plane Newton step. A disjoint nontransversal boundary still fails explicitly. Preserve paired polygon/native edge slots during insertion rather than suppressing a failed native cut.
+
+Native cap orientation determines outer/hole roles. Return closed f64 loops, outer CCW/hole CW in the canonical frame, rotated to the least lexical frame coordinate and sorted outer-first, then by frame bounds/point sequence. Reject zero area, over-40,000-point loops and aggregate SPLS packing above 16 MiB, including headers/aligned offsets. Engine callers may narrow this sampled-output budget to remaining per-job cache capacity; check before retained point growth and again after sorted packing. Check cancellation around booleans and between faces/wires/sampling. Errors retain typed degenerate_section, kernel_failure, resource_limit and cancelled distinctions; no source FaceId is assigned to generated caps.
+
+Exercise `cargo test --locked -p spiling-geometry` and the real native corpus smoke; local section tests cover oblique box/cylinder/hole sections, frame/normal invariance, native tangent and edge degeneracy, canonical winding/order, certified clipping extents and resource caps. See [geometry evidence](../../../../docs/quality/geometry-evidence.md); implementation and unexecuted tests do not establish the numerical capability gate.

@@ -14,11 +14,14 @@ import { homedir } from "node:os";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const desktop = join(root, "apps", "desktop");
 const binSuffix = process.platform === "win32" ? ".exe" : "";
+const cargoTarget = resolve(root, process.env.CARGO_TARGET_DIR ?? "target");
 const environment = {
   ...process.env,
   PATH: `${join(homedir(), ".cargo", "bin")}${delimiter}${process.env.PATH}`,
   CEF_PATH: process.env.CEF_PATH ?? join(root, ".cache", "cef"),
-  CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "4",
+  CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "1",
+  RUST_TEST_THREADS: process.env.RUST_TEST_THREADS ?? "1",
+  RAYON_NUM_THREADS: process.env.RAYON_NUM_THREADS ?? "1",
 };
 const children = new Set();
 let stopping = false;
@@ -91,7 +94,7 @@ async function stageEngine(release = false) {
     ...(release ? ["--release"] : []),
   ]);
   const triple = await hostTriple();
-  const source = join(root, "target", release ? "release" : "debug", `spiling-engine${binSuffix}`);
+  const source = join(cargoTarget, release ? "release" : "debug", `spiling-engine${binSuffix}`);
   const destination = join(
     desktop,
     "src-tauri",
@@ -291,7 +294,7 @@ async function cliSmoke() {
 
 async function benchmark() {
   const engine = await stageEngine();
-  const cli = join(root, "target", "debug", `spiling-cli${binSuffix}`);
+  const cli = join(cargoTarget, "debug", `spiling-cli${binSuffix}`);
   const results = [];
   for (let index = 0; index < 10; index++) {
     const start = performance.now();

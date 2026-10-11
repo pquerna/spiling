@@ -6,8 +6,12 @@ Licensed under the Open Software License version 3.0
 
 # Desktop vision
 
-Spiling's desktop becomes an inspectable native BREP manufacturing workbench. B0 establishes the operator-facing connection boundary: offline license assent, Tauri/CEF identity, supervised Rust engine, bounded diagnostic mesh transfer, and a real Three.js WebGPU viewport.
+Provide one thin CEF/WebGPU native workbench over authenticated gRPC: source-backed STEP import, shared rigid occurrences, exact native face inspection/sections, bounded undo/redo and explicit save/open/recovery/read-only snapshots. Core owns durable project transactions; the engine owns native caches and revisions; React owns transient forms and synchronization; WebGPU owns disposable approximations.
 
-The current surface shows incremental synthetic diagnostic output, operation progress/cancellation, process/build identity, empty geometry capability negotiation, transfer wall-clock intervals, interruption, stop, and restart. Monstertruck is the configured future kernel, not an installed CAD capability in B0. No project import, geometry authoring, slicing, or machine control is represented as working.
+Retain durable incremental diagnostic progress/cancellation, synthetic triangle transfer, process/build identity, interruption and restart alongside authoring. Native operations use standard Google Operations names and ByteStream resources, with distinct checked native and diagnostic metadata views. Diagnostic output is never a geometry fallback.
 
-A browser intentionally shows desktop-required after assent. A native runtime without a working WebGPU device intentionally cannot launch the engine through this UI. Packaged support is established by actual shell and GPU evidence on declared platforms, not by an attractive browser rendering. Future authoring must preserve native authority, revision-aware display, and clear unsupported-state diagnostics.
+First save creates a new project directory; subsequent checkpoints preserve undo. Dirty replacement needs explicit discard intent. Restart reopens only an attached saved checkpoint, not unsaved edits or old session handles. Supported import remains step-planar-cylindrical-v1, not general STEP product trees or topology editing. Software-only manufacturing service capability/results are consumed exhaustively without desktop manufacturing controls or machine-ready claims.
+
+Cancellation remains independently responsive during retrieval. Paused scene synchronization exposes engine versus displayed revision and disables stale picking/mutations; resume uses cached geometry. Section transfer cancellation preserves the prior labelled overlay. Source-face identity, not float32 hit position, is inspected natively.
+
+Browser-only and missing WebGPU states are deliberately unsupported. Startup-gated fixed-root automation uses real production tokens and native bridge paths. Typechecking and bridge smoke are not visible authoring, physical picking, dialog or platform certification; those gates require declared reference-hardware evidence. No alternate webview, renderer project store, planner or manufacturing execution belongs here.

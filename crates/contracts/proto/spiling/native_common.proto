@@ -1,0 +1,31 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+syntax = "proto3";
+package spiling.engine;
+message Vec3 { double x = 1; double y = 2; double z = 3; }
+message Quaternion { double x = 1; double y = 2; double z = 3; double w = 4; }
+message AabbMm { Vec3 min = 1; Vec3 max = 2; }
+message RigidPoseMm { Vec3 translation_mm = 1; Quaternion rotation_xyzw = 2; }
+message PlaneMm { Vec3 origin_mm = 1; Vec3 normal = 2; }
+message NativePath { oneof value { bytes unix_bytes = 1; Utf16Path windows_utf16 = 2; } }
+message Utf16Path { repeated uint32 units = 1; }
+message KernelIdentity { string name = 1; string version = 2; string revision = 3; }
+message GeometryLimits {
+  uint32 source_bytes = 1; uint32 live_source_bytes = 2; uint32 step_entities = 3;
+  uint32 native_faces = 4; uint32 definitions = 5; uint32 occurrences = 6;
+  uint32 display_vertices = 7; uint32 display_triangles = 8; uint32 scene_mesh_bytes = 9;
+  uint32 section_bytes = 10; uint32 engine_artifact_bytes = 11; uint32 geometry_chunk_bytes = 12;
+  uint32 display_buffer_bytes = 13; uint32 loop_points = 14; uint32 active_jobs = 15;
+  uint32 outstanding_chunks = 16;
+}
+message DomainError { string code = 1; string message = 2; }
+message DomainErrorDetail {
+  oneof error { DomainError geometry = 1; DomainError project = 2; DomainError manufacturing = 3; }
+}
+message Artifact {
+  string name = 1;
+  uint64 size_bytes = 2;
+  string sha256 = 3;
+  string media_type = 4;
+}

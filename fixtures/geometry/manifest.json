@@ -1,0 +1,260 @@
+{
+  "fixtures": [
+    {
+      "byte_count": 7867,
+      "expectation": {
+        "face_count": 6,
+        "physical_bounds_mm": {
+          "max": [
+            20,
+            10,
+            8
+          ],
+          "min": [
+            0,
+            0,
+            0
+          ]
+        },
+        "section_area_mm2": 200,
+        "section_z_mm": 4
+      },
+      "expected": "accepted",
+      "path": "box-mm.step",
+      "recipe": "public analytic planar-wire extrusion",
+      "sha256": "1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98"
+    },
+    {
+      "byte_count": 10258,
+      "expectation": {
+        "face_count": 6,
+        "physical_bounds_mm": {
+          "max": [
+            20,
+            10,
+            8
+          ],
+          "min": [
+            0,
+            0,
+            0
+          ]
+        },
+        "section_area_mm2": 200,
+        "section_z_mm": 4,
+        "source_unit": "inch"
+      },
+      "expected": "accepted",
+      "path": "box-inch.step",
+      "recipe": "public analytic planar-wire extrusion",
+      "sha256": "74da493fcabe4c0bc1061eb3645f003227ea861f0196be40cd5748d870f797de"
+    },
+    {
+      "byte_count": 5224,
+      "expectation": {
+        "physical_bounds_mm": {
+          "max": [
+            5,
+            5,
+            8
+          ],
+          "min": [
+            -5,
+            -5,
+            0
+          ]
+        },
+        "radius_mm": 5,
+        "section_area_expression": "25*pi",
+        "section_z_mm": 4
+      },
+      "expected": "accepted",
+      "path": "cylinder.step",
+      "recipe": "public analytic planar-wire extrusion",
+      "sha256": "95df1da444dc9c49529054f1825c9013c135301df677e30269c3a789ee2b464b"
+    },
+    {
+      "byte_count": 11475,
+      "expectation": {
+        "hole_radius_mm": 3,
+        "physical_bounds_mm": {
+          "max": [
+            20,
+            20,
+            8
+          ],
+          "min": [
+            0,
+            0,
+            0
+          ]
+        },
+        "section_area_expression": "400-9*pi",
+        "section_loop_count": 2,
+        "section_z_mm": 4
+      },
+      "expected": "accepted",
+      "path": "through-hole.step",
+      "recipe": "public analytic planar-wire extrusion",
+      "sha256": "eb2112f9ef4be523615f237b86b69569026cef8e1cafbc20e2fdca7e3459cb29"
+    },
+    {
+      "byte_count": 1978213,
+      "expectation": {
+        "columns": 32,
+        "exterior_margin_mm": 25,
+        "packed_mesh_bytes": {
+          "max_inclusive": 67108864,
+          "min_exclusive": 4194304
+        },
+        "physical_bounds_mm": {
+          "max": [
+            1640.0,
+            840.0,
+            20
+          ],
+          "min": [
+            0,
+            0,
+            0
+          ]
+        },
+        "pitch_mm": 50,
+        "radius_mm": 20,
+        "rows": 16,
+        "source_geometry_frozen": true,
+        "thickness_mm": 20
+      },
+      "expected": "accepted",
+      "path": "perforated-plate.step",
+      "recipe": "public analytic planar-wire extrusion",
+      "sha256": "0c293704778df64793df3889a93891c7878525b5874b81080bb883e79f3922dd"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9875,
+      "expected_error": "unsupported_units",
+      "mutation": "remove_referenced_length_unit",
+      "path": "missing-units.step",
+      "sha256": "c34a1813b38a8ae88f9caa5314d58563d1b27690c2ef5c78af351e2717ae6268"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9940,
+      "expected_error": "unsupported_units",
+      "mutation": "add_conflicting_length_unit",
+      "path": "conflicting-units.step",
+      "sha256": "e366e7f6aa0af8b9d3a88f5b13412a6ac5efbc1107ab68fb6a5d29d6740f93d0"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9880,
+      "expected_error": "invalid_geometry",
+      "mutation": "replace_face_carrier_with_missing_reference",
+      "path": "missing-reference.step",
+      "sha256": "57b91abbdc68f5981cc8835ba56ed4a284bdf0d2615ecbbb97927ea577c18673"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9877,
+      "expected_error": "invalid_geometry",
+      "mutation": "change_closed_shell_to_open_shell",
+      "path": "open-shell.step",
+      "sha256": "1801a12c3d0471dfc5be64ccc75cabe7785592979201e5b1f43f39f965b79b18"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9875,
+      "expected_error": "invalid_geometry",
+      "mutation": "remove_one_shell_face",
+      "path": "non-manifold-shell.step",
+      "sha256": "636944641491939594da05184787d86bb00cdce3a1335adbdf67c4dc38c668ad"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 10712,
+      "expected_error": "unsupported_geometry",
+      "mutation": "replace_one_plane_with_original_nurbs_carrier",
+      "path": "unsupported-nurbs.step",
+      "sha256": "18cb1e88a3f45bb7abe675f975d17606358d37e6d0e9f807b7e6dfb663d4b0d4"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9910,
+      "expected_error": "unsupported_geometry",
+      "mutation": "replace_one_boundary_curve_with_polyline",
+      "path": "reachable-unsupported.step",
+      "sha256": "49ed9689c1e4b6ce59a1358087ea480104080ddfb13559863b50432112464e3d"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9952,
+      "expected_error": "unsupported_geometry",
+      "mutation": "add_assembly_relationship",
+      "path": "assembly.step",
+      "sha256": "b912437b8852266419f754de3577cb33e8eb2d717b2afa0bc40d53b5b723b3d7"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9865,
+      "expected_error": "invalid_geometry",
+      "mutation": "overflow_one_cartesian_coordinate",
+      "path": "nonfinite-coordinate.step",
+      "sha256": "29f8548067d262da6ec902cbe526f80212dec604c2083409ee1afb0baaa53c4a"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9855,
+      "expected_error": "invalid_geometry",
+      "mutation": "truncate_exchange_terminator",
+      "path": "truncated.step",
+      "sha256": "863b45c986bb8a3a7ae280dd23fdf25cc4eb2811e6ab376031992ff76c1e588a"
+    },
+    {
+      "baseline": "box-inch.step",
+      "byte_count": 10258,
+      "expected_error": "unsupported_units",
+      "mutation": "change_inch_length_exponent_to_two",
+      "path": "wrong-conversion-dimension.step",
+      "sha256": "c3c719d0de03aa8deb52e03a167ab989d857386d147e1425279d26d70d034f15"
+    },
+    {
+      "baseline": "box-inch.step",
+      "byte_count": 10257,
+      "expected_error": "unsupported_units",
+      "mutation": "make_inch_conversion_reference_itself",
+      "path": "recursive-units.step",
+      "sha256": "86a683a0914fa112fa2d7db5ce3ebf2d10dab3e35662d9a2f9e64392f7b6540d"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 10230,
+      "expected_error": "unsupported_units",
+      "mutation": "replace_radian_with_conversion_angle_unit",
+      "path": "degrees.step",
+      "sha256": "cf7e3cbf139e9891ff04994f6c933743bac8c1216146fd04ec92bd7da6a56c7a"
+    },
+    {
+      "baseline": "box-mm.step",
+      "byte_count": 9883,
+      "expected_error": "invalid_geometry",
+      "mutation": "duplicate_canonical_shell_face_use",
+      "path": "duplicate-face-use.step",
+      "sha256": "9c2281463275eccb3374049754614327edcdf70709eb658769371cfeca78aa4d"
+    }
+  ],
+  "generation": {
+    "command": "cargo run --locked -p spiling-geometry --example generate_corpus --",
+    "drift_command": "cargo run --locked -p spiling-geometry --example generate_corpus -- --check",
+    "plate_status": "32x16 source geometry frozen; measured packed workload evidence is separate from engine transfer acceptance",
+    "timestamp": "2026-01-01T00:00:00"
+  },
+  "kernel_revision": "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001",
+  "license": {
+    "SPDX-FileCopyrightText": "2026 Spiling contributors",
+    "SPDX-License-Identifier": "OSL-3.0",
+    "origin": "Original Spiling public native builder recipe; no external CAD source"
+  },
+  "profile": "step-planar-cylindrical-v1",
+  "schema_version": 1
+}

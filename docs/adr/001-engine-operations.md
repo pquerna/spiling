@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Engine operations use gRPC and standard Google resources
 
-Status: adopted for the diagnostic operation implementation.
+Status: adopted for diagnostics, native geometry, recoverable authoring and software-only manufacturing.
 
 ## Decision
 
@@ -22,8 +22,8 @@ JSON-RPC with LSP-style progress over stdio would simplify child transport but r
 
 Loopback introduces a local listener and per-launch capability. It assumes a trusted host and is not a remote service. Protobuf generation adds pinned build dependencies and imported Apache schemas whose licensing must remain intact. Wire messages and saved domain state must not become accidentally identical schemas.
 
-The diagnostic implementation deliberately has bounded retained operations/storage and a single cooperative worker. It does not implement authoring state, a generic geometry scheduler, isolated native workers, computational checkpoints or manufactured output. Standards do not justify inventing those capabilities in the current API.
+The operation ledger has bounded retained operations/storage and a shared execution permit. Native services add one session-owned geometry worker and watchdog, not a second public scheduler. Core owns project transactions and persistence; native values/display caches remain derived. Promotion ACK precedes durable operation output publication. Cancel intent cannot undo a won manifest replacement or native commit, and unfinished work is never automatically resumed. Computational checkpoints, machine execution and physical printer support remain outside this decision.
 
 ## Validation
 
-The real-process suite exercises long jobs beyond unary deadlines, concurrent retries, cancellation races, partial output, reconnect, restart/deduplication, immutable binary/range reads, slow downloads, admission/observer bounds, authentication, owner EOF and child cleanup. CLI smoke checks actual streamed bytes against the TypeScript decoder. Native shell compile/bridge and CEF/GPU acceptance remain distinct; see [current operation evidence](../quality/engine-operations.md).
+The real-process suite covers long jobs beyond unary deadlines, retries/deduplication, cancellation races, partial diagnostic output, reconnect, restart, immutable binary/range reads, admission/observer bounds, authentication, owner EOF and child cleanup. Native regressions additionally cover revision/session ownership, source-backed save/reopen/recovery, promotion ACK and independent program replay. CLI smoke checks actual streamed bytes against independent binary decoders. Executed results—not suite presence—govern acceptance in [operation evidence](../quality/engine-operations.md), [geometry evidence](../quality/geometry-evidence.md) and [manufacturing evidence](../quality/manufacturing-evidence.md). Native shell/CEF presentation and physical hardware acceptance remain separate.

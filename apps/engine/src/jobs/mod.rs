@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Durable diagnostic operations. SQLite commits acceptance, outputs and state atomically.
+//! Durable operation admission, execution ownership and immutable artifact publication.
 use prost::Message;
+mod native;
+pub use native::NativeAdmission;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
@@ -11,6 +13,7 @@ use spiling_contracts::{
     google::longrunning::operation::Result as Outcome, google::rpc::Status as RpcStatus, metadata,
     rpc::*, synthetic_triangle,
 };
+use spiling_contracts::{NATIVE_METADATA_TYPE, native_metadata};
 use std::{
     collections::HashMap,
     fs::File,
@@ -47,6 +50,13 @@ fn terminal(
     state: DiagnosticState,
     error: Option<(Code, &str)>,
 ) -> Result<(), Status> {
+    if op
+        .metadata
+        .as_ref()
+        .is_some_and(|m| m.type_url == NATIVE_METADATA_TYPE)
+    {
+        return native::terminal_native(op, native::state_from_diagnostic(state), error);
+    }
     let mut meta = metadata(op).map_err(internal)?;
     meta.state = state as i32;
     meta.phase = state.as_str_name().to_lowercase();
@@ -78,7 +88,7 @@ pub struct Inner {
     _lock: File,
 }
 impl Inner {
-    fn get(&self, name: &str) -> Result<Operation, Status> {
+    pub(crate) fn get(&self, name: &str) -> Result<Operation, Status> {
         let bytes: Option<Vec<u8>> = self
             .db
             .query_row(
@@ -96,12 +106,36 @@ impl Inner {
         .map_err(internal)
     }
     fn save(&mut self, op: &Operation) -> Result<(), Status> {
-        self.db
-            .execute(
-                "UPDATE operations SET operation=? WHERE name=?",
-                params![op.encode_to_vec(), op.name],
-            )
-            .map_err(internal)?;
+        if op.done
+            && op
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.type_url == NATIVE_METADATA_TYPE)
+        {
+            let size: u64 = native_metadata(op)
+                .map_err(internal)?
+                .outputs
+                .iter()
+                .map(|a| a.size_bytes)
+                .sum();
+            self.db
+                .execute(
+                    "UPDATE operations SET operation=?,reserved_bytes=? WHERE name=?",
+                    params![
+                        op.encode_to_vec(),
+                        i64::try_from(size).map_err(internal)?,
+                        op.name
+                    ],
+                )
+                .map_err(internal)?;
+        } else {
+            self.db
+                .execute(
+                    "UPDATE operations SET operation=? WHERE name=?",
+                    params![op.encode_to_vec(), op.name],
+                )
+                .map_err(internal)?;
+        }
         self.notify(op);
         Ok(())
     }
@@ -141,7 +175,9 @@ impl Jobs {
             CREATE TABLE IF NOT EXISTS operations(name TEXT PRIMARY KEY, parent TEXT NOT NULL,
                 request_id TEXT NOT NULL, digest TEXT NOT NULL, reserved_bytes INTEGER NOT NULL,
                 operation BLOB NOT NULL, UNIQUE(parent,request_id));
-            CREATE TABLE IF NOT EXISTS artifacts(name TEXT PRIMARY KEY, bytes BLOB NOT NULL);",
+            CREATE TABLE IF NOT EXISTS artifacts(name TEXT PRIMARY KEY, bytes BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS artifact_types(name TEXT PRIMARY KEY, media_type TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS native_operations(name TEXT PRIMARY KEY);",
         )?;
         let mut inner = Inner {
             db,
@@ -180,6 +216,13 @@ impl Jobs {
         })
         .await
         .map_err(internal)?
+    }
+    pub(crate) fn with_sync<T>(
+        &self,
+        f: impl FnOnce(&mut Inner) -> Result<T, Status>,
+    ) -> Result<T, Status> {
+        let mut guard = self.inner.lock().map_err(internal)?;
+        f(&mut guard)
     }
     pub async fn interrupt_all(&self) -> Result<(), Status> {
         self.with(|s| {
@@ -282,7 +325,7 @@ impl Jobs {
                 drop(stmt);
                 let reserved: i64 =
                     s.db.query_row(
-                        "SELECT COALESCE(SUM(reserved_bytes),0) FROM operations",
+                        "SELECT COALESCE(SUM(reserved_bytes),0) FROM operations WHERE name NOT IN (SELECT name FROM native_operations)",
                         [],
                         |r| r.get(0),
                     )
@@ -354,6 +397,13 @@ impl Jobs {
     pub async fn cancel(&self, name: String) -> Result<(), Status> {
         self.with(move |s| {
             let mut op = s.get(&name)?;
+            if op
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.type_url == NATIVE_METADATA_TYPE)
+            {
+                return native::cancel_native(s, op);
+            }
             let mut meta = metadata(&op).map_err(internal)?;
             if !op.done && meta.state != DiagnosticState::Cancelling as i32 {
                 meta.state = DiagnosticState::Cancelling as i32;
@@ -486,7 +536,11 @@ impl Jobs {
         page_size: i32,
         page_token: String,
     ) -> Result<spiling_contracts::google::longrunning::ListOperationsResponse, Status> {
-        validate_parent(&parent)?;
+        if parent.starts_with("sessions/") {
+            native::validate_native_parent(&parent)?;
+        } else {
+            validate_parent(&parent)?;
+        }
         if page_size < 0 {
             return Err(Status::invalid_argument("negative page_size"));
         }
@@ -535,14 +589,24 @@ impl Jobs {
                     .strip_prefix("artifacts/")
                     .ok_or_else(|| Status::invalid_argument("invalid artifact name"))?
                     .into(),
-                name,
                 size_bytes: size as u64,
-                media_type: if size == 64 {
-                    "application/x-spiling-triangle"
-                } else {
-                    "application/x-spiling-diagnostic-padded-triangle"
-                }
-                .into(),
+                media_type: s
+                    .db
+                    .query_row(
+                        "SELECT media_type FROM artifact_types WHERE name=?",
+                        [&name],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(internal)?
+                    .unwrap_or_else(|| {
+                        if size == 64 {
+                            "application/x-spiling-triangle".into()
+                        } else {
+                            "application/x-spiling-diagnostic-padded-triangle".into()
+                        }
+                    }),
+                name,
             })
         })
         .await

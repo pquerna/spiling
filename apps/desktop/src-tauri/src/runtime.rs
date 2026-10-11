@@ -41,13 +41,15 @@ pub struct RuntimeInfo {
     app_build: &'static str,
     runtime: &'static str,
     cef_api_version: i32,
+    geometry_debug_enabled: bool,
 }
 
 #[tauri::command]
-pub fn runtime_info() -> RuntimeInfo {
+pub fn runtime_info(state: tauri::State<'_, crate::engine::EngineState>) -> RuntimeInfo {
     RuntimeInfo {
         app_build: env!("CARGO_PKG_VERSION"),
         runtime: "cef",
         cef_api_version: CEF_API_VERSION_LAST,
+        geometry_debug_enabled: state.geometry_debug_enabled(),
     }
 }

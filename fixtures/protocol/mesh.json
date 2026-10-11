@@ -1,0 +1,48 @@
+{
+  "chunks": [
+    {
+      "data": "53504c4d01000000060000000600000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000400000000000000000000000000000803f00000000000000400000803f00000040000000000000803f00000000000000000000803f00000000000000000000803f00000000000000000000803f0000000000000000000080bf0000000000000000000080bf0000000000000000000080bf0000000001000000020000000300000004000000050000000000000001000000",
+      "metadata": {
+        "artifact_id": 1,
+        "bounds_mm": {
+          "max": [
+            2.0,
+            2.0,
+            1.0
+          ],
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "byte_count": 240,
+        "carrier_deviation_mm": 0.0,
+        "chunk_count": 1,
+        "chunk_index": 0,
+        "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+        "face_count": 2,
+        "mesh_profile": "mesh-mm-0.05-v1",
+        "quantization_error_mm": 0.0,
+        "schema_version": 1,
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sha256": "3dd7618be8f481e8346e909802784b77b07a333ba1d0e611bbc485b236928a9e"
+      }
+    }
+  ],
+  "encoding": "hex",
+  "face_table": [
+    {
+      "face_id": "step:9007199254740993",
+      "ordinal": 0
+    },
+    {
+      "face_id": "step:42",
+      "ordinal": 1
+    }
+  ],
+  "purpose": "Original algebraic multi-face SPLM diagnostic; not native geometry proof.",
+  "total_bytes": 240,
+  "triangle_count": 2,
+  "vertex_count": 6
+}

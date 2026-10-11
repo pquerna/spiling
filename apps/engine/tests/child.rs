@@ -47,7 +47,13 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     assert!(client.status().await.unwrap());
     assert_eq!(client.hello().kernel, "monstertruck");
-    assert!(client.hello().geometry_capabilities.is_empty());
+    assert!(
+        client
+            .hello()
+            .geometry_capabilities
+            .iter()
+            .any(|capability| capability == "step_planar_cylindrical_v1")
+    );
     client.ping().await.unwrap();
     assert_eq!(client.triangle().await.unwrap(), synthetic_triangle());
     client.shutdown().await.unwrap();

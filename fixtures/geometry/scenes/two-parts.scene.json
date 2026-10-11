@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "parts": [
+    {
+      "key": "box",
+      "path": "../box-mm.step",
+      "pose": {
+        "translation_mm": [
+          0,
+          0,
+          0
+        ],
+        "rotation_xyzw": [
+          0,
+          0,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "key": "cylinder",
+      "path": "../cylinder.step",
+      "pose": {
+        "translation_mm": [
+          40,
+          0,
+          0
+        ],
+        "rotation_xyzw": [
+          0,
+          0,
+          0,
+          1
+        ]
+      }
+    }
+  ],
+  "instances": [
+    {
+      "key": "box-rotated",
+      "part": "box",
+      "pose": {
+        "translation_mm": [
+          80,
+          0,
+          0
+        ],
+        "rotation_xyzw": [
+          0,
+          0,
+          0.7071067811865476,
+          0.7071067811865476
+        ]
+      }
+    }
+  ]
+}

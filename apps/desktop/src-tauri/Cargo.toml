@@ -20,6 +20,8 @@ serde.workspace = true
 tokio.workspace = true
 spiling-contracts.workspace = true
 spiling-engine-client.workspace = true
+uuid.workspace = true
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
 tauri = { version = "=3.0.0-alpha.4", features = [] }
 # The direct dependency is also the upstream CLI/build-time CEF detection hook.
 tauri-runtime-cef = { version = "=3.0.0-alpha.5" }

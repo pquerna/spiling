@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Local Spiling workbench engine supervision and runtime diagnostics only",
+  "description": "Local diagnostic and token-scoped native authoring workbench",
   "local": true,
   "windows": ["main"],
   "permissions": [
@@ -16,6 +16,18 @@
     "allow-engine-run-diagnostic",
     "allow-engine-get-operation",
     "allow-engine-cancel-operation",
-    "allow-engine-read-artifact"
+    "allow-engine-read-artifact",
+    "allow-engine-native-operation",
+    "allow-geometry-select-sources",
+    "allow-geometry-import-source",
+    "allow-geometry-control",
+    "allow-geometry-chunk",
+    "allow-geometry-debug-select-sources",
+    "allow-project-select-path",
+    "allow-project-debug-select-path",
+    "allow-project-control",
+    "allow-project-open",
+    "allow-project-save",
+    "allow-project-reopen"
   ]
 }

@@ -14,13 +14,13 @@ The first intended product is a recoverable STEP-to-print workflow for one teste
 
 **Spiling is not a functional manufacturing product yet. It is not recommended for use.**
 
-The current implementation is runtime bootstrap and diagnostics: a desktop shell, engine/CLI communication, and a synthetic triangle diagnostic. CAD import, project editing, slicing, machine-program verification, and printable-job export are not implemented.
+The engine and CLI implement a restricted native STEP/geometry workflow, source-backed recoverable projects, explicit printer/recipe intent, constrained planar compilation, emitted-program verification and durable software-only exports. They share authenticated gRPC services, Google Operations and ByteStream. The desktop provides project and geometry inspection controls, not manufacturing UI. Programs are **not machine ready**; no physical printer support or printability is established. Synthetic Triangle is an explicit diagnostic, never an import fallback.
 
-Packaged WebGPU presentation and physical-platform acceptance remain unverified. Windows, macOS, and Linux are intended targets, not certified support claims. See the [acceptance evidence](docs/quality/B0-evidence.md) for measured results and unmet gates.
+Packaged WebGPU presentation and physical-platform acceptance remain unverified. Windows, macOS, and Linux are intended targets, not certified support claims. See [geometry evidence](docs/quality/geometry-evidence.md), [software manufacturing evidence](docs/quality/manufacturing-evidence.md), [operation evidence](docs/quality/engine-operations.md) and [bootstrap evidence](docs/quality/B0-evidence.md) for exercised results, support limits and unmet gates.
 
 ## Experimental installation from source
 
-This setup is for contributors evaluating the unfinished bootstrap, not for manufacturing or operating a machine.
+This setup is for contributors evaluating the unfinished native workbench and software workflows, not for manufacturing or operating a machine.
 
 Install Node **24.x**, Rustup, and the [platform-native prerequisites](docs/quality/development.md#prerequisites), then:
 
@@ -39,6 +39,9 @@ The repository pins the Rust toolchain and dependencies. The first native build 
 - [Architecture and bootstrap acceptance](docs/quality/B0-plan.md)
 - [Engine control protocol](docs/protocol/control.md)
 - [Measured status and support limits](docs/quality/B0-evidence.md)
+- [Native geometry support and evidence](docs/quality/geometry-evidence.md)
+- [Project format and persistence](docs/protocol/project.md)
+- [Software manufacturing contracts](docs/protocol/manufacturing.md)
 
 ## License
 
