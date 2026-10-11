@@ -8,6 +8,16 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod display;
+pub mod geometry;
+pub mod manufacturing;
+pub mod native;
+pub mod project;
+pub use native::{
+    NativeOperationView, domain_error, domain_status, native_metadata, native_operation_view,
+    native_result,
+};
+
 pub mod google {
     // Upstream generated documentation has list indentation Clippy cannot infer.
     #[allow(clippy::doc_lazy_continuation)]
@@ -41,6 +51,9 @@ pub const TRIANGLE_VERTEX_COUNT: u32 = 3;
 pub const TRIANGLE_INDEX_COUNT: u32 = 3;
 pub const METADATA_TYPE: &str = "type.googleapis.com/spiling.engine.DiagnosticMetadata";
 pub const RESULT_TYPE: &str = "type.googleapis.com/spiling.engine.DiagnosticResult";
+pub const NATIVE_METADATA_TYPE: &str = "type.googleapis.com/spiling.engine.NativeOperationMetadata";
+pub const NATIVE_RESULT_TYPE: &str = "type.googleapis.com/spiling.engine.NativeOperationResult";
+pub const DOMAIN_ERROR_TYPE: &str = "type.googleapis.com/spiling.engine.DomainErrorDetail";
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Hello {
@@ -51,10 +64,41 @@ pub struct Hello {
     pub max_control_bytes: u32,
     pub max_binary_bytes: u32,
     pub pid: u32,
+    pub session_id: geometry::SessionId,
+    pub kernel_identity: geometry::KernelIdentity,
+    pub geometry_limits: geometry::GeometryLimits,
+    pub manufacturing_capabilities: Vec<String>,
+    pub project_capabilities: Vec<String>,
 }
-impl From<rpc::EngineInfo> for Hello {
-    fn from(info: rpc::EngineInfo) -> Self {
-        Self {
+impl TryFrom<rpc::EngineInfo> for Hello {
+    type Error = String;
+    fn try_from(info: rpc::EngineInfo) -> Result<Self, String> {
+        if info.pid == 0
+            || info.max_message_bytes != MAX_CONTROL_BYTES
+            || info.max_artifact_bytes != MAX_ARTIFACT_BYTES
+            || uuid::Uuid::parse_str(&info.instance_id).is_err()
+            || info.engine_build.is_empty()
+            || info.engine_build.len() > 256
+            || info.kernel.is_empty()
+            || info.kernel.len() > 256
+        {
+            return Err("invalid engine identity or diagnostic limits".into());
+        }
+        for capabilities in [
+            &info.geometry_capabilities,
+            &info.manufacturing_capabilities,
+            &info.project_capabilities,
+        ] {
+            if capabilities.is_empty()
+                || capabilities.len() > 64
+                || capabilities
+                    .iter()
+                    .any(|s| s.is_empty() || s.len() > 256 || s.contains('\0'))
+            {
+                return Err("invalid native capabilities".into());
+            }
+        }
+        Ok(Self {
             instance_id: info.instance_id,
             engine_build: info.engine_build,
             kernel: info.kernel,
@@ -62,7 +106,18 @@ impl From<rpc::EngineInfo> for Hello {
             max_control_bytes: info.max_message_bytes,
             max_binary_bytes: info.max_artifact_bytes,
             pid: info.pid,
-        }
+            session_id: geometry::SessionId::parse(info.session_id).map_err(|e| e.to_string())?,
+            kernel_identity: info
+                .kernel_identity
+                .ok_or("kernel identity missing")?
+                .try_into()?,
+            geometry_limits: info
+                .geometry_limits
+                .ok_or("native limits missing")?
+                .try_into()?,
+            manufacturing_capabilities: info.manufacturing_capabilities,
+            project_capabilities: info.project_capabilities,
+        })
     }
 }
 
@@ -74,7 +129,7 @@ pub struct StartupInfo {
     pub pid: u32,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub struct ArtifactView {
     pub name: String,
     pub size_bytes: String,

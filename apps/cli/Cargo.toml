@@ -13,7 +13,14 @@ publish = false
 [dependencies]
 spiling-engine-client.workspace = true
 spiling-contracts.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

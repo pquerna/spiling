@@ -6,4 +6,4 @@ Licensed under the Open Software License version 3.0
 
 # Wire specifications vision
 
-Describe the concrete authenticated gRPC operation/ByteStream API and synthetic diagnostic binary layout precisely enough for independent decoding. Future CAD/artifact wire schemas belong here only when implemented, with revisions and provenance; B0 has no such schemas.
+Describe authenticated gRPC diagnostics, native geometry/project/manufacturing services, standard Operations/ByteStream and packed synthetic/mesh/section payloads precisely enough for independent decoding. Keep native session identity, persistent project revisions, immutable artifact provenance and bounded failure behavior explicit. Implemented software semantics do not establish physical GPU, printer or arbitrary-import support.

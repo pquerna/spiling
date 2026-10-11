@@ -13,3 +13,5 @@ Licensed under the Open Software License version 3.0
 - Contract generation owns generated files. Check drift without rewriting output.
 - Packaging compiles release without bundling, collects notices after CEF is available, then bundles the existing binaries. Do not require a debug bootstrap build just to package release.
 - Exercise actual engine/CLI and packaged desktop commands. Refer to `docs/quality/B0-plan.md` for acceptance; report unexecuted platforms as unverified.
+- `pnpm manufacturing:intent TRUSTED_SOURCE.ts NEW_INTENT.json` type-checks and executes a trusted TypeScript author module with operator permissions; it is not a sandbox. Emit bounded finite JSON without overwriting existing output. The engine independently validates inert intent and never executes the author module.
+- Respect `CARGO_TARGET_DIR` when staging sidecars and locating CLI outputs. Default Cargo build jobs, Rust test threads and Rayon workers to one, honoring explicit environment overrides. Resource-sensitive host verification additionally requires externally enforced memory/task limits and sequential native workloads; worker counts alone do not bound kernel/test memory.

@@ -1,0 +1,95 @@
+{
+  "chunks": [
+    {
+      "data": "53504c530100000001000000050000000000000000000000000000000000000000000000000010400000000000000000000000000000000000000000000000000000000005000000000000000000000000000000000000000000000000000000000000000000344000000000000000000000000000000000000000000000344000000000000024400000000000000000000000000000000000000000000024400000000000000000000000000000000000000000000000000000000000000000",
+      "metadata": {
+        "artifact_id": 3,
+        "byte_count": 192,
+        "chunk_count": 2,
+        "chunk_index": 0,
+        "first_loop_ordinal": 0,
+        "loop_count": 1,
+        "schema_version": 1,
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sha256": "fbd4e48f4da449eb5c92dff23d4d15a9c74e959a6fcd89bd91591cc0db135468"
+      }
+    },
+    {
+      "data": "53504c530100000001000000050000000000000000000000000000000000000000000000000010400100000001000000000000000000000000000000000000000000000005000000000000000000004000000000000000400000000000000000000000000000004000000000000010400000000000000000000000000000104000000000000010400000000000000000000000000000104000000000000000400000000000000000000000000000004000000000000000400000000000000000",
+      "metadata": {
+        "artifact_id": 3,
+        "byte_count": 192,
+        "chunk_count": 2,
+        "chunk_index": 1,
+        "first_loop_ordinal": 1,
+        "loop_count": 1,
+        "schema_version": 1,
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sha256": "613ccd4a07c19c1ba3e6df37b4c8ab06937c2560002cc8710598f31b27d6c16c"
+      }
+    }
+  ],
+  "encoding": "hex",
+  "loops": [
+    {
+      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "is_hole": false,
+      "occurrence_id": 1,
+      "ordinal": 0,
+      "point_count": 5
+    },
+    {
+      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "is_hole": true,
+      "occurrence_id": 1,
+      "ordinal": 1,
+      "point_count": 5
+    }
+  ],
+  "purpose": "Original algebraic outer/hole SPLS diagnostic; not a native-derived section or native capability proof.",
+  "summary": {
+    "artifact_id": 3,
+    "boolean_tolerance_mm": 0.00001,
+    "chunk_count": 2,
+    "frame": {
+      "origin_mm": [
+        0.0,
+        0.0,
+        4.0
+      ],
+      "x_axis": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "y_axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "z_axis": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "plane": {
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin_mm": [
+        0.0,
+        0.0,
+        4.0
+      ]
+    },
+    "revision": 7,
+    "sampling_tolerance_mm": 0.005,
+    "schema_version": 1,
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "total_bytes": 384,
+    "total_loop_count": 2
+  }
+}

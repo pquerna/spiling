@@ -6,6 +6,6 @@ Licensed under the Open Software License version 3.0
 
 # Protocol package vision
 
-This dependency-free package gives TypeScript consumers Rust-generated operation/engine shell views and validated packed display buffers. The engine remains authoritative; the package owns neither planning nor rendering.
+This dependency-free package gives TypeScript consumers Rust-generated engine/native operation and authoring views, inert printer specifications and independently validated packed display buffers. Protobuf remains the only native API; the shell receives adapters rather than an alternate wire protocol.
 
-B0 supports exactly the version-one SPLT diagnostic payload and generated bounded operation metadata. Its acceptance boundary is cross-language byte compatibility plus rejection of malformed, oversized, misaligned, nonfinite, and out-of-range inputs before GPU upload. Future mesh schemas must declare identity, revision, bounds, units, and provenance through canonical native contracts rather than silently expanding this diagnostic decoder.
+The acceptance boundary is unchanged schema-v1 SPLT/SPLM/SPLS byte compatibility, explicit identity/revision/resource correspondence, immutable borrowing and rejection of malformed hashes, sizes, alignment, finite coordinates, source-face ordinals and section loop ranges before GPU upload. Engine-owned recovery and software-only manufacturing are not implemented by this package; geometry accuracy, independent program replay, real storage and packaged desktop support require separate evidence.

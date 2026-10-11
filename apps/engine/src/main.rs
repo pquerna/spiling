@@ -2,8 +2,15 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod geometry;
 mod jobs;
+mod native;
+mod session;
+use geometry::{Control, Reply};
 use jobs::Jobs;
+use native::NativeHost;
+use prost::Message;
+use sha2::{Digest, Sha256};
 use spiling_contracts::{
     MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo, TRANSFER_FRAGMENT_BYTES,
     google::{bytestream::*, longrunning::*},
@@ -19,6 +26,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct Service {
     jobs: Jobs,
+    native: NativeHost,
     info: EngineInfo,
     stop: watch::Sender<bool>,
     observers: Arc<Semaphore>,
@@ -226,6 +234,251 @@ impl byte_stream_server::ByteStream for Service {
     }
 }
 
+fn native_digest<T: Message>(method: &str, request: &T) -> String {
+    let mut hash = Sha256::new();
+    hash.update(method.as_bytes());
+    hash.update([0]);
+    hash.update(request.encode_to_vec());
+    format!("{:x}", hash.finalize())
+}
+fn request_error(status: spiling_contracts::google::rpc::Status) -> Status {
+    Status::with_details(
+        tonic::Code::from_i32(status.code),
+        status.message.clone(),
+        status.encode_to_vec().into(),
+    )
+}
+
+#[tonic::async_trait]
+impl geometry_server::Geometry for Service {
+    async fn execute(
+        &self,
+        req: Request<GeometryRequest>,
+    ) -> Result<Response<GeometryReply>, Status> {
+        let command = req.into_inner().try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::geometry_request_status(&e))
+        })?;
+        match self.native.execute(Control::Geometry(command)).await? {
+            Reply::Geometry(
+                response @ (spiling_contracts::geometry::GeometryResponse::Error { .. }
+                | spiling_contracts::geometry::GeometryResponse::ProjectError { .. }),
+            ) => Err(native::reply_error(Reply::Geometry(response))),
+            Reply::Geometry(response) => GeometryReply::try_from(response)
+                .map(Response::new)
+                .map_err(jobs::internal),
+            reply => Err(native::reply_error(reply)),
+        }
+    }
+    async fn import_part(
+        &self,
+        req: Request<ImportPartRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Geometry.ImportPart", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::geometry_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Geometry(command),
+            reservation: 64 * 1024 * 1024,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+    async fn start_section(
+        &self,
+        req: Request<StartSectionRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Geometry.StartSection", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::geometry_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Geometry(command),
+            reservation: 16 * 1024 * 1024,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+}
+#[tonic::async_trait]
+impl projects_server::Projects for Service {
+    async fn execute(
+        &self,
+        req: Request<ProjectRequest>,
+    ) -> Result<Response<ProjectReply>, Status> {
+        let command = req.into_inner().try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::project_request_status(&e))
+        })?;
+        match self.native.execute(Control::Project(command)).await? {
+            Reply::Project(
+                response @ spiling_contracts::project::ProjectResponse::Error { .. },
+            ) => Err(native::reply_error(Reply::Project(response))),
+            Reply::Project(response) => ProjectReply::try_from(response)
+                .map(Response::new)
+                .map_err(jobs::internal),
+            reply => Err(native::reply_error(reply)),
+        }
+    }
+    async fn open(&self, req: Request<OpenProjectRequest>) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.Open", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::project_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Project(command),
+            reservation: 80 * 1024 * 1024,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+    async fn save(&self, req: Request<SaveProjectRequest>) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.Save", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::project_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Project(command),
+            reservation: 0,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+}
+#[tonic::async_trait]
+impl manufacturing_server::Manufacturing for Service {
+    async fn execute(
+        &self,
+        req: Request<ManufacturingRequest>,
+    ) -> Result<Response<ManufacturingReply>, Status> {
+        let command = req.into_inner().try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::manufacturing_request_status(&e))
+        })?;
+        match self.native.execute(Control::Manufacturing(command)).await? {
+            Reply::Manufacturing(
+                response @ spiling_contracts::manufacturing::ManufacturingResponse::Error { .. },
+            ) => Err(native::reply_error(Reply::Manufacturing(response))),
+            Reply::Manufacturing(response) => ManufacturingReply::try_from(response)
+                .map(Response::new)
+                .map_err(jobs::internal),
+            reply => Err(native::reply_error(reply)),
+        }
+    }
+    async fn compile(
+        &self,
+        req: Request<CompileManufacturingRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Manufacturing.Compile", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::manufacturing_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Manufacturing(command),
+            reservation: 16 * 1024 * 1024,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+    async fn verify(
+        &self,
+        req: Request<VerifyManufacturingRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Manufacturing.Verify", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::manufacturing_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Manufacturing(command),
+            reservation: 16 * 1024 * 1024,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProjectFault {
+    AfterAssets,
+    BeforeManifestReplace,
+    AfterManifestReplace,
+}
+impl ProjectFault {
+    fn from_env() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        match std::env::var("SPILING_PROJECT_FAULT") {
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Ok(value) => match value.as_str() {
+                "after_assets" => Ok(Some(Self::AfterAssets)),
+                "before_manifest_replace" => Ok(Some(Self::BeforeManifestReplace)),
+                "after_manifest_replace" => Ok(Some(Self::AfterManifestReplace)),
+                _ => Err("unknown SPILING_PROJECT_FAULT stage".into()),
+            },
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub(crate) fn matches(self, stage: spiling_core::storage::SaveStage) -> bool {
+        matches!(
+            (self, stage),
+            (
+                Self::AfterAssets,
+                spiling_core::storage::SaveStage::AssetsSynced
+            ) | (
+                Self::BeforeManifestReplace,
+                spiling_core::storage::SaveStage::BeforeManifestReplace
+            ) | (
+                Self::AfterManifestReplace,
+                spiling_core::storage::SaveStage::AfterManifestReplace
+            )
+        )
+    }
+}
+pub(crate) fn diagnostic(level: &str, event: &str, message: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({"level":level,"event":event,"message":message})
+    );
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(std::ffi::OsStr::new("--store")) {
@@ -259,6 +512,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let capability = String::from_utf8(capability[..64].to_vec())?;
     let jobs = Jobs::open(&store)?;
+    let native = NativeHost::new(jobs.clone(), ProjectFault::from_env()?);
+    let (session_id, _, _) = native.capture().await?;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let instance_id = Uuid::new_v4().to_string();
     let info = EngineInfo {
@@ -266,7 +521,46 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         engine_build: env!("CARGO_PKG_VERSION").into(),
         pid: std::process::id(),
         kernel: "monstertruck".into(),
-        geometry_capabilities: vec![],
+        geometry_capabilities: [
+            "step_planar_cylindrical_v1",
+            "multi_instance_scene_v1",
+            "mesh_chunks_v1",
+            "native_plane_section_v1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        session_id: session_id.as_str().to_owned(),
+        kernel_identity: Some(
+            spiling_contracts::geometry::KernelIdentity {
+                name: "monstertruck".into(),
+                version: "0.4.1".into(),
+                revision: "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001".into(),
+            }
+            .try_into()
+            .map_err(jobs::internal)?,
+        ),
+        geometry_limits: Some(
+            spiling_contracts::geometry::GeometryLimits::FROZEN
+                .try_into()
+                .map_err(jobs::internal)?,
+        ),
+        project_capabilities: [
+            "recoverable_projects_v2",
+            "project_transactions_v1",
+            "project_read_only_v1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        manufacturing_capabilities: [
+            "planar_software_compile_v1",
+            "independent_program_replay_v1",
+            "immutable_bundle_bytestream_v1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
         max_message_bytes: MAX_CONTROL_BYTES,
         max_artifact_bytes: MAX_ARTIFACT_BYTES,
     };
@@ -278,6 +572,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::to_string(&startup)?);
     let service = Service {
         jobs,
+        native,
         info,
         stop,
         observers: Arc::new(Semaphore::new(16)),
@@ -296,6 +591,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let shutdown_jobs = service.jobs.clone();
     let mut drain_signal = stopping.clone();
+    let shutdown_native = service.native.clone();
     let server = tonic::transport::Server::builder()
         .max_concurrent_streams(32)
         .add_service(tonic::service::interceptor::InterceptedService::new(
@@ -317,6 +613,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             authenticate.clone(),
         ))
         .add_service(tonic::service::interceptor::InterceptedService::new(
+            geometry_server::GeometryServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            projects_server::ProjectsServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
+            manufacturing_server::ManufacturingServer::new(service.clone())
+                .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
+                .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
+            authenticate.clone(),
+        ))
+        .add_service(tonic::service::interceptor::InterceptedService::new(
             artifacts_server::ArtifactsServer::new(service)
                 .max_decoding_message_size(MAX_CONTROL_BYTES as usize)
                 .max_encoding_message_size(MAX_CONTROL_BYTES as usize),
@@ -331,11 +645,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = &mut server => result?,
         _ = drain_signal.changed() => {
-            shutdown_jobs.interrupt_all().await?;
             // Bound drain time even when a consumer holds an unread stream.
             if let Ok(result) = tokio::time::timeout(Duration::from_secs(2), &mut server).await { result?; }
         }
     }
+    let _ = tokio::time::timeout(Duration::from_secs(12), shutdown_native.shutdown()).await;
+    shutdown_jobs.interrupt_all().await?;
     Ok(())
 }
 

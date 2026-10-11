@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "exporter": {
+    "bindings": "cadquery-ocp",
+    "version": "7.9.3.1",
+    "schema": "AP214IS",
+    "unit": "millimetre"
+  },
+  "purpose": "Original independent-exporter admission diagnostics; outcomes recorded in geometry evidence.",
+  "fixtures": [
+    {
+      "path": "occt-box-mm.step",
+      "bytes": 15395,
+      "sha256": "809bae57212f4c640016cafe3bfe4487f7f899326ee00e663774be6a673a1b82"
+    },
+    {
+      "path": "occt-cylinder-mm.step",
+      "bytes": 5649,
+      "sha256": "21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a"
+    },
+    {
+      "path": "occt-through-hole-mm.step",
+      "bytes": 19015,
+      "sha256": "71d0276a8ba240c608597baf0a079ecb6078f1bd88ebd61bff88abdaa3c25ff0"
+    }
+  ]
+}

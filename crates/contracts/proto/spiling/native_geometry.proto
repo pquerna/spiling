@@ -1,0 +1,115 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+syntax = "proto3";
+package spiling.engine;
+
+import "spiling/native_common.proto";
+import "google/longrunning/operations.proto";
+import "google/protobuf/empty.proto";
+
+service Geometry {
+  rpc Execute(GeometryRequest) returns (GeometryReply);
+  rpc ImportPart(ImportPartRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
+  }
+  rpc StartSection(StartSectionRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
+  }
+}
+message ImportPartRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+  NativePath source = 4;
+  RigidPoseMm initial_pose = 5;
+}
+message StartSectionRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+  PlaneMm plane = 4;
+}
+message GeometryRequest {
+  oneof command {
+    AddInstanceRequest add_instance = 1;
+    SetInstancePoseRequest set_instance_pose = 2;
+    RemoveInstanceRequest remove_instance = 3;
+    GetSceneRequest get_scene = 4;
+    GetScenePageRequest get_scene_page = 5;
+    GetFaceIndexPageRequest get_face_index_page = 6;
+    InspectFaceRequest inspect_face = 7;
+    GetArtifactPageRequest get_artifact_page = 8;
+    ReleaseArtifactRequest release_artifact = 9;
+  }
+}
+message AddInstanceRequest { string session_id = 1; uint32 base_revision = 2; string definition_id = 3; RigidPoseMm pose = 4; }
+message SetInstancePoseRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; RigidPoseMm pose = 4; }
+message RemoveInstanceRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; }
+message GetSceneRequest { string session_id = 1; }
+message GetScenePageRequest { string session_id = 1; uint32 revision = 2; ScenePageKind kind = 3; uint32 offset = 4; }
+message GetFaceIndexPageRequest { string session_id = 1; string definition_id = 2; uint32 offset = 3; }
+message InspectFaceRequest { FaceRef reference = 1; }
+message GetArtifactPageRequest { string session_id = 1; uint32 artifact_id = 2; ArtifactPageKind kind = 3; uint32 offset = 4; }
+message ReleaseArtifactRequest { string session_id = 1; uint32 artifact_id = 2; }
+enum ScenePageKind { SCENE_PAGE_KIND_UNSPECIFIED = 0; DEFINITIONS = 1; OCCURRENCES = 2; }
+enum ArtifactPageKind { ARTIFACT_PAGE_KIND_UNSPECIFIED = 0; CHUNKS = 1; LOOPS = 2; }
+message GeometryReply {
+  oneof response {
+    SceneSummary scene_changed = 1;
+    SceneSummary scene = 2;
+    ScenePage scene_page = 3;
+    FaceIndexPage face_index_page = 4;
+    FaceInspection face_inspection = 5;
+    ArtifactPage artifact_page = 6;
+    google.protobuf.Empty released = 7;
+  }
+}
+message SceneSummary { string session_id = 1; uint32 revision = 2; uint32 definition_count = 3; uint32 occurrence_count = 4; AabbMm bounds_mm = 5; uint32 unique_mesh_bytes = 6; }
+message ScenePage { repeated DefinitionRecord definitions = 1; repeated OccurrenceRecord occurrences = 2; optional uint32 next_offset = 3; }
+message FaceIndexPage { repeated FaceIndexRow faces = 1; optional uint32 next_offset = 2; }
+message ArtifactPage {
+  ArtifactSummary summary = 1;
+  repeated ArtifactChunkMetadata chunks = 2;
+  repeated SectionLoopMetadata loops = 3;
+  optional uint32 next_offset = 4;
+  repeated Artifact resources = 5;
+}
+enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; }
+enum DisplayProfile { DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_MM_005_V1 = 1; }
+message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; }
+message DefinitionRecord { string definition_id = 1; SourceProvenance provenance = 2; uint32 face_count = 3; AabbMm bounds_mm = 4; uint32 mesh_artifact_id = 5; }
+message OccurrenceRecord { uint32 occurrence_id = 1; string definition_id = 2; RigidPoseMm pose = 3; }
+message FaceRef { string session_id = 1; uint32 scene_revision = 2; uint32 occurrence_id = 3; string definition_id = 4; string face_id = 5; }
+message FaceCarrier {
+  oneof kind { PlaneFaceCarrier plane = 1; CylinderFaceCarrier cylinder = 2; }
+}
+message PlaneFaceCarrier { Vec3 origin_mm = 1; Vec3 normal = 2; }
+message CylinderFaceCarrier { Vec3 axis_origin_mm = 1; Vec3 axis_direction = 2; double radius_mm = 3; }
+message FaceInfo { string face_id = 1; string surface_face_entity = 2; string source_entity_kind = 3; bool orientation = 4; FaceCarrier carrier = 5; }
+message FaceInspection { FaceRef reference = 1; FaceInfo face = 2; RigidPoseMm pose = 3; SourceProvenance provenance = 4; }
+message FaceIndexRow { uint32 ordinal = 1; string face_id = 2; }
+message PlaneFrameMm { Vec3 origin_mm = 1; Vec3 x_axis = 2; Vec3 y_axis = 3; Vec3 z_axis = 4; }
+message MeshChunkMetadata {
+  string session_id = 1; uint32 artifact_id = 2; string definition_id = 3;
+  uint32 schema_version = 4; DisplayProfile mesh_profile = 5;
+  uint32 chunk_index = 6; uint32 chunk_count = 7; uint32 byte_count = 8;
+  string sha256 = 9; uint32 face_count = 10; AabbMm bounds_mm = 11;
+  double carrier_deviation_mm = 12; double quantization_error_mm = 13;
+}
+message SectionChunkMetadata {
+  string session_id = 1; uint32 artifact_id = 2; uint32 schema_version = 3;
+  uint32 chunk_index = 4; uint32 chunk_count = 5; uint32 byte_count = 6;
+  string sha256 = 7; uint32 first_loop_ordinal = 8; uint32 loop_count = 9;
+}
+message SectionLoopMetadata { uint32 ordinal = 1; uint32 occurrence_id = 2; string definition_id = 3; bool is_hole = 4; uint32 point_count = 5; }
+message SectionSummary {
+  string session_id = 1; uint32 artifact_id = 2; uint32 revision = 3; uint32 schema_version = 4;
+  PlaneMm plane = 5; PlaneFrameMm frame = 6;
+  uint32 total_loop_count = 7; uint32 chunk_count = 8; uint32 total_bytes = 9;
+  double sampling_tolerance_mm = 10; double boolean_tolerance_mm = 11;
+}
+message ArtifactSummary { oneof kind { MeshArtifactSummary mesh = 1; SectionSummary section = 2; } }
+message MeshArtifactSummary { uint32 artifact_id = 1; string definition_id = 2; uint32 chunk_count = 3; uint32 total_bytes = 4; }
+message ArtifactChunkMetadata { oneof kind { MeshChunkMetadata mesh = 1; SectionChunkMetadata section = 2; } }

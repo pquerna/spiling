@@ -3,6 +3,10 @@
 // Licensed under the Open Software License version 3.0
 
 //! Shared gRPC client. RPC cancellation does not own accepted operations or the process.
+mod native;
+#[cfg(test)]
+mod tests;
+
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
     Hello, MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo,
@@ -37,8 +41,32 @@ pub enum ClientError {
     Protocol(String),
     #[error("engine exchange timed out")]
     Timeout,
+    #[error("geometry: {0}")]
+    Geometry(#[from] spiling_contracts::geometry::GeometryError),
+    #[error("project: {0}")]
+    Project(#[from] spiling_contracts::project::ProjectError),
+    #[error("manufacturing: {0}")]
+    Manufacturing(#[from] spiling_contracts::manufacturing::ManufacturingError),
+    #[error("invalid local request: {0}")]
+    InvalidRequest(String),
     #[error("engine exited: {0}")]
     UnexpectedExit(String),
+}
+
+impl ClientError {
+    /// RPC observations do not own accepted work or child lifetime. Domain failures,
+    /// bad local input and individual call deadlines leave the session usable.
+    pub fn is_fatal(&self) -> bool {
+        !matches!(
+            self,
+            Self::Geometry(_)
+                | Self::Project(_)
+                | Self::Manufacturing(_)
+                | Self::InvalidRequest(_)
+                | Self::Timeout
+                | Self::Rpc(_)
+        )
+    }
 }
 
 /// Cloneable RPC access without process ownership. Dropping a call never kills the child.
@@ -159,22 +187,38 @@ impl EngineRpc {
         )
     }
     pub async fn read_artifact(&self, artifact: &Artifact) -> Result<Vec<u8>, ClientError> {
-        if artifact.size_bytes > u64::from(MAX_ARTIFACT_BYTES) {
+        self.read_bounded_artifact(
+            &artifact.name,
+            artifact.size_bytes,
+            &artifact.sha256,
+            u64::from(MAX_ARTIFACT_BYTES),
+        )
+        .await
+    }
+
+    async fn read_bounded_artifact(
+        &self,
+        name: &str,
+        size_bytes: u64,
+        sha256: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, ClientError> {
+        if size_bytes > limit || usize::try_from(size_bytes).is_err() {
             return Err(ClientError::Protocol(
                 "artifact exceeds client allocation limit".into(),
             ));
         }
         let mut stream = self
             .read_artifact_range(ReadRequest {
-                resource_name: artifact.name.clone(),
+                resource_name: name.to_owned(),
                 read_offset: 0,
                 read_limit: 0,
             })
             .await?;
-        let mut bytes = Vec::with_capacity(artifact.size_bytes as usize);
+        let mut bytes = Vec::with_capacity(size_bytes as usize);
         while let Some(fragment) = stream.message().await? {
             if fragment.data.is_empty()
-                || bytes.len() + fragment.data.len() > artifact.size_bytes as usize
+                || fragment.data.len() > (size_bytes as usize).saturating_sub(bytes.len())
             {
                 return Err(ClientError::Protocol(
                     "artifact fragment range invalid".into(),
@@ -182,9 +226,7 @@ impl EngineRpc {
             }
             bytes.extend_from_slice(&fragment.data);
         }
-        if bytes.len() as u64 != artifact.size_bytes
-            || format!("{:x}", Sha256::digest(&bytes)) != artifact.sha256
-        {
+        if bytes.len() as u64 != size_bytes || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
             return Err(ClientError::Protocol(
                 "artifact size/checksum mismatch".into(),
             ));
@@ -248,7 +290,16 @@ impl EngineClient {
         path: impl AsRef<Path>,
         store: impl AsRef<Path>,
     ) -> Result<Self, ClientError> {
-        let mut child = Command::new(path.as_ref())
+        Self::spawn_command(Command::new(path.as_ref()), store).await
+    }
+
+    /// Start the same supervised engine with caller-scoped environment/arguments.
+    /// The client still owns authentication, storage, stdio and child cleanup.
+    pub async fn spawn_command(
+        mut command: Command,
+        store: impl AsRef<Path>,
+    ) -> Result<Self, ClientError> {
+        let mut child = command
             .arg("--store")
             .arg(store.as_ref())
             .stdin(Stdio::piped())
@@ -315,7 +366,13 @@ impl EngineClient {
                     "engine readiness identity/limits invalid".into(),
                 ));
             }
-            Ok((input, rpc, Hello::from(info)))
+            let hello = Hello::try_from(info).map_err(ClientError::Protocol)?;
+            if hello.geometry_limits != spiling_contracts::geometry::GeometryLimits::FROZEN {
+                return Err(ClientError::Protocol(
+                    "native geometry limits mismatch".into(),
+                ));
+            }
+            Ok((input, rpc, hello))
         }
         .await;
         match result {
@@ -344,6 +401,13 @@ impl EngineClient {
     }
     pub async fn status(&mut self) -> Result<bool, ClientError> {
         Ok(self.child.try_wait()?.is_none())
+    }
+    /// Observe and reap an actual child exit, including fault-injected native exits.
+    pub async fn wait_exit(&mut self) -> Result<std::process::ExitStatus, ClientError> {
+        timeout(REQUEST_TIMEOUT, self.child.wait())
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(ClientError::Io)
     }
     pub async fn ping(&self) -> Result<(), ClientError> {
         self.rpc.info().await?;

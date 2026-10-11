@@ -14,3 +14,19 @@ apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/binaries/
 **/dist/
 packages/protocol/src/generated.ts
+fixtures/protocol/mesh.json
+fixtures/protocol/section.json
+fixtures/protocol/section-multichunk.json
+fixtures/protocol/native-mesh.json
+fixtures/protocol/native-section.json
+fixtures/protocol/native-section-multichunk.json
+# Rust-generated corpus metadata is byte-checked by generate_corpus --check.
+fixtures/geometry/manifest.json
+fixtures/geometry/recipe.json
+fixtures/geometry/scenes/two-parts.scene.json
+fixtures/geometry/scenes/repeated-128.scene.json
+fixtures/geometry/scenes/large-origin.scene.json
+# Independently exported source metadata is byte-checked by its frozen recipe.
+fixtures/geometry/independent-exporters/manifest.json
+# Trusted TypeScript authoring output is reproduced byte-for-byte by its tool.
+fixtures/manufacturing/solid-fill.intent.json

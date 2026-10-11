@@ -5,17 +5,21 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { decodeTriangle } from "../packages/protocol/src/index.ts";
+import { decodeMesh, validateMeshManifest } from "../packages/protocol/src/mesh.ts";
+import { decodeSection, validateSectionManifest } from "../packages/protocol/src/section.ts";
 
 const suffix = process.platform === "win32" ? ".exe" : "";
-const engine = resolve(`target/debug/spiling-engine${suffix}`);
-const cli = resolve(`target/debug/spiling-cli${suffix}`);
+const target = resolve(process.env.CARGO_TARGET_DIR ?? "target");
+const engine = resolve(target, `debug/spiling-engine${suffix}`);
+const cli = resolve(target, `debug/spiling-cli${suffix}`);
 const directory = await mkdtemp(join(tmpdir(), "spiling-protocol-"));
 function invoke(args) {
-  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 15000 });
+  const result = spawnSync(cli, args, { encoding: "utf8", timeout: 120000 });
   if (result.error) throw result.error;
   return result;
 }
@@ -28,7 +32,9 @@ try {
   const report = JSON.parse(diagnostic.stdout);
   assert.match(report.hello.instance_id, /^[0-9a-f-]{36}$/);
   assert.equal(report.hello.kernel, "monstertruck");
-  assert.deepEqual(report.hello.geometry_capabilities, []);
+  assert.ok(report.hello.geometry_capabilities.length > 0);
+  assert.match(report.hello.session_id, /^[0-9a-f-]{36}$/);
+  assert.equal(report.hello.kernel_identity.name, "monstertruck");
   assert.ok(report.hello.pid > 0);
   const output = join(directory, "triangle.bin");
   const transfer = invoke(["triangle", "--engine", engine, "--output", output]);
@@ -63,6 +69,157 @@ try {
   assert.equal(jobReport.operation.state, "succeeded");
   assert.equal(jobReport.bytes, 256);
   assert.ok(jobReport.partial_updates > 0, "real partial output must arrive before completion");
+  assert.match(jobReport.operation.name, /^diagnostics\/default\/operations\/[0-9a-f-]{36}$/);
+  const requestId = "518947e2-c3d1-4c9d-8e80-9a83ff7d6c54";
+  const store = join(directory, "operations");
+  const durableArgs = [
+    "job",
+    "--engine",
+    engine,
+    "--store",
+    store,
+    "--request-id",
+    requestId,
+    "--chunks",
+    "2",
+    "--delay-ms",
+    "1",
+    "--input-revision",
+    "retained-diagnostic",
+  ];
+  const retained = invoke(durableArgs);
+  assert.equal(retained.status, 0, retained.stderr);
+  const reconnected = invoke(durableArgs);
+  assert.equal(reconnected.status, 0, reconnected.stderr);
+  assert.equal(
+    JSON.parse(retained.stdout).operation.name,
+    JSON.parse(reconnected.stdout).operation.name,
+  );
+  const geometryOut = join(directory, "geometry");
+  const geometry = invoke([
+    "geometry",
+    "--scene",
+    resolve("fixtures/geometry/scenes/two-parts.scene.json"),
+    "--section",
+    "0,0,4:0,0,1",
+    "--out",
+    geometryOut,
+    "--engine",
+    engine,
+  ]);
+  assert.equal(geometry.status, 0, geometry.stderr);
+  const geometryReport = JSON.parse(geometry.stdout);
+  assert.equal(geometryReport.scene.definition_count, 2);
+  assert.equal(geometryReport.scene.occurrence_count, 3);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(geometryOut, "manifest.json"), "utf8")),
+    geometryReport,
+  );
+  for (const definition of geometryReport.definitions) {
+    const identity = {
+      session_id: geometryReport.hello.session_id,
+      artifact_id: definition.record.mesh_artifact_id,
+      definition_id: definition.record.definition_id,
+    };
+    validateMeshManifest(definition.chunks, identity);
+    for (const chunk of definition.chunks) {
+      const bytes = await readFile(
+        join(
+          geometryOut,
+          `mesh-${String(identity.artifact_id).padStart(6, "0")}-${String(chunk.chunk_index).padStart(6, "0")}.splm`,
+        ),
+      );
+      await decodeMesh(bytes, chunk, { ...identity, chunk_index: chunk.chunk_index });
+    }
+  }
+  const section = geometryReport.section;
+  const sectionIdentity = {
+    session_id: geometryReport.hello.session_id,
+    artifact_id: section.summary.artifact_id,
+    revision: geometryReport.scene.revision,
+  };
+  const loops = section.loops.map((loop) => loop.metadata);
+  validateSectionManifest(section.summary, section.chunks, loops, sectionIdentity);
+  for (const chunk of section.chunks) {
+    const bytes = await readFile(
+      join(
+        geometryOut,
+        `section-${String(sectionIdentity.artifact_id).padStart(6, "0")}-${String(chunk.chunk_index).padStart(6, "0")}.spls`,
+      ),
+    );
+    await decodeSection(
+      bytes,
+      chunk,
+      section.summary,
+      loops.slice(chunk.first_loop_ordinal, chunk.first_loop_ordinal + chunk.loop_count),
+      { ...sectionIdentity, chunk_index: chunk.chunk_index },
+    );
+  }
+  const source = join(directory, "operator-source.step");
+  await copyFile(resolve("fixtures/geometry/box-mm.step"), source);
+  const project = join(directory, "project");
+  const firstExport = join(directory, "first-export");
+  const created = invoke([
+    "project",
+    "create",
+    project,
+    "--import",
+    source,
+    "--intent",
+    resolve("fixtures/manufacturing/solid-fill.intent.json"),
+    "--compile",
+    "--verify",
+    "--manufacturing-out",
+    firstExport,
+    "--engine",
+    engine,
+  ]);
+  assert.equal(created.status, 0, created.stderr);
+  const createdReport = JSON.parse(created.stdout);
+  await rm(source);
+  const freshExport = join(directory, "fresh-export");
+  const reopened = invoke([
+    "project",
+    "inspect",
+    project,
+    "--verify",
+    "--manufacturing-out",
+    freshExport,
+    "--engine",
+    engine,
+  ]);
+  assert.equal(reopened.status, 0, reopened.stderr);
+  const reopenedReport = JSON.parse(reopened.stdout);
+  assert.notEqual(createdReport.hello.session_id, reopenedReport.hello.session_id);
+  assert.deepEqual(createdReport.manufacturing.artifact, reopenedReport.manufacturing.artifact);
+  assert.equal(reopenedReport.manufacturing_export.software_only, true);
+  assert.equal(reopenedReport.manufacturing_export.not_machine_ready, true);
+  assert.equal(reopenedReport.manufacturing_export.verification.verified, true);
+  assert.deepEqual(
+    createdReport.definitions.map((d) => d.record.provenance),
+    reopenedReport.definitions.map((d) => d.record.provenance),
+  );
+  for (const name of ["plan.json", "program.gcode", "verification.json", "provenance.json"]) {
+    const before = await readFile(join(firstExport, name));
+    const after = await readFile(join(freshExport, name));
+    assert.equal(
+      createHash("sha256").update(before).digest("hex"),
+      createHash("sha256").update(after).digest("hex"),
+      name,
+    );
+  }
+  assert.deepEqual(
+    JSON.parse(await readFile(join(freshExport, "verification.json"), "utf8")),
+    reopenedReport.manufacturing_export.verification,
+    "export must use the exact fresh replay result",
+  );
+  for (const report of [geometryReport, createdReport, reopenedReport]) {
+    assert.throws(
+      () => process.kill(report.hello.pid, 0),
+      { code: "ESRCH" },
+      "completion must follow actual child reap",
+    );
+  }
   if (process.platform === "linux") {
     // Linux permits invalid UTF-8 filenames; macOS rejects this fixture with EILSEQ.
     // A shell expands the controlled glob as native bytes, unlike Node argv strings.
@@ -112,6 +269,13 @@ try {
         decoder:
           "cross-language native transfer; truncation, oversized allocation, schema, reserved, count overflow, index bounds, nonfinite rejected",
         operations: jobReport,
+        geometry: {
+          definitions: geometryReport.scene.definition_count,
+          occurrences: geometryReport.scene.occurrence_count,
+          uniqueMeshBytes: geometryReport.unique_mesh_bytes,
+          sections: section.occurrences,
+        },
+        manufacturing: reopenedReport.manufacturing_export,
         nonUtfPaths:
           process.platform === "linux"
             ? "JSON reports and child cleanup passed"

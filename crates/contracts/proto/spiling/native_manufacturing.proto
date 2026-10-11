@@ -1,0 +1,166 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+
+syntax = "proto3";
+package spiling.engine;
+
+import "google/longrunning/operations.proto";
+import "spiling/native_common.proto";
+import "spiling/native_project.proto";
+
+service Manufacturing {
+  rpc Execute(ManufacturingRequest) returns (ManufacturingReply);
+  rpc Compile(CompileManufacturingRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = {
+      response_type: "NativeOperationResult"
+      metadata_type: "NativeOperationMetadata"
+    };
+  }
+  rpc Verify(VerifyManufacturingRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = {
+      response_type: "NativeOperationResult"
+      metadata_type: "NativeOperationMetadata"
+    };
+  }
+}
+
+message ManufacturingRequest {
+  string parent = 1; // sessions/{session_uuid}
+  oneof command {
+    GetManufacturingRequest get = 2;
+    SetManufacturingIntentRequest set_intent = 3;
+  }
+}
+message GetManufacturingRequest {}
+message SetManufacturingIntentRequest {
+  uint32 base_revision = 1; // Project revision, not scene publication revision.
+  ManufacturingIntent intent = 2;
+}
+message CompileManufacturingRequest {
+  string parent = 1;
+  string request_id = 2; // Optional canonical nonnil UUID.
+  uint32 base_revision = 3;
+}
+message VerifyManufacturingRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+}
+// Domain failures use canonical Google Status, never a success reply arm.
+message ManufacturingReply {
+  ManufacturingStatus status = 1;
+}
+message ManufacturingStatus {
+  ProjectInfo info = 1;
+  ManufacturingIntent intent = 2;
+  ManufacturingArtifactRecord artifact = 3;
+  Artifact resource = 4;
+}
+message ManufacturingCompiledResult {
+  ProjectInfo info = 1;
+  ManufacturingArtifactRecord record = 2;
+  Artifact resource = 3;
+}
+message ManufacturingVerifiedResult {
+  ManufacturingArtifactRecord record = 1;
+  VerificationReport report = 2;
+  Artifact resource = 3;
+}
+
+message ManufacturingIntent {
+  PrinterSpecification printer = 1;
+  PlanarPrintRecipe recipe = 2;
+}
+enum PrinterCoordinateFrame {
+  PRINTER_COORDINATE_FRAME_UNSPECIFIED = 0;
+  RIGHT_HANDED_MILLIMETRES = 1;
+}
+enum MotionSpace {
+  MOTION_SPACE_UNSPECIFIED = 0;
+  CARTESIAN_XYZ = 1;
+}
+enum OutputDialect {
+  OUTPUT_DIALECT_UNSPECIFIED = 0;
+  CARTESIAN_ABSOLUTE_GCODE_V1 = 1;
+}
+message PrinterCapabilities {
+  MotionSpace motion_space = 1;
+  uint32 extruders = 2;
+  OutputDialect output_dialect = 3;
+  bool generated_supports = 4;
+}
+enum MachineComponentRole {
+  MACHINE_COMPONENT_ROLE_UNSPECIFIED = 0;
+  BED = 1;
+  TOOLHEAD = 2;
+  FIXTURE = 3;
+}
+message CylinderComponentShape {
+  double radius_mm = 1;
+  double height_mm = 2;
+}
+message MachineComponentShape {
+  oneof shape {
+    AabbMm box = 1;
+    CylinderComponentShape cylinder = 2;
+  }
+}
+message MachineComponent {
+  string id = 1;
+  MachineComponentRole role = 2;
+  RigidPoseMm pose = 3;
+  MachineComponentShape shape = 4;
+}
+message PrinterSpecification {
+  uint32 schema_version = 1;
+  string id = 2;
+  string revision = 3;
+  string name = 4;
+  PrinterCoordinateFrame coordinate_frame = 5;
+  AabbMm build_envelope = 6;
+  repeated MachineComponent components = 7;
+  PrinterCapabilities capabilities = 8;
+  double nozzle_diameter_mm = 9;
+  double max_feed_mm_s = 10;
+  double max_volumetric_flow_mm3_s = 11;
+}
+message PlanarPrintRecipe {
+  string id = 1;
+  string revision = 2;
+  string material_id = 3;
+  string material_revision = 4;
+  double filament_diameter_mm = 5;
+  double layer_height_mm = 6;
+  double bead_width_mm = 7;
+  uint32 perimeter_count = 8;
+  double infill_fraction = 9;
+  double print_speed_mm_s = 10;
+  double travel_speed_mm_s = 11;
+  double flow_multiplier = 12;
+}
+message ManufacturingArtifactRecord {
+  string hash = 1;
+  string input_hash = 2;
+  uint32 byte_count = 3;
+  ManufacturingSummary summary = 4;
+}
+message ManufacturingSummary {
+  uint32 layers = 1;
+  uint32 paths = 2;
+  uint32 deposition_segments = 3;
+  double deposited_volume_mm3 = 4;
+  double filament_length_mm = 5;
+  bool software_only = 6;
+}
+message VerificationReport {
+  bool verified = 1;
+  repeated string coverage = 2;
+  repeated string limitations = 3;
+  uint32 deposition_segments = 4;
+  uint32 travel_segments = 5;
+  double deposited_volume_mm3 = 6;
+  double filament_length_mm = 7;
+  double max_position_error_mm = 8;
+  double max_extrusion_error_mm = 9;
+}

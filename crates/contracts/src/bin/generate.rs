@@ -3,9 +3,10 @@
 // Licensed under the Open Software License version 3.0
 
 use spiling_contracts::{
-    ArtifactView, Hello, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, OperationView, TRIANGLE_HEADER_BYTES,
-    TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
+    ArtifactView, Hello, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, NativeOperationView, OperationView,
+    TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
+use spiling_contracts::{display::*, geometry::*, manufacturing::*, project::*};
 use std::{env, fs, path::Path};
 use ts_rs::TS;
 
@@ -20,8 +21,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for declaration in [
         ArtifactView::decl(&config),
-        Hello::decl(&config),
         OperationView::decl(&config),
+        NativeOperationView::decl(&config),
+        Hello::decl(&config),
+        GeometryErrorCode::decl(&config),
+        GeometryError::decl(&config),
+        SessionId::decl(&config),
+        DefinitionId::decl(&config),
+        SourceHash::decl(&config),
+        FaceId::decl(&config),
+        OccurrenceId::decl(&config),
+        ArtifactId::decl(&config),
+        SceneRevision::decl(&config),
+        AabbMm::decl(&config),
+        RigidPoseMm::decl(&config),
+        PlaneMm::decl(&config),
+        PlaneFrameMm::decl(&config),
+        SourceUnit::decl(&config),
+        SourceProvenance::decl(&config),
+        DisplayProfile::decl(&config),
+        FaceRef::decl(&config),
+        FaceCarrier::decl(&config),
+        FaceInfo::decl(&config),
+        FaceInspection::decl(&config),
+        FaceIndexRow::decl(&config),
+        SceneSummary::decl(&config),
+        DefinitionRecord::decl(&config),
+        OccurrenceRecord::decl(&config),
+        NativePath::decl(&config),
+        MeshChunkMetadata::decl(&config),
+        SectionChunkMetadata::decl(&config),
+        SectionLoopMetadata::decl(&config),
+        SectionSummary::decl(&config),
+        GeometryLimits::decl(&config),
+        KernelIdentity::decl(&config),
+        SelectedSource::decl(&config),
+        GeometryCommand::decl(&config),
+        GeometryResponse::decl(&config),
+        ScenePageKind::decl(&config),
+        ArtifactPageKind::decl(&config),
+        JobStatus::decl(&config),
+        JobResult::decl(&config),
+        JobError::decl(&config),
+        ProjectErrorCode::decl(&config),
+        ProjectError::decl(&config),
+        ProjectId::decl(&config),
+        ProjectRevision::decl(&config),
+        ProjectUnits::decl(&config),
+        ProjectFrame::decl(&config),
+        StoredDefinition::decl(&config),
+        ProjectManifest::decl(&config),
+        ProjectInfo::decl(&config),
+        ProjectCommand::decl(&config),
+        ProjectResponse::decl(&config),
+        ProjectPathIntent::decl(&config),
+        SelectedProjectPath::decl(&config),
+        ArtifactSummary::decl(&config),
+        ArtifactChunkMetadata::decl(&config),
+        ManufacturingErrorCode::decl(&config),
+        ManufacturingError::decl(&config),
+        PrinterCoordinateFrame::decl(&config),
+        MotionSpace::decl(&config),
+        OutputDialect::decl(&config),
+        PrinterCapabilities::decl(&config),
+        MachineComponentRole::decl(&config),
+        MachineComponentShape::decl(&config),
+        MachineComponent::decl(&config),
+        PrinterSpecification::decl(&config),
+        PlanarPrintRecipe::decl(&config),
+        ManufacturingIntent::decl(&config),
+        DepositionKind::decl(&config),
+        DepositionPath::decl(&config),
+        PrintLayer::decl(&config),
+        NormalizedPrintPlan::decl(&config),
+        ManufacturingProvenance::decl(&config),
+        VerificationReport::decl(&config),
+        ManufacturingSummary::decl(&config),
+        ManufacturingBundle::decl(&config),
+        ManufacturingArtifactRecord::decl(&config),
+        ManufacturingCommand::decl(&config),
+        ManufacturingResponse::decl(&config),
     ] {
         output.push_str("export ");
         output.push_str(&declaration);
@@ -37,8 +116,122 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("TRIANGLE_HEADER_BYTES", TRIANGLE_HEADER_BYTES as u64),
         ("TRIANGLE_VERTEX_COUNT", u64::from(TRIANGLE_VERTEX_COUNT)),
         ("TRIANGLE_INDEX_COUNT", u64::from(TRIANGLE_INDEX_COUNT)),
+        ("MESH_SCHEMA_VERSION", u64::from(MESH_SCHEMA_VERSION)),
+        ("MESH_HEADER_BYTES", MESH_HEADER_BYTES as u64),
+        ("SECTION_SCHEMA_VERSION", u64::from(SECTION_SCHEMA_VERSION)),
+        ("SECTION_HEADER_BYTES", SECTION_HEADER_BYTES as u64),
+        ("MAX_SOURCE_BYTES", u64::from(MAX_SOURCE_BYTES)),
+        ("MAX_LIVE_SOURCE_BYTES", u64::from(MAX_LIVE_SOURCE_BYTES)),
+        ("MAX_STEP_ENTITIES", u64::from(MAX_STEP_ENTITIES)),
+        ("MAX_NATIVE_FACES", u64::from(MAX_NATIVE_FACES)),
+        ("MAX_DEFINITIONS", u64::from(MAX_DEFINITIONS)),
+        ("MAX_OCCURRENCES", u64::from(MAX_OCCURRENCES)),
+        ("MAX_DISPLAY_VERTICES", u64::from(MAX_DISPLAY_VERTICES)),
+        ("MAX_DISPLAY_TRIANGLES", u64::from(MAX_DISPLAY_TRIANGLES)),
+        ("MAX_SCENE_MESH_BYTES", u64::from(MAX_SCENE_MESH_BYTES)),
+        ("MAX_SECTION_BYTES", u64::from(MAX_SECTION_BYTES)),
+        (
+            "MAX_ENGINE_ARTIFACT_BYTES",
+            u64::from(MAX_ENGINE_ARTIFACT_BYTES),
+        ),
+        (
+            "MAX_GEOMETRY_CHUNK_BYTES",
+            u64::from(MAX_GEOMETRY_CHUNK_BYTES),
+        ),
+        (
+            "MAX_DISPLAY_BUFFER_BYTES",
+            u64::from(MAX_DISPLAY_BUFFER_BYTES),
+        ),
+        ("MAX_LOOP_POINTS", u64::from(MAX_LOOP_POINTS)),
+        ("MAX_NATIVE_PATH_UNITS", u64::from(MAX_NATIVE_PATH_UNITS)),
+        (
+            "MAX_DISPLAY_LABEL_BYTES",
+            u64::from(MAX_DISPLAY_LABEL_BYTES),
+        ),
+        (
+            "MAX_ERROR_MESSAGE_BYTES",
+            u64::from(MAX_ERROR_MESSAGE_BYTES),
+        ),
+        ("SCENE_PAGE_SIZE", u64::from(SCENE_PAGE_SIZE)),
+        ("FACE_PAGE_SIZE", u64::from(FACE_PAGE_SIZE)),
+        ("ARTIFACT_PAGE_SIZE", u64::from(ARTIFACT_PAGE_SIZE)),
+        ("MAX_TERMINAL_JOBS", u64::from(MAX_TERMINAL_JOBS)),
+        ("JOB_POLL_INTERVAL_MS", u64::from(JOB_POLL_INTERVAL_MS)),
+        ("JOB_CANCEL_AFTER_MS", u64::from(JOB_CANCEL_AFTER_MS)),
+        ("JOB_CANCEL_GRACE_MS", u64::from(JOB_CANCEL_GRACE_MS)),
+        (
+            "MAX_ACTIVE_GEOMETRY_JOBS",
+            u64::from(MAX_ACTIVE_GEOMETRY_JOBS),
+        ),
+        ("MAX_OUTSTANDING_CHUNKS", u64::from(MAX_OUTSTANDING_CHUNKS)),
+        ("PROJECT_FORMAT_VERSION", u64::from(PROJECT_FORMAT_VERSION)),
+        (
+            "MAX_PROJECT_MANIFEST_BYTES",
+            u64::from(MAX_PROJECT_MANIFEST_BYTES),
+        ),
+        ("MAX_PROJECT_HISTORY", MAX_PROJECT_HISTORY as u64),
+        (
+            "MAX_PROJECT_STORED_SOURCE_BYTES",
+            MAX_PROJECT_STORED_SOURCE_BYTES,
+        ),
+        (
+            "MAX_PROJECT_STORED_ASSETS",
+            MAX_PROJECT_STORED_ASSETS as u64,
+        ),
+        ("MAX_PROJECT_ERROR_BYTES", MAX_PROJECT_ERROR_BYTES as u64),
+        (
+            "MANUFACTURING_SCHEMA_VERSION",
+            u64::from(MANUFACTURING_SCHEMA_VERSION),
+        ),
+        (
+            "MAX_MANUFACTURING_BUNDLE_BYTES",
+            u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
+        ),
+        (
+            "MAX_MANUFACTURING_RETAINED_BYTES",
+            MAX_MANUFACTURING_RETAINED_BYTES,
+        ),
+        ("MAX_PRINT_LAYERS", u64::from(MAX_PRINT_LAYERS)),
+        (
+            "MAX_DEPOSITION_SEGMENTS",
+            u64::from(MAX_DEPOSITION_SEGMENTS),
+        ),
+        ("MAX_MACHINE_COMPONENTS", u64::from(MAX_MACHINE_COMPONENTS)),
+        ("MAX_PROFILE_JSON_BYTES", u64::from(MAX_PROFILE_JSON_BYTES)),
+        (
+            "MAX_MANUFACTURING_ERROR_BYTES",
+            MAX_MANUFACTURING_ERROR_BYTES as u64,
+        ),
+        (
+            "MAX_MANUFACTURING_LABEL_BYTES",
+            MAX_MANUFACTURING_LABEL_BYTES as u64,
+        ),
     ] {
         output.push_str(&format!("export const {name} = {value} as const;\n"));
+    }
+    for (name, value) in [
+        ("MESH_CARRIER_TOLERANCE_MM", MESH_CARRIER_TOLERANCE_MM),
+        (
+            "MESH_QUANTIZATION_TOLERANCE_MM",
+            MESH_QUANTIZATION_TOLERANCE_MM,
+        ),
+        ("MESH_SURFACE_TOLERANCE_MM", MESH_SURFACE_TOLERANCE_MM),
+        (
+            "SECTION_SAMPLING_TOLERANCE_MM",
+            SECTION_SAMPLING_TOLERANCE_MM,
+        ),
+        ("SECTION_BOOLEAN_TOLERANCE_MM", SECTION_BOOLEAN_TOLERANCE_MM),
+        ("SECTION_PLANE_TOLERANCE_MM", SECTION_PLANE_TOLERANCE_MM),
+        ("POSE_NORM_TOLERANCE", POSE_NORM_TOLERANCE),
+        ("NORMAL_NORM_TOLERANCE", NORMAL_NORM_TOLERANCE),
+    ] {
+        output.push_str(&format!("export const {name} = {value} as const;\n"));
+    }
+    for (name, value) in [
+        ("IMPORT_PROFILE", IMPORT_PROFILE),
+        ("MESH_PROFILE", MESH_PROFILE),
+    ] {
+        output.push_str(&format!("export const {name} = {value:?} as const;\n"));
     }
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/protocol/src/generated.ts");
@@ -53,5 +246,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(path.parent().ok_or("generated path has no parent")?)?;
         fs::write(path, output)?;
     }
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/protocol");
+    for (name, value) in geometry_fixtures()? {
+        let path = fixture_root.join(name);
+        let output = format!("{}\n", serde_json::to_string_pretty(&value)?);
+        if args == ["--check"] {
+            if fs::read_to_string(&path)? != output {
+                return Err(format!("generated geometry fixture drift: {}", path.display()).into());
+            }
+        } else {
+            fs::write(path, output)?;
+        }
+    }
     Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to String");
+    }
+    output
+}
+
+/// Original algebraic interoperability vectors, deliberately independent of a CAD kernel.
+/// These are display-layout diagnostics, never a certificate of native import/section support.
+fn geometry_fixtures() -> Result<Vec<(&'static str, serde_json::Value)>, Box<dyn std::error::Error>>
+{
+    let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")?;
+    let definition = DefinitionId::from_source_sha256(&[7; 32]);
+    let mut mesh = MeshChunkBuilder::new(definition.clone(), 2, DisplayProfile::MeshMm005V1)?;
+    mesh.push_face(
+        0,
+        &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        &[[0.0, 0.0, 1.0]; 3],
+        &[[0, 1, 2]],
+        0.0,
+    )?;
+    mesh.push_face(
+        1,
+        &[[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
+        &[[0.0, 0.0, -1.0]; 3],
+        &[[0, 2, 1]],
+        0.0,
+    )?;
+    let mesh = mesh.finish()?;
+    let mesh_value = serde_json::json!({
+        "encoding": "hex", "purpose": "Original algebraic multi-face SPLM diagnostic; not native geometry proof.",
+        "face_table": [FaceIndexRow { ordinal:0,face_id:FaceId::from_step_entity(9_007_199_254_740_993)? }, FaceIndexRow { ordinal:1,face_id:FaceId::from_step_entity(42)? }],
+        "vertex_count": mesh.vertex_count, "triangle_count": mesh.triangle_count, "total_bytes": mesh.total_bytes,
+        "chunks": mesh.chunks.into_iter().map(|chunk|serde_json::json!({"metadata":chunk.descriptor.into_metadata(session.clone(), ArtifactId::new(1).expect("fixed nonzero fixture artifact")),"data":hex(&chunk.bytes)})).collect::<Vec<_>>()
+    });
+    let mut values = vec![("mesh.json", mesh_value)];
+    for (name, artifact, cap) in [
+        ("section.json", 2, MAX_GEOMETRY_CHUNK_BYTES),
+        ("section-multichunk.json", 3, 192),
+    ] {
+        let mut section = SectionChunkBuilder::with_chunk_limit(
+            session.clone(),
+            ArtifactId::new(artifact)?,
+            SceneRevision(7),
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 4.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            cap,
+        )?;
+        section.push_loop(
+            OccurrenceId::new(1)?,
+            definition.clone(),
+            false,
+            &[
+                [0.0, 0.0, 4.0],
+                [20.0, 0.0, 4.0],
+                [20.0, 10.0, 4.0],
+                [0.0, 10.0, 4.0],
+                [0.0, 0.0, 4.0],
+            ],
+        )?;
+        section.push_loop(
+            OccurrenceId::new(1)?,
+            definition.clone(),
+            true,
+            &[
+                [2.0, 2.0, 4.0],
+                [2.0, 4.0, 4.0],
+                [4.0, 4.0, 4.0],
+                [4.0, 2.0, 4.0],
+                [2.0, 2.0, 4.0],
+            ],
+        )?;
+        let section = section.finish()?;
+        values.push((name, serde_json::json!({
+            "encoding": "hex", "purpose": "Original algebraic outer/hole SPLS diagnostic; not a native-derived section or native capability proof.",
+            "summary": section.summary, "loops": section.loops,
+            "chunks": section.chunks.iter().map(|chunk|serde_json::json!({"metadata":chunk.metadata,"data":hex(&chunk.bytes)})).collect::<Vec<_>>()
+        })));
+    }
+    Ok(values)
 }

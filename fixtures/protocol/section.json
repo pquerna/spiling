@@ -1,0 +1,81 @@
+{
+  "chunks": [
+    {
+      "data": "53504c5301000000020000000a00000000000000000000000000000000000000000000000000104000000000000000000000000000000000000000000000000000000000050000000a00000000000000000000000000000000000000000000000000000000000000000000000000344000000000000000000000000000000000000000000000344000000000000024400000000000000000000000000000000000000000000024400000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000400000000000000000000000000000004000000000000010400000000000000000000000000000104000000000000010400000000000000000000000000000104000000000000000400000000000000000000000000000004000000000000000400000000000000000",
+      "metadata": {
+        "artifact_id": 2,
+        "byte_count": 320,
+        "chunk_count": 1,
+        "chunk_index": 0,
+        "first_loop_ordinal": 0,
+        "loop_count": 2,
+        "schema_version": 1,
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sha256": "96fec25c150ea8cb365039ef51f38cd6d49a46d5c23260a89044fda9f96e3773"
+      }
+    }
+  ],
+  "encoding": "hex",
+  "loops": [
+    {
+      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "is_hole": false,
+      "occurrence_id": 1,
+      "ordinal": 0,
+      "point_count": 5
+    },
+    {
+      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "is_hole": true,
+      "occurrence_id": 1,
+      "ordinal": 1,
+      "point_count": 5
+    }
+  ],
+  "purpose": "Original algebraic outer/hole SPLS diagnostic; not a native-derived section or native capability proof.",
+  "summary": {
+    "artifact_id": 2,
+    "boolean_tolerance_mm": 0.00001,
+    "chunk_count": 1,
+    "frame": {
+      "origin_mm": [
+        0.0,
+        0.0,
+        4.0
+      ],
+      "x_axis": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "y_axis": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "z_axis": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "plane": {
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "origin_mm": [
+        0.0,
+        0.0,
+        4.0
+      ]
+    },
+    "revision": 7,
+    "sampling_tolerance_mm": 0.005,
+    "schema_version": 1,
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "total_bytes": 320,
+    "total_loop_count": 2
+  }
+}

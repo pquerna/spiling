@@ -8,6 +8,10 @@ package spiling.engine;
 import "google/longrunning/operations.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
+import "spiling/native_common.proto";
+import "spiling/native_geometry.proto";
+import "spiling/native_project.proto";
+import "spiling/native_manufacturing.proto";
 
 // Engine and clients ship together. No cross-version negotiation or shims.
 service Engine {
@@ -35,6 +39,11 @@ message EngineInfo {
   repeated string geometry_capabilities = 5;
   uint32 max_message_bytes = 6;
   uint32 max_artifact_bytes = 7;
+  string session_id = 8;
+  KernelIdentity kernel_identity = 9;
+  GeometryLimits geometry_limits = 10;
+  repeated string manufacturing_capabilities = 11;
+  repeated string project_capabilities = 12;
 }
 
 message RunDiagnosticRequest {
@@ -76,9 +85,37 @@ message DiagnosticMetadata {
 message DiagnosticResult { repeated Artifact artifacts = 1; }
 message WatchOperationRequest { string name = 1; }
 message GetArtifactRequest { string name = 1; }
-message Artifact {
-  string name = 1;
-  uint64 size_bytes = 2;
-  string sha256 = 3;
-  string media_type = 4;
+
+enum NativeOperationState {
+  NATIVE_OPERATION_STATE_UNSPECIFIED = 0;
+  NATIVE_QUEUED = 1;
+  NATIVE_RUNNING = 2;
+  NATIVE_CANCELLING = 3;
+  NATIVE_SUCCEEDED = 4;
+  NATIVE_FAILED = 5;
+  NATIVE_CANCELLED = 6;
+  NATIVE_INTERRUPTED = 7;
+}
+message NativeOperationMetadata {
+  NativeOperationState state = 1;
+  uint64 state_version = 2;
+  string session_id = 3;
+  uint32 captured_scene_revision = 4;
+  uint32 captured_project_revision = 5;
+  string phase = 6;
+  uint32 completed_units = 7;
+  uint32 total_units = 8;
+  repeated Artifact outputs = 9;
+  google.protobuf.Timestamp create_time = 10;
+  google.protobuf.Timestamp update_time = 11;
+  google.protobuf.Timestamp end_time = 12;
+}
+message NativeOperationResult {
+  oneof result {
+    SceneSummary scene = 1;
+    uint32 section_artifact_id = 2;
+    ProjectInfo project_saved = 3;
+    ManufacturingCompiledResult manufacturing_compiled = 4;
+    ManufacturingVerifiedResult manufacturing_verified = 5;
+  }
 }

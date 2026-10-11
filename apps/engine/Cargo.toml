@@ -13,6 +13,11 @@ publish = false
 [dependencies]
 spiling-contracts.workspace = true
 serde_json.workspace = true
+spiling-geometry.workspace = true
+spiling-core.workspace = true
+spiling-manufacturing.workspace = true
+serde.workspace = true
+parking_lot = "=0.12.5"
 tokio.workspace = true
 tonic.workspace = true
 prost.workspace = true
@@ -22,6 +27,9 @@ uuid.workspace = true
 sha2.workspace = true
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 fs2 = "=0.4.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"
 
 [dev-dependencies]
 spiling-engine-client.workspace = true
