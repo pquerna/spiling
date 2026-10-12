@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
+mod replay;
+pub use replay::*;
+
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 1;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
@@ -1035,6 +1038,7 @@ pub enum ManufacturingCommand {
     Inspect {
         session_id: SessionId,
         base_revision: ProjectRevision,
+        output: VerificationOutput,
     },
 }
 #[expect(
@@ -1057,6 +1061,8 @@ pub enum ManufacturingResponse {
         record: ManufacturingArtifactRecord,
         report: VerificationReport,
         resource: crate::ArtifactView,
+        provenance: ManufacturingInspectionProvenance,
+        replay_display: Option<ReplayDisplayDescriptor>,
     },
     Error {
         error: ManufacturingError,

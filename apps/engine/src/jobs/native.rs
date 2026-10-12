@@ -338,6 +338,10 @@ impl Jobs {
         self.with_sync(|s| {
             let mut op = s.get(name)?;
             if op.done { return Ok(()); }
+            let reservation = u64::try_from(s.db.query_row(
+                "SELECT reserved_bytes FROM operations WHERE name=?",
+                [name], |r| r.get::<_,i64>(0),
+            ).map_err(internal)?).map_err(internal)?;
             let mut meta = native_metadata(&op).map_err(internal)?;
             meta.outputs = buffers.iter().map(|(artifact,_)|artifact.clone()).collect();
             meta.completed_units = 1;
@@ -365,6 +369,9 @@ impl Jobs {
                     }
                     used += artifact.size_bytes;
                     size += artifact.size_bytes;
+                    if size > reservation {
+                        return Err(Status::resource_exhausted("native publication exceeds its admitted reservation"));
+                    }
                     tx.execute("INSERT INTO artifacts VALUES(?,?)",params![artifact.name,bytes]).map_err(internal)?;
                     tx.execute("INSERT INTO artifact_types VALUES(?,?)",params![artifact.name,artifact.media_type]).map_err(internal)?;
                 }

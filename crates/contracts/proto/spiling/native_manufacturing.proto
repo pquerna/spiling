@@ -46,6 +46,7 @@ message VerifyManufacturingRequest {
   string parent = 1;
   string request_id = 2;
   uint32 base_revision = 3;
+  VerificationOutput output = 4;
 }
 // Domain failures use canonical Google Status, never a success reply arm.
 message ManufacturingReply {
@@ -66,6 +67,40 @@ message ManufacturingVerifiedResult {
   ManufacturingArtifactRecord record = 1;
   VerificationReport report = 2;
   Artifact resource = 3;
+  ManufacturingInspectionProvenance provenance = 4;
+  ReplayDisplayDescriptor replay_display = 5;
+}
+
+enum VerificationOutput {
+  VERIFICATION_OUTPUT_UNSPECIFIED = 0;
+  REPORT_ONLY = 1;
+  REPORT_AND_MOTION = 2;
+}
+message ManufacturingInspectionProvenance {
+  string project_id = 1;
+  uint32 input_revision = 2;
+  string input_hash = 3;
+  KernelIdentity kernel = 4;
+  string planner_version = 5;
+  string emitter_version = 6;
+  string verifier_version = 7;
+}
+message ReplayDisplayInfo {
+  uint32 schema_version = 1;
+  string bundle_hash = 2;
+  string input_hash = 3;
+  string program_hash = 4;
+  string verifier_version = 5;
+  PrinterCoordinateFrame frame = 6;
+  uint32 event_count = 7;
+  uint32 deposition_count = 8;
+  uint32 travel_count = 9;
+  uint32 layer_count = 10;
+  AabbMm bounds_mm = 11;
+}
+message ReplayDisplayDescriptor {
+  ReplayDisplayInfo info = 1;
+  Artifact resource = 2;
 }
 
 message ManufacturingIntent {

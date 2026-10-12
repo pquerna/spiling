@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Shared gRPC client. RPC cancellation does not own accepted operations or the process.
+pub mod export;
 mod native;
 #[cfg(test)]
 mod tests;
@@ -203,6 +204,23 @@ impl EngineRpc {
         sha256: &str,
         limit: u64,
     ) -> Result<Vec<u8>, ClientError> {
+        let bytes = self.read_sized_artifact(name, size_bytes, limit).await?;
+        if format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+            return Err(ClientError::Protocol(
+                "artifact size/checksum mismatch".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    // Packed-format validators own hashing; keep transfer sizing separate so a
+    // checked replay is not hashed once here and again by its packed validator.
+    async fn read_sized_artifact(
+        &self,
+        name: &str,
+        size_bytes: u64,
+        limit: u64,
+    ) -> Result<Vec<u8>, ClientError> {
         if size_bytes > limit || usize::try_from(size_bytes).is_err() {
             return Err(ClientError::Protocol(
                 "artifact exceeds client allocation limit".into(),
@@ -218,6 +236,7 @@ impl EngineRpc {
         let mut bytes = Vec::with_capacity(size_bytes as usize);
         while let Some(fragment) = stream.message().await? {
             if fragment.data.is_empty()
+                || fragment.data.len() > 1024 * 1024
                 || fragment.data.len() > (size_bytes as usize).saturating_sub(bytes.len())
             {
                 return Err(ClientError::Protocol(
@@ -226,7 +245,7 @@ impl EngineRpc {
             }
             bytes.extend_from_slice(&fragment.data);
         }
-        if bytes.len() as u64 != size_bytes || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+        if bytes.len() as u64 != size_bytes {
             return Err(ClientError::Protocol(
                 "artifact size/checksum mismatch".into(),
             ));

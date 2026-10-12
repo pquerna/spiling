@@ -19,22 +19,27 @@ const option = (name, fallback) => {
 const executable = option("--executable");
 const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
+const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|gpu-unavailable|engine-operations]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
-  !["normal", "geometry", "project-bridge", "gpu-unavailable", "engine-operations"].includes(
-    scenario,
-  )
+  ![
+    "normal",
+    "geometry",
+    "project-bridge",
+    "manufacturing",
+    "gpu-unavailable",
+    "engine-operations",
+  ].includes(scenario)
 )
   throw new Error("Unknown smoke scenario");
 const sourceFixtureRoot = resolve(option("--fixture-root", "fixtures/geometry"));
-const fixtureRoot =
-  scenario === "project-bridge"
-    ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
-    : sourceFixtureRoot;
-if (scenario === "project-bridge") {
+const fixtureRoot = ["project-bridge", "manufacturing"].includes(scenario)
+  ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
+  : sourceFixtureRoot;
+if (["project-bridge", "manufacturing"].includes(scenario)) {
   for (const name of ["box-mm.step", "cylinder.step"])
     await copyFile(resolve(sourceFixtureRoot, name), resolve(fixtureRoot, name));
 }
@@ -45,8 +50,11 @@ const child = spawn(resolve(executable), [], {
   env: {
     ...process.env,
     SPILING_CEF_DEBUG_PORT: String(port),
-    ...(["geometry", "project-bridge"].includes(scenario)
+    ...(["geometry", "project-bridge", "manufacturing"].includes(scenario)
       ? { SPILING_GEOMETRY_FIXTURE_ROOT: fixtureRoot }
+      : {}),
+    ...(scenario === "manufacturing" && manufacturingDiagnostic
+      ? { SPILING_MANUFACTURING_DIAGNOSTIC: "1" }
       : {}),
   },
   stdio: ["ignore", "inherit", "inherit"],
@@ -628,6 +636,373 @@ async function inspectProjectBridge() {
   };
 }
 
+async function manufacturingState() {
+  return JSON.parse(await text("manufacturing-state"));
+}
+async function inspectManufacturing() {
+  await until(
+    () => evaluate("!!document.querySelector('[data-testid=\"manufacturing-panel\"]')"),
+    "production manufacturing panel",
+  );
+  await until(
+    async () => /running|unsupported|error/.test(await text("engine-status")),
+    "GPU admission settled",
+  );
+  if (manufacturingDiagnostic) {
+    assert.equal(
+      await text("engine-status"),
+      "unsupported",
+      "Product GPU gate is preserved before explicit diagnostic attach",
+    );
+    const stopped = await invoke("engine_status");
+    assert.equal(stopped.state, "stopped");
+    assert.equal(stopped.hello, null);
+    const runtime = await invoke("runtime_info");
+    assert.equal(
+      runtime.manufacturing_diagnostic_enabled,
+      true,
+      "Native startup capability gates attachment",
+    );
+    await click("manufacturing-diagnostic-attach");
+  } else if ((await text("engine-status")) !== "running") {
+    throw new Error(
+      "Manufacturing visual smoke requires working WebGPU. For explicitly labelled native-panel-only evidence, rerun --scenario manufacturing --diagnostic-no-gpu; no silent GPU fallback.",
+    );
+  }
+  await until(
+    async () => (await text("engine-status")) === "running",
+    "manufacturing native session",
+  );
+  enginePid = (await invoke("engine_status")).hello.pid;
+  let state = await until(async () => {
+    const current = await manufacturingState();
+    return current.session_id && !current.working ? current : false;
+  }, "manufacturing status");
+  assert.equal(state.diagnostic_no_gpu, manufacturingDiagnostic);
+  assert.equal(state.selected_intent, null, "There is no implicitly selected printer intent");
+  assert.equal(state.selected_artifact, null);
+  if (manufacturingDiagnostic) await click("manufacturing-diagnostic-import");
+  else {
+    await input('[data-testid="geometry-debug-paths"]', JSON.stringify(["box-mm.step"]));
+    await click("geometry-debug-import");
+  }
+  await until(
+    async () => {
+      const current = await geometryState();
+      return current.occurrences.length === 1 && !current.active_job && !current.stale;
+    },
+    "real native token import",
+    65000,
+  );
+  await click("manufacturing-select-software");
+  await until(
+    async () => (await manufacturingState()).draft_changed,
+    "explicit operator intent selection",
+  );
+  await click("manufacturing-apply");
+  state = await until(async () => {
+    const current = await manufacturingState();
+    return current.selected_intent && !current.working && !current.draft_changed ? current : false;
+  }, "full intent Apply");
+  assert.equal(
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-apply\"]').disabled"),
+    true,
+    "Unchanged intent is not submitted",
+  );
+  const appliedRevision = state.project_revision;
+  await input('[data-testid="manufacturing-perimeter_count"]', "9");
+  await click("manufacturing-apply");
+  await until(
+    async () => /invalid_specification/.test(await text("manufacturing-message")),
+    "recoverable failed Apply",
+  );
+  assert.equal(
+    await evaluate(
+      "document.querySelector('[data-testid=\"manufacturing-perimeter_count\"]').value",
+    ),
+    "9",
+    "Failed Apply retains the operator draft",
+  );
+  assert.equal((await manufacturingState()).project_revision, appliedRevision);
+  await click("manufacturing-reset-draft");
+  await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
+  await click("manufacturing-apply");
+  await until(async () => {
+    const current = await manufacturingState();
+    return (
+      current.selected_intent?.recipe.flow_multiplier === 1.1 &&
+      !current.working &&
+      !current.draft_changed
+    );
+  }, "scalar Apply");
+  await click("project-undo");
+  await until(
+    async () => (await manufacturingState()).selected_intent?.recipe.flow_multiplier === 1,
+    "Core intent Undo",
+  );
+  await click("project-redo");
+  await until(
+    async () => (await manufacturingState()).selected_intent?.recipe.flow_multiplier === 1.1,
+    "Core intent Redo",
+  );
+  await click("project-undo");
+  await until(
+    async () => (await manufacturingState()).selected_intent?.recipe.flow_multiplier === 1,
+    "Core intent restored",
+  );
+  await click("manufacturing-compile");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.selected_artifact && !current.working ? current : false;
+    },
+    "native immutable compile",
+    65000,
+  );
+  const record = state.selected_artifact;
+  assert.equal(state.fresh, false, "Stored verified flags confer no fresh authority");
+  await click("manufacturing-verify-report");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.fresh && !current.working ? current : false;
+    },
+    "fresh report-only verification",
+    65000,
+  );
+  assert.equal(state.replay, null);
+  assert.equal(state.report.verified, true);
+  assert.deepEqual(state.selected_artifact, record, "Inspection does not change the Core artifact");
+  await click("manufacturing-verify-motion");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.fresh && current.replay && !current.working ? current : false;
+    },
+    "actual replay transport and panel",
+    65000,
+  );
+  assert.ok(state.replay.event_count > 0);
+  assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
+  assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
+  assert.deepEqual(state.selected_artifact, record);
+  const cancellationRequested = await evaluate(`(async () => {
+    document.querySelector('[data-testid="manufacturing-verify-motion"]').click();
+    const deadline = performance.now() + 10000;
+    while (performance.now() < deadline) {
+      const button = document.querySelector('[data-testid="manufacturing-cancel"]');
+      if (button && !button.disabled) { button.click(); return true; }
+      await new Promise(requestAnimationFrame);
+    }
+    return false;
+  })()`);
+  assert.equal(
+    cancellationRequested,
+    true,
+    "Actual panel cancellation reaches the accepted native operation",
+  );
+  const cancelled = await until(
+    async () => {
+      const current = await manufacturingState();
+      return !current.working ? current : false;
+    },
+    "native cancellation/ACK-winning terminal completion",
+    65000,
+  );
+  assert.deepEqual(
+    cancelled.selected_artifact,
+    record,
+    "Cancellation never mutates the immutable Core bundle",
+  );
+  if (cancelled.fresh)
+    assert.ok(
+      cancelled.report.verified && cancelled.replay,
+      "ACK-winning late cancellation may retain only a complete terminal report/motion result",
+    );
+  await click("manufacturing-verify-motion");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.fresh && current.replay && !current.working ? current : false;
+    },
+    "fresh replay after cancellation",
+    65000,
+  );
+  await input('[data-testid="manufacturing-events"]', "1");
+  await until(
+    async () => JSON.parse(await text("manufacturing-event")).event_index === 0,
+    "event cursor",
+  );
+  const first = JSON.parse(await text("manufacturing-event"));
+  assert.equal(first.kind, "travel");
+  assert.equal(first.known_start, false, "No invented origin segment");
+  assert.ok(first.source_line > 0 && first.feed_mm_min > 0);
+  await input('[data-testid="manufacturing-layer"]', "0");
+  await click("manufacturing-travel");
+  await input('[data-testid="manufacturing-events"]', String(state.replay.event_count));
+  await input('[data-testid="project-debug-path"]', "manufacturing-project");
+  await click("project-debug-save");
+  await until(
+    async () =>
+      /manufacturing-project/.test(await text("project-saved")) &&
+      /Clean/.test(await text("project-dirty")),
+    "Core checkpoint",
+  );
+  await until(
+    async () => (await manufacturingState()).fresh,
+    "unchanged checkpoint content remains fresh",
+  );
+  await input('[data-testid="manufacturing-export-path"]', "export-one");
+  await click("manufacturing-debug-export");
+  await until(
+    async () => /Committed/.test(await text("manufacturing-message")),
+    "common four-file export",
+  );
+  const exported = Object.fromEntries(
+    await Promise.all(
+      ["plan.json", "program.gcode", "provenance.json", "verification.json"].map(async (name) => [
+        name,
+        await readFile(resolve(fixtureRoot, "export-one", name), "utf8"),
+      ]),
+    ),
+  );
+  assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
+  assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
+  assert.ok(exported["program.gcode"].includes("G1 "));
+  await click("manufacturing-debug-export");
+  await until(
+    async () => /new directory|new destination/.test(await text("manufacturing-message")),
+    "no-overwrite export rejection",
+  );
+  assert.equal(
+    await readFile(resolve(fixtureRoot, "export-one", "program.gcode"), "utf8"),
+    exported["program.gcode"],
+  );
+  await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
+  await click("manufacturing-apply");
+  await until(async () => {
+    const current = await manufacturingState();
+    return !current.fresh && !current.selected_artifact && !current.working;
+  }, "content change invalidates inspection/export");
+  assert.equal(
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-export\"]').disabled"),
+    true,
+  );
+  await click("project-undo");
+  await until(
+    async () => (await manufacturingState()).selected_artifact?.hash === record.hash,
+    "Core artifact Undo",
+  );
+  assert.equal(
+    (await manufacturingState()).fresh,
+    false,
+    "Historical result cannot reactivate on Undo",
+  );
+  await click("project-save");
+  await until(
+    async () =>
+      /Clean/.test(await text("project-dirty")) &&
+      (await evaluate("!document.querySelector('[data-testid=\"project-debug-open\"]').disabled")),
+    "completed checkpoint before reopen",
+  );
+  await rm(resolve(fixtureRoot, "box-mm.step"));
+  await click("project-read-only");
+  await click("project-debug-open");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.read_only && current.selected_artifact?.hash === record.hash ? current : false;
+    },
+    "source-independent read-only reopen",
+    65000,
+  );
+  assert.equal(state.fresh, false, "Reopen requires fresh Verify");
+  assert.equal(
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-compile\"]').disabled"),
+    true,
+  );
+  const reopenedRevision = state.project_revision;
+  await click("manufacturing-verify-motion");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.fresh && current.replay && !current.working ? current : false;
+    },
+    "read-only fresh replay",
+    65000,
+  );
+  assert.equal(state.project_revision, reopenedRevision);
+  assert.deepEqual(state.selected_artifact, record);
+  await input('[data-testid="manufacturing-export-path"]', "export-readonly");
+  await click("manufacturing-debug-export");
+  await until(
+    async () => /Committed/.test(await text("manufacturing-message")),
+    "read-only fresh export",
+  );
+  assert.equal(
+    await readFile(resolve(fixtureRoot, "export-readonly", "program.gcode"), "utf8"),
+    exported["program.gcode"],
+  );
+  const previousSession = state.session_id,
+    previousPid = enginePid;
+  await click("stop-engine");
+  await until(
+    async () => (await text("engine-status")) === "stopped" && !alive(previousPid),
+    "native stop reaps manufacturing session",
+  );
+  await click("restart-engine");
+  if (manufacturingDiagnostic) {
+    await until(
+      async () => (await text("engine-status")) === "unsupported",
+      "ordinary restart retains product GPU gate",
+    );
+    assert.equal((await invoke("engine_status")).hello, null);
+    await click("manufacturing-diagnostic-attach");
+  }
+  await until(
+    async () => (await text("engine-status")) === "running",
+    "new session reopens attached checkpoint",
+    65000,
+  );
+  enginePid = (await invoke("engine_status")).hello.pid;
+  state = await until(async () => {
+    const current = await manufacturingState();
+    return current.session_id !== previousSession &&
+      current.read_only &&
+      current.selected_artifact?.hash === record.hash
+      ? current
+      : false;
+  }, "session-bound saved manufacturing status");
+  assert.equal(state.fresh, false, "Previous-session verification cannot become active");
+  await click("manufacturing-verify-motion");
+  state = await until(
+    async () => {
+      const current = await manufacturingState();
+      return current.fresh && current.replay && !current.working ? current : false;
+    },
+    "fresh session-independent replay after restart",
+    65000,
+  );
+  await evaluate(
+    "document.querySelector('[data-testid=\"manufacturing-panel\"]').scrollIntoView({block:'start'})",
+  );
+  await screenshot("manufacturing-production-panel");
+  return {
+    record,
+    report: state.report,
+    provenance: state.provenance,
+    replay: state.replay,
+    firstActualEndpoint: first,
+    cancellationRequested,
+    previousSession,
+    enginePid,
+    diagnosticNoGpu: manufacturingDiagnostic,
+    qualification: manufacturingDiagnostic
+      ? "Real production panel and native bridge; explicit startup diagnostic; no GPU/picking/hardware/dialog certification"
+      : "Real WebGPU panel/native bridge; hardware, physical picking, dialogs and machine certification are separate gates",
+  };
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -666,7 +1041,10 @@ try {
   });
   await cdp("Page.enable");
   await cdp("Runtime.enable");
-  if (["gpu-unavailable", "engine-operations", "project-bridge"].includes(scenario)) {
+  if (
+    ["gpu-unavailable", "engine-operations", "project-bridge"].includes(scenario) ||
+    (scenario === "manufacturing" && manufacturingDiagnostic)
+  ) {
     await cdp("Page.addScriptToEvaluateOnNewDocument", {
       source: "Object.defineProperty(navigator, 'gpu', {value: undefined, configurable: true});",
     });
@@ -680,6 +1058,9 @@ try {
   }
   if (scenario === "project-bridge") {
     const proof = await inspectProjectBridge();
+    console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
+  } else if (scenario === "manufacturing") {
+    const proof = await inspectManufacturing();
     console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
   } else if (scenario === "gpu-unavailable") {
     const body = await until(async () => {
@@ -842,6 +1223,16 @@ try {
   assert.equal(childExited, true, "Native window close terminates desktop");
   if (enginePid) assert.equal(alive(enginePid), false, "Native window close releases engine child");
   console.log("PASS: native window close exits application and engine");
+} catch (error) {
+  if (scenario === "manufacturing" && socket && !childExited) {
+    try {
+      console.error("Manufacturing failure surface:", await evaluate("document.body.innerText"));
+      await screenshot("manufacturing-failure");
+    } catch (captureError) {
+      console.error("Failure capture unavailable:", String(captureError));
+    }
+  }
+  throw error;
 } finally {
   for (const waiter of pending.values()) {
     clearTimeout(waiter.timer);
@@ -849,7 +1240,7 @@ try {
   }
   socket?.close();
   if (!childExited) child.kill("SIGTERM");
-  if (scenario === "project-bridge") {
+  if (["project-bridge", "manufacturing"].includes(scenario)) {
     if (childExited && (!enginePid || !alive(enginePid)))
       await rm(fixtureRoot, { recursive: true, force: true });
     else console.error(`Preserved live-writer smoke directory: ${fixtureRoot}`);

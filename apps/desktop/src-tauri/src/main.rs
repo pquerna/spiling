@@ -43,6 +43,12 @@ fn main() {
             engine::project_open,
             engine::project_save,
             engine::project_reopen,
+            engine::manufacturing::manufacturing_control,
+            engine::manufacturing::manufacturing_replay,
+            engine::manufacturing::manufacturing_select_export,
+            engine::manufacturing::manufacturing_debug_select_export,
+            engine::manufacturing::manufacturing_export,
+            engine::manufacturing::manufacturing_diagnostic_attach,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Spiling CEF desktop")

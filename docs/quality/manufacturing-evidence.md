@@ -6,7 +6,32 @@ Licensed under the Open Software License version 3.0
 
 # Software-only manufacturing evidence
 
-## Current authenticated gRPC integration
+## Manufacturing review and actual-program inspection
+
+The manufacturing-workbench change builds on merged main `49a07d2`. The desktop feature and native bridge are separate owning modules; CLI and shell share one exclusive export writer. The engine remains the only intent/planning/verification authority. Report-only inspection retains no display bytes; report-and-motion publishes bounded SPLR schema 1 from the existing independent actual-command decoder through the same durable operation ledger and ByteStream. The original verified-result resource remains the manufacturing bundle. Descriptor/provenance and resource bindings are documented in [packed replay](../protocol/replay.md).
+
+Focused verification passed: real native motion read-only publication, cancellation and corrupt-transfer boundaries; three actual CLI manufacturing cases; six shared exclusive-output/ownership cases; packed corruption, strict wire/provenance validation and the 200,000-event sink boundary. The native actual-rounding/coincident-travel fixture uses fixed identity and checks golden drift. All TypeScript consumers typechecked, the production frontend bundled, 167 protocol tests passed, and the regenerated replay fixture passed its 26 decoder cases. Two workbench state cases cover unchanged/failed drafts and session/content/reopen freshness. A throwaway renderer smoke exercised the actual packed module's endpoint-only first travel, empty prefix, travel toggle, precision rejection and disposal without claiming GPU execution. Generated-contract drift passed without another compilation.
+
+The real CLI imported the frozen independent OCCT box, applied the explicit reference intent, compiled, freshly inspected with motion and exclusively exported. After removing only the owned operator source, a fresh read-only process reopened the saved project and produced identical replay bytes and four immutable export files. The 615,931-byte bundle reported 40 layers, 1,400 paths and 3,920 deposition segments. Circular independent-exporter rejection remains explicit; both cylinder and through-hole now expose the native identical-vertex closed-edge failure rather than a generic manifold message. No admission widening, seam repair or fallback was introduced.
+
+The actual CEF production-panel scenario passed explicit selection/Apply, unchanged suppression, failed-draft retention, scalar editing, Core Undo/Redo, compile, fresh report-only/motion inspection, cancellation, actual endpoint controls, unchanged-checkpoint freshness, exclusive four-file export/no-overwrite, content invalidation, source-independent read-only reopen/export and fresh-session child restart/reaping. It used the real panel/native adapter and independently validated transported bytes, not API mocks.
+
+| Native CEF panel observation                 | Result                                                         |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| Compiled bundle                              | 647,544 bytes                                                  |
+| Layers / paths / deposition segments         | 40 / 1,400 / 4,200                                             |
+| Actual replay events / bytes                 | 5,600 / 268,896                                                |
+| First actual endpoint                        | `[0.225, 0.225, 0.2]` mm; source line 7; travel; start unknown |
+| First actual feed                            | 6,000 mm/min                                                   |
+| Passing whole-scenario runtime / cgroup peak | 8.825 s / 453 MiB; zero swap                                   |
+
+Native workloads were sequential under 3 GiB memory / 256 MiB swap limits, with one Cargo job and one Rayon worker; CEF used a separately chosen 256-task allowance. The matching expanded CEF runtime was reused, not downloaded or rebuilt. The largest observed build peak was 911.9 MiB with zero swap. Development/test profiles now disable debug symbols and incremental caches; obsolete build variants were removed while preserving current dependency/runtime caches. No release build, installer, benchmark or blanket workspace test rerun was performed.
+
+The first desktop check exposed a missing Tauri `Manager` import; the corrected bridge compiled. Initial CEF probes exposed stale embedded frontend assets and an old staged pipe-protocol sidecar copied over the current gRPC executable; current frontend and matching sidecar staging corrected those integration prerequisites. The scenario then exposed a checker race when a clean checkpoint still had a pending Save; it now waits for completed Save/control readiness before reopen rather than treating an already-clean label as completion.
+
+CEF evidence deliberately injected GPU unavailability, checked normal startup rejection, then used an explicitly startup-gated native diagnostic attachment. `display_ready` remained false. The actual panel screenshot is under ignored `artifacts/manufacturing-production-panel.png`. This establishes native-panel software behavior, not rendered motion, picking, native-dialog interaction, normal sandboxing, physical hardware/printer support or packaging certification. Existing GTK/D-Bus/CEF diagnostics remain visible. The physical and independent circular-part gates remain open.
+
+## Prior authenticated gRPC integration
 
 The integration branch is based on main `4ac3d97`, not the earlier pipe-framed checkpoint. Typed Geometry, Projects and Manufacturing RPCs use the existing authenticated engine, single durable SQLite operation ledger, standard Google Operations and immutable ByteStream resources. No protocol-v4 compatibility shim or second public scheduler remains. Saved project format 2 and packed SPLT/SPLM/SPLS version 1 remain separately versioned contracts.
 

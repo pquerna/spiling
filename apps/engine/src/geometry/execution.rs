@@ -65,6 +65,8 @@ pub(crate) enum JobResult {
     ManufacturingVerified {
         record: ManufacturingArtifactRecord,
         report: VerificationReport,
+        provenance: ManufacturingInspectionProvenance,
+        replay: Option<ReplayDisplayInfo>,
     },
 }
 

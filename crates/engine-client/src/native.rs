@@ -13,9 +13,9 @@ use spiling_contracts::{
         GeometryResponse, JobError, MAX_GEOMETRY_CHUNK_BYTES,
     },
     manufacturing::{
-        MAX_MANUFACTURING_BUNDLE_BYTES, ManufacturingArtifactRecord, ManufacturingBundle,
-        ManufacturingCommand, ManufacturingError, ManufacturingErrorCode, ManufacturingResponse,
-        decode_bundle,
+        MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
+        ManufacturingBundle, ManufacturingCommand, ManufacturingError, ManufacturingErrorCode,
+        ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle, validate_replay_display,
     },
     native::{self, GeometryCall, ManufacturingCall, NativeOperationView, ProjectCall},
     project::{ProjectCommand, ProjectResponse},
@@ -421,6 +421,29 @@ impl EngineRpc {
             })?;
         decode_manufacturing_artifact(&bytes, record)
     }
+
+    /// Pull one immutable actual-program display, bound to its verified bundle.
+    /// ByteStream fragments are bounded to 1 MiB; no per-event RPCs are issued.
+    pub async fn fetch_replay_display(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &ReplayDisplayDescriptor,
+    ) -> Result<Vec<u8>, ClientError> {
+        descriptor.validate_for_record(record)?;
+        let resource = &descriptor.resource;
+        let size = native::validate_artifact_view(resource, u64::from(MAX_REPLAY_DISPLAY_BYTES))
+            .map_err(|error| corrupt_manufacturing(&error))?;
+        let bytes = self
+            .read_sized_artifact(&resource.name, size, u64::from(MAX_REPLAY_DISPLAY_BYTES))
+            .await
+            .map_err(|error| match error {
+                ClientError::Protocol(message) => corrupt_manufacturing(&message),
+                ClientError::Rpc(status) => rpc_error(status),
+                error => error,
+            })?;
+        validate_replay_display(&bytes, descriptor)?;
+        Ok(bytes)
+    }
 }
 
 pub(crate) fn decode_manufacturing_artifact(
@@ -480,5 +503,12 @@ impl EngineClient {
         self.rpc
             .fetch_manufacturing_bundle(record, descriptor)
             .await
+    }
+    pub async fn fetch_replay_display(
+        &self,
+        record: &ManufacturingArtifactRecord,
+        descriptor: &ReplayDisplayDescriptor,
+    ) -> Result<Vec<u8>, ClientError> {
+        self.rpc.fetch_replay_display(record, descriptor).await
     }
 }

@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import licenseDocument from "../../../LICENSE.md?raw";
 import { IMPORT_PROFILE, type OccurrenceRecord, type RigidPoseMm } from "@spiling/protocol";
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
+import { ManufacturingPanel } from "./manufacturing/ManufacturingPanel.tsx";
 
 const assentKey = "spiling:license-assent:OSL-3.0:b0-1";
 const phaseDescriptions: Record<Phase, string> = {
@@ -209,8 +210,9 @@ function Workbench() {
     else action(false);
   }
   const running = state.phase === "running",
-    interactive = running && !state.busy && !state.stale,
-    editable = interactive && !state.project?.read_only;
+    interactive = running && !state.busy && !state.stale && !state.diagnosticSession,
+    editable = interactive && !state.project?.read_only,
+    projectEditable = running && !state.busy && !state.project?.read_only;
   const selected = state.occurrences.find((row) => row.occurrence_id === selectedId) ?? null;
   const definition = state.definitions.find((row) => row.definition_id === selected?.definition_id);
   const greeting = state.hello,
@@ -310,7 +312,7 @@ function Workbench() {
               </button>
               <button
                 data-testid="project-save"
-                disabled={!editable}
+                disabled={!projectEditable}
                 onClick={() => {
                   void workbench.saveProject();
                 }}
@@ -319,7 +321,7 @@ function Workbench() {
               </button>
               <button
                 data-testid="project-undo"
-                disabled={!editable || !state.project?.can_undo}
+                disabled={!projectEditable || !state.project?.can_undo}
                 onClick={() => {
                   void workbench.projectControl("undo");
                 }}
@@ -328,7 +330,7 @@ function Workbench() {
               </button>
               <button
                 data-testid="project-redo"
-                disabled={!editable || !state.project?.can_redo}
+                disabled={!projectEditable || !state.project?.can_redo}
                 onClick={() => {
                   void workbench.projectControl("redo");
                 }}
@@ -371,7 +373,7 @@ function Workbench() {
                 />
                 <button
                   data-testid="project-debug-save"
-                  disabled={!editable || state.project?.path_label != null}
+                  disabled={!projectEditable || state.project?.path_label != null}
                   onClick={() => {
                     void workbench.saveProject(projectFixture);
                   }}
@@ -403,6 +405,11 @@ function Workbench() {
               </details>
             )}
           </section>
+          <ManufacturingPanel
+            host={workbench.manufacturingHost}
+            cancel={workbench.cancel}
+            diagnosticImport={() => workbench.debugImport(["box-mm.step"])}
+          />
           <button
             className="primary"
             data-testid="import-parts"
@@ -577,17 +584,27 @@ function Workbench() {
               );
             }}
           />
-          {(!running || (noObjects && !state.stale)) && (
+          {(!running ||
+            state.diagnosticSession ||
+            (noObjects && !state.stale && !state.replayDisplayed)) && (
             <div className="viewport-empty" role="status">
-              <h2>{running ? "Empty native scene" : phaseDescriptions[state.phase]}</h2>
+              <h2>
+                {state.diagnosticSession
+                  ? "Native diagnostic — no GPU display"
+                  : running
+                    ? "Empty native scene"
+                    : phaseDescriptions[state.phase]}
+              </h2>
               <p>
-                {running
-                  ? "Import parts or open a saved project. First save chooses a new project directory."
-                  : state.phase === "desktop-required"
-                    ? "Open the Tauri / CEF desktop; browsers cannot launch the engine."
-                    : state.phase === "unsupported"
-                      ? "A working WebGPU device is required. No WebGL fallback is used."
-                      : state.message || "Connecting the engine after GPU admission."}
+                {state.diagnosticSession
+                  ? "Production native manufacturing bridge only. No picking, rendering acceptance or hardware claim."
+                  : running
+                    ? "Import parts or open a saved project. First save chooses a new project directory."
+                    : state.phase === "desktop-required"
+                      ? "Open the Tauri / CEF desktop; browsers cannot launch the engine."
+                      : state.phase === "unsupported"
+                        ? "A working WebGPU device is required. No WebGL fallback is used."
+                        : state.message || "Connecting the engine after GPU admission."}
               </p>
             </div>
           )}
@@ -664,6 +681,17 @@ function Workbench() {
           <div className="diagnostic-message" role="alert">
             {state.message}
           </div>
+        )}
+        {state.phase === "unsupported" && state.runtime?.manufacturing_diagnostic_enabled && (
+          <button
+            data-testid="manufacturing-diagnostic-attach"
+            disabled={state.busy}
+            onClick={() => {
+              void workbench.attachManufacturingDiagnostic();
+            }}
+          >
+            Explicit native manufacturing diagnostic (no GPU / picking)
+          </button>
         )}
         {planeError && (
           <div className="diagnostic-message" role="alert">
@@ -930,8 +958,8 @@ function Workbench() {
           <p>Project: {greeting?.project_capabilities.join(", ") ?? "Not negotiated"}</p>
           <p>
             Software-only manufacturing service:{" "}
-            {greeting?.manufacturing_capabilities.join(", ") ?? "Not negotiated"} (no desktop
-            manufacturing controls)
+            {greeting?.manufacturing_capabilities.join(", ") ?? "Not negotiated"} (review,
+            independent replay and export; not machine-ready)
           </p>
           <p>
             Diagnostic control / binary limits: {greeting?.max_control_bytes ?? "—"} /{" "}

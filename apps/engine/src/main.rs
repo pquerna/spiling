@@ -424,12 +424,19 @@ impl manufacturing_server::Manufacturing for Service {
         let command = req.try_into().map_err(|e: String| {
             request_error(spiling_contracts::native::manufacturing_request_status(&e))
         })?;
+        let reservation = match &command {
+            spiling_contracts::manufacturing::ManufacturingCommand::Inspect {
+                output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
+                ..
+            } => 32 * 1024 * 1024,
+            _ => 16 * 1024 * 1024,
+        };
         let input = jobs::NativeAdmission {
             parent,
             request_id: id,
             digest,
             command: Control::Manufacturing(command),
-            reservation: 16 * 1024 * 1024,
+            reservation,
         };
         Ok(Response::new(
             self.jobs.start_native(self.native.clone(), input).await?,

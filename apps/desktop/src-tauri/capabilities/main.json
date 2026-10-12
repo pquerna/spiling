@@ -28,6 +28,12 @@
     "allow-project-control",
     "allow-project-open",
     "allow-project-save",
-    "allow-project-reopen"
+    "allow-project-reopen",
+    "allow-manufacturing-control",
+    "allow-manufacturing-replay",
+    "allow-manufacturing-select-export",
+    "allow-manufacturing-debug-select-export",
+    "allow-manufacturing-export",
+    "allow-manufacturing-diagnostic-attach"
   ]
 }

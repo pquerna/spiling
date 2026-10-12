@@ -9,6 +9,14 @@ use std::{
     path::{Component, Path},
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    #[error("export I/O: {0}")]
+    Io(#[from] io::Error),
+    #[error("export JSON: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
 pub struct OutputDirectory {
     owned: platform::OwnedDirectory,
     committed: bool,
@@ -35,7 +43,7 @@ impl OutputDirectory {
         &mut self,
         bundle: &spiling_contracts::manufacturing::ManufacturingBundle,
         verification: &spiling_contracts::manufacturing::VerificationReport,
-    ) -> Result<(), crate::Error> {
+    ) -> Result<(), ExportError> {
         self.write("plan.json", &serde_json::to_vec_pretty(&bundle.plan)?)?;
         self.write("program.gcode", bundle.program.as_bytes())?;
         self.write(
@@ -48,12 +56,40 @@ impl OutputDirectory {
         )?;
         Ok(())
     }
-    /// Call only after successful shutdown and completion-manifest creation.
+    /// Call only after validated output and its completion evidence are written.
     pub fn commit(&mut self) {
         self.committed = true;
     }
 }
 impl Drop for OutputDirectory {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.owned.cleanup();
+        }
+    }
+}
+
+/// A previously nonexistent file, retained by handle until the caller commits.
+/// Rollback never removes a replacement inode or follows a substituted symlink.
+pub struct OutputFile {
+    owned: platform::OwnedFile,
+    committed: bool,
+}
+impl OutputFile {
+    pub fn create(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            owned: platform::OwnedFile::create(path)?,
+            committed: false,
+        })
+    }
+    pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.owned.write(bytes)
+    }
+    pub fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+impl Drop for OutputFile {
     fn drop(&mut self) {
         if !self.committed {
             self.owned.cleanup();
@@ -79,6 +115,59 @@ mod platform {
     }
     fn same(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
         a.st_dev == b.st_dev && a.st_ino == b.st_ino
+    }
+    pub struct OwnedFile {
+        parent: File,
+        name: OsString,
+        handle: File,
+    }
+    impl OwnedFile {
+        pub fn create(path: &Path) -> io::Result<Self> {
+            let name = path
+                .file_name()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "output requires a new file name",
+                    )
+                })?
+                .to_owned();
+            let parent = File::from(open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            let handle = File::from(openat(
+                &parent,
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )?);
+            Ok(Self {
+                parent,
+                name,
+                handle,
+            })
+        }
+        pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+            let current = statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW)?;
+            if !same(&current, &fstat(&self.handle)?) {
+                return Err(io::Error::other("output file was replaced or moved"));
+            }
+            self.handle.write_all(bytes)?;
+            self.handle.flush()
+        }
+        pub fn cleanup(&mut self) {
+            if let (Ok(current), Ok(owned)) = (
+                statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW),
+                fstat(&self.handle),
+            ) && same(&current, &owned)
+            {
+                let _ = unlinkat(&self.parent, &self.name, AtFlags::empty());
+            }
+        }
     }
     impl OwnedDirectory {
         pub fn create(path: &Path) -> io::Result<Self> {
@@ -183,6 +272,47 @@ mod platform {
         },
     };
 
+    pub struct OwnedFile {
+        handle: File,
+        _ancestors: Vec<File>,
+    }
+    impl OwnedFile {
+        pub fn create(path: &Path) -> io::Result<Self> {
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "output requires a new file name",
+                )
+            })?;
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .canonicalize()?;
+            let ancestors = parent
+                .ancestors()
+                .map(|p| hold_directory(p, false))
+                .collect::<io::Result<Vec<_>>>()?;
+            let handle = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .access_mode(0x40000000 | DELETE)
+                .share_mode(FILE_SHARE_READ)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(parent.join(name))?;
+            Ok(Self {
+                handle,
+                _ancestors: ancestors,
+            })
+        }
+        pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.handle.write_all(bytes)?;
+            self.handle.flush()
+        }
+        pub fn cleanup(&mut self) {
+            delete_on_handle(&self.handle);
+        }
+    }
     pub struct OwnedDirectory {
         path: PathBuf,
         directory: File,
@@ -358,6 +488,43 @@ mod tests {
         assert_eq!(std::fs::read(path.join("mesh.splm")).unwrap(), b"keep");
         std::fs::remove_file(path.join("mesh.splm")).unwrap();
         std::fs::remove_dir(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn replay_file_is_exclusive_and_rolls_back_uncommitted_bytes() {
+        let root = root();
+        let path = root.join("replay.splr");
+        let mut output = OutputFile::create(&path).unwrap();
+        output.write(b"checked replay").unwrap();
+        assert!(OutputFile::create(&path).is_err());
+        drop(output);
+        assert!(!path.exists());
+        let mut output = OutputFile::create(&path).unwrap();
+        output.write(b"checked replay").unwrap();
+        output.commit();
+        drop(output);
+        assert_eq!(std::fs::read(&path).unwrap(), b"checked replay");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn replay_file_replacement_is_never_written_or_deleted() {
+        use std::os::unix::fs::symlink;
+        let root = root();
+        let path = root.join("replay.splr");
+        let victim = root.join("operator.splr");
+        std::fs::write(&victim, b"keep").unwrap();
+        let mut output = OutputFile::create(&path).unwrap();
+        output.write(b"ours").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&victim, &path).unwrap();
+        assert!(output.write(b"bad").is_err());
+        drop(output);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(victim).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 }

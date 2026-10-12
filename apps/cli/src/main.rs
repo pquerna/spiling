@@ -3,14 +3,13 @@
 // Licensed under the Open Software License version 3.0
 
 mod geometry;
-mod output;
 mod project;
 use spiling_contracts::{geometry::PlaneMm, metadata, operation_view, rpc::RunDiagnosticRequest};
-use spiling_engine_client::EngineClient;
+use spiling_engine_client::{EngineClient, export as output};
 use std::{env, ffi::OsString, io::Write, path::PathBuf, process::ExitCode, time::Instant};
 use uuid::Uuid;
 type Error = Box<dyn std::error::Error>;
-const USAGE: &str = "usage: spiling-cli [--engine PATH] [--store PATH] diagnose | triangle [--output FILE] | job [--request-id UUID] [--chunks N] [--delay-ms N] [--chunk-bytes N] [--input-revision TEXT]\n       spiling-cli geometry (--scene SCENE_JSON | --source PATH...) [--section ox,oy,oz:nx,ny,nz] [--out DIRECTORY] [--engine PATH]\n       spiling-cli project (create|edit|save|open|inspect|recover) PATH [--import STEP] [--add DEFINITION_ID POSE_JSON] [--pose OCCURRENCE_ID POSE_JSON] [--remove ID] [--undo] [--redo] [--intent JSON_FILE] [--compile] [--verify] [--manufacturing-out NEW_DIRECTORY] [--save] [--save-as PATH] [--read-only] [--inspect-face OCCURRENCE_ID FACE_ID] [--section PLANE] [--out NEW_DIRECTORY] [--engine PATH]\nProject operations execute in flag order. Manufacturing output is SOFTWARE ONLY, NOT MACHINE READY; --intent reads bounded inert JSON, not executable TypeScript.";
+const USAGE: &str = "usage: spiling-cli [--engine PATH] [--store PATH] diagnose | triangle [--output FILE] | job [--request-id UUID] [--chunks N] [--delay-ms N] [--chunk-bytes N] [--input-revision TEXT]\n       spiling-cli geometry (--scene SCENE_JSON | --source PATH...) [--section ox,oy,oz:nx,ny,nz] [--out DIRECTORY] [--engine PATH]\n       spiling-cli project (create|edit|save|open|inspect|recover) PATH [--import STEP] [--add DEFINITION_ID POSE_JSON] [--pose OCCURRENCE_ID POSE_JSON] [--remove ID] [--undo] [--redo] [--intent JSON_FILE] [--compile] [--verify] [--manufacturing-out NEW_DIRECTORY] [--replay-out NEW_FILE] [--save] [--save-as PATH] [--read-only] [--inspect-face OCCURRENCE_ID FACE_ID] [--section PLANE] [--out NEW_DIRECTORY] [--engine PATH]\nProject operations execute in flag order. --replay-out on create/inspect requests fresh actual-program motion. Manufacturing output is SOFTWARE ONLY, NOT MACHINE READY; --intent reads bounded inert JSON, not executable TypeScript.";
 
 struct Options {
     command: Command,
@@ -35,6 +34,7 @@ enum Command {
         plane: Option<PlaneMm>,
         output: Option<PathBuf>,
         manufacturing_output: Option<PathBuf>,
+        replay_output: Option<PathBuf>,
     },
 }
 fn set_once<T>(target: &mut Option<T>, value: T, name: &str) -> Result<(), Error> {
@@ -193,6 +193,13 @@ async fn run(options: Options) -> Result<(), Error> {
         } => Some(output::OutputDirectory::create(path)?),
         _ => None,
     };
+    let mut replay_output = match &options.command {
+        Command::Project {
+            replay_output: Some(path),
+            ..
+        } => Some(output::OutputFile::create(path)?),
+        _ => None,
+    };
     let start = Instant::now();
     let mut client = if let Some(store) = &options.store {
         EngineClient::spawn_in(&options.engine, store).await?
@@ -244,11 +251,12 @@ async fn run(options: Options) -> Result<(), Error> {
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
-            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path } => {
-                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut()).await?;
+            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path } => {
+                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut()).await?;
                 report["transfer_and_jobs_us"] = serde_json::json!(transfer.elapsed().as_micros());
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report["manufacturing_output"] = serde_json::json!(manufacturing_path.as_ref().map(|path| path.to_string_lossy()));
+                report["replay_output"] = serde_json::json!(replay_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
         };
@@ -283,6 +291,9 @@ async fn run(options: Options) -> Result<(), Error> {
         output.commit();
     }
     if let Some(output) = &mut manufacturing_output {
+        output.commit();
+    }
+    if let Some(output) = &mut replay_output {
         output.commit();
     }
     Ok(())

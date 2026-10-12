@@ -42,6 +42,7 @@ pub struct RuntimeInfo {
     runtime: &'static str,
     cef_api_version: i32,
     geometry_debug_enabled: bool,
+    manufacturing_diagnostic_enabled: bool,
 }
 
 #[tauri::command]
@@ -51,5 +52,6 @@ pub fn runtime_info(state: tauri::State<'_, crate::engine::EngineState>) -> Runt
         runtime: "cef",
         cef_api_version: CEF_API_VERSION_LAST,
         geometry_debug_enabled: state.geometry_debug_enabled(),
+        manufacturing_diagnostic_enabled: state.manufacturing_diagnostic_enabled(),
     }
 }

@@ -96,6 +96,7 @@ pub enum Work {
     Compile(CompileRequest),
     Verify {
         asset: Arc<ManufacturingAsset>,
+        output: VerificationOutput,
     },
     Section {
         session: SessionId,
@@ -155,7 +156,7 @@ pub enum Product {
     Compiled(Arc<ManufacturingAsset>),
     Verified {
         record: ManufacturingArtifactRecord,
-        report: VerificationReport,
+        inspection: spiling_manufacturing::ManufacturingInspection,
     },
 }
 pub enum Transition {
@@ -292,10 +293,10 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
             Work::Compile(request) => {
                 compile(request, &definitions, &cancel).map(Product::Compiled)
             }
-            Work::Verify { asset } => {
-                verify_asset(&asset, &cancel).map(|report| Product::Verified {
+            Work::Verify { asset, output } => {
+                inspect_asset(&asset, output, &cancel).map(|inspection| Product::Verified {
                     record: asset.record.clone(),
-                    report,
+                    inspection,
                 })
             }
             Work::Section {
@@ -596,7 +597,7 @@ fn open(
     }
     check_cancel(cancel)?;
     if let Some(asset) = &loaded.manufacturing_artifact {
-        verify_asset(asset, cancel)?;
+        inspect_asset(asset, VerificationOutput::ReportOnly, cancel)?;
     }
     let project = Project::from_loaded(loaded)?;
     check_cancel(cancel)?;
@@ -765,12 +766,14 @@ fn compare2(a: [f64; 2], b: [f64; 2]) -> std::cmp::Ordering {
     a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1]))
 }
 
-fn verify_asset(
+fn inspect_asset(
     asset: &ManufacturingAsset,
+    output: VerificationOutput,
     cancel: &AtomicBool,
-) -> Result<VerificationReport, JobError> {
+) -> Result<spiling_manufacturing::ManufacturingInspection, JobError> {
     let bundle = decode_bundle(asset.bytes.as_slice()).map_err(JobError::from)?;
-    spiling_manufacturing::verify_bundle(&bundle, cancel).map_err(JobError::from)
+    spiling_manufacturing::inspect_bundle(&bundle, &asset.record.hash, output, cancel)
+        .map_err(JobError::from)
 }
 
 struct BundleWriter {

@@ -134,6 +134,8 @@ pub enum JobResult {
         record: crate::manufacturing::ManufacturingArtifactRecord,
         report: crate::manufacturing::VerificationReport,
         resource: crate::ArtifactView,
+        provenance: crate::manufacturing::ManufacturingInspectionProvenance,
+        replay_display: Option<crate::manufacturing::ReplayDisplayDescriptor>,
     },
 }
 

@@ -37,6 +37,10 @@ import {
   type SectionLoopMetadata,
   type SectionSummary,
   type SelectedSource,
+  type ManufacturingResponse,
+  type ReplayDisplayDescriptor,
+  type DecodedReplayDisplay,
+  type JobResult,
 } from "@spiling/protocol";
 import {
   createGeometryViewport,
@@ -84,6 +88,29 @@ export interface WorkbenchState {
   inspection: FaceInspection | null;
   section: SectionSummary | null;
   bufferUsage: GeometryViewport["bufferUsage"];
+  diagnosticSession: boolean;
+  projectEpoch: number;
+  replayDisplayed: boolean;
+}
+export interface ManufacturingHost {
+  state: WorkbenchState;
+  run(operation: (token: number) => Promise<void>): Promise<void>;
+  exchange<T>(operation: () => Promise<T>, token: number): Promise<T>;
+  poll(
+    response: GeometryResponse | ProjectResponse | ManufacturingResponse,
+    token: number,
+  ): Promise<JobResult>;
+  ensure(token: number): void;
+  token(): number;
+  snapshot(): WorkbenchState;
+  refreshProject(token: number): Promise<ProjectInfo>;
+  showReplay(descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay): Promise<void>;
+  clearReplay(): Promise<void>;
+  setReplayView(options: {
+    layer: number | null;
+    eventCount: number;
+    showTravel: boolean;
+  }): Promise<void>;
 }
 class DomainError extends Error {
   constructor(
@@ -121,6 +148,9 @@ const initial: WorkbenchState = {
   inspection: null,
   section: null,
   bufferUsage: { rawBytes: 0, gpuBytes: 0, ownedBytes: 0 },
+  diagnosticSession: false,
+  projectEpoch: 0,
+  replayDisplayed: false,
 };
 
 export function useWorkbench(
@@ -422,6 +452,22 @@ export function useWorkbench(
       );
   }
   async function syncScene(summary: SceneSummary, token: number) {
+    if (stateRef.current.diagnosticSession) {
+      const pages = await scenePages(summary, token);
+      ensure(token);
+      sceneRef.current = summary;
+      patch({
+        scene: summary,
+        occurrences: pages.occurrences,
+        definitions: pages.definitions.map((definition) => ({ ...definition, faces: [] })),
+        stale: false,
+        inspection: null,
+        section: null,
+        message:
+          "Native diagnostic metadata only — no GPU display, picking or hardware acceptance.",
+      });
+      return;
+    }
     const view = viewport.current;
     if (!view) throw new ObsoleteOperation();
     sceneRef.current = summary;
@@ -606,7 +652,10 @@ export function useWorkbench(
       if (current(token)) patch({ transferring: null });
     }
   }
-  async function waitJob(response: GeometryResponse | ProjectResponse, token: number) {
+  async function waitJob(
+    response: GeometryResponse | ProjectResponse | ManufacturingResponse,
+    token: number,
+  ) {
     if (response.type === "error" || response.type === "project_error")
       throw new DomainError(response.error.code, response.error.message);
     if (response.type !== "operation_accepted")
@@ -635,15 +684,9 @@ export function useWorkbench(
               return result;
             case "manufacturing_compiled":
               patch({ project: result.info });
-              throw new DomainError(
-                "unsupported_capability",
-                "Manufacturing job results are not exposed by the desktop workbench.",
-              );
+              return result;
             case "manufacturing_verified":
-              throw new DomainError(
-                "unsupported_capability",
-                "Manufacturing job results are not exposed by the desktop workbench.",
-              );
+              return result;
             default:
               return unexpectedJob(result);
           }
@@ -775,10 +818,17 @@ export function useWorkbench(
     if (name) void native.cancelOperation(name).catch((error: unknown) => failure(error, token));
   };
 
-  async function applyProjectResponse(response: ProjectResponse, token: number) {
+  async function applyProjectResponse(response: ProjectResponse, token: number, replacing = false) {
     if (response.type === "error") {
       await getProject(token);
       throw new DomainError(response.error.code, response.error.message);
+    }
+    if (
+      replacing &&
+      (response.type === "scene_changed" || response.type === "operation_accepted")
+    ) {
+      patch({ projectEpoch: stateRef.current.projectEpoch + 1 });
+      await viewport.current?.clearReplay();
     }
     if (response.type === "status") {
       // Intent/artifact-only undo/redo does not change geometry or display state.
@@ -803,6 +853,9 @@ export function useWorkbench(
           break;
         case "section":
           throw new Error("unexpected section result for a project job");
+        case "manufacturing_compiled":
+        case "manufacturing_verified":
+          throw new Error("unexpected manufacturing result for a project job");
         default:
           unexpectedJob(result);
       }
@@ -820,7 +873,11 @@ export function useWorkbench(
               discard_changes: discardChanges,
             }
           : { op, session_id: summary.session_id, base_revision: summary.revision };
-      await applyProjectResponse(await exchange(() => native.project(command), token), token);
+      await applyProjectResponse(
+        await exchange(() => native.project(command), token),
+        token,
+        op === "new",
+      );
     });
   const openProject = (
     readOnly: boolean,
@@ -850,6 +907,7 @@ export function useWorkbench(
           token,
         ),
         token,
+        true,
       );
     });
   const saveProject = (relativePath?: string) =>
@@ -1046,6 +1104,7 @@ export function useWorkbench(
         transferring: null,
         inspection: null,
         section: null,
+        diagnosticSession: false,
       });
       try {
         if (action === "stop" || action === "interrupt") {
@@ -1078,6 +1137,8 @@ export function useWorkbench(
           stale: false,
           message: "",
         });
+        const runtime = await exchange(() => native.runtime(), token);
+        patch({ runtime });
         if (!canvas.current) throw new Error("Viewport canvas is missing");
         let next: GeometryViewport | undefined;
         next = await createGeometryViewport(canvas.current, (message) => {
@@ -1102,7 +1163,6 @@ export function useWorkbench(
         }
         viewport.current = next;
         patch({ gpu: next.adapter, phase: "starting" });
-        const runtime = await exchange(() => native.runtime(), token);
         const hello = await exchange(
           () => (action === "restart" ? native.restart(discardChanges) : native.start()),
           token,
@@ -1147,6 +1207,49 @@ export function useWorkbench(
     },
     [canvas, disposeViewport],
   );
+
+  const attachManufacturingDiagnostic = async () => {
+    if (
+      !mounted.current ||
+      workflow.current ||
+      stateRef.current.busy ||
+      stateRef.current.phase !== "unsupported" ||
+      !stateRef.current.runtime?.manufacturing_diagnostic_enabled
+    )
+      return;
+    const reopenSaved = stateRef.current.project?.path_label != null;
+    const token = ++generation.current;
+    patch({ busy: true, message: "" });
+    try {
+      await disposeViewport();
+      const hello = await exchange(() => native.attachManufacturingDiagnostic(), token);
+      helloRef.current = hello;
+      pauseDisplay.current = false;
+      patch({ hello, diagnosticSession: true });
+      // State patches render asynchronously; metadata sync needs the explicit diagnostic flag.
+      stateRef.current = { ...stateRef.current, hello, diagnosticSession: true };
+      const summary = await getScene(token);
+      if (reopenSaved) {
+        await applyProjectResponse(
+          await exchange(() => native.reopenProject(hello.session_id, summary.revision), token),
+          token,
+          true,
+        );
+      } else {
+        await getProject(token);
+        await syncScene(summary, token);
+      }
+      patch({
+        phase: "running",
+        message:
+          "Explicit native diagnostic session: production manufacturing controls, no GPU, no picking or hardware claim.",
+      });
+    } catch (error) {
+      await failure(error, token);
+    } finally {
+      if (current(token)) patch({ busy: false });
+    }
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -1215,5 +1318,41 @@ export function useWorkbench(
     inspect,
     setView,
     fit,
+    attachManufacturingDiagnostic,
+    manufacturingHost: {
+      state,
+      run,
+      exchange,
+      poll: waitJob,
+      ensure,
+      token: () => generation.current,
+      snapshot: () => stateRef.current,
+      refreshProject: getProject,
+      showReplay: async (descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay) => {
+        const view = viewport.current;
+        if (!view)
+          throw new Error(
+            "WebGPU replay display unavailable; diagnostic transport is not visual acceptance.",
+          );
+        await view.showReplay(descriptor, replay);
+        patch({ bufferUsage: view.bufferUsage, replayDisplayed: true });
+      },
+      clearReplay: async () => {
+        await viewport.current?.clearReplay();
+        patch({
+          replayDisplayed: false,
+          ...(viewport.current ? { bufferUsage: viewport.current.bufferUsage } : {}),
+        });
+      },
+      setReplayView: async (options: {
+        layer: number | null;
+        eventCount: number;
+        showTravel: boolean;
+      }) => {
+        if (!viewport.current)
+          throw new Error("WebGPU replay controls unavailable in native diagnostics.");
+        await viewport.current.setReplayView(options);
+      },
+    },
   };
 }
