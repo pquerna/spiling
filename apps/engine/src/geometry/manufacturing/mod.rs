@@ -168,6 +168,7 @@ impl Runtime {
             ManufacturingCommand::Inspect {
                 session_id,
                 base_revision,
+                output,
             } => {
                 self.manufacturing_base(&session_id, base_revision)?;
                 if self.active.is_some() {
@@ -188,7 +189,10 @@ impl Runtime {
                         )
                     })?;
                 let response = self
-                    .start(Purpose::Verify, 0, move |_, _, _| Work::Verify { asset })
+                    .start(Purpose::Verify, 0, move |_, _, _| Work::Verify {
+                        asset,
+                        output,
+                    })
                     .map_err(geometry_error)?;
                 Ok(response)
             }

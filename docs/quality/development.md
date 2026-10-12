@@ -69,7 +69,7 @@ macOS development must use Tauri CLI so it launches the CEF application bundle a
 
 Material source/configuration changes run one Linux job: generated-contract drift, TypeScript consumers, selected engine/protocol Rust tests, real CLI incremental transfer/cleanup and TypeScript binary tests. Markdown-only changes do not launch builds. Automatic CI does not compile the desktop/CEF, run Clippy, build installers or claim cross-platform support.
 
-Run `pnpm check && pnpm test` locally before merging or preparing release evidence. These retain full workspace formatting, Clippy and behavior checks; cheaper CI is not permission to skip them.
+Before merging, verify changed interface consumers, relevant behavioral properties and the actual changed surface. Use focused checks on resource-constrained hosts; do not repeat unrelated suites or rebuild release/CEF artifacts merely to satisfy a blanket command. `pnpm check` and `pnpm test` remain the full-workspace checks for broad changes and release preparation. Record exactly which checks ran and any unverified gates.
 
 Native packaging is opt-in through the workflow's `platform` input (`linux`, `macos`, `windows`, or explicit `all`; default Linux). For example, `gh workflow run build.yml -f platform=windows` requests Windows distribution evidence. Each selected platform compiles release once, without repeating debug bootstrap or deep workspace checks.
 
@@ -99,21 +99,23 @@ Printer specifications are trusted TypeScript-authored data against generated Ru
 
 ```sh
 pnpm manufacturing:intent fixtures/manufacturing/solid-fill.intent.ts NEW_INTENT.json
-"$CLI" project create NEW_PRINT_PROJECT --import fixtures/geometry/box-mm.step --intent NEW_INTENT.json --compile --verify --manufacturing-out NEW_SOFTWARE_EXPORT --engine "$ENGINE"
-"$CLI" project inspect NEW_PRINT_PROJECT --verify --manufacturing-out NEW_REOPENED_EXPORT --engine "$ENGINE"
+"$CLI" project create NEW_PRINT_PROJECT --import fixtures/geometry/box-mm.step --intent NEW_INTENT.json --compile --verify --manufacturing-out NEW_SOFTWARE_EXPORT --replay-out NEW_ACTUAL_MOTION.splr --engine "$ENGINE"
+"$CLI" project inspect NEW_PRINT_PROJECT --verify --manufacturing-out NEW_REOPENED_EXPORT --replay-out NEW_REOPENED_MOTION.splr --engine "$ENGINE"
 ```
 
 There are no hidden printer/recipe defaults. Compile and Verify capture the persistent project revision and return Google operations. Artifact invalidation and undo restoration are core transactions. Fresh read-only inspection independently replays exact stored program bytes; it never trusts a stored `verified` flag.
 
-Export exclusively writes `plan.json`, `program.gcode`, fresh `verification.json`, captured `provenance.json` and a completion `manifest.json` after engine cleanup. Compare immutable files, not transient completion/session/timing metadata. See [manufacturing contracts](../protocol/manufacturing.md) and [measured evidence](manufacturing-evidence.md).
+CLI export exclusively writes `plan.json`, `program.gcode`, fresh `verification.json`, captured `provenance.json` and a completion `manifest.json` after engine cleanup. The desktop uses the same exclusive four-file writer; its completion receipt is transient rather than a session manifest. `--replay-out` requests fresh report-and-motion inspection and exclusively writes a complete validated SPLR file, with its bound descriptor in CLI JSON. Existing destinations are never overwritten. Compare immutable files, not transient completion/session/timing metadata. See [manufacturing contracts](../protocol/manufacturing.md), [packed replay](../protocol/replay.md) and [measured evidence](manufacturing-evidence.md).
 
 The measured three-part scenario copies `box-mm.step`, `cylinder.step` and `through-hole.step` to an exclusively created operator-source directory. In a new project, import the box, import the cylinder and pose occurrence 2 with `{"translation_mm":[40,20,0],"rotation_xyzw":[0,0,0,1]}`, then import the hole and pose occurrence 3 with `{"translation_mm":[80,0,0],"rotation_xyzw":[0,0,0,1]}`. Apply the authored intent, compile, verify and export. Remove only the owned operator-source directory; inspect the saved project in a fresh read-only process, verify and export to another new directory. Check captured provenance and all four immutable files byte-for-byte; assert both reported engine PIDs no longer exist. Fixture hashes and observed measurements are in [manufacturing evidence](manufacturing-evidence.md).
 
 Support is world-vertical planar/cylindrical native geometry, bed-anchored integral fixed-height layers and nominal 100% solid fill. Slopes, tilted cylinders, nonaligned shelves, partial top layers, generated supports, unresolved thin regions and erased wall topology are rejected. Box/cylinder component shapes are retained metadata, not collision verification. Programs say `SOFTWARE VALIDATION ONLY, NOT MACHINE READY`; no heating, homing, firmware initialization, printer execution, physical support or printability is claimed.
 
+The desktop manufacturing panel requires explicit software-reference intent selection and one full-intent Apply. Scalar drafts do not mutate Core until Apply; unchanged drafts submit nothing. Compile produces an immutable bundle; Report only performs fresh verification without display allocation, while Report and motion admits independently decoded actual command endpoints. Layer/event/travel controls do not regenerate geometry or replay. First travel has no known physical start and is displayed only as an endpoint. Fresh export requires the current session and server-selected bundle/input hashes, including a recheck after transport; Save bookkeeping alone does not invalidate unchanged content. Read-only projects permit Verify/export, not Apply/Compile. There is no Print action.
+
 ## Resource-controlled local verification
 
-Keep native builds, actual-engine workloads and CEF diagnostics sequential. Disable incremental compilation/debug information on constrained hosts and use disk-backed Cargo storage; `/tmp` may be tmpfs and consume the same RAM needed by compiler/kernel workloads. Do not infer memory capacity from apparent tmpfs free space.
+Keep native builds, actual-engine workloads and CEF diagnostics sequential. The workspace development/test profile disables debug information and incremental compilation to avoid duplicate bulky artifact variants. Reuse that profile and disk-backed Cargo storage; `/tmp` may be tmpfs and consume the same RAM needed by compiler/kernel workloads. Check free disk before native builds and do not infer memory capacity from apparent tmpfs free space. Cargo's target directory is a disk cache, not a RAM allowance.
 
 On Linux with systemd, enforce limits on the entire command/child cgroup rather than only Cargo concurrency. This example uses a disk-backed target directory and limits memory, swap and task count:
 
@@ -124,7 +126,7 @@ systemd-run --wait --pipe --collect \
   /usr/bin/env PATH="$PATH" CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 \
   CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUST_TEST_THREADS=1 \
   RAYON_NUM_THREADS=1 CARGO_TARGET_DIR="$PWD/target" \
-  cargo test --locked --workspace -- --include-ignored --test-threads=1
+  cargo test --locked -p spiling-manufacturing actual_motion_inspection_rounding_coincident_travel_and_fixture -- --test-threads=1
 ```
 
 System limits may require administrator privileges. A limit-triggered failure is a failed check, not permission to lift limits or weaken acceptance silently. Nonpreemptible upstream calls and bounded retained buffers are not allocator-level RSS guarantees. Actual-child suites must point `SPILING_TEST_ENGINE` to the newly built integrated engine and explicitly include ignored cases. Unit tests alone do not establish the native CLI/desktop workflow.
@@ -156,6 +158,18 @@ SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 xvfb-run -a pnpm smoke:desk
 ```
 
 Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
+
+For development-native checks, build current frontend assets and stage the matching engine **before** building the desktop: `pnpm build` implements that order. A direct desktop Cargo build can copy an old staged sidecar over the engine executable; sharing a warm target does not validate sidecar identity.
+
+`--scenario manufacturing` exercises the actual production panel, native intent/history/compile/verification, motion transport, exclusive export, source-independent read-only reopen and child restart/cleanup. It requires working WebGPU by default. On a headless Linux diagnostic host, `--diagnostic-no-gpu` explicitly preserves the startup GPU rejection, then enables a startup-gated native-panel attachment:
+
+```sh
+SPILING_ENGINE_PATH="$PWD/target/debug/spiling-engine" SPILING_CEF_UNSANDBOXED=1 \
+  xvfb-run -a node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \
+  --scenario manufacturing --diagnostic-no-gpu --port 9222
+```
+
+This mode proves panel/native software behavior, not rendered motion, picking, native-dialog interaction, normal sandboxing, hardware support or packaging certification. Use the resource limits above, with a separately chosen CEF task allowance; do not overlap it with native compilation.
 
 ## Release evidence
 

@@ -10,6 +10,9 @@ use spiling_contracts::manufacturing::{
     ManufacturingIntent, NormalizedPrintPlan, VerificationReport,
 };
 
+mod replay;
+pub(crate) use replay::ReplaySink;
+
 const XYZ_HALF_STEP: f64 = 0.000_000_5;
 const E_HALF_STEP: f64 = 0.000_000_005;
 const F_HALF_STEP: f64 = 0.000_000_5;
@@ -138,6 +141,16 @@ pub fn verify(
     intent: &ManufacturingIntent,
     cancel: &AtomicBool,
 ) -> Result<VerificationReport, ManufacturingError> {
+    verify_actual(program, plan, intent, cancel, None)
+}
+
+pub(crate) fn verify_actual(
+    program: &str,
+    plan: &NormalizedPrintPlan,
+    intent: &ManufacturingIntent,
+    cancel: &AtomicBool,
+    mut replay: Option<&mut ReplaySink>,
+) -> Result<VerificationReport, ManufacturingError> {
     cancelled(cancel)?;
     if program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
         return Err(ManufacturingError::new(
@@ -165,21 +178,27 @@ pub fn verify(
 
     // One borrowed point at a time. A path start denotes travel even when its
     // position coincides with the preceding path's endpoint.
-    let mut expected = plan.layers.iter().flat_map(|layer| {
-        layer.paths.iter().flat_map(|path| {
-            path.points_mm
-                .iter()
-                .enumerate()
-                .map(move |(index, point)| {
-                    (
-                        point,
-                        index
-                            .checked_sub(1)
-                            .map(|previous| &path.points_mm[previous]),
-                    )
-                })
-        })
-    });
+    let mut expected = plan
+        .layers
+        .iter()
+        .enumerate()
+        .flat_map(|(layer_index, layer)| {
+            layer.paths.iter().flat_map(move |path| {
+                path.points_mm
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, point)| {
+                        (
+                            point,
+                            index
+                                .checked_sub(1)
+                                .map(|previous| &path.points_mm[previous]),
+                            layer_index as u16,
+                            path.kind,
+                        )
+                    })
+            })
+        });
     let setup = [
         Command::Millimetres,
         Command::AbsolutePosition,
@@ -215,7 +234,7 @@ pub fn verify(
             setup_index += 1;
             continue;
         }
-        let Some((target, source)) = expected.next() else {
+        let Some((target, source, layer_index, deposition_kind)) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
         let required_command = if source.is_some() {
@@ -320,6 +339,24 @@ pub fn verify(
             deposition_segments += 1;
         } else {
             travel_segments += 1;
+        }
+        if let Some(sink) = replay.as_deref_mut() {
+            let kind = if source.is_none() {
+                0
+            } else {
+                match deposition_kind {
+                    spiling_contracts::manufacturing::DepositionKind::Perimeter => 1,
+                    spiling_contracts::manufacturing::DepositionKind::SolidFill => 2,
+                }
+            };
+            sink.push(
+                position,
+                actual_e,
+                feed,
+                (line_index + 1) as u32,
+                layer_index,
+                kind,
+            )?;
         }
         previous_position = Some(position);
     }

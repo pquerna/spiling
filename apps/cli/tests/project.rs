@@ -308,6 +308,7 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     let source = root.join("source.step");
     std::fs::copy(fixture("box-mm.step"), &source).unwrap();
     let first_export = root.join("first-export");
+    let first_replay = root.join("first.splr");
     let created = report(
         cli("create", &project)
             .arg("--import")
@@ -316,6 +317,8 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
             .arg(manufacturing_intent_fixture())
             .args(["--compile", "--verify", "--manufacturing-out"])
             .arg(&first_export)
+            .arg("--replay-out")
+            .arg(&first_replay)
             .output()
             .unwrap(),
     );
@@ -328,10 +331,13 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert_eq!(created["project"]["can_undo"], true);
     std::fs::remove_file(source).unwrap();
     let reopened_export = root.join("reopened-export");
+    let reopened_replay = root.join("reopened.splr");
     let reopened = report(
         cli("inspect", &project)
             .args(["--verify", "--manufacturing-out"])
             .arg(&reopened_export)
+            .arg("--replay-out")
+            .arg(&reopened_replay)
             .output()
             .unwrap(),
     );
@@ -347,6 +353,27 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
         created["manufacturing"]["intent"]
     );
     assert_eq!(reopened["manufacturing_export"]["artifact"], artifact);
+    let display: spiling_contracts::manufacturing::ReplayDisplayDescriptor =
+        serde_json::from_value(reopened["manufacturing_replay"]["replay_display"].clone()).unwrap();
+    let record: spiling_contracts::manufacturing::ManufacturingArtifactRecord =
+        serde_json::from_value(artifact.clone()).unwrap();
+    let actual = std::fs::read(&reopened_replay).unwrap();
+    display.validate_for_record(&record).unwrap();
+    spiling_contracts::manufacturing::validate_replay_display(&actual, &display).unwrap();
+    assert_eq!(actual, std::fs::read(&first_replay).unwrap());
+    assert_eq!(
+        created["manufacturing_replay"]["replay_display"],
+        reopened["manufacturing_replay"]["replay_display"]
+    );
+    let occupied = terminal_error(
+        cli("inspect", &project)
+            .arg("--replay-out")
+            .arg(&reopened_replay)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(occupied["domain"], "input_or_output");
+    assert_eq!(std::fs::read(&reopened_replay).unwrap(), actual);
     for name in [
         "plan.json",
         "program.gcode",
@@ -530,14 +557,18 @@ fn manufacturing_errors_leave_no_export_or_success_and_preserve_checkpoint() {
     corrupt["program"] = serde_json::json!("G21\nG90\nM82\nG92 E0\nG1 X999 Y999 Z999 E999 F999\n");
     std::fs::write(&asset, serde_json::to_vec(&corrupt).unwrap()).unwrap();
     let corrupt_output = root.join("corrupt-export");
+    let corrupt_replay = root.join("corrupt.splr");
     terminal_error(
         cli("inspect", &project)
             .arg("--manufacturing-out")
             .arg(&corrupt_output)
+            .arg("--replay-out")
+            .arg(&corrupt_replay)
             .output()
             .unwrap(),
     );
     assert!(!corrupt_output.exists());
+    assert!(!corrupt_replay.exists());
     std::fs::write(&asset, original).unwrap();
     assert_eq!(
         report(cli("inspect", &project).arg("--verify").output().unwrap())["manufacturing"]["artifact"],

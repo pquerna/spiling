@@ -16,14 +16,15 @@ Licensed under the Open Software License version 3.0
 - On recoverable save failure query authoritative project status without retry. Preserve dirty/save_uncertain evidence: a committed-but-unsynced checkpoint is not a confirmed save or assumed rollback. No success stdout or completion manifest on save error.
 - --out and --manufacturing-out admit previously nonexistent directories before spawn, use exclusive files and roll back only their own handles/inodes on failure, without recursive deletion or following substituted symlinks. Never overwrite/delete foreign replacements. Completion manifests and final stdout follow successful observed child reap; output failure still rolls back owned files.
 - Manufacturing export independently replays through the engine and retrieves the descriptor-bound, size/hash/input/schema/summary-validated bundle through EngineClient. Export plan.json/program.gcode/verification.json/provenance.json; verification.json is the exact fresh replay report, not the persisted flag. Identify exported content even if later ordered edits invalidate the active artifact. Every manufacturing report states software_only and not_machine_ready; no physical readiness or printability claims.
+- `project create/inspect --replay-out NEW_FILE` requests a fresh ReportAndMotion inspection and uses `EngineClient::fetch_replay_display` before writing SPLR actual-program bytes. Include its descriptor and captured provenance in the JSON report. The new file is admitted exclusively before spawn and owned-handle rollback removes only that file on any failure; commit follows successful observed child reap/stdout. All other inspection callers explicitly select ReportOnly. Filesystem safety is shared directly from `spiling_engine_client::export`, not duplicated in CLI.
 - Create/edit checkpoint final state; open does not implicitly save. Save preserves undo/redo history. Fresh inspection reopens engine-owned source assets after originals are removed.
 - Exercise node --import tsx tools/smoke-cli.mjs against built binaries and SPILING_TEST_ENGINE=PATH cargo test --locked -p spiling-cli -- --ignored --test-threads=1. Actual-child regressions cover source deletion/reopen, ordered checkpoints and history, transfer/sections/faces, failure/reap/rollback, fresh manufacturing replay/export and non-UTF8 paths. Parent integration verification runs these sequentially under its resource limits; do not claim unexecuted checks.
 
 Software-only operator workflow:
 
 ```sh
-spiling-cli project create PROJECT --import fixtures/geometry/box-mm.step --intent fixtures/manufacturing/solid-fill.intent.json --compile --verify --manufacturing-out NEW_EXPORT --engine ENGINE
-spiling-cli project inspect PROJECT --verify --manufacturing-out NEW_REOPEN_EXPORT --engine ENGINE
+spiling-cli project create PROJECT --import fixtures/geometry/box-mm.step --intent fixtures/manufacturing/solid-fill.intent.json --compile --verify --manufacturing-out NEW_EXPORT --replay-out NEW_MOTION.splr --engine ENGINE
+spiling-cli project inspect PROJECT --verify --manufacturing-out NEW_REOPEN_EXPORT --replay-out NEW_REOPEN_MOTION.splr --engine ENGINE
 ```
 
 See [development](../../docs/quality/development.md#real-engine-and-cli), [control protocol](../../docs/protocol/control.md) and [project format](../../docs/protocol/project.md).

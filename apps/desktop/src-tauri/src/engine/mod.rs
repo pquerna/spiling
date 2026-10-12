@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+pub mod manufacturing;
+
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -31,11 +33,15 @@ pub struct EngineState {
     pub closing: AtomicBool,
     pub exit_ready: AtomicBool,
     fixture_root: Option<PathBuf>,
+    manufacturing_diagnostic: bool,
 }
 
 impl EngineState {
     pub fn geometry_debug_enabled(&self) -> bool {
         self.fixture_root.is_some()
+    }
+    pub fn manufacturing_diagnostic_enabled(&self) -> bool {
+        self.manufacturing_diagnostic
     }
     async fn active(&self) -> Result<MutexGuard<'_, Supervisor>, String> {
         if self.closing.load(Ordering::Acquire) {
@@ -59,11 +65,15 @@ impl Default for EngineState {
             .and_then(|_| std::env::var_os("SPILING_GEOMETRY_FIXTURE_ROOT"))
             .and_then(|path| PathBuf::from(path).canonicalize().ok())
             .filter(|path| path.is_dir());
+        let manufacturing_diagnostic = fixture_root.is_some()
+            && std::env::var_os("SPILING_MANUFACTURING_DIAGNOSTIC").as_deref()
+                == Some(std::ffi::OsStr::new("1"));
         Self {
             inner: Mutex::default(),
             closing: AtomicBool::new(false),
             exit_ready: AtomicBool::new(false),
             fixture_root,
+            manufacturing_diagnostic,
         }
     }
 }
@@ -93,6 +103,7 @@ pub struct Supervisor {
     project_paths: Vec<SelectedProjectEntry>,
     attached_project: Option<AttachedProject>,
     pending_project: Option<(String, AttachedProject, bool)>,
+    manufacturing: manufacturing::ManufacturingSession,
 }
 
 // A shared job's completion alone is not a project open/save receipt.
@@ -160,6 +171,9 @@ impl Supervisor {
         let is_new = matches!(command, ProjectCommand::New { .. });
         let replacing = matches!(command, ProjectCommand::Open { .. });
         let client = self.client.as_mut().ok_or("engine is not running")?;
+        if replacing {
+            self.manufacturing.clear();
+        }
         match client.project(command).await {
             Ok(response) => {
                 if let ProjectResponse::OperationAccepted { operation } = &response {
@@ -172,6 +186,7 @@ impl Supervisor {
                     self.pending_project = None;
                     self.sources.clear();
                     self.project_paths.clear();
+                    self.manufacturing.clear();
                 }
                 Ok(response)
             }
@@ -205,6 +220,7 @@ impl Supervisor {
                 self.sources.clear();
                 self.project_paths.clear();
                 self.pending_project = None;
+                self.manufacturing.clear();
                 self.client = None;
                 self.state = Lifecycle::Interrupted;
                 self.message = Some("engine exited unexpectedly; restart to recover".into());
@@ -220,6 +236,7 @@ impl Supervisor {
         self.sources.clear();
         self.project_paths.clear();
         self.pending_project = None;
+        self.manufacturing.clear();
         if let Some(mut client) = self.client.take()
             && let Err(error) = client.terminate().await
         {
@@ -262,6 +279,7 @@ impl Supervisor {
         self.sources.clear();
         self.project_paths.clear();
         self.pending_project = None;
+        self.manufacturing.clear();
         let mut note = None;
         if let Some(mut client) = self.client.take()
             && let Err(error) = client.shutdown().await
@@ -430,6 +448,7 @@ pub async fn engine_native_operation(
         .await
         .map_err(|e| e.to_string())?;
     let mut supervisor = state.active().await?;
+    manufacturing::observe(&mut supervisor, &operation);
     // Retained historical results never attach a checkpoint to a different session.
     if supervisor
         .client
@@ -513,6 +532,7 @@ pub async fn engine_interrupt(state: State<'_, EngineState>) -> Result<(), Strin
     supervisor.sources.clear();
     supervisor.project_paths.clear();
     supervisor.pending_project = None;
+    supervisor.manufacturing.clear();
     let mut client = supervisor.client.take().ok_or("engine is not running")?;
     supervisor.state = Lifecycle::Interrupted;
     supervisor.message =
@@ -1127,6 +1147,20 @@ mod tests {
                 resource: resource(),
             },
             JobResult::ManufacturingVerified {
+                provenance: spiling_contracts::manufacturing::ManufacturingInspectionProvenance {
+                    project_id: project_info(false).project_id,
+                    input_revision: spiling_contracts::project::ProjectRevision::ZERO,
+                    input_hash: record.input_hash.clone(),
+                    kernel: spiling_contracts::geometry::KernelIdentity {
+                        name: "native".into(),
+                        version: "1".into(),
+                        revision: "pinned".into(),
+                    },
+                    planner_version: "1".into(),
+                    emitter_version: "1".into(),
+                    verifier_version: "1".into(),
+                },
+                replay_display: None,
                 record,
                 resource: resource(),
                 report: VerificationReport {

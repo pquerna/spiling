@@ -96,7 +96,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, };
+export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
 
@@ -166,15 +166,23 @@ export type ManufacturingProvenance = { project_id: ProjectId, input_revision: P
 
 export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, };
 
+export type VerificationOutput = "report_only" | "report_and_motion";
+
+export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
+
+export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, bounds_mm: AabbMm, };
+
+export type ReplayDisplayDescriptor = { info: ReplayDisplayInfo, resource: ArtifactView, };
+
 export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, software_only: boolean, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 
 export type ManufacturingArtifactRecord = { hash: SourceHash, input_hash: SourceHash, byte_count: number, summary: ManufacturingSummary, };
 
-export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, };
+export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "op": "set_intent", session_id: SessionId, base_revision: ProjectRevision, intent: ManufacturingIntent, } | { "op": "compile", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "inspect", session_id: SessionId, base_revision: ProjectRevision, output: VerificationOutput, };
 
-export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, } | { "type": "error", error: ManufacturingError, };
+export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_CONTROL_BYTES = 65536 as const;
 export const MAX_BINARY_BYTES = 4194304 as const;
@@ -196,6 +204,11 @@ export const MAX_DISPLAY_VERTICES = 1000000 as const;
 export const MAX_DISPLAY_TRIANGLES = 1000000 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
 export const MAX_SECTION_BYTES = 16777216 as const;
+export const MAX_REPLAY_DISPLAY_BYTES = 16777216 as const;
+export const MAX_REPLAY_EVENTS = 200000 as const;
+export const REPLAY_HEADER_BYTES = 96 as const;
+export const REPLAY_RECORD_BYTES = 48 as const;
+export const REPLAY_SCHEMA_VERSION = 1 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;

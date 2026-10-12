@@ -125,6 +125,87 @@ pub fn verify_bundle(
     bundle: &ManufacturingBundle,
     cancel: &AtomicBool,
 ) -> Result<VerificationReport, ManufacturingError> {
+    inspect_report(bundle, cancel)
+}
+
+pub struct EncodedReplayDisplay {
+    pub info: ReplayDisplayInfo,
+    pub bytes: Vec<u8>,
+}
+
+pub struct ManufacturingInspection {
+    pub report: VerificationReport,
+    pub provenance: ManufacturingInspectionProvenance,
+    pub replay: Option<EncodedReplayDisplay>,
+}
+
+/// Fresh independent replay; display output is opt-in and bound to the caller's immutable bundle hash.
+pub fn inspect_bundle(
+    bundle: &ManufacturingBundle,
+    bundle_hash: &spiling_contracts::geometry::SourceHash,
+    output: VerificationOutput,
+    cancel: &AtomicBool,
+) -> Result<ManufacturingInspection, ManufacturingError> {
+    validate_inspection_bundle(bundle, cancel)?;
+    let mut sink = match output {
+        VerificationOutput::ReportOnly => None,
+        VerificationOutput::ReportAndMotion => Some(verifier::ReplaySink::new(&bundle.plan)?),
+    };
+    let report = verifier::verify_actual(
+        &bundle.program,
+        &bundle.plan,
+        &bundle.provenance.intent,
+        cancel,
+        sink.as_mut(),
+    )?;
+    check_cancel(cancel)?;
+    let replay = if let Some(sink) = sink {
+        let (bytes, bounds_mm) = sink.finish()?;
+        let info = ReplayDisplayInfo {
+            schema_version: REPLAY_SCHEMA_VERSION,
+            bundle_hash: bundle_hash.clone(),
+            input_hash: bundle.provenance.input_hash.clone(),
+            program_hash: spiling_contracts::geometry::SourceHash::from_bytes(
+                bundle.program.as_bytes(),
+            ),
+            verifier_version: VERIFIER_VERSION.into(),
+            frame: bundle.provenance.intent.printer.coordinate_frame,
+            event_count: report.deposition_segments + report.travel_segments,
+            deposition_count: report.deposition_segments,
+            travel_count: report.travel_segments,
+            layer_count: bundle.plan.layers.len() as u32,
+            bounds_mm,
+        };
+        info.validate()?;
+        Some(EncodedReplayDisplay { info, bytes })
+    } else {
+        None
+    };
+    check_cancel(cancel)?;
+    Ok(ManufacturingInspection {
+        report,
+        provenance: (&bundle.provenance).into(),
+        replay,
+    })
+}
+
+fn inspect_report(
+    bundle: &ManufacturingBundle,
+    cancel: &AtomicBool,
+) -> Result<VerificationReport, ManufacturingError> {
+    validate_inspection_bundle(bundle, cancel)?;
+    verifier::verify(
+        &bundle.program,
+        &bundle.plan,
+        &bundle.provenance.intent,
+        cancel,
+    )
+}
+
+fn validate_inspection_bundle(
+    bundle: &ManufacturingBundle,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
     bundle.validate()?;
     let p = &bundle.provenance;
@@ -140,7 +221,7 @@ pub fn verify_bundle(
             "bundle algorithm/kernel version is not supported",
         ));
     }
-    verifier::verify(&bundle.program, &bundle.plan, &p.intent, cancel)
+    Ok(())
 }
 
 pub(crate) fn error(code: ManufacturingErrorCode, message: impl AsRef<str>) -> ManufacturingError {

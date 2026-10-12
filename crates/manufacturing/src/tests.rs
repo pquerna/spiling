@@ -411,3 +411,130 @@ fn repeated_slab_paths_charge_every_layer_against_segment_budget() {
         ManufacturingErrorCode::ResourceLimit
     );
 }
+
+#[test]
+fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
+    let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    scene.id = ProjectId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let intent = intent();
+    let cancel = AtomicBool::new(false);
+    let mut bundle = scene.compile(&intent).unwrap();
+    // A supported two-path plan retains actual source provenance; only the first
+    // endpoint has an intentionally visible serialization-rounding deviation.
+    bundle.plan.layers.truncate(1);
+    bundle.plan.layers[0].paths = vec![
+        DepositionPath {
+            kind: DepositionKind::SolidFill,
+            points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
+        },
+        DepositionPath {
+            kind: DepositionKind::SolidFill,
+            points_mm: vec![[5.0, 1.0, 0.4], [5.0, 5.0, 0.4]],
+        },
+    ];
+    bundle.program = backend::emit(&bundle.plan, &intent, &cancel).unwrap();
+    bundle.verification =
+        verifier::verify(&bundle.program, &bundle.plan, &intent, &cancel).unwrap();
+    let bundle_bytes = serde_json::to_vec(&bundle).unwrap();
+    let hash = SourceHash::from_bytes(&bundle_bytes);
+    let inspection =
+        inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel).unwrap();
+    assert!(inspection.report.max_position_error_mm > 0.0);
+    assert_eq!(
+        inspection.provenance,
+        ManufacturingInspectionProvenance::from(&bundle.provenance)
+    );
+    let replay = inspection.replay.unwrap();
+    assert_eq!(replay.info.event_count, 4);
+    assert_eq!(replay.info.travel_count, 2);
+    assert_eq!(replay.bytes[REPLAY_HEADER_BYTES + 47], 0);
+    assert_eq!(
+        replay.bytes[REPLAY_HEADER_BYTES + 2 * REPLAY_RECORD_BYTES + 47],
+        1
+    );
+    let positions: Vec<[f64; 3]> = replay.bytes[REPLAY_HEADER_BYTES..]
+        .chunks_exact(REPLAY_RECORD_BYTES)
+        .map(|r| {
+            std::array::from_fn(|axis| {
+                f64::from_le_bytes(r[axis * 8..axis * 8 + 8].try_into().unwrap())
+            })
+        })
+        .collect();
+    assert_eq!(positions[0], [1.0, 1.0, 0.4]);
+    assert_ne!(positions[0], bundle.plan.layers[0].paths[0].points_mm[0]);
+    assert_eq!(positions[1], positions[2]);
+    let replay_hash = SourceHash::from_bytes(&replay.bytes);
+    let descriptor = ReplayDisplayDescriptor {
+        info: replay.info,
+        resource: spiling_contracts::ArtifactView {
+            name: format!("artifacts/{}", replay_hash.as_str()),
+            size_bytes: replay.bytes.len().to_string(),
+            sha256: replay_hash.as_str().into(),
+            media_type: REPLAY_MEDIA_TYPE.into(),
+        },
+    };
+    descriptor
+        .validate_for_record(&ManufacturingArtifactRecord {
+            hash: hash.clone(),
+            input_hash: bundle.provenance.input_hash.clone(),
+            byte_count: bundle_bytes.len() as u32,
+            summary: bundle.summary(),
+        })
+        .unwrap();
+    validate_replay_display(&replay.bytes, &descriptor).unwrap();
+    let mut corrupted = replay.bytes.clone();
+    corrupted[REPLAY_HEADER_BYTES + 47] = 1;
+    let changed_hash = SourceHash::from_bytes(&corrupted);
+    let mut corrupted_descriptor = descriptor.clone();
+    corrupted_descriptor.resource.name = format!("artifacts/{}", changed_hash.as_str());
+    corrupted_descriptor.resource.sha256 = changed_hash.as_str().into();
+    assert!(validate_replay_display(&corrupted, &corrupted_descriptor).is_err());
+    assert!(
+        inspect_bundle(&bundle, &hash, VerificationOutput::ReportOnly, &cancel)
+            .unwrap()
+            .replay
+            .is_none()
+    );
+    let mut invalid_bundle = bundle.clone();
+    invalid_bundle.program = invalid_bundle.program.replacen("G1 ", "G0 ", 1);
+    assert!(
+        inspect_bundle(
+            &invalid_bundle,
+            &hash,
+            VerificationOutput::ReportAndMotion,
+            &cancel
+        )
+        .is_err()
+    );
+    assert_eq!(
+        inspect_bundle(
+            &bundle,
+            &hash,
+            VerificationOutput::ReportAndMotion,
+            &AtomicBool::new(true)
+        )
+        .err()
+        .unwrap()
+        .code,
+        ManufacturingErrorCode::Cancelled
+    );
+    // Fixed fixture identity makes the independently decoded ABI golden reproducible.
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(replay.bytes.len() * 2);
+    for byte in &replay.bytes {
+        write!(&mut hex, "{byte:02x}").unwrap();
+    }
+    let fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,
+        "data":hex, "actual_positions":positions, "program":bundle.program });
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/protocol/replay.json"
+    );
+    if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
+        std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+    } else {
+        let committed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(committed, fixture, "native replay ABI golden drift");
+    }
+}

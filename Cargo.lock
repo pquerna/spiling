@@ -4757,14 +4757,12 @@ dependencies = [
 name = "spiling-cli"
 version = "0.1.0"
 dependencies = [
- "rustix",
  "serde",
  "serde_json",
  "spiling-contracts",
  "spiling-engine-client",
  "tokio",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4844,6 +4842,7 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-types",
+ "rustix",
  "serde_json",
  "sha2",
  "spiling-contracts",
@@ -4853,6 +4852,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

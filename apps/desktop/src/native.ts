@@ -21,6 +21,10 @@ import type {
   ArtifactView,
   ArtifactChunkMetadata,
   ArtifactSummary,
+  ManufacturingCommand,
+  ManufacturingResponse,
+  ManufacturingArtifactRecord,
+  ReplayDisplayDescriptor,
 } from "@spiling/protocol";
 
 export interface RuntimeInfo {
@@ -28,11 +32,22 @@ export interface RuntimeInfo {
   runtime: string;
   cef_api_version: number;
   geometry_debug_enabled: boolean;
+  manufacturing_diagnostic_enabled: boolean;
 }
 export interface EngineStatus {
   state: "stopped" | "running" | "interrupted";
   message: string | null;
   hello: Hello | null;
+}
+
+export interface SelectedManufacturingExport {
+  token: string;
+  session_id: SessionId;
+  label: string;
+}
+export interface ManufacturingExportReceipt {
+  label: string;
+  files: string[];
 }
 
 export const native = {
@@ -87,5 +102,23 @@ export const native = {
   readArtifact: (name: string) => invoke<ArrayBuffer>("engine_read_artifact", { name }),
   chunk: (resource: ArtifactView, expected: ArtifactChunkMetadata, summary: ArtifactSummary) =>
     invoke<ArrayBuffer>("geometry_chunk", { resource, expected, summary }),
+  manufacturing: (command: ManufacturingCommand) =>
+    invoke<ManufacturingResponse>("manufacturing_control", { command }),
+  replay: (descriptor: ReplayDisplayDescriptor, record: ManufacturingArtifactRecord) =>
+    invoke<ArrayBuffer>("manufacturing_replay", { descriptor, record }),
+  selectManufacturingExport: () =>
+    invoke<SelectedManufacturingExport | null>("manufacturing_select_export"),
+  debugSelectManufacturingExport: (relativePath: string) =>
+    invoke<SelectedManufacturingExport>("manufacturing_debug_select_export", { relativePath }),
+  exportManufacturing: (
+    selection: SelectedManufacturingExport,
+    record: ManufacturingArtifactRecord,
+  ) =>
+    invoke<ManufacturingExportReceipt>("manufacturing_export", {
+      token: selection.token,
+      sessionId: selection.session_id,
+      record,
+    }),
+  attachManufacturingDiagnostic: () => invoke<Hello>("manufacturing_diagnostic_attach"),
   triangle: () => invoke<ArrayBuffer>("engine_triangle"),
 };

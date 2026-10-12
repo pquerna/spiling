@@ -619,6 +619,7 @@ async fn manufacturing_rejections_preserve_pid_session_and_unwritten_preflight()
         ManufacturingCommand::Inspect {
             session_id: session.clone(),
             base_revision: info.revision,
+            output: VerificationOutput::ReportOnly,
         },
     ] {
         let ManufacturingResponse::OperationAccepted { operation } =
@@ -793,6 +794,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
         .manufacturing(ManufacturingCommand::Inspect {
             session_id: session.clone(),
             base_revision: info.revision,
+            output: VerificationOutput::ReportOnly,
         })
         .await
         .unwrap()
@@ -845,6 +847,7 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
         .manufacturing(ManufacturingCommand::Inspect {
             session_id: reopened.hello().session_id.clone(),
             base_revision: info.revision,
+            output: VerificationOutput::ReportOnly,
         })
         .await
         .unwrap()

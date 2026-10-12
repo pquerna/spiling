@@ -42,7 +42,8 @@ spiling-core = { path = "crates/core" }
 spiling-manufacturing = { path = "crates/manufacturing" }
 
 [profile.dev]
-debug = 1
+debug = 0
+incremental = false
 
 [profile.release]
 lto = "thin"

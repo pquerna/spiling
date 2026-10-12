@@ -127,6 +127,7 @@ impl TryFrom<ManufacturingCommand> for rpc::VerifyManufacturingRequest {
         let ManufacturingCommand::Inspect {
             session_id,
             base_revision,
+            output,
         } = value
         else {
             return Err("expected manufacturing inspect command".into());
@@ -137,6 +138,7 @@ impl TryFrom<ManufacturingCommand> for rpc::VerifyManufacturingRequest {
             parent,
             request_id: String::new(),
             base_revision: base_revision.get(),
+            output: rpc::VerificationOutput::try_from(output)? as i32,
         })
     }
 }
@@ -147,6 +149,9 @@ impl TryFrom<rpc::VerifyManufacturingRequest> for ManufacturingCommand {
         Ok(Self::Inspect {
             session_id: super::session_parent(&value.parent)?,
             base_revision: ProjectRevision(value.base_revision),
+            output: rpc::VerificationOutput::try_from(value.output)
+                .map_err(|_| "unknown verification output")?
+                .try_into()?,
         })
     }
 }
@@ -695,6 +700,7 @@ mod tests {
         let command = ManufacturingCommand::Inspect {
             session_id,
             base_revision: ProjectRevision(19),
+            output: VerificationOutput::ReportOnly,
         };
         let request_id = "3d21ddeb-0e96-4c9e-a2e2-7f37642366f1";
         let ManufacturingCall::Verify(request) =

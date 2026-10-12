@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod manufacturing;
 mod operation;
 pub mod project;
+mod replay;
 pub use error::*;
 pub use geometry::*;
 pub use manufacturing::*;

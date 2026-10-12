@@ -29,6 +29,8 @@ import {
   WebGPURenderer,
 } from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { createReplayDisplay, replayBudget } from "./replay/index.ts";
+import type { ReplayDisplay, ReplayView } from "./replay/index.ts";
 import {
   MAX_DEFINITIONS,
   MAX_DISPLAY_BUFFER_BYTES,
@@ -54,6 +56,8 @@ import type {
   OccurrenceRecord,
   SceneSummary,
   SectionSummary,
+  ReplayDisplayDescriptor,
+  DecodedReplayDisplay,
 } from "@spiling/protocol";
 
 export interface DiagnosticViewport {
@@ -82,6 +86,9 @@ export interface GeometryViewport {
   setSelection(reference: FaceRef | null): Promise<void>;
   showSection(summary: SectionSummary, section: DisplaySection | null): Promise<void>;
   discardSection(): Promise<void>;
+  showReplay(descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay): Promise<void>;
+  clearReplay(): Promise<void>;
+  setReplayView(options: ReplayView): Promise<void>;
   fitToScene(): Promise<void>;
   setView(view: "front" | "isometric"): Promise<void>;
   dispose(): Promise<void>;
@@ -202,6 +209,8 @@ export async function createGeometryViewport(
   let candidate: Display | null = null;
   let overlay: SectionDisplay | null = null;
   let stagedSection: SectionDisplay | null = null;
+  let motion: ReplayDisplay | null = null;
+  let stagedMotion: ReplayDisplay | null = null;
   const highlights = new Group();
   scene.add(highlights);
   let synchronized = true;
@@ -236,6 +245,10 @@ export async function createGeometryViewport(
     for (const lines of [overlay, stagedSection]) {
       rawBytes += lines?.rawBytes ?? 0;
       gpuBytes += lines?.gpuBytes ?? 0;
+    }
+    for (const replay of [motion, stagedMotion]) {
+      rawBytes += replay?.rawBytes ?? 0;
+      gpuBytes += replay?.gpuBytes ?? 0;
     }
     return { rawBytes, gpuBytes, ownedBytes: rawBytes + gpuBytes };
   }
@@ -560,7 +573,7 @@ export async function createGeometryViewport(
     camera.bottom = -viewHeight / 2;
     camera.updateProjectionMatrix();
   }
-  function fit(summary: SceneSummary | undefined) {
+  function fit(summary: Pick<SceneSummary, "bounds_mm"> | undefined) {
     const bounds = summary?.bounds_mm;
     const extent = bounds
       ? Math.max(...bounds.max.map((value, axis) => value - bounds.min[axis]!))
@@ -587,10 +600,12 @@ export async function createGeometryViewport(
     candidate = buildDisplay(stagedSummary, definitions, occurrences);
     const next = candidate;
     await upload(next.root);
+    motion?.rebase(next.summary.occurrence_count > 0 ? next.origin : motion.origin);
     const previous = active;
     if (previous) scene.remove(previous.root);
     scene.add(next.root);
-    if (!previous || previous.summary.occurrence_count === 0) fit(next.summary);
+    if (next.summary.occurrence_count === 0 && motion) fit({ bounds_mm: motion.replay.boundsMm });
+    else if (!previous || previous.summary.occurrence_count === 0) fit(next.summary);
     await redraw();
     available();
     active = next;
@@ -623,6 +638,10 @@ export async function createGeometryViewport(
       dropStaging();
       destroyDisplay(active, new Set());
       active = null;
+      motion?.dispose();
+      motion = null;
+      stagedMotion?.dispose();
+      stagedMotion = null;
       material.dispose();
       selectionMaterial.dispose();
       lineMaterial.dispose();
@@ -978,10 +997,63 @@ export async function createGeometryViewport(
         stagedSection = null;
         await redraw();
       },
+      showReplay(descriptor, replay) {
+        return perform(async () => {
+          await rendering;
+          const budget = replayBudget(replay);
+          reserve(budget.rawBytes, budget.gpuBytes);
+          const next = createReplayDisplay(
+            descriptor,
+            replay,
+            active && active.summary.occurrence_count > 0 ? active.origin : null,
+          );
+          stagedMotion = next;
+          const previous = motion;
+          try {
+            await upload(next.root);
+            previous?.root.removeFromParent();
+            scene.add(next.root);
+            if (!active || active.summary.occurrence_count === 0)
+              fit({ bounds_mm: replay.boundsMm });
+            await redraw();
+            available();
+            motion = next;
+            stagedMotion = null;
+            previous?.dispose();
+          } catch (error) {
+            next.dispose();
+            stagedMotion = null;
+            if (previous && !disposed && !failed) scene.add(previous.root);
+            throw error;
+          }
+        });
+      },
+      clearReplay() {
+        return perform(async () => {
+          await rendering;
+          motion?.dispose();
+          motion = null;
+          await redraw();
+        });
+      },
+      setReplayView(options) {
+        return perform(async () => {
+          await rendering;
+          if (!motion) reject("No replay display is installed.");
+          motion.setView(options);
+          await redraw();
+        });
+      },
       fitToScene() {
         return perform(async () => {
           await rendering;
-          fit(active?.summary);
+          fit(
+            active && active.summary.occurrence_count > 0
+              ? active.summary
+              : motion
+                ? { bounds_mm: motion.replay.boundsMm }
+                : active?.summary,
+          );
           await redraw();
         });
       },

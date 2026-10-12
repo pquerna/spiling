@@ -90,16 +90,33 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         "application/x-spiling-manufacturing-bundle" => {
             Ok(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         }
+        "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
         _ => Err("unexpected native artifact media type".into()),
     }
 }
 fn validate_verified(
     record: &ManufacturingArtifactRecord,
     report: &VerificationReport,
+    provenance: &ManufacturingInspectionProvenance,
+    replay_display: Option<&ReplayDisplayDescriptor>,
 ) -> Result<(), String> {
     report.validate().map_err(|e| e.to_string())?;
+    provenance
+        .validate_for_record(record)
+        .map_err(|e| e.to_string())?;
+    if let Some(display) = replay_display {
+        display
+            .validate_for_record(record)
+            .map_err(|e| e.to_string())?;
+        if display.info.verifier_version != provenance.verifier_version
+            || display.info.travel_count != report.travel_segments
+        {
+            return Err("replay/provenance/report mismatch".into());
+        }
+    }
     if !report.verified
         || report.deposition_segments != record.summary.deposition_segments
+        || report.travel_segments != record.summary.paths
         || report.deposited_volume_mm3 != record.summary.deposited_volume_mm3
         || report.filament_length_mm != record.summary.filament_length_mm
     {
@@ -219,6 +236,22 @@ pub fn native_operation_view(
             }
             _ => {}
         }
+        if let JobResult::ManufacturingVerified {
+            replay_display: Some(display),
+            ..
+        } = result
+        {
+            let size =
+                super::validate_artifact_view(&display.resource, MAX_REPLAY_DISPLAY_BYTES as u64)?;
+            if !meta.outputs.iter().any(|a| {
+                a.name == display.resource.name
+                    && a.size_bytes == size
+                    && a.sha256 == display.resource.sha256
+                    && a.media_type == display.resource.media_type
+            }) {
+                return Err("replay result not published in outputs".into());
+            }
+        }
         if matches!(
             &operation.result,
             Some(google::longrunning::operation::Result::Error(_))
@@ -288,10 +321,16 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
                 super::manufacturing::validate_resource(&record, &resource)?;
                 let report: VerificationReport =
                     required(v.report, "verification report")?.try_into()?;
-                validate_verified(&record, &report)?;
+                let provenance: ManufacturingInspectionProvenance =
+                    required(v.provenance, "inspection provenance")?.try_into()?;
+                let replay_display: Option<ReplayDisplayDescriptor> =
+                    v.replay_display.map(TryInto::try_into).transpose()?;
+                validate_verified(&record, &report, &provenance, replay_display.as_ref())?;
                 Self::ManufacturingVerified {
                     record,
                     report,
+                    provenance,
+                    replay_display,
                     resource: artifact_to_view(
                         resource,
                         u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
@@ -327,8 +366,10 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                 record,
                 report,
                 resource,
+                provenance,
+                replay_display,
             } => {
-                validate_verified(&record, &report)?;
+                validate_verified(&record, &report, &provenance, replay_display.as_ref())?;
                 let resource =
                     artifact_from_view(resource, u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))?;
                 super::manufacturing::validate_resource(&record, &resource)?;
@@ -336,6 +377,8 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
                     record: Some(record.try_into()?),
                     report: Some(report.try_into()?),
                     resource: Some(resource),
+                    provenance: Some(provenance.try_into()?),
+                    replay_display: replay_display.map(TryInto::try_into).transpose()?,
                 })
             }
         };

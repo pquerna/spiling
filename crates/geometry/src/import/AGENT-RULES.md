@@ -10,4 +10,6 @@ Parse UTF-8 once through maintained step-p21 after source/entity lexical caps; r
 
 `mod.rs` owns native admission and positional source/native face assertions; `ast.rs` owns bounded lexical/AST traversal; `units.rs` resolves only solid-referenced representation contexts. Every normalized definition includes exact bounded line/circle witnesses plus actual native vertices for sections. Circular witnesses precede modeling's rational-curve conversion and are not sampled. `FaceInfo.orientation` is the effective native direction relative to the declared plane normal or outward cylinder radial normal, including processor handedness; inward hole faces are false. No source paths or session/artifact identities belong here.
 
+Preserve the bounded native extraction cause in rejection diagnostics. A kernel representation failure is not independent proof that the source solid is invalid; do not hide it with healing, source rewriting or guessed face remapping.
+
 Exercise `cargo test --locked -p spiling-geometry` and the real native corpus smoke; see [geometry evidence](../../../../docs/quality/geometry-evidence.md).

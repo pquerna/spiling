@@ -517,7 +517,7 @@ pub(crate) fn import_step(
         .collect::<Vec<_>>();
     check_cancel(cancel)?;
     let native = monstertruck_topology::Solid::extract(compressed)
-        .map_err(|_| invalid("solid is not a connected closed manifold"))?;
+        .map_err(|cause| invalid(&format!("native solid extraction failed: {cause}")))?;
     check_cancel(cancel)?;
     for shell in native.boundaries() {
         shell

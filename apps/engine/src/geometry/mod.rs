@@ -136,7 +136,7 @@ enum PublicationKind {
     },
     Verified {
         record: ManufacturingArtifactRecord,
-        report: VerificationReport,
+        inspection: spiling_manufacturing::ManufacturingInspection,
     },
 }
 struct Active {
@@ -161,6 +161,9 @@ pub struct Runtime {
     project: Project,
     retained_source_bytes: u32,
     artifacts: BTreeMap<ArtifactId, Artifact>,
+    // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
+    // into the terminal ledger transaction after ACK and released immediately.
+    replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
@@ -180,6 +183,7 @@ impl Runtime {
             project: Project::new(),
             retained_source_bytes: 0,
             artifacts: BTreeMap::new(),
+            replay_publication: None,
             released: VecDeque::new(),
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
@@ -246,6 +250,26 @@ impl Runtime {
             .chunks
             .iter()
             .zip(artifact.bytes.iter().map(Vec::as_slice)))
+    }
+
+    pub fn replay_publication(
+        &self,
+        id: JobId,
+    ) -> Option<&spiling_manufacturing::EncodedReplayDisplay> {
+        self.replay_publication
+            .as_ref()
+            .filter(|(job, _)| *job == id)
+            .map(|(_, replay)| replay)
+    }
+
+    pub fn release_replay_publication(&mut self, id: JobId) {
+        if self
+            .replay_publication
+            .as_ref()
+            .is_some_and(|(job, _)| *job == id)
+        {
+            self.replay_publication = None;
+        }
     }
 
     pub fn poll(&mut self) -> Result<(), String> {
@@ -419,8 +443,21 @@ impl Runtime {
                                 record,
                             })
                         }
-                        PublicationKind::Verified { record, report } => {
-                            Some(JobResult::ManufacturingVerified { record, report })
+                        PublicationKind::Verified { record, inspection } => {
+                            let replay =
+                                inspection.replay.as_ref().map(|replay| replay.info.clone());
+                            if let Some(display) = inspection.replay {
+                                if self.replay_publication.is_some() {
+                                    return Err("unreleased replay publication".into());
+                                }
+                                self.replay_publication = Some((job, display));
+                            }
+                            Some(JobResult::ManufacturingVerified {
+                                record,
+                                report: inspection.report,
+                                provenance: inspection.provenance,
+                                replay,
+                            })
                         }
                         PublicationKind::Section => {
                             self.artifacts.insert(
@@ -559,10 +596,21 @@ impl Runtime {
                     artifact: None,
                 })
             }
-            (Purpose::Verify, Product::Verified { record, report }) => Ok(Publication {
-                kind: PublicationKind::Verified { record, report },
-                artifact: None,
-            }),
+            (Purpose::Verify, Product::Verified { record, inspection }) => {
+                if inspection.replay.as_ref().is_some_and(|replay| {
+                    replay.bytes.capacity() > MAX_REPLAY_DISPLAY_BYTES as usize
+                }) {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "staged replay exceeds its separate 16 MiB byte budget",
+                    )
+                    .into());
+                }
+                Ok(Publication {
+                    kind: PublicationKind::Verified { record, inspection },
+                    artifact: None,
+                })
+            }
             (Purpose::Section, Product::Section(section)) => {
                 if section.summary.total_bytes > MAX_ENGINE_ARTIFACT_BYTES - self.artifact_bytes() {
                     return Err(resource("section exceeds remaining artifact budget").into());

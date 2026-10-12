@@ -9,3 +9,4 @@ export type { DiagnosticTriangle } from "./triangle.ts";
 export * from "./display.ts";
 export * from "./mesh.ts";
 export * from "./section.ts";
+export * from "./replay.ts";

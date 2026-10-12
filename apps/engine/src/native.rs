@@ -10,7 +10,7 @@ use crate::{
 use spiling_contracts::{
     ArtifactView,
     geometry::{ArtifactChunkMetadata, ArtifactId, GeometryResponse, SceneRevision, SessionId},
-    manufacturing::ManufacturingResponse,
+    manufacturing::{MAX_REPLAY_DISPLAY_BYTES, ManufacturingResponse, ReplayDisplayDescriptor},
     project::ProjectRevision,
     rpc::Artifact,
 };
@@ -61,7 +61,7 @@ impl NativeHost {
                     std::process::exit(70);
                 }
                 if let Some((name,id)) = &pending
-                    && publish_terminal(&runtime,&jobs,name,*id,&mut resources).unwrap_or_else(fatal)
+                    && publish_terminal(&mut runtime,&jobs,name,*id,&mut resources).unwrap_or_else(fatal)
                 {
                     pending = None;
                 }
@@ -93,7 +93,7 @@ impl NativeHost {
                     Command::Refresh(name,id,cancel,tx) => {
                         if cancel { runtime.cancel(id); }
                         let result = jobs.with_sync(|s| Ok(s.get(&name)?.done)).and_then(|done| {
-                            if done { Ok(true) } else { publish_terminal(&runtime,&jobs,&name,id,&mut resources) }
+                            if done { Ok(true) } else { publish_terminal(&mut runtime,&jobs,&name,id,&mut resources) }
                         });
                         let _=tx.send(result);
                     }
@@ -103,7 +103,7 @@ impl NativeHost {
                                 runtime.cancel(id);
                                 loop {
                                     runtime.poll().map_err(Status::internal)?;
-                                    if publish_terminal(&runtime,&jobs,&name,id,&mut resources)? { break; }
+                                    if publish_terminal(&mut runtime,&jobs,&name,id,&mut resources)? { break; }
                                     std::thread::sleep(Duration::from_millis(2));
                                 }
                             }
@@ -240,7 +240,7 @@ pub(crate) fn fatal<T>(error: Status) -> T {
     std::process::exit(70)
 }
 fn publish_terminal(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     jobs: &Jobs,
     name: &str,
     id: geometry::JobId,
@@ -286,8 +286,38 @@ fn publish_terminal(
         resources.insert(descriptor.sha256.clone(), descriptor.clone());
         outputs.push((descriptor, asset.bytes.as_slice()));
     }
-    let result = public_result(private, resources)?;
+    let replay_display = match &private {
+        geometry::JobResult::ManufacturingVerified {
+            record,
+            replay: Some(info),
+            ..
+        } => {
+            let replay = runtime
+                .replay_publication(id)
+                .ok_or_else(|| Status::internal("ACK replay bytes missing"))?;
+            if &replay.info != info {
+                return Err(Status::data_loss("ACK replay metadata mismatch"));
+            }
+            let artifact = jobs.describe_native_artifact(
+                &replay.bytes,
+                "application/x-spiling-replay-motion",
+                u64::from(MAX_REPLAY_DISPLAY_BYTES),
+            )?;
+            let descriptor = ReplayDisplayDescriptor {
+                info: info.clone(),
+                resource: view(&artifact)?,
+            };
+            descriptor
+                .validate_for_record(record)
+                .map_err(|e| domain_tonic(e.into()))?;
+            outputs.push((artifact, replay.bytes.as_slice()));
+            Some(descriptor)
+        }
+        _ => None,
+    };
+    let result = public_result(private, resources, replay_display)?;
     jobs.native_finish(name, Ok(result), outputs)?;
+    runtime.release_replay_publication(id);
     Ok(true)
 }
 
@@ -411,6 +441,7 @@ pub(crate) fn reply_error(reply: Reply) -> Status {
 fn public_result(
     result: geometry::JobResult,
     resources: &BTreeMap<String, Artifact>,
+    replay_display: Option<ReplayDisplayDescriptor>,
 ) -> Result<spiling_contracts::geometry::JobResult, Status> {
     use spiling_contracts::geometry::JobResult as Public;
     Ok(match result {
@@ -425,11 +456,21 @@ fn public_result(
                 resource: descriptor,
             }
         }
-        geometry::JobResult::ManufacturingVerified { record, report } => {
+        geometry::JobResult::ManufacturingVerified {
+            record,
+            report,
+            provenance,
+            replay,
+        } => {
+            if replay.is_some() != replay_display.is_some() {
+                return Err(Status::internal("ACK replay descriptor missing"));
+            }
             let descriptor = resource(record.hash.as_str(), resources)?;
             Public::ManufacturingVerified {
                 record,
                 report,
+                provenance,
+                replay_display,
                 resource: descriptor,
             }
         }

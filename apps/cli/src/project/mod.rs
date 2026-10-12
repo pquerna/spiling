@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use crate::{Command, Error, Options, geometry, output::OutputDirectory, set_once};
+use crate::{
+    Command, Error, Options, geometry,
+    output::{OutputDirectory, OutputFile},
+    set_once,
+};
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
 use spiling_engine_client::EngineClient;
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
@@ -57,6 +61,7 @@ enum Operation {
     Compile,
     Verify,
     ExportManufacturing,
+    ExportReplay,
     Undo,
     Redo,
     Save(Option<NativePath>),
@@ -104,6 +109,7 @@ pub fn parse(
     let mut plane = None;
     let mut output = None;
     let mut manufacturing_output = None;
+    let mut replay_output = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -152,6 +158,17 @@ pub fn parse(
                 )?;
                 operations.push(Operation::ExportManufacturing);
             }
+            Some("--replay-out") => {
+                if !matches!(mode.as_str(), "create" | "inspect") {
+                    return Err("--replay-out is valid only with project create or inspect".into());
+                }
+                let value = args
+                    .next()
+                    .ok_or("--replay-out requires a native file path")?;
+                NativePath::from_os_str(&value)?;
+                set_once(&mut replay_output, PathBuf::from(value), "--replay-out")?;
+                operations.push(Operation::ExportReplay);
+            }
             Some("--import") => operations.push(Operation::Import(path(&mut args, "--import")?)),
             Some("--add") => {
                 let id = DefinitionId::parse(text(&mut args, "--add")?)?;
@@ -183,7 +200,7 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::Verify | Operation::ExportManufacturing
+                    Operation::Verify | Operation::ExportManufacturing | Operation::ExportReplay
                 )
             }))
     {
@@ -227,6 +244,7 @@ pub fn parse(
             plane,
             output,
             manufacturing_output,
+            replay_output,
         },
         engine: engine.unwrap_or(
             env::current_exe()?
@@ -291,22 +309,24 @@ async fn manufacturing_status(
         _ => Err("unexpected manufacturing status response".into()),
     }
 }
+struct FreshInspection {
+    record: ManufacturingArtifactRecord,
+    report: VerificationReport,
+    resource: ArtifactView,
+    provenance: ManufacturingInspectionProvenance,
+    replay_display: Option<ReplayDisplayDescriptor>,
+}
 async fn verify(
     client: &mut EngineClient,
-) -> Result<
-    (
-        ManufacturingArtifactRecord,
-        VerificationReport,
-        ArtifactView,
-    ),
-    Error,
-> {
+    output: VerificationOutput,
+) -> Result<FreshInspection, Error> {
     let session = client.hello().session_id.clone();
     let base_revision = info(client).await?.revision;
     match client
         .manufacturing(ManufacturingCommand::Inspect {
             session_id: session.clone(),
             base_revision,
+            output,
         })
         .await?
     {
@@ -314,14 +334,30 @@ async fn verify(
             record,
             report,
             resource,
-        } => Ok((record, report, resource)),
+            provenance,
+            replay_display,
+        } => Ok(FreshInspection {
+            record,
+            report,
+            resource,
+            provenance,
+            replay_display,
+        }),
         ManufacturingResponse::OperationAccepted { operation } => {
             match geometry::wait_operation(client, &session, operation).await? {
                 JobResult::ManufacturingVerified {
                     record,
                     report,
                     resource,
-                } => Ok((record, report, resource)),
+                    provenance,
+                    replay_display,
+                } => Ok(FreshInspection {
+                    record,
+                    report,
+                    resource,
+                    provenance,
+                    replay_display,
+                }),
                 _ => Err("unexpected manufacturing verification job result".into()),
             }
         }
@@ -337,8 +373,18 @@ pub async fn run(
     plane: Option<PlaneMm>,
     output: Option<&mut OutputDirectory>,
     manufacturing_output: Option<&mut OutputDirectory>,
+    replay_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
-    match execute(client, workflow, plane, output, manufacturing_output).await {
+    match execute(
+        client,
+        workflow,
+        plane,
+        output,
+        manufacturing_output,
+        replay_output,
+    )
+    .await
+    {
         Ok(report) => Ok(report),
         Err(error)
             if matches!(
@@ -363,6 +409,7 @@ async fn execute(
     plane: Option<PlaneMm>,
     output: Option<&mut OutputDirectory>,
     mut manufacturing_output: Option<&mut OutputDirectory>,
+    mut replay_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     let session = client.hello().session_id.clone();
     let summary = geometry::scene(client, &session).await?;
@@ -394,6 +441,7 @@ async fn execute(
     })];
     let mut verification = None;
     let mut export_evidence = None;
+    let mut replay_evidence = None;
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
@@ -447,7 +495,14 @@ async fn execute(
                 } else {
                     "verify"
                 };
-                let (record, report, resource) = verify(client).await?;
+                let inspection = verify(client, VerificationOutput::ReportOnly).await?;
+                let FreshInspection {
+                    record,
+                    report,
+                    resource,
+                    provenance,
+                    replay_display,
+                } = inspection;
                 if !report.verified {
                     return Err("manufacturing replay did not verify the emitted program".into());
                 }
@@ -464,7 +519,39 @@ async fn execute(
                         "software_only": true, "not_machine_ready": true
                     }));
                 }
-                verification = Some((record, report));
+                verification = Some(FreshInspection {
+                    record,
+                    report,
+                    resource,
+                    provenance,
+                    replay_display,
+                });
+            }
+            Operation::ExportReplay => {
+                label = "replay_export";
+                let inspection = verify(client, VerificationOutput::ReportAndMotion).await?;
+                if !inspection.report.verified {
+                    return Err("manufacturing replay did not verify the emitted program".into());
+                }
+                let descriptor = inspection
+                    .replay_display
+                    .as_ref()
+                    .ok_or("motion inspection completed without its replay descriptor")?;
+                let bytes = client
+                    .fetch_replay_display(&inspection.record, descriptor)
+                    .await?;
+                replay_output
+                    .as_deref_mut()
+                    .ok_or("replay output file was not admitted")?
+                    .write(&bytes)?;
+                replay_evidence = Some(serde_json::json!({
+                    "artifact": inspection.record,
+                    "verification": inspection.report,
+                    "provenance": inspection.provenance,
+                    "replay_display": descriptor,
+                    "software_only": true, "not_machine_ready": true
+                }));
+                verification = Some(inspection);
             }
             Operation::Import(source) => {
                 label = "import";
@@ -578,8 +665,8 @@ async fn execute(
             }
         }
         let manufacturing = manufacturing_status(client, false).await?;
-        if verification.as_ref().is_some_and(|(record, _)| {
-            manufacturing["artifact"]["hash"].as_str() != Some(record.hash.as_str())
+        if verification.as_ref().is_some_and(|inspection| {
+            manufacturing["artifact"]["hash"].as_str() != Some(inspection.record.hash.as_str())
         }) {
             verification = None;
         }
@@ -628,12 +715,19 @@ async fn execute(
     report["face_inspections"] = serde_json::to_value(inspections)?;
     report["operations"] = serde_json::json!(history);
     report["manufacturing"] = manufacturing_status(client, true).await?;
-    if let Some((record, verification)) = verification {
-        report["manufacturing"]["verified_artifact_hash"] = serde_json::json!(record.hash);
-        report["manufacturing"]["verification"] = serde_json::to_value(verification)?;
+    if let Some(inspection) = verification {
+        report["manufacturing"]["verified_artifact_hash"] =
+            serde_json::json!(inspection.record.hash);
+        report["manufacturing"]["verification"] = serde_json::to_value(inspection.report)?;
+        report["manufacturing"]["provenance"] = serde_json::to_value(inspection.provenance)?;
+        report["manufacturing"]["replay_display"] =
+            serde_json::to_value(inspection.replay_display)?;
     }
     if let Some(export_evidence) = export_evidence {
         report["manufacturing_export"] = export_evidence;
+    }
+    if let Some(replay_evidence) = replay_evidence {
+        report["manufacturing_replay"] = replay_evidence;
     }
     Ok(report)
 }
@@ -709,6 +803,35 @@ mod tests {
             workflow.operations.as_slice(),
             [Operation::Compile, Operation::Verify, Operation::Save(None)]
         ));
+        let options = parse_args(&["inspect", "project", "--replay-out", "motion.splr"])
+            .unwrap()
+            .unwrap();
+        let Command::Project {
+            workflow,
+            replay_output,
+            ..
+        } = options.command
+        else {
+            panic!("expected project command")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [Operation::ExportReplay]
+        ));
+        assert_eq!(replay_output.unwrap(), PathBuf::from("motion.splr"));
+        assert!(parse_args(&["inspect", "project", "--replay-out"]).is_err());
+        assert!(
+            parse_args(&[
+                "inspect",
+                "project",
+                "--replay-out",
+                "one",
+                "--replay-out",
+                "two"
+            ])
+            .is_err()
+        );
+        assert!(parse_args(&["edit", "project", "--replay-out", "motion.splr"]).is_err());
     }
     #[test]
     fn intent_json_is_bounded_before_child_spawn() {

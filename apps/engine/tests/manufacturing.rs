@@ -169,6 +169,7 @@ async fn inspect(client: &mut EngineClient) -> (ManufacturingArtifactRecord, Ver
         .manufacturing(ManufacturingCommand::Inspect {
             session_id,
             base_revision: info.revision,
+            output: VerificationOutput::ReportOnly,
         })
         .await
         .unwrap()
@@ -731,4 +732,189 @@ async fn queued_save_rejects_intent_only_revision_change_before_snapshot_or_mani
     assert_eq!(stored.as_deref(), Some(&changed));
     save(&mut client, &checkpoint).await;
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundaries() {
+    use spiling_contracts::rpc::{DiagnosticState, RunDiagnosticRequest};
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let checkpoint = work.0.join("motion-project");
+    let store = work.0.join("reader-operations");
+    let mut writer = spawn().await;
+    import(&mut writer, &source).await;
+    set_intent(&mut writer, intent()).await;
+    let record = compile(&mut writer).await;
+    let bundle = fetch_bundle(&mut writer, &record).await.unwrap();
+    save(&mut writer, &checkpoint).await;
+    writer.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+
+    let mut reader = EngineClient::spawn_in(ENGINE, &store).await.unwrap();
+    assert_eq!(
+        open(&mut reader, &checkpoint, true).await.status,
+        JobStatus::Completed
+    );
+    let before = status(&mut reader).await;
+    let original_scene = scene(&mut reader).await;
+    let session = reader.hello().session_id.clone();
+    let command = ManufacturingCommand::Inspect {
+        session_id: session.clone(),
+        base_revision: before.0.revision,
+        output: VerificationOutput::ReportAndMotion,
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let rpc = reader.rpc();
+    let ManufacturingResponse::OperationAccepted { operation } = rpc
+        .manufacturing_with_request_id(command.clone(), &request_id)
+        .await
+        .unwrap()
+    else {
+        panic!("motion admission")
+    };
+    let completed = wait(&mut reader, operation.name.clone()).await;
+    assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+    let Some(JobResult::ManufacturingVerified {
+        record: inspected,
+        report,
+        provenance,
+        replay_display: Some(display),
+        resource,
+    }) = &completed.result
+    else {
+        panic!("complete actual-program display")
+    };
+    assert_eq!(inspected, &record);
+    assert!(report.verified);
+    assert_eq!(provenance.input_hash, record.input_hash);
+    assert_eq!(provenance.input_revision, bundle.provenance.input_revision);
+    assert_eq!(
+        display.info.program_hash,
+        SourceHash::from_bytes(bundle.program.as_bytes())
+    );
+    assert!(completed.outputs.iter().any(|out| out == &display.resource));
+    assert!(completed.outputs.iter().any(|out| out == resource));
+    let bytes = reader.fetch_replay_display(&record, display).await.unwrap();
+    assert_eq!(&bytes[..4], b"SPLR");
+    assert_eq!(bytes.len(), 96 + 48 * display.info.event_count as usize);
+    assert_eq!(bytes[96 + 46], 0, "first event is endpoint-only travel");
+    assert_eq!(bytes[96 + 47], 0, "no invented origin");
+    for event in bytes[96..].chunks_exact(48) {
+        let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
+        let actual_line = bundle
+            .program
+            .lines()
+            .nth(source_line as usize - 1)
+            .unwrap();
+        assert!(actual_line.starts_with("G0 ") || actual_line.starts_with("G1 "));
+        for (axis, offset) in [('X', 0), ('Y', 8), ('Z', 16), ('E', 24), ('F', 32)] {
+            if let Some(value) = actual_line
+                .split_ascii_whitespace()
+                .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
+            {
+                assert_eq!(
+                    f64::from_le_bytes(event[offset..offset + 8].try_into().unwrap()),
+                    value,
+                    "display must reflect the emitted bytes at line {source_line}, not plan coordinates"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        status(&mut reader).await,
+        before,
+        "inspection never mutates Core"
+    );
+    assert_eq!(scene(&mut reader).await, original_scene);
+    let duplicate = rpc
+        .manufacturing_with_request_id(command.clone(), &request_id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(duplicate, ManufacturingResponse::OperationAccepted { operation } if operation == completed)
+    );
+    let mut report_only = command.clone();
+    let ManufacturingCommand::Inspect { output, .. } = &mut report_only else {
+        unreachable!()
+    };
+    *output = VerificationOutput::ReportOnly;
+    assert!(
+        matches!(rpc.manufacturing_with_request_id(report_only, &request_id).await,
+        Err(ClientError::Rpc(error)) if error.code() == tonic::Code::AlreadyExists)
+    );
+    reader.cancel_operation(&completed.name).await.unwrap();
+    assert_eq!(
+        reader.native_operation(&completed.name).await.unwrap(),
+        completed,
+        "late cancellation cannot turn an ACK-winning result into fake cancellation"
+    );
+
+    let blocking = rpc
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/motion-cancel-boundary".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let op = rpc.get_operation(&blocking.name).await.unwrap();
+            if spiling_contracts::metadata(&op).unwrap().state == DiagnosticState::Running as i32 {
+                break;
+            }
+            assert!(!op.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let ManufacturingResponse::OperationAccepted { operation: queued } =
+        reader.manufacturing(command).await.unwrap()
+    else {
+        panic!("queued motion")
+    };
+    reader.cancel_operation(&queued.name).await.unwrap();
+    let cancelled = wait(&mut reader, queued.name).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    rpc.cancel_operation(&blocking.name).await.unwrap();
+    assert_eq!(status(&mut reader).await, before);
+
+    let mut mismatch = display.clone();
+    mismatch.info.bundle_hash = SourceHash::from_bytes(b"another bundle");
+    typed(
+        reader.fetch_replay_display(&record, &mismatch).await,
+        ManufacturingErrorCode::CorruptArtifact,
+    );
+    let mut corrupt = bytes.clone();
+    corrupt[96 + 47] = 0x80;
+    let database = rusqlite::Connection::open(store.join("operations.sqlite")).unwrap();
+    database
+        .execute(
+            "UPDATE artifacts SET bytes=? WHERE name=?",
+            rusqlite::params![corrupt, display.resource.name],
+        )
+        .unwrap();
+    let error = reader
+        .fetch_replay_display(&record, display)
+        .await
+        .unwrap_err();
+    assert!(matches!(&error, ClientError::Manufacturing(error)
+        if error.code == ManufacturingErrorCode::CorruptArtifact));
+    assert!(
+        !error.is_fatal(),
+        "fully received corrupt bytes leave the child usable"
+    );
+    database
+        .execute(
+            "UPDATE artifacts SET bytes=? WHERE name=?",
+            rusqlite::params![bytes, display.resource.name],
+        )
+        .unwrap();
+    reader.ping().await.unwrap();
+    reader.shutdown().await.unwrap();
 }

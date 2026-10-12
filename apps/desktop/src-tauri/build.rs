@@ -27,6 +27,12 @@ fn main() {
         "project_open",
         "project_save",
         "project_reopen",
+        "manufacturing_control",
+        "manufacturing_replay",
+        "manufacturing_select_export",
+        "manufacturing_debug_select_export",
+        "manufacturing_export",
+        "manufacturing_diagnostic_attach",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("failed to prepare the Spiling CEF application");
