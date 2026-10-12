@@ -195,6 +195,9 @@ impl TryFrom<rpc::OutputDialect> for OutputDialect {
     fn try_from(value: rpc::OutputDialect) -> Result<Self, String> {
         match value {
             rpc::OutputDialect::CartesianAbsoluteGcodeV1 => Ok(Self::CartesianAbsoluteGcodeV1),
+            rpc::OutputDialect::Marlin2SingleExtruderGcodeV1 => {
+                Ok(Self::Marlin2SingleExtruderGcodeV1)
+            }
             _ => Err("unsupported output dialect".into()),
         }
     }
@@ -204,6 +207,7 @@ impl TryFrom<OutputDialect> for rpc::OutputDialect {
     fn try_from(value: OutputDialect) -> Result<Self, String> {
         match value {
             OutputDialect::CartesianAbsoluteGcodeV1 => Ok(Self::CartesianAbsoluteGcodeV1),
+            OutputDialect::Marlin2SingleExtruderGcodeV1 => Ok(Self::Marlin2SingleExtruderGcodeV1),
         }
     }
 }
@@ -347,6 +351,88 @@ impl TryFrom<MachineComponent> for rpc::MachineComponent {
         })
     }
 }
+impl TryFrom<rpc::JobWorkflow> for JobWorkflow {
+    type Error = String;
+    fn try_from(value: rpc::JobWorkflow) -> Result<Self, String> {
+        use rpc::job_workflow::Workflow;
+        let result = match required(value.workflow, "job workflow selection")? {
+            Workflow::DiagnosticBodyOnly(_) => Self::DiagnosticBodyOnly,
+            Workflow::CompleteMarlin(job) => {
+                if rpc::HomingCoordinateContract::try_from(job.homing_contract)
+                    .map_err(|e| e.to_string())?
+                    != rpc::HomingCoordinateContract::MarlinNativeCartesian
+                {
+                    return Err("unsupported homing coordinate contract".into());
+                }
+                Self::CompleteMarlin {
+                    job: SingleExtruderJob {
+                        machine_id: job.machine_id,
+                        firmware_version: job.firmware_version,
+                        configuration_hash: SourceHash::parse(job.configuration_hash)
+                            .map_err(|e| e.to_string())?,
+                        calibration_record_hash: SourceHash::parse(job.calibration_record_hash)
+                            .map_err(|e| e.to_string())?,
+                        homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+                        home_position_mm: required(job.home_position_mm, "home position")?
+                            .try_into()?,
+                        nozzle_temperature_c: job.nozzle_temperature_c,
+                        bed_temperature_c: job.bed_temperature_c,
+                        minimum_extrusion_temperature_c: job.minimum_extrusion_temperature_c,
+                        maximum_nozzle_temperature_c: job.maximum_nozzle_temperature_c,
+                        maximum_bed_temperature_c: job.maximum_bed_temperature_c,
+                        prime_start_mm: required(job.prime_start_mm, "prime start")?.try_into()?,
+                        prime_end_mm: required(job.prime_end_mm, "prime end")?.try_into()?,
+                        prime_filament_length_mm: job.prime_filament_length_mm,
+                        prime_speed_mm_s: job.prime_speed_mm_s,
+                        park_position_mm: required(job.park_position_mm, "park position")?
+                            .try_into()?,
+                    },
+                }
+            }
+        };
+        if let Self::CompleteMarlin { job } = &result {
+            job.validate_declaration().map_err(|e| e.to_string())?;
+        }
+        Ok(result)
+    }
+}
+impl TryFrom<JobWorkflow> for rpc::JobWorkflow {
+    type Error = String;
+    fn try_from(value: JobWorkflow) -> Result<Self, String> {
+        use rpc::job_workflow::Workflow;
+        if let JobWorkflow::CompleteMarlin { job } = &value {
+            job.validate_declaration().map_err(|e| e.to_string())?;
+        }
+        Ok(Self {
+            workflow: Some(match value {
+                JobWorkflow::DiagnosticBodyOnly => {
+                    Workflow::DiagnosticBodyOnly(rpc::DiagnosticBodyOnly {})
+                }
+                JobWorkflow::CompleteMarlin { job } => {
+                    Workflow::CompleteMarlin(rpc::SingleExtruderJob {
+                        machine_id: job.machine_id,
+                        firmware_version: job.firmware_version,
+                        configuration_hash: job.configuration_hash.as_str().into(),
+                        calibration_record_hash: job.calibration_record_hash.as_str().into(),
+                        homing_contract: rpc::HomingCoordinateContract::MarlinNativeCartesian
+                            as i32,
+                        home_position_mm: Some(job.home_position_mm.try_into()?),
+                        nozzle_temperature_c: job.nozzle_temperature_c,
+                        bed_temperature_c: job.bed_temperature_c,
+                        minimum_extrusion_temperature_c: job.minimum_extrusion_temperature_c,
+                        maximum_nozzle_temperature_c: job.maximum_nozzle_temperature_c,
+                        maximum_bed_temperature_c: job.maximum_bed_temperature_c,
+                        prime_start_mm: Some(job.prime_start_mm.try_into()?),
+                        prime_end_mm: Some(job.prime_end_mm.try_into()?),
+                        prime_filament_length_mm: job.prime_filament_length_mm,
+                        prime_speed_mm_s: job.prime_speed_mm_s,
+                        park_position_mm: Some(job.park_position_mm.try_into()?),
+                    })
+                }
+            }),
+        })
+    }
+}
 impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
     type Error = String;
     fn try_from(value: rpc::PrinterSpecification) -> Result<Self, String> {
@@ -372,6 +458,7 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                 nozzle_diameter_mm: value.nozzle_diameter_mm,
                 max_feed_mm_s: value.max_feed_mm_s,
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+                workflow: required(value.workflow, "job workflow")?.try_into()?,
             },
             Self::validate,
         )
@@ -397,6 +484,7 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
             nozzle_diameter_mm: value.nozzle_diameter_mm,
             max_feed_mm_s: value.max_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
+            workflow: Some(value.workflow.try_into()?),
         })
     }
 }
@@ -417,6 +505,8 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 print_speed_mm_s: value.print_speed_mm_s,
                 travel_speed_mm_s: value.travel_speed_mm_s,
                 flow_multiplier: value.flow_multiplier,
+                top_skin_thickness_mm: value.top_skin_thickness_mm,
+                bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
             },
             Self::validate,
         )
@@ -439,6 +529,8 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             print_speed_mm_s: value.print_speed_mm_s,
             travel_speed_mm_s: value.travel_speed_mm_s,
             flow_multiplier: value.flow_multiplier,
+            top_skin_thickness_mm: value.top_skin_thickness_mm,
+            bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
         })
     }
 }
@@ -534,6 +626,8 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
                 filament_length_mm: value.filament_length_mm,
                 max_position_error_mm: value.max_position_error_mm,
                 max_extrusion_error_mm: value.max_extrusion_error_mm,
+                lifecycle_motion_count: value.lifecycle_motion_count,
+                priming_filament_length_mm: value.priming_filament_length_mm,
             },
             Self::validate,
         )
@@ -553,6 +647,8 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
             filament_length_mm: value.filament_length_mm,
             max_position_error_mm: value.max_position_error_mm,
             max_extrusion_error_mm: value.max_extrusion_error_mm,
+            lifecycle_motion_count: value.lifecycle_motion_count,
+            priming_filament_length_mm: value.priming_filament_length_mm,
         })
     }
 }
@@ -680,7 +776,7 @@ mod tests {
             vec![rpc::MachineComponent::default(); MAX_MACHINE_COMPONENTS as usize + 1];
         assert!(ManufacturingIntent::try_from(invalid).is_err());
         let mut invalid = wire;
-        invalid.recipe.as_mut().unwrap().infill_fraction = 0.5;
+        invalid.recipe.as_mut().unwrap().infill_fraction = 0.0;
         assert!(ManufacturingIntent::try_from(invalid).is_err());
     }
 
@@ -779,6 +875,8 @@ mod tests {
             filament_length_mm: 1.0,
             max_position_error_mm: 0.0,
             max_extrusion_error_mm: 0.0,
+            lifecycle_motion_count: 0,
+            priming_filament_length_mm: 0.0,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);
@@ -798,5 +896,70 @@ mod tests {
             .is_err()
         );
         assert!(ManufacturingResponse::try_from(rpc::ManufacturingReply::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod job_wire_tests {
+    use super::*;
+    #[test]
+    fn complete_job_wire_round_trip_and_declaration_rejection() {
+        let mut intent = decode_intent(include_bytes!(
+            "../../../../fixtures/manufacturing/solid-fill.intent.json"
+        ))
+        .unwrap();
+        let low = intent.printer.build_envelope.min;
+        intent.printer.capabilities.output_dialect = OutputDialect::Marlin2SingleExtruderGcodeV1;
+        intent.printer.workflow = JobWorkflow::CompleteMarlin {
+            job: SingleExtruderJob {
+                machine_id: "unqualified-wire-test".into(),
+                firmware_version: "2.1.2.5".into(),
+                configuration_hash: SourceHash::from_bytes(b"declared test config"),
+                calibration_record_hash: SourceHash::from_bytes(b"declared test record"),
+                homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+                home_position_mm: low,
+                nozzle_temperature_c: 200.0,
+                bed_temperature_c: 60.0,
+                minimum_extrusion_temperature_c: 170.0,
+                maximum_nozzle_temperature_c: 250.0,
+                maximum_bed_temperature_c: 100.0,
+                prime_start_mm: [low[0] + 1.0, low[1] + 1.0, low[2] + 0.2],
+                prime_end_mm: [low[0] + 11.0, low[1] + 1.0, low[2] + 0.2],
+                prime_filament_length_mm: 1.0,
+                prime_speed_mm_s: 5.0,
+                park_position_mm: [low[0], low[1], low[2] + 10.0],
+            },
+        };
+        let wire = rpc::ManufacturingIntent::try_from(intent.clone()).unwrap();
+        assert_eq!(ManufacturingIntent::try_from(wire.clone()).unwrap(), intent);
+        let mut missing = wire.clone();
+        missing.printer.as_mut().unwrap().workflow = None;
+        assert!(ManufacturingIntent::try_from(missing).is_err());
+        let mut invalid = wire.clone();
+        if let Some(rpc::job_workflow::Workflow::CompleteMarlin(job)) = &mut invalid
+            .printer
+            .as_mut()
+            .unwrap()
+            .workflow
+            .as_mut()
+            .unwrap()
+            .workflow
+        {
+            job.homing_contract = 0;
+        }
+        assert!(ManufacturingIntent::try_from(invalid).is_err());
+        let mut invalid = wire;
+        if let Some(rpc::job_workflow::Workflow::CompleteMarlin(job)) = &mut invalid
+            .printer
+            .as_mut()
+            .unwrap()
+            .workflow
+            .as_mut()
+            .unwrap()
+            .workflow
+        {
+            job.nozzle_temperature_c = f64::NAN;
+        }
+        assert!(ManufacturingIntent::try_from(invalid).is_err());
     }
 }

@@ -49,7 +49,11 @@ async function main() {
         "--skipLibCheck",
         source,
       ],
-      { stdio: "inherit", windowsHide: true },
+      {
+        stdio: "inherit",
+        windowsHide: true,
+        env: { ...process.env, GOMAXPROCS: process.env.GOMAXPROCS ?? "1" },
+      },
     );
     child.once("error", reject);
     child.once("exit", (code, signal) =>

@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use spiling_contracts::{
     MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo, TRANSFER_FRAGMENT_BYTES,
     google::{bytestream::*, longrunning::*},
+    manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES},
     rpc::*,
 };
 use std::io::{BufRead, Read};
@@ -407,7 +408,7 @@ impl manufacturing_server::Manufacturing for Service {
             request_id: id,
             digest,
             command: Control::Manufacturing(command),
-            reservation: 16 * 1024 * 1024,
+            reservation: u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
         };
         Ok(Response::new(
             self.jobs.start_native(self.native.clone(), input).await?,
@@ -428,8 +429,8 @@ impl manufacturing_server::Manufacturing for Service {
             spiling_contracts::manufacturing::ManufacturingCommand::Inspect {
                 output: spiling_contracts::manufacturing::VerificationOutput::ReportAndMotion,
                 ..
-            } => 32 * 1024 * 1024,
-            _ => 16 * 1024 * 1024,
+            } => u64::from(MAX_MANUFACTURING_BUNDLE_BYTES) + u64::from(MAX_REPLAY_DISPLAY_BYTES),
+            _ => u64::from(MAX_MANUFACTURING_BUNDLE_BYTES),
         };
         let input = jobs::NativeAdmission {
             parent,
@@ -542,7 +543,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             spiling_contracts::geometry::KernelIdentity {
                 name: "monstertruck".into(),
                 version: "0.4.1".into(),
-                revision: "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001".into(),
+                revision: "f6e8a88d08d998970ab17aefd53bd2946408363f".into(),
             }
             .try_into()
             .map_err(jobs::internal)?,

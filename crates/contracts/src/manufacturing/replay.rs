@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! SPLR schema 1 admission. This is display integrity, not program verification.
+//! SPLR schema 2 admission. This is display integrity, not program verification.
 use super::*;
 use crate::ArtifactView;
 
 pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 16 * 1024 * 1024;
-pub const MAX_REPLAY_EVENTS: u32 = 200_000;
+pub const MAX_REPLAY_EVENTS: u32 = 200_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 48;
-pub const REPLAY_SCHEMA_VERSION: u32 = 1;
+pub const REPLAY_SCHEMA_VERSION: u32 = 2;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -83,6 +83,7 @@ pub struct ReplayDisplayInfo {
     pub deposition_count: u32,
     pub travel_count: u32,
     pub layer_count: u32,
+    pub lifecycle_count: u32,
     pub bounds_mm: AabbMm,
 }
 impl ReplayDisplayInfo {
@@ -96,7 +97,12 @@ impl ReplayDisplayInfo {
             || self.deposition_count > MAX_DEPOSITION_SEGMENTS
             || self.travel_count == 0
             || self.travel_count > MAX_DEPOSITION_SEGMENTS
-            || self.deposition_count.checked_add(self.travel_count) != Some(self.event_count)
+            || (self.lifecycle_count != 0 && self.lifecycle_count != 4)
+            || self
+                .deposition_count
+                .checked_add(self.travel_count)
+                .and_then(|n| n.checked_add(self.lifecycle_count))
+                != Some(self.event_count)
             || self.layer_count == 0
             || self.layer_count > MAX_PRINT_LAYERS
             || self.layer_count > self.deposition_count
@@ -178,14 +184,15 @@ pub fn validate_replay_display(
         return Err(corrupt("replay bytes size or hash mismatch"));
     }
     if &bytes[..4] != b"SPLR"
-        || u16_at(bytes, 4) != 1
+        || u16_at(bytes, 4) != REPLAY_SCHEMA_VERSION as u16
         || u16_at(bytes, 6) != 96
         || u32_at(bytes, 8) != info.event_count
         || u32_at(bytes, 12) != 48
         || u32_at(bytes, 16) != info.deposition_count
         || u32_at(bytes, 20) != info.travel_count
         || u32_at(bytes, 24) != info.layer_count
-        || bytes[28..32].iter().chain(&bytes[80..96]).any(|b| *b != 0)
+        || u32_at(bytes, 28) != info.lifecycle_count
+        || bytes[80..96].iter().any(|b| *b != 0)
     {
         return Err(corrupt("replay header mismatch"));
     }
@@ -203,10 +210,14 @@ pub fn validate_replay_display(
     let mut layer_deposition = false;
     let mut depositions = 0;
     let mut travels = 0;
+    let mut lifecycle = 0;
+    let mut lifecycle_phase = 0;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for (index, record) in bytes[REPLAY_HEADER_BYTES..]
-        .chunks_exact(REPLAY_RECORD_BYTES)
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
         .enumerate()
     {
         let position = [f64_at(record, 0), f64_at(record, 8), f64_at(record, 16)];
@@ -223,31 +234,70 @@ pub fn validate_replay_display(
             || feed <= 0.0
             || line <= previous_line
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
-            || next_layer >= info.layer_count
-            || kind > 2
+            || (kind < 6 && next_layer >= info.layer_count)
+            || kind > 7
             || flags != u8::from(index != 0)
-            || (index == 0 && (kind != 0 || next_layer != 0))
+            || (index == 0 && (kind != 0 && kind != 6))
+            || (index == 0 && kind == 0 && next_layer != 0)
         {
             return Err(corrupt("invalid replay record fields"));
         }
-        if next_layer != layer {
-            if next_layer != layer + 1 || !layer_deposition || kind != 0 {
-                return Err(corrupt("invalid replay layer sequence"));
+        if kind >= 6 {
+            if info.lifecycle_count != 4 || next_layer != u16::MAX as u32 {
+                return Err(corrupt("invalid lifecycle replay attribution"));
             }
-            layer = next_layer;
-            layer_deposition = false;
-        }
-        if kind == 0 {
-            if e != previous_e {
-                return Err(corrupt("travel changes extrusion"));
+            let required_kind = if lifecycle_phase == 1 { 7 } else { 6 };
+            if kind != required_kind
+                || lifecycle_phase >= 4
+                || (lifecycle_phase < 2 && depositions != 0)
+                || (lifecycle_phase >= 2
+                    && (depositions != info.deposition_count || travels != info.travel_count))
+            {
+                return Err(corrupt("invalid lifecycle replay sequence"));
             }
-            travels += 1;
+            if (lifecycle_phase == 2
+                && (position[0] != previous[0]
+                    || position[1] != previous[1]
+                    || position[2] <= previous[2]))
+                || (lifecycle_phase == 3 && position[2] != previous[2])
+            {
+                return Err(corrupt("invalid final lift/park replay"));
+            }
+            if kind == 7 {
+                if index == 0 || e <= previous_e || position == previous {
+                    return Err(corrupt("invalid priming replay"));
+                }
+            } else if e != previous_e {
+                return Err(corrupt("lifecycle travel changes extrusion"));
+            }
+            lifecycle += 1;
+            lifecycle_phase += 1;
         } else {
-            if index == 0 || e <= previous_e || position == previous {
-                return Err(corrupt("invalid replay deposition"));
+            if info.lifecycle_count == 4 && lifecycle_phase != 2 {
+                return Err(corrupt("plan motion outside lifecycle body"));
             }
-            depositions += 1;
-            layer_deposition = true;
+            if depositions == 0 && travels == 0 && (kind != 0 || next_layer != 0) {
+                return Err(corrupt("body must start with layer-zero travel"));
+            }
+            if next_layer != layer {
+                if next_layer != layer + 1 || !layer_deposition || kind != 0 {
+                    return Err(corrupt("invalid replay layer sequence"));
+                }
+                layer = next_layer;
+                layer_deposition = false;
+            }
+            if kind == 0 {
+                if e != previous_e {
+                    return Err(corrupt("travel changes extrusion"));
+                }
+                travels += 1;
+            } else {
+                if index == 0 || e <= previous_e || position == previous {
+                    return Err(corrupt("invalid replay deposition"));
+                }
+                depositions += 1;
+                layer_deposition = true;
+            }
         }
         for axis in 0..3 {
             min[axis] = min[axis].min(position[axis]);
@@ -261,6 +311,7 @@ pub fn validate_replay_display(
         || layer + 1 != info.layer_count
         || depositions != info.deposition_count
         || travels != info.travel_count
+        || lifecycle != info.lifecycle_count
         || min != info.bounds_mm.min
         || max != info.bounds_mm.max
     {
@@ -276,7 +327,7 @@ mod tests {
     fn encoded() -> (Vec<u8>, ReplayDisplayDescriptor) {
         let mut bytes = vec![0; REPLAY_HEADER_BYTES];
         bytes[..4].copy_from_slice(b"SPLR");
-        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        bytes[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
         bytes[6..8].copy_from_slice(&96u16.to_le_bytes());
         for (offset, value) in [(8, 4u32), (12, 48), (16, 2), (20, 2), (24, 1)] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -306,7 +357,7 @@ mod tests {
         let hash = SourceHash::from_bytes(&bytes);
         let descriptor = ReplayDisplayDescriptor {
             info: ReplayDisplayInfo {
-                schema_version: 1,
+                schema_version: REPLAY_SCHEMA_VERSION,
                 bundle_hash: SourceHash::from_bytes(b"bundle"),
                 input_hash: SourceHash::from_bytes(b"input"),
                 program_hash: SourceHash::from_bytes(b"program"),
@@ -316,6 +367,7 @@ mod tests {
                 deposition_count: 2,
                 travel_count: 2,
                 layer_count: 1,
+                lifecycle_count: 0,
                 bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             },
             resource: ArtifactView {

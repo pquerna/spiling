@@ -5,10 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use spiling_contracts::manufacturing::{
-    MAX_MANUFACTURING_BUNDLE_BYTES, ManufacturingError, ManufacturingErrorCode,
-    ManufacturingIntent, NormalizedPrintPlan, VerificationReport,
-};
+use spiling_contracts::manufacturing::*;
 
 mod replay;
 pub(crate) use replay::ReplaySink;
@@ -41,6 +38,18 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
 }
 
+fn verify_region_volume(layer: &PrintLayer, volume: f64) -> Result<(), ManufacturingError> {
+    let declared = layer.region_coverage.nominal_deposition_volume_mm3;
+    if !volume.is_finite()
+        || (declared - volume).abs() > 1e-9 * volume.max(1.0) + arithmetic_slack(volume)
+    {
+        return Err(failed(
+            "region nominal deposition volume disagrees with decoded path semantics",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Millimetres,
@@ -49,11 +58,24 @@ enum Command {
     ResetExtrusion,
     Travel,
     Deposit,
+    VolumetricOff,
+    FeedScale,
+    FlowScale,
+    FanOff,
+    Home,
+    LevelingOff,
+    WaitBed,
+    WaitNozzle,
+    Barrier,
+    NozzleOff,
+    BedOff,
+    MotorsOff,
+    Celsius,
 }
 
 struct Decoded {
     command: Command,
-    fields: [Option<f64>; 5], // X, Y, Z, E, F
+    fields: [Option<f64>; 8], // X, Y, Z, E, F, S, R, D
 }
 
 // Deliberately not a general firmware parser. Only the declared inert dialect
@@ -79,9 +101,31 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         Some("G92") => Command::ResetExtrusion,
         Some("G0") => Command::Travel,
         Some("G1") => Command::Deposit,
+        Some("M200") => Command::VolumetricOff,
+        Some("M220") => Command::FeedScale,
+        Some("M221") => Command::FlowScale,
+        Some("M107") => Command::FanOff,
+        Some("G28") => Command::Home,
+        Some("M420") => Command::LevelingOff,
+        Some("M190") => Command::WaitBed,
+        Some("M109") => Command::WaitNozzle,
+        Some("M400") => Command::Barrier,
+        Some("M104") => Command::NozzleOff,
+        Some("M140") => Command::BedOff,
+        Some("M84") => Command::MotorsOff,
+        Some("M149") => Command::Celsius,
         _ => return Err("unsupported or malformed command"),
     };
-    let mut fields = [None; 5];
+    if command == Command::Celsius {
+        if words.next() != Some("C") || words.next().is_some() {
+            return Err("temperature units must be exactly M149 C");
+        }
+        return Ok(Some(Decoded {
+            command,
+            fields: [None; 8],
+        }));
+    }
+    let mut fields = [None; 8];
     for word in words {
         let (index, precision) = match word.as_bytes().first() {
             Some(b'X') => (0, 6),
@@ -89,6 +133,9 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
             Some(b'Z') => (2, 6),
             Some(b'E') => (3, 8),
             Some(b'F') => (4, 6),
+            Some(b'S') => (5, 6),
+            Some(b'R') => (6, 6),
+            Some(b'D') => (7, 6),
             _ => return Err("unsupported command field"),
         };
         if fields[index].is_some() {
@@ -98,10 +145,26 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
     }
     let present = fields.map(|field| field.is_some());
     let permitted = match command {
-        Command::Millimetres | Command::AbsolutePosition | Command::AbsoluteExtrusion => [false; 5],
-        Command::ResetExtrusion => [false, false, false, true, false],
-        Command::Travel => [true, true, true, false, true],
-        Command::Deposit => [true; 5],
+        Command::Millimetres
+        | Command::AbsolutePosition
+        | Command::AbsoluteExtrusion
+        | Command::FanOff
+        | Command::Home
+        | Command::Barrier
+        | Command::MotorsOff
+        | Command::Celsius => [false; 8],
+        Command::ResetExtrusion => [false, false, false, true, false, false, false, false],
+        Command::Travel => [true, true, true, false, true, false, false, false],
+        Command::Deposit => [true, true, true, true, true, false, false, false],
+        Command::VolumetricOff => [false, false, false, false, false, false, false, true],
+        Command::FeedScale
+        | Command::FlowScale
+        | Command::LevelingOff
+        | Command::NozzleOff
+        | Command::BedOff => [false, false, false, false, false, true, false, false],
+        Command::WaitBed | Command::WaitNozzle => {
+            [false, false, false, false, false, false, true, false]
+        }
     };
     if present != permitted {
         return Err("missing or unsupported fields for command");
@@ -133,6 +196,147 @@ fn decimal(text: &str, precision: usize) -> Result<f64, &'static str> {
     Ok(value)
 }
 
+enum Lifecycle {
+    Bare(Command),
+    Scalar(Command, usize, f64),
+    Motion([f64; 3], f64, Option<f64>),
+}
+struct MotionState {
+    position: Option<[f64; 3]>,
+    extrusion: f64,
+}
+
+fn inspect_lifecycle(
+    decoded: &Decoded,
+    operation: Lifecycle,
+    intent: &ManufacturingIntent,
+    state: &mut MotionState,
+    line: u32,
+    replay: Option<&mut ReplaySink>,
+    prime_exclusion: Option<PrimeExclusionBoundsMm>,
+) -> Result<(f64, f64), ManufacturingError> {
+    let mut position_error = 0.0;
+    let mut extrusion_error = 0.0;
+    match operation {
+        Lifecycle::Bare(command) => {
+            if decoded.command != command {
+                return Err(failed("missing or reordered lifecycle state/barrier"));
+            }
+        }
+        Lifecycle::Scalar(command, field, value) => {
+            if decoded.command != command
+                || decoded.fields[field].is_none_or(|actual| {
+                    (actual - value).abs() > F_HALF_STEP + arithmetic_slack(value)
+                })
+            {
+                return Err(failed(
+                    "lifecycle modal or thermal command differs from specification",
+                ));
+            }
+        }
+        Lifecycle::Motion(target, speed, extrusion) => {
+            let command = if extrusion.is_some() {
+                Command::Deposit
+            } else {
+                Command::Travel
+            };
+            if decoded.command != command {
+                return Err(failed("missing or reordered lifecycle motion"));
+            }
+            let position = [
+                decoded.fields[0].unwrap(),
+                decoded.fields[1].unwrap(),
+                decoded.fields[2].unwrap(),
+            ];
+            let feed = decoded.fields[4].unwrap();
+            let envelope = intent.printer.build_envelope;
+            if (0..3).any(|a| {
+                (position[a] - target[a]).abs() > XYZ_HALF_STEP + arithmetic_slack(target[a])
+                    || position[a] < envelope.min[a]
+                    || position[a] > envelope.max[a]
+            }) || feed <= 0.0
+                || (feed - speed * 60.0).abs() > F_HALF_STEP + arithmetic_slack(speed * 60.0)
+                || feed / 60.0
+                    > intent.printer.max_feed_mm_s + F_HALF_STEP / 60.0 + arithmetic_slack(speed)
+            {
+                return Err(failed("unsafe or mutated lifecycle endpoint/feed"));
+            }
+            position_error = distance(position, target);
+            if let Some(expected_e) = extrusion {
+                let e = decoded.fields[3].unwrap();
+                extrusion_error = (e - expected_e).abs();
+                let from = state
+                    .position
+                    .ok_or_else(|| failed("priming before positioning"))?;
+                let bounds =
+                    prime_exclusion.ok_or_else(|| failed("missing priming ownership envelope"))?;
+                let mut first = 0.0_f64;
+                let mut last = 1.0_f64;
+                let mut separated = false;
+                for axis in 0..2 {
+                    let direction = position[axis] - from[axis];
+                    if direction == 0.0 {
+                        if from[axis] < bounds[0][axis] || from[axis] > bounds[1][axis] {
+                            separated = true;
+                            break;
+                        }
+                    } else {
+                        let lower = (bounds[0][axis] - from[axis]) / direction;
+                        let upper = (bounds[1][axis] - from[axis]) / direction;
+                        first = first.max(lower.min(upper));
+                        last = last.min(lower.max(upper));
+                        if first > last {
+                            separated = true;
+                            break;
+                        }
+                    }
+                }
+                if !separated {
+                    return Err(failed(
+                        "decoded prime crosses conservative object XY ownership envelope",
+                    ));
+                }
+                let length = distance(from, position);
+                let delta = e - state.extrusion;
+                if length <= 0.0
+                    || delta <= 0.0
+                    || (e - expected_e).abs() > E_HALF_STEP + arithmetic_slack(expected_e)
+                {
+                    return Err(failed(
+                        "priming extrusion differs from bounded specification",
+                    ));
+                }
+                let area =
+                    std::f64::consts::PI * (intent.recipe.filament_diameter_mm / 2.0).powi(2);
+                let flow = delta * area * feed / 60.0 / length;
+                let slack = (intent.printer.max_volumetric_flow_mm3_s
+                    * 2.0
+                    * 3.0_f64.sqrt()
+                    * XYZ_HALF_STEP
+                    + E_HALF_STEP * area * feed / 60.0)
+                    / length
+                    + arithmetic_slack(flow);
+                if !flow.is_finite() || flow > intent.printer.max_volumetric_flow_mm3_s + slack {
+                    return Err(failed("decoded priming exceeds volumetric flow limit"));
+                }
+                state.extrusion = e;
+            }
+            if let Some(sink) = replay {
+                sink.push(
+                    position,
+                    state.extrusion,
+                    feed,
+                    line,
+                    u16::MAX,
+                    if extrusion.is_some() { 7 } else { 6 },
+                )?;
+            }
+            state.position = Some(position);
+        }
+    }
+    Ok((position_error, extrusion_error))
+}
+
 /// Replays a bounded actual program against borrowed normalized path semantics.
 /// A successful result is software validation, never machine-ready certification.
 pub fn verify(
@@ -158,7 +362,7 @@ pub(crate) fn verify_actual(
             "emitted program exceeds manufacturing byte limit",
         ));
     }
-    plan.validate(intent)?;
+    let prime_exclusion = plan.validate_and_prime_exclusion(intent)?;
 
     let recipe = &intent.recipe;
     let printer = &intent.printer;
@@ -198,7 +402,8 @@ pub(crate) fn verify_actual(
                         )
                     })
             })
-        });
+        })
+        .peekable();
     let setup = [
         Command::Millimetres,
         Command::AbsolutePosition,
@@ -206,13 +411,24 @@ pub(crate) fn verify_actual(
         Command::ResetExtrusion,
     ];
     let mut setup_index = 0;
-    let mut previous_position = None;
-    let mut actual_e = 0.0;
+    let mut state = MotionState {
+        position: None,
+        extrusion: 0.0,
+    };
     let mut expected_e = 0.0;
     let mut deposition_segments = 0_u32;
     let mut travel_segments = 0_u32;
     let mut max_position_error_mm: f64 = 0.0;
     let mut max_extrusion_error_mm: f64 = 0.0;
+    let job = match &printer.workflow {
+        JobWorkflow::DiagnosticBodyOnly => None,
+        JobWorkflow::CompleteMarlin { job } => Some(job),
+    };
+    let mut lifecycle_index = 0usize;
+    let mut finish_index = 0usize;
+    let mut priming_filament_length_mm = 0.0;
+    let mut volume_layer = 0u16;
+    let mut layer_nominal_volume = 0.0;
 
     for (line_index, line) in program.lines().enumerate() {
         cancelled(cancel)?;
@@ -234,9 +450,99 @@ pub(crate) fn verify_actual(
             setup_index += 1;
             continue;
         }
+        if let Some(job) = job {
+            let operation = if lifecycle_index < 11 {
+                let op = match lifecycle_index {
+                    0 => Lifecycle::Bare(Command::Celsius),
+                    1 => Lifecycle::Scalar(Command::VolumetricOff, 7, 0.0),
+                    2 => Lifecycle::Scalar(Command::FeedScale, 5, 100.0),
+                    3 => Lifecycle::Scalar(Command::FlowScale, 5, 100.0),
+                    4 => Lifecycle::Bare(Command::FanOff),
+                    5 => Lifecycle::Bare(Command::Home),
+                    6 => Lifecycle::Scalar(Command::LevelingOff, 5, 0.0),
+                    7 => Lifecycle::Scalar(Command::WaitBed, 6, job.bed_temperature_c),
+                    8 => Lifecycle::Scalar(Command::WaitNozzle, 6, job.nozzle_temperature_c),
+                    9 => Lifecycle::Motion(job.prime_start_mm, recipe.travel_speed_mm_s, None),
+                    _ => Lifecycle::Motion(
+                        job.prime_end_mm,
+                        job.prime_speed_mm_s,
+                        Some(job.prime_filament_length_mm),
+                    ),
+                };
+                lifecycle_index += 1;
+                Some(op)
+            } else if expected.peek().is_none() {
+                let last = state
+                    .position
+                    .ok_or_else(|| failed("park without deposition"))?;
+                let op = match finish_index {
+                    0 => Lifecycle::Bare(Command::Barrier),
+                    1 => Lifecycle::Motion(
+                        [last[0], last[1], job.park_position_mm[2]],
+                        recipe.travel_speed_mm_s,
+                        None,
+                    ),
+                    2 => Lifecycle::Motion(job.park_position_mm, recipe.travel_speed_mm_s, None),
+                    3 => Lifecycle::Bare(Command::Barrier),
+                    4 => Lifecycle::Scalar(Command::NozzleOff, 5, 0.0),
+                    5 => Lifecycle::Scalar(Command::BedOff, 5, 0.0),
+                    6 => Lifecycle::Bare(Command::FanOff),
+                    7 => Lifecycle::Bare(Command::MotorsOff),
+                    _ => return Err(failed("extra command after shutdown")),
+                };
+                finish_index += 1;
+                Some(op)
+            } else {
+                None
+            };
+            if let Some(operation) = operation {
+                if finish_index == 2
+                    && state.position.is_some_and(|last| {
+                        decoded.fields[0] != Some(last[0])
+                            || decoded.fields[1] != Some(last[1])
+                            || decoded.fields[2].is_some_and(|z| z <= last[2])
+                    })
+                {
+                    return Err(failed(
+                        "final lift must be vertical with representable clearance",
+                    ));
+                }
+                if finish_index == 3
+                    && state
+                        .position
+                        .is_some_and(|last| decoded.fields[2] != Some(last[2]))
+                {
+                    return Err(failed("final XY park must preserve clearance Z"));
+                }
+                let (position_error, extrusion_error) = inspect_lifecycle(
+                    &decoded,
+                    operation,
+                    intent,
+                    &mut state,
+                    (line_index + 1) as u32,
+                    replay.as_deref_mut(),
+                    prime_exclusion,
+                )?;
+                max_position_error_mm = max_position_error_mm.max(position_error);
+                max_extrusion_error_mm = max_extrusion_error_mm.max(extrusion_error);
+                if decoded.command == Command::Home {
+                    state.position = Some(job.home_position_mm);
+                }
+                if lifecycle_index == 11 && expected_e == 0.0 {
+                    priming_filament_length_mm = state.extrusion;
+                    expected_e = job.prime_filament_length_mm;
+                }
+                continue;
+            }
+        }
         let Some((target, source, layer_index, deposition_kind)) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
+        if layer_index != volume_layer {
+            verify_region_volume(&plan.layers[volume_layer as usize], layer_nominal_volume)?;
+            volume_layer = layer_index;
+            layer_nominal_volume = 0.0;
+        }
         let required_command = if source.is_some() {
             Command::Deposit
         } else {
@@ -288,11 +594,14 @@ pub(crate) fn verify_actual(
         }
 
         if let Some(source) = source {
-            let from = previous_position.ok_or_else(|| failed("deposition before positioning"))?;
+            let from = state
+                .position
+                .ok_or_else(|| failed("deposition before positioning"))?;
             let length = distance(from, position);
             let nominal_length = distance(*source, *target);
+            layer_nominal_volume += nominal_length * volume_per_mm;
             let next_e = decoded.fields[3].ok_or_else(|| failed("missing extrusion"))?;
-            let delta_e = next_e - actual_e;
+            let delta_e = next_e - state.extrusion;
             let nominal_e = nominal_length * volume_per_mm / filament_area;
             expected_e += nominal_e;
             if !expected_e.is_finite()
@@ -335,7 +644,7 @@ pub(crate) fn verify_actual(
             {
                 return Err(failed("decoded volumetric flow exceeds printer limit"));
             }
-            actual_e = next_e;
+            state.extrusion = next_e;
             deposition_segments += 1;
         } else {
             travel_segments += 1;
@@ -347,50 +656,63 @@ pub(crate) fn verify_actual(
                 match deposition_kind {
                     spiling_contracts::manufacturing::DepositionKind::Perimeter => 1,
                     spiling_contracts::manufacturing::DepositionKind::SolidFill => 2,
+                    DepositionKind::BottomSkin => 3,
+                    DepositionKind::TopSkin => 4,
+                    DepositionKind::SparseFill => 5,
                 }
             };
             sink.push(
                 position,
-                actual_e,
+                state.extrusion,
                 feed,
                 (line_index + 1) as u32,
                 layer_index,
                 kind,
             )?;
         }
-        previous_position = Some(position);
+        state.position = Some(position);
     }
     cancelled(cancel)?;
-    if setup_index != setup.len() || expected.next().is_some() || deposition_segments == 0 {
+    if setup_index != setup.len()
+        || expected.next().is_some()
+        || deposition_segments == 0
+        || (job.is_some() && (lifecycle_index != 11 || finish_index != 8))
+    {
         return Err(failed("program is missing setup or normalized motions"));
     }
-    let deposited_volume_mm3 = actual_e * filament_area;
+    verify_region_volume(&plan.layers[volume_layer as usize], layer_nominal_volume)?;
+    let object_filament = state.extrusion - priming_filament_length_mm;
+    let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
     }
     Ok(VerificationReport {
         verified: true,
         coverage: vec![
-            "Independent decoding of actual program bytes; strict G21/G90/M82/G92 E0 then absolute XYZ/E G0/G1 state transitions".into(),
+            "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
             "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
+            if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
+            if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
         ],
         limitations: vec![
             "SOFTWARE VALIDATION ONLY, NOT MACHINE READY; no physical printer support or printability certification".into(),
             "No physics, structural/mechanical or material deposition validation".into(),
             "No collisions or component/fixture clearance validation; component shapes are metadata only".into(),
             "No firmware behavior, execution, calibration or hardware accuracy validation".into(),
-            "No startup, homing or known physical initial position; first travel checks only commanded endpoint/feed".into(),
-            "No temperature, thermal behavior, heating or cooling validation".into(),
+            "Homing path, thermal sensor truth, firmware configuration and calibration records are declared, not physically measured or certified".into(),
+            if job.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
             "No generated or physical support certification; normalized geometry policy is not a physical guarantee".into(),
         ],
         deposition_segments,
         travel_segments,
         deposited_volume_mm3,
-        filament_length_mm: actual_e,
+        filament_length_mm: object_filament,
         max_position_error_mm,
         max_extrusion_error_mm,
+        lifecycle_motion_count: if job.is_some() { 4 } else { 0 },
+        priming_filament_length_mm,
     })
 }
 

@@ -2,14 +2,21 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod classification;
 mod region;
+#[cfg(test)]
+mod tests;
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Area, BooleanOps, BoundingRect, MultiPolygon};
 use spiling_contracts::geometry::{
     AabbMm, FaceCarrier, GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
 use spiling_contracts::manufacturing::*;
-use std::{collections::BTreeSet, sync::atomic::AtomicBool};
+use std::{
+    borrow::Cow,
+    collections::BTreeSet,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
@@ -146,91 +153,166 @@ pub(crate) fn plan(
             "top height is not an integral fixed layer height; partial top layers are unsupported",
         ));
     }
+    let count = count as u32;
+    let recipe = &input.intent.recipe;
+    let bottom_layers = skin_layers(recipe.bottom_skin_thickness_mm, height, count);
+    let top_layers = skin_layers(recipe.top_skin_thickness_mm, height, count);
+    // Retain one native footprint per certified slab, not one polygon copy per
+    // layer and not a second full classified polygon plan.
+    let mut sections: Vec<SectionSpan> = Vec::new();
+    let mut retained_points = 0usize;
+    let mut index = 0u32;
+    while index < count {
+        check_cancel(cancel)?;
+        let sample = bed + (index as f64 + 0.5) * height;
+        let end = if reuse_slabs {
+            slab_boundaries
+                .range((index + 1)..)
+                .next()
+                .copied()
+                .unwrap_or(count)
+                .min(count)
+        } else {
+            index + 1
+        };
+        let mut next = MultiPolygon(Vec::new());
+        for occurrence in &occurrences {
+            check_cancel(cancel)?;
+            let definition = &input.definitions[&occurrence.definition_id];
+            let plane = PlaneMm {
+                origin_mm: inverse(&occurrence.pose, [0.0, 0.0, sample]),
+                normal: rotate_inverse(&occurrence.pose, [0.0, 0.0, 1.0]),
+            };
+            let native = spiling_geometry::section_with_byte_limit(
+                definition,
+                plane,
+                cancel,
+                4 * 1024 * 1024,
+            )
+            .map_err(|e| {
+                let code = match e.code {
+                    GeometryErrorCode::Cancelled => ManufacturingErrorCode::Cancelled,
+                    GeometryErrorCode::ResourceLimit => ManufacturingErrorCode::ResourceLimit,
+                    _ => ManufacturingErrorCode::UnsupportedGeometry,
+                };
+                error(code, format!("native section at layer {index}: {e}"))
+            })?;
+            let placed = region::from_native(native, &occurrence.pose, sample, cancel)?;
+            if placed.0.is_empty() {
+                continue;
+            }
+            if next.0.is_empty() {
+                next = placed;
+            } else {
+                boolean_budget(&next, &placed)?;
+                next = next.union(&placed);
+            }
+            check_cancel(cancel)?;
+            region::check_size(&next)?;
+        }
+        region::canonicalize(&mut next);
+        if next.0.is_empty() || next.unsigned_area() <= 0.0 {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "empty aggregate layer would require unsupported suspension/support",
+            ));
+        }
+        if let Some(previous) = sections.last() {
+            let supported = region::offset(
+                &previous.material,
+                2.0 * SECTION_SAMPLING_TOLERANCE_MM,
+                cancel,
+            )?;
+            boolean_budget(&next, &supported)?;
+            let unsupported_area = next.difference(&supported).unsigned_area();
+            check_cancel(cancel)?;
+            if unsupported_area > OFFSET_TOLERANCE_MM * OFFSET_TOLERANCE_MM {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "section expands beyond previous layer; supports/bridging are unsupported",
+                ));
+            }
+        }
+        retained_points = retained_points
+            .checked_add(region::point_count(&next))
+            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "retained native footprint point budget exceeded",
+                )
+            })?;
+        sections.push(SectionSpan {
+            start: index,
+            end,
+            material: next,
+        });
+        index = end;
+    }
     let mut layers = Vec::with_capacity(count as usize);
-    let mut section = MultiPolygon(Vec::new());
-    let mut templates: [Option<Vec<DepositionPath>>; 2] = [None, None];
     let mut segments = 0usize;
-    for index in 0..count as u32 {
+    let mut neighborhood_work = 0usize;
+    let mut key = None;
+    let mut classified = None;
+    let mut layout_span = None;
+    let mut wall_layout = None;
+    let mut templates: [Option<(Vec<DepositionPath>, PlanarRegionCoverage)>; 2] = [None, None];
+    for index in 0..count {
         check_cancel(cancel)?;
         let z = bed + (index as f64 + 1.0) * height;
         let sample = bed + (index as f64 + 0.5) * height;
-        // Exact world-vertical carriers have invariant XY between horizontal
-        // faces. Residual floating tilt admitted by carrier tolerances still
-        // uses fresh native sections; it cannot silently grow a reuse error.
-        if index == 0 || !reuse_slabs || slab_boundaries.contains(&index) {
-            let mut next = MultiPolygon(Vec::new());
-            for occurrence in &occurrences {
-                check_cancel(cancel)?;
-                let definition = &input.definitions[&occurrence.definition_id];
-                let plane = PlaneMm {
-                    origin_mm: inverse(&occurrence.pose, [0.0, 0.0, sample]),
-                    normal: rotate_inverse(&occurrence.pose, [0.0, 0.0, 1.0]),
-                };
-                let native = spiling_geometry::section_with_byte_limit(
-                    definition,
-                    plane,
-                    cancel,
-                    4 * 1024 * 1024,
-                )
-                .map_err(|e| {
-                    let code = match e.code {
-                        GeometryErrorCode::Cancelled => ManufacturingErrorCode::Cancelled,
-                        GeometryErrorCode::ResourceLimit => ManufacturingErrorCode::ResourceLimit,
-                        _ => ManufacturingErrorCode::UnsupportedGeometry,
-                    };
-                    error(code, format!("native section at layer {index}: {e}"))
-                })?;
-                let placed = region::from_native(native, &occurrence.pose, sample, cancel)?;
-                if placed.0.is_empty() {
-                    continue;
-                }
-                if next.0.is_empty() {
-                    next = placed;
-                } else {
-                    boolean_budget(&next, &placed)?;
-                    next = next.union(&placed);
-                }
-                check_cancel(cancel)?;
-                region::check_size(&next)?;
-            }
-            region::canonicalize(&mut next);
-            if next.0.is_empty() || next.unsigned_area() <= 0.0 {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    "empty aggregate layer would require unsupported suspension/support",
-                ));
-            }
-            if !section.0.is_empty() {
-                let supported =
-                    region::offset(&section, 2.0 * SECTION_SAMPLING_TOLERANCE_MM, cancel)?;
-                boolean_budget(&next, &supported)?;
-                let unsupported_area = next.difference(&supported).unsigned_area();
-                check_cancel(cancel)?;
-                if unsupported_area > OFFSET_TOLERANCE_MM * OFFSET_TOLERANCE_MM {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        "section expands beyond previous layer; supports/bridging are unsupported",
-                    ));
-                }
-            }
-            section = next;
+        let current = span_at(&sections, index);
+        let below = index
+            .checked_sub(bottom_layers)
+            .map(|i| span_at(&sections, i));
+        let above = index
+            .checked_add(top_layers)
+            .filter(|i| *i < count)
+            .map(|i| span_at(&sections, i));
+        let next_key = (current, below, above);
+        if key != Some(next_key) {
+            // Drop the prior classification before allocating its replacement.
+            // The current wall layout survives skin-key changes, not span changes.
+            drop(classified.take());
             templates = [None, None];
+            if layout_span != Some(current) {
+                drop(wall_layout.take());
+                wall_layout = Some(Arc::new(classification::WallLayout::new(
+                    &sections[current].material,
+                    recipe,
+                    retained_points,
+                    cancel,
+                )?));
+                layout_span = Some(current);
+            }
+            let lower = survival(&sections, current, below, &mut neighborhood_work, cancel)?;
+            let upper = survival(&sections, current, above, &mut neighborhood_work, cancel)?;
+            classified = Some(classification::ClassifiedRegions::new(
+                Arc::clone(
+                    wall_layout
+                        .as_ref()
+                        .expect("current wall layout initialized"),
+                ),
+                &lower,
+                &upper,
+                recipe,
+                cancel,
+            )?);
+            key = Some(next_key);
         }
         let parity = index as usize % 2;
         if templates[parity].is_none() {
-            let mut template_segments = 0;
-            templates[parity] = Some(region::paths(
-                &section,
-                z,
-                index,
-                &input.intent.recipe,
-                &mut template_segments,
-                cancel,
-            )?);
+            let mut template_segments = segments;
+            templates[parity] = Some(
+                classified
+                    .as_ref()
+                    .expect("region classification initialized")
+                    .paths(z, index, recipe, &mut template_segments, cancel)?,
+            );
         }
-        let template = templates[parity]
+        let (template, coverage) = templates[parity]
             .as_ref()
-            .expect("current parity template was initialized");
+            .expect("current parity template initialized");
         let additional = template
             .iter()
             .map(|p| p.points_mm.len() - 1)
@@ -257,10 +339,11 @@ pub(crate) fn plan(
             z_mm: z,
             section_z_mm: sample,
             paths,
+            region_coverage: coverage.clone(),
         });
     }
     let result = NormalizedPrintPlan {
-        schema_version: 1,
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         layers,
         sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
         offset_tolerance_mm: OFFSET_TOLERANCE_MM,
@@ -268,6 +351,72 @@ pub(crate) fn plan(
     };
     result.validate(input.intent)?;
     Ok(result)
+}
+
+struct SectionSpan {
+    start: u32,
+    end: u32,
+    material: MultiPolygon<f64>,
+}
+
+fn skin_layers(thickness: f64, height: f64, count: u32) -> u32 {
+    // Saturating at the admitted layer count avoids unchecked integer casts and
+    // still classifies the whole model when the requested skin is thicker.
+    (thickness / height).ceil().max(1.0).min(count as f64) as u32
+}
+
+fn span_at(sections: &[SectionSpan], index: u32) -> usize {
+    let position = sections.partition_point(|s| s.end <= index);
+    debug_assert!(sections[position].start <= index);
+    position
+}
+
+fn survival<'a>(
+    sections: &'a [SectionSpan],
+    current: usize,
+    neighbor: Option<usize>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Cow<'a, MultiPolygon<f64>>, ManufacturingError> {
+    let Some(neighbor) = neighbor else {
+        return Ok(Cow::Owned(MultiPolygon(Vec::new())));
+    };
+    let mut survives = Cow::Borrowed(&sections[current].material);
+    let first = current.min(neighbor);
+    let last = current.max(neighbor);
+    for (offset, section) in sections[first..=last].iter().enumerate() {
+        let other = first + offset;
+        check_cancel(cancel)?;
+        if other == current {
+            continue;
+        }
+        let pairs = region::point_count(&survives)
+            .checked_mul(region::point_count(&section.material))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "skin neighborhood work overflow",
+                )
+            })?;
+        *work = work
+            .checked_add(pairs)
+            .filter(|n| *n <= MAX_BOOLEAN_PAIRS)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "skin neighborhood Boolean work limit exceeded",
+                )
+            })?;
+        survives = Cow::Owned(classification::intersection(
+            &survives,
+            &section.material,
+            cancel,
+        )?);
+        if survives.0.is_empty() {
+            break;
+        }
+    }
+    Ok(survives)
 }
 
 pub(super) fn boolean_budget(

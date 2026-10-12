@@ -1,0 +1,13 @@
+{
+  "status": "software-contract-fixture-not-a-deployable-firmware-configuration",
+  "machine_id": "software-marlin2-reference",
+  "firmware_version": "2.1.2.5-software-contract-fixture",
+  "coordinate_contract": "native Cartesian XYZ millimetres, home at [0,0,0]",
+  "required_commands": ["M149 C", "M200 D0", "M420 S0"],
+  "temperature_units_support": true,
+  "workspace_home_tool_skew_offsets": "absent",
+  "homing_restores_leveling": false,
+  "firmware_extrusion_compensation": "absent",
+  "fixed_g0_feed_override": false,
+  "physical_qualification": "absent"
+}

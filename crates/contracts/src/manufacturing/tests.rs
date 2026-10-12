@@ -7,7 +7,7 @@ use super::*;
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
         printer: PrinterSpecification {
-            schema_version: 1,
+            schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-cartesian".into(),
             revision: "1".into(),
             name: "Software only".into(),
@@ -44,6 +44,7 @@ fn intent() -> ManufacturingIntent {
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
             },
+            workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
             max_feed_mm_s: 150.0,
             max_volumetric_flow_mm3_s: 15.0,
@@ -58,6 +59,8 @@ fn intent() -> ManufacturingIntent {
             bead_width_mm: 0.45,
             perimeter_count: 2,
             infill_fraction: 1.0,
+            top_skin_thickness_mm: 0.6,
+            bottom_skin_thickness_mm: 0.6,
             print_speed_mm_s: 30.0,
             travel_speed_mm_s: 100.0,
             flow_multiplier: 1.0,
@@ -86,9 +89,23 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
         }],
     )
 }
+fn coverage() -> PlanarRegionCoverage {
+    PlanarRegionCoverage {
+        section_area_mm2: 50.0,
+        wall_area_mm2: 50.0,
+        bottom_skin_area_mm2: 0.0,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: 0.0,
+        requested_infill_fraction: 1.0,
+    }
+}
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
-        schema_version: 1,
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         sampling_tolerance_mm: 0.005,
         offset_tolerance_mm: 0.005,
         layer_quantization_mm: 0.000001,
@@ -96,6 +113,7 @@ fn plan() -> NormalizedPrintPlan {
             index: 0,
             z_mm: 5.2,
             section_z_mm: 5.1,
+            region_coverage: coverage(),
             paths: vec![DepositionPath {
                 kind: DepositionKind::Perimeter,
                 points_mm: vec![
@@ -113,7 +131,7 @@ fn bundle() -> ManufacturingBundle {
     let intent = intent();
     let input_hash = input_fingerprint(&project_id, &definitions, &occurrences, &intent).unwrap();
     ManufacturingBundle {
-        schema_version: 1,
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance: ManufacturingProvenance {
             project_id,
             input_revision: ProjectRevision(9),
@@ -142,6 +160,8 @@ fn bundle() -> ManufacturingBundle {
             filament_length_mm: 0.4,
             max_position_error_mm: 0.0,
             max_extrusion_error_mm: 0.0,
+            lifecycle_motion_count: 0,
+            priming_filament_length_mm: 0.0,
         },
     }
 }
@@ -175,8 +195,8 @@ fn strict_authoring_json_requires_every_explicit_profile_and_recipe_field() {
     assert_eq!(decode_intent(&bytes).unwrap(), intent());
     let mut duplicate = String::from_utf8(bytes).unwrap();
     duplicate = duplicate.replacen(
-        "\"schema_version\":1",
-        "\"schema_version\":1,\"schema_version\":1",
+        &format!("\"schema_version\":{MANUFACTURING_SCHEMA_VERSION}"),
+        &format!("\"schema_version\":{MANUFACTURING_SCHEMA_VERSION},\"schema_version\":{MANUFACTURING_SCHEMA_VERSION}"),
         1,
     );
     assert!(decode_intent(duplicate.as_bytes()).is_err());
@@ -200,10 +220,9 @@ fn profiles_reject_nonfinite_ranges_capabilities_flow_and_duplicate_components()
     assert!(changed.validate().is_err());
     changed = valid.clone();
     changed.recipe.infill_fraction = 0.5;
-    assert_eq!(
-        changed.validate().unwrap_err().code,
-        ManufacturingErrorCode::UnsupportedCapability
-    );
+    changed.validate().unwrap();
+    changed.recipe.infill_fraction = 0.0;
+    assert!(changed.validate().is_err());
     changed = valid.clone();
     changed.printer.capabilities.extruders = 2;
     assert_eq!(
@@ -451,6 +470,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                 index: index as u32,
                 z_mm,
                 section_z_mm: 5.0 + (index as f64 + 0.5) * 0.2,
+                region_coverage: coverage(),
                 paths: counts
                     .iter()
                     .map(|count| DepositionPath {
@@ -574,7 +594,7 @@ fn cumulative_segment_excess_is_rejected_before_decoding_later_points() {
 fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
     for points in ["[]", "[[10,10,5.2]]"] {
         let json = format!(
-            r#"{{"schema_version":1,"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
+            r#"{{"schema_version":{MANUFACTURING_SCHEMA_VERSION},"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
         );
         let error = serde_json::from_str::<NormalizedPrintPlan>(&json).unwrap_err();
         assert!(error.is_data(), "{error:?}");
@@ -584,12 +604,15 @@ fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
 #[test]
 fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     let expected = segmented_plan(&[&[1]]);
+    let coverage = serde_json::to_string(&expected.layers[0].region_coverage).unwrap();
     let points = r#"[[10,10,5.2],[11,10,5.2]]"#;
     let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill"}}"#);
-    let layer = format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#);
+    let layer = format!(
+        r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+    );
     let wrap = |layer: &str| {
         format!(
-            r#"{{"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"sampling_tolerance_mm":0.005,"schema_version":1}}"#
+            r#"{{"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
         )
     };
     assert_eq!(
@@ -601,8 +624,9 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         format!(r#""points_mm":{points}"#),
     ] {
         let duplicate = format!(r#"{{{field},"points_mm":{points},"kind":"solid_fill"}}"#);
-        let changed =
-            format!(r#"{{"paths":[{duplicate}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#);
+        let changed = format!(
+            r#"{{"region_coverage":{coverage},"paths":[{duplicate}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed))
                 .unwrap_err()
@@ -614,9 +638,11 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         r#""z_mm":5.2"#,
         r#""section_z_mm":5.1"#,
         &format!(r#""paths":[{path}]"#),
+        &format!(r#""region_coverage":{coverage}"#),
     ] {
-        let duplicate =
-            format!(r#"{{{field},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#);
+        let duplicate = format!(
+            r#"{{{field},"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&duplicate))
                 .unwrap_err()
@@ -628,8 +654,9 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         format!(r#"{{"points_mm":{points}}}"#),
         r#"{"kind":"solid_fill"}"#.to_string(),
     ] {
-        let changed_layer =
-            format!(r#"{{"paths":[{changed_path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#);
+        let changed_layer = format!(
+            r#"{{"region_coverage":{coverage},"paths":[{changed_path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))
                 .unwrap_err()
@@ -637,11 +664,18 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         );
     }
     for changed_layer in [
-        format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0,"extra":0}}"#),
-        format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2}}"#),
-        format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"index":0}}"#),
-        format!(r#"{{"paths":[{path}],"z_mm":5.2,"index":0}}"#),
-        r#"{"section_z_mm":5.1,"z_mm":5.2,"index":0}"#.to_string(),
+        format!(
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0,"extra":0}}"#
+        ),
+        format!(
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2}}"#
+        ),
+        format!(
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"index":0}}"#
+        ),
+        format!(r#"{{"region_coverage":{coverage},"paths":[{path}],"z_mm":5.2,"index":0}}"#),
+        format!(r#"{{"region_coverage":{coverage},"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
+        format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
     ] {
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))

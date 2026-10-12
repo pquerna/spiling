@@ -212,16 +212,15 @@ fn ring_compare(a: &LineString<f64>, b: &LineString<f64>) -> std::cmp::Ordering 
     a.0.len().cmp(&b.0.len())
 }
 
-pub(super) fn paths(
+pub(super) fn wall_centers(
     section: &MultiPolygon<f64>,
-    z: f64,
-    index: u32,
     recipe: &PlanarPrintRecipe,
-    segments: &mut usize,
+    retained_native_points: usize,
     cancel: &AtomicBool,
-) -> Result<Vec<DepositionPath>, ManufacturingError> {
+) -> Result<Vec<MultiPolygon<f64>>, ManufacturingError> {
     let width = recipe.bead_width_mm;
-    let mut paths = Vec::new();
+    let mut walls = Vec::with_capacity(recipe.perimeter_count as usize);
+    let mut retained_points = retained_native_points;
     for wall in 0..recipe.perimeter_count {
         let centers = offset(section, -(wall as f64 + 0.5) * width, cancel)?;
         if centers.0.len() != section.0.len() {
@@ -268,18 +267,54 @@ pub(super) fn paths(
                 ));
             }
         }
-        for p in &centers.0 {
-            for ring in std::iter::once(p.exterior()).chain(p.interiors()) {
-                check_cancel(cancel)?;
-                reserve_segments(segments, ring.0.len() - 1)?;
-                let points_mm = ring.0.iter().map(|c| [c.x, c.y, z]).collect();
-                push_path(&mut paths, DepositionKind::Perimeter, points_mm)?;
-            }
+        retained_points = retained_points
+            .checked_add(point_count(&centers))
+            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| resource("retained wall center point limit exceeded"))?;
+        walls.push(centers);
+    }
+    Ok(walls)
+}
+
+pub(super) fn wall_paths(
+    centers: &MultiPolygon<f64>,
+    z: f64,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    for p in &centers.0 {
+        for ring in std::iter::once(p.exterior()).chain(p.interiors()) {
+            check_cancel(cancel)?;
+            reserve_segments(segments, ring.0.len() - 1)?;
+            let points_mm = ring.0.iter().map(|c| [c.x, c.y, z]).collect();
+            push_path(paths, DepositionKind::Perimeter, points_mm)?;
         }
     }
-    let fill = offset(section, -(recipe.perimeter_count as f64) * width, cancel)?;
+    Ok(())
+}
+
+pub(super) struct HatchLayer<'a> {
+    pub z: f64,
+    pub index: u32,
+    pub recipe: &'a PlanarPrintRecipe,
+}
+
+// Fill endpoints belong to the eroded interior boundary, half a bead from
+// the final wall center. No wall-extension strokes or duplicate outlines.
+pub(super) fn hatch(
+    fill: &MultiPolygon<f64>,
+    kind: DepositionKind,
+    fraction: f64,
+    layer: &HatchLayer<'_>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let HatchLayer { z, index, recipe } = *layer;
+    let width = recipe.bead_width_mm;
     let h = recipe.layer_height_mm;
-    let spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
+    let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
     for polygon in &fill.0 {
         check_cancel(cancel)?;
         let rect = polygon
@@ -291,12 +326,19 @@ pub(super) fn paths(
         } else {
             (rect.min().y, rect.max().y)
         };
-        let row_count = ((max - min) / spacing).ceil().max(1.0);
+        // Multiplying density before dividing avoids overflow for tiny finite
+        // fractions; a single centered sparse row needs no finite huge pitch.
+        let row_count = (((max - min) / solid_spacing) * fraction).ceil().max(1.0);
         if !row_count.is_finite()
             || row_count > (MAX_DEPOSITION_SEGMENTS as usize - *segments) as f64
         {
-            return Err(resource("solid hatch row limit exceeded"));
+            return Err(resource("rectilinear hatch row limit exceeded"));
         }
+        let spacing = if row_count == 1.0 {
+            0.0
+        } else {
+            solid_spacing / fraction
+        };
         let start = min + ((max - min) - (row_count - 1.0) * spacing) * 0.5;
         let mut hits = Vec::new();
         for row in 0..row_count as usize {
@@ -305,6 +347,7 @@ pub(super) fn paths(
             let coordinate = start + row as f64 * spacing;
             for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
                 for edge in ring.0.windows(2) {
+                    check_cancel(cancel)?;
                     let a = if swap {
                         [edge[0].y, edge[0].x]
                     } else {
@@ -325,12 +368,14 @@ pub(super) fn paths(
             }
             hits.sort_by(f64::total_cmp);
             if hits.len() % 2 != 0 {
-                return Err(unsupported("solid hatch clipping has odd boundary parity"));
+                return Err(unsupported(
+                    "rectilinear hatch clipping has odd boundary parity",
+                ));
             }
             for pair in hits.as_chunks::<2>().0 {
                 if pair[1] - pair[0] <= 0.000002 {
                     return Err(unsupported(
-                        "solid hatch creates unresolved thin or zero-length deposition",
+                        "rectilinear hatch creates unresolved thin or zero-length deposition",
                     ));
                 }
                 reserve_segments(segments, 1)?;
@@ -347,16 +392,11 @@ pub(super) fn paths(
                 if row % 2 == 1 {
                     std::mem::swap(&mut a, &mut b);
                 }
-                push_path(&mut paths, DepositionKind::SolidFill, vec![a, b])?;
+                push_path(paths, kind, vec![a, b])?;
             }
         }
     }
-    if paths.is_empty() {
-        return Err(unsupported(
-            "section has no printable nominal deposition paths",
-        ));
-    }
-    Ok(paths)
+    Ok(())
 }
 fn push_path(
     paths: &mut Vec<DepositionPath>,

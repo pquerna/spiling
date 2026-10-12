@@ -5,9 +5,9 @@
 import type { PrinterSpecification } from "../../packages/protocol/src/generated.ts";
 
 const printer = {
-  schema_version: 1,
+  schema_version: 2,
   id: "software-cartesian-reference",
-  revision: "1",
+  revision: "2",
   name: "Software Cartesian reference — not machine-ready",
   coordinate_frame: "right_handed_millimetres",
   build_envelope: { min: [0, 0, 0], max: [220, 220, 220] },
@@ -31,6 +31,7 @@ const printer = {
     output_dialect: "cartesian_absolute_gcode_v1",
     generated_supports: false,
   },
+  workflow: { kind: "diagnostic_body_only" },
   nozzle_diameter_mm: 0.4,
   max_feed_mm_s: 150,
   max_volumetric_flow_mm3_s: 12,

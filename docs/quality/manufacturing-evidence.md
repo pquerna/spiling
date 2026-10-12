@@ -6,7 +6,100 @@ Licensed under the Open Software License version 3.0
 
 # Software-only manufacturing evidence
 
-## Manufacturing review and actual-program inspection
+## Complete-job and planar-region software proof
+
+Based on merged main `0b4a14f`, manufacturing data and SPLR are schema 2; planner/emitter/verifier provenance is version 2. Machine lifecycle, native material classification, Core storage and client display remain separate owners. This gate explicitly accepts software-verified jobs first, not physical machine qualification. Diagnostic bodies remain a distinct workflow; complete Marlin jobs declare exact configuration/calibration record hashes without claiming measurements.
+
+The focused proof below used the previous exact published kernel `d87b4d9ced1f3baf31aa771ac0e7c663efb1c001`, independently of the periodic-edge kernel work. Trusted TypeScript authoring of `complete-sparse.intent.ts` produced 3,147 bytes, SHA-256 `d37102c5c8c2528d41d81d3384d30e466e8a700829764645878b1ed0e7a49b43`. The actual CLI imported the original native box, compiled complete Marlin startup/waits/prime/object/lift/park/shutdown with 25% sparse interior and 0.8 mm top/bottom skins, independently inspected actual motion, saved and exclusively exported. A fresh read-only engine independently replayed the stored job.
+
+| Complete sparse-box observation             | Result                                  |
+| ------------------------------------------- | --------------------------------------- |
+| Layers / object paths / deposition segments | 40 / 632 / 3,432                        |
+| Object volume / filament                    | 882.4183774865178 mm³ / 366.86693003 mm |
+| Separate priming / lifecycle events         | 1.5 mm filament / 4                     |
+| Actual replay events / bytes                | 4,068 / 195,360                         |
+| Compile/replay/save/export runtime / peak   | 1.420 s / 12.2 MiB; zero swap           |
+| Fresh read-only runtime / peak              | 1.134 s / 11.3 MiB; zero swap           |
+
+The four immutable export files and packed replay were byte-identical across reopen. Both reported engine PIDs were reaped. The public TypeScript decoder admitted the actual native bytes and observed layer-free prime/lift/park, endpoint-only unknown first start, known first object travel, and perimeter/bottom-skin/sparse-fill/top-skin roles. No homing trajectory was fabricated.
+
+A disposable smoke projected those actual bytes through the production packed renderer: layer filtering hid lifecycle, travel hiding retained priming/deposition, and the empty event prefix drew no marker/segments. Accounted retained CPU/raw bytes were 309,248 and GPU-buffer bytes 97,620; the Node process peaked at 51.1 MiB under a 512 MiB cap with zero swap. This is CPU construction/visibility proof, not a GPU upload, rendered-motion or picking claim. The disposable script was removed.
+
+Focused manufacturing coverage passed 37 distinct behavioral tests across corrected targeted runs; the native golden refresh is separate. Coverage includes conservative physical skin horizons, local roofs/floors, protected holes/islands, density extremes, shared-layout equivalence, independent nominal-volume binding, complete-job thermal/modal/order mutations, rounding-aware object exclusion, barriers and parser/resource/cancellation boundaries. A newly exposed empty-operand overlay re-quantization changed nominal partition area; preserving mathematical empty-set identities removed the unnecessary computation without weakening the original absolute partition assertion. Independent analytic area and offset-sagitta obligations remain.
+
+The actual-engine complete sparse source-deletion/fresh-read-only case passed, as did stale/cancelled/resource-limited no-publication behavior. Existing Core coverage passed 42 tests; contract coverage passed 45 across full and corrected targeted runs. Protocol/viewport/desktop type checks and the two workbench state cases passed. Native builds were sequential under 3 GiB memory, 128 MiB swap and 64-task limits, one Cargo/Rayon worker and disk-backed scratch storage; the matching CLI workload used a 1 GiB/64 MiB cap. The Go-backed author type checker defaults to one worker after task exhaustion was observed; limits were not raised. No release, packaging or blanket workspace rerun establishes support.
+
+The refreshed schema-2 native rounding/coincident-travel golden passed its Rust generation contract; the independent TypeScript packed suite passed all 171 cases, including 30 replay admission cases. The first whole-suite invocation used concurrent Node test children under a 32-task cap and reported one failed test file without an assertion diagnostic; direct replay execution passed, then `--test-concurrency=1` passed the complete suite at 52.1 MiB with zero swap. No test expectation was weakened.
+
+The real production CEF panel was opened through its local debugging endpoint after the explicit no-GPU diagnostic attachment. Visible controls admitted the original native box, selected the reference draft explicitly, applied 0.6 mm top skin / 0.4 mm bottom skin / 25% infill, compiled and independently inspected actual transported motion. The fresh report was verified with 40 layers, 569 paths, 3,369 object deposition events, 3,938 total replay events / 189,120 bytes, object volume 815.9341319315249 mm³ and object filament 339.22599271 mm. The displayed workflow was explicitly diagnostic body-only, lifecycle/prime totals were zero, and `display_ready` stayed false. Changing layer/cursor retained the same bundle/revision and exposed actual source-line-6 first travel `[0.225,0.225,0.2]` mm with unknown start and zero E. Screenshots confirmed the skin/infill editor. Explicit discard/Stop reaped the owned engine PID. This proves native-panel controls and coordinate inspection, not WebGPU motion/picking, dialogs or hardware qualification.
+
+Canonical `pnpm build` staged the matching engine before embedding the frontend and building the desktop, reusing cached CEF without packaging or downloading it. The earlier build peaked at 1.6 GiB with zero swap; the final exact-kernel build after private interface factoring peaked at 1.5 GiB. The exact Git-pinned native replay/executable build peaked at 941.2 MiB. The completed kernel investigation's owned 1.6 GiB build cache was removed; Spiling retained one warm 9.8 GiB target with 3.0 GiB free disk. All observed runs used zero swap.
+
+### Final exact-kernel three-part integration
+
+The final exact published kernel is `f6e8a88d08d998970ab17aefd53bd2946408363f`.
+The actual CLI imported unchanged independent OCCT box/cylinder/through-hole
+sources, preserving 6/3/7 source faces, posed the cylinder at `[40,20,0]` mm and
+hole at `[80,0,0]` mm, applied the same explicit complete/sparse intent, and
+compiled, independently replayed, saved and exclusively exported. This includes
+the original failing first-layer `z=0.1` native cut, not a substituted midplane.
+After deleting only the owned operator-source copies, a fresh read-only engine
+reopened persisted sources/program and independently verified/exported again.
+
+| Final independent OCCT complete-job observation   | Result                                         |
+| ------------------------------------------------- | ---------------------------------------------- |
+| Layers / object paths / deposition segments       | 40 / 2,256 / 30,536                            |
+| Object volume / filament                          | 2,827.375123713008 mm³ / 1,175.48598051 mm     |
+| Separate priming / lifecycle events               | 1.5 mm filament / 4                            |
+| Replay events / bytes                             | 32,796 / 1,574,304                             |
+| Compile/replay/save/export runtime / peak         | 38.705 s / 53.9 MiB                            |
+| Fresh source-independent read-only runtime / peak | 5.425 s / 47.4 MiB                             |
+| Nominal section / protected-hole area             | 650.2553349444219 mm² / 28.247784358680462 mm² |
+| Interior intentional-void area at 25% density     | 364.1298861737432 mm²                          |
+
+All four immutable export files and packed replay were byte-identical.
+Actual program SHA-256 is
+`58f742c75f15d98c1fdd0a88e609f3124fc245edcaa22c897ea540bd4bb23bfa`;
+packed replay SHA-256 is
+`8b7b40084e2d4fa211e41125a7e8e86f536ec2ec8bcd52d3aafae9b93ee2f991`.
+Bundle/input hashes are
+`fc199f8e140b0f333e0396ffcbaf8589107ef2b57b2c4559b1373e78dcd2fd1d` /
+`5826f847fa32df8d64c04014fd20c10489e13e0a34e87a2503e7dc46ed93a128`.
+The independent public TypeScript decoder admitted seven actual roles:
+travel/perimeter/bottom skin/top skin/sparse/lifecycle travel/prime. All 40 layers
+preserved the existing ownership partition bound and protected hole; the 0.8 mm
+skin horizon occupied four bottom and four top layers, with bottom precedence.
+Intentional void is a reported subset of sparse ownership, not another material
+partition or protected source hole. Both native child PIDs were reaped.
+
+The final real CEF production panel opened that persisted complete-job project
+through confined native tokens. Scalar Apply changed top skin to 0.6 mm while
+preserving every printer/job/configuration/calibration declaration exactly and
+invalidating the old artifact. Core Undo restored the complete intent without
+making historical verification fresh. A new compile after private hatch-layer
+and independent motion-state factoring produced the same input hash and object
+totals; fresh actual-program inspection transported all 32,796 events. Visible
+first/last endpoints were `[10,210,0.2]` mm at source line 15 with unknown start and
+`[0,210,20]` mm at source line 32,811 with known start and absolute E
+1,176.98598051 mm. Neither has an object-layer attribution. Priming remained
+separate from object totals. The negotiated UI kernel was the exact published
+revision. The explicit no-GPU diagnostic retained the normal startup rejection
+and `display_ready=false`; this is not GPU/picking or physical machine evidence.
+The owned unsaved smoke changes were discarded, the native child was observed
+reaped, and the diagnostic service was stopped; its peak was 621.9 MiB with zero
+swap. Readable recipe/report evidence is retained under ignored `artifacts/`.
+
+Selected contracts/core/geometry/manufacturing/engine/CLI/desktop all-target
+Clippy passed with warnings denied at 542 MiB peak. Bounded control/native result
+oneofs retain the existing allocation-free inline policy rather than adding
+per-call boxes. After factoring, the lifecycle modal/thermal/barrier/extrusion
+mutation regression, local physical-skin/slab-transition regression and exact
+native rounding/coincident-travel golden passed; that focused run peaked at
+550.7 MiB. Final-revision TypeScript replay admission passed all 30 cases.
+Existing generator `ts-rs` attribute diagnostics and third-party future-compiler
+warnings remain visible.
+
+## Prior manufacturing review and actual-program inspection
 
 The manufacturing-workbench change builds on merged main `49a07d2`. The desktop feature and native bridge are separate owning modules; CLI and shell share one exclusive export writer. The engine remains the only intent/planning/verification authority. Report-only inspection retains no display bytes; report-and-motion publishes bounded SPLR schema 1 from the existing independent actual-command decoder through the same durable operation ledger and ByteStream. The original verified-result resource remains the manufacturing bundle. Descriptor/provenance and resource bindings are documented in [packed replay](../protocol/replay.md).
 
@@ -150,4 +243,4 @@ The exercised environment was Linux x64, Intel i7-10710U (6 cores / 12 threads),
 | `fixtures/geometry/through-hole.step`           | `eb2112f9ef4be523615f237b86b69569026cef8e1cafbc20e2fdca7e3459cb29` |
 | `fixtures/manufacturing/solid-fill.intent.json` | `97ca7ea395b7c44aef1e15ff61d505dab42b1d64b6849204f07dd120d297e58b` |
 
-Support remains restricted to the declared import and planar manufacturing envelope. Slopes, tilted cylinders, non-layer-aligned shelves, partial top layers, generated supports, arbitrary repair and unresolved thin geometry are rejected. Component shapes are metadata. Independently exported cylinder/hole admission and physical visible/pickable acceptance remain separate unresolved geometry gates; see [geometry evidence](geometry-evidence.md). Private Blender-format research is nonbinding and introduces no importer implementation.
+At this historical checkpoint, support was restricted to the declared import and planar manufacturing envelope. Slopes, tilted cylinders, non-layer-aligned shelves, partial top layers, generated supports, arbitrary repair and unresolved thin geometry were rejected; component shapes were metadata. Its independently exported cylinder/hole admission gate was unresolved. The current exact-kernel software gate is recorded above and in [geometry evidence](geometry-evidence.md); physical visible/pickable and machine acceptance remain open. Private Blender-format research is nonbinding and introduces no importer implementation.

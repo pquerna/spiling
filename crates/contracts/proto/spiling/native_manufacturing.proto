@@ -97,6 +97,7 @@ message ReplayDisplayInfo {
   uint32 travel_count = 9;
   uint32 layer_count = 10;
   AabbMm bounds_mm = 11;
+  uint32 lifecycle_count = 12;
 }
 message ReplayDisplayDescriptor {
   ReplayDisplayInfo info = 1;
@@ -118,6 +119,7 @@ enum MotionSpace {
 enum OutputDialect {
   OUTPUT_DIALECT_UNSPECIFIED = 0;
   CARTESIAN_ABSOLUTE_GCODE_V1 = 1;
+  MARLIN2_SINGLE_EXTRUDER_GCODE_V1 = 2;
 }
 message PrinterCapabilities {
   MotionSpace motion_space = 1;
@@ -159,6 +161,40 @@ message PrinterSpecification {
   double nozzle_diameter_mm = 9;
   double max_feed_mm_s = 10;
   double max_volumetric_flow_mm3_s = 11;
+  JobWorkflow workflow = 12;
+}
+message DiagnosticBodyOnly {}
+enum HomingCoordinateContract {
+  HOMING_COORDINATE_CONTRACT_UNSPECIFIED = 0;
+  MARLIN_NATIVE_CARTESIAN = 1;
+}
+message JobWorkflow {
+  oneof workflow {
+    DiagnosticBodyOnly diagnostic_body_only = 1;
+    SingleExtruderJob complete_marlin = 2;
+  }
+}
+message SingleExtruderJob {
+  string machine_id = 1;
+  string firmware_version = 2;
+  string configuration_hash = 3;
+  string calibration_record_hash = 4;
+  HomingCoordinateContract homing_contract = 5;
+  Vec3 home_position_mm = 6;
+  // Temperature targets/limits are finite positive integral Celsius degrees.
+  // Complete configuration must compile TEMPERATURE_UNITS_SUPPORT (M149 C).
+  double nozzle_temperature_c = 7;
+  double bed_temperature_c = 8;
+  double minimum_extrusion_temperature_c = 9;
+  double maximum_nozzle_temperature_c = 10;
+  double maximum_bed_temperature_c = 11;
+  // Complete prime segment excludes the conservative whole-object XY bounds
+  // plus half bead width and serialization padding, irrespective of Z/holes.
+  Vec3 prime_start_mm = 12;
+  Vec3 prime_end_mm = 13;
+  double prime_filament_length_mm = 14;
+  double prime_speed_mm_s = 15;
+  Vec3 park_position_mm = 16;
 }
 message PlanarPrintRecipe {
   string id = 1;
@@ -173,6 +209,8 @@ message PlanarPrintRecipe {
   double print_speed_mm_s = 10;
   double travel_speed_mm_s = 11;
   double flow_multiplier = 12;
+  double top_skin_thickness_mm = 13;
+  double bottom_skin_thickness_mm = 14;
 }
 message ManufacturingArtifactRecord {
   string hash = 1;
@@ -198,4 +236,6 @@ message VerificationReport {
   double filament_length_mm = 7;
   double max_position_error_mm = 8;
   double max_extrusion_error_mm = 9;
+  uint32 lifecycle_motion_count = 10;
+  double priming_filament_length_mm = 11;
 }

@@ -75,6 +75,18 @@ fn oblique_sections_preserve_native_box_cylinder_and_hole_area_and_winding() {
             2,
             6.0 * PI * area_scale,
         ),
+        (
+            "independent-exporters/occt-cylinder-mm.step",
+            25.0 * PI,
+            1,
+            10.0 * PI * area_scale,
+        ),
+        (
+            "independent-exporters/occt-through-hole-mm.step",
+            400.0 - 9.0 * PI,
+            2,
+            6.0 * PI * area_scale,
+        ),
     ] {
         let result = section(&fixture(name), plane, &AtomicBool::new(false)).unwrap();
         assert_eq!(result.loops.len(), loop_count, "{name}");
@@ -262,12 +274,10 @@ fn near_parallel_source_face_is_not_misidentified_as_generated_cap() {
     );
 }
 
-#[test]
-fn original_analytic_cylinder_public_boolean_preserves_closed_native_caps() {
-    // Source: examples/generate_corpus.rs, extruded(circle(0, 0, 5), 8).
-    // This is the original analytic cylinder, not a NURBS surface substitute.
-    // The imported source and its face slots stay intact.
-    let definition = fixture("cylinder.step");
+fn assert_analytic_cylinder_public_boolean_preserves_closed_caps(name: &str, source_faces: usize) {
+    let definition = fixture(name);
+    let source_mapping = definition.faces.clone();
+    let source_provenance = definition.provenance.clone();
     let plane = PlaneMm {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
@@ -293,15 +303,25 @@ fn original_analytic_cylinder_public_boolean_preserves_closed_native_caps() {
     let allowance =
         10.0 * PI * SECTION_SAMPLING_TOLERANCE_MM + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2);
     assert!((signed_area(&result.loops[0], &frame) - 25.0 * PI).abs() <= allowance);
-    assert_eq!(definition.solid.face_iter().count(), 4);
+    assert_eq!(definition.solid.face_iter().count(), source_faces);
+    assert_eq!(definition.faces, source_mapping);
+    assert_eq!(definition.provenance, source_provenance);
 }
 
 #[test]
-fn original_through_hole_public_boolean_preserves_inner_cap_edge_incidence() {
-    // Source: examples/generate_corpus.rs, the 20x20x8 original extrusion
-    // with the inverted radius-3 circular boundary centered at (10, 10).
-    let definition = fixture("through-hole.step");
+fn cylinder_exporters_public_boolean_preserves_closed_native_caps() {
+    assert_analytic_cylinder_public_boolean_preserves_closed_caps("cylinder.step", 4);
+    assert_analytic_cylinder_public_boolean_preserves_closed_caps(
+        "independent-exporters/occt-cylinder-mm.step",
+        3,
+    );
+}
+
+fn assert_through_hole_public_boolean_preserves_inner_cap_incidence(name: &str) {
+    let definition = fixture(name);
     let source_faces = definition.solid.face_iter().count();
+    let source_mapping = definition.faces.clone();
+    let source_provenance = definition.provenance.clone();
     let plane = PlaneMm {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],
@@ -336,4 +356,93 @@ fn original_through_hole_public_boolean_preserves_inner_cap_edge_incidence() {
         6.0 * PI * SECTION_SAMPLING_TOLERANCE_MM + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2);
     assert!((area - (400.0 - 9.0 * PI)).abs() <= allowance);
     assert_eq!(definition.solid.face_iter().count(), source_faces);
+    assert_eq!(definition.faces, source_mapping);
+    assert_eq!(definition.provenance, source_provenance);
+}
+
+#[test]
+fn through_hole_exporters_public_boolean_preserves_inner_cap_edge_incidence() {
+    for name in [
+        "through-hole.step",
+        "independent-exporters/occt-through-hole-mm.step",
+    ] {
+        assert_through_hole_public_boolean_preserves_inner_cap_incidence(name);
+    }
+}
+
+#[test]
+fn frozen_occt_placed_first_layers_keep_native_caps_and_source_identity() {
+    for (name, inverse_pose_xy, area, loop_count, radius, center) in [
+        (
+            "independent-exporters/occt-cylinder-mm.step",
+            [-40.0, -20.0],
+            25.0 * PI,
+            1,
+            5.0,
+            [0.0, 0.0],
+        ),
+        (
+            "independent-exporters/occt-through-hole-mm.step",
+            [-80.0, 0.0],
+            400.0 - 9.0 * PI,
+            2,
+            3.0,
+            [10.0, 10.0],
+        ),
+    ] {
+        let definition = fixture(name);
+        let source_mapping = definition.faces.clone();
+        let source_provenance = definition.provenance.clone();
+        let source_geometry =
+            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        for height in [0.1, 0.3] {
+            // Engine occurrence placement inverse-transforms the world plane;
+            // the authoritative definition and original STEP bytes stay local.
+            let plane = PlaneMm {
+                origin_mm: [inverse_pose_xy[0], inverse_pose_xy[1], height],
+                normal: [0.0, 0.0, 1.0],
+            };
+            let frame = PlaneFrameMm::from_plane(plane).unwrap();
+            let (min, max) = clip_bounds(&definition, &frame).unwrap();
+            let clip: Solid = primitive::cuboid(BoundingBox::from_iter([
+                Point3::from(min),
+                Point3::from(max),
+            ]));
+            let clip = builder::transformed(&clip, frame_to_definition(&frame));
+            let native =
+                monstertruck_solid::and(&definition.solid, &clip, SECTION_BOOLEAN_TOLERANCE_MM)
+                    .expect(
+                        "original placed first-layer OCCT geometry has a transverse native cap",
+                    );
+            assert!(native.is_geometric_consistent());
+            assert_eq!(native.boundaries().len(), 1);
+            native.boundaries()[0].check_solid_boundary().unwrap();
+            let result = section(&definition, plane, &AtomicBool::new(false)).unwrap();
+            assert_eq!(result.loops.len(), loop_count);
+            assert_canonical(&result);
+            let circle = &result.loops[loop_count - 1];
+            assert_eq!(circle.is_hole, loop_count == 2);
+            for point in &circle.points_mm {
+                assert!(
+                    ((point[0] - center[0]).hypot(point[1] - center[1]) - radius).abs()
+                        <= SECTION_PLANE_TOLERANCE_MM
+                );
+                assert!((point[2] - height).abs() <= SECTION_PLANE_TOLERANCE_MM);
+            }
+            let measured: f64 = result
+                .loops
+                .iter()
+                .map(|boundary| signed_area(boundary, &frame))
+                .sum();
+            let allowance = 2.0 * PI * radius * SECTION_SAMPLING_TOLERANCE_MM
+                + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2);
+            assert!((measured - area).abs() <= allowance);
+            assert_eq!(definition.faces, source_mapping);
+            assert_eq!(definition.provenance, source_provenance);
+            assert_eq!(
+                serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+                source_geometry,
+            );
+        }
+    }
 }

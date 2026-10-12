@@ -62,6 +62,8 @@ fn audit_encoded(definition: &Definition, encoded: &EncodedMesh) {
     let mut triangles = 0;
     let mut bytes = 0;
     for (chunk, descriptor) in encoded.chunks.iter().zip(&descriptors) {
+        assert_eq!(descriptor.definition_id, definition.id);
+        assert_eq!(descriptor.face_count as usize, definition.faces.len());
         assert!(chunk.bytes.len() <= MAX_GEOMETRY_CHUNK_BYTES as usize);
         assert!(descriptor.carrier_deviation_mm <= MESH_CARRIER_TOLERANCE_MM);
         assert!(descriptor.quantization_error_mm <= MESH_QUANTIZATION_TOLERANCE_MM);
@@ -119,6 +121,9 @@ fn original_parts_preserve_all_source_faces_analytic_normals_and_profile_precisi
         "box-inch.step",
         "cylinder.step",
         "through-hole.step",
+        "independent-exporters/occt-box-mm.step",
+        "independent-exporters/occt-cylinder-mm.step",
+        "independent-exporters/occt-through-hole-mm.step",
     ] {
         let definition = fixture(name);
         if name.starts_with("box-") {
@@ -148,9 +153,8 @@ fn original_parts_preserve_all_source_faces_analytic_normals_and_profile_precisi
     }
 }
 
-#[test]
-fn through_hole_caps_keep_the_trim_and_cylinder_normals_point_into_the_hole() {
-    let definition = fixture("through-hole.step");
+fn assert_through_hole_caps_keep_trim_and_inward_normals(name: &str) {
+    let definition = fixture(name);
     let encoded = tessellate(
         &definition,
         DisplayProfile::MeshMm005V1,
@@ -221,6 +225,16 @@ fn through_hole_caps_keep_the_trim_and_cylinder_normals_point_into_the_hole() {
         + std::f64::consts::PI * MESH_CARRIER_TOLERANCE_MM.powi(2);
     for area in areas {
         assert!((area - expected).abs() <= sampling_area_bound + 1e-5);
+    }
+}
+
+#[test]
+fn through_hole_exporters_keep_cap_trims_and_inward_cylinder_normals() {
+    for name in [
+        "through-hole.step",
+        "independent-exporters/occt-through-hole-mm.step",
+    ] {
+        assert_through_hole_caps_keep_trim_and_inward_normals(name);
     }
 }
 

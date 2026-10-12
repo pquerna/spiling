@@ -16,10 +16,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "1";
-pub const EMITTER_VERSION: &str = "1";
-pub const VERIFIER_VERSION: &str = "1";
-const KERNEL_REVISION: &str = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001";
+pub const PLANNER_VERSION: &str = "2";
+pub const EMITTER_VERSION: &str = "2";
+pub const VERIFIER_VERSION: &str = "2";
+const KERNEL_REVISION: &str = "f6e8a88d08d998970ab17aefd53bd2946408363f";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -109,7 +109,7 @@ pub fn compile(
     let program = backend::emit(&plan, input.intent, cancel)?;
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
     let bundle = ManufacturingBundle {
-        schema_version: 1,
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance,
         plan,
         program,
@@ -149,7 +149,10 @@ pub fn inspect_bundle(
     validate_inspection_bundle(bundle, cancel)?;
     let mut sink = match output {
         VerificationOutput::ReportOnly => None,
-        VerificationOutput::ReportAndMotion => Some(verifier::ReplaySink::new(&bundle.plan)?),
+        VerificationOutput::ReportAndMotion => Some(verifier::ReplaySink::new(
+            &bundle.plan,
+            &bundle.provenance.intent,
+        )?),
     };
     let report = verifier::verify_actual(
         &bundle.program,
@@ -170,9 +173,12 @@ pub fn inspect_bundle(
             ),
             verifier_version: VERIFIER_VERSION.into(),
             frame: bundle.provenance.intent.printer.coordinate_frame,
-            event_count: report.deposition_segments + report.travel_segments,
+            event_count: report.deposition_segments
+                + report.travel_segments
+                + report.lifecycle_motion_count,
             deposition_count: report.deposition_segments,
             travel_count: report.travel_segments,
+            lifecycle_count: report.lifecycle_motion_count,
             layer_count: bundle.plan.layers.len() as u32,
             bounds_mm,
         };

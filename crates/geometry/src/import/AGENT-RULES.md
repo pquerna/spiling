@@ -12,4 +12,6 @@ Parse UTF-8 once through maintained step-p21 after source/entity lexical caps; r
 
 Preserve the bounded native extraction cause in rejection diagnostics. A kernel representation failure is not independent proof that the source solid is invalid; do not hide it with healing, source rewriting or guessed face remapping.
 
+The authoritative public STEP converter may represent a one-period closed edge by two shared exact native subedges; the same subdivision must appear in every oriented use, without changing source bytes, face count/order, carriers or face direction. Paired seam uses may explain repeated boundary vertices; arbitrary touching loops, seam spikes, open boundaries, nonperiodic/collapsed self-loops and geometrically inconsistent periods remain refusals. Do not implement that representation by an adapter-side healer or second extraction path.
+
 Exercise `cargo test --locked -p spiling-geometry` and the real native corpus smoke; see [geometry evidence](../../../../docs/quality/geometry-evidence.md).

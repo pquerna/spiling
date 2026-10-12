@@ -8,7 +8,7 @@ use spiling_contracts::geometry::{AabbMm, OccurrenceId, RigidPoseMm, SourceHash}
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
         printer: PrinterSpecification {
-            schema_version: 1,
+            schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-cartesian".into(),
             revision: "1".into(),
             name: "Software validation only".into(),
@@ -21,6 +21,7 @@ fn intent() -> ManufacturingIntent {
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
             },
+            workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
             max_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
@@ -35,6 +36,8 @@ fn intent() -> ManufacturingIntent {
             bead_width_mm: 0.6,
             perimeter_count: 1,
             infill_fraction: 1.0,
+            top_skin_thickness_mm: 0.8,
+            bottom_skin_thickness_mm: 0.8,
             print_speed_mm_s: 20.0,
             travel_speed_mm_s: 100.0,
             flow_multiplier: 1.0,
@@ -304,7 +307,7 @@ fn unsupported_thin_support_partial_top_envelope_and_invalid_profiles_are_errors
             0 => data.recipe.print_speed_mm_s = 201.0,
             1 => data.printer.max_volumetric_flow_mm3_s = 0.01,
             2 => data.recipe.flow_multiplier = f64::NAN,
-            _ => data.recipe.infill_fraction = 0.5,
+            _ => data.recipe.infill_fraction = 0.0,
         }
         assert!(scene.compile(&data).is_err());
     }
@@ -432,6 +435,23 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
             points_mm: vec![[5.0, 1.0, 0.4], [5.0, 5.0, 0.4]],
         },
     ];
+    let recipe = &intent.recipe;
+    let bead_area = ((recipe.bead_width_mm - recipe.layer_height_mm) * recipe.layer_height_mm
+        + std::f64::consts::PI * (recipe.layer_height_mm * 0.5).powi(2))
+        * recipe.flow_multiplier;
+    bundle.plan.layers[0]
+        .region_coverage
+        .nominal_deposition_volume_mm3 = bundle.plan.layers[0]
+        .paths
+        .iter()
+        .flat_map(|path| path.points_mm.windows(2))
+        .map(|edge| {
+            (edge[1][0] - edge[0][0])
+                .hypot(edge[1][1] - edge[0][1])
+                .hypot(edge[1][2] - edge[0][2])
+                * bead_area
+        })
+        .sum();
     bundle.program = backend::emit(&bundle.plan, &intent, &cancel).unwrap();
     bundle.verification =
         verifier::verify(&bundle.program, &bundle.plan, &intent, &cancel).unwrap();
@@ -453,7 +473,9 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         1
     );
     let positions: Vec<[f64; 3]> = replay.bytes[REPLAY_HEADER_BYTES..]
-        .chunks_exact(REPLAY_RECORD_BYTES)
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
         .map(|r| {
             std::array::from_fn(|axis| {
                 f64::from_le_bytes(r[axis * 8..axis * 8 + 8].try_into().unwrap())

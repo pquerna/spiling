@@ -27,10 +27,38 @@ G0 X2 Y2 Z2 F1200
 G1 X2 Y6 Z2 E6 F600
 ";
 
+fn coverage() -> PlanarRegionCoverage {
+    PlanarRegionCoverage {
+        section_area_mm2: 16.0,
+        wall_area_mm2: 16.0,
+        bottom_skin_area_mm2: 0.0,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: 0.0,
+        requested_infill_fraction: 1.0,
+    }
+}
+fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
+    let r = &intent.recipe;
+    let area = ((r.bead_width_mm - r.layer_height_mm) * r.layer_height_mm
+        + std::f64::consts::PI * (r.layer_height_mm / 2.0).powi(2))
+        * r.flow_multiplier;
+    for layer in &mut plan.layers {
+        layer.region_coverage.nominal_deposition_volume_mm3 = layer
+            .paths
+            .iter()
+            .flat_map(|path| path.points_mm.windows(2))
+            .map(|edge| distance(edge[0], edge[1]) * area)
+            .sum();
+    }
+}
 fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     let intent = ManufacturingIntent {
         printer: PrinterSpecification {
-            schema_version: 1,
+            schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "software-fixture".into(),
             revision: "1".into(),
             name: "Not a physical printer".into(),
@@ -46,6 +74,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
             },
+            workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 1.0,
             max_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 100.0,
@@ -60,13 +89,15 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             bead_width_mm: 1.0,
             perimeter_count: 1,
             infill_fraction: 1.0,
+            top_skin_thickness_mm: 1.0,
+            bottom_skin_thickness_mm: 1.0,
             print_speed_mm_s: 10.0,
             travel_speed_mm_s: 20.0,
             flow_multiplier: 1.0,
         },
     };
-    let plan = NormalizedPrintPlan {
-        schema_version: 1,
+    let mut plan = NormalizedPrintPlan {
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         sampling_tolerance_mm: 0.005,
         offset_tolerance_mm: 0.001,
         layer_quantization_mm: 0.000_001,
@@ -75,6 +106,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 index: 0,
                 z_mm: 1.0,
                 section_z_mm: 0.5,
+                region_coverage: coverage(),
                 paths: vec![
                     DepositionPath {
                         kind: DepositionKind::Perimeter,
@@ -96,6 +128,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 index: 1,
                 z_mm: 2.0,
                 section_z_mm: 1.5,
+                region_coverage: coverage(),
                 paths: vec![DepositionPath {
                     kind: DepositionKind::SolidFill,
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
@@ -103,6 +136,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             },
         ],
     };
+    refresh_volumes(&intent, &mut plan);
     (intent, plan)
 }
 
@@ -139,6 +173,7 @@ fn replay_rejects_omitted_intermediate_and_final_fixed_height_layers() {
                 index: empty_index as u32,
                 z_mm: (empty_index + 1) as f64,
                 section_z_mm: empty_index as f64 + 0.5,
+                region_coverage: coverage(),
                 paths: vec![],
             },
         );
@@ -186,6 +221,7 @@ fn actual_backend_program_is_independently_replayed() {
             }
         }
     }
+    refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     let report = verify(&program, &plan, &intent, &cancel).unwrap();
@@ -250,6 +286,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
         kind: DepositionKind::SolidFill,
         points_mm: vec![[1.0, 1.0, 1.0], [4.0, 5.0, 1.0]],
     }];
+    refresh_volumes(&intent, &mut plan);
     let program = "G21\nG90\nM82\nG92 E0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\n";
     let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
     assert_eq!(report.filament_length_mm, 1.25);
@@ -502,9 +539,10 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
         };
         spiling_contracts::manufacturing::MAX_DEPOSITION_SEGMENTS as usize
     ];
+    refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
-    let mut sink = ReplaySink::new(&plan).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
     let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
     assert_eq!(report.deposition_segments, 100_000);
     assert_eq!(report.travel_segments, 100_000);
@@ -517,5 +555,231 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     assert_eq!(bounds.max, [5.0, 1.0, 1.0]);
     let excess_path = plan.layers[0].paths[0].clone();
     plan.layers[0].paths.push(excess_path);
-    assert!(ReplaySink::new(&plan).is_err());
+    assert!(ReplaySink::new(&plan, &intent).is_err());
+}
+
+fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (mut intent, plan) = fixture();
+    intent.printer.capabilities.output_dialect = OutputDialect::Marlin2SingleExtruderGcodeV1;
+    intent.printer.workflow = JobWorkflow::CompleteMarlin {
+        job: SingleExtruderJob {
+            machine_id: "unqualified-software-test-machine".into(),
+            firmware_version: "2.1.2.5".into(),
+            configuration_hash: spiling_contracts::geometry::SourceHash::from_bytes(
+                b"test configuration declaration",
+            ),
+            calibration_record_hash: spiling_contracts::geometry::SourceHash::from_bytes(
+                b"test calibration declaration, not a measurement",
+            ),
+            homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+            home_position_mm: [0.0; 3],
+            nozzle_temperature_c: 200.0,
+            bed_temperature_c: 60.0,
+            minimum_extrusion_temperature_c: 170.0,
+            maximum_nozzle_temperature_c: 250.0,
+            maximum_bed_temperature_c: 100.0,
+            prime_start_mm: [10.0, 10.0, 1.0],
+            prime_end_mm: [20.0, 10.0, 1.0],
+            prime_filament_length_mm: 1.0,
+            prime_speed_mm_s: 5.0,
+            park_position_mm: [0.0, 0.0, 10.0],
+        },
+    };
+    (intent, plan)
+}
+
+#[test]
+fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
+    let (intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+    assert_eq!(report.filament_length_mm, 6.0);
+    assert_eq!(report.priming_filament_length_mm, 1.0);
+    assert_eq!(report.lifecycle_motion_count, 4);
+    let (bytes, bounds) = sink.finish().unwrap();
+    assert_eq!(bytes.len(), 96 + 48 * 13);
+    assert_eq!(bounds.max, [20.0, 10.0, 10.0]);
+    assert_eq!(&bytes[28..32], &4u32.to_le_bytes());
+    assert_eq!(bytes[96 + 46], 6);
+    assert_eq!(bytes[96 + 48 + 46], 7);
+    report.validate().unwrap();
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&bytes);
+    let descriptor = ReplayDisplayDescriptor {
+        info: ReplayDisplayInfo {
+            schema_version: REPLAY_SCHEMA_VERSION,
+            bundle_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"test bundle"),
+            input_hash: spiling_contracts::geometry::SourceHash::from_bytes(b"test intent"),
+            program_hash: spiling_contracts::geometry::SourceHash::from_bytes(program.as_bytes()),
+            verifier_version: "test".into(),
+            frame: intent.printer.coordinate_frame,
+            event_count: 13,
+            deposition_count: 6,
+            travel_count: 3,
+            lifecycle_count: 4,
+            layer_count: 2,
+            bounds_mm: bounds,
+        },
+        resource: spiling_contracts::ArtifactView {
+            name: format!("artifacts/{}", hash.as_str()),
+            sha256: hash.as_str().into(),
+            size_bytes: bytes.len().to_string(),
+            media_type: REPLAY_MEDIA_TYPE.into(),
+        },
+    };
+    validate_replay_display(&bytes, &descriptor).unwrap();
+    for offset in [96 + 44, 96 + 46, 96 + 48 + 46, 96 + 11 * 48 + 16] {
+        let mut corrupt = bytes.clone();
+        corrupt[offset] ^= 1;
+        let mut rebound = descriptor.clone();
+        let hash = spiling_contracts::geometry::SourceHash::from_bytes(&corrupt);
+        rebound.resource.name = format!("artifacts/{}", hash.as_str());
+        rebound.resource.sha256 = hash.as_str().into();
+        assert!(validate_replay_display(&corrupt, &rebound).is_err());
+    }
+}
+
+#[test]
+fn complete_job_rejects_lifecycle_modal_thermal_barrier_and_extrusion_mutations() {
+    let (intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    for (from, to) in [
+        ("M200 D0", "M200 D1.75"),
+        ("M220 S100", "M220 S90"),
+        ("M221 S100", "M221 S110"),
+        ("G28\n", ""),
+        ("M420 S0", "M420 S1"),
+        ("M190 R60.000000", "M190 S60"),
+        ("M109 R200.000000", "M109 R190"),
+        ("M109 R200.000000\n", ""),
+        ("M400\n", ""),
+        ("M104 S0", "M104 S200"),
+        ("M84\n", ""),
+        ("M82\n", "M83\n"),
+        ("G90\n", "G91\n"),
+        ("Z10.000000", "Z1.000000"),
+        ("E1.00000000", "E2.00000000"),
+        ("G28", "START_PRINT"),
+        ("M107", "M106 S255"),
+    ] {
+        let mutated = program.replacen(from, to, 1);
+        assert_ne!(mutated, program, "{from}");
+        assert!(
+            verify(&mutated, &plan, &intent, &cancel).is_err(),
+            "{from} -> {to}"
+        );
+    }
+    assert!(verify(&(program + "G0 X0 Y0 Z0 F1200\n"), &plan, &intent, &cancel).is_err());
+}
+
+#[test]
+fn complete_job_rejects_unsafe_or_incompatible_specifications() {
+    let (intent, plan) = complete_fixture();
+    for mutation in 0..5 {
+        let mut bad = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut bad.printer.workflow {
+            match mutation {
+                0 => job.prime_end_mm[0] = 101.0,
+                1 => job.park_position_mm[2] = 2.0,
+                2 => job.nozzle_temperature_c = 100.0,
+                3 => job.prime_filament_length_mm = 101.0,
+                _ => job.firmware_version = "unknown".into(),
+            }
+        }
+        assert!(crate::backend::emit(&plan, &bad, &AtomicBool::new(false)).is_err());
+    }
+    let mut bad = intent;
+    bad.printer.capabilities.output_dialect = OutputDialect::CartesianAbsoluteGcodeV1;
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn region_nominal_measurement_mutation_is_not_trusted() {
+    let (intent, mut plan) = fixture();
+    plan.layers[0].region_coverage.nominal_deposition_volume_mm3 += 1.0;
+    assert!(verify(GOLDEN, &plan, &intent, &AtomicBool::new(false)).is_err());
+}
+
+#[test]
+fn complete_job_requires_integral_celsius_and_explicit_temperature_units() {
+    let (intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    for replacement in [
+        "",
+        "M149 F\n",
+        "M149 K\n",
+        "M149\n",
+        "M149 C F\n",
+        "M149 C1\n",
+    ] {
+        let mutated = program.replacen("M149 C\n", replacement, 1);
+        assert!(
+            verify(&mutated, &plan, &intent, &cancel).is_err(),
+            "{replacement:?}"
+        );
+    }
+    for temperature in [-0.1, 0.5, 169.999999, 200.25, 249.999999, 250.000001] {
+        let mut bad = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut bad.printer.workflow {
+            job.nozzle_temperature_c = temperature;
+        }
+        assert!(bad.validate().is_err(), "{temperature}");
+        assert!(crate::backend::emit(&plan, &bad, &cancel).is_err());
+    }
+    for temperature in [170.0, 250.0] {
+        let mut boundary = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut boundary.printer.workflow {
+            job.nozzle_temperature_c = temperature;
+        }
+        let program = crate::backend::emit(&plan, &boundary, &cancel).unwrap();
+        verify(&program, &plan, &boundary, &cancel).unwrap();
+    }
+    let mut bad = intent;
+    if let JobWorkflow::CompleteMarlin { job } = &mut bad.printer.workflow {
+        job.bed_temperature_c = 60.5;
+    }
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn priming_excludes_whole_object_xy_even_above_object_and_across_gaps() {
+    let (intent, plan) = complete_fixture();
+    for (start, end) in [
+        ([0.0, 3.0, 1.0], [8.0, 3.0, 1.0]),
+        ([3.0, 3.0, 1.0], [4.0, 3.0, 1.0]),
+        ([0.0, 3.0, 9.0], [8.0, 3.0, 9.0]),
+        ([0.0, 0.5, 1.0], [8.0, 0.5, 1.0]),
+    ] {
+        let mut bad = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut bad.printer.workflow {
+            job.prime_start_mm = start;
+            job.prime_end_mm = end;
+        }
+        assert!(bad.validate().is_ok()); // Individually bounded lifecycle data.
+        assert!(plan.validate(&bad).is_err()); // Captured object ownership matters.
+        assert!(crate::backend::emit(&plan, &bad, &AtomicBool::new(false)).is_err());
+    }
+}
+
+#[test]
+fn priming_exclusion_accounts_for_emitted_rounding_at_boundary() {
+    let (intent, plan) = complete_fixture();
+    let cancel = AtomicBool::new(false);
+    for (y, admissible) in [(0.499998, true), (0.4999988, false), (0.5, false)] {
+        let mut candidate = intent.clone();
+        if let JobWorkflow::CompleteMarlin { job } = &mut candidate.printer.workflow {
+            job.prime_start_mm = [0.0, y, 1.0];
+            job.prime_end_mm = [8.0, y, 1.0];
+        }
+        assert_eq!(plan.validate(&candidate).is_ok(), admissible, "{y}");
+        if admissible {
+            let program = crate::backend::emit(&plan, &candidate, &cancel).unwrap();
+            verify(&program, &plan, &candidate, &cancel).unwrap();
+            let mutated = program.replace("Y0.499998", "Y0.500000");
+            assert!(verify(&mutated, &plan, &candidate, &cancel).is_err());
+        }
+    }
 }

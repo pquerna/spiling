@@ -59,6 +59,7 @@ export function createReplayDisplay(
     replay.eventCount !== descriptor.info.event_count ||
     replay.depositionCount !== descriptor.info.deposition_count ||
     replay.travelCount !== descriptor.info.travel_count ||
+    replay.lifecycleCount !== descriptor.info.lifecycle_count ||
     replay.layerCount !== descriptor.info.layer_count ||
     replay.bytes.byteLength !== Number(descriptor.resource.size_bytes)
   )
@@ -75,10 +76,10 @@ export function createReplayDisplay(
   const batches: Batch[] = [];
   const materials: (LineBasicMaterial | PointsMaterial)[] = [];
   const geometries: BufferGeometry[] = [];
-  const counts = [replay.travelCount - 1, 0, 0];
+  const counts = new Uint32Array(8);
   for (let event = 1; event < replay.eventCount; event++) {
     const kind = data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46);
-    if (kind > 0) counts[kind] = counts[kind]! + 1;
+    counts[kind] = counts[kind]! + 1;
   }
   const project = (event: number, axis: number): number => {
     const absolute = data.getFloat64(
@@ -98,8 +99,17 @@ export function createReplayDisplay(
     root.clear();
   };
   try {
-    const colors = ["#8eacbd", "#ffbb66", "#6cdec7"];
-    for (let kind = 0; kind < 3; kind++) {
+    const colors = [
+      "#8eacbd",
+      "#ffbb66",
+      "#6cdec7",
+      "#b693ff",
+      "#ff799b",
+      "#8ed05a",
+      "#7b91eb",
+      "#fff07a",
+    ];
+    for (let kind = 0; kind < counts.length; kind++) {
       if (!counts[kind]) continue;
       const positions = new Float32Array(counts[kind]! * 6);
       const events = new Uint32Array(counts[kind]!);
@@ -163,18 +173,21 @@ export function createReplayDisplay(
       )
         reject("invalid draw state");
       for (const batch of batches) {
+        const lifecycle = batch.kind >= 6;
         const start =
-          view.layer === null
+          view.layer === null || lifecycle
             ? 0
             : lowerBound(batch.events, (event) => layerAt(event) >= view.layer!);
         const ordinalEnd = lowerBound(batch.events, (event) => event >= view.eventCount);
         const layerEnd =
-          view.layer === null
+          view.layer === null || lifecycle
             ? batch.events.length
             : lowerBound(batch.events, (event) => layerAt(event) > view.layer!);
         const end = Math.min(ordinalEnd, layerEnd);
         batch.lines.geometry.setDrawRange(start * 2, Math.max(0, end - start) * 2);
-        batch.lines.visible = batch.kind !== 0 || view.showTravel;
+        batch.lines.visible =
+          (!lifecycle || view.layer === null) &&
+          ((batch.kind !== 0 && batch.kind !== 6) || view.showTravel);
       }
       marker.visible =
         view.showTravel &&

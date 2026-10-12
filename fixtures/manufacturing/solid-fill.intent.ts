@@ -9,7 +9,7 @@ const intent = {
   printer,
   recipe: {
     id: "software-solid-fill",
-    revision: "1",
+    revision: "2",
     material_id: "nominal-software-filament",
     material_revision: "1",
     filament_diameter_mm: 1.75,
@@ -17,6 +17,8 @@ const intent = {
     bead_width_mm: 0.45,
     perimeter_count: 2,
     infill_fraction: 1,
+    top_skin_thickness_mm: 0.8,
+    bottom_skin_thickness_mm: 0.8,
     print_speed_mm_s: 35,
     travel_speed_mm_s: 100,
     flow_multiplier: 1,

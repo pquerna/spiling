@@ -47,6 +47,10 @@ impl JobStatus {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded job observations stay inline without a per-result allocation"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum JobResult {
     Scene {

@@ -346,3 +346,191 @@ fn deep_acyclic_conversion_units_resolve_without_consuming_the_call_stack() {
         assert!((definition.bounds.max[axis] - [20.0, 10.0, 8.0][axis]).abs() < 1e-6);
     }
 }
+
+#[test]
+fn frozen_occt_periodic_edges_admit_closed_solids_without_changing_source_face_slots() {
+    for (name, bytes, hash, count, min, max) in [
+        (
+            "independent-exporters/occt-cylinder-mm.step",
+            5649,
+            "21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a",
+            3,
+            [-5.0, -5.0, 0.0],
+            [5.0, 5.0, 8.0],
+        ),
+        (
+            "independent-exporters/occt-through-hole-mm.step",
+            19015,
+            "71d0276a8ba240c608597baf0a079ecb6078f1bd88ebd61bff88abdaa3c25ff0",
+            7,
+            [0.0, 0.0, 0.0],
+            [20.0, 20.0, 8.0],
+        ),
+    ] {
+        let source = fixture(name);
+        assert_eq!(source.len(), bytes, "frozen source bytes");
+        assert_eq!(
+            SourceHash::from_bytes(&source).as_str(),
+            hash,
+            "frozen source hash"
+        );
+        let cancel = cancelled();
+        let exchange = step_p21::parser::parse(std::str::from_utf8(&source).unwrap()).unwrap();
+        let entities = Entities::new(&exchange.data[0], &cancel).unwrap();
+        let shell_id = entities.named("CLOSED_SHELL", &cancel).unwrap()[0];
+        let canonical =
+            list(at(entities.record(shell_id, "CLOSED_SHELL").unwrap(), 1).unwrap()).unwrap();
+        let definition = import_step(&source, &cancel).expect("unchanged independent OCCT solid");
+        assert_eq!(definition.source_bytes as usize, source.len());
+        assert_eq!(definition.provenance.source_hash.as_str(), hash);
+        assert_eq!(definition.faces.len(), count);
+        for (info, source_face) in definition.faces.iter().zip(canonical) {
+            let id = reference(source_face).unwrap();
+            assert_eq!(info.face_id, FaceId::from_step_entity(id).unwrap());
+            assert_eq!(
+                info.surface_face_entity,
+                resolve_face(&entities, id).unwrap().to_string()
+            );
+        }
+        let uncertainty = definition
+            .provenance
+            .uncertainty_mm
+            .expect("declared source uncertainty");
+        let mut physical_min = [f64::INFINITY; 3];
+        let mut physical_max = [f64::NEG_INFINITY; 3];
+        let mut hull_budget = [0.0_f64; 3];
+        for curve in &definition.boundary_curves {
+            for axis in 0..3 {
+                let mut include = |value: f64| {
+                    physical_min[axis] = physical_min[axis].min(value);
+                    physical_max[axis] = physical_max[axis].max(value);
+                };
+                match curve {
+                    BoundaryCurveMm::Line { start_mm, end_mm } => {
+                        include(start_mm[axis]);
+                        include(end_mm[axis]);
+                    }
+                    BoundaryCurveMm::CircleArc {
+                        center_mm,
+                        u_mm,
+                        v_mm,
+                        start_angle,
+                        end_angle,
+                    } => {
+                        let lo = start_angle.min(*end_angle);
+                        let hi = start_angle.max(*end_angle);
+                        let radius = u_mm.iter().map(|value| value * value).sum::<f64>().sqrt();
+                        assert!(hi - lo <= std::f64::consts::PI + uncertainty / radius);
+                        let evaluate = |angle: f64| {
+                            center_mm[axis] + u_mm[axis] * angle.cos() + v_mm[axis] * angle.sin()
+                        };
+                        include(evaluate(lo));
+                        include(evaluate(hi));
+                        let phase = v_mm[axis].atan2(u_mm[axis]);
+                        for stationary in [phase, phase + std::f64::consts::PI] {
+                            let angle = lo + (stationary - lo).rem_euclid(std::f64::consts::TAU);
+                            if angle <= hi {
+                                include(evaluate(angle));
+                            }
+                        }
+                        // Exact rational semicircles, with quarter-parameter knot
+                        // insertion, have projected control radius <= sqrt(5)/2
+                        // times the physical radius. The certified hull/tube can
+                        // therefore overestimate an axis extent by this amount;
+                        // it is not a larger physical cylinder.
+                        hull_budget[axis] = hull_budget[axis]
+                            .max(u_mm[axis].hypot(v_mm[axis]) * (5.0_f64.sqrt() / 2.0 - 1.0));
+                    }
+                }
+            }
+        }
+        for axis in 0..3 {
+            assert!((physical_min[axis] - min[axis]).abs() <= uncertainty);
+            assert!((physical_max[axis] - max[axis]).abs() <= uncertainty);
+            assert!(definition.bounds.min[axis] <= physical_min[axis]);
+            assert!(definition.bounds.max[axis] >= physical_max[axis]);
+            let roundoff = 64.0
+                * f64::EPSILON
+                * physical_min[axis]
+                    .abs()
+                    .max(physical_max[axis].abs())
+                    .max(1.0);
+            assert!(
+                physical_min[axis] - definition.bounds.min[axis] <= hull_budget[axis] + roundoff
+            );
+            assert!(
+                definition.bounds.max[axis] - physical_max[axis] <= hull_budget[axis] + roundoff
+            );
+        }
+        let shell = &definition.solid.boundaries()[0];
+        shell
+            .check_solid_boundary()
+            .expect("closed oriented manifold");
+        assert!(definition.solid.is_geometric_consistent());
+        assert!(shell.edge_iter().all(|edge| edge.front() != edge.back()));
+        assert!(
+            shell
+                .iter()
+                .any(|face| face.absolute_boundaries().iter().any(|wire| {
+                    wire.iter().enumerate().any(|(index, edge)| {
+                        wire.iter().skip(index + 1).any(|other| {
+                            edge.is_same(other) && edge.orientation() != other.orientation()
+                        })
+                    })
+                })),
+            "periodic carrier keeps both shared seam uses in its original face"
+        );
+        let total_circle_angle: f64 = definition
+            .boundary_curves
+            .iter()
+            .filter_map(|curve| match curve {
+                BoundaryCurveMm::CircleArc {
+                    start_angle,
+                    end_angle,
+                    ..
+                } => Some((end_angle - start_angle).abs()),
+                _ => None,
+            })
+            .sum();
+        assert!((total_circle_angle - 4.0 * std::f64::consts::PI).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology() {
+    let source = fixture("independent-exporters/occt-cylinder-mm.step");
+    let original = step_p21::parser::parse(std::str::from_utf8(&source).unwrap()).unwrap();
+    let mut open = original.clone();
+    let Parameter::List(edges) = &mut corpus::parameters(corpus::first(&mut open, "EDGE_LOOP"))[1]
+    else {
+        panic!("original periodic lateral edge loop")
+    };
+    edges.pop().unwrap();
+    assert_eq!(
+        import_step(corpus::serialize(&open).as_bytes(), &cancelled())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::InvalidGeometry
+    );
+    let mut nonperiodic = original.clone();
+    let cancel = cancelled();
+    let entities = Entities::new(&original.data[0], &cancel).unwrap();
+    let seam = entities.named("SEAM_CURVE", &cancel).unwrap()[0];
+    let line = reference(at(entities.record(seam, "SEAM_CURVE").unwrap(), 1).unwrap()).unwrap();
+    corpus::parameters(corpus::first(&mut nonperiodic, "EDGE_CURVE"))[3] =
+        Parameter::Ref(Name::Entity(line));
+    assert_eq!(
+        import_step(corpus::serialize(&nonperiodic).as_bytes(), &cancelled())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::InvalidGeometry
+    );
+    let mut inconsistent = original;
+    corpus::parameters(corpus::first(&mut inconsistent, "CIRCLE"))[2] = Parameter::Real(4.0);
+    assert_eq!(
+        import_step(corpus::serialize(&inconsistent).as_bytes(), &cancelled())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::InvalidGeometry
+    );
+}
