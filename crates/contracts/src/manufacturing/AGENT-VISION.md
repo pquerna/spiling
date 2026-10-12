@@ -1,13 +1,12 @@
-<!--
-SPDX-FileCopyrightText: 2026 Spiling contributors
-SPDX-License-Identifier: OSL-3.0
-Licensed under the Open Software License version 3.0
--->
+<!-- SPDX-FileCopyrightText: 2026 Spiling contributors -->
+<!-- SPDX-License-Identifier: OSL-3.0 -->
 
-# Software manufacturing contract vision
+# Manufacturing contract vision
 
-Provide one runtime-independent, Rust-defined language for TypeScript-authored machine data, explicit planar recipes and durable independently replayed manufacturing bundles. Core, compiler, engine and clients consume the same strict schema rather than maintain alternate models. Typed protobuf Manufacturing services expose short intent/status actions and long compile/verify operations; Google Operations supplies observation/cancellation and immutable artifact descriptors supply ByteStream retrieval. Shell DTOs adapt this API rather than define another native transport.
+Provide one bounded inert Rust-defined language for printer/job data, explicit planar recipes, classified paths and independently replayed durable bundles. Core/compiler/native clients consume the same strict schema; protobuf adapters and generated shell DTOs do not establish another authority.
 
-Fresh inspection exposes captured bundle provenance and explicitly selected report-only or report-plus-actual-motion output. SPLR metadata and streaming packed admission let native clients and the workbench independently reject corrupt or mismatched derived display bytes without owning a second machine-program parser. A maximum 100000 deposition plus 100000 travel artifact fits one bounded resource; classification is expected-plan attribution, while numeric positions/extrusion/feeds are actual decoder evidence.
+One single-extruder complete Marlin 2 job declares named machine/firmware/configuration/calibration provenance and typed native-home, thermal-wait, prime and final-park data. Diagnostic body-only compilation is an explicit distinct software workflow. Recipe skins request physical thickness with conservative layer rounding; sparse fraction and per-layer material ownership accounting preserve protected holes and intentional nominal void. Classification metadata is not strength or physical deposition certification.
 
-Current scope is a software-only Cartesian planar compiler gate with fixed-height, nonempty deposition layers and bounded streaming JSON admission shared across the complete plan. Every declared layer must be represented by deposition before independent replay can establish software coverage; exact 100000-segment plans are admitted without permitting cumulative excess across paths or layers. Machine components and process declarations do not certify collision safety, firmware, startup, thermal behavior, calibration, printability or physical printer support. Execution connectors, supports, multiple extruders and additional process dialects remain outside this contract's implemented support envelope.
+Opt-in SPLR schema2 inspection carries actual object and lifecycle XYZ/E/F, source lines and validated kind attribution without another program parser or giant copied motion vector. Body deposition/path counts remain separate from lifecycle/prime counts; homing trajectories are firmware-owned and excluded.
+
+Independent software decoding remains mandatory on compile and reopen. Command-space/modal/wait/barrier completeness does not certify firmware configuration truth, calibration, thermal sensor behavior, collision clearance or physical printability. Hardware selection, actual metadata/measurements and supervised physical prints remain unresolved external gates; no connector, arbitrary macros, multiple extruders, universal scheduler or physical qualification claim.

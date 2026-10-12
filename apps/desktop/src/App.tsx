@@ -520,8 +520,8 @@ function Workbench() {
           <strong>{IMPORT_PROFILE}</strong>
           <p>
             Native BREP is authoritative. Mesh surface deviation ≤0.05 mm relative to admitted
-            carriers. Durable source-backed projects and bounded session undo; no general STEP
-            assembly or manufacturing operations.
+            carriers. Durable source-backed projects, bounded session undo and software-only
+            manufacturing review; no general STEP assemblies or machine execution.
           </p>
         </div>
       </aside>

@@ -7,7 +7,7 @@ use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
 use std::sync::atomic::AtomicBool;
 
-/// Emit only the software-validation dialect. Independent replay is mandatory.
+/// Emit the explicit diagnostic or complete typed Marlin workflow; replay is mandatory.
 pub fn emit(
     plan: &NormalizedPrintPlan,
     intent: &ManufacturingIntent,
@@ -35,9 +35,56 @@ pub fn emit(
         ));
     }
     let mut program = BoundedProgram(String::new());
-    program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY\n; No homing, heating, startup, collision or physical printability certification\nG21\nG90\nM82\nG92 E0\n").map_err(limit)?;
+    program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\nG92 E0\n").map_err(limit)?;
     let mut extrusion = 0.0f64;
     let mut emitted_extrusion = 0.0f64;
+    if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
+        // Reviewed Marlin 2 subset: resets scale/volumetric state, homes native
+        // axes, explicitly disables leveling, and waits for heating OR cooling.
+        program
+            .write_str("M149 C\nM200 D0\nM220 S100\nM221 S100\nM107\nG28\nM420 S0\n")
+            .map_err(limit)?;
+        writeln!(
+            program,
+            "M190 R{:.6}\nM109 R{:.6}",
+            job.bed_temperature_c, job.nozzle_temperature_c
+        )
+        .map_err(limit)?;
+        let start = job.prime_start_mm.map(round_xyz);
+        let end = job.prime_end_mm.map(round_xyz);
+        writable_position(start, intent)?;
+        writable_position(end, intent)?;
+        if start == end {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "priming collapses at coordinate precision",
+            ));
+        }
+        writeln!(
+            program,
+            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+            start[0], start[1], start[2], travel_feed
+        )
+        .map_err(limit)?;
+        extrusion = job.prime_filament_length_mm;
+        emitted_extrusion = (extrusion * 100_000_000.0).round() / 100_000_000.0;
+        if emitted_extrusion <= 0.0 {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "priming extrusion collapses",
+            ));
+        }
+        writeln!(
+            program,
+            "G1 X{:.6} Y{:.6} Z{:.6} E{:.8} F{:.6}",
+            end[0],
+            end[1],
+            end[2],
+            extrusion,
+            job.prime_speed_mm_s * 60.0
+        )
+        .map_err(limit)?;
+    }
     for layer in &plan.layers {
         check_cancel(cancel)?;
         for path in &layer.paths {
@@ -82,6 +129,44 @@ pub fn emit(
                 last = destination;
             }
         }
+    }
+    if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
+        let last = plan
+            .layers
+            .last()
+            .unwrap()
+            .paths
+            .last()
+            .unwrap()
+            .points_mm
+            .last()
+            .unwrap();
+        let lift = [last[0], last[1], job.park_position_mm[2]].map(round_xyz);
+        let park = job.park_position_mm.map(round_xyz);
+        writable_position(lift, intent)?;
+        writable_position(park, intent)?;
+        if lift[2] <= round_xyz(last[2]) {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "park clearance collapses at coordinate precision",
+            ));
+        }
+        program.write_str("M400\n").map_err(limit)?;
+        writeln!(
+            program,
+            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+            lift[0], lift[1], lift[2], travel_feed
+        )
+        .map_err(limit)?;
+        writeln!(
+            program,
+            "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
+            park[0], park[1], park[2], travel_feed
+        )
+        .map_err(limit)?;
+        program
+            .write_str("M400\nM104 S0\nM140 S0\nM107\nM84\n")
+            .map_err(limit)?;
     }
     check_cancel(cancel)?;
     Ok(program.0)

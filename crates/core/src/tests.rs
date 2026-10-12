@@ -338,7 +338,7 @@ fn retained_raw_byte_limit_counts_history_not_only_active_sources() {
 pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
     ManufacturingIntent {
         printer: PrinterSpecification {
-            schema_version: 1,
+            schema_version: MANUFACTURING_SCHEMA_VERSION,
             id: "storage-cartesian".into(),
             revision: "1".into(),
             name: "Software storage fixture".into(),
@@ -354,6 +354,7 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
                 output_dialect: OutputDialect::CartesianAbsoluteGcodeV1,
                 generated_supports: false,
             },
+            workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
             max_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 10.0,
@@ -368,6 +369,8 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             bead_width_mm: 0.4,
             perimeter_count: 1,
             infill_fraction: 1.0,
+            top_skin_thickness_mm: 0.2,
+            bottom_skin_thickness_mm: 0.2,
             print_speed_mm_s: 10.0,
             travel_speed_mm_s: 20.0,
             flow_multiplier: 1.0,
@@ -377,13 +380,28 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
 pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
     let manifest = project.capture().manifest;
     let intent = manifest.manufacturing_intent.unwrap().as_ref().clone();
-    let area = (intent.recipe.bead_width_mm - intent.recipe.layer_height_mm)
-        * intent.recipe.layer_height_mm
-        + std::f64::consts::PI * (intent.recipe.layer_height_mm / 2.0).powi(2);
-    let filament =
-        area / (std::f64::consts::PI * (intent.recipe.filament_diameter_mm / 2.0).powi(2));
+    let recipe = &intent.recipe;
+    let path_length_mm = 1.0;
+    let section_area_mm2 = path_length_mm * recipe.bead_width_mm;
+    let volume = path_length_mm
+        * ((recipe.bead_width_mm - recipe.layer_height_mm) * recipe.layer_height_mm
+            + std::f64::consts::PI * (recipe.layer_height_mm / 2.0).powi(2))
+        * recipe.flow_multiplier;
+    let filament = volume / (std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2));
+    let region_coverage = PlanarRegionCoverage {
+        section_area_mm2,
+        wall_area_mm2: 0.0,
+        bottom_skin_area_mm2: section_area_mm2,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: volume,
+        requested_infill_fraction: recipe.infill_fraction,
+    };
     ManufacturingBundle {
-        schema_version: 1,
+        schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance: ManufacturingProvenance {
             input_hash: input_fingerprint(
                 &manifest.project_id,
@@ -407,7 +425,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             verifier_version: "1".into(),
         },
         plan: NormalizedPrintPlan {
-            schema_version: 1,
+            schema_version: MANUFACTURING_SCHEMA_VERSION,
             sampling_tolerance_mm: 0.001,
             offset_tolerance_mm: 0.001,
             layer_quantization_mm: 0.000001,
@@ -416,9 +434,10 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 z_mm: 0.2,
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
-                    kind: DepositionKind::SolidFill,
+                    kind: DepositionKind::BottomSkin,
                     points_mm: vec![[1.0, 1.0, 0.2], [2.0, 1.0, 0.2]],
                 }],
+                region_coverage,
             }],
         },
         program: format!(
@@ -431,10 +450,12 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             limitations: vec!["not independently replayed".into()],
             deposition_segments: 1,
             travel_segments: 1,
-            deposited_volume_mm3: area,
+            deposited_volume_mm3: volume,
             filament_length_mm: filament,
             max_position_error_mm: 0.0,
             max_extrusion_error_mm: 0.0,
+            lifecycle_motion_count: 0,
+            priming_filament_length_mm: 0.0,
         },
     }
 }
@@ -495,7 +516,7 @@ fn manufacturing_geometry_and_intent_history_restore_coherent_shared_assets() {
     assert!(project.snapshot().manufacturing_artifact.is_none());
     project.undo().unwrap();
     let mut intent = manufacturing_intent();
-    intent.recipe.print_speed_mm_s = 12.0;
+    intent.recipe.top_skin_thickness_mm = 0.4;
     edit(
         &mut project,
         Edit::SetManufacturingIntent {

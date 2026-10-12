@@ -1173,6 +1173,8 @@ mod tests {
                     filament_length_mm: 1.0,
                     max_position_error_mm: 0.0,
                     max_extrusion_error_mm: 0.0,
+                    lifecycle_motion_count: 0,
+                    priming_filament_length_mm: 0.0,
                 },
             },
             JobResult::Section {

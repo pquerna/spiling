@@ -297,7 +297,13 @@ export function useManufacturing(host: ManufacturingHost) {
           const descriptor = result.replay_display;
           if (
             descriptor.info.bundle_hash !== result.record.hash ||
-            descriptor.info.input_hash !== result.record.input_hash
+            descriptor.info.input_hash !== result.record.input_hash ||
+            descriptor.info.input_hash !== result.provenance.input_hash ||
+            descriptor.info.verifier_version !== result.provenance.verifier_version ||
+            descriptor.info.layer_count !== result.record.summary.layers ||
+            descriptor.info.deposition_count !== result.report.deposition_segments ||
+            descriptor.info.travel_count !== result.report.travel_segments ||
+            descriptor.info.lifecycle_count !== result.report.lifecycle_motion_count
           )
             throw new Error(
               "Replay descriptor is not bound to the freshly verified active bundle.",

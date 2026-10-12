@@ -43,14 +43,15 @@ fn native(path: &Path) -> NativePath {
 fn intent() -> ManufacturingIntent {
     serde_json::from_value(serde_json::json!({
         "printer": {
-            "schema_version":1,"id":"software-test","revision":"1","name":"Software only",
+            "schema_version":MANUFACTURING_SCHEMA_VERSION,"id":"software-test","revision":"1","name":"Software only",
             "coordinate_frame":"right_handed_millimetres",
             "build_envelope":{"min":[-20.0,-20.0,0.0],"max":[200.0,200.0,100.0]},
             "components":[{"id":"bed","role":"bed","pose":{"translation_mm":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"shape":{"kind":"box","bounds_mm":{"min":[-20.0,-20.0,-1.0],"max":[200.0,200.0,0.0]}}}],
             "capabilities":{"motion_space":"cartesian_xyz","extruders":1,"output_dialect":"cartesian_absolute_gcode_v1","generated_supports":false},
+            "workflow":{"kind":"diagnostic_body_only"},
             "nozzle_diameter_mm":0.4,"max_feed_mm_s":150.0,"max_volumetric_flow_mm3_s":20.0
         },
-        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0}
+        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0}
     })).unwrap()
 }
 async fn spawn() -> EngineClient {
@@ -360,6 +361,37 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     let record = compile(&mut client).await;
     assert_eq!(scene(&mut client).await, original_scene);
     let bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    let before_invalid = status(&mut client).await;
+    let mut invalid_inputs = Vec::new();
+    for fraction in [0.0, f64::NAN, 1.01] {
+        let mut invalid = intent();
+        invalid.recipe.infill_fraction = fraction;
+        invalid_inputs.push(invalid);
+    }
+    let mut invalid = intent();
+    invalid.recipe.top_skin_thickness_mm = 0.0;
+    invalid_inputs.push(invalid);
+    let mut invalid = intent();
+    invalid.recipe.bottom_skin_thickness_mm = f64::INFINITY;
+    invalid_inputs.push(invalid);
+    let mut invalid = intent();
+    invalid.printer.capabilities.output_dialect = OutputDialect::Marlin2SingleExtruderGcodeV1;
+    invalid_inputs.push(invalid);
+    for invalid in invalid_inputs {
+        typed(
+            client
+                .manufacturing(ManufacturingCommand::SetIntent {
+                    session_id: client.hello().session_id.clone(),
+                    base_revision: before_invalid.0.revision,
+                    intent: invalid.into(),
+                })
+                .await,
+            ManufacturingErrorCode::InvalidSpecification,
+        );
+        assert_eq!(status(&mut client).await, before_invalid);
+        assert_eq!(scene(&mut client).await, original_scene);
+        client.ping().await.unwrap();
+    }
     let mut missing = record.clone();
     missing.hash = SourceHash::from_bytes(b"not retained");
     typed(
@@ -743,9 +775,82 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     let store = work.0.join("reader-operations");
     let mut writer = spawn().await;
     import(&mut writer, &source).await;
-    set_intent(&mut writer, intent()).await;
+    let mut requested = intent();
+    requested.printer.capabilities.output_dialect = OutputDialect::Marlin2SingleExtruderGcodeV1;
+    requested.printer.workflow = JobWorkflow::CompleteMarlin {
+        job: SingleExtruderJob {
+            machine_id: "software-declaration-not-qualified".into(),
+            firmware_version: "2.1.2.5".into(),
+            configuration_hash: SourceHash::from_bytes(b"software fixture configuration"),
+            calibration_record_hash: SourceHash::from_bytes(
+                b"software fixture declaration, not measured calibration",
+            ),
+            homing_contract: HomingCoordinateContract::MarlinNativeCartesian,
+            home_position_mm: [0.0, 0.0, 0.0],
+            nozzle_temperature_c: 200.0,
+            bed_temperature_c: 60.0,
+            minimum_extrusion_temperature_c: 170.0,
+            maximum_nozzle_temperature_c: 250.0,
+            maximum_bed_temperature_c: 100.0,
+            prime_start_mm: [-10.0, -10.0, 0.2],
+            prime_end_mm: [-5.0, -10.0, 0.2],
+            prime_filament_length_mm: 1.0,
+            prime_speed_mm_s: 5.0,
+            park_position_mm: [0.0, 0.0, 30.0],
+        },
+    };
+    requested.recipe.infill_fraction = 0.35;
+    requested.recipe.top_skin_thickness_mm = 0.4;
+    requested.recipe.bottom_skin_thickness_mm = 0.6;
+    set_intent(&mut writer, requested.clone()).await;
     let record = compile(&mut writer).await;
     let bundle = fetch_bundle(&mut writer, &record).await.unwrap();
+    assert_eq!(bundle.provenance.intent, requested);
+    assert_eq!(bundle.verification.lifecycle_motion_count, 4);
+    assert_eq!(bundle.verification.priming_filament_length_mm, 1.0);
+    assert!(bundle.plan.layers.iter().any(|layer| {
+        layer.region_coverage.intentional_void_area_mm2 > 0.0
+            && layer
+                .paths
+                .iter()
+                .any(|path| path.kind == DepositionKind::SparseFill)
+    }));
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| { layer.region_coverage.bottom_skin_area_mm2 > 0.0 })
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| { layer.region_coverage.top_skin_area_mm2 > 0.0 })
+    );
+    let bead_area = ((requested.recipe.bead_width_mm - requested.recipe.layer_height_mm)
+        * requested.recipe.layer_height_mm
+        + std::f64::consts::PI * (requested.recipe.layer_height_mm / 2.0).powi(2))
+        * requested.recipe.flow_multiplier;
+    let nominal_volume: f64 = bundle
+        .plan
+        .layers
+        .iter()
+        .map(|layer| {
+            let path_length: f64 = layer
+                .paths
+                .iter()
+                .flat_map(|path| path.points_mm.windows(2))
+                .map(|points| (points[1][0] - points[0][0]).hypot(points[1][1] - points[0][1]))
+                .sum();
+            let volume = path_length * bead_area;
+            assert!((layer.region_coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-8);
+            volume
+        })
+        .sum();
+    assert!((bundle.verification.deposited_volume_mm3 - nominal_volume).abs() < 0.001);
+    assert!(record.summary.software_only);
     save(&mut writer, &checkpoint).await;
     writer.shutdown().await.unwrap();
     std::fs::remove_file(source).unwrap();
@@ -786,6 +891,13 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     };
     assert_eq!(inspected, &record);
     assert!(report.verified);
+    assert_eq!(report.lifecycle_motion_count, 4);
+    assert_eq!(report.priming_filament_length_mm, 1.0);
+    assert_eq!(display.info.lifecycle_count, 4);
+    assert_eq!(
+        display.info.event_count,
+        report.deposition_segments + report.travel_segments + report.lifecycle_motion_count
+    );
     assert_eq!(provenance.input_hash, record.input_hash);
     assert_eq!(provenance.input_revision, bundle.provenance.input_revision);
     assert_eq!(
@@ -797,9 +909,29 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     let bytes = reader.fetch_replay_display(&record, display).await.unwrap();
     assert_eq!(&bytes[..4], b"SPLR");
     assert_eq!(bytes.len(), 96 + 48 * display.info.event_count as usize);
-    assert_eq!(bytes[96 + 46], 0, "first event is endpoint-only travel");
+    assert_eq!(
+        bytes[96 + 46],
+        6,
+        "first event is endpoint-only lifecycle travel"
+    );
     assert_eq!(bytes[96 + 47], 0, "no invented origin");
-    for event in bytes[96..].chunks_exact(48) {
+    let lifecycle: Vec<_> = bytes[96..]
+        .as_chunks::<48>()
+        .0
+        .iter()
+        .filter(|event| event[46] >= 6)
+        .collect();
+    assert_eq!(lifecycle.len(), 4);
+    assert!(
+        lifecycle
+            .iter()
+            .all(|event| { u16::from_le_bytes(event[44..46].try_into().unwrap()) == u16::MAX })
+    );
+    assert_eq!(
+        lifecycle[1][46], 7,
+        "priming is separate from object deposition"
+    );
+    for event in bytes[96..].as_chunks::<48>().0 {
         let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
         let actual_line = bundle
             .program

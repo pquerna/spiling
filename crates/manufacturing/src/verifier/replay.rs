@@ -12,15 +12,29 @@ pub(crate) struct ReplaySink {
     depositions: u32,
     travels: u32,
     layers: u32,
+    lifecycle: u32,
     expected_events: u32,
 }
 impl ReplaySink {
-    pub(crate) fn new(plan: &NormalizedPrintPlan) -> Result<Self, ManufacturingError> {
+    pub(crate) fn new(
+        plan: &NormalizedPrintPlan,
+        intent: &ManufacturingIntent,
+    ) -> Result<Self, ManufacturingError> {
+        plan.validate(intent)?;
         let events = plan
             .layers
             .iter()
             .flat_map(|l| &l.paths)
             .try_fold(0usize, |n, p| n.checked_add(p.points_mm.len()))
+            .and_then(|n| {
+                n.checked_add(
+                    if matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. }) {
+                        4
+                    } else {
+                        0
+                    },
+                )
+            })
             .ok_or_else(|| super::failed("replay event count overflow"))?;
         let bytes = events
             .checked_mul(REPLAY_RECORD_BYTES)
@@ -54,6 +68,7 @@ impl ReplaySink {
             depositions: 0,
             travels: 0,
             layers: plan.layers.len() as u32,
+            lifecycle: 0,
             expected_events: events as u32,
         })
     }
@@ -83,12 +98,14 @@ impl ReplaySink {
         self.bytes.extend_from_slice(&layer.to_le_bytes());
         self.bytes.push(kind);
         self.bytes.push(u8::from(self.events != 0));
-        for axis in 0..3 {
-            self.min[axis] = self.min[axis].min(position[axis]);
-            self.max[axis] = self.max[axis].max(position[axis]);
+        for (axis, value) in position.iter().enumerate() {
+            self.min[axis] = self.min[axis].min(*value);
+            self.max[axis] = self.max[axis].max(*value);
         }
         self.events += 1;
-        if kind == 0 {
+        if kind >= 6 {
+            self.lifecycle += 1;
+        } else if kind == 0 {
             self.travels += 1;
         } else {
             self.depositions += 1;
@@ -100,7 +117,7 @@ impl ReplaySink {
             return Err(super::failed("incomplete replay display"));
         }
         self.bytes[..4].copy_from_slice(b"SPLR");
-        self.bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        self.bytes[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
         self.bytes[6..8].copy_from_slice(&(REPLAY_HEADER_BYTES as u16).to_le_bytes());
         for (offset, value) in [
             (8, self.events),
@@ -108,6 +125,7 @@ impl ReplaySink {
             (16, self.depositions),
             (20, self.travels),
             (24, self.layers),
+            (28, self.lifecycle),
         ] {
             self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }

@@ -699,11 +699,23 @@ async function inspectManufacturing() {
     async () => (await manufacturingState()).draft_changed,
     "explicit operator intent selection",
   );
+  await input('[data-testid="manufacturing-top_skin_thickness_mm"]', "0.6");
+  await input('[data-testid="manufacturing-bottom_skin_thickness_mm"]', "0.4");
+  await input('[data-testid="manufacturing-infill_fraction"]', "0.25");
   await click("manufacturing-apply");
   state = await until(async () => {
     const current = await manufacturingState();
     return current.selected_intent && !current.working && !current.draft_changed ? current : false;
   }, "full intent Apply");
+  assert.equal(state.selected_intent.printer.schema_version, 2);
+  assert.equal(state.selected_intent.recipe.top_skin_thickness_mm, 0.6);
+  assert.equal(state.selected_intent.recipe.bottom_skin_thickness_mm, 0.4);
+  assert.equal(state.selected_intent.recipe.infill_fraction, 0.25);
+  assert.ok(
+    ["diagnostic_body_only", "complete_marlin"].includes(
+      state.selected_intent.printer.workflow.kind,
+    ),
+  );
   assert.equal(
     await evaluate("document.querySelector('[data-testid=\"manufacturing-apply\"]').disabled"),
     true,
@@ -784,6 +796,15 @@ async function inspectManufacturing() {
   );
   assert.ok(state.replay.event_count > 0);
   assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
+  assert.equal(
+    state.replay.event_count,
+    state.replay.deposition_count + state.replay.travel_count + state.replay.lifecycle_count,
+  );
+  assert.equal(state.replay.lifecycle_count, state.report.lifecycle_motion_count);
+  assert.equal(
+    state.replay.lifecycle_count,
+    state.selected_intent.printer.workflow.kind === "complete_marlin" ? 4 : 0,
+  );
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.deepEqual(state.selected_artifact, record);
   const cancellationRequested = await evaluate(`(async () => {
@@ -834,7 +855,9 @@ async function inspectManufacturing() {
     "event cursor",
   );
   const first = JSON.parse(await text("manufacturing-event"));
-  assert.equal(first.kind, "travel");
+  const completeJob = state.selected_intent.printer.workflow.kind === "complete_marlin";
+  assert.equal(first.kind, completeJob ? "lifecycle_travel" : "travel");
+  assert.equal(first.layer, completeJob ? null : 0);
   assert.equal(first.known_start, false, "No invented origin segment");
   assert.ok(first.source_line > 0 && first.feed_mm_min > 0);
   await input('[data-testid="manufacturing-layer"]', "0");
@@ -868,6 +891,13 @@ async function inspectManufacturing() {
   );
   assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
   assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
+  const plan = JSON.parse(exported["plan.json"]);
+  assert.equal(plan.schema_version, 2);
+  assert.ok(plan.layers.every((layer) => layer.region_coverage.requested_infill_fraction === 0.25));
+  const kinds = new Set(plan.layers.flatMap((layer) => layer.paths.map((path) => path.kind)));
+  assert.ok(kinds.has("bottom_skin"));
+  assert.ok(kinds.has("top_skin"));
+  assert.ok(kinds.has("sparse_fill"));
   assert.ok(exported["program.gcode"].includes("G1 "));
   await click("manufacturing-debug-export");
   await until(

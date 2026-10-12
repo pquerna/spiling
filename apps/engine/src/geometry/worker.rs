@@ -145,6 +145,10 @@ pub struct Imported {
     pub faces: Vec<FaceInfo>,
     pub mesh: Option<MeshArtifact>,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The single native worker returns bounded products without extra heap indirection"
+)]
 pub enum Product {
     Import(Imported),
     Open {

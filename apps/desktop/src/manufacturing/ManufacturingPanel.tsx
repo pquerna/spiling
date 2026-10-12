@@ -9,6 +9,8 @@ import {
   MAX_REPLAY_EVENTS,
   MAX_PRINT_LAYERS,
   MAX_DEPOSITION_SEGMENTS,
+  REPLAY_KIND_LABELS,
+  REPLAY_LIFECYCLE_LAYER,
 } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
 import { scalarFields } from "./draft.ts";
@@ -94,6 +96,28 @@ export function ManufacturingPanel({
             {draft.intent.printer.id} / {draft.intent.printer.revision}; {draft.intent.recipe.id} /{" "}
             {draft.intent.recipe.revision}
           </p>
+          <p data-testid="manufacturing-workflow">
+            {draft.intent.printer.workflow.kind === "diagnostic_body_only"
+              ? "Diagnostic body-only program — no executable startup or shutdown lifecycle."
+              : "Complete Marlin 2 single-extruder job — software-verified lifecycle, physically unqualified."}{" "}
+            Dialect: {draft.intent.printer.capabilities.output_dialect}.
+          </p>
+          {draft.intent.printer.workflow.kind === "complete_marlin" && (
+            <details>
+              <summary>
+                Explicit job declarations and provenance — not physical qualification
+              </summary>
+              <p>
+                Machine, firmware, configuration and calibration hashes are supplied declarations.
+                Recipe edits preserve this complete job unchanged; no machine values are invented.
+                Rust validates the full intent on Apply. Homing trajectories are firmware-owned and
+                never displayed as interpolated paths.
+              </p>
+              <pre data-testid="manufacturing-job-declarations">
+                {JSON.stringify(draft.intent.printer.workflow.job, null, 2)}
+              </pre>
+            </details>
+          )}
           <p>
             Frame: {draft.intent.printer.coordinate_frame}. Nozzle{" "}
             {draft.intent.printer.nozzle_diameter_mm} mm; maximum feed{" "}
@@ -101,7 +125,7 @@ export function ManufacturingPanel({
             {draft.intent.printer.max_volumetric_flow_mm3_s} mm³/s.
           </p>
           <fieldset disabled={!writable} className="manufacturing-draft">
-            <legend>Supported solid-fill recipe scalars</legend>
+            <legend>Planar recipe scalars — physical-thickness skins and interior fill</legend>
             {scalarFields.map(([key, label]) => (
               <label key={key}>
                 {label}
@@ -116,9 +140,10 @@ export function ManufacturingPanel({
             ))}
           </fieldset>
           <p>
-            Fixed-height vertical planar/cylindrical geometry; integral layer heights; solid fill
-            only. No generated supports, multi-axis execution, material calibration or
-            physical-printability proof.
+            Fixed-height vertical planar/cylindrical geometry; integral layer heights. Skin
+            thickness conservatively rounds up to whole layers; interior fill is solid at fraction 1
+            and sparse below 1. No generated supports, material calibration or physical-printability
+            proof.
           </p>
           {manufacturing.conflict && (
             <p role="alert">
@@ -255,14 +280,18 @@ export function ManufacturingPanel({
             ))}
           </ul>
           <dl>
-            <dt>Deposition / travel events</dt>
+            <dt>Object deposition / travel events</dt>
             <dd>
               {result.report.deposition_segments} / {result.report.travel_segments}
             </dd>
-            <dt>Deposited volume</dt>
+            <dt>Object deposited volume</dt>
             <dd>{result.report.deposited_volume_mm3} mm³</dd>
-            <dt>Filament length</dt>
+            <dt>Object filament length</dt>
             <dd>{result.report.filament_length_mm} mm</dd>
+            <dt>Lifecycle motion events</dt>
+            <dd>{result.report.lifecycle_motion_count}</dd>
+            <dt>Priming filament length (separate from object)</dt>
+            <dd>{result.report.priming_filament_length_mm} mm</dd>
             <dt>Maximum position deviation</dt>
             <dd>{result.report.max_position_error_mm} mm</dd>
             <dt>Maximum extrusion deviation</dt>
@@ -279,9 +308,15 @@ export function ManufacturingPanel({
               <legend>Actual emitted-program replay — endpoint coordinates in mm</legend>
               <p>
                 {replay.eventCount} events, {replay.depositionCount} deposition,{" "}
-                {replay.travelCount} travel;
-                {replay.layerCount} layers. Positions, E and F come from decoded program bytes, not
-                planned paths.
+                {replay.travelCount} object travel, {replay.lifecycleCount} lifecycle;
+                {replay.layerCount} object layers. Positions, E and F come from decoded program
+                bytes, not planned paths.
+              </p>
+              <p>
+                Packed path colors: perimeter orange, solid fill turquoise, bottom skin purple, top
+                skin pink, sparse fill green, object travel blue-gray, lifecycle travel blue, prime
+                yellow. Lifecycle events have no object layer and appear only with all layers
+                selected; the travel toggle also controls lifecycle travel, not priming.
               </p>
               {!inspection?.displayReady && (
                 <p>
@@ -347,8 +382,9 @@ export function ManufacturingPanel({
                     {
                       event_index: event,
                       source_line: replay.sourceLine(event),
-                      layer: replay.layer(event),
-                      kind: ["travel", "perimeter", "solid_fill"][replay.kind(event)],
+                      layer:
+                        replay.layer(event) === REPLAY_LIFECYCLE_LAYER ? null : replay.layer(event),
+                      kind: REPLAY_KIND_LABELS[replay.kind(event)],
                       known_start: replay.knownStart(event),
                       position_mm: replay.position(event),
                       absolute_extrusion_mm: replay.extrusion(event),
@@ -360,9 +396,10 @@ export function ManufacturingPanel({
                 </pre>
               )}
               <p>
-                The first travel is an endpoint only: its prior position, distance and duration are
-                unknown. Coincident travels remain valid events. Display projection error is bounded
-                to 0.001 mm; float display is not native measurement or material calibration.
+                The first commanded travel is an endpoint only: its prior position, distance and
+                duration are unknown. No homing trajectory is displayed. Coincident travels remain
+                valid events. Display projection error is bounded to 0.001 mm; float display is not
+                native measurement or material calibration.
               </p>
             </fieldset>
           )}
@@ -418,6 +455,9 @@ export function ManufacturingPanel({
               replay: replay
                 ? {
                     event_count: replay.eventCount,
+                    lifecycle_count: replay.lifecycleCount,
+                    deposition_count: replay.depositionCount,
+                    travel_count: replay.travelCount,
                     layer_count: replay.layerCount,
                     byte_count: replay.bytes.byteLength,
                     display_ready: inspection?.displayReady,

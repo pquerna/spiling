@@ -1,0 +1,9 @@
+{
+  "status": "unqualified-software-fixture",
+  "machine_id": "software-marlin2-reference",
+  "material_id": "nominal-software-filament",
+  "material_revision": "1",
+  "physical_measurements": [],
+  "physical_qualification": "absent",
+  "purpose": "Exercise configuration/calibration record hashing and independent command semantics; no accuracy, safety or printability claim."
+}

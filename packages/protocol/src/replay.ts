@@ -16,19 +16,33 @@ import {
 import type { ReplayDisplayDescriptor } from "./generated.ts";
 import { bounds, hash, keys, uint, verifyHash, zero } from "./display.ts";
 
+export type ReplayKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+export const REPLAY_KIND_LABELS = [
+  "travel",
+  "perimeter",
+  "solid_fill",
+  "bottom_skin",
+  "top_skin",
+  "sparse_fill",
+  "lifecycle_travel",
+  "prime",
+] as const;
+export const REPLAY_LIFECYCLE_LAYER = 65535;
+
 export interface DecodedReplayDisplay {
   readonly bytes: ArrayBuffer;
   readonly eventCount: number;
   readonly depositionCount: number;
   readonly travelCount: number;
   readonly layerCount: number;
+  readonly lifecycleCount: number;
   readonly boundsMm: { min: [number, number, number]; max: [number, number, number] };
   position(index: number): [number, number, number];
   extrusion(index: number): number;
   feed(index: number): number;
   sourceLine(index: number): number;
   layer(index: number): number;
-  kind(index: number): 0 | 1 | 2;
+  kind(index: number): ReplayKind;
   knownStart(index: number): boolean;
 }
 export class ReplayDecodeError extends Error {
@@ -61,6 +75,7 @@ export async function decodeReplayDisplay(
       "deposition_count",
       "travel_count",
       "layer_count",
+      "lifecycle_count",
       "bounds_mm",
     ],
     fail,
@@ -70,7 +85,7 @@ export async function decodeReplayDisplay(
   hash(info.input_hash, fail);
   hash(info.program_hash, fail);
   hash(resource.sha256, fail);
-  if (info.schema_version !== 1 || info.frame !== "right_handed_millimetres")
+  if (info.schema_version !== 2 || info.frame !== "right_handed_millimetres")
     fail("unsupported schema or coordinate frame");
   if (
     typeof info.verifier_version !== "string" ||
@@ -83,7 +98,13 @@ export async function decodeReplayDisplay(
   uint(info.deposition_count, "deposition count", fail, 1, MAX_DEPOSITION_SEGMENTS);
   uint(info.travel_count, "travel count", fail, 1, MAX_DEPOSITION_SEGMENTS);
   uint(info.layer_count, "layer count", fail, 1, MAX_PRINT_LAYERS);
-  if (info.event_count !== info.deposition_count + info.travel_count) fail("count mismatch");
+  uint(info.lifecycle_count, "lifecycle count", fail, 0, 4);
+  if (info.lifecycle_count !== 0 && info.lifecycle_count !== 4) fail("unsupported lifecycle count");
+  if (
+    info.layer_count > info.deposition_count ||
+    info.event_count !== info.deposition_count + info.travel_count + info.lifecycle_count
+  )
+    fail("count mismatch");
   bounds(info.bounds_mm, fail);
   const length = REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * info.event_count;
   if (
@@ -101,7 +122,7 @@ export async function decodeReplayDisplay(
   const data = new DataView(bytes, 0, length);
   if (
     data.getUint32(0, true) !== 0x524c5053 ||
-    data.getUint16(4, true) !== 1 ||
+    data.getUint16(4, true) !== 2 ||
     data.getUint16(6, true) !== REPLAY_HEADER_BYTES ||
     data.getUint32(12, true) !== REPLAY_RECORD_BYTES
   )
@@ -111,9 +132,9 @@ export async function decodeReplayDisplay(
     [16, info.deposition_count],
     [20, info.travel_count],
     [24, info.layer_count],
+    [28, info.lifecycle_count],
   ])
     if (data.getUint32(offset!, true) !== value) fail("header/descriptor count mismatch");
-  zero(data, 28, 32, fail);
   zero(data, 80, REPLAY_HEADER_BYTES, fail);
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
@@ -126,6 +147,8 @@ export async function decodeReplayDisplay(
   }
   let deposition = 0,
     travel = 0,
+    lifecycle = 0,
+    lifecyclePhase = 0,
     lastLayer = 0,
     layerDepositions = 0,
     lastLine = 0,
@@ -151,34 +174,69 @@ export async function decodeReplayDisplay(
       fail("invalid extrusion or feed");
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_BUNDLE_BYTES);
     if (line <= lastLine) fail("source line sequence is not increasing");
-    if (kind > 2 || flags !== (index === 0 ? 0 : 1)) fail("unknown kind or invalid start flags");
-    if (
-      layer >= info.layer_count ||
-      layer < lastLayer ||
-      layer > lastLayer + 1 ||
-      (index === 0 && layer !== 0)
-    )
-      fail("invalid layer sequence");
-    if (layer !== lastLayer) {
-      if (layerDepositions === 0) fail("layer contains no deposition");
-      layerDepositions = 0;
-    }
-    if (kind === 0) {
-      travel++;
-      if (e !== lastE) fail("travel changes extrusion");
+    if (kind > 7 || flags !== (index === 0 ? 0 : 1)) fail("unknown kind or invalid start flags");
+    if (index === 0 && kind !== 0 && kind !== 6)
+      fail("first endpoint must be unknown-start travel");
+    if (kind >= 6) {
+      if (info.lifecycle_count !== 4 || layer !== REPLAY_LIFECYCLE_LAYER)
+        fail("invalid lifecycle layer attribution");
+      if (
+        kind !== (lifecyclePhase === 1 ? 7 : 6) ||
+        lifecyclePhase >= 4 ||
+        (lifecyclePhase < 2 && deposition !== 0) ||
+        (lifecyclePhase >= 2 &&
+          (deposition !== info.deposition_count || travel !== info.travel_count))
+      )
+        fail("invalid lifecycle sequence");
+      if (
+        lifecyclePhase === 2 &&
+        (data.getFloat64(start, true) !== data.getFloat64(start - 48, true) ||
+          data.getFloat64(start + 8, true) !== data.getFloat64(start - 40, true) ||
+          data.getFloat64(start + 16, true) <= data.getFloat64(start - 32, true))
+      )
+        fail("final lift must be vertical with increasing Z");
+      if (
+        lifecyclePhase === 3 &&
+        data.getFloat64(start + 16, true) !== data.getFloat64(start - 32, true)
+      )
+        fail("park must retain clearance Z");
+      if (kind === 7) {
+        if (index === 0 || !moved || e <= lastE)
+          fail("prime needs known nonzero movement and increasing extrusion");
+      } else if (e !== lastE) fail("lifecycle travel changes extrusion");
+      lifecycle++;
+      lifecyclePhase++;
     } else {
-      if (index === 0 || !moved || e <= lastE)
-        fail("deposition needs known nonzero movement and increasing extrusion");
-      deposition++;
-      layerDepositions++;
+      if (info.lifecycle_count === 4 && lifecyclePhase !== 2)
+        fail("body outside lifecycle boundaries");
+      if (
+        layer >= info.layer_count ||
+        (deposition === 0 && travel === 0 && (kind !== 0 || layer !== 0))
+      )
+        fail("body must start with layer-zero travel");
+      if (layer !== lastLayer) {
+        if (layer !== lastLayer + 1 || layerDepositions === 0 || kind !== 0)
+          fail("invalid layer sequence");
+        layerDepositions = 0;
+        lastLayer = layer;
+      }
+      if (kind === 0) {
+        travel++;
+        if (e !== lastE) fail("travel changes extrusion");
+      } else {
+        if (index === 0 || !moved || e <= lastE)
+          fail("deposition needs known nonzero movement and increasing extrusion");
+        deposition++;
+        layerDepositions++;
+      }
     }
     lastE = e;
     lastLine = line;
-    lastLayer = layer;
   }
   if (
     deposition !== info.deposition_count ||
     travel !== info.travel_count ||
+    lifecycle !== info.lifecycle_count ||
     lastLayer + 1 !== info.layer_count ||
     layerDepositions === 0
   )
@@ -196,6 +254,7 @@ export async function decodeReplayDisplay(
     eventCount: info.event_count,
     depositionCount: deposition,
     travelCount: travel,
+    lifecycleCount: lifecycle,
     layerCount: info.layer_count,
     boundsMm: { min, max },
     position(index: number): [number, number, number] {
@@ -210,7 +269,7 @@ export async function decodeReplayDisplay(
     feed: (index: number) => data.getFloat64(offset(index) + 32, true),
     sourceLine: (index: number) => data.getUint32(offset(index) + 40, true),
     layer: (index: number) => data.getUint16(offset(index) + 44, true),
-    kind: (index: number) => data.getUint8(offset(index) + 46) as 0 | 1 | 2,
+    kind: (index: number) => data.getUint8(offset(index) + 46) as ReplayKind,
     knownStart: (index: number) => data.getUint8(offset(index) + 47) === 1,
   });
 }

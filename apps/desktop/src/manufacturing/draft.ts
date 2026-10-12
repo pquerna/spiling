@@ -8,6 +8,9 @@ export const scalarFields = [
   ["layer_height_mm", "Layer height (mm)"],
   ["bead_width_mm", "Bead width (mm)"],
   ["perimeter_count", "Perimeters"],
+  ["top_skin_thickness_mm", "Top skin thickness (mm)"],
+  ["bottom_skin_thickness_mm", "Bottom skin thickness (mm)"],
+  ["infill_fraction", "Interior infill fraction (0–1]"],
   ["filament_diameter_mm", "Filament diameter (mm)"],
   ["print_speed_mm_s", "Deposition speed (mm/s)"],
   ["travel_speed_mm_s", "Travel speed (mm/s)"],
@@ -41,10 +44,13 @@ export function draftIntent(draft: IntentDraft): ManufacturingIntent {
       !text.trim() ||
       !Number.isFinite(value) ||
       value <= 0 ||
-      (key === "perimeter_count" && !Number.isInteger(value))
+      (key === "perimeter_count" && !Number.isInteger(value)) ||
+      (key === "infill_fraction" && value > 1)
     ) {
       throw new Error(
-        `${label} must be a finite positive ${key === "perimeter_count" ? "integer" : "number"}.`,
+        key === "infill_fraction"
+          ? `${label} must be finite and greater than zero, at most one.`
+          : `${label} must be a finite positive ${key === "perimeter_count" ? "integer" : "number"}.`,
       );
     }
     intent.recipe[key] = value;

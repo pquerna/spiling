@@ -116,6 +116,10 @@ struct Publication {
     kind: PublicationKind,
     artifact: Option<Artifact>,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Single-writer bounded publication values stay inline without extra heap indirection"
+)]
 enum PublicationKind {
     Import {
         edit: PreparedEdit,

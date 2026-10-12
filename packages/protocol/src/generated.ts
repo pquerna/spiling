@@ -138,7 +138,23 @@ export type PrinterCoordinateFrame = "right_handed_millimetres";
 
 export type MotionSpace = "cartesian_xyz";
 
-export type OutputDialect = "cartesian_absolute_gcode_v1";
+export type OutputDialect = "cartesian_absolute_gcode_v1" | "marlin2_single_extruder_gcode_v1";
+
+export type JobWorkflow = { "kind": "diagnostic_body_only" } | { "kind": "complete_marlin", job: SingleExtruderJob, };
+
+export type SingleExtruderJob = { machine_id: string, firmware_version: string, configuration_hash: SourceHash, calibration_record_hash: SourceHash, homing_contract: HomingCoordinateContract, home_position_mm: [number, number, number], nozzle_temperature_c: number, bed_temperature_c: number, minimum_extrusion_temperature_c: number, maximum_nozzle_temperature_c: number, maximum_bed_temperature_c: number, 
+/**
+ * Priming is excluded from conservative all-layer object XY ownership,
+ * independent of Z, protected holes or gaps; plan admission checks rounding.
+ */
+prime_start_mm: [number, number, number], prime_end_mm: [number, number, number], prime_filament_length_mm: number, prime_speed_mm_s: number, 
+/**
+ * Final park Z must exceed all object and priming coordinates. The backend
+ * lifts vertically first, then moves XY at this Z, then barriers/shuts down.
+ */
+park_position_mm: [number, number, number], };
+
+export type HomingCoordinateContract = "marlin_native_cartesian";
 
 export type PrinterCapabilities = { motion_space: MotionSpace, extruders: number, output_dialect: OutputDialect, generated_supports: boolean, };
 
@@ -148,29 +164,31 @@ export type MachineComponentShape = { "kind": "box", bounds_mm: AabbMm, } | { "k
 
 export type MachineComponent = { id: string, role: MachineComponentRole, pose: RigidPoseMm, shape: MachineComponentShape, };
 
-export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, nozzle_diameter_mm: number, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
+export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, };
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, };
 
 export type ManufacturingIntent = { printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
-export type DepositionKind = "perimeter" | "solid_fill";
+export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill";
 
 export type DepositionPath = { kind: DepositionKind, points_mm: Array<[number, number, number]>, };
 
-export type PrintLayer = { index: number, z_mm: number, section_z_mm: number, paths: Array<DepositionPath>, };
+export type PlanarRegionCoverage = { section_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, requested_infill_fraction: number, };
+
+export type PrintLayer = { index: number, z_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
 export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, };
+export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, };
 
 export type VerificationOutput = "report_only" | "report_and_motion";
 
 export type ManufacturingInspectionProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
-export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, bounds_mm: AabbMm, };
+export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHash, input_hash: SourceHash, program_hash: SourceHash, verifier_version: string, frame: PrinterCoordinateFrame, event_count: number, deposition_count: number, travel_count: number, layer_count: number, lifecycle_count: number, bounds_mm: AabbMm, };
 
 export type ReplayDisplayDescriptor = { info: ReplayDisplayInfo, resource: ArtifactView, };
 
@@ -205,10 +223,10 @@ export const MAX_DISPLAY_TRIANGLES = 1000000 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
 export const MAX_SECTION_BYTES = 16777216 as const;
 export const MAX_REPLAY_DISPLAY_BYTES = 16777216 as const;
-export const MAX_REPLAY_EVENTS = 200000 as const;
+export const MAX_REPLAY_EVENTS = 200004 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 48 as const;
-export const REPLAY_SCHEMA_VERSION = 1 as const;
+export const REPLAY_SCHEMA_VERSION = 2 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;
@@ -231,7 +249,7 @@ export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
 export const MAX_PROJECT_STORED_ASSETS = 128 as const;
 export const MAX_PROJECT_ERROR_BYTES = 2048 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 1 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 2 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;

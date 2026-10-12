@@ -113,6 +113,10 @@ impl JobStatus {
         )
     }
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded job observations stay inline without a per-result allocation"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobResult {
@@ -186,6 +190,10 @@ pub enum ArtifactChunkMetadata {
     Mesh { metadata: MeshChunkMetadata },
     Section { metadata: SectionChunkMetadata },
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Bounded control replies stay inline without a per-operation allocation"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GeometryResponse {

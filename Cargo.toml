@@ -31,11 +31,11 @@ ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 spiling-contracts = { path = "crates/contracts" }
 spiling-engine-client = { path = "crates/engine-client" }
 geo = "=0.32.0"
-monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
-monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
-monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
-monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001", default-features = false, features = ["step"] }
-monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d87b4d9ced1f3baf31aa771ac0e7c663efb1c001" }
+monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "f6e8a88d08d998970ab17aefd53bd2946408363f" }
+monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "f6e8a88d08d998970ab17aefd53bd2946408363f" }
+monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "f6e8a88d08d998970ab17aefd53bd2946408363f" }
+monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "f6e8a88d08d998970ab17aefd53bd2946408363f", default-features = false, features = ["step"] }
+monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "f6e8a88d08d998970ab17aefd53bd2946408363f" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-core = { path = "crates/core" }
