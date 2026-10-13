@@ -57,6 +57,59 @@ fn assert_canonical(result: &NativeSection) {
 }
 
 #[test]
+fn exact_fit_prepared_source_keeps_independent_clip_capacity_and_native_queries() {
+    let definition = fixture("box-mm.step");
+    let cancel = AtomicBool::new(false);
+    let baseline =
+        prepare_section_source(&definition, MAX_PREPARED_SECTION_SOURCE_BYTES, &cancel).unwrap();
+    let source_bytes = baseline.retained_bytes();
+    drop(baseline);
+
+    let insufficient = prepare_section_source(&definition, source_bytes - 1, &cancel)
+        .err()
+        .expect("source capacity must reject one byte below owned seed storage");
+    assert_eq!(insufficient.code, GeometryErrorCode::ResourceLimit);
+    let source = prepare_section_source(&definition, source_bytes, &cancel).unwrap();
+    for (z, normal) in [
+        (4.0, [0.0, 0.0, 1.0]),
+        (1.0, [0.0, 0.0, -1.0]),
+        (7.0, [0.0, 0.0, 1.0]),
+    ] {
+        let result = source
+            .section_with_byte_limit(
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, z],
+                    normal,
+                },
+                &cancel,
+                spiling_contracts::geometry::MAX_SECTION_BYTES,
+            )
+            .unwrap();
+        assert_canonical(&result);
+        let area: f64 = result
+            .loops
+            .iter()
+            .map(|boundary| signed_area(boundary, &result.frame))
+            .sum();
+        assert!(
+            (area - 200.0).abs() < 1e-7,
+            "unchanged analytic box must remain whole across prepared cuts"
+        );
+    }
+    let cancelled = source
+        .section_with_byte_limit(
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 4.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &AtomicBool::new(true),
+            spiling_contracts::geometry::MAX_SECTION_BYTES,
+        )
+        .unwrap_err();
+    assert_eq!(cancelled.code, GeometryErrorCode::Cancelled);
+}
+
+#[test]
 fn oblique_sections_preserve_native_box_cylinder_and_hole_area_and_winding() {
     // The small tilt cuts only lateral faces and avoids all original vertices,
     // contained boundary edges, tangencies and source coplanar carriers.
@@ -445,4 +498,52 @@ fn frozen_occt_placed_first_layers_keep_native_caps_and_source_identity() {
             );
         }
     }
+}
+
+#[test]
+fn native_projection_mixed_axis_cylinder_is_not_rotated_aabb_contact() {
+    let definition = fixture("cylinder.step");
+    let faces = definition.faces.clone();
+    let provenance = definition.provenance.clone();
+    let angle = 0.37f64;
+    let direction = [
+        angle.sin() / 2.0f64.sqrt(),
+        -angle.sin() / 2.0f64.sqrt(),
+        angle.cos(),
+    ];
+    let extent = crate::projected_extent(&definition, direction, &AtomicBool::new(false)).unwrap();
+    // Independent analytic witness: radius5, native height8, center on Z axis.
+    let expected = [-5.0 * angle.sin(), 8.0 * angle.cos() + 5.0 * angle.sin()];
+    assert!((extent[0] - expected[0]).abs() < 1e-10);
+    assert!((extent[1] - expected[1]).abs() < 1e-10);
+    let box_min = -5.0 * (direction[0].abs() + direction[1].abs());
+    assert!(extent[0] - box_min > 0.5);
+    let scaled = crate::projected_extent(
+        &definition,
+        direction.map(|x| x * 1e200),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!((scaled[0] - extent[0]).abs() < 1e-10);
+    assert!((scaled[1] - extent[1]).abs() < 1e-10);
+    assert_eq!(definition.faces, faces);
+    assert_eq!(definition.provenance, provenance);
+    assert_eq!(
+        crate::projected_extent(&definition, [0.0; 3], &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        crate::projected_extent(&definition, [f64::NAN, 0.0, 1.0], &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::InvalidGeometry
+    );
+    assert_eq!(
+        crate::projected_extent(&definition, direction, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::Cancelled
+    );
 }

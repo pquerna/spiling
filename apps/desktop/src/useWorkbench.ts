@@ -104,6 +104,7 @@ export interface ManufacturingHost {
   token(): number;
   snapshot(): WorkbenchState;
   refreshProject(token: number): Promise<ProjectInfo>;
+  prepareBed(occurrenceId: number, center: boolean): Promise<void>;
   showReplay(descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay): Promise<void>;
   clearReplay(): Promise<void>;
   setReplayView(options: {
@@ -686,6 +687,7 @@ export function useWorkbench(
               patch({ project: result.info });
               return result;
             case "manufacturing_verified":
+            case "manufacturing_preflight":
               return result;
             default:
               return unexpectedJob(result);
@@ -855,6 +857,7 @@ export function useWorkbench(
           throw new Error("unexpected section result for a project job");
         case "manufacturing_compiled":
         case "manufacturing_verified":
+        case "manufacturing_preflight":
           throw new Error("unexpected manufacturing result for a project job");
         default:
           unexpectedJob(result);
@@ -1002,6 +1005,10 @@ export function useWorkbench(
       await getProject(token);
       sceneRef.current = next;
       patch({ scene: next, stale: true, inspection: null, section: null });
+      if (stateRef.current.diagnosticSession) {
+        await syncScene(next, token);
+        return;
+      }
       const view = viewport.current!;
       try {
         await view.beginScene(next);
@@ -1328,6 +1335,31 @@ export function useWorkbench(
       token: () => generation.current,
       snapshot: () => stateRef.current,
       refreshProject: getProject,
+      prepareBed: async (occurrenceId: number, center: boolean) => {
+        let applied = false;
+        let failureCause: unknown;
+        await run(async token => {
+          try {
+            const snapshot = stateRef.current;
+            if (snapshot.project?.read_only)
+              throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
+            if (snapshot.stale || !sceneRef.current)
+              throw new DomainError("stale_revision", "Resume the native scene before preparing the bed.");
+            const summary = sceneRef.current;
+            const response = await exchange(() => native.prepareManufacturingBed(
+              summary.session_id, summary.revision, occurrenceId, center,
+            ), token);
+            if (response.type === "error" || response.type === "project_error")
+              throw new DomainError(response.error.code, response.error.message);
+            if (response.type !== "scene_changed") throw new Error("Unexpected native bed preparation response.");
+            await getProject(token);
+            await syncScene(response.summary, token);
+            applied = true;
+          } catch (error) { failureCause = error; throw error; }
+        });
+        if (failureCause) throw failureCause;
+        if (!applied) throw new Error("Bed preparation was not admitted.");
+      },
       showReplay: async (descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay) => {
         const view = viewport.current;
         if (!view)

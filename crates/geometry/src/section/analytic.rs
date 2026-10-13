@@ -95,6 +95,32 @@ fn angle_in_arc(phase: f64, lo: f64, hi: f64) -> Option<f64> {
     if angle <= hi { Some(angle) } else { None }
 }
 
+/// Exact line/circle boundary projection for the admitted analytic carriers.
+/// This is not a tessellated or control-hull bound and performs no boolean.
+pub(crate) fn projected_extent(
+    definition: &Definition,
+    direction: [f64; 3],
+    cancel: &AtomicBool,
+) -> Result<[f64; 2], GeometryError> {
+    check_cancel(cancel)?;
+    let plane = PlaneMm {
+        origin_mm: [0.0; 3],
+        normal: direction,
+    }
+    .normalized()?;
+    let mut extrema = Extrema::new();
+    for curve in &definition.boundary_curves {
+        check_cancel(cancel)?;
+        extrema.include_curve(curve, &plane)?;
+    }
+    if !extrema.min.is_finite() || !extrema.max.is_finite() {
+        return Err(kernel_error(
+            "native definition has no finite analytic boundary witnesses",
+        ));
+    }
+    Ok([extrema.min, extrema.max])
+}
+
 pub(super) fn crosses_plane(
     definition: &Definition,
     plane: &PlaneMm,

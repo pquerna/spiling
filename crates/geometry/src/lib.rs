@@ -13,6 +13,10 @@ mod tessellation;
 mod tests;
 
 pub use kernel::Definition;
+pub use section::{
+    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, PreparedSectionSource,
+    prepare_section_source,
+};
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -36,6 +40,17 @@ pub struct NativeSection {
     pub loops: Vec<SectionLoopMm>,
     pub sampling_tolerance_mm: f64,
     pub boolean_tolerance_mm: f64,
+}
+
+/// Native analytic line/circle extrema along a normalized definition-local
+/// direction. Admitted planar/cylindrical carriers only; no source mutation,
+/// native intersection, sampled geometry or general freeform guarantee.
+pub fn projected_extent(
+    definition: &Definition,
+    direction: [f64; 3],
+    cancel: &AtomicBool,
+) -> Result<[f64; 2], GeometryError> {
+    section::projected_extent(definition, direction, cancel)
 }
 
 pub fn import_step(bytes: &[u8], cancel: &AtomicBool) -> Result<Definition, GeometryError> {

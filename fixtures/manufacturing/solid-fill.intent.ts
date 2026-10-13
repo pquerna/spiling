@@ -9,7 +9,7 @@ const intent = {
   printer,
   recipe: {
     id: "software-solid-fill",
-    revision: "2",
+    revision: "3",
     material_id: "nominal-software-filament",
     material_revision: "1",
     filament_diameter_mm: 1.75,
@@ -22,6 +22,18 @@ const intent = {
     print_speed_mm_s: 35,
     travel_speed_mm_s: 100,
     flow_multiplier: 1,
+    process: {
+      first_layer_speed_factor: 0.5,
+      first_layer_flow_factor: 1,
+      fan_first_layers: 0,
+      fan_after_first_layers: 128,
+      bridge_speed_factor: 0.6,
+      bridge_flow_factor: 1,
+      bridge_fan_pwm: 255,
+      max_bridge_span_mm: 10,
+      retraction: { kind: "enabled", distance_mm: 0.8, speed_mm_s: 25, minimum_travel_mm: 2, z_hop_mm: 0.2 },
+    },
+    supports: { kind: "disabled" },
   },
 } satisfies ManufacturingIntent;
 

@@ -93,7 +93,13 @@ impl ClassifiedRegions {
         check_cancel(cancel)?;
         let bottom = difference(&layout.fill, survives_below, cancel)?;
         retained_budget(layout.retained_points, &[&bottom])?;
-        let remaining = difference(&layout.fill, &bottom, cancel)?;
+        let remaining = if bottom.0.is_empty() {
+            layout.fill.clone()
+        } else {
+            // Both sides of a split use the original operands and coordinate
+            // frame, never a newly quantized subtraction of the rounded mask.
+            intersection(&layout.fill, survives_below, cancel)?
+        };
         retained_budget(layout.retained_points, &[&bottom, &remaining])?;
         // Bottom ownership wins when physical skin thicknesses overlap.
         let top = difference(&remaining, survives_above, cancel)?;
@@ -101,7 +107,9 @@ impl ClassifiedRegions {
         let interior = if top.0.is_empty() {
             remaining
         } else {
-            let result = difference(&remaining, &top, cancel)?;
+            // Intersect the original operands of the top split. Subtracting its
+            // already rounded result would introduce a second, different grid.
+            let result = intersection(&remaining, survives_above, cancel)?;
             drop(remaining);
             result
         };
@@ -126,6 +134,8 @@ impl ClassifiedRegions {
             protected_hole_area_mm2: layout.protected_hole_area_mm2,
             nominal_deposition_volume_mm3: 0.0,
             requested_infill_fraction: recipe.infill_fraction,
+            support_area_mm2: 0.0,
+            support_nominal_deposition_volume_mm3: 0.0,
         };
         Ok(Self {
             layout,
@@ -139,7 +149,8 @@ impl ClassifiedRegions {
     pub(super) fn paths(
         &self,
         z: f64,
-        index: u32,
+        height: f64,
+        axis: region::HatchAxis,
         recipe: &PlanarPrintRecipe,
         segments: &mut usize,
         cancel: &AtomicBool,
@@ -148,7 +159,12 @@ impl ClassifiedRegions {
         for centers in &self.layout.wall_centers {
             region::wall_paths(centers, z, &mut paths, segments, cancel)?;
         }
-        let layer = region::HatchLayer { z, index, recipe };
+        let layer = region::HatchLayer {
+            z,
+            height,
+            axis,
+            recipe,
+        };
         region::hatch(
             &self.bottom,
             DepositionKind::BottomSkin,
@@ -187,7 +203,7 @@ impl ClassifiedRegions {
                 "section has no printable nominal deposition paths",
             ));
         }
-        let h = recipe.layer_height_mm;
+        let h = height;
         let bead_area = ((recipe.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
             * recipe.flow_multiplier;
         let mut coverage = self.coverage.clone();
@@ -203,6 +219,35 @@ impl ClassifiedRegions {
             ));
         }
         Ok((paths, coverage))
+    }
+
+    /// Whole rows remain clipped by native perimeter-owned fill. They are only
+    /// candidates for joining already-required hatch pieces, never extra fill.
+    pub(super) fn whole_rows(
+        &self,
+        z: f64,
+        height: f64,
+        axis: region::HatchAxis,
+        recipe: &PlanarPrintRecipe,
+        segments: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DepositionPath>, ManufacturingError> {
+        let mut rows = Vec::new();
+        region::hatch(
+            &self.layout.fill,
+            DepositionKind::Bridge,
+            1.0,
+            &region::HatchLayer {
+                z,
+                height,
+                axis,
+                recipe,
+            },
+            &mut rows,
+            segments,
+            cancel,
+        )?;
+        Ok(rows)
     }
 }
 

@@ -23,6 +23,7 @@ import type {
   ArtifactSummary,
   ManufacturingCommand,
   ManufacturingResponse,
+  ManufacturingIntent,
   ManufacturingArtifactRecord,
   ReplayDisplayDescriptor,
 } from "@spiling/protocol";
@@ -48,6 +49,18 @@ export interface SelectedManufacturingExport {
 export interface ManufacturingExportReceipt {
   label: string;
   files: string[];
+}
+export interface SelectedManufacturingIntent {
+  token: string;
+  session_id: SessionId;
+  label: string;
+}
+export interface ManufacturingLayer {
+  index: number;
+  z_mm: number;
+  height_mm: number;
+  section_z_mm: number;
+  deposition_segments: number;
 }
 
 export const native = {
@@ -104,6 +117,18 @@ export const native = {
     invoke<ArrayBuffer>("geometry_chunk", { resource, expected, summary }),
   manufacturing: (command: ManufacturingCommand) =>
     invoke<ManufacturingResponse>("manufacturing_control", { command }),
+  selectManufacturingIntent: () =>
+    invoke<SelectedManufacturingIntent | null>("manufacturing_select_intent"),
+  debugSelectManufacturingIntent: (relativePath: string) =>
+    invoke<SelectedManufacturingIntent>("manufacturing_debug_select_intent", { relativePath }),
+  loadManufacturingIntent: (selection: SelectedManufacturingIntent) =>
+    invoke<ManufacturingIntent>("manufacturing_load_intent", {
+      token: selection.token, sessionId: selection.session_id,
+    }),
+  manufacturingLayers: (record: ManufacturingArtifactRecord) =>
+    invoke<ManufacturingLayer[]>("manufacturing_layers", { record }),
+  prepareManufacturingBed: (sessionId: SessionId, baseRevision: SceneRevision, occurrenceId: number, center: boolean) =>
+    invoke<GeometryResponse>("manufacturing_prepare_bed", { sessionId, baseRevision, occurrenceId, center }),
   replay: (descriptor: ReplayDisplayDescriptor, record: ManufacturingArtifactRecord) =>
     invoke<ArrayBuffer>("manufacturing_replay", { descriptor, record }),
   selectManufacturingExport: () =>

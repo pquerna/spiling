@@ -76,6 +76,7 @@ impl TryFrom<rpc::ReplayDisplayInfo> for ReplayDisplayInfo {
             travel_count: v.travel_count,
             layer_count: v.layer_count,
             lifecycle_count: v.lifecycle_count,
+            process_count: v.process_count,
             bounds_mm: required(v.bounds_mm, "replay bounds")?.try_into()?,
         };
         value.validate().map_err(|e| e.to_string())?;
@@ -98,6 +99,7 @@ impl TryFrom<ReplayDisplayInfo> for rpc::ReplayDisplayInfo {
             travel_count: v.travel_count,
             layer_count: v.layer_count,
             lifecycle_count: v.lifecycle_count,
+            process_count: v.process_count,
             bounds_mm: Some(v.bounds_mm.try_into()?),
         })
     }
@@ -150,6 +152,7 @@ mod tests {
                 travel_count: 2,
                 layer_count: 1,
                 lifecycle_count: 0,
+                process_count: 0,
                 bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             },
             resource: crate::ArtifactView {
@@ -222,6 +225,9 @@ mod tests {
                 deposited_volume_mm3: 1.0,
                 filament_length_mm: 1.0,
                 software_only: true,
+                support_deposition_segments: 0,
+                support_deposited_volume_mm3: 0.0,
+                support_filament_length_mm: 0.0,
             },
         };
         descriptor.validate_for_record(&record).unwrap();
@@ -262,6 +268,11 @@ mod tests {
                 max_extrusion_error_mm: 0.0,
                 lifecycle_motion_count: 0,
                 priming_filament_length_mm: 0.0,
+                support_deposition_segments: 0,
+                support_deposited_volume_mm3: 0.0,
+                support_filament_length_mm: 0.0,
+                retraction_count: 0,
+                retracted_filament_mm: 0.0,
             },
             resource: crate::ArtifactView {
                 name: format!("artifacts/{}", record.hash.as_str()),

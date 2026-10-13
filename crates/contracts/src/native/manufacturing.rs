@@ -25,6 +25,7 @@ fn valid<T>(
 pub enum ManufacturingCall {
     Execute(rpc::ManufacturingRequest),
     Compile(rpc::CompileManufacturingRequest),
+    Preflight(rpc::PreflightManufacturingRequest),
     Verify(rpc::VerifyManufacturingRequest),
 }
 
@@ -34,6 +35,11 @@ pub fn manufacturing_call(
 ) -> Result<ManufacturingCall, String> {
     super::request_id(request_id)?;
     match command {
+        command @ ManufacturingCommand::Preflight { .. } => {
+            let mut request = rpc::PreflightManufacturingRequest::try_from(command)?;
+            request.request_id = request_id.to_owned();
+            Ok(ManufacturingCall::Preflight(request))
+        }
         command @ ManufacturingCommand::Compile { .. } => {
             let mut request = rpc::CompileManufacturingRequest::try_from(command)?;
             request.request_id = request_id.to_owned();
@@ -152,6 +158,235 @@ impl TryFrom<rpc::VerifyManufacturingRequest> for ManufacturingCommand {
             output: rpc::VerificationOutput::try_from(value.output)
                 .map_err(|_| "unknown verification output")?
                 .try_into()?,
+        })
+    }
+}
+impl TryFrom<ManufacturingCommand> for rpc::PreflightManufacturingRequest {
+    type Error = String;
+    fn try_from(value: ManufacturingCommand) -> Result<Self, String> {
+        let ManufacturingCommand::Preflight {
+            session_id,
+            base_revision,
+        } = value
+        else {
+            return Err("expected manufacturing preflight command".into());
+        };
+        let parent = format!("sessions/{}", session_id.as_str());
+        super::session_parent(&parent)?;
+        Ok(Self {
+            parent,
+            request_id: String::new(),
+            base_revision: base_revision.get(),
+        })
+    }
+}
+impl TryFrom<rpc::PreflightManufacturingRequest> for ManufacturingCommand {
+    type Error = String;
+    fn try_from(value: rpc::PreflightManufacturingRequest) -> Result<Self, String> {
+        super::request_id(&value.request_id)?;
+        Ok(Self::Preflight {
+            session_id: super::session_parent(&value.parent)?,
+            base_revision: ProjectRevision(value.base_revision),
+        })
+    }
+}
+impl TryFrom<rpc::RetractionPolicy> for RetractionPolicy {
+    type Error = String;
+    fn try_from(value: rpc::RetractionPolicy) -> Result<Self, String> {
+        use rpc::retraction_policy::Policy;
+        let policy = match required(value.policy, "retraction policy")? {
+            Policy::Disabled(_) => Self::Disabled,
+            Policy::Enabled(p) => Self::Enabled {
+                distance_mm: p.distance_mm,
+                speed_mm_s: p.speed_mm_s,
+                minimum_travel_mm: p.minimum_travel_mm,
+                z_hop_mm: p.z_hop_mm,
+            },
+        };
+        policy.validate().map_err(|e| e.to_string())?;
+        Ok(policy)
+    }
+}
+impl TryFrom<RetractionPolicy> for rpc::RetractionPolicy {
+    type Error = String;
+    fn try_from(value: RetractionPolicy) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        use rpc::retraction_policy::Policy;
+        Ok(Self {
+            policy: Some(match value {
+                RetractionPolicy::Disabled => Policy::Disabled(rpc::RetractionDisabled {}),
+                RetractionPolicy::Enabled {
+                    distance_mm,
+                    speed_mm_s,
+                    minimum_travel_mm,
+                    z_hop_mm,
+                } => Policy::Enabled(rpc::RetractionEnabled {
+                    distance_mm,
+                    speed_mm_s,
+                    minimum_travel_mm,
+                    z_hop_mm,
+                }),
+            }),
+        })
+    }
+}
+impl TryFrom<rpc::ProcessPolicy> for ProcessPolicy {
+    type Error = String;
+    fn try_from(value: rpc::ProcessPolicy) -> Result<Self, String> {
+        valid(
+            Self {
+                first_layer_speed_factor: value.first_layer_speed_factor,
+                first_layer_flow_factor: value.first_layer_flow_factor,
+                fan_first_layers: value
+                    .fan_first_layers
+                    .try_into()
+                    .map_err(|_| "fan PWM exceeds 255")?,
+                fan_after_first_layers: value
+                    .fan_after_first_layers
+                    .try_into()
+                    .map_err(|_| "fan PWM exceeds 255")?,
+                bridge_speed_factor: value.bridge_speed_factor,
+                bridge_flow_factor: value.bridge_flow_factor,
+                bridge_fan_pwm: value
+                    .bridge_fan_pwm
+                    .try_into()
+                    .map_err(|_| "fan PWM exceeds 255")?,
+                max_bridge_span_mm: value.max_bridge_span_mm,
+                retraction: required(value.retraction, "retraction policy")?.try_into()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<ProcessPolicy> for rpc::ProcessPolicy {
+    type Error = String;
+    fn try_from(value: ProcessPolicy) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            first_layer_speed_factor: value.first_layer_speed_factor,
+            first_layer_flow_factor: value.first_layer_flow_factor,
+            fan_first_layers: value.fan_first_layers.into(),
+            fan_after_first_layers: value.fan_after_first_layers.into(),
+            bridge_speed_factor: value.bridge_speed_factor,
+            bridge_flow_factor: value.bridge_flow_factor,
+            bridge_fan_pwm: value.bridge_fan_pwm.into(),
+            max_bridge_span_mm: value.max_bridge_span_mm,
+            retraction: Some(value.retraction.try_into()?),
+        })
+    }
+}
+impl TryFrom<rpc::SupportPolicy> for SupportPolicy {
+    type Error = String;
+    fn try_from(value: rpc::SupportPolicy) -> Result<Self, String> {
+        use rpc::support_policy::Policy;
+        valid(
+            match required(value.policy, "support policy")? {
+                Policy::Disabled(_) => Self::Disabled,
+                Policy::Breakaway(p) => Self::Breakaway {
+                    density: p.density,
+                    xy_clearance_mm: p.xy_clearance_mm,
+                    z_gap_mm: p.z_gap_mm,
+                    interface_thickness_mm: p.interface_thickness_mm,
+                },
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<SupportPolicy> for rpc::SupportPolicy {
+    type Error = String;
+    fn try_from(value: SupportPolicy) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        use rpc::support_policy::Policy;
+        Ok(Self {
+            policy: Some(match value {
+                SupportPolicy::Disabled => Policy::Disabled(rpc::SupportsDisabled {}),
+                SupportPolicy::Breakaway {
+                    density,
+                    xy_clearance_mm,
+                    z_gap_mm,
+                    interface_thickness_mm,
+                } => Policy::Breakaway(rpc::BreakawaySupports {
+                    density,
+                    xy_clearance_mm,
+                    z_gap_mm,
+                    interface_thickness_mm,
+                }),
+            }),
+        })
+    }
+}
+impl TryFrom<rpc::PreflightReport> for PreflightReport {
+    type Error = String;
+    fn try_from(value: rpc::PreflightReport) -> Result<Self, String> {
+        if value.checks.len() > 256 {
+            return Err("preflight check limit exceeded".into());
+        }
+        valid(
+            Self {
+                input_revision: ProjectRevision(value.input_revision),
+                eligible: value.eligible,
+                software_only: value.software_only,
+                checks: value
+                    .checks
+                    .into_iter()
+                    .map(|check| {
+                        Ok(PreflightCheck {
+                            code: check.code,
+                            message: check.message,
+                            occurrence_id: check
+                                .occurrence_id
+                                .map(crate::geometry::OccurrenceId::new)
+                                .transpose()
+                                .map_err(|e| e.to_string())?,
+                            face_id: check
+                                .face_id
+                                .map(crate::geometry::FaceId::parse)
+                                .transpose()
+                                .map_err(|e| e.to_string())?,
+                            severity: match rpc::PreflightSeverity::try_from(check.severity) {
+                                Ok(rpc::PreflightSeverity::PreflightError) => {
+                                    PreflightSeverity::Error
+                                }
+                                Ok(rpc::PreflightSeverity::PreflightWarning) => {
+                                    PreflightSeverity::Warning
+                                }
+                                Ok(rpc::PreflightSeverity::PreflightInfo) => {
+                                    PreflightSeverity::Info
+                                }
+                                _ => return Err("unknown preflight severity".into()),
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<PreflightReport> for rpc::PreflightReport {
+    type Error = String;
+    fn try_from(value: PreflightReport) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            input_revision: value.input_revision.get(),
+            eligible: value.eligible,
+            software_only: value.software_only,
+            checks: value
+                .checks
+                .into_iter()
+                .map(|check| rpc::PreflightCheck {
+                    code: check.code,
+                    message: check.message,
+                    occurrence_id: check.occurrence_id.map(|id| id.get()),
+                    face_id: check.face_id.map(|id| id.as_str().to_owned()),
+                    severity: match check.severity {
+                        PreflightSeverity::Error => rpc::PreflightSeverity::PreflightError,
+                        PreflightSeverity::Warning => rpc::PreflightSeverity::PreflightWarning,
+                        PreflightSeverity::Info => rpc::PreflightSeverity::PreflightInfo,
+                    } as i32,
+                })
+                .collect(),
         })
     }
 }
@@ -507,6 +742,8 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 flow_multiplier: value.flow_multiplier,
                 top_skin_thickness_mm: value.top_skin_thickness_mm,
                 bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
+                process: required(value.process, "process policy")?.try_into()?,
+                supports: required(value.supports, "support policy")?.try_into()?,
             },
             Self::validate,
         )
@@ -531,6 +768,8 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             flow_multiplier: value.flow_multiplier,
             top_skin_thickness_mm: value.top_skin_thickness_mm,
             bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
+            process: Some(value.process.try_into()?),
+            supports: Some(value.supports.try_into()?),
         })
     }
 }
@@ -567,6 +806,9 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
                 deposited_volume_mm3: value.deposited_volume_mm3,
                 filament_length_mm: value.filament_length_mm,
                 software_only: value.software_only,
+                support_deposition_segments: value.support_deposition_segments,
+                support_deposited_volume_mm3: value.support_deposited_volume_mm3,
+                support_filament_length_mm: value.support_filament_length_mm,
             },
             Self::validate,
         )
@@ -583,6 +825,9 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
             deposited_volume_mm3: value.deposited_volume_mm3,
             filament_length_mm: value.filament_length_mm,
             software_only: value.software_only,
+            support_deposition_segments: value.support_deposition_segments,
+            support_deposited_volume_mm3: value.support_deposited_volume_mm3,
+            support_filament_length_mm: value.support_filament_length_mm,
         })
     }
 }
@@ -628,6 +873,11 @@ impl TryFrom<rpc::VerificationReport> for VerificationReport {
                 max_extrusion_error_mm: value.max_extrusion_error_mm,
                 lifecycle_motion_count: value.lifecycle_motion_count,
                 priming_filament_length_mm: value.priming_filament_length_mm,
+                support_deposition_segments: value.support_deposition_segments,
+                support_deposited_volume_mm3: value.support_deposited_volume_mm3,
+                support_filament_length_mm: value.support_filament_length_mm,
+                retraction_count: value.retraction_count,
+                retracted_filament_mm: value.retracted_filament_mm,
             },
             Self::validate,
         )
@@ -649,6 +899,11 @@ impl TryFrom<VerificationReport> for rpc::VerificationReport {
             max_extrusion_error_mm: value.max_extrusion_error_mm,
             lifecycle_motion_count: value.lifecycle_motion_count,
             priming_filament_length_mm: value.priming_filament_length_mm,
+            support_deposition_segments: value.support_deposition_segments,
+            support_deposited_volume_mm3: value.support_deposited_volume_mm3,
+            support_filament_length_mm: value.support_filament_length_mm,
+            retraction_count: value.retraction_count,
+            retracted_filament_mm: value.retracted_filament_mm,
         })
     }
 }
@@ -749,12 +1004,81 @@ mod tests {
         ))
         .unwrap()
     }
+    #[test]
+    fn preflight_request_report_and_operation_round_trip_are_checked() {
+        let session = SessionId::new();
+        let command = ManufacturingCommand::Preflight {
+            session_id: session,
+            base_revision: ProjectRevision(7),
+        };
+        let ManufacturingCall::Preflight(request) =
+            manufacturing_call(command.clone(), "").unwrap()
+        else {
+            panic!("wrong preflight dispatch");
+        };
+        assert_eq!(
+            ManufacturingCommand::try_from(request.clone()).unwrap(),
+            command
+        );
+        let mut invalid = request;
+        invalid.request_id = "not-a-uuid".into();
+        assert!(ManufacturingCommand::try_from(invalid).is_err());
+        let report = PreflightReport {
+            input_revision: ProjectRevision(7), eligible: true, software_only: true,
+            checks: vec![PreflightCheck {
+                code: "compile_analysis_required".into(), severity: PreflightSeverity::Info,
+                message: "Native layer/support/bridge/offset analysis occurs during Compile; physical qualification absent".into(),
+                occurrence_id: Some(crate::geometry::OccurrenceId::new(1).unwrap()),
+                face_id: Some(crate::geometry::FaceId::from_step_entity(9007199254740993).unwrap()),
+            }],
+        };
+        let wire = rpc::PreflightReport::try_from(report.clone()).unwrap();
+        assert_eq!(PreflightReport::try_from(wire.clone()).unwrap(), report);
+        let result = crate::geometry::JobResult::ManufacturingPreflight { report };
+        assert_eq!(
+            crate::geometry::JobResult::try_from(
+                rpc::NativeOperationResult::try_from(result.clone()).unwrap()
+            )
+            .unwrap(),
+            result
+        );
+        for severity in [0, i32::MAX] {
+            let mut invalid = wire.clone();
+            invalid.checks[0].severity = severity;
+            assert!(PreflightReport::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.checks[0].occurrence_id = Some(0);
+        assert!(PreflightReport::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.checks[0].face_id = Some("step:01".into());
+        assert!(PreflightReport::try_from(invalid).is_err());
+        let mut invalid = wire;
+        invalid.software_only = false;
+        assert!(PreflightReport::try_from(invalid).is_err());
+    }
 
     #[test]
     fn intent_round_trip_reapplies_domain_admission() {
         let domain = intent();
         let wire = rpc::ManufacturingIntent::try_from(domain.clone()).unwrap();
         assert_eq!(ManufacturingIntent::try_from(wire.clone()).unwrap(), domain);
+        let mut missing = wire.clone();
+        missing.recipe.as_mut().unwrap().process = None;
+        assert!(ManufacturingIntent::try_from(missing).is_err());
+        let mut missing = wire.clone();
+        missing.recipe.as_mut().unwrap().supports = None;
+        assert!(ManufacturingIntent::try_from(missing).is_err());
+        let mut invalid_pwm = wire.clone();
+        invalid_pwm
+            .recipe
+            .as_mut()
+            .unwrap()
+            .process
+            .as_mut()
+            .unwrap()
+            .bridge_fan_pwm = 256;
+        assert!(ManufacturingIntent::try_from(invalid_pwm).is_err());
         let mut invalid = wire.clone();
         invalid.recipe.as_mut().unwrap().flow_multiplier = f64::NAN;
         assert!(ManufacturingIntent::try_from(invalid).is_err());
@@ -835,6 +1159,9 @@ mod tests {
                 deposited_volume_mm3: 1.0,
                 filament_length_mm: 1.0,
                 software_only: true,
+                support_deposition_segments: 0,
+                support_deposited_volume_mm3: 0.0,
+                support_filament_length_mm: 0.0,
             },
         };
         let wire = rpc::ManufacturingArtifactRecord::try_from(record.clone()).unwrap();
@@ -877,6 +1204,11 @@ mod tests {
             max_extrusion_error_mm: 0.0,
             lifecycle_motion_count: 0,
             priming_filament_length_mm: 0.0,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
+            retraction_count: 0,
+            retracted_filament_mm: 0.0,
         };
         let wire = rpc::VerificationReport::try_from(report.clone()).unwrap();
         assert_eq!(VerificationReport::try_from(wire.clone()).unwrap(), report);

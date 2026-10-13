@@ -22,7 +22,7 @@ export interface ReplayView {
   showTravel: boolean;
 }
 interface Batch {
-  lines: LineSegments;
+  lines: LineSegments | Points;
   events: Uint32Array;
   kind: number;
 }
@@ -45,7 +45,7 @@ const reject = (message: string): never => {
 /** Computes all retained raw/CPU/GPU buffer costs before any projection allocation. */
 export function replayBudget(replay: DecodedReplayDisplay) {
   const segments = replay.eventCount - 1;
-  const vertexBytes = segments * 24 + 12;
+  const vertexBytes = segments * 24 - replay.processCount * 12 + 12;
   return { rawBytes: replay.bytes.byteLength + vertexBytes + segments * 4, gpuBytes: vertexBytes };
 }
 
@@ -60,6 +60,7 @@ export function createReplayDisplay(
     replay.depositionCount !== descriptor.info.deposition_count ||
     replay.travelCount !== descriptor.info.travel_count ||
     replay.lifecycleCount !== descriptor.info.lifecycle_count ||
+    replay.processCount !== descriptor.info.process_count ||
     replay.layerCount !== descriptor.info.layer_count ||
     replay.bytes.byteLength !== Number(descriptor.resource.size_bytes)
   )
@@ -76,7 +77,7 @@ export function createReplayDisplay(
   const batches: Batch[] = [];
   const materials: (LineBasicMaterial | PointsMaterial)[] = [];
   const geometries: BufferGeometry[] = [];
-  const counts = new Uint32Array(8);
+  const counts = new Uint32Array(13);
   for (let event = 1; event < replay.eventCount; event++) {
     const kind = data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46);
     counts[kind] = counts[kind]! + 1;
@@ -108,27 +109,39 @@ export function createReplayDisplay(
       "#8ed05a",
       "#7b91eb",
       "#fff07a",
+      "#ff934a",
+      "#62a2ff",
+      "#b3e5ff",
+      "#e26086",
+      "#f6b8ce",
     ];
     for (let kind = 0; kind < counts.length; kind++) {
       if (!counts[kind]) continue;
-      const positions = new Float32Array(counts[kind]! * 6);
+      const stationary = kind === 11 || kind === 12;
+      const vertices = stationary ? 1 : 2;
+      const positions = new Float32Array(counts[kind]! * vertices * 3);
       const events = new Uint32Array(counts[kind]!);
       let cursor = 0;
       for (let event = 1; event < replay.eventCount; event++) {
         if (data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46) !== kind)
           continue;
         events[cursor] = event;
-        for (let endpoint = 0; endpoint < 2; endpoint++)
+        for (let endpoint = 0; endpoint < vertices; endpoint++)
           for (let axis = 0; axis < 3; axis++)
-            positions[cursor * 6 + endpoint * 3 + axis] = project(event - 1 + endpoint, axis);
+            positions[cursor * vertices * 3 + endpoint * 3 + axis] =
+              project(stationary ? event : event - 1 + endpoint, axis);
         cursor++;
       }
       const geometry = new BufferGeometry();
       geometries.push(geometry);
       geometry.setAttribute("position", new BufferAttribute(positions, 3));
-      const material = new LineBasicMaterial({ color: colors[kind], depthTest: false });
+      const material = stationary
+        ? new PointsMaterial({ color: colors[kind], size: 5, sizeAttenuation: false, depthTest: false })
+        : new LineBasicMaterial({ color: colors[kind], depthTest: false });
       materials.push(material);
-      const lines = new LineSegments(geometry, material);
+      const lines = stationary
+        ? new Points(geometry, material as PointsMaterial)
+        : new LineSegments(geometry, material as LineBasicMaterial);
       lines.frustumCulled = false;
       lines.renderOrder = 3;
       root.add(lines);
@@ -173,7 +186,7 @@ export function createReplayDisplay(
       )
         reject("invalid draw state");
       for (const batch of batches) {
-        const lifecycle = batch.kind >= 6;
+        const lifecycle = batch.kind === 6 || batch.kind === 7;
         const start =
           view.layer === null || lifecycle
             ? 0
@@ -184,7 +197,8 @@ export function createReplayDisplay(
             ? batch.events.length
             : lowerBound(batch.events, (event) => layerAt(event) > view.layer!);
         const end = Math.min(ordinalEnd, layerEnd);
-        batch.lines.geometry.setDrawRange(start * 2, Math.max(0, end - start) * 2);
+        const vertices = batch.kind === 11 || batch.kind === 12 ? 1 : 2;
+        batch.lines.geometry.setDrawRange(start * vertices, Math.max(0, end - start) * vertices);
         batch.lines.visible =
           (!lifecycle || view.layer === null) &&
           ((batch.kind !== 0 && batch.kind !== 6) || view.showTravel);

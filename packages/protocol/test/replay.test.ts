@@ -35,7 +35,8 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
   const replay = await decodeReplayDisplay(golden, descriptor);
   assert.equal(replay.bytes, golden);
   assert.equal(replay.eventCount, descriptor.info.event_count);
-  assert.equal(descriptor.info.schema_version, 2);
+  assert.equal(descriptor.info.schema_version, 3);
+  assert.equal(replay.processCount, descriptor.info.process_count);
   assert.equal(replay.lifecycleCount, descriptor.info.lifecycle_count);
   assert.deepEqual(fixture.actual_positions.slice(0, 4), [
     [1, 1, 0.4],
@@ -88,7 +89,7 @@ const corruptions: [string, (data: DataView) => void][] = [
   ["header count", (data) => data.setUint32(8, 0xffffffff, true)],
   ["lifecycle header count", (data) => data.setUint32(28, 1, true)],
   ["reserved tail", (data) => data.setUint8(95, 1)],
-  ["unknown kind", (data) => data.setUint8(96 + 46, 8)],
+  ["unknown kind", (data) => data.setUint8(96 + 46, 13)],
   ["unknown flags", (data) => data.setUint8(96 + 47, 2)],
   ["invented first start", (data) => data.setUint8(96 + 47, 1)],
   ["unknown later start", (data) => data.setUint8(144 + 47, 0)],
@@ -133,7 +134,7 @@ test("replay rejects zero-distance deposition and unchanged deposition E", async
 test("replay rejects descriptor tampering, hash mismatch and trailing/truncated bodies", async () => {
   for (const mutate of [
     (value: ReplayDisplayDescriptor) => {
-      value.info.event_count = 200005;
+      value.info.event_count = 300005;
     },
     (value: ReplayDisplayDescriptor) => {
       value.info.travel_count = 100001;
@@ -143,6 +144,9 @@ test("replay rejects descriptor tampering, hash mismatch and trailing/truncated 
     },
     (value: ReplayDisplayDescriptor) => {
       value.info.lifecycle_count = 2;
+    },
+    (value: ReplayDisplayDescriptor) => {
+      value.info.process_count = 100001;
     },
     (value: ReplayDisplayDescriptor) => {
       value.info.program_hash = "not-a-hash";
@@ -172,7 +176,7 @@ test("replay rejects descriptor tampering, hash mismatch and trailing/truncated 
   );
 });
 
-test("replay rejects loose advertised bounds and empty/skipped layers", async () => {
+test("replay rejects loose bounds and attribution without printed layer endpoints", async () => {
   const loose = golden.slice(0),
     data = new DataView(loose);
   data.setFloat64(32, data.getFloat64(32, true) - 1, true);
@@ -190,8 +194,73 @@ test("replay rejects loose advertised bounds and empty/skipped layers", async ()
   emptyLayer.info.layer_count = 2;
   await assert.rejects(decodeReplayDisplay(bytes, emptyLayer), ReplayDecodeError);
 });
+test("packed schedule may skip internal contact gaps without inventing events", async () => {
+  // Structural admission only; native plan replay proves actual contact-gap semantics.
+  const bytes = golden.slice(0), data = new DataView(bytes);
+  data.setUint32(24, 3, true);
+  data.setUint16(96 + 2 * 48 + 44, 2, true);
+  data.setUint16(96 + 3 * 48 + 44, 2, true);
+  const value = structuredClone(descriptor);
+  value.info.layer_count = 3;
+  const replay = await decodeReplayDisplay(bytes, await rehash(bytes, value));
+  assert.equal(replay.layerCount, 3);
+  assert.deepEqual([0, 1, 2, 3].map((event) => replay.layer(event)), [0, 0, 2, 2]);
+  const trailing = structuredClone(value);
+  trailing.info.layer_count = 4;
+  data.setUint32(24, 4, true);
+  await assert.rejects(decodeReplayDisplay(bytes, await rehash(bytes, trailing)), ReplayDecodeError);
+});
 
-// Compose structural SPLR2 cases around native body bytes. This does not assert
+
+test("stationary extrusion and new deposition roles are independently admitted", async () => {
+  const native = await decodeReplayDisplay(golden, descriptor);
+  const bytes = new ArrayBuffer(golden.byteLength + 96);
+  const raw = new Uint8Array(bytes), data = new DataView(bytes);
+  raw.set(new Uint8Array(golden, 0, 144));
+  raw.set(new Uint8Array(golden, 144), 240);
+  const value = structuredClone(descriptor);
+  value.info.event_count += 2;
+  value.info.process_count += 2;
+  value.resource.size_bytes = String(bytes.byteLength);
+  data.setUint32(8, value.info.event_count, true);
+  data.setUint32(88, value.info.process_count, true);
+  for (let event = 1; event <= 2; event++) {
+    const start = 96 + event * 48;
+    raw.set(new Uint8Array(golden, 96, 48), start);
+    data.setFloat64(start + 24, event === 1 ? native.extrusion(0) - 0.8 : native.extrusion(0), true);
+    data.setUint32(start + 40, native.sourceLine(0) + event, true);
+    data.setUint8(start + 46, event === 1 ? 11 : 12);
+    data.setUint8(start + 47, 1);
+  }
+  for (let event = 3; event < value.info.event_count; event++) {
+    const start = 96 + event * 48;
+    data.setUint32(start + 40, data.getUint32(start + 40, true) + 2, true);
+  }
+  const admitted = await decodeReplayDisplay(bytes, await rehash(bytes, value));
+  assert.equal(admitted.processCount, 2);
+  assert.deepEqual(admitted.position(1), admitted.position(0));
+  assert.deepEqual(admitted.position(2), admitted.position(1));
+  for (const [offset, mutation] of [
+    [144, 1.1], // retract must not move
+    [192 + 24, 0.1], // recovery cannot add deposited filament
+    [144 + 24, 0], // retract must decrease E
+  ]) {
+    const corrupted = bytes.slice(0);
+    new DataView(corrupted).setFloat64(offset!, mutation!, true);
+    await assert.rejects(decodeReplayDisplay(corrupted, await rehash(corrupted, value)), ReplayDecodeError);
+  }
+  for (const role of [8, 9, 10]) {
+    const roleBytes = bytes.slice(0);
+    new DataView(roleBytes).setUint8(240 + 46, role);
+    const decoded = await decodeReplayDisplay(roleBytes, await rehash(roleBytes, value));
+    assert.equal(decoded.kind(3), role);
+  }
+  const countBytes = bytes.slice(0);
+  new DataView(countBytes).setUint32(88, 1, true);
+  await assert.rejects(decodeReplayDisplay(countBytes, await rehash(countBytes, value)), ReplayDecodeError);
+});
+
+// Compose structural SPLR3 cases around native body bytes. This does not assert
 // that this composition is a native-verified executable machine program.
 async function lifecycleCase(): Promise<{
   bytes: ArrayBuffer;
@@ -250,6 +319,49 @@ async function lifecycleCase(): Promise<{
   }
   return { bytes, descriptor: await rehash(bytes, value) };
 }
+test("complete body admits actual stationary startup retraction after lifecycle prime", async () => {
+  const complete = await lifecycleCase();
+  const before = await decodeReplayDisplay(complete.bytes, complete.descriptor);
+  const bytes = new ArrayBuffer(complete.bytes.byteLength + 96);
+  const raw = new Uint8Array(bytes), data = new DataView(bytes);
+  raw.set(new Uint8Array(complete.bytes, 0, 192));
+  // Lifecycle prime supplies the known XYZ for the first body feeder-only event.
+  raw.set(new Uint8Array(complete.bytes, 144, 48), 192);
+  data.setFloat64(192 + 24, before.extrusion(1) - 0.8, true);
+  data.setUint16(192 + 44, 0, true);
+  data.setUint8(192 + 46, 11);
+  raw.set(new Uint8Array(complete.bytes, 192, 48), 240);
+  data.setFloat64(240 + 24, before.extrusion(1) - 0.8, true);
+  raw.set(new Uint8Array(complete.bytes, 192, 48), 288);
+  data.setUint8(288 + 46, 12);
+  raw.set(new Uint8Array(complete.bytes, 240), 336);
+  const value = structuredClone(complete.descriptor);
+  value.info.event_count += 2;
+  value.info.process_count += 2;
+  value.resource.size_bytes = String(bytes.byteLength);
+  data.setUint32(8, value.info.event_count, true);
+  data.setUint32(88, value.info.process_count, true);
+  for (let event = 0; event < value.info.event_count; event++)
+    data.setUint32(96 + event * 48 + 40, event + 1, true);
+  const admitted = await decodeReplayDisplay(bytes, await rehash(bytes, value));
+  assert.deepEqual([2, 3, 4].map((event) => admitted.kind(event)), [11, 0, 12]);
+  assert.deepEqual(admitted.position(2), admitted.position(1));
+  assert.deepEqual(admitted.position(4), admitted.position(3));
+  assert.equal(admitted.processCount, 2);
+  assert.equal(admitted.extrusion(4), admitted.extrusion(1));
+  for (const [offset, byte] of [[192 + 47, 0], [192 + 44, 1], [192 + 46, 12]]) {
+    const corrupted = bytes.slice(0);
+    new DataView(corrupted).setUint8(offset!, byte!);
+    await assert.rejects(decodeReplayDisplay(corrupted, await rehash(corrupted, value)), ReplayDecodeError);
+  }
+  const moved = bytes.slice(0);
+  new DataView(moved).setFloat64(192, before.position(1)[0] + 0.1, true);
+  await assert.rejects(decodeReplayDisplay(moved, await rehash(moved, value)), ReplayDecodeError);
+  const extraRecovery = bytes.slice(0);
+  new DataView(extraRecovery).setFloat64(288 + 24, before.extrusion(1) + 0.1, true);
+  await assert.rejects(decodeReplayDisplay(extraRecovery, await rehash(extraRecovery, value)), ReplayDecodeError);
+});
+
 
 test("lifecycle events retain unknown start and no object-layer attribution or object counts", async () => {
   const value = await lifecycleCase();

@@ -82,3 +82,39 @@ test("freshness uses selected content, not captured revision; session, reopen an
     false,
   );
 });
+
+test("full complete intent scalar edits preserve declaration identity and unedited policies", async () => {
+  const complete = JSON.parse(await readFile(new URL(
+    "../../../fixtures/manufacturing/complete-sparse.intent.json", import.meta.url), "utf8"));
+  const original = structuredClone(complete);
+  const draft = makeDraft(complete, complete);
+  assert.equal(draftChanged(draft), false);
+  draft.values.infill_fraction = "0.5";
+  draft.policyValues["process.first_layer_speed_factor"] = "0.4";
+  draft.policyValues["process.retraction.distance_mm"] = "1.1";
+  const changed = draftIntent(draft);
+  assert.deepEqual(changed.printer, original.printer);
+  assert.equal(changed.recipe.process.first_layer_speed_factor, 0.4);
+  assert.equal(changed.recipe.process.retraction.distance_mm, 1.1);
+  assert.deepEqual(changed.recipe.supports, original.recipe.supports);
+  assert.equal(changed.recipe.process.bridge_fan_pwm, original.recipe.process.bridge_fan_pwm);
+  assert.deepEqual(complete, original, "Draft must not mutate the admitted intent");
+  draft.policyValues["process.fan_first_layers"] = "256";
+  assert.throws(() => draftIntent(draft), /policy range/);
+  assert.equal(draft.policyValues["process.fan_first_layers"], "256", "Failed policy edit is retained");
+});
+
+test("enabled support edits retain explicit zero gap and disabled policies are never invented", () => {
+  const supported = structuredClone(intent);
+  supported.recipe.supports = { kind: "breakaway", density: 0.25, xy_clearance_mm: 0.5,
+    z_gap_mm: 0, interface_thickness_mm: 0.4 };
+  const draft = makeDraft(supported, supported);
+  draft.policyValues["supports.density"] = "0.5";
+  const changed = draftIntent(draft);
+  assert.equal(changed.recipe.supports.density, 0.5);
+  assert.equal(changed.recipe.supports.z_gap_mm, 0);
+  assert.deepEqual(changed.printer, supported.printer);
+  const disabled = makeDraft(intent, intent);
+  assert.equal("supports.density" in disabled.policyValues, false);
+  assert.deepEqual(draftIntent(disabled).recipe.supports, intent.recipe.supports);
+});

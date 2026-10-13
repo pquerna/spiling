@@ -110,13 +110,17 @@ fn validate_verified(
             .map_err(|e| e.to_string())?;
         if display.info.verifier_version != provenance.verifier_version
             || display.info.travel_count != report.travel_segments
+            || display.info.process_count != report.retraction_count * 2
+            || display.info.lifecycle_count != report.lifecycle_motion_count
         {
             return Err("replay/provenance/report mismatch".into());
         }
     }
     if !report.verified
         || report.deposition_segments != record.summary.deposition_segments
-        || report.travel_segments != record.summary.paths
+        || report.support_deposition_segments != record.summary.support_deposition_segments
+        || report.support_deposited_volume_mm3 != record.summary.support_deposited_volume_mm3
+        || report.support_filament_length_mm != record.summary.support_filament_length_mm
         || report.deposited_volume_mm3 != record.summary.deposited_volume_mm3
         || report.filament_length_mm != record.summary.filament_length_mm
     {
@@ -214,6 +218,13 @@ pub fn native_operation_view(
     };
     if let Some(result) = &result {
         match result {
+            JobResult::ManufacturingPreflight { report } => {
+                if report.input_revision != ProjectRevision(meta.captured_project_revision)
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("preflight revision or output mismatch".into());
+                }
+            }
             JobResult::Scene { summary } => {
                 if summary.session_id != session_id {
                     return Err("scene result session mismatch".into());
@@ -300,6 +311,9 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::ProjectSaved(info) => Self::ProjectSaved {
                 info: info.try_into()?,
             },
+            R::ManufacturingPreflight(v) => Self::ManufacturingPreflight {
+                report: required(v.report, "preflight report")?.try_into()?,
+            },
             R::ManufacturingCompiled(v) => {
                 let record: ManufacturingArtifactRecord =
                     required(v.record, "manufacturing record")?.try_into()?;
@@ -348,6 +362,11 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
             JobResult::ProjectSaved { info } => R::ProjectSaved(info.try_into()?),
+            JobResult::ManufacturingPreflight { report } => {
+                R::ManufacturingPreflight(rpc::ManufacturingPreflightResult {
+                    report: Some(report.try_into()?),
+                })
+            }
             JobResult::ManufacturingCompiled {
                 info,
                 record,

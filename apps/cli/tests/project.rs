@@ -301,6 +301,86 @@ fn manufacturing_intent_fixture() -> PathBuf {
 }
 
 #[test]
+#[ignore = "actual preflight CLI regression; requires SPILING_TEST_ENGINE"]
+fn ineligible_preflight_is_read_only_and_never_supplies_machine_permissions() {
+    let root = root();
+    let project = root.join("project");
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(fixture("box-mm.step"))
+            .output()
+            .unwrap(),
+    );
+    let rejected_preflight = terminal_error(
+        cli("inspect", &project)
+            .arg("--preflight")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(rejected_preflight["domain"], "manufacturing");
+    assert_eq!(rejected_preflight["error"]["code"], "no_intent");
+    assert_eq!(
+        rejected_preflight["project"]["revision"],
+        created["project"]["revision"]
+    );
+    assert!(rejected_preflight["manufacturing"]["intent"].is_null());
+    let rejected = cli("open", &project)
+        .args(["--center-on-bed", "1"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    let reopened = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(
+        reopened["project"]["revision"],
+        created["project"]["revision"]
+    );
+    assert!(reopened["manufacturing"]["intent"].is_null());
+    let invalid = report(
+        cli("edit", &project)
+            .arg("--intent")
+            .arg(manufacturing_intent_fixture())
+            .args([
+                "--pose",
+                "1",
+                r#"{"translation_mm":[0,0,20],"rotation_xyzw":[0,0,0,1]}"#,
+            ])
+            .output()
+            .unwrap(),
+    );
+    let inspected = report(
+        cli("inspect", &project)
+            .arg("--preflight")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(inspected["manufacturing"]["preflight"]["eligible"], false);
+    assert_eq!(
+        inspected["manufacturing"]["preflight"]["software_only"],
+        true
+    );
+    assert!(
+        inspected["manufacturing"]["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| {
+                check["severity"] == "error" && check["code"] == "floating_without_support"
+            })
+    );
+    assert_eq!(
+        inspected["project"]["revision"],
+        invalid["project"]["revision"]
+    );
+    assert_eq!(inspected["project"]["dirty"], false);
+    assert_eq!(inspected["project"]["read_only"], true);
+    assert!(inspected["manufacturing"]["artifact"].is_null());
+    assert_eq!(inspected["manufacturing"]["not_machine_ready"], true);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "actual software manufacturing CLI regression; requires SPILING_TEST_ENGINE"]
 fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     let root = root();
@@ -315,7 +395,16 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
             .arg(&source)
             .arg("--intent")
             .arg(manufacturing_intent_fixture())
-            .args(["--compile", "--verify", "--manufacturing-out"])
+            .args([
+                "--place-on-bed",
+                "1",
+                "--center-on-bed",
+                "1",
+                "--preflight",
+                "--compile",
+                "--verify",
+                "--manufacturing-out",
+            ])
             .arg(&first_export)
             .arg("--replay-out")
             .arg(&first_replay)
@@ -327,6 +416,30 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert_eq!(artifact["summary"]["software_only"], true);
     assert_eq!(created["manufacturing"]["not_machine_ready"], true);
     assert_eq!(created["manufacturing"]["verification"]["verified"], true);
+    assert_eq!(created["manufacturing"]["preflight"]["eligible"], true);
+    assert_eq!(created["manufacturing"]["preflight"]["software_only"], true);
+    assert!(
+        !created["manufacturing"]["preflight"]["checks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let declared_intent: Value =
+        serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
+    assert_eq!(created["manufacturing"]["intent"], declared_intent);
+    let operations = created["operations"].as_array().unwrap();
+    let preflight = operations
+        .iter()
+        .find(|row| row["operation"] == "preflight")
+        .unwrap();
+    let centered = operations
+        .iter()
+        .find(|row| row["operation"] == "center_on_bed")
+        .unwrap();
+    assert_eq!(
+        preflight["project"]["revision"],
+        centered["project"]["revision"]
+    );
     assert_eq!(created["project"]["dirty"], false);
     assert_eq!(created["project"]["can_undo"], true);
     std::fs::remove_file(source).unwrap();
@@ -334,7 +447,7 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     let reopened_replay = root.join("reopened.splr");
     let reopened = report(
         cli("inspect", &project)
-            .args(["--verify", "--manufacturing-out"])
+            .args(["--preflight", "--verify", "--manufacturing-out"])
             .arg(&reopened_export)
             .arg("--replay-out")
             .arg(&reopened_replay)
@@ -348,6 +461,11 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert_eq!(reopened["project"]["read_only"], true);
     assert_eq!(reopened["project"]["dirty"], false);
     assert_eq!(reopened["manufacturing"]["artifact"], artifact);
+    assert_eq!(reopened["manufacturing"]["preflight"]["eligible"], true);
+    assert_eq!(
+        reopened["project"]["revision"],
+        created["project"]["revision"]
+    );
     assert_eq!(
         reopened["manufacturing"]["intent"],
         created["manufacturing"]["intent"]

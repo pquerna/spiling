@@ -9,11 +9,12 @@ import diagnosticPrinter from "./software-cartesian.printer.ts";
 const printer = {
   ...diagnosticPrinter,
   id: "software-marlin2-reference",
-  revision: "1",
+  revision: "2",
   name: "Complete Marlin 2 software reference — physically unqualified",
   capabilities: {
     ...diagnosticPrinter.capabilities,
     output_dialect: "marlin2_single_extruder_gcode_v1",
+    generated_supports: true,
   },
   workflow: {
     kind: "complete_marlin",
@@ -21,7 +22,7 @@ const printer = {
       machine_id: "software-marlin2-reference",
       firmware_version: "2.1.2.5-software-contract-fixture",
       // SHA-256 of the exact adjacent configuration and calibration record bytes.
-      configuration_hash: "64e88bbb6311c12f10e121e16429bba5526fa0ed8ce5d3306ec7ba6513df11f7",
+      configuration_hash: "c46cf9a35f2916b3109dbbae2a06dc0cb212d4fe611b511bf1c72220bbcc147c",
       calibration_record_hash: "322df893a20557507671a732334464bebf7164d9c547e6ef09eea356e99b3a8b",
       homing_contract: "marlin_native_cartesian",
       home_position_mm: [0, 0, 0],

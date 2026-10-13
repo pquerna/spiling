@@ -20,6 +20,9 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             deposition_segments: 1,
             deposited_volume_mm3: 1.0,
             filament_length_mm: 1.0,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
             software_only: true,
         },
     }
@@ -196,6 +199,36 @@ fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info()
         ..Default::default()
     };
     assert!(Hello::try_from(info).is_err());
+}
+
+#[test]
+fn bed_preparation_rejects_extent_amplified_near_axis_rotation_without_snapping() {
+    let bounds = AabbMm::new([0.0; 3], [1e12, 20.0, 10.0]).unwrap();
+    let envelope = AabbMm::new([-2e12, -2e12, 0.0], [2e12, 2e12, 100.0]).unwrap();
+    let near_axis = RigidPoseMm {
+        translation_mm: [0.0; 3],
+        rotation_xyzw: [0.0, 5e-16, 0.0, 1.0],
+    };
+    assert!(matches!(
+        super::prepare_bed_pose(bounds, near_axis, envelope, true),
+        Err(ClientError::InvalidRequest(_))
+    ));
+    let quarter_turn = RigidPoseMm {
+        translation_mm: [40.0, 40.0, 30.0],
+        rotation_xyzw: [
+            0.0,
+            0.0,
+            std::f64::consts::FRAC_1_SQRT_2,
+            std::f64::consts::FRAC_1_SQRT_2,
+        ],
+    };
+    let small = AabbMm::new([0.0; 3], [20.0, 20.0, 10.0]).unwrap();
+    let machine = AabbMm::new([0.0; 3], [200.0; 3]).unwrap();
+    let placed = super::prepare_bed_pose(small, quarter_turn, machine, true).unwrap();
+    assert_eq!(placed.rotation_xyzw, quarter_turn.rotation_xyzw);
+    assert!(placed.translation_mm[2].abs() < 1e-12);
+    assert!((placed.translation_mm[0] - 110.0).abs() < 1e-10);
+    assert!((placed.translation_mm[1] - 90.0).abs() < 1e-10);
 }
 
 mod real;

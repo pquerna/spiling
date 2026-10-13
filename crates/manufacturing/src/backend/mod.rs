@@ -17,18 +17,9 @@ pub fn emit(
     intent.validate()?;
     plan.validate(intent)?;
     let recipe = &intent.recipe;
-    let bead_area = (recipe.bead_width_mm - recipe.layer_height_mm) * recipe.layer_height_mm
-        + std::f64::consts::PI * (recipe.layer_height_mm * 0.5).powi(2);
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
-    let extrusion_per_mm = bead_area * recipe.flow_multiplier / filament_area;
-    let print_feed = recipe.print_speed_mm_s * 60.0;
     let travel_feed = recipe.travel_speed_mm_s * 60.0;
-    if !extrusion_per_mm.is_finite()
-        || !print_feed.is_finite()
-        || !travel_feed.is_finite()
-        || print_feed < 0.000001
-        || travel_feed < 0.000001
-    {
+    if !travel_feed.is_finite() || travel_feed < 0.000001 {
         return Err(error(
             ManufacturingErrorCode::InvalidSpecification,
             "backend feed or extrusion cannot be represented at declared precision",
@@ -38,6 +29,7 @@ pub fn emit(
     program.write_str("; SOFTWARE VALIDATION ONLY - NOT MACHINE READY; PHYSICAL QUALIFICATION ABSENT\nG21\nG90\nM82\nG92 E0\n").map_err(limit)?;
     let mut extrusion = 0.0f64;
     let mut emitted_extrusion = 0.0f64;
+    let mut position = None;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         // Reviewed Marlin 2 subset: resets scale/volumetric state, homes native
         // axes, explicitly disables leveling, and waits for heating OR cooling.
@@ -84,63 +76,99 @@ pub fn emit(
             job.prime_speed_mm_s * 60.0
         )
         .map_err(limit)?;
+        position = Some(end);
     }
-    for layer in &plan.layers {
-        check_cancel(cancel)?;
-        for path in &layer.paths {
-            check_cancel(cancel)?;
-            let first = path.points_mm[0].map(round_xyz);
-            writable_position(first, intent)?;
-            writeln!(
-                program,
-                "G0 X{:.6} Y{:.6} Z{:.6} F{:.6}",
-                first[0], first[1], first[2], travel_feed
-            )
-            .map_err(limit)?;
-            let mut last = first;
-            for edge in path.points_mm.windows(2) {
-                check_cancel(cancel)?;
-                let destination = edge[1].map(round_xyz);
-                writable_position(destination, intent)?;
-                if destination == last {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        "deposition collapses at emitted coordinate precision",
-                    ));
+    let (last, _) =
+        crate::realization::stream(plan, intent, cancel, position, extrusion, |event| {
+            use crate::realization::Event;
+            match event {
+                Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
+                Event::Extrusion(e, speed) => {
+                    let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
+                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    if !feed.is_finite()
+                        || feed <= 0.0
+                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "actual stationary extrusion feed exceeds printer limit",
+                        ));
+                    }
+                    if position.is_none() || !rounded.is_finite() || rounded == emitted_extrusion {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "stationary extrusion collapses or lacks known position",
+                        ));
+                    }
+                    writeln!(program, "G1 E{e:.8} F{feed:.6}").map_err(limit)?;
+                    emitted_extrusion = rounded;
                 }
-                let length = (edge[1][0] - edge[0][0])
-                    .hypot(edge[1][1] - edge[0][1])
-                    .hypot(edge[1][2] - edge[0][2]);
-                extrusion += length * extrusion_per_mm;
-                let rounded = (extrusion * 100_000_000.0).round() / 100_000_000.0;
-                if !rounded.is_finite() || rounded <= emitted_extrusion {
-                    return Err(error(
-                        ManufacturingErrorCode::InvalidSpecification,
-                        "deposition extrusion collapses or overflows at emitted precision",
-                    ));
+                Event::Travel(target, speed) | Event::Deposit(target, _, speed) => {
+                    let to = target.map(round_xyz);
+                    writable_position(to, intent)?;
+                    let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
+                    if !feed.is_finite()
+                        || feed <= 0.0
+                        || feed / 60.0 > intent.printer.max_feed_mm_s
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "actual emitted feed exceeds printer limit or precision",
+                        ));
+                    }
+                    if let Event::Deposit(_, e, _) = event {
+                        let from = position.ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::InvalidSpecification,
+                                "deposition before positioning",
+                            )
+                        })?;
+                        let length = (to[0] - from[0])
+                            .hypot(to[1] - from[1])
+                            .hypot(to[2] - from[2]);
+                        let rounded = (e * 100_000_000.0).round() / 100_000_000.0;
+                        let delta = rounded - emitted_extrusion;
+                        if !rounded.is_finite() || length <= 0.0 || delta <= 0.0 {
+                            return Err(error(
+                                ManufacturingErrorCode::UnsupportedGeometry,
+                                "deposition collapses at serialized precision",
+                            ));
+                        }
+                        let flow = delta * filament_area * feed / 60.0 / length;
+                        let rounding_slack = (intent.printer.max_volumetric_flow_mm3_s * 0.000002
+                            + 0.00000001 * filament_area * speed)
+                            / length;
+                        if !flow.is_finite()
+                            || flow > intent.printer.max_volumetric_flow_mm3_s + rounding_slack
+                        {
+                            return Err(error(
+                                ManufacturingErrorCode::InvalidSpecification,
+                                "actual decoded deposition flow exceeds printer limit",
+                            ));
+                        }
+                        writeln!(
+                            program,
+                            "G1 X{:.6} Y{:.6} Z{:.6} E{e:.8} F{feed:.6}",
+                            to[0], to[1], to[2]
+                        )
+                        .map_err(limit)?;
+                        emitted_extrusion = rounded;
+                    } else {
+                        writeln!(
+                            program,
+                            "G0 X{:.6} Y{:.6} Z{:.6} F{feed:.6}",
+                            to[0], to[1], to[2]
+                        )
+                        .map_err(limit)?;
+                    }
+                    position = Some(to);
                 }
-                writeln!(
-                    program,
-                    "G1 X{:.6} Y{:.6} Z{:.6} E{:.8} F{:.6}",
-                    destination[0], destination[1], destination[2], extrusion, print_feed
-                )
-                .map_err(limit)?;
-                emitted_extrusion = rounded;
-                last = destination;
             }
-        }
-    }
+            Ok(())
+        })?;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
-        let last = plan
-            .layers
-            .last()
-            .unwrap()
-            .paths
-            .last()
-            .unwrap()
-            .points_mm
-            .last()
-            .unwrap();
+        let last = last.unwrap();
         let lift = [last[0], last[1], job.park_position_mm[2]].map(round_xyz);
         let park = job.park_position_mm.map(round_xyz);
         writable_position(lift, intent)?;

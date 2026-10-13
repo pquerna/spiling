@@ -392,6 +392,28 @@ impl manufacturing_server::Manufacturing for Service {
             reply => Err(native::reply_error(reply)),
         }
     }
+    async fn preflight(
+        &self,
+        req: Request<PreflightManufacturingRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Manufacturing.Preflight", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::manufacturing_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Manufacturing(command),
+            reservation: 0,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
     async fn compile(
         &self,
         req: Request<CompileManufacturingRequest>,
@@ -543,7 +565,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             spiling_contracts::geometry::KernelIdentity {
                 name: "monstertruck".into(),
                 version: "0.4.1".into(),
-                revision: "f6e8a88d08d998970ab17aefd53bd2946408363f".into(),
+                revision: "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e".into(),
             }
             .try_into()
             .map_err(jobs::internal)?,

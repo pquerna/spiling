@@ -5,7 +5,9 @@
 //! Software-only native-section manufacturing, with mandatory independent replay.
 pub mod backend;
 pub mod planner;
+mod realization;
 pub mod verifier;
+pub use planner::preflight;
 
 use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
@@ -16,10 +18,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "2";
-pub const EMITTER_VERSION: &str = "2";
-pub const VERIFIER_VERSION: &str = "2";
-const KERNEL_REVISION: &str = "f6e8a88d08d998970ab17aefd53bd2946408363f";
+pub const PLANNER_VERSION: &str = "3";
+pub const EMITTER_VERSION: &str = "3";
+pub const VERIFIER_VERSION: &str = "3";
+const KERNEL_REVISION: &str = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -105,7 +107,8 @@ pub fn compile(
         emitter_version: EMITTER_VERSION.into(),
         verifier_version: VERIFIER_VERSION.into(),
     };
-    let plan = planner::plan(&input, cancel)?;
+    let mut plan = planner::plan(&input, cancel)?;
+    realization::canonicalize(&mut plan, input.intent, cancel)?;
     let program = backend::emit(&plan, input.intent, cancel)?;
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
     let bundle = ManufacturingBundle {
@@ -174,11 +177,14 @@ pub fn inspect_bundle(
             verifier_version: VERIFIER_VERSION.into(),
             frame: bundle.provenance.intent.printer.coordinate_frame,
             event_count: report.deposition_segments
+                + report.support_deposition_segments
                 + report.travel_segments
+                + report.retraction_count * 2
                 + report.lifecycle_motion_count,
-            deposition_count: report.deposition_segments,
+            deposition_count: report.deposition_segments + report.support_deposition_segments,
             travel_count: report.travel_segments,
             lifecycle_count: report.lifecycle_motion_count,
+            process_count: report.retraction_count * 2,
             layer_count: bundle.plan.layers.len() as u32,
             bounds_mm,
         };

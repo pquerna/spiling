@@ -110,6 +110,7 @@ enum Purpose {
     Open,
     Save,
     Compile,
+    Preflight,
     Verify,
 }
 struct Publication {
@@ -138,6 +139,7 @@ enum PublicationKind {
         edit: PreparedEdit,
         record: ManufacturingArtifactRecord,
     },
+    Preflight(PreflightReport),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -316,11 +318,16 @@ impl Runtime {
                 let publication = if !durable && active.cancel.load(Ordering::Acquire) {
                     Err(cancelled(&active.purpose))
                 } else if active.base != self.revision
-                    || (matches!(active.purpose, Purpose::Compile | Purpose::Verify)
-                        && active.project_base != self.project.info().revision)
+                    || (matches!(
+                        active.purpose,
+                        Purpose::Compile | Purpose::Preflight | Purpose::Verify
+                    ) && active.project_base != self.project.info().revision)
                 {
                     Err(
-                        if matches!(active.purpose, Purpose::Compile | Purpose::Verify) {
+                        if matches!(
+                            active.purpose,
+                            Purpose::Compile | Purpose::Preflight | Purpose::Verify
+                        ) {
                             ManufacturingError::new(
                                 ManufacturingErrorCode::StaleRevision,
                                 "manufacturing input revision is stale",
@@ -446,6 +453,9 @@ impl Runtime {
                                 info: self.project.info(),
                                 record,
                             })
+                        }
+                        PublicationKind::Preflight(report) => {
+                            Some(JobResult::ManufacturingPreflight { report })
                         }
                         PublicationKind::Verified { record, inspection } => {
                             let replay =
@@ -597,6 +607,13 @@ impl Runtime {
                     .map_err(manufacturing::project_error)?;
                 Ok(Publication {
                     kind: PublicationKind::Manufacturing { edit, record },
+                    artifact: None,
+                })
+            }
+            (Purpose::Preflight, Product::Preflight(report)) => {
+                report.validate()?;
+                Ok(Publication {
+                    kind: PublicationKind::Preflight(report),
                     artifact: None,
                 })
             }
@@ -1306,6 +1323,7 @@ impl Runtime {
             Purpose::Open => "opening",
             Purpose::Save => "saving",
             Purpose::Compile => "compiling_manufacturing",
+            Purpose::Preflight => "preflighting_manufacturing",
             Purpose::Verify => "verifying_manufacturing",
         };
         self.watchdog.start(job, cancel.clone());
@@ -1400,7 +1418,7 @@ fn is_cancelled(error: &JobError) -> bool {
 }
 fn cancelled(purpose: &Purpose) -> JobError {
     match purpose {
-        Purpose::Compile | Purpose::Verify => ManufacturingError::new(
+        Purpose::Compile | Purpose::Preflight | Purpose::Verify => ManufacturingError::new(
             ManufacturingErrorCode::Cancelled,
             "manufacturing job cancelled before publication",
         )

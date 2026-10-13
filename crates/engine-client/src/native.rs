@@ -240,6 +240,17 @@ impl EngineRpc {
                         .map_err(ClientError::Protocol)?,
                 })
             }
+            ManufacturingCall::Preflight(request) => {
+                let operation = client
+                    .preflight(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ManufacturingResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
             ManufacturingCall::Verify(request) => {
                 let operation = client
                     .verify(self.request(bounded(request)?))

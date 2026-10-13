@@ -11,6 +11,12 @@ import "spiling/native_project.proto";
 
 service Manufacturing {
   rpc Execute(ManufacturingRequest) returns (ManufacturingReply);
+  rpc Preflight(PreflightManufacturingRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = {
+      response_type: "NativeOperationResult"
+      metadata_type: "NativeOperationMetadata"
+    };
+  }
   rpc Compile(CompileManufacturingRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = {
       response_type: "NativeOperationResult"
@@ -41,6 +47,33 @@ message CompileManufacturingRequest {
   string parent = 1;
   string request_id = 2; // Optional canonical nonnil UUID.
   uint32 base_revision = 3;
+}
+message PreflightManufacturingRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+}
+enum PreflightSeverity {
+  PREFLIGHT_SEVERITY_UNSPECIFIED = 0;
+  PREFLIGHT_ERROR = 1;
+  PREFLIGHT_WARNING = 2;
+  PREFLIGHT_INFO = 3;
+}
+message PreflightCheck {
+  string code = 1;
+  PreflightSeverity severity = 2;
+  string message = 3;
+  optional uint32 occurrence_id = 4;
+  optional string face_id = 5;
+}
+message PreflightReport {
+  uint32 input_revision = 1;
+  bool eligible = 2;
+  bool software_only = 3;
+  repeated PreflightCheck checks = 4;
+}
+message ManufacturingPreflightResult {
+  PreflightReport report = 1;
 }
 message VerifyManufacturingRequest {
   string parent = 1;
@@ -98,6 +131,7 @@ message ReplayDisplayInfo {
   uint32 layer_count = 10;
   AabbMm bounds_mm = 11;
   uint32 lifecycle_count = 12;
+  uint32 process_count = 13;
 }
 message ReplayDisplayDescriptor {
   ReplayDisplayInfo info = 1;
@@ -211,6 +245,45 @@ message PlanarPrintRecipe {
   double flow_multiplier = 12;
   double top_skin_thickness_mm = 13;
   double bottom_skin_thickness_mm = 14;
+  ProcessPolicy process = 15;
+  SupportPolicy supports = 16;
+}
+message RetractionDisabled {}
+message RetractionEnabled {
+  double distance_mm = 1;
+  double speed_mm_s = 2;
+  double minimum_travel_mm = 3;
+  double z_hop_mm = 4;
+}
+message RetractionPolicy {
+  oneof policy {
+    RetractionDisabled disabled = 1;
+    RetractionEnabled enabled = 2;
+  }
+}
+message ProcessPolicy {
+  double first_layer_speed_factor = 1;
+  double first_layer_flow_factor = 2;
+  uint32 fan_first_layers = 3;
+  uint32 fan_after_first_layers = 4;
+  double bridge_speed_factor = 5;
+  double bridge_flow_factor = 6;
+  uint32 bridge_fan_pwm = 7;
+  double max_bridge_span_mm = 8;
+  RetractionPolicy retraction = 9;
+}
+message SupportsDisabled {}
+message BreakawaySupports {
+  double density = 1;
+  double xy_clearance_mm = 2;
+  double z_gap_mm = 3;
+  double interface_thickness_mm = 4;
+}
+message SupportPolicy {
+  oneof policy {
+    SupportsDisabled disabled = 1;
+    BreakawaySupports breakaway = 2;
+  }
 }
 message ManufacturingArtifactRecord {
   string hash = 1;
@@ -225,6 +298,9 @@ message ManufacturingSummary {
   double deposited_volume_mm3 = 4;
   double filament_length_mm = 5;
   bool software_only = 6;
+  uint32 support_deposition_segments = 7;
+  double support_deposited_volume_mm3 = 8;
+  double support_filament_length_mm = 9;
 }
 message VerificationReport {
   bool verified = 1;
@@ -238,4 +314,9 @@ message VerificationReport {
   double max_extrusion_error_mm = 9;
   uint32 lifecycle_motion_count = 10;
   double priming_filament_length_mm = 11;
+  uint32 support_deposition_segments = 12;
+  double support_deposited_volume_mm3 = 13;
+  double support_filament_length_mm = 14;
+  uint32 retraction_count = 15;
+  double retracted_filament_mm = 16;
 }

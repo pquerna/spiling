@@ -13,7 +13,7 @@ import {
   REPLAY_LIFECYCLE_LAYER,
 } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
-import { scalarFields } from "./draft.ts";
+import { scalarFields, policyScalarFields } from "./draft.ts";
 import { useManufacturing } from "./useManufacturing.ts";
 import "./manufacturing.css";
 
@@ -28,10 +28,14 @@ export function ManufacturingPanel({
 }) {
   const manufacturing = useManufacturing(host);
   const [exportPath, setExportPath] = useState("manufacturing-export");
+  const [intentPath, setIntentPath] = useState("fixtures/manufacturing/complete-sparse.intent.json");
+  const [bedOccurrence, setBedOccurrence] = useState("");
   const { status, draft, inspection, fresh, available, writable } = manufacturing;
   const result = inspection?.result,
     replay = inspection?.replay;
-  const event = replay && manufacturing.eventCount > 0 ? manufacturing.eventCount - 1 : null;
+  const emptyLayer = manufacturing.layer !== null &&
+    inspection?.layers.find(row => row.index === manufacturing.layer)?.deposition_segments === 0;
+  const event = replay && manufacturing.eventCount > 0 && !emptyLayer ? manufacturing.eventCount - 1 : null;
   const job = host.state.activeJob;
   return (
     <section
@@ -76,12 +80,26 @@ export function ManufacturingPanel({
           Admit box-mm STEP fixture through native tokens
         </button>
       )}
+      <button data-testid="manufacturing-load-intent" disabled={!writable}
+        onClick={() => { void manufacturing.selectIntent(); }}>
+        Load full ManufacturingIntent JSON…
+      </button>
+      <p>Native dialog only; inert JSON limited to 32 KiB and validated in Rust. No TypeScript execution or renderer file access.</p>
+      {host.state.runtime?.geometry_debug_enabled && (
+        <details>
+          <summary>Confined inert intent fixture admission</summary>
+          <input data-testid="manufacturing-intent-path" value={intentPath}
+            onChange={event => setIntentPath(event.target.value)} />
+          <button disabled={!writable} data-testid="manufacturing-debug-intent"
+            onClick={() => { void manufacturing.selectIntent(intentPath); }}>Load confined JSON</button>
+        </details>
+      )}
       <button
         data-testid="manufacturing-select-software"
         disabled={!writable}
         onClick={manufacturing.selectSoftwareIntent}
       >
-        Select bundled software-only reference intent
+        Select bundled diagnostic body-only software reference intent
       </button>
       {!draft && (
         <p>
@@ -138,13 +156,29 @@ export function ManufacturingPanel({
                 />
               </label>
             ))}
+            {policyScalarFields(draft.intent).map(([key, label]) => (
+              <label key={key}>{label}
+                <input type="number" step={key.includes("fan_") ? "1" : "any"}
+                  data-testid={`manufacturing-${key.replaceAll(".", "-")}`}
+                  value={draft.policyValues[key]}
+                  onChange={event => manufacturing.editPolicyScalar(key, event.target.value)} />
+              </label>
+            ))}
           </fieldset>
           <p>
-            Fixed-height vertical planar/cylindrical geometry; integral layer heights. Skin
-            thickness conservatively rounds up to whole layers; interior fill is solid at fraction 1
-            and sparse below 1. No generated supports, material calibration or physical-printability
-            proof.
+            Native event-aligned layers can have nonnominal final or shelf thickness; bead/flow uses
+            actual thickness. Physical-thickness skins and sparse interior preserve object ownership.
+            Bridge and breakaway support policies are explicit bounded software declarations, not
+            physical-printability or collision certification.
           </p>
+          <details>
+            <summary>First-layer, cooling, retraction, bridge and support policies</summary>
+            <pre data-testid="manufacturing-process-policy">
+              {JSON.stringify({ process: draft.intent.recipe.process, supports: draft.intent.recipe.supports }, null, 2)}
+            </pre>
+            <p>Scalar edits preserve every machine, configuration, calibration and process declaration.
+              Apply revalidates the entire intent natively. Fan PWM is commanded state, not measured cooling.</p>
+          </details>
           {manufacturing.conflict && (
             <p role="alert">
               The authoritative intent changed while this draft was edited. Reload the current
@@ -175,7 +209,27 @@ export function ManufacturingPanel({
           </p>
         </>
       )}
+      <fieldset disabled={!writable || !status?.intent || manufacturing.changed || host.state.stale}>
+        <legend>Prepare an occurrence on the declared native bed</legend>
+        <select data-testid="manufacturing-bed-occurrence" value={bedOccurrence}
+          onChange={event => setBedOccurrence(event.target.value)}>
+          <option value="">Select occurrence explicitly</option>
+          {host.state.occurrences.map(row => <option key={row.occurrence_id} value={row.occurrence_id}>
+            Occurrence {row.occurrence_id} / definition {row.definition_id}
+          </option>)}
+        </select>
+        <button data-testid="manufacturing-place-bed" disabled={!bedOccurrence}
+          onClick={() => { void manufacturing.prepareBed(Number(bedOccurrence), false); }}>Place on bed</button>
+        <button data-testid="manufacturing-center-bed" disabled={!bedOccurrence}
+          onClick={() => { void manufacturing.prepareBed(Number(bedOccurrence), true); }}>Center and place on bed</button>
+        <p>Uses certified native definition bounds and current axis-aligned pose, never mesh bounds.
+          Preserves orientation; one SetInstancePose transaction uses current revision and Core undo.
+          Oblique orientations require native contact analysis and are rejected explicitly.</p>
+      </fieldset>
       <div className="geometry-buttons">
+        <button data-testid="manufacturing-preflight"
+          disabled={!available || !status?.intent || manufacturing.changed}
+          onClick={() => { void manufacturing.preflightIntent(); }}>Run input Preflight</button>
         <button
           data-testid="manufacturing-compile"
           disabled={!writable || !status?.intent || manufacturing.changed}
@@ -204,6 +258,22 @@ export function ManufacturingPanel({
           Fresh report and motion
         </button>
       </div>
+      {manufacturing.preflight && (
+        <section data-testid="manufacturing-preflight-report">
+          <h3>Preflight — input eligibility only</h3>
+          <p>Revision {manufacturing.preflight.input_revision};
+            {manufacturing.preflight.input_revision === host.state.project?.revision ? " current" : " stale — rerun"}.
+            Eligible: {String(manufacturing.preflight.eligible)}.
+            Software only: {String(manufacturing.preflight.software_only)}.
+            Native layer/support/bridge/offset analysis remains pending until Compile.
+            Physical qualification is absent.</p>
+          <ul>{manufacturing.preflight.checks.map((check, index) => <li key={index}>
+            <strong>{check.severity}: {check.code}</strong> — {check.message}
+            {check.occurrence_id !== null && <>; occurrence {check.occurrence_id}</>}
+            {check.face_id !== null && <>; face {check.face_id}</>}
+          </li>)}</ul>
+        </section>
+      )}
       {job && manufacturing.working && (
         <div data-testid="manufacturing-progress" role="status">
           {job.status}: {job.stage} — {job.completed_units} / {job.total_units}
@@ -288,6 +358,10 @@ export function ManufacturingPanel({
             <dd>{result.report.deposited_volume_mm3} mm³</dd>
             <dt>Object filament length</dt>
             <dd>{result.report.filament_length_mm} mm</dd>
+            <dt>Support deposition events / volume / filament (separate from object and prime)</dt>
+            <dd>{result.report.support_deposition_segments} / {result.report.support_deposited_volume_mm3} mm³ / {result.report.support_filament_length_mm} mm</dd>
+            <dt>Retractions / withdrawn filament (recovery is not deposition)</dt>
+            <dd>{result.report.retraction_count} / {result.report.retracted_filament_mm} mm</dd>
             <dt>Lifecycle motion events</dt>
             <dd>{result.report.lifecycle_motion_count}</dd>
             <dt>Priming filament length (separate from object)</dt>
@@ -298,6 +372,15 @@ export function ManufacturingPanel({
             <dd>{result.report.max_extrusion_error_mm} mm</dd>
           </dl>
           <details>
+            <summary>Actual native layer thickness and section heights (mm)</summary>
+            <table data-testid="manufacturing-layer-accounting">
+              <thead><tr><th>Layer</th><th>Z</th><th>Actual thickness</th><th>Native section Z</th></tr></thead>
+              <tbody>{inspection?.layers.map(row => <tr key={row.index}>
+                <td>{row.index}</td><td>{row.z_mm}</td><td>{row.height_mm}</td><td>{row.section_z_mm}</td>
+              </tr>)}</tbody>
+            </table>
+          </details>
+          <details>
             <summary>Captured provenance</summary>
             <pre data-testid="manufacturing-provenance">
               {JSON.stringify(result.provenance, null, 2)}
@@ -307,16 +390,16 @@ export function ManufacturingPanel({
             <fieldset disabled={!fresh}>
               <legend>Actual emitted-program replay — endpoint coordinates in mm</legend>
               <p>
-                {replay.eventCount} events, {replay.depositionCount} deposition,{" "}
-                {replay.travelCount} object travel, {replay.lifecycleCount} lifecycle;
+                {replay.eventCount} events, {replay.depositionCount} object + support deposition,{" "}
+                {replay.travelCount} object travel, {replay.lifecycleCount} lifecycle, {replay.processCount} stationary retraction/recovery;
                 {replay.layerCount} object layers. Positions, E and F come from decoded program
                 bytes, not planned paths.
               </p>
               <p>
-                Packed path colors: perimeter orange, solid fill turquoise, bottom skin purple, top
-                skin pink, sparse fill green, object travel blue-gray, lifecycle travel blue, prime
-                yellow. Lifecycle events have no object layer and appear only with all layers
-                selected; the travel toggle also controls lifecycle travel, not priming.
+                Packed roles distinguish object walls/skins/fill/bridge, support/interface, travel,
+                lifecycle and prime. Retract/recover are stationary process events, not deposited
+                material or fictional XYZ motion. Lifecycle events have no object layer and appear only
+                with all layers selected; travel toggle excludes prime and stationary process events.
               </p>
               {!inspection?.displayReady && (
                 <p>
@@ -324,6 +407,10 @@ export function ManufacturingPanel({
                   diagnostic evidence does not certify WebGPU rendering or picking.
                 </p>
               )}
+              {emptyLayer && <p data-testid="manufacturing-empty-layer">
+                Selected schedule layer is a verified support contact gap: no deposition or motion
+                events. Actual thickness is retained; no neighbouring layer is substituted.
+              </p>}
               <label>
                 Layer (zero-based; blank means all)
                 <input
@@ -452,11 +539,13 @@ export function ManufacturingPanel({
               fresh,
               working: manufacturing.working,
               draft_changed: manufacturing.changed,
+              preflight: manufacturing.preflight ?? null,
               replay: replay
                 ? {
                     event_count: replay.eventCount,
                     lifecycle_count: replay.lifecycleCount,
                     deposition_count: replay.depositionCount,
+                    process_count: replay.processCount,
                     travel_count: replay.travelCount,
                     layer_count: replay.layerCount,
                     byte_count: replay.bytes.byteLength,

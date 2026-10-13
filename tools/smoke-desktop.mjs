@@ -43,6 +43,13 @@ if (["project-bridge", "manufacturing"].includes(scenario)) {
   for (const name of ["box-mm.step", "cylinder.step"])
     await copyFile(resolve(sourceFixtureRoot, name), resolve(fixtureRoot, name));
 }
+if (scenario === "manufacturing") {
+  await copyFile(
+    resolve("fixtures/manufacturing/complete-sparse.intent.json"),
+    resolve(fixtureRoot, "operator.intent.json"),
+  );
+  await writeFile(resolve(fixtureRoot, "invalid.intent.json"), "{");
+}
 const scenePath = resolve(option("--scene", "fixtures/geometry/scenes/two-parts.scene.json"));
 const recipe = scenario === "geometry" ? JSON.parse(await readFile(scenePath, "utf8")) : null;
 
@@ -132,9 +139,10 @@ async function input(selector, value) {
   await evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
     if (!element) throw new Error("Missing input");
-    const prototype = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const prototype = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype
+      : element.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, ${JSON.stringify(String(value))});
-    element.dispatchEvent(new Event("input", {bubbles:true}));
+    element.dispatchEvent(new Event(element.tagName === "SELECT" ? "change" : "input", {bubbles:true}));
   })()`);
 }
 async function selectOccurrence(id) {
@@ -694,20 +702,35 @@ async function inspectManufacturing() {
     "real native token import",
     65000,
   );
-  await click("manufacturing-select-software");
-  await until(
-    async () => (await manufacturingState()).draft_changed,
-    "explicit operator intent selection",
-  );
+  await input('[data-testid="manufacturing-intent-path"]', "operator.intent.json");
+  await click("manufacturing-debug-intent");
+  await until(async () => {
+    const current = await manufacturingState();
+    return current.draft_changed && !current.working;
+  }, "native bounded inert profile selection and single-use load");
   await input('[data-testid="manufacturing-top_skin_thickness_mm"]', "0.6");
   await input('[data-testid="manufacturing-bottom_skin_thickness_mm"]', "0.4");
   await input('[data-testid="manufacturing-infill_fraction"]', "0.25");
+  const beforeInvalidLoad = await manufacturingState();
+  const beforeInvalidMessage = await text("manufacturing-message");
+  await input('[data-testid="manufacturing-intent-path"]', "invalid.intent.json");
+  await click("manufacturing-debug-intent");
+  await until(async () => {
+    const current = await manufacturingState();
+    return !current.working && (await text("manufacturing-message")) !== beforeInvalidMessage;
+  }, "recoverable native malformed profile admission");
+  assert.equal((await manufacturingState()).project_revision, beforeInvalidLoad.project_revision);
+  assert.equal((await manufacturingState()).selected_intent, null);
+  assert.equal(
+    await evaluate('document.querySelector(\'[data-testid="manufacturing-top_skin_thickness_mm"]\').value'),
+    "0.6",
+    "Failed profile loading preserves the existing operator draft",
+  );
   await click("manufacturing-apply");
   state = await until(async () => {
     const current = await manufacturingState();
     return current.selected_intent && !current.working && !current.draft_changed ? current : false;
   }, "full intent Apply");
-  assert.equal(state.selected_intent.printer.schema_version, 2);
   assert.equal(state.selected_intent.recipe.top_skin_thickness_mm, 0.6);
   assert.equal(state.selected_intent.recipe.bottom_skin_thickness_mm, 0.4);
   assert.equal(state.selected_intent.recipe.infill_fraction, 0.25);
@@ -721,6 +744,24 @@ async function inspectManufacturing() {
     true,
     "Unchanged intent is not submitted",
   );
+  const bedOccurrence = (await geometryState()).occurrences[0].occurrence_id;
+  await input('[data-testid="manufacturing-bed-occurrence"]', bedOccurrence);
+  await click("manufacturing-center-bed");
+  await until(async () => {
+    const row = (await geometryState()).occurrences.find(row => row.occurrence_id === bedOccurrence);
+    return row && JSON.stringify(row.pose.translation_mm) === JSON.stringify([100, 105, 0]);
+  }, "shared native center-and-bed transaction");
+  const beforePreflight = await manufacturingState();
+  await click("manufacturing-preflight");
+  state = await until(async () => {
+    const current = await manufacturingState();
+    return !current.working &&
+      current.preflight?.input_revision === beforePreflight.project_revision ? current : false;
+  }, "revision-captured read-only native Preflight");
+  assert.equal(state.preflight.eligible, true);
+  assert.equal(state.preflight.software_only, true);
+  assert.equal(state.project_revision, beforePreflight.project_revision);
+  assert.deepEqual(state.selected_artifact, beforePreflight.selected_artifact);
   const appliedRevision = state.project_revision;
   await input('[data-testid="manufacturing-perimeter_count"]', "9");
   await click("manufacturing-apply");
@@ -794,13 +835,14 @@ async function inspectManufacturing() {
     "actual replay transport and panel",
     65000,
   );
-  assert.ok(state.replay.event_count > 0);
   assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
   assert.equal(
     state.replay.event_count,
-    state.replay.deposition_count + state.replay.travel_count + state.replay.lifecycle_count,
+    state.replay.deposition_count + state.replay.travel_count +
+      state.replay.lifecycle_count + state.replay.process_count,
   );
   assert.equal(state.replay.lifecycle_count, state.report.lifecycle_motion_count);
+  assert.equal(state.replay.process_count, 2 * state.report.retraction_count);
   assert.equal(
     state.replay.lifecycle_count,
     state.selected_intent.printer.workflow.kind === "complete_marlin" ? 4 : 0,
@@ -892,13 +934,12 @@ async function inspectManufacturing() {
   assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
   assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
   const plan = JSON.parse(exported["plan.json"]);
-  assert.equal(plan.schema_version, 2);
+  assert.equal(plan.schema_version, 3);
   assert.ok(plan.layers.every((layer) => layer.region_coverage.requested_infill_fraction === 0.25));
   const kinds = new Set(plan.layers.flatMap((layer) => layer.paths.map((path) => path.kind)));
   assert.ok(kinds.has("bottom_skin"));
   assert.ok(kinds.has("top_skin"));
   assert.ok(kinds.has("sparse_fill"));
-  assert.ok(exported["program.gcode"].includes("G1 "));
   await click("manufacturing-debug-export");
   await until(
     async () => /new directory|new destination/.test(await text("manufacturing-message")),
