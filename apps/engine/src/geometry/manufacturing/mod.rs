@@ -102,6 +102,42 @@ impl Runtime {
                 // compiler sees its captured ProjectRevision become stale at staging.
                 Ok(self.manufacturing_status())
             }
+            ManufacturingCommand::Preflight {
+                session_id,
+                base_revision,
+            } => {
+                self.manufacturing_base(&session_id, base_revision)?;
+                if self.active.is_some() {
+                    return Err(ManufacturingError::new(
+                        ManufacturingErrorCode::Busy,
+                        "an engine job is active",
+                    ));
+                }
+                let snapshot = self.project.snapshot();
+                let intent = snapshot.manufacturing_intent.clone().ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::NoIntent,
+                        "an explicit printer specification and recipe are required",
+                    )
+                })?;
+                let request = super::worker::CompileRequest {
+                    project_id: self.project.info().project_id,
+                    revision: base_revision,
+                    definition_ids: snapshot.sources.keys().cloned().collect(),
+                    stored_definitions: snapshot
+                        .sources
+                        .values()
+                        .map(|source| source.record.clone())
+                        .collect(),
+                    occurrences: snapshot.occurrences.values().cloned().collect(),
+                    intent,
+                    byte_budget: 0,
+                };
+                self.start(Purpose::Preflight, 0, move |_, _, _| {
+                    Work::Preflight(request)
+                })
+                .map_err(geometry_error)
+            }
             ManufacturingCommand::Compile {
                 session_id,
                 base_revision,

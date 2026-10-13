@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use spiling_contracts::manufacturing::*;
 
+mod expected;
 mod replay;
 pub(crate) use replay::ReplaySink;
 
@@ -38,10 +39,18 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
 }
 
-fn verify_region_volume(layer: &PrintLayer, volume: f64) -> Result<(), ManufacturingError> {
+fn verify_region_volume(
+    layer: &PrintLayer,
+    volume: f64,
+    support_volume: f64,
+) -> Result<(), ManufacturingError> {
     let declared = layer.region_coverage.nominal_deposition_volume_mm3;
+    let support_declared = layer.region_coverage.support_nominal_deposition_volume_mm3;
     if !volume.is_finite()
         || (declared - volume).abs() > 1e-9 * volume.max(1.0) + arithmetic_slack(volume)
+        || !support_volume.is_finite()
+        || (support_declared - support_volume).abs()
+            > 1e-9 * support_volume.max(1.0) + arithmetic_slack(support_volume)
     {
         return Err(failed(
             "region nominal deposition volume disagrees with decoded path semantics",
@@ -62,6 +71,8 @@ enum Command {
     FeedScale,
     FlowScale,
     FanOff,
+    Fan,
+    Recovery,
     Home,
     LevelingOff,
     WaitBed,
@@ -106,6 +117,7 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         Some("M221") => Command::FlowScale,
         Some("M107") => Command::FanOff,
         Some("G28") => Command::Home,
+        Some("M106") => Command::Fan,
         Some("M420") => Command::LevelingOff,
         Some("M190") => Command::WaitBed,
         Some("M109") => Command::WaitNozzle,
@@ -143,6 +155,11 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         }
         fields[index] = Some(decimal(&word[1..], precision)?);
     }
+    let command = if command == Command::Deposit && fields[0..3].iter().all(Option::is_none) {
+        Command::Recovery
+    } else {
+        command
+    };
     let present = fields.map(|field| field.is_some());
     let permitted = match command {
         Command::Millimetres
@@ -156,12 +173,14 @@ fn decode(line: &str) -> Result<Option<Decoded>, &'static str> {
         Command::ResetExtrusion => [false, false, false, true, false, false, false, false],
         Command::Travel => [true, true, true, false, true, false, false, false],
         Command::Deposit => [true, true, true, true, true, false, false, false],
+        Command::Recovery => [false, false, false, true, true, false, false, false],
         Command::VolumetricOff => [false, false, false, false, false, false, false, true],
         Command::FeedScale
         | Command::FlowScale
         | Command::LevelingOff
         | Command::NozzleOff
-        | Command::BedOff => [false, false, false, false, false, true, false, false],
+        | Command::BedOff
+        | Command::Fan => [false, false, false, false, false, true, false, false],
         Command::WaitBed | Command::WaitNozzle => {
             [false, false, false, false, false, false, true, false]
         }
@@ -366,44 +385,19 @@ pub(crate) fn verify_actual(
 
     let recipe = &intent.recipe;
     let printer = &intent.printer;
-    let bead_area = (recipe.bead_width_mm - recipe.layer_height_mm) * recipe.layer_height_mm
-        + std::f64::consts::PI * (recipe.layer_height_mm / 2.0).powi(2);
     let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2);
-    let volume_per_mm = bead_area * recipe.flow_multiplier;
-    if !volume_per_mm.is_finite()
-        || volume_per_mm <= 0.0
-        || !filament_area.is_finite()
-        || filament_area <= 0.0
-    {
-        return Err(failed(
-            "nominal extrusion arithmetic is not finite and positive",
-        ));
+    if !filament_area.is_finite() || filament_area <= 0.0 {
+        return Err(failed("filament area is not finite and positive"));
     }
 
-    // One borrowed point at a time. A path start denotes travel even when its
-    // position coincides with the preceding path's endpoint.
-    let mut expected = plan
-        .layers
-        .iter()
-        .enumerate()
-        .flat_map(|(layer_index, layer)| {
-            layer.paths.iter().flat_map(move |path| {
-                path.points_mm
-                    .iter()
-                    .enumerate()
-                    .map(move |(index, point)| {
-                        (
-                            point,
-                            index
-                                .checked_sub(1)
-                                .map(|previous| &path.points_mm[previous]),
-                            layer_index as u16,
-                            path.kind,
-                        )
-                    })
-            })
-        })
-        .peekable();
+    let initial_position = match &printer.workflow {
+        JobWorkflow::CompleteMarlin { job } => Some(
+            job.prime_end_mm
+                .map(|v| (v * 1_000_000.0).round() / 1_000_000.0),
+        ),
+        JobWorkflow::DiagnosticBodyOnly => None,
+    };
+    let mut expected = expected::Expected::new(plan, recipe, initial_position).peekable();
     let setup = [
         Command::Millimetres,
         Command::AbsolutePosition,
@@ -429,6 +423,15 @@ pub(crate) fn verify_actual(
     let mut priming_filament_length_mm = 0.0;
     let mut volume_layer = 0u16;
     let mut layer_nominal_volume = 0.0;
+    let mut layer_support_volume = 0.0;
+    let mut support_deposition_segments = 0u32;
+    let mut object_filament = 0.0;
+    let mut support_filament = 0.0;
+    let mut retraction_count = 0u32;
+    let mut retracted_filament_mm = 0.0;
+    let mut retracted_endpoint = None;
+    let mut fan_state = None;
+    let mut recovery_moves = 0u8;
 
     for (line_index, line) in program.lines().enumerate() {
         cancelled(cancel)?;
@@ -535,13 +538,131 @@ pub(crate) fn verify_actual(
                 continue;
             }
         }
-        let Some((target, source, layer_index, deposition_kind)) = expected.next() else {
+        let Some(action) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
+        let (target, source, layer_index, deposition_kind) = match action {
+            expected::Action::Fan(pwm) => {
+                if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm)) {
+                    return Err(failed("missing or mutated process cooling state"));
+                }
+                fan_state = Some(pwm);
+                continue;
+            }
+            expected::Action::Recovery {
+                retract,
+                layer,
+                role,
+            } => {
+                let RetractionPolicy::Enabled {
+                    distance_mm,
+                    speed_mm_s,
+                    z_hop_mm,
+                    ..
+                } = recipe.process.retraction
+                else {
+                    return Err(failed("stationary extrusion without enabled retraction"));
+                };
+                if decoded.command != Command::Recovery
+                    || state.position.is_none()
+                    || retract == retracted_endpoint.is_some()
+                {
+                    return Err(failed(
+                        "missing, reordered or nonstationary retraction/recovery",
+                    ));
+                }
+                let pwm = if role == DepositionKind::Bridge {
+                    recipe.process.bridge_fan_pwm
+                } else if layer == 0 {
+                    recipe.process.fan_first_layers
+                } else {
+                    recipe.process.fan_after_first_layers
+                };
+                if fan_state != Some(pwm)
+                    || (!retract && recovery_moves != if z_hop_mm > 0.0 { 3 } else { 1 })
+                {
+                    return Err(failed(
+                        "recovery without required queued fan or complete travel/hop sequence",
+                    ));
+                }
+                let next_e = decoded.fields[3].unwrap();
+                let feed = decoded.fields[4].unwrap();
+                let delta = next_e - state.extrusion;
+                let desired = if retract { -distance_mm } else { distance_mm };
+                let wanted_e = if retract {
+                    expected_e - distance_mm
+                } else {
+                    expected_e
+                };
+                if (next_e - wanted_e).abs() > E_HALF_STEP + arithmetic_slack(wanted_e)
+                    || (delta - desired).abs() > 2.0 * E_HALF_STEP + arithmetic_slack(expected_e)
+                    || (!retract && retracted_endpoint != Some(next_e))
+                    || (retract && delta >= 0.0)
+                    || (!retract && delta <= 0.0)
+                    || (feed - speed_mm_s * 60.0).abs() > F_HALF_STEP + arithmetic_slack(feed)
+                    || feed <= 0.0
+                    || feed / 60.0 > printer.max_feed_mm_s + F_HALF_STEP / 60.0
+                {
+                    return Err(failed(
+                        "actual retraction distance, recovery or feed differs from policy",
+                    ));
+                }
+                max_extrusion_error_mm = max_extrusion_error_mm
+                    .max((next_e - wanted_e).abs())
+                    .max((delta - desired).abs());
+                if retract {
+                    recovery_moves = 0;
+                    retraction_count += 1;
+                    retracted_filament_mm -= delta;
+                    if retraction_count > 50_000 {
+                        return Err(failed("process event budget exceeded"));
+                    }
+                }
+                retracted_endpoint = if retract { Some(state.extrusion) } else { None };
+                state.extrusion = next_e;
+                if let Some(sink) = replay.as_deref_mut() {
+                    sink.push(
+                        state.position.unwrap(),
+                        next_e,
+                        feed,
+                        (line_index + 1) as u32,
+                        layer,
+                        if retract { 11 } else { 12 },
+                    )?;
+                }
+                continue;
+            }
+            expected::Action::Move {
+                target,
+                source,
+                layer,
+                role,
+            } => (target, source, layer, role),
+        };
         if layer_index != volume_layer {
-            verify_region_volume(&plan.layers[volume_layer as usize], layer_nominal_volume)?;
+            verify_region_volume(
+                &plan.layers[volume_layer as usize],
+                layer_nominal_volume,
+                layer_support_volume,
+            )?;
+            for skipped in volume_layer + 1..layer_index {
+                verify_region_volume(&plan.layers[skipped as usize], 0.0, 0.0)?;
+            }
             volume_layer = layer_index;
             layer_nominal_volume = 0.0;
+            layer_support_volume = 0.0;
+        }
+        let wanted_fan = if deposition_kind == DepositionKind::Bridge {
+            recipe.process.bridge_fan_pwm
+        } else if layer_index == 0 {
+            recipe.process.fan_first_layers
+        } else {
+            recipe.process.fan_after_first_layers
+        };
+        if fan_state != Some(wanted_fan) {
+            return Err(failed(
+                "motion without independently decoded queued process fan state",
+            ));
         }
         let required_command = if source.is_some() {
             Command::Deposit
@@ -572,11 +693,51 @@ pub(crate) fn verify_actual(
                 ));
             }
         }
-        max_position_error_mm = max_position_error_mm.max(distance(position, *target));
+        if retracted_endpoint.is_some() && source.is_none() {
+            let previous = state
+                .position
+                .ok_or_else(|| failed("hop without known actual position"))?;
+            let RetractionPolicy::Enabled { z_hop_mm, .. } = recipe.process.retraction else {
+                unreachable!()
+            };
+            if z_hop_mm > 0.0 {
+                let unsafe_hop = match recovery_moves {
+                    0 => {
+                        position[0..2] != previous[0..2]
+                            || position[2] <= previous[2]
+                            || position[2] <= plan.layers[layer_index as usize].z_mm
+                    }
+                    1 => position[2] != previous[2],
+                    2 => position[0..2] != previous[0..2] || position[2] >= previous[2],
+                    _ => true,
+                };
+                if unsafe_hop {
+                    return Err(failed(
+                        "actual travel hop lacks vertical clearance, constant elevated Z or stationary-XY landing",
+                    ));
+                }
+            }
+            recovery_moves += 1;
+        }
+        max_position_error_mm = max_position_error_mm.max(distance(position, target));
         let feed = decoded.fields[4].ok_or_else(|| failed("missing feed"))?;
+        let mut process_speed = recipe.print_speed_mm_s;
+        let mut process_flow = recipe.flow_multiplier;
+        if layer_index == 0 {
+            process_speed *= recipe.process.first_layer_speed_factor;
+            process_flow *= recipe.process.first_layer_flow_factor;
+        }
+        if deposition_kind == DepositionKind::Bridge {
+            process_speed *= recipe.process.bridge_speed_factor;
+            process_flow *= recipe.process.bridge_flow_factor;
+        }
+        let height = plan.layers[layer_index as usize].height_mm;
+        let volume_per_mm = ((recipe.bead_width_mm - height) * height
+            + std::f64::consts::PI * (height * 0.5).powi(2))
+            * process_flow;
         let expected_feed = 60.0
             * if source.is_some() {
-                recipe.print_speed_mm_s
+                process_speed
             } else {
                 recipe.travel_speed_mm_s
             };
@@ -598,8 +759,19 @@ pub(crate) fn verify_actual(
                 .position
                 .ok_or_else(|| failed("deposition before positioning"))?;
             let length = distance(from, position);
-            let nominal_length = distance(*source, *target);
-            layer_nominal_volume += nominal_length * volume_per_mm;
+            let nominal_length = distance(source, target);
+            let support = matches!(
+                deposition_kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            );
+            if support {
+                layer_support_volume += nominal_length * volume_per_mm;
+            } else {
+                layer_nominal_volume += nominal_length * volume_per_mm;
+            }
+            if retracted_endpoint.is_some() {
+                return Err(failed("deposition before exact stationary recovery"));
+            }
             let next_e = decoded.fields[3].ok_or_else(|| failed("missing extrusion"))?;
             let delta_e = next_e - state.extrusion;
             let nominal_e = nominal_length * volume_per_mm / filament_area;
@@ -645,9 +817,21 @@ pub(crate) fn verify_actual(
                 return Err(failed("decoded volumetric flow exceeds printer limit"));
             }
             state.extrusion = next_e;
-            deposition_segments += 1;
+            if support {
+                support_deposition_segments += 1;
+                support_filament += delta_e;
+            } else {
+                deposition_segments += 1;
+                object_filament += delta_e;
+            }
+            if deposition_segments + support_deposition_segments > MAX_DEPOSITION_SEGMENTS {
+                return Err(failed("whole deposition budget exceeded"));
+            }
         } else {
             travel_segments += 1;
+            if travel_segments > MAX_DEPOSITION_SEGMENTS {
+                return Err(failed("travel event budget exceeded"));
+            }
         }
         if let Some(sink) = replay.as_deref_mut() {
             let kind = if source.is_none() {
@@ -659,6 +843,9 @@ pub(crate) fn verify_actual(
                     DepositionKind::BottomSkin => 3,
                     DepositionKind::TopSkin => 4,
                     DepositionKind::SparseFill => 5,
+                    DepositionKind::Bridge => 8,
+                    DepositionKind::Support => 9,
+                    DepositionKind::SupportInterface => 10,
                 }
             };
             sink.push(
@@ -675,13 +862,20 @@ pub(crate) fn verify_actual(
     cancelled(cancel)?;
     if setup_index != setup.len()
         || expected.next().is_some()
-        || deposition_segments == 0
+        || deposition_segments + support_deposition_segments == 0
+        || retracted_endpoint.is_some()
         || (job.is_some() && (lifecycle_index != 11 || finish_index != 8))
     {
         return Err(failed("program is missing setup or normalized motions"));
     }
-    verify_region_volume(&plan.layers[volume_layer as usize], layer_nominal_volume)?;
-    let object_filament = state.extrusion - priming_filament_length_mm;
+    verify_region_volume(
+        &plan.layers[volume_layer as usize],
+        layer_nominal_volume,
+        layer_support_volume,
+    )?;
+    for skipped in volume_layer as usize + 1..plan.layers.len() {
+        verify_region_volume(&plan.layers[skipped], 0.0, 0.0)?;
+    }
     let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
@@ -693,6 +887,8 @@ pub(crate) fn verify_actual(
             "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
+            "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
+            "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
             if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
             if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
         ],
@@ -703,7 +899,7 @@ pub(crate) fn verify_actual(
             "No firmware behavior, execution, calibration or hardware accuracy validation".into(),
             "Homing path, thermal sensor truth, firmware configuration and calibration records are declared, not physically measured or certified".into(),
             if job.is_some() { "Complete Marlin lifecycle/modal/wait/barrier semantics checked in software only".into() } else { "Diagnostic body-only workflow: no homing or thermal waits; first commanded endpoint has unknown start".into() },
-            "No generated or physical support certification; normalized geometry policy is not a physical guarantee".into(),
+            "Generated supports/bridges are bounded software geometry/process only; no physical support certification or swept-bead guarantee".into(),
         ],
         deposition_segments,
         travel_segments,
@@ -713,6 +909,11 @@ pub(crate) fn verify_actual(
         max_extrusion_error_mm,
         lifecycle_motion_count: if job.is_some() { 4 } else { 0 },
         priming_filament_length_mm,
+        support_deposition_segments,
+        support_deposited_volume_mm3: support_filament * filament_area,
+        support_filament_length_mm: support_filament,
+        retraction_count,
+        retracted_filament_mm,
     })
 }
 

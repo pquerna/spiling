@@ -94,6 +94,7 @@ pub enum Work {
         fault: Option<crate::ProjectFault>,
     },
     Compile(CompileRequest),
+    Preflight(CompileRequest),
     Verify {
         asset: Arc<ManufacturingAsset>,
         output: VerificationOutput,
@@ -158,6 +159,7 @@ pub enum Product {
     Saved(SaveReceipt),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
+    Preflight(PreflightReport),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -296,6 +298,9 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
             } => save(snapshot, existing, target, commit, fault, &cancel).map(Product::Saved),
             Work::Compile(request) => {
                 compile(request, &definitions, &cancel).map(Product::Compiled)
+            }
+            Work::Preflight(request) => {
+                preflight(request, &definitions, &cancel).map(Product::Preflight)
             }
             Work::Verify { asset, output } => {
                 inspect_asset(&asset, output, &cancel).map(|inspection| Product::Verified {
@@ -808,6 +813,39 @@ impl std::io::Write for BundleWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+fn preflight(
+    request: CompileRequest,
+    residents: &BTreeMap<DefinitionId, Resident>,
+    cancel: &AtomicBool,
+) -> Result<PreflightReport, JobError> {
+    let definitions = request
+        .definition_ids
+        .iter()
+        .map(|id| {
+            residents
+                .get(id)
+                .map(|resident| (id.clone(), resident.definition.clone()))
+                .ok_or_else(|| {
+                    ManufacturingError::new(
+                        ManufacturingErrorCode::StaleRevision,
+                        "manufacturing definition was reclaimed",
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(spiling_manufacturing::preflight(
+        &spiling_manufacturing::CompilerInput {
+            project_id: &request.project_id,
+            revision: request.revision,
+            definitions: &definitions,
+            stored_definitions: &request.stored_definitions,
+            occurrences: &request.occurrences,
+            intent: &request.intent,
+        },
+        cancel,
+    )?)
 }
 
 fn compile(

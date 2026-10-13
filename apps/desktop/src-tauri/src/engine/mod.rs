@@ -121,6 +121,7 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
         Some(JobResult::Section { .. })
         | Some(JobResult::ManufacturingCompiled { .. })
         | Some(JobResult::ManufacturingVerified { .. })
+        | Some(JobResult::ManufacturingPreflight { .. })
         | None => false,
     }
 }
@@ -1137,10 +1138,21 @@ mod tests {
                 deposition_segments: 1,
                 deposited_volume_mm3: 1.0,
                 filament_length_mm: 1.0,
+                support_deposition_segments: 0,
+                support_deposited_volume_mm3: 0.0,
+                support_filament_length_mm: 0.0,
                 software_only: true,
             },
         };
         let results = [
+            JobResult::ManufacturingPreflight {
+                report: spiling_contracts::manufacturing::PreflightReport {
+                    input_revision: spiling_contracts::project::ProjectRevision::ZERO,
+                    eligible: true,
+                    software_only: true,
+                    checks: vec![],
+                },
+            },
             JobResult::ManufacturingCompiled {
                 info: project_info(false),
                 record: record.clone(),
@@ -1175,6 +1187,11 @@ mod tests {
                     max_extrusion_error_mm: 0.0,
                     lifecycle_motion_count: 0,
                     priming_filament_length_mm: 0.0,
+                    support_deposition_segments: 0,
+                    support_deposited_volume_mm3: 0.0,
+                    support_filament_length_mm: 0.0,
+                    retraction_count: 0,
+                    retracted_filament_mm: 0.0,
                 },
             },
             JobResult::Section {

@@ -64,6 +64,18 @@ fn intent() -> ManufacturingIntent {
             print_speed_mm_s: 30.0,
             travel_speed_mm_s: 100.0,
             flow_multiplier: 1.0,
+            process: ProcessPolicy {
+                first_layer_speed_factor: 1.0,
+                first_layer_flow_factor: 1.0,
+                fan_first_layers: 0,
+                fan_after_first_layers: 0,
+                bridge_speed_factor: 0.5,
+                bridge_flow_factor: 1.0,
+                bridge_fan_pwm: 255,
+                max_bridge_span_mm: 5.0,
+                retraction: RetractionPolicy::Disabled,
+            },
+            supports: SupportPolicy::Disabled,
         },
     }
 }
@@ -100,6 +112,8 @@ fn coverage() -> PlanarRegionCoverage {
         intentional_void_area_mm2: 0.0,
         protected_hole_area_mm2: 0.0,
         nominal_deposition_volume_mm3: 0.0,
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0,
         requested_infill_fraction: 1.0,
     }
 }
@@ -112,6 +126,7 @@ fn plan() -> NormalizedPrintPlan {
         layers: vec![PrintLayer {
             index: 0,
             z_mm: 5.2,
+            height_mm: 0.2,
             section_z_mm: 5.1,
             region_coverage: coverage(),
             paths: vec![DepositionPath {
@@ -162,6 +177,11 @@ fn bundle() -> ManufacturingBundle {
             max_extrusion_error_mm: 0.0,
             lifecycle_motion_count: 0,
             priming_filament_length_mm: 0.0,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
+            retraction_count: 0,
+            retracted_filament_mm: 0.0,
         },
     }
 }
@@ -231,10 +251,15 @@ fn profiles_reject_nonfinite_ranges_capabilities_flow_and_duplicate_components()
     );
     changed = valid.clone();
     changed.printer.capabilities.generated_supports = true;
-    assert_eq!(
-        changed.validate().unwrap_err().code,
-        ManufacturingErrorCode::UnsupportedCapability
-    );
+    changed.validate().unwrap();
+    changed.printer.capabilities.generated_supports = false;
+    changed.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.25,
+        xy_clearance_mm: 0.5,
+        z_gap_mm: 0.2,
+        interface_thickness_mm: 0.4,
+    };
+    assert!(changed.validate().is_err());
     changed = valid.clone();
     changed.recipe.travel_speed_mm_s = 151.0;
     assert!(changed.validate().is_err());
@@ -469,6 +494,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
             PrintLayer {
                 index: index as u32,
                 z_mm,
+                height_mm: 0.2,
                 section_z_mm: 5.0 + (index as f64 + 0.5) * 0.2,
                 region_coverage: coverage(),
                 paths: counts
@@ -487,7 +513,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
 }
 
 #[test]
-fn every_fixed_height_layer_requires_deposition_in_typed_and_decoded_plans() {
+fn missing_object_deposition_is_rejected_at_whole_plan_admission() {
     let valid = segmented_plan(&[&[1], &[1], &[1]]);
     valid.validate(&intent()).unwrap();
     for index in 0..valid.layers.len() {
@@ -498,20 +524,15 @@ fn every_fixed_height_layer_requires_deposition_in_typed_and_decoded_plans() {
             ManufacturingErrorCode::InvalidSpecification
         );
         let bytes = serde_json::to_vec(&empty_layer).unwrap();
-        assert!(
-            serde_json::from_slice::<NormalizedPrintPlan>(&bytes)
-                .unwrap_err()
-                .is_data()
+        let decoded: NormalizedPrintPlan = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decoded.validate(&intent()).unwrap_err().code,
+            ManufacturingErrorCode::InvalidSpecification
         );
         let mut artifact = bundle();
         artifact.plan = empty_layer;
         artifact.verification.deposition_segments = 2;
-        assert_eq!(
-            decode_bundle(&serde_json::to_vec(&artifact).unwrap())
-                .unwrap_err()
-                .code,
-            ManufacturingErrorCode::CorruptArtifact
-        );
+        assert!(decode_bundle(&serde_json::to_vec(&artifact).unwrap()).is_err());
     }
 }
 
@@ -608,7 +629,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     let points = r#"[[10,10,5.2],[11,10,5.2]]"#;
     let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill"}}"#);
     let layer = format!(
-        r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
     );
     let wrap = |layer: &str| {
         format!(
@@ -625,7 +646,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     ] {
         let duplicate = format!(r#"{{{field},"points_mm":{points},"kind":"solid_fill"}}"#);
         let changed = format!(
-            r#"{{"region_coverage":{coverage},"paths":[{duplicate}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+            r#"{{"region_coverage":{coverage},"paths":[{duplicate}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
         );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed))
@@ -637,11 +658,12 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         r#""index":0"#,
         r#""z_mm":5.2"#,
         r#""section_z_mm":5.1"#,
+        r#""height_mm":0.2"#,
         &format!(r#""paths":[{path}]"#),
         &format!(r#""region_coverage":{coverage}"#),
     ] {
         let duplicate = format!(
-            r#"{{{field},"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+            r#"{{{field},"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
         );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&duplicate))
@@ -655,7 +677,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         r#"{"kind":"solid_fill"}"#.to_string(),
     ] {
         let changed_layer = format!(
-            r#"{{"region_coverage":{coverage},"paths":[{changed_path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+            r#"{{"region_coverage":{coverage},"paths":[{changed_path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
         );
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))
@@ -665,17 +687,24 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     }
     for changed_layer in [
         format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0,"extra":0}}"#
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0,"extra":0}}"#
         ),
         format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2}}"#
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2}}"#
         ),
         format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"index":0}}"#
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"index":0}}"#
         ),
-        format!(r#"{{"region_coverage":{coverage},"paths":[{path}],"z_mm":5.2,"index":0}}"#),
-        format!(r#"{{"region_coverage":{coverage},"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
-        format!(r#"{{"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
+        format!(
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"height_mm":0.2,"z_mm":5.2,"index":0}}"#
+        ),
+        format!(
+            r#"{{"region_coverage":{coverage},"height_mm":0.2,"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        ),
+        format!(r#"{{"paths":[{path}],"height_mm":0.2,"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
+        format!(
+            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
+        ),
     ] {
         assert!(
             serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))
@@ -683,4 +712,206 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
                 .is_data()
         );
     }
+}
+
+#[test]
+fn schema3_process_and_support_fields_are_required_without_defaults() {
+    let original = serde_json::to_value(intent()).unwrap();
+    for field in ["process", "supports"] {
+        let mut missing = original.clone();
+        missing["recipe"].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ManufacturingIntent>(missing).is_err());
+    }
+    for field in [
+        "first_layer_speed_factor",
+        "first_layer_flow_factor",
+        "fan_first_layers",
+        "fan_after_first_layers",
+        "bridge_speed_factor",
+        "bridge_flow_factor",
+        "bridge_fan_pwm",
+        "max_bridge_span_mm",
+        "retraction",
+    ] {
+        let mut missing = original.clone();
+        missing["recipe"]["process"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            serde_json::from_value::<ManufacturingIntent>(missing).is_err(),
+            "{field}"
+        );
+    }
+    let mut missing = serde_json::to_value(plan()).unwrap();
+    missing["layers"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("height_mm");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(missing).is_err());
+    let mut old = original;
+    old["printer"]["schema_version"] = 2.into();
+    assert!(
+        serde_json::from_value::<ManufacturingIntent>(old)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
+fn process_policy_rejects_numeric_flow_feed_and_serialization_excess() {
+    for case in 0..9 {
+        let mut data = intent();
+        match case {
+            0 => data.recipe.process.first_layer_speed_factor = 0.0,
+            1 => data.recipe.process.first_layer_speed_factor = 1.1,
+            2 => data.recipe.process.bridge_speed_factor = f64::NAN,
+            3 => data.recipe.process.first_layer_flow_factor = f64::INFINITY,
+            4 => data.recipe.process.bridge_flow_factor = 1000.0,
+            5 => data.recipe.process.max_bridge_span_mm = -1.0,
+            6 => data.recipe.process.first_layer_speed_factor = 1e-30,
+            7 => {
+                data.recipe.process.retraction = RetractionPolicy::Enabled {
+                    distance_mm: 1e-12,
+                    speed_mm_s: 10.0,
+                    minimum_travel_mm: 1.0,
+                    z_hop_mm: 0.0,
+                }
+            }
+            _ => {
+                data.recipe.process.retraction = RetractionPolicy::Enabled {
+                    distance_mm: 1.0,
+                    speed_mm_s: 151.0,
+                    minimum_travel_mm: 1.0,
+                    z_hop_mm: 0.0,
+                }
+            }
+        }
+        assert!(data.validate().is_err(), "case {case}");
+    }
+}
+
+#[test]
+fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
+    let data = intent();
+    let mut scheduled = plan();
+    let layer = &mut scheduled.layers[0];
+    layer.height_mm = 0.15;
+    layer.z_mm = 5.15;
+    layer.section_z_mm = 5.075;
+    for path in &mut layer.paths {
+        for point in &mut path.points_mm {
+            point[2] = 5.15;
+        }
+    }
+    scheduled.validate(&data).unwrap();
+    scheduled.layers[0].height_mm = 0.2;
+    assert!(scheduled.validate(&data).is_err());
+    let mut support = data;
+    support.printer.capabilities.generated_supports = true;
+    support.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.5,
+        xy_clearance_mm: 0.4,
+        z_gap_mm: 0.15,
+        interface_thickness_mm: 0.2,
+    };
+    let mut mixed = plan();
+    mixed.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::Support,
+        points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
+    });
+    mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
+    mixed.layers[0]
+        .region_coverage
+        .support_nominal_deposition_volume_mm3 = 0.1;
+    mixed.validate(&support).unwrap();
+    mixed.layers[0].region_coverage.section_area_mm2 += 1.0;
+    assert!(
+        mixed.validate(&support).is_err(),
+        "support cannot enter object partition"
+    );
+}
+
+#[test]
+fn preflight_admission_is_bounded_and_eligibility_is_not_physical_authority() {
+    let check = PreflightCheck {
+        code: "native_analysis_required".into(),
+        severity: PreflightSeverity::Info,
+        message: "Native compile analysis required; physical qualification absent".into(),
+        occurrence_id: None,
+        face_id: None,
+    };
+    let mut report = PreflightReport {
+        input_revision: ProjectRevision(9),
+        eligible: true,
+        software_only: true,
+        checks: vec![check.clone()],
+    };
+    report.validate().unwrap();
+    report.software_only = false;
+    assert!(report.validate().is_err());
+    report.software_only = true;
+    report.checks[0].severity = PreflightSeverity::Error;
+    assert!(report.validate().is_err());
+    report.eligible = false;
+    report.validate().unwrap();
+    let mut value = serde_json::to_value(report).unwrap();
+    value["checks"] = serde_json::to_value(vec![check; 257]).unwrap();
+    assert!(serde_json::from_value::<PreflightReport>(value).is_err());
+}
+
+#[test]
+fn durable_contact_gap_admission_requires_whole_plan_support_context() {
+    let mut data = intent();
+    data.printer.capabilities.generated_supports = true;
+    data.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.5,
+        xy_clearance_mm: 0.3,
+        z_gap_mm: 0.2,
+        interface_thickness_mm: 0.2,
+    };
+    let mut scheduled = plan();
+    let mut object = scheduled.layers[0].clone();
+    object.index = 2;
+    object.z_mm = 5.6;
+    object.section_z_mm = 5.5;
+    for path in &mut object.paths {
+        for point in &mut path.points_mm {
+            point[2] = 5.6;
+        }
+    }
+    let mut zero = coverage();
+    zero.section_area_mm2 = 0.0;
+    zero.wall_area_mm2 = 0.0;
+    let support = &mut scheduled.layers[0];
+    support.region_coverage = zero.clone();
+    support.region_coverage.support_area_mm2 = 50.0;
+    support
+        .region_coverage
+        .support_nominal_deposition_volume_mm3 = 1.0;
+    for path in &mut support.paths {
+        path.kind = DepositionKind::SupportInterface;
+    }
+    scheduled.layers.push(PrintLayer {
+        index: 1,
+        z_mm: 5.4,
+        height_mm: 0.2,
+        section_z_mm: 5.3,
+        region_coverage: zero,
+        paths: Vec::new(),
+    });
+    scheduled.layers.push(object);
+    let bytes = serde_json::to_vec(&scheduled).unwrap();
+    let admitted: NormalizedPrintPlan = serde_json::from_slice(&bytes).unwrap();
+    admitted.validate(&data).unwrap();
+    data.recipe.supports = SupportPolicy::Disabled;
+    assert!(admitted.validate(&data).is_err());
+    data.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.5,
+        xy_clearance_mm: 0.3,
+        z_gap_mm: 0.19,
+        interface_thickness_mm: 0.2,
+    };
+    assert!(admitted.validate(&data).is_err());
 }

@@ -117,5 +117,6 @@ message NativeOperationResult {
     ProjectInfo project_saved = 3;
     ManufacturingCompiledResult manufacturing_compiled = 4;
     ManufacturingVerifiedResult manufacturing_verified = 5;
+    ManufacturingPreflightResult manufacturing_preflight = 6;
   }
 }

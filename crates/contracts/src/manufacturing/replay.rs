@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! SPLR schema 2 admission. This is display integrity, not program verification.
+//! SPLR schema 3 admission. This is display integrity, not program verification.
 use super::*;
 use crate::ArtifactView;
 
 pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 16 * 1024 * 1024;
-pub const MAX_REPLAY_EVENTS: u32 = 200_004;
+pub const MAX_REPLAY_EVENTS: u32 = 300_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 48;
-pub const REPLAY_SCHEMA_VERSION: u32 = 2;
+pub const REPLAY_SCHEMA_VERSION: u32 = 3;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -84,6 +84,7 @@ pub struct ReplayDisplayInfo {
     pub travel_count: u32,
     pub layer_count: u32,
     pub lifecycle_count: u32,
+    pub process_count: u32,
     pub bounds_mm: AabbMm,
 }
 impl ReplayDisplayInfo {
@@ -98,14 +99,15 @@ impl ReplayDisplayInfo {
             || self.travel_count == 0
             || self.travel_count > MAX_DEPOSITION_SEGMENTS
             || (self.lifecycle_count != 0 && self.lifecycle_count != 4)
+            || self.process_count > MAX_DEPOSITION_SEGMENTS
             || self
                 .deposition_count
                 .checked_add(self.travel_count)
                 .and_then(|n| n.checked_add(self.lifecycle_count))
+                .and_then(|n| n.checked_add(self.process_count))
                 != Some(self.event_count)
             || self.layer_count == 0
             || self.layer_count > MAX_PRINT_LAYERS
-            || self.layer_count > self.deposition_count
         {
             return Err(corrupt("invalid replay schema or counts"));
         }
@@ -150,8 +152,8 @@ impl ReplayDisplayDescriptor {
         if self.info.bundle_hash != record.hash
             || self.info.input_hash != record.input_hash
             || self.info.layer_count != record.summary.layers
-            || self.info.deposition_count != record.summary.deposition_segments
-            || self.info.travel_count != record.summary.paths
+            || self.info.deposition_count
+                != record.summary.deposition_segments + record.summary.support_deposition_segments
         {
             return Err(corrupt("replay descriptor disagrees with bundle record"));
         }
@@ -192,7 +194,9 @@ pub fn validate_replay_display(
         || u32_at(bytes, 20) != info.travel_count
         || u32_at(bytes, 24) != info.layer_count
         || u32_at(bytes, 28) != info.lifecycle_count
-        || bytes[80..96].iter().any(|b| *b != 0)
+        || bytes[80..88].iter().any(|b| *b != 0)
+        || u32_at(bytes, 88) != info.process_count
+        || u32_at(bytes, 92) != 0
     {
         return Err(corrupt("replay header mismatch"));
     }
@@ -212,6 +216,8 @@ pub fn validate_replay_display(
     let mut travels = 0;
     let mut lifecycle = 0;
     let mut lifecycle_phase = 0;
+    let mut process = 0;
+    let mut retracted_e = None;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for (index, record) in bytes[REPLAY_HEADER_BYTES..]
@@ -229,20 +235,20 @@ pub fn validate_replay_display(
         let flags = record[47];
         if position.iter().any(|v| !v.is_finite())
             || !e.is_finite()
-            || e < 0.0
+            || (e < 0.0 && kind != 11 && retracted_e.is_none())
             || !feed.is_finite()
             || feed <= 0.0
             || line <= previous_line
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
-            || (kind < 6 && next_layer >= info.layer_count)
-            || kind > 7
+            || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
+            || kind > 12
             || flags != u8::from(index != 0)
             || (index == 0 && (kind != 0 && kind != 6))
             || (index == 0 && kind == 0 && next_layer != 0)
         {
             return Err(corrupt("invalid replay record fields"));
         }
-        if kind >= 6 {
+        if kind == 6 || kind == 7 {
             if info.lifecycle_count != 4 || next_layer != u16::MAX as u32 {
                 return Err(corrupt("invalid lifecycle replay attribution"));
             }
@@ -252,6 +258,7 @@ pub fn validate_replay_display(
                 || (lifecycle_phase < 2 && depositions != 0)
                 || (lifecycle_phase >= 2
                     && (depositions != info.deposition_count || travels != info.travel_count))
+                || retracted_e.is_some()
             {
                 return Err(corrupt("invalid lifecycle replay sequence"));
             }
@@ -276,11 +283,24 @@ pub fn validate_replay_display(
             if info.lifecycle_count == 4 && lifecycle_phase != 2 {
                 return Err(corrupt("plan motion outside lifecycle body"));
             }
-            if depositions == 0 && travels == 0 && (kind != 0 || next_layer != 0) {
-                return Err(corrupt("body must start with layer-zero travel"));
+            let startup_retraction = kind == 11
+                && process == 0
+                && info.lifecycle_count == 4
+                && lifecycle_phase == 2
+                && index > 0;
+            if depositions == 0
+                && travels == 0
+                && ((!startup_retraction && kind != 0) || next_layer != 0)
+            {
+                return Err(corrupt(
+                    "body must start with layer-zero travel or complete-job retraction",
+                ));
             }
             if next_layer != layer {
-                if next_layer != layer + 1 || !layer_deposition || kind != 0 {
+                if next_layer <= layer
+                    || (travels != 0 && !layer_deposition)
+                    || (kind != 0 && kind != 11)
+                {
                     return Err(corrupt("invalid replay layer sequence"));
                 }
                 layer = next_layer;
@@ -291,8 +311,24 @@ pub fn validate_replay_display(
                     return Err(corrupt("travel changes extrusion"));
                 }
                 travels += 1;
+            } else if kind == 11 || kind == 12 {
+                if index == 0 || position != previous {
+                    return Err(corrupt("process extrusion must be known and stationary"));
+                }
+                if kind == 11 {
+                    if retracted_e.is_some() || e >= previous_e {
+                        return Err(corrupt("invalid replay retraction"));
+                    }
+                    retracted_e = Some(previous_e);
+                } else {
+                    if e <= previous_e || retracted_e != Some(e) {
+                        return Err(corrupt("invalid replay recovery"));
+                    }
+                    retracted_e = None;
+                }
+                process += 1;
             } else {
-                if index == 0 || e <= previous_e || position == previous {
+                if index == 0 || e <= previous_e || position == previous || retracted_e.is_some() {
                     return Err(corrupt("invalid replay deposition"));
                 }
                 depositions += 1;
@@ -312,6 +348,8 @@ pub fn validate_replay_display(
         || depositions != info.deposition_count
         || travels != info.travel_count
         || lifecycle != info.lifecycle_count
+        || process != info.process_count
+        || retracted_e.is_some()
         || min != info.bounds_mm.min
         || max != info.bounds_mm.max
     {
@@ -368,6 +406,7 @@ mod tests {
                 travel_count: 2,
                 layer_count: 1,
                 lifecycle_count: 0,
+                process_count: 0,
                 bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             },
             resource: ArtifactView {
@@ -383,6 +422,98 @@ mod tests {
         let hash = SourceHash::from_bytes(bytes);
         descriptor.resource.name = format!("artifacts/{}", hash.as_str());
         descriptor.resource.sha256 = hash.as_str().into();
+    }
+    #[test]
+    fn complete_body_startup_retraction_uses_known_prime_endpoint() {
+        let (body, mut descriptor) = encoded();
+        let mut bytes = body[..96].to_vec();
+        let records = [
+            ([0.0f64; 3], 0.0f64, 6u8, u16::MAX),
+            ([0.0, 1.0, 0.0], 1.0, 7, u16::MAX),
+            ([0.0, 1.0, 0.0], 0.2, 11, 0),
+            ([0.0; 3], 0.2, 0, 0),
+            ([0.0; 3], 1.0, 12, 0),
+            ([1.0; 3], 2.0, 1, 0),
+            ([1.0; 3], 2.0, 0, 0),
+            ([0.0; 3], 3.0, 2, 0),
+            ([0.0, 0.0, 2.0], 3.0, 6, u16::MAX),
+            ([1.0, 0.0, 2.0], 3.0, 6, u16::MAX),
+        ];
+        for (index, (position, e, kind, layer)) in records.into_iter().enumerate() {
+            for coordinate in position {
+                bytes.extend_from_slice(&coordinate.to_le_bytes());
+            }
+            bytes.extend_from_slice(&e.to_le_bytes());
+            bytes.extend_from_slice(&600.0f64.to_le_bytes());
+            bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
+            bytes.extend_from_slice(&layer.to_le_bytes());
+            bytes.extend_from_slice(&[kind, u8::from(index != 0)]);
+        }
+        for (offset, value) in [(8, 10u32), (28, 4), (88, 2)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[72..80].copy_from_slice(&2.0f64.to_le_bytes());
+        descriptor.info.event_count = 10;
+        descriptor.info.lifecycle_count = 4;
+        descriptor.info.process_count = 2;
+        descriptor.info.bounds_mm.max[2] = 2.0;
+        descriptor.resource.size_bytes = bytes.len().to_string();
+        rebind(&bytes, &mut descriptor);
+        validate_replay_display(&bytes, &descriptor).unwrap();
+        for (offset, value) in [(192 + 47, 0u8), (192 + 44, 1), (192 + 46, 12)] {
+            let mut bad = bytes.clone();
+            bad[offset] = value;
+            let mut rebound = descriptor.clone();
+            rebind(&bad, &mut rebound);
+            assert!(validate_replay_display(&bad, &rebound).is_err());
+        }
+        for (offset, value) in [(192, 0.1f64), (288 + 24, 1.1)] {
+            let mut bad = bytes.clone();
+            bad[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            let mut rebound = descriptor.clone();
+            rebind(&bad, &mut rebound);
+            assert!(validate_replay_display(&bad, &rebound).is_err());
+        }
+    }
+    #[test]
+    fn stationary_process_roles_and_exact_recovery_are_checked() {
+        let (mut bytes, mut descriptor) = encoded();
+        let mut events = Vec::with_capacity(bytes.len() + 96);
+        events.extend_from_slice(&bytes[..144]);
+        for (e, kind, line) in [(-0.8f64, 11u8, 6u32), (0.0, 12, 7)] {
+            let mut record = bytes[96..144].to_vec();
+            record[24..32].copy_from_slice(&e.to_le_bytes());
+            record[40..44].copy_from_slice(&line.to_le_bytes());
+            record[46] = kind;
+            record[47] = 1;
+            events.extend_from_slice(&record);
+        }
+        for record in bytes[144..].as_chunks_mut::<48>().0 {
+            let line = u32_at(record, 40) + 2;
+            record[40..44].copy_from_slice(&line.to_le_bytes());
+        }
+        events.extend_from_slice(&bytes[144..]);
+        events[8..12].copy_from_slice(&6u32.to_le_bytes());
+        events[88..92].copy_from_slice(&2u32.to_le_bytes());
+        descriptor.info.event_count = 6;
+        descriptor.info.process_count = 2;
+        descriptor.resource.size_bytes = events.len().to_string();
+        rebind(&events, &mut descriptor);
+        validate_replay_display(&events, &descriptor).unwrap();
+        for (offset, value) in [(144, 0.1f64), (144 + 24, 0.0), (192 + 24, 0.1)] {
+            let mut corrupted = events.clone();
+            corrupted[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            let mut rebound = descriptor.clone();
+            rebind(&corrupted, &mut rebound);
+            assert!(validate_replay_display(&corrupted, &rebound).is_err());
+        }
+        for kind in [8, 9, 10] {
+            let mut role = events.clone();
+            role[240 + 46] = kind;
+            let mut rebound = descriptor.clone();
+            rebind(&role, &mut rebound);
+            validate_replay_display(&role, &rebound).unwrap();
+        }
     }
     #[test]
     fn packed_admission_checks_semantics_even_with_rehashed_corruption() {

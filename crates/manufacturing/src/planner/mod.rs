@@ -3,18 +3,23 @@
 // Licensed under the Open Software License version 3.0
 
 mod classification;
+mod preflight;
 mod region;
+mod support;
+pub use preflight::preflight;
+#[cfg(test)]
+mod native_tests;
 #[cfg(test)]
 mod tests;
 use crate::{CompilerInput, check_cancel, error};
-use geo::{Area, BooleanOps, BoundingRect, MultiPolygon};
+use geo::{BooleanOps, BoundingRect, MultiPolygon};
 use spiling_contracts::geometry::{
-    AabbMm, FaceCarrier, GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
+    GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
 use spiling_contracts::manufacturing::*;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -26,146 +31,68 @@ pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    check_cancel(cancel)?;
-    input.intent.validate()?;
+    let admission = preflight::admit(input, cancel)?;
+    if !admission.report.eligible {
+        let check = admission
+            .report
+            .checks
+            .iter()
+            .find(|check| check.severity == PreflightSeverity::Error)
+            .expect("ineligible metadata has an error");
+        let code = match check.code.as_str() {
+            "resource_limit" | "event_limit" => ManufacturingErrorCode::ResourceLimit,
+            "empty_project" => ManufacturingErrorCode::EmptyProject,
+            "invalid_intent" | "source_identity" | "invalid_pose" | "missing_definition" => {
+                ManufacturingErrorCode::InvalidSpecification
+            }
+            _ => ManufacturingErrorCode::UnsupportedGeometry,
+        };
+        return Err(error(code, check.message.clone()));
+    }
+    let bounds = admission
+        .bounds
+        .expect("eligible native geometry has bounds");
     let bed = input.intent.printer.build_envelope.min[2];
-    let height = input.intent.recipe.layer_height_mm;
-    let alignment_tolerance = LAYER_QUANTIZATION_MM.min(height * 1e-6);
-    let mut slab_boundaries = BTreeSet::new();
-    let mut reuse_slabs = true;
-    let mut bounds: Option<AabbMm> = None;
+    let recipe = &input.intent.recipe;
+    let mut events = admission.horizontal_events.clone();
+    if let SupportPolicy::Breakaway {
+        z_gap_mm,
+        interface_thickness_mm,
+        ..
+    } = recipe.supports
+    {
+        for event in &admission.horizontal_events {
+            let stop = event - z_gap_mm;
+            let interface_start = stop - interface_thickness_mm;
+            if stop > bed {
+                events.push(stop);
+            }
+            if interface_start > bed {
+                events.push(interface_start);
+            }
+        }
+    }
+    let schedule = layer_schedule(bed, bounds.max[2], recipe.layer_height_mm, &events)?;
+    let count = schedule.len() as u32;
     let mut occurrences = input.occurrences.iter().collect::<Vec<_>>();
     occurrences.sort_by_key(|o| o.occurrence_id);
-    for occurrence in &occurrences {
-        check_cancel(cancel)?;
-        occurrence
-            .pose
-            .validate()
-            .map_err(|e| error(ManufacturingErrorCode::InvalidSpecification, e.to_string()))?;
-        let definition = input
-            .definitions
-            .get(&occurrence.definition_id)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::InvalidSpecification,
-                    "occurrence definition is missing",
-                )
-            })?;
-        // Vertical analytic carriers plus layer-aligned horizontal faces make
-        // midpoint sampling exhaustive for admitted layer geometry, rather than
-        // silently missing sub-layer shelves, sloped roofs or tilted cylinders.
-        for face in definition.faces() {
-            check_cancel(cancel)?;
-            match &face.carrier {
-                FaceCarrier::Plane { origin_mm, normal } => {
-                    let n = rotate(&occurrence.pose, *normal);
-                    if n[2].abs() <= 1e-10 {
-                        reuse_slabs &= n[2] == 0.0;
-                        continue;
-                    }
-                    if n[0].hypot(n[1]) > 1e-10 {
-                        return Err(error(
-                            ManufacturingErrorCode::UnsupportedGeometry,
-                            "sloped planar carriers require unsupported within-layer/support analysis",
-                        ));
-                    }
-                    reuse_slabs &= n[0] == 0.0 && n[1] == 0.0;
-                    let elevation = forward(&occurrence.pose, *origin_mm)[2];
-                    let grid = ((elevation - bed) / height).round();
-                    if (bed + grid * height - elevation).abs() > alignment_tolerance {
-                        return Err(error(
-                            ManufacturingErrorCode::UnsupportedGeometry,
-                            "horizontal native boundary is not aligned to fixed layer quantization",
-                        ));
-                    }
-                    if grid >= 0.0 && grid <= MAX_PRINT_LAYERS as f64 {
-                        slab_boundaries.insert(grid as u32);
-                    }
-                }
-                FaceCarrier::Cylinder { axis_direction, .. } => {
-                    let axis = rotate(&occurrence.pose, *axis_direction);
-                    if axis[0].hypot(axis[1]) > 1e-10 {
-                        return Err(error(
-                            ManufacturingErrorCode::UnsupportedGeometry,
-                            "nonvertical cylindrical carriers require unsupported support analysis",
-                        ));
-                    }
-                    reuse_slabs &= axis[0] == 0.0 && axis[1] == 0.0;
-                }
-            }
-        }
-        let local = definition.bounds_mm();
-        for mask in 0..8 {
-            let point = forward(
-                &occurrence.pose,
-                std::array::from_fn(|a| {
-                    if mask & (1 << a) == 0 {
-                        local.min[a]
-                    } else {
-                        local.max[a]
-                    }
-                }),
-            );
-            let envelope = input.intent.printer.build_envelope;
-            if (0..3).any(|a| {
-                point[a] < envelope.min[a] - LAYER_QUANTIZATION_MM
-                    || point[a] > envelope.max[a] + LAYER_QUANTIZATION_MM
-            }) {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    "placed native certified bounds exceed printer build envelope",
-                ));
-            }
-            if let Some(b) = &mut bounds {
-                b.include(point).map_err(|e| {
-                    error(ManufacturingErrorCode::UnsupportedGeometry, e.to_string())
-                })?;
-            } else {
-                bounds = Some(AabbMm {
-                    min: point,
-                    max: point,
-                });
-            }
-        }
+    let mut slab_boundaries = BTreeSet::new();
+    for event in &admission.horizontal_events {
+        let index =
+            schedule.partition_point(|layer| layer.z <= *event + LAYER_QUANTIZATION_MM) as u32;
+        slab_boundaries.insert(index);
     }
-    let bounds = bounds.ok_or_else(|| {
-        error(
-            ManufacturingErrorCode::EmptyProject,
-            "no placed native geometry",
-        )
-    })?;
-    if (bounds.min[2] - bed).abs() > LAYER_QUANTIZATION_MM {
-        return Err(error(
-            ManufacturingErrorCode::UnsupportedGeometry,
-            "geometry must begin on the declared bed plane; generated supports are unavailable",
-        ));
-    }
-    let count = ((bounds.max[2] - bed) / height).round();
-    if !count.is_finite() || count < 1.0 || count > MAX_PRINT_LAYERS as f64 {
-        return Err(error(
-            ManufacturingErrorCode::ResourceLimit,
-            "fixed layer count exceeds support limits",
-        ));
-    }
-    if (bed + count * height - bounds.max[2]).abs() > LAYER_QUANTIZATION_MM {
-        return Err(error(
-            ManufacturingErrorCode::UnsupportedGeometry,
-            "top height is not an integral fixed layer height; partial top layers are unsupported",
-        ));
-    }
-    let count = count as u32;
-    let recipe = &input.intent.recipe;
-    let bottom_layers = skin_layers(recipe.bottom_skin_thickness_mm, height, count);
-    let top_layers = skin_layers(recipe.top_skin_thickness_mm, height, count);
     // Retain one native footprint per certified slab, not one polygon copy per
     // layer and not a second full classified polygon plan.
     let mut sections: Vec<SectionSpan> = Vec::new();
     let mut retained_points = 0usize;
+    let mut prepared_sources = BTreeMap::new();
+    let mut remaining_prepared_bytes = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
     let mut index = 0u32;
     while index < count {
         check_cancel(cancel)?;
-        let sample = bed + (index as f64 + 0.5) * height;
-        let end = if reuse_slabs {
+        let sample = schedule[index as usize].sample;
+        let end = if admission.reuse_slabs {
             slab_boundaries
                 .range((index + 1)..)
                 .next()
@@ -183,20 +110,37 @@ pub(crate) fn plan(
                 origin_mm: inverse(&occurrence.pose, [0.0, 0.0, sample]),
                 normal: rotate_inverse(&occurrence.pose, [0.0, 0.0, 1.0]),
             };
-            let native = spiling_geometry::section_with_byte_limit(
-                definition,
-                plane,
-                cancel,
-                4 * 1024 * 1024,
-            )
-            .map_err(|e| {
+            let native_error = |e: spiling_contracts::geometry::GeometryError| {
                 let code = match e.code {
                     GeometryErrorCode::Cancelled => ManufacturingErrorCode::Cancelled,
                     GeometryErrorCode::ResourceLimit => ManufacturingErrorCode::ResourceLimit,
                     _ => ManufacturingErrorCode::UnsupportedGeometry,
                 };
                 error(code, format!("native section at layer {index}: {e}"))
-            })?;
+            };
+            let source = match prepared_sources.entry(&occurrence.definition_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let source = spiling_geometry::prepare_section_source(
+                        definition,
+                        remaining_prepared_bytes,
+                        cancel,
+                    )
+                    .map_err(native_error)?;
+                    remaining_prepared_bytes = remaining_prepared_bytes
+                        .checked_sub(source.retained_bytes())
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "aggregate prepared native section capacity exceeded",
+                            )
+                        })?;
+                    entry.insert(source)
+                }
+            };
+            let native = source
+                .section_with_byte_limit(plane, cancel, 4 * 1024 * 1024)
+                .map_err(native_error)?;
             let placed = region::from_native(native, &occurrence.pose, sample, cancel)?;
             if placed.0.is_empty() {
                 continue;
@@ -211,28 +155,8 @@ pub(crate) fn plan(
             region::check_size(&next)?;
         }
         region::canonicalize(&mut next);
-        if next.0.is_empty() || next.unsigned_area() <= 0.0 {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                "empty aggregate layer would require unsupported suspension/support",
-            ));
-        }
-        if let Some(previous) = sections.last() {
-            let supported = region::offset(
-                &previous.material,
-                2.0 * SECTION_SAMPLING_TOLERANCE_MM,
-                cancel,
-            )?;
-            boolean_budget(&next, &supported)?;
-            let unsupported_area = next.difference(&supported).unsigned_area();
-            check_cancel(cancel)?;
-            if unsupported_area > OFFSET_TOLERANCE_MM * OFFSET_TOLERANCE_MM {
-                return Err(error(
-                    ManufacturingErrorCode::UnsupportedGeometry,
-                    "section expands beyond previous layer; supports/bridging are unsupported",
-                ));
-            }
-        }
+        // Empty native intervals are retained for genuine floating material.
+        // Their support paths are generated after actual object-anchor analysis.
         retained_points = retained_points
             .checked_add(region::point_count(&next))
             .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -249,6 +173,7 @@ pub(crate) fn plan(
         });
         index = end;
     }
+    drop(prepared_sources);
     let mut layers = Vec::with_capacity(count as usize);
     let mut segments = 0usize;
     let mut neighborhood_work = 0usize;
@@ -259,17 +184,27 @@ pub(crate) fn plan(
     let mut templates: [Option<(Vec<DepositionPath>, PlanarRegionCoverage)>; 2] = [None, None];
     for index in 0..count {
         check_cancel(cancel)?;
-        let z = bed + (index as f64 + 1.0) * height;
-        let sample = bed + (index as f64 + 0.5) * height;
+        let elevation = &schedule[index as usize];
+        let z = elevation.z;
+        let sample = elevation.sample;
+        let height = elevation.height;
         let current = span_at(&sections, index);
-        let below = index
-            .checked_sub(bottom_layers)
+        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = index
-            .checked_add(top_layers)
-            .filter(|i| *i < count)
+        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
-        let next_key = (current, below, above);
+        if sections[current].material.0.is_empty() {
+            layers.push(PrintLayer {
+                index,
+                z_mm: z,
+                height_mm: height,
+                section_z_mm: sample,
+                paths: Vec::new(),
+                region_coverage: empty_coverage(recipe.infill_fraction),
+            });
+            continue;
+        }
+        let next_key = (current, below, above, height.to_bits());
         if key != Some(next_key) {
             // Drop the prior classification before allocating its replacement.
             // The current wall layout survives skin-key changes, not span changes.
@@ -282,7 +217,13 @@ pub(crate) fn plan(
                     recipe,
                     retained_points,
                     cancel,
-                )?));
+                ).map_err(|mut failure| {
+                    failure.message = format!(
+                        "layer {index} (section Z={sample} mm, deposition Z={z} mm, height={height} mm): {}",
+                        failure.message
+                    );
+                    failure
+                })?));
                 layout_span = Some(current);
             }
             let lower = survival(&sections, current, below, &mut neighborhood_work, cancel)?;
@@ -307,7 +248,14 @@ pub(crate) fn plan(
                 classified
                     .as_ref()
                     .expect("region classification initialized")
-                    .paths(z, index, recipe, &mut template_segments, cancel)?,
+                    .paths(
+                        z,
+                        height,
+                        region::HatchAxis::preferred(index),
+                        recipe,
+                        &mut template_segments,
+                        cancel,
+                    )?,
             );
         }
         let (template, coverage) = templates[parity]
@@ -337,11 +285,66 @@ pub(crate) fn plan(
         layers.push(PrintLayer {
             index,
             z_mm: z,
+            height_mm: height,
             section_z_mm: sample,
             paths,
             region_coverage: coverage.clone(),
         });
     }
+    drop(classified);
+    drop(wall_layout);
+    drop(templates);
+    support::realize(
+        &mut layers,
+        &sections,
+        retained_points,
+        recipe,
+        &mut segments,
+        cancel,
+        |index, axis, segments| {
+            let elevation = &schedule[index];
+            let current = span_at(&sections, index as u32);
+            let below = physical_neighbor(
+                &schedule,
+                index as u32,
+                recipe.bottom_skin_thickness_mm,
+                false,
+            )
+            .map(|i| span_at(&sections, i));
+            let above =
+                physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
+                    .map(|i| span_at(&sections, i));
+            let lower = survival(&sections, current, below, &mut neighborhood_work, cancel)?;
+            let upper = survival(&sections, current, above, &mut neighborhood_work, cancel)?;
+            let wall = Arc::new(classification::WallLayout::new(
+                &sections[current].material,
+                recipe,
+                retained_points,
+                cancel,
+            )?);
+            let classified =
+                classification::ClassifiedRegions::new(wall, &lower, &upper, recipe, cancel)?;
+            let paths = classified
+                .paths(
+                    elevation.z,
+                    elevation.height,
+                    axis,
+                    recipe,
+                    segments,
+                    cancel,
+                )?
+                .0;
+            let whole_rows = classified.whole_rows(
+                elevation.z,
+                elevation.height,
+                axis,
+                recipe,
+                segments,
+                cancel,
+            )?;
+            Ok(support::RasterCandidate { paths, whole_rows })
+        },
+    )?;
     let result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         layers,
@@ -359,10 +362,124 @@ struct SectionSpan {
     material: MultiPolygon<f64>,
 }
 
-fn skin_layers(thickness: f64, height: f64, count: u32) -> u32 {
-    // Saturating at the admitted layer count avoids unchecked integer casts and
-    // still classifies the whole model when the requested skin is thicker.
-    (thickness / height).ceil().max(1.0).min(count as f64) as u32
+struct LayerElevation {
+    z: f64,
+    sample: f64,
+    height: f64,
+}
+
+fn layer_schedule(
+    bed: f64,
+    top: f64,
+    nominal: f64,
+    events: &[f64],
+) -> Result<Vec<LayerElevation>, ManufacturingError> {
+    let nominal_count = ((top - bed) / nominal).ceil();
+    if !nominal_count.is_finite() || nominal_count < 1.0 || nominal_count > MAX_PRINT_LAYERS as f64
+    {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "layer schedule exceeds the layer budget",
+        ));
+    }
+    let mut ends = Vec::with_capacity(nominal_count as usize + events.len() + 1);
+    for index in 1..nominal_count as usize {
+        let z = bed + index as f64 * nominal;
+        if z < top - 4.0 * f64::EPSILON * top.abs().max(z.abs()).max(1.0) {
+            ends.push(z);
+        }
+    }
+    ends.extend(events.iter().copied().filter(|z| *z > bed && *z < top));
+    ends.push(top);
+    // Event identities are subject only to bounded floating arithmetic roundoff,
+    // including cancellation at the bed. This is not the native plane tolerance.
+    let identity_roundoff = 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max(1.0);
+    for z in &mut ends {
+        if (*z - bed).abs() <= identity_roundoff {
+            *z = bed;
+        } else if (*z - top).abs() <= identity_roundoff {
+            *z = top;
+        } else {
+            let grid = bed + ((*z - bed) / nominal).round_ties_even() * nominal;
+            if grid > bed && grid < top && (*z - grid).abs() <= identity_roundoff {
+                *z = grid;
+            }
+        }
+    }
+    ends.retain(|z| *z > bed);
+    ends.sort_by(f64::total_cmp);
+    // Only floating arithmetic roundoff may coalesce; a genuinely short native
+    // interval still reaches the explicit degeneracy/thickness refusal below.
+    ends.dedup_by(|a, b| (*a - *b).abs() <= 4.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0));
+    if ends.len() > MAX_PRINT_LAYERS as usize {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "horizontal native events exceed the layer budget",
+        ));
+    }
+    let mut previous = bed;
+    let mut schedule = Vec::with_capacity(ends.len());
+    for z in ends {
+        let height = z - previous;
+        // The midpoint must remain away from native degeneracy gates and both
+        // boundaries must survive six-decimal emitted coordinate precision.
+        if height <= 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                format!(
+                    "native event at Z {z:.9} creates unresolved layer thickness {height:.9} mm"
+                ),
+            ));
+        }
+        schedule.push(LayerElevation {
+            z,
+            sample: previous + height * 0.5,
+            height,
+        });
+        previous = z;
+    }
+    Ok(schedule)
+}
+
+fn physical_neighbor(
+    schedule: &[LayerElevation],
+    index: u32,
+    thickness: f64,
+    above: bool,
+) -> Option<u32> {
+    let i = index as usize;
+    if above {
+        let target = schedule[i].z + thickness;
+        let j = schedule
+            .partition_point(|layer| layer.z < target - LAYER_QUANTIZATION_MM)
+            .max(i + 1);
+        (j < schedule.len()).then_some(j as u32)
+    } else {
+        let bottom = schedule[i].z - schedule[i].height;
+        let target = bottom - thickness;
+        if target < schedule[0].z - schedule[0].height - LAYER_QUANTIZATION_MM {
+            return None;
+        }
+        let j = schedule.partition_point(|layer| layer.z <= target + LAYER_QUANTIZATION_MM);
+        Some(j as u32)
+    }
+}
+
+fn empty_coverage(fraction: f64) -> PlanarRegionCoverage {
+    PlanarRegionCoverage {
+        section_area_mm2: 0.0,
+        wall_area_mm2: 0.0,
+        bottom_skin_area_mm2: 0.0,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: 0.0,
+        requested_infill_fraction: fraction,
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0,
+    }
 }
 
 fn span_at(sections: &[SectionSpan], index: u32) -> usize {

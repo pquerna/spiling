@@ -3,12 +3,16 @@
 // Licensed under the Open Software License version 3.0
 
 mod analytic;
+pub(crate) use analytic::projected_extent;
 mod loops;
 #[cfg(test)]
 mod tests;
 
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, check_cancel};
-use monstertruck_modeling::{BoundingBox, Matrix4, Point3, Solid, Surface, builder, primitive};
+use monstertruck_modeling::{
+    BoundingBox, Curve, Matrix4, Point3, Solid, Surface, builder, primitive,
+};
+use monstertruck_solid::{BooleanWorkLimits, PreparedBooleanSource, ShapeOpsError};
 use spiling_contracts::geometry::{
     GeometryErrorCode, SECTION_BOOLEAN_TOLERANCE_MM, SECTION_PLANE_TOLERANCE_MM,
     SECTION_SAMPLING_TOLERANCE_MM,
@@ -17,11 +21,98 @@ use std::sync::atomic::AtomicBool;
 
 const PARALLEL_TOLERANCE: f64 = 1e-10;
 
+/// Source cache plus derived clipping seeds across one consumer's section job.
+pub const MAX_PREPARED_SECTION_BYTES: usize = 64 * 1024 * 1024;
+const MAX_QUERY_SEED_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PREPARED_SECTION_SOURCE_BYTES: usize =
+    MAX_PREPARED_SECTION_BYTES - MAX_QUERY_SEED_BYTES;
+// Search preparation is independent of renderer/packed-display admission.
+const MAX_NATIVE_SEED_VERTICES: usize = 1_000_000;
+const MAX_NATIVE_SEED_TRIANGLES: usize = 1_000_000;
+
+/// Job-local search seeds borrowing one immutable native definition.
+///
+/// Seeds accelerate native intersections; they never certify section geometry.
+/// Dropping this value releases its buffers without retaining the definition.
+pub struct PreparedSectionSource<'a> {
+    definition: &'a Definition,
+    native: PreparedBooleanSource<'a, Curve, Surface>,
+}
+
+impl PreparedSectionSource<'_> {
+    /// Owned buffer capacity, excluding borrowed BREP and allocator bookkeeping.
+    pub fn retained_bytes(&self) -> usize {
+        self.native.retained_bytes()
+    }
+
+    /// Apply the same analytic, native topology and sampled-output gates.
+    pub fn section_with_byte_limit(
+        &self,
+        plane: PlaneMm,
+        cancel: &AtomicBool,
+        byte_limit: u32,
+    ) -> Result<NativeSection, GeometryError> {
+        section_using(
+            self.definition,
+            plane,
+            cancel,
+            byte_limit,
+            Some(&self.native),
+        )
+    }
+}
+
+/// Prepare only original-tolerance native seeds within remaining job capacity.
+///
+/// Native tessellation is indivisible; these admission limits are not RSS limits.
+pub fn prepare_section_source<'a>(
+    definition: &'a Definition,
+    remaining_prepared_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<PreparedSectionSource<'a>, GeometryError> {
+    check_cancel(cancel)?;
+    if remaining_prepared_bytes == 0 {
+        return Err(resource_error("prepared native section capacity exhausted"));
+    }
+    let limits = BooleanWorkLimits {
+        max_faces: spiling_contracts::geometry::MAX_NATIVE_FACES as usize + 6,
+        max_edges: 4 * spiling_contracts::geometry::MAX_STEP_ENTITIES as usize,
+        max_mesh_vertices: MAX_NATIVE_SEED_VERTICES,
+        max_mesh_triangles: MAX_NATIVE_SEED_TRIANGLES,
+        max_triangle_pairs: 20_000_000,
+        max_interference_segments: 1_000_000,
+        max_output_faces: spiling_contracts::geometry::MAX_NATIVE_FACES as usize + 6,
+        max_output_edges: 4 * spiling_contracts::geometry::MAX_STEP_ENTITIES as usize,
+        max_prepared_bytes: MAX_PREPARED_SECTION_BYTES,
+        max_source_prepared_bytes: remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES),
+        max_other_prepared_bytes: MAX_QUERY_SEED_BYTES,
+        max_intermediate_prepared_bytes: MAX_PREPARED_SECTION_BYTES,
+    };
+    let native = monstertruck_solid::prepare_boolean_source(
+        &definition.solid,
+        SECTION_BOOLEAN_TOLERANCE_MM,
+        limits,
+        cancel,
+    )
+    .map_err(native_error)?;
+    Ok(PreparedSectionSource { definition, native })
+}
+
 pub(crate) fn section(
     definition: &Definition,
     plane: PlaneMm,
     cancel: &AtomicBool,
     byte_limit: u32,
+) -> Result<NativeSection, GeometryError> {
+    section_using(definition, plane, cancel, byte_limit, None)
+}
+
+fn section_using(
+    definition: &Definition,
+    plane: PlaneMm,
+    cancel: &AtomicBool,
+    byte_limit: u32,
+    prepared: Option<&PreparedBooleanSource<'_, Curve, Surface>>,
 ) -> Result<NativeSection, GeometryError> {
     check_cancel(cancel)?;
     let mut budget = loops::SectionBudget::with_limit(byte_limit)?;
@@ -66,10 +157,16 @@ pub(crate) fn section(
     let clip_carrier = clip_carrier
         .ok_or_else(|| kernel_error("native clipping cuboid has no plane-side carrier"))?;
     check_cancel(cancel)?;
-    let cut = monstertruck_solid::and(&definition.solid, &clip, SECTION_BOOLEAN_TOLERANCE_MM);
+    let owned;
+    let source = match prepared {
+        Some(source) => source,
+        None => {
+            owned = prepare_section_source(definition, MAX_PREPARED_SECTION_SOURCE_BYTES, cancel)?;
+            &owned.native
+        }
+    };
+    let cut = monstertruck_solid::and_prepared(source, &clip, cancel).map_err(native_error)?;
     check_cancel(cancel)?;
-    let cut =
-        cut.map_err(|error| kernel_error(format!("native section boolean failed: {error}")))?;
     for shell in cut.boundaries() {
         check_cancel(cancel)?;
         shell
@@ -219,6 +316,15 @@ fn in_frame(point: [f64; 3], frame: &PlaneFrameMm) -> Result<[f64; 3], GeometryE
 
 fn kernel_error(message: impl AsRef<str>) -> GeometryError {
     GeometryError::new(GeometryErrorCode::KernelFailure, message)
+}
+
+fn native_error(error: ShapeOpsError) -> GeometryError {
+    let code = match &error {
+        ShapeOpsError::Cancelled => GeometryErrorCode::Cancelled,
+        ShapeOpsError::WorkLimitExceeded { .. } => GeometryErrorCode::ResourceLimit,
+        _ => GeometryErrorCode::KernelFailure,
+    };
+    GeometryError::new(code, format!("native section boolean failed: {error}"))
 }
 
 fn resource_error(message: &'static str) -> GeometryError {

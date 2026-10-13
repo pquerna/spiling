@@ -13,8 +13,10 @@ mod replay;
 pub use replay::*;
 mod job;
 pub use job::*;
+mod process;
+pub use process::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 2;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 3;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -264,16 +266,13 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathsSeed<'_> {
 impl<'de> serde::de::Visitor<'de> for PathsSeed<'_> {
     type Value = Vec<DepositionPath>;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a nonempty bounded array of deposition paths")
+        f.write_str("a bounded array of deposition paths")
     }
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut paths = Vec::new();
         while paths.len() < MAX_DEPOSITION_SEGMENTS as usize {
             match seq.next_element_seed(PathSeed(&mut *self.0))? {
                 Some(path) => paths.push(path),
-                None if paths.is_empty() => {
-                    return Err(serde::de::Error::custom("print layer has no deposition"));
-                }
                 None => return Ok(paths),
             }
         }
@@ -289,6 +288,7 @@ impl<'de> serde::de::Visitor<'de> for PathsSeed<'_> {
 enum LayerField {
     Index,
     ZMm,
+    HeightMm,
     SectionZMm,
     Paths,
     RegionCoverage,
@@ -299,7 +299,14 @@ impl<'de> serde::de::DeserializeSeed<'de> for LayerSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "PrintLayer",
-            &["index", "z_mm", "section_z_mm", "paths", "region_coverage"],
+            &[
+                "index",
+                "z_mm",
+                "height_mm",
+                "section_z_mm",
+                "paths",
+                "region_coverage",
+            ],
             self,
         )
     }
@@ -312,6 +319,7 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut index = None;
         let mut z_mm = None;
+        let mut height_mm = None;
         let mut section_z_mm = None;
         let mut paths = None;
         let mut region_coverage = None;
@@ -328,6 +336,12 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
                         return Err(serde::de::Error::duplicate_field("z_mm"));
                     }
                     z_mm = Some(map.next_value()?);
+                }
+                LayerField::HeightMm => {
+                    if height_mm.is_some() {
+                        return Err(serde::de::Error::duplicate_field("height_mm"));
+                    }
+                    height_mm = Some(map.next_value()?);
                 }
                 LayerField::SectionZMm => {
                     if section_z_mm.is_some() {
@@ -352,6 +366,7 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
         Ok(PrintLayer {
             index: index.ok_or_else(|| serde::de::Error::missing_field("index"))?,
             z_mm: z_mm.ok_or_else(|| serde::de::Error::missing_field("z_mm"))?,
+            height_mm: height_mm.ok_or_else(|| serde::de::Error::missing_field("height_mm"))?,
             section_z_mm: section_z_mm
                 .ok_or_else(|| serde::de::Error::missing_field("section_z_mm"))?,
             paths: paths.ok_or_else(|| serde::de::Error::missing_field("paths"))?,
@@ -433,10 +448,10 @@ pub struct PrinterCapabilities {
 }
 impl PrinterCapabilities {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if self.extruders != 1 || self.generated_supports {
+        if self.extruders != 1 {
             return Err(ManufacturingError::new(
                 ManufacturingErrorCode::UnsupportedCapability,
-                "only one extruder and no generated supports are implemented",
+                "only one extruder is implemented",
             ));
         }
         Ok(())
@@ -567,6 +582,8 @@ pub struct PlanarPrintRecipe {
     pub print_speed_mm_s: f64,
     pub travel_speed_mm_s: f64,
     pub flow_multiplier: f64,
+    pub process: ProcessPolicy,
+    pub supports: SupportPolicy,
 }
 impl PlanarPrintRecipe {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -574,6 +591,8 @@ impl PlanarPrintRecipe {
         label(&self.revision)?;
         label(&self.material_id)?;
         label(&self.material_revision)?;
+        self.process.validate()?;
+        self.supports.validate()?;
         positive(&[
             self.filament_diameter_mm,
             self.layer_height_mm,
@@ -610,6 +629,12 @@ impl ManufacturingIntent {
         self.recipe.validate()?;
         let p = &self.printer;
         let r = &self.recipe;
+        r.process.validate_printer(p)?;
+        if !matches!(r.supports, SupportPolicy::Disabled) && !p.capabilities.generated_supports {
+            return Err(invalid(
+                "breakaway supports require declared generated_supports capability",
+            ));
+        }
         let area = ((r.bead_width_mm - r.layer_height_mm) * r.layer_height_mm
             + std::f64::consts::PI * (r.layer_height_mm / 2.0).powi(2))
             * r.flow_multiplier;
@@ -627,10 +652,42 @@ impl ManufacturingIntent {
             || extrusion_per_mm <= 0.0
             || r.print_speed_mm_s > p.max_feed_mm_s
             || r.travel_speed_mm_s > p.max_feed_mm_s
+            || !(r.travel_speed_mm_s * 60.0).is_finite()
+            || r.travel_speed_mm_s * 60.0 < 0.000001
+            || (r.travel_speed_mm_s * 60_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_feed_mm_s
         {
             return Err(invalid(
                 "recipe exceeds printer feed/rounded-bead flow limits or numeric range",
             ));
+        }
+        for (speed_factor, flow_factor) in [
+            (1.0, 1.0),
+            (
+                r.process.first_layer_speed_factor,
+                r.process.first_layer_flow_factor,
+            ),
+            (r.process.bridge_speed_factor, r.process.bridge_flow_factor),
+            (
+                r.process.first_layer_speed_factor * r.process.bridge_speed_factor,
+                r.process.first_layer_flow_factor * r.process.bridge_flow_factor,
+            ),
+        ] {
+            let process_flow = flow * speed_factor * flow_factor;
+            let feed = r.print_speed_mm_s * speed_factor * 60.0;
+            let process_extrusion = extrusion_per_mm * flow_factor;
+            if !feed.is_finite()
+                || feed < 0.000001
+                || (feed * 1_000_000.0).round() / 1_000_000.0 / 60.0 > p.max_feed_mm_s
+                || !process_extrusion.is_finite()
+                || process_extrusion <= 0.0
+                || !process_flow.is_finite()
+                || process_flow <= 0.0
+                || process_flow > p.max_volumetric_flow_mm3_s
+            {
+                return Err(invalid(
+                    "process override exceeds printer feed/flow or serialized precision",
+                ));
+            }
         }
         if let JobWorkflow::CompleteMarlin { job } = &p.workflow {
             let length = (job.prime_end_mm[0] - job.prime_start_mm[0])
@@ -638,6 +695,12 @@ impl ManufacturingIntent {
                 .hypot(job.prime_end_mm[2] - job.prime_start_mm[2]);
             let prime_flow =
                 job.prime_filament_length_mm * filament_area * job.prime_speed_mm_s / length;
+            let prime_feed = (job.prime_speed_mm_s * 60_000_000.0).round() / 1_000_000.0;
+            if !prime_feed.is_finite() || prime_feed <= 0.0 || prime_feed / 60.0 > p.max_feed_mm_s {
+                return Err(invalid(
+                    "priming feed exceeds printer limit at serialized precision",
+                ));
+            }
             if !prime_flow.is_finite() || prime_flow > p.max_volumetric_flow_mm3_s {
                 return Err(invalid("priming exceeds declared volumetric flow limit"));
             }
@@ -654,6 +717,9 @@ pub enum DepositionKind {
     BottomSkin,
     TopSkin,
     SparseFill,
+    Bridge,
+    Support,
+    SupportInterface,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -674,6 +740,8 @@ pub struct PlanarRegionCoverage {
     pub intentional_void_area_mm2: f64,
     pub protected_hole_area_mm2: f64,
     pub nominal_deposition_volume_mm3: f64,
+    pub support_area_mm2: f64,
+    pub support_nominal_deposition_volume_mm3: f64,
     pub requested_infill_fraction: f64,
 }
 impl PlanarRegionCoverage {
@@ -688,6 +756,8 @@ impl PlanarRegionCoverage {
             self.intentional_void_area_mm2,
             self.protected_hole_area_mm2,
             self.nominal_deposition_volume_mm3,
+            self.support_area_mm2,
+            self.support_nominal_deposition_volume_mm3,
         ];
         let partition = self.wall_area_mm2
             + self.bottom_skin_area_mm2
@@ -696,7 +766,15 @@ impl PlanarRegionCoverage {
             + self.sparse_interior_area_mm2;
         let tolerance = 1e-7 * self.section_area_mm2.max(1.0);
         if values.iter().any(|v| !v.is_finite() || *v < 0.0)
-            || self.section_area_mm2 <= 0.0
+            || (self.section_area_mm2 == 0.0
+                && (self.nominal_deposition_volume_mm3 != 0.0
+                    || partition != 0.0
+                    || self.protected_hole_area_mm2 != 0.0
+                    || self.intentional_void_area_mm2 != 0.0))
+            || (self.support_area_mm2 == 0.0) != (self.support_nominal_deposition_volume_mm3 == 0.0)
+            || (matches!(recipe.supports, SupportPolicy::Disabled)
+                && (self.support_area_mm2 != 0.0
+                    || self.support_nominal_deposition_volume_mm3 != 0.0))
             || self.requested_infill_fraction != recipe.infill_fraction
             || !partition.is_finite()
             || (partition - self.section_area_mm2).abs() > tolerance
@@ -717,6 +795,7 @@ impl PlanarRegionCoverage {
 pub struct PrintLayer {
     pub index: u32,
     pub z_mm: f64,
+    pub height_mm: f64,
     pub section_z_mm: f64,
     #[serde(deserialize_with = "paths")]
     pub paths: Vec<DepositionPath>,
@@ -782,37 +861,113 @@ impl NormalizedPrintPlan {
             return Err(resource("print layer limit exceeded"));
         }
         let envelope = &intent.printer.build_envelope;
-        let height = intent.recipe.layer_height_mm;
+        let mut lower_z = envelope.min[2];
         let mut segments = 0usize;
+        let mut object_segments = 0usize;
         let complete = matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. });
         let mut object_xy = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
+        let mut gap_height = 0.0;
         for (index, layer) in self.layers.iter().enumerate() {
             layer.region_coverage.validate(&intent.recipe)?;
-            let expected_z = envelope.min[2] + (index + 1) as f64 * height;
-            let lower_z = envelope.min[2] + index as f64 * height;
+            let height = layer.height_mm;
             if layer.index != index as u32
                 || !layer.z_mm.is_finite()
                 || !layer.section_z_mm.is_finite()
-                || (layer.z_mm - expected_z).abs() > self.layer_quantization_mm
+                || !height.is_finite()
+                || height <= 0.0
+                || height > intent.recipe.layer_height_mm + self.layer_quantization_mm
+                || height > intent.recipe.bead_width_mm
+                || (layer.z_mm - lower_z - height).abs() > 1e-9 * height.max(1.0)
                 || layer.z_mm <= lower_z
                 || layer.z_mm > envelope.max[2]
                 || layer.section_z_mm <= lower_z
                 || layer.section_z_mm >= layer.z_mm
             {
                 return Err(invalid(
-                    "invalid fixed-height layer index, deposition height or interior section height",
+                    "invalid variable-thickness layer index, deposition height or interior section height",
                 ));
             }
+            lower_z = layer.z_mm;
             if layer.paths.is_empty() {
-                return Err(invalid("print layer has no deposition"));
+                let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
+                    return Err(invalid(
+                        "empty schedule layers require explicit breakaway support policy",
+                    ));
+                };
+                if index == 0
+                    || index + 1 == self.layers.len()
+                    || !self.layers[0].paths.iter().any(|p| {
+                        matches!(
+                            p.kind,
+                            DepositionKind::Support | DepositionKind::SupportInterface
+                        )
+                    })
+                    || (gap_height == 0.0
+                        && !self.layers[index - 1]
+                            .paths
+                            .iter()
+                            .any(|p| p.kind == DepositionKind::SupportInterface))
+                {
+                    return Err(invalid(
+                        "contact gap requires bed-anchored support and preceding support interface",
+                    ));
+                }
+                gap_height += layer.height_mm;
+                if gap_height > z_gap_mm + self.layer_quantization_mm {
+                    return Err(invalid("empty contact gap exceeds declared physical Z gap"));
+                }
+            } else if gap_height > 0.0 {
+                if !layer.paths.iter().any(|p| {
+                    !matches!(
+                        p.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    )
+                }) {
+                    return Err(invalid("contact gap must end at actual object deposition"));
+                }
+                gap_height = 0.0;
+            }
+            let has_object = layer.paths.iter().any(|p| {
+                !matches!(
+                    p.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            });
+            let has_support = layer.paths.iter().any(|p| {
+                matches!(
+                    p.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            });
+            if has_object != (layer.region_coverage.section_area_mm2 > 0.0)
+                || has_support != (layer.region_coverage.support_area_mm2 > 0.0)
+            {
+                return Err(invalid(
+                    "object/support paths disagree with region ownership",
+                ));
             }
             for path in &layer.paths {
+                if matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                ) && matches!(intent.recipe.supports, SupportPolicy::Disabled)
+                {
+                    return Err(invalid(
+                        "support deposition requires enabled support policy",
+                    ));
+                }
                 if path.points_mm.len() < 2 {
                     return Err(invalid("deposition path requires at least two points"));
                 }
                 segments = segments
                     .checked_add(path.points_mm.len() - 1)
                     .ok_or_else(|| resource("segment count overflow"))?;
+                if !matches!(
+                    path.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                ) {
+                    object_segments += path.points_mm.len() - 1;
+                }
                 if segments > MAX_DEPOSITION_SEGMENTS as usize {
                     return Err(resource("deposition segment limit exceeded"));
                 }
@@ -898,8 +1053,8 @@ impl NormalizedPrintPlan {
                 ));
             }
         }
-        if segments == 0 {
-            return Err(invalid("print plan has no deposition"));
+        if segments == 0 || object_segments == 0 {
+            return Err(invalid("print plan has no object deposition"));
         }
         Ok(if complete { Some(object_xy) } else { None })
     }
@@ -965,10 +1120,19 @@ pub struct VerificationReport {
     pub max_extrusion_error_mm: f64,
     pub lifecycle_motion_count: u32,
     pub priming_filament_length_mm: f64,
+    pub support_deposition_segments: u32,
+    pub support_deposited_volume_mm3: f64,
+    pub support_filament_length_mm: f64,
+    pub retraction_count: u32,
+    pub retracted_filament_mm: f64,
 }
 impl VerificationReport {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        if self.deposition_segments > MAX_DEPOSITION_SEGMENTS
+        if self
+            .deposition_segments
+            .checked_add(self.support_deposition_segments)
+            .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
+            || self.retraction_count > 50_000
             || self.travel_segments > MAX_DEPOSITION_SEGMENTS
         {
             return Err(resource("verification segment limit exceeded"));
@@ -985,12 +1149,23 @@ impl VerificationReport {
             self.max_position_error_mm,
             self.max_extrusion_error_mm,
             self.priming_filament_length_mm,
+            self.support_deposited_volume_mm3,
+            self.support_filament_length_mm,
+            self.retracted_filament_mm,
         ]
         .iter()
         .any(|v| !v.is_finite() || *v < 0.0)
         {
             return Err(invalid(
                 "verification measurements must be finite and nonnegative",
+            ));
+        }
+        if (self.retraction_count == 0) != (self.retracted_filament_mm == 0.0)
+            || (self.support_deposition_segments == 0) != (self.support_filament_length_mm == 0.0)
+            || (self.support_deposition_segments == 0) != (self.support_deposited_volume_mm3 == 0.0)
+        {
+            return Err(invalid(
+                "verification process/support counts disagree with measurements",
             ));
         }
         if self.coverage.len() > 64 || self.limitations.len() > 64 {
@@ -1010,6 +1185,9 @@ pub struct ManufacturingSummary {
     pub deposition_segments: u32,
     pub deposited_volume_mm3: f64,
     pub filament_length_mm: f64,
+    pub support_deposition_segments: u32,
+    pub support_deposited_volume_mm3: f64,
+    pub support_filament_length_mm: f64,
     pub software_only: bool,
 }
 impl ManufacturingSummary {
@@ -1017,12 +1195,29 @@ impl ManufacturingSummary {
         if self.layers == 0
             || self.layers > MAX_PRINT_LAYERS
             || self.paths == 0
-            || self.paths > self.deposition_segments
-            || self.deposition_segments > MAX_DEPOSITION_SEGMENTS
+            || self
+                .deposition_segments
+                .checked_add(self.support_deposition_segments)
+                .is_none_or(|n| self.paths > n)
+            || self
+                .deposition_segments
+                .checked_add(self.support_deposition_segments)
+                .is_none_or(|n| n > MAX_DEPOSITION_SEGMENTS)
         {
             return Err(invalid("invalid manufacturing summary counts"));
         }
         positive(&[self.deposited_volume_mm3, self.filament_length_mm])?;
+        if [
+            self.support_deposited_volume_mm3,
+            self.support_filament_length_mm,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(invalid(
+                "support summary measurements must be finite and nonnegative",
+            ));
+        }
         if !self.software_only {
             return Err(invalid("manufacturing artifacts must be software-only"));
         }
@@ -1050,15 +1245,24 @@ impl ManufacturingBundle {
         if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err(resource("manufacturing program size is invalid"));
         }
-        let count: usize = self
-            .plan
-            .layers
-            .iter()
-            .flat_map(|l| &l.paths)
-            .map(|p| p.points_mm.len() - 1)
-            .sum();
-        if self.verification.deposition_segments as usize != count {
-            return Err(invalid("verification/plan segment count mismatch"));
+        let mut object_count = 0usize;
+        let mut support_count = 0usize;
+        for path in self.plan.layers.iter().flat_map(|l| &l.paths) {
+            if matches!(
+                path.kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            ) {
+                support_count += path.points_mm.len() - 1;
+            } else {
+                object_count += path.points_mm.len() - 1;
+            }
+        }
+        if self.verification.deposition_segments as usize != object_count
+            || self.verification.support_deposition_segments as usize != support_count
+        {
+            return Err(invalid(
+                "verification/plan object or support segment count mismatch",
+            ));
         }
         self.summary().validate()?;
         json_bytes(self, MAX_MANUFACTURING_BUNDLE_BYTES as usize)?;
@@ -1072,6 +1276,9 @@ impl ManufacturingBundle {
             deposition_segments: self.verification.deposition_segments,
             deposited_volume_mm3: self.verification.deposited_volume_mm3,
             filament_length_mm: self.verification.filament_length_mm,
+            support_deposition_segments: self.verification.support_deposition_segments,
+            support_deposited_volume_mm3: self.verification.support_deposited_volume_mm3,
+            support_filament_length_mm: self.verification.support_filament_length_mm,
             software_only: true,
         }
     }
@@ -1224,6 +1431,10 @@ pub enum ManufacturingCommand {
         session_id: SessionId,
         base_revision: ProjectRevision,
     },
+    Preflight {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+    },
     Inspect {
         session_id: SessionId,
         base_revision: ProjectRevision,
@@ -1252,6 +1463,9 @@ pub enum ManufacturingResponse {
         resource: crate::ArtifactView,
         provenance: ManufacturingInspectionProvenance,
         replay_display: Option<ReplayDisplayDescriptor>,
+    },
+    Preflight {
+        report: PreflightReport,
     },
     Error {
         error: ManufacturingError,

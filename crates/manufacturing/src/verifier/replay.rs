@@ -13,6 +13,7 @@ pub(crate) struct ReplaySink {
     travels: u32,
     layers: u32,
     lifecycle: u32,
+    process: u32,
     expected_events: u32,
 }
 impl ReplaySink {
@@ -21,20 +22,29 @@ impl ReplaySink {
         intent: &ManufacturingIntent,
     ) -> Result<Self, ManufacturingError> {
         plan.validate(intent)?;
-        let events = plan
+        let deposition: usize = plan
             .layers
             .iter()
             .flat_map(|l| &l.paths)
-            .try_fold(0usize, |n, p| n.checked_add(p.points_mm.len()))
-            .and_then(|n| {
-                n.checked_add(
-                    if matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. }) {
-                        4
-                    } else {
-                        0
-                    },
-                )
-            })
+            .map(|p| p.points_mm.len() - 1)
+            .sum();
+        let paths: usize = plan.layers.iter().map(|l| l.paths.len()).sum();
+        let (travels, process) = match intent.recipe.process.retraction {
+            RetractionPolicy::Disabled => (paths, 0),
+            RetractionPolicy::Enabled { z_hop_mm, .. } => (
+                (paths * if z_hop_mm > 0.0 { 3 } else { 1 }).min(100_000),
+                (paths * 2).min(100_000),
+            ),
+        };
+        let lifecycle = if matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. }) {
+            4
+        } else {
+            0
+        };
+        let events = deposition
+            .checked_add(travels)
+            .and_then(|n| n.checked_add(process))
+            .and_then(|n| n.checked_add(lifecycle))
             .ok_or_else(|| super::failed("replay event count overflow"))?;
         let bytes = events
             .checked_mul(REPLAY_RECORD_BYTES)
@@ -69,6 +79,7 @@ impl ReplaySink {
             travels: 0,
             layers: plan.layers.len() as u32,
             lifecycle: 0,
+            process: 0,
             expected_events: events as u32,
         })
     }
@@ -81,6 +92,19 @@ impl ReplaySink {
         layer: u16,
         kind: u8,
     ) -> Result<(), ManufacturingError> {
+        let count = match kind {
+            0 => self.travels,
+            6 | 7 => self.lifecycle,
+            11 | 12 => self.process,
+            _ => self.depositions,
+        };
+        let max = if matches!(kind, 6 | 7) { 4 } else { 100_000 };
+        if count >= max {
+            return Err(ManufacturingError::new(
+                ManufacturingErrorCode::ResourceLimit,
+                "replay category event budget exceeded",
+            ));
+        }
         if self.events >= self.expected_events
             || self.bytes.len() + REPLAY_RECORD_BYTES > self.bytes.capacity()
         {
@@ -103,8 +127,10 @@ impl ReplaySink {
             self.max[axis] = self.max[axis].max(*value);
         }
         self.events += 1;
-        if kind >= 6 {
+        if matches!(kind, 6 | 7) {
             self.lifecycle += 1;
+        } else if matches!(kind, 11 | 12) {
+            self.process += 1;
         } else if kind == 0 {
             self.travels += 1;
         } else {
@@ -113,7 +139,7 @@ impl ReplaySink {
         Ok(())
     }
     pub(crate) fn finish(mut self) -> Result<(Vec<u8>, AabbMm), ManufacturingError> {
-        if self.events != self.expected_events {
+        if self.events == 0 || !self.process.is_multiple_of(2) {
             return Err(super::failed("incomplete replay display"));
         }
         self.bytes[..4].copy_from_slice(b"SPLR");
@@ -126,6 +152,7 @@ impl ReplaySink {
             (20, self.travels),
             (24, self.layers),
             (28, self.lifecycle),
+            (88, self.process),
         ] {
             self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }

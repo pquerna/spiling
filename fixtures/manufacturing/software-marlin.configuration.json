@@ -9,5 +9,8 @@
   "homing_restores_leveling": false,
   "firmware_extrusion_compensation": "absent",
   "fixed_g0_feed_override": false,
+  "default_cooling_fan": "ordinary print cooling fan",
+  "laser_synchronous_m106_m107": false,
+  "external_e_only_retraction": true,
   "physical_qualification": "absent"
 }

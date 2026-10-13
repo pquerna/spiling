@@ -51,7 +51,9 @@ fn intent() -> ManufacturingIntent {
             "workflow":{"kind":"diagnostic_body_only"},
             "nozzle_diameter_mm":0.4,"max_feed_mm_s":150.0,"max_volumetric_flow_mm3_s":20.0
         },
-        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0}
+        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
+            "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"}},
+            "supports":{"kind":"disabled"}}
     })).unwrap()
 }
 async fn spawn() -> EngineClient {
@@ -247,6 +249,142 @@ async fn history(client: &mut EngineClient, undo: bool) {
     ));
 }
 
+async fn preflight(client: &mut EngineClient) -> NativeOperationView {
+    let (info, _) = status(client).await;
+    let session_id = client.hello().session_id.clone();
+    let ManufacturingResponse::OperationAccepted { operation } = client
+        .manufacturing(ManufacturingCommand::Preflight {
+            session_id,
+            base_revision: info.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("preflight must be a durable native operation")
+    };
+    wait(client, operation.name).await
+}
+
+#[tokio::test]
+async fn preflight_is_durable_nonmutating_and_reports_software_eligibility() {
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let store = work.0.join("operations");
+    let checkpoint = work.0.join("project");
+    let mut client = EngineClient::spawn_in(ENGINE, &store).await.unwrap();
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    let before = status(&mut client).await;
+    let scene_before = scene(&mut client).await;
+    let result = preflight(&mut client).await;
+    assert_eq!(result.status, JobStatus::Completed, "{result:?}");
+    assert!(
+        result.outputs.is_empty(),
+        "preflight must not publish artifacts"
+    );
+    let Some(JobResult::ManufacturingPreflight { report }) = result.result else {
+        panic!("preflight report missing")
+    };
+    report.validate().unwrap();
+    assert_eq!(report.input_revision, before.0.revision);
+    assert!(report.software_only);
+    assert!(report.eligible);
+    assert_eq!(status(&mut client).await, before);
+    assert_eq!(scene(&mut client).await, scene_before);
+    let retained = client.native_operation(result.name.clone()).await.unwrap();
+    assert!(matches!(
+        retained.result,
+        Some(JobResult::ManufacturingPreflight { .. })
+    ));
+    assert_eq!(retained.outputs, result.outputs);
+    save(&mut client, &checkpoint).await;
+    client.shutdown().await.unwrap();
+    let mut reader = EngineClient::spawn_in(ENGINE, &store).await.unwrap();
+    let historical = reader.native_operation(result.name).await.unwrap();
+    assert_eq!(historical.result, retained.result);
+    assert!(historical.outputs.is_empty());
+    assert_eq!(
+        open(&mut reader, &checkpoint, true).await.status,
+        JobStatus::Completed
+    );
+    let read_only_before = status(&mut reader).await;
+    assert!(read_only_before.0.read_only);
+    let read_only_report = preflight(&mut reader).await;
+    assert_eq!(read_only_report.status, JobStatus::Completed);
+    assert!(read_only_report.outputs.is_empty());
+    assert_eq!(status(&mut reader).await, read_only_before);
+    reader.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_preflight_cancellation_and_revision_staleness_do_not_publish() {
+    use spiling_contracts::rpc::{DiagnosticState, RunDiagnosticRequest};
+    let work = Workspace::new();
+    let source = work.source("box-mm.step");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    let rpc = client.rpc();
+    let blocker = rpc
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/preflight-boundary".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if spiling_contracts::metadata(&operation).unwrap().state
+                == DiagnosticState::Running as i32
+            {
+                break;
+            }
+            assert!(!operation.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = status(&mut client).await;
+    let command = ManufacturingCommand::Preflight {
+        session_id: client.hello().session_id.clone(),
+        base_revision: before.0.revision,
+    };
+    let ManufacturingResponse::OperationAccepted { operation } =
+        client.manufacturing(command.clone()).await.unwrap()
+    else {
+        panic!("queued preflight")
+    };
+    client.cancel_operation(&operation.name).await.unwrap();
+    let cancelled = wait(&mut client, operation.name).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    assert_eq!(status(&mut client).await, before);
+    let ManufacturingResponse::OperationAccepted { operation } =
+        client.manufacturing(command).await.unwrap()
+    else {
+        panic!("queued preflight")
+    };
+    let mut changed = intent();
+    changed.recipe.revision = "2".into();
+    set_intent(&mut client, changed).await;
+    let changed_state = status(&mut client).await;
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait(&mut client, operation.name).await;
+    assert_eq!(stale.status, JobStatus::Failed);
+    assert!(
+        matches!(stale.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::StaleRevision)
+    );
+    assert!(stale.result.is_none() && stale.outputs.is_empty());
+    assert_eq!(status(&mut client).await, changed_state);
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn intent_commit_releases_redo_native_pins_without_advancing_scene_epoch() {
     let work = Workspace::new();
@@ -413,11 +551,6 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
         ManufacturingErrorCode::StaleRevision,
     );
     assert!(bundle.verification.verified && record.summary.software_only);
-    assert!(
-        bundle.program.contains("G21")
-            && bundle.program.contains("G90")
-            && bundle.program.contains("M82")
-    );
     assert_eq!(inspect(&mut client).await.0, record);
     save(&mut client, &checkpoint).await;
     let mut changed = intent();

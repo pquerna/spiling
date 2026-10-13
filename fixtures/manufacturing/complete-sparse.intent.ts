@@ -11,10 +11,11 @@ const intent = {
   recipe: {
     ...solidIntent.recipe,
     id: "software-sparse-skins",
-    revision: "1",
+    revision: "2",
     infill_fraction: 0.25,
     top_skin_thickness_mm: 0.8,
     bottom_skin_thickness_mm: 0.8,
+    supports: { kind: "breakaway", density: 0.3, xy_clearance_mm: 0.3, z_gap_mm: 0.2, interface_thickness_mm: 0.4 },
   },
 } satisfies ManufacturingIntent;
 

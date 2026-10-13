@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{OFFSET_TOLERANCE_MM, boolean_budget, forward};
+use super::{MAX_BOOLEAN_PAIRS, OFFSET_TOLERANCE_MM, boolean_budget, forward};
 use crate::{check_cancel, error};
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
 use geo::{
-    Area, BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Point,
-    Polygon,
+    Area, BooleanOps, BoundingRect, Buffer, Contains, ConvexHull, Coord, LineString, MultiPoint,
+    MultiPolygon, Point, Polygon, unary_union,
 };
 use spiling_contracts::geometry::RigidPoseMm;
 use spiling_contracts::manufacturing::*;
@@ -102,62 +102,118 @@ pub(super) fn offset(
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     check_cancel(cancel)?;
     check_size(region)?;
+    if region.0.is_empty() || distance == 0.0 {
+        return Ok(region.clone());
+    }
+    if !distance.is_finite() {
+        return Err(unsupported("offset distance is not finite"));
+    }
     let radius = distance.abs();
-    // LineJoin::Round takes maximum chord length / radius, not segment count.
-    let ratio = if radius <= OFFSET_TOLERANCE_MM {
-        1.0
-    } else {
-        2.0 * (2.0 * OFFSET_TOLERANCE_MM / radius - (OFFSET_TOLERANCE_MM / radius).powi(2)).sqrt()
-    };
-    if !ratio.is_finite() || ratio <= 0.0 || (std::f64::consts::TAU / ratio).ceil() > 4096.0 {
-        return Err(resource("offset arc subdivision exceeds work limit"));
+    // A circumscribed disk reserves half the existing offset error budget for
+    // ordinary Boolean arithmetic. Fourfold symmetry retains cardinal supports.
+    let radial_error = OFFSET_TOLERANCE_MM * 0.5;
+    let angle = (radius / (radius + radial_error)).acos();
+    let required = (std::f64::consts::PI / angle).ceil();
+    if !required.is_finite() || required > 4096.0 {
+        return Err(resource("offset disk subdivision exceeds work limit"));
     }
-    boolean_budget(region, region)?;
-    let mut expanded_points = point_count(region);
-    for polygon in &region.0 {
-        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            let n = ring.0.len() - 1;
-            for i in 0..n {
-                check_cancel(cancel)?;
-                let a = ring.0[(i + n - 1) % n];
-                let b = ring.0[i];
-                let c = ring.0[(i + 1) % n];
-                let incoming = [b.x - a.x, b.y - a.y];
-                let outgoing = [c.x - b.x, c.y - b.y];
-                let turn = (incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
-                    .atan2(incoming[0] * outgoing[0] + incoming[1] * outgoing[1]);
-                if turn * distance > 0.0 {
-                    let additional = (turn.abs() / ratio.min(1.0)).ceil() as usize + 1;
-                    expanded_points = expanded_points
-                        .checked_add(additional)
-                        .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-                        .ok_or_else(|| {
-                            resource("offset expanded point budget exceeded before buffering")
-                        })?;
-                }
+    let sides = (required as usize).max(4).div_ceil(4) * 4;
+    let circumradius = radius / (std::f64::consts::PI / sides as f64).cos();
+    if !circumradius.is_finite() || circumradius - radius > radial_error {
+        return Err(resource("offset disk cannot meet the radial error budget"));
+    }
+    let disk = (0..sides)
+        .map(|index| {
+            let angle = std::f64::consts::TAU * (index as f64 + 0.5) / sides as f64;
+            Coord {
+                x: circumradius * angle.cos(),
+                y: circumradius * angle.sin(),
             }
-        }
-    }
-    let style = || BufferStyle::new(distance).line_join(LineJoin::Round(ratio.min(1.0)));
+        })
+        .collect::<Vec<_>>();
     let mut result = if distance < 0.0 {
-        // Erosion cannot join disconnected material islands. Buffer each island in
-        // its own coordinate range so distant placements do not reduce the
-        // integer overlay's precision and introduce spurious contour fragments.
+        // S eroded by a disk is S minus the disk-neighborhood of its boundary.
+        // Build that neighborhood from convex segment capsules, not independently
+        // shifted finite edges whose disappearing supports can form false islands.
+        // Each island retains its own Boolean coordinate range.
         let mut polygons = Vec::with_capacity(region.0.len());
         for polygon in &region.0 {
             check_cancel(cancel)?;
-            let mut eroded = polygon.buffer_with_style(style());
+            let tube = boundary_tube(polygon, &disk, cancel)?;
+            let source = MultiPolygon(vec![polygon.clone()]);
+            boolean_budget(&source, &tube)?;
+            let mut eroded = source.difference(&tube);
+            check_cancel(cancel)?;
             check_size(&eroded)?;
             polygons.append(&mut eroded.0);
         }
         MultiPolygon(polygons)
     } else {
-        region.buffer_with_style(style())
+        let mut expanded = region.clone();
+        for polygon in &region.0 {
+            let tube = boundary_tube(polygon, &disk, cancel)?;
+            boolean_budget(&expanded, &tube)?;
+            expanded = expanded.union(&tube);
+            check_cancel(cancel)?;
+            check_size(&expanded)?;
+        }
+        expanded
     };
     check_cancel(cancel)?;
     check_size(&result)?;
     canonicalize(&mut result);
     Ok(result)
+}
+
+fn boundary_tube(
+    polygon: &Polygon<f64>,
+    disk: &[Coord<f64>],
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    let mut primitives = MultiPolygon(Vec::new());
+    let mut retained_points = 0usize;
+    for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+        for segment in ring.0.windows(2) {
+            check_cancel(cancel)?;
+            // Only this convex construction primitive is hulled; authoritative
+            // material rings are never simplified, snapped or replaced by a hull.
+            let capsule = MultiPoint(
+                segment
+                    .iter()
+                    .flat_map(|endpoint| {
+                        disk.iter().map(move |delta| {
+                            Point(Coord {
+                                x: endpoint.x + delta.x,
+                                y: endpoint.y + delta.y,
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .convex_hull();
+            retained_points = retained_points
+                .checked_add(capsule.exterior().0.len())
+                .filter(|count| *count <= MAX_DEPOSITION_SEGMENTS as usize)
+                .ok_or_else(|| resource("offset primitive point limit exceeded"))?;
+            let count = primitives.0.len() + 1;
+            if count
+                .checked_mul(count)
+                .is_none_or(|pairs| pairs > MAX_BOOLEAN_PAIRS)
+            {
+                return Err(resource("offset primitive pair admission limit exceeded"));
+            }
+            primitives.0.push(capsule);
+        }
+    }
+    check_size(&primitives)?;
+    boolean_budget(&primitives, &primitives)?;
+    check_cancel(cancel)?;
+    // One overlay coordinate frame for all boundary capsules. Incremental
+    // unions repeatedly quantize prior results and can create sub-grid edges.
+    let tube = unary_union(&primitives.0);
+    check_cancel(cancel)?;
+    check_size(&tube)?;
+    Ok(tube)
 }
 
 pub(super) fn canonicalize(region: &mut MultiPolygon<f64>) {
@@ -224,9 +280,13 @@ pub(super) fn wall_centers(
     for wall in 0..recipe.perimeter_count {
         let centers = offset(section, -(wall as f64 + 0.5) * width, cancel)?;
         if centers.0.len() != section.0.len() {
-            return Err(unsupported(
-                "requested perimeter offset erases or splits an island; thin geometry is unsupported",
-            ));
+            return Err(unsupported(&format!(
+                "requested perimeter offset erases or splits an island; thin geometry is unsupported (source islands {}, offset islands {}, section area {} mm², bead width {} mm)",
+                section.0.len(),
+                centers.0.len(),
+                section.unsigned_area(),
+                width
+            )));
         }
         for original in &section.0 {
             check_cancel(cancel)?;
@@ -294,9 +354,31 @@ pub(super) fn wall_paths(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HatchAxis {
+    X,
+    Y,
+}
+impl HatchAxis {
+    pub(super) fn preferred(index: u32) -> Self {
+        if index.is_multiple_of(2) {
+            Self::X
+        } else {
+            Self::Y
+        }
+    }
+    pub(super) fn orthogonal(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::X,
+        }
+    }
+}
+
 pub(super) struct HatchLayer<'a> {
     pub z: f64,
-    pub index: u32,
+    pub height: f64,
+    pub axis: HatchAxis,
     pub recipe: &'a PlanarPrintRecipe,
 }
 
@@ -311,16 +393,20 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let HatchLayer { z, index, recipe } = *layer;
+    let HatchLayer {
+        z,
+        height: h,
+        axis,
+        recipe,
+    } = *layer;
     let width = recipe.bead_width_mm;
-    let h = recipe.layer_height_mm;
     let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
     for polygon in &fill.0 {
         check_cancel(cancel)?;
         let rect = polygon
             .bounding_rect()
             .ok_or_else(|| unsupported("fill has no finite bounds"))?;
-        let swap = index % 2 == 1;
+        let swap = axis == HatchAxis::Y;
         let (min, max) = if swap {
             (rect.min().x, rect.max().x)
         } else {
@@ -403,12 +489,18 @@ fn push_path(
     kind: DepositionKind,
     points_mm: Vec<[f64; 3]>,
 ) -> Result<(), ManufacturingError> {
-    if points_mm
+    if let Some(edge) = points_mm
         .windows(2)
-        .any(|p| (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]) <= 0.000002)
+        .find(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]) <= 0.000002)
     {
-        return Err(unsupported(
-            "offset creates unresolved or zero-length deposition segment",
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            format!(
+                "offset creates unresolved or zero-length deposition segment; role {kind:?}, {:?} to {:?}, length {:.12} mm",
+                edge[0],
+                edge[1],
+                (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1])
+            ),
         ));
     }
     paths.push(DepositionPath { kind, points_mm });

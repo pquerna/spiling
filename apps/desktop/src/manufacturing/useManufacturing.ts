@@ -12,7 +12,7 @@ import {
   type ManufacturingIntent,
   type VerificationOutput,
 } from "@spiling/protocol";
-import { native } from "../native.ts";
+import { native, type ManufacturingLayer } from "../native.ts";
 import type { ManufacturingHost } from "../useWorkbench.ts";
 import softwareIntentJson from "../../../../fixtures/manufacturing/solid-fill.intent.json?raw";
 import {
@@ -30,6 +30,7 @@ const softwareIntent: ManufacturingIntent = JSON.parse(softwareIntentJson);
 
 type Status = Extract<ManufacturingResponse, { type: "status" }>;
 type Verified = Extract<JobResult, { kind: "manufacturing_verified" }>;
+type Preflight = Extract<JobResult, { kind: "manufacturing_preflight" }>["report"];
 interface Inspection {
   result: Verified;
   session: string;
@@ -39,6 +40,7 @@ interface Inspection {
   diagnostic: boolean;
   authority: string;
   invalidated: boolean;
+  layers: ManufacturingLayer[];
 }
 export function useManufacturing(host: ManufacturingHost) {
   const hostRef = useRef(host);
@@ -52,6 +54,7 @@ export function useManufacturing(host: ManufacturingHost) {
   const inspectionRef = useRef(inspection);
   inspectionRef.current = inspection;
   const [message, setMessage] = useState("");
+  const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [working, setWorking] = useState(false);
   const [admittingReplay, setAdmittingReplay] = useState(false);
   const [layer, setLayer] = useState<number | null>(null);
@@ -143,6 +146,7 @@ export function useManufacturing(host: ManufacturingHost) {
       setDraft(null);
       setMessage("");
       setWorking(false);
+      setPreflight(null);
       if (inspectionRef.current) {
         const historical = {
           ...inspectionRef.current,
@@ -177,6 +181,32 @@ export function useManufacturing(host: ManufacturingHost) {
     }
   }, [status, inspection]);
 
+  async function selectIntent(relativePath?: string) {
+    if (!writable) return;
+    setWorking(true);
+    await hostRef.current.run(async (token) => {
+      try {
+        const selection = await hostRef.current.exchange(
+          () => relativePath === undefined ? native.selectManufacturingIntent()
+            : native.debugSelectManufacturingIntent(relativePath), token,
+        );
+        if (!selection) { setMessage("Intent selection cancelled; draft unchanged."); return; }
+        const intent = await hostRef.current.exchange(() => native.loadManufacturingIntent(selection), token);
+        const next = makeDraft(intent, statusRef.current?.intent ?? null);
+        draftRef.current = next;
+        setDraft(next);
+        setMessage(`Loaded ${selection.label}: Rust-validated full inert intent. Apply commits it; physical qualification is absent.`);
+      } catch (error) { setMessage(String(error)); throw error; }
+    });
+    if (mounted.current) setWorking(false);
+  }
+  async function prepareBed(occurrenceId: number, center: boolean) {
+    if (!writable || !statusRef.current?.intent || changed) return;
+    try {
+      await hostRef.current.prepareBed(occurrenceId, center);
+      setMessage("Bed placement submitted through authoritative SetInstancePose; Core revision/history owns the edit.");
+    } catch (error) { setMessage(String(error)); }
+  }
   function selectSoftwareIntent() {
     const next = makeDraft(softwareIntent, statusRef.current?.intent ?? null);
     draftRef.current = next;
@@ -190,6 +220,9 @@ export function useManufacturing(host: ManufacturingHost) {
       previous ? { ...previous, values: { ...previous.values, [key]: value } } : null,
     );
   }
+  function editPolicyScalar(key: string, value: string) {
+    setDraft(previous => previous ? { ...previous, policyValues: { ...previous.policyValues, [key]: value } } : null);
+  }
   function reloadDraft() {
     const intent = statusRef.current?.intent;
     const next = intent ? makeDraft(intent, intent) : null;
@@ -197,8 +230,8 @@ export function useManufacturing(host: ManufacturingHost) {
     setDraft(next);
     setMessage("");
   }
-  async function perform(action: "apply" | "compile" | "inspect", output?: VerificationOutput) {
-    if (!available || (action !== "inspect" && !writable)) return;
+  async function perform(action: "apply" | "compile" | "inspect" | "preflight", output?: VerificationOutput) {
+    if (!available || ((action === "apply" || action === "compile") && !writable)) return;
     if (action === "apply" && (!draftRef.current || !draftChanged(draftRef.current) || conflict))
       return;
     let appliedIntent: ManufacturingIntent | undefined;
@@ -230,6 +263,8 @@ export function useManufacturing(host: ManufacturingHost) {
               }
             : action === "compile"
               ? { op: "compile" as const, session_id: session, base_revision: before.info.revision }
+              : action === "preflight"
+                ? { op: "preflight" as const, session_id: session, base_revision: before.info.revision }
               : {
                   op: "inspect" as const,
                   session_id: session,
@@ -252,6 +287,19 @@ export function useManufacturing(host: ManufacturingHost) {
           setMessage(
             "Full manufacturing intent applied once. Project Undo, Save and Reopen use Core history/checkpoints.",
           );
+          return;
+        }
+        if (action === "preflight") {
+          const result = response.type === "preflight"
+            ? { kind: "manufacturing_preflight" as const, report: response.report }
+            : await hostRef.current.poll(response, token);
+          ensureRequest(token, id);
+          if (result.kind !== "manufacturing_preflight")
+            throw new Error("Preflight returned another operation kind.");
+          if (hostRef.current.snapshot().project?.revision !== result.report.input_revision)
+            throw new Error("Preflight revision changed; run it again.");
+          setPreflight(result.report);
+          setMessage("Inexpensive input eligibility only: native slicing analysis pending; software-only and physically unqualified.");
           return;
         }
         if (inspectionRef.current) {
@@ -301,9 +349,10 @@ export function useManufacturing(host: ManufacturingHost) {
             descriptor.info.input_hash !== result.provenance.input_hash ||
             descriptor.info.verifier_version !== result.provenance.verifier_version ||
             descriptor.info.layer_count !== result.record.summary.layers ||
-            descriptor.info.deposition_count !== result.report.deposition_segments ||
+            descriptor.info.deposition_count !== result.report.deposition_segments + result.report.support_deposition_segments ||
             descriptor.info.travel_count !== result.report.travel_segments ||
-            descriptor.info.lifecycle_count !== result.report.lifecycle_motion_count
+            descriptor.info.lifecycle_count !== result.report.lifecycle_motion_count ||
+            descriptor.info.process_count !== result.report.retraction_count * 2
           )
             throw new Error(
               "Replay descriptor is not bound to the freshly verified active bundle.",
@@ -328,6 +377,12 @@ export function useManufacturing(host: ManufacturingHost) {
         } else {
           await hostRef.current.clearReplay();
         }
+        const layers = await native.manufacturingLayers(result.record);
+        ensureRequest(token, id);
+        const afterLayers = await refresh(token);
+        ensureRequest(token, id);
+        if (!sameArtifact(afterLayers.artifact, result.record))
+          throw new Error("Bundle changed during native layer accounting retrieval.");
         const next: Inspection = {
           result,
           session,
@@ -337,6 +392,7 @@ export function useManufacturing(host: ManufacturingHost) {
           diagnostic,
           authority: currentAuthority,
           invalidated: false,
+          layers,
         };
         inspectionRef.current = next;
         setInspection(next);
@@ -353,6 +409,8 @@ export function useManufacturing(host: ManufacturingHost) {
       } catch (error) {
         try {
           hostRef.current.ensure(token);
+          if (action === "inspect" && request.current === id && !inspectionRef.current?.displayReady)
+            await hostRef.current.clearReplay();
           await hostRef.current.refreshProject(token);
           await refresh(token);
         } catch {
@@ -448,6 +506,9 @@ export function useManufacturing(host: ManufacturingHost) {
     status,
     draft,
     inspection,
+    preflight,
+    selectIntent,
+    prepareBed,
     fresh,
     message,
     working,
@@ -460,9 +521,11 @@ export function useManufacturing(host: ManufacturingHost) {
     showTravel,
     selectSoftwareIntent,
     editScalar,
+    editPolicyScalar,
     reloadDraft,
     apply: () => perform("apply"),
     compile: () => perform("compile"),
+    preflightIntent: () => perform("preflight"),
     inspect: (output: VerificationOutput) => perform("inspect", output),
     updateView,
     exportBundle,

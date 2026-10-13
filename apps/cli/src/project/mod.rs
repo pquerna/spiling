@@ -8,7 +8,7 @@ use crate::{
     set_once,
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
-use spiling_engine_client::EngineClient;
+use spiling_engine_client::{EngineClient, prepare_bed_pose as bed_pose};
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
 
 /// A failed checkpoint with freshly observed engine state, not an assumed rollback.
@@ -56,8 +56,10 @@ enum Operation {
     Import(NativePath),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
+    PrepareBed(OccurrenceId, bool),
     Remove(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
+    Preflight,
     Compile,
     Verify,
     ExportManufacturing,
@@ -144,6 +146,13 @@ pub fn parse(
                 inspections.push((occurrence, face));
             }
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
+            Some("--preflight") => operations.push(Operation::Preflight),
+            Some("--place-on-bed" | "--center-on-bed") => {
+                let center = arg == "--center-on-bed";
+                let id =
+                    OccurrenceId::new(text(&mut args, "--place-on-bed/--center-on-bed")?.parse()?)?;
+                operations.push(Operation::PrepareBed(id, center));
+            }
             Some("--compile") => operations.push(Operation::Compile),
             Some("--verify") => operations.push(Operation::Verify),
             Some("--manufacturing-out") => {
@@ -200,7 +209,10 @@ pub fn parse(
             || operations.iter().any(|operation| {
                 !matches!(
                     operation,
-                    Operation::Verify | Operation::ExportManufacturing | Operation::ExportReplay
+                    Operation::Preflight
+                        | Operation::Verify
+                        | Operation::ExportManufacturing
+                        | Operation::ExportReplay
                 )
             }))
     {
@@ -367,6 +379,31 @@ async fn verify(
         _ => Err("unexpected manufacturing verification response".into()),
     }
 }
+
+async fn preflight(client: &mut EngineClient) -> Result<PreflightReport, Error> {
+    let session = client.hello().session_id.clone();
+    let base_revision = info(client).await?.revision;
+    match client
+        .manufacturing(ManufacturingCommand::Preflight {
+            session_id: session.clone(),
+            base_revision,
+        })
+        .await?
+    {
+        ManufacturingResponse::Preflight { report } => Ok(report),
+        ManufacturingResponse::OperationAccepted { operation } => {
+            match geometry::wait_operation(client, &session, operation).await? {
+                JobResult::ManufacturingPreflight { report } => Ok(report),
+                _ => Err("unexpected manufacturing preflight job result".into()),
+            }
+        }
+        ManufacturingResponse::Error { error } => {
+            Err(spiling_engine_client::ClientError::Manufacturing(error).into())
+        }
+        _ => Err("unexpected manufacturing preflight response".into()),
+    }
+}
+
 pub async fn run(
     client: &mut EngineClient,
     workflow: Workflow,
@@ -442,6 +479,7 @@ async fn execute(
     let mut verification = None;
     let mut export_evidence = None;
     let mut replay_evidence = None;
+    let mut preflight_report = None;
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
@@ -463,6 +501,10 @@ async fn execute(
                     }
                     _ => return Err("unexpected set manufacturing intent response".into()),
                 }
+            }
+            Operation::Preflight => {
+                label = "preflight";
+                preflight_report = Some(preflight(client).await?);
             }
             Operation::Compile => {
                 label = "compile";
@@ -607,6 +649,48 @@ async fn execute(
                     return Err("unexpected pose response".into());
                 }
             }
+            Operation::PrepareBed(occurrence_id, center) => {
+                label = if center {
+                    "center_on_bed"
+                } else {
+                    "place_on_bed"
+                };
+                let summary = geometry::scene(client, &session).await?;
+                let (definitions, occurrences) = geometry::records(client, &summary).await?;
+                let occurrence = occurrences
+                    .iter()
+                    .find(|row| row.occurrence_id == occurrence_id)
+                    .ok_or("bed preparation occurrence not in project")?;
+                let definition = definitions
+                    .iter()
+                    .find(|row| row.definition_id == occurrence.definition_id)
+                    .ok_or("bed preparation definition not in project")?;
+                let intent = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone() }).await? {
+                    ManufacturingResponse::Status { intent: Some(intent), .. } => intent,
+                    ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
+                    ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
+                    _ => return Err("unexpected manufacturing status response".into()),
+                };
+                let pose = bed_pose(
+                    definition.bounds_mm,
+                    occurrence.pose,
+                    intent.printer.build_envelope,
+                    center,
+                )?;
+                let response = geometry::control(
+                    client,
+                    GeometryCommand::SetInstancePose {
+                        session_id: session.clone(),
+                        base_revision: summary.revision,
+                        occurrence_id,
+                        pose,
+                    },
+                )
+                .await?;
+                if !matches!(response, GeometryResponse::SceneChanged { .. }) {
+                    return Err("unexpected bed preparation pose response".into());
+                }
+            }
             Operation::Remove(occurrence_id) => {
                 label = "remove";
                 let response = geometry::control(
@@ -671,7 +755,8 @@ async fn execute(
             verification = None;
         }
         history.push(serde_json::json!({
-            "operation": label, "project": info(client).await?, "manufacturing": manufacturing
+            "operation": label, "project": info(client).await?, "manufacturing": manufacturing,
+            "preflight": if label == "preflight" { preflight_report.as_ref() } else { None }
         }));
     }
     let summary = geometry::scene(client, &session).await?;
@@ -715,6 +800,9 @@ async fn execute(
     report["face_inspections"] = serde_json::to_value(inspections)?;
     report["operations"] = serde_json::json!(history);
     report["manufacturing"] = manufacturing_status(client, true).await?;
+    if let Some(preflight) = preflight_report {
+        report["manufacturing"]["preflight"] = serde_json::to_value(preflight)?;
+    }
     if let Some(inspection) = verification {
         report["manufacturing"]["verified_artifact_hash"] =
             serde_json::json!(inspection.record.hash);
@@ -833,6 +921,86 @@ mod tests {
         );
         assert!(parse_args(&["edit", "project", "--replay-out", "motion.splr"]).is_err());
     }
+    #[test]
+    fn bed_preparation_preserves_orientation_and_uses_declared_envelope() {
+        let bounds = AabbMm::new([-2.0, -4.0, -3.0], [8.0, 6.0, 7.0]).unwrap();
+        let envelope = AabbMm::new([10.0, 20.0, 5.0], [110.0, 120.0, 105.0]).unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [30.0, 40.0, 50.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        let placed = bed_pose(bounds, pose, envelope, false).unwrap();
+        assert_eq!(placed.translation_mm, [30.0, 40.0, 8.0]);
+        assert_eq!(placed.rotation_xyzw, pose.rotation_xyzw);
+        let centered = bed_pose(bounds, pose, envelope, true).unwrap();
+        assert_eq!(centered.translation_mm, [57.0, 69.0, 8.0]);
+        let tilted = RigidPoseMm {
+            rotation_xyzw: [
+                0.0,
+                0.0,
+                (std::f64::consts::PI / 8.0).sin(),
+                (std::f64::consts::PI / 8.0).cos(),
+            ],
+            ..pose
+        };
+        assert!(bed_pose(bounds, tilted, envelope, true).is_err());
+        let small = AabbMm::new([0.0; 3], [1.0; 3]).unwrap();
+        assert!(bed_pose(bounds, pose, small, true).is_err());
+        let rotated = RigidPoseMm {
+            rotation_xyzw: [0.0, 0.0, 1.0, 0.0],
+            ..pose
+        };
+        let centered = bed_pose(bounds, rotated, envelope, true).unwrap();
+        assert_eq!(centered.rotation_xyzw, rotated.rotation_xyzw);
+        assert_eq!(centered.translation_mm, [63.0, 71.0, 8.0]);
+    }
+
+    #[test]
+    fn preflight_is_read_only_but_bed_preparation_is_an_ordered_edit() {
+        let options = parse_args(&["inspect", "project", "--preflight"])
+            .unwrap()
+            .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [Operation::Preflight]
+        ));
+        for flag in ["--place-on-bed", "--center-on-bed"] {
+            assert!(parse_args(&["inspect", "project", flag, "1"]).is_err());
+            assert!(parse_args(&["open", "project", flag, "0"]).is_err());
+            assert!(parse_args(&["open", "project", flag]).is_err());
+        }
+        let options = parse_args(&[
+            "edit",
+            "project",
+            "--place-on-bed",
+            "1",
+            "--center-on-bed",
+            "2",
+            "--preflight",
+            "--compile",
+            "--verify",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project expected")
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::PrepareBed(_, false),
+                Operation::PrepareBed(_, true),
+                Operation::Preflight,
+                Operation::Compile,
+                Operation::Verify,
+                Operation::Save(None)
+            ]
+        ));
+    }
+
     #[test]
     fn intent_json_is_bounded_before_child_spawn() {
         let root = env::temp_dir().join(format!("spiling-intent-{}", SessionId::new().as_str()));

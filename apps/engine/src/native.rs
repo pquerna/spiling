@@ -261,6 +261,11 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
+    if matches!(&private, geometry::JobResult::ManufacturingPreflight { .. }) {
+        let result = public_result(private, resources, None)?;
+        jobs.native_finish(name, Ok(result), vec![])?;
+        return Ok(true);
+    }
     // No short edit can interleave between ACK/Core commit and immutable output capture.
     let mut outputs = Vec::new();
     for artifact in runtime.scene_artifacts() {
@@ -448,6 +453,9 @@ fn public_result(
         geometry::JobResult::Scene { summary } => Public::Scene { summary },
         geometry::JobResult::Section { artifact_id } => Public::Section { artifact_id },
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
+        geometry::JobResult::ManufacturingPreflight { report } => {
+            Public::ManufacturingPreflight { report }
+        }
         geometry::JobResult::ManufacturingCompiled { info, record } => {
             let descriptor = resource(record.hash.as_str(), resources)?;
             Public::ManufacturingCompiled {

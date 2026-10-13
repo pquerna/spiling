@@ -66,6 +66,9 @@ pub(crate) enum JobResult {
         info: ProjectInfo,
         record: ManufacturingArtifactRecord,
     },
+    ManufacturingPreflight {
+        report: PreflightReport,
+    },
     ManufacturingVerified {
         record: ManufacturingArtifactRecord,
         report: VerificationReport,

@@ -129,6 +129,9 @@ pub enum JobResult {
     ProjectSaved {
         info: crate::project::ProjectInfo,
     },
+    ManufacturingPreflight {
+        report: crate::manufacturing::PreflightReport,
+    },
     ManufacturingCompiled {
         info: crate::project::ProjectInfo,
         record: crate::manufacturing::ManufacturingArtifactRecord,

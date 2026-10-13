@@ -41,6 +41,18 @@ fn intent() -> ManufacturingIntent {
             print_speed_mm_s: 20.0,
             travel_speed_mm_s: 100.0,
             flow_multiplier: 1.0,
+            process: ProcessPolicy {
+                first_layer_speed_factor: 1.0,
+                first_layer_flow_factor: 1.0,
+                fan_first_layers: 0,
+                fan_after_first_layers: 0,
+                bridge_speed_factor: 0.5,
+                bridge_flow_factor: 1.0,
+                bridge_fan_pwm: 255,
+                max_bridge_span_mm: 5.0,
+                retraction: RetractionPolicy::Disabled,
+            },
+            supports: SupportPolicy::Disabled,
         },
     }
 }
@@ -275,7 +287,7 @@ fn rigid_rotated_sections_and_nonzero_bed_use_declared_world_frame() {
 }
 
 #[test]
-fn unsupported_thin_support_partial_top_envelope_and_invalid_profiles_are_errors() {
+fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
     let scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut data = intent();
     data.recipe.bead_width_mm = 12.0;
@@ -291,10 +303,11 @@ fn unsupported_thin_support_partial_top_envelope_and_invalid_profiles_are_errors
     );
     data = intent();
     data.recipe.layer_height_mm = 0.3;
-    assert_eq!(
-        scene.compile(&data).err().unwrap().code,
-        ManufacturingErrorCode::UnsupportedGeometry
-    );
+    let variable = scene.compile(&data).unwrap();
+    let last = variable.plan.layers.last().unwrap();
+    assert!((last.z_mm - 8.0).abs() < 1e-6);
+    assert!(last.height_mm > 0.0 && last.height_mm < data.recipe.layer_height_mm);
+    assert!(variable.verification.verified);
     data = intent();
     data.printer.build_envelope.max[0] = 19.0;
     assert_eq!(

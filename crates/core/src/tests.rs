@@ -374,6 +374,18 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             print_speed_mm_s: 10.0,
             travel_speed_mm_s: 20.0,
             flow_multiplier: 1.0,
+            process: spiling_contracts::manufacturing::ProcessPolicy {
+                first_layer_speed_factor: 1.0,
+                first_layer_flow_factor: 1.0,
+                fan_first_layers: 0,
+                fan_after_first_layers: 0,
+                bridge_speed_factor: 1.0,
+                bridge_flow_factor: 1.0,
+                bridge_fan_pwm: 0,
+                max_bridge_span_mm: 10.0,
+                retraction: spiling_contracts::manufacturing::RetractionPolicy::Disabled,
+            },
+            supports: spiling_contracts::manufacturing::SupportPolicy::Disabled,
         },
     }
 }
@@ -399,6 +411,8 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         protected_hole_area_mm2: 0.0,
         nominal_deposition_volume_mm3: volume,
         requested_infill_fraction: recipe.infill_fraction,
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0,
     };
     ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -432,6 +446,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             layers: vec![PrintLayer {
                 index: 0,
                 z_mm: 0.2,
+                height_mm: 0.2,
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
                     kind: DepositionKind::BottomSkin,
@@ -456,6 +471,11 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             max_extrusion_error_mm: 0.0,
             lifecycle_motion_count: 0,
             priming_filament_length_mm: 0.0,
+            support_deposition_segments: 0,
+            support_deposited_volume_mm3: 0.0,
+            support_filament_length_mm: 0.0,
+            retraction_count: 0,
+            retracted_filament_mm: 0.0,
         },
     }
 }
@@ -476,6 +496,33 @@ pub(crate) fn bundle_asset(bundle: &ManufacturingBundle) -> Arc<ManufacturingAss
         )
         .unwrap(),
     )
+}
+
+#[test]
+fn exact_floating_totals_admit_durable_bundles_but_reject_changed_records() {
+    let project = manufactured();
+    let mut bundle = manufacturing_bundle(&project);
+    // Core checks durable metadata, not physical/replay claims in this unverified fixture.
+    let volume = 230.33379795276542;
+    bundle.verification.deposited_volume_mm3 = volume;
+    let asset = bundle_asset(&bundle);
+    assert_eq!(
+        asset
+            .validate()
+            .unwrap()
+            .summary()
+            .deposited_volume_mm3
+            .to_bits(),
+        volume.to_bits()
+    );
+    let mut changed = asset.record.clone();
+    changed.summary.deposited_volume_mm3 = f64::from_bits(volume.to_bits() + 1);
+    assert_eq!(
+        ManufacturingAsset::new(changed, asset.bytes.as_ref().clone())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset,
+    );
 }
 pub(crate) fn manufactured() -> Project {
     let mut project = imported();

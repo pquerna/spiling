@@ -6,7 +6,7 @@ use super::*;
 use classification::{ClassifiedRegions, WallLayout};
 use geo::{Coord, LineString, Polygon};
 
-fn recipe(fraction: f64) -> PlanarPrintRecipe {
+pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
     PlanarPrintRecipe {
         id: "region-test".into(),
         revision: "1".into(),
@@ -22,6 +22,18 @@ fn recipe(fraction: f64) -> PlanarPrintRecipe {
         print_speed_mm_s: 20.0,
         travel_speed_mm_s: 100.0,
         flow_multiplier: 1.0,
+        process: ProcessPolicy {
+            first_layer_speed_factor: 1.0,
+            first_layer_flow_factor: 1.0,
+            fan_first_layers: 1,
+            fan_after_first_layers: 0,
+            bridge_speed_factor: 0.5,
+            bridge_flow_factor: 1.0,
+            bridge_fan_pwm: 255,
+            max_bridge_span_mm: 6.0,
+            retraction: RetractionPolicy::Disabled,
+        },
+        supports: SupportPolicy::Disabled,
     }
 }
 fn ring(x: f64, y: f64, width: f64, height: f64) -> LineString<f64> {
@@ -68,7 +80,14 @@ fn output(
     let recipe = recipe(fraction);
     classify(section, below, above, &recipe, &cancel)
         .unwrap()
-        .paths(0.4 * (index + 1) as f64, index, &recipe, &mut 0, &cancel)
+        .paths(
+            0.4 * (index + 1) as f64,
+            0.4,
+            region::HatchAxis::preferred(index),
+            &recipe,
+            &mut 0,
+            &cancel,
+        )
         .unwrap()
 }
 fn partition(coverage: &PlanarRegionCoverage) {
@@ -77,7 +96,67 @@ fn partition(coverage: &PlanarRegionCoverage) {
         + coverage.top_skin_area_mm2
         + coverage.solid_interior_area_mm2
         + coverage.sparse_interior_area_mm2;
-    assert!((sum - coverage.section_area_mm2).abs() < 1e-7);
+    assert!(
+        (sum - coverage.section_area_mm2).abs() < 1e-7,
+        "partition residual {}: {coverage:?}",
+        sum - coverage.section_area_mm2
+    );
+}
+
+#[test]
+fn native_cap_disappearing_offset_supports_preserve_material_and_bead_clearance() {
+    use geo::{Contains, Point};
+    let points: Vec<[f64; 2]> = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/native/tilted-cap-offset.points.json"
+    ))
+    .unwrap();
+    let source = Polygon::new(
+        LineString(
+            points
+                .into_iter()
+                .map(|p| Coord { x: p[0], y: p[1] })
+                .collect(),
+        ),
+        Vec::new(),
+    );
+    let material = MultiPolygon(vec![source.clone()]);
+    let radius = 0.3;
+    let result = region::offset(&material, -radius, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        result.0.len(),
+        1,
+        "a disappearing support edge must not create material islands"
+    );
+    assert!(result.0[0].interiors().is_empty());
+    for coordinate in &result.0[0].exterior().0 {
+        assert!(source.contains(&Point(*coordinate)));
+        let distance = source
+            .exterior()
+            .0
+            .windows(2)
+            .map(|edge| {
+                let dx = edge[1].x - edge[0].x;
+                let dy = edge[1].y - edge[0].y;
+                let squared_length = dx * dx + dy * dy;
+                let t = if squared_length == 0.0 {
+                    0.0
+                } else {
+                    (((coordinate.x - edge[0].x) * dx + (coordinate.y - edge[0].y) * dy)
+                        / squared_length)
+                        .clamp(0.0, 1.0)
+                };
+                (coordinate.x - edge[0].x - t * dx).hypot(coordinate.y - edge[0].y - t * dy)
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            distance >= radius - 0.000001,
+            "unsafe bead center clearance {distance}"
+        );
+        assert!(
+            distance <= radius + OFFSET_TOLERANCE_MM,
+            "offset error exceeds declared bound: {distance}"
+        );
+    }
 }
 
 #[test]
@@ -162,18 +241,23 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         },
     ];
     let recipe = recipe(0.3);
-    let top_layers = skin_layers(recipe.top_skin_thickness_mm, recipe.layer_height_mm, 12);
-    let bottom_layers = skin_layers(recipe.bottom_skin_thickness_mm, recipe.layer_height_mm, 12);
-    assert_eq!(top_layers, 3);
-    assert_eq!(bottom_layers, 2);
+    let schedule = layer_schedule(0.0, 4.8, recipe.layer_height_mm, &[]).unwrap();
+    assert_eq!(
+        physical_neighbor(&schedule, 0, recipe.top_skin_thickness_mm, true),
+        Some(3)
+    );
+    assert_eq!(
+        physical_neighbor(&schedule, 2, recipe.bottom_skin_thickness_mm, false),
+        Some(0)
+    );
     let cancel = AtomicBool::new(false);
     let mut work = 0;
     for index in 0..12u32 {
         let current = span_at(&sections, index);
-        let below = index
-            .checked_sub(bottom_layers)
+        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = (index + top_layers < 12).then(|| span_at(&sections, index + top_layers));
+        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
+            .map(|i| span_at(&sections, i));
         let lower = survival(&sections, current, below, &mut work, &cancel).unwrap();
         let upper = survival(&sections, current, above, &mut work, &cancel).unwrap();
         let (_, coverage) = output(&sections[current].material, &lower, &upper, 0.3, index);
@@ -284,7 +368,8 @@ fn cancellation_and_retained_segment_budget_precede_path_growth() {
     .unwrap();
     let result = classified.paths(
         0.4,
-        0,
+        0.4,
+        region::HatchAxis::X,
         &recipe,
         &mut (MAX_DEPOSITION_SEGMENTS as usize),
         &AtomicBool::new(false),
@@ -377,17 +462,320 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
         (&void, &section),
         (&section, &section),
         (&section, &upper),
+        (&upper, &section),
         (&section, &void),
     ] {
         for index in 0..2 {
             let cached =
                 ClassifiedRegions::new(Arc::clone(&layout), below, above, &recipe, &cancel)
                     .unwrap()
-                    .paths(0.4 * (index + 1) as f64, index, &recipe, &mut 0, &cancel)
+                    .paths(
+                        0.4 * (index + 1) as f64,
+                        0.4,
+                        region::HatchAxis::preferred(index),
+                        &recipe,
+                        &mut 0,
+                        &cancel,
+                    )
                     .unwrap();
             let uncached = output(&section, below, above, 0.25, index);
             assert_eq!(cached, uncached);
             partition(&cached.1);
         }
     }
+}
+
+#[test]
+fn true_height_schedule_and_physical_skin_neighborhoods_are_bounded() {
+    let schedule = layer_schedule(0.0, 1.05, 0.4, &[0.55]).unwrap();
+    assert_eq!(schedule.len(), 4);
+    for (layer, (z, h)) in
+        schedule
+            .iter()
+            .zip([(0.4, 0.4), (0.55, 0.15), (0.8, 0.25), (1.05, 0.25)])
+    {
+        assert!((layer.z - z).abs() < 1e-12);
+        assert!((layer.height - h).abs() < 1e-12);
+        assert!((layer.sample - (z - h * 0.5)).abs() < 1e-12);
+    }
+    assert_eq!(physical_neighbor(&schedule, 3, 0.3, false), Some(1));
+    assert_eq!(physical_neighbor(&schedule, 0, 0.3, true), Some(2));
+    assert_eq!(
+        layer_schedule(0.0, 1.0, 0.4, &[0.4001]).err().unwrap().code,
+        ManufacturingErrorCode::UnsupportedGeometry
+    );
+    assert_eq!(
+        layer_schedule(0.0, 1e9, 0.4, &[]).err().unwrap().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn native_event_roundoff_identity_includes_bed_grid_and_exact_top() {
+    let top = 1.05;
+    let events = [
+        f64::EPSILON * 0.125,
+        0.4 - f64::EPSILON,
+        0.8 + f64::EPSILON,
+        top - f64::EPSILON,
+    ];
+    let schedule = layer_schedule(0.0, top, 0.4, &events).unwrap();
+    assert_eq!(
+        schedule.iter().map(|layer| layer.z).collect::<Vec<_>>(),
+        [0.4, 0.8, top]
+    );
+    assert_eq!(schedule[0].height, 0.4);
+    for events in [&[0.0001][..], &[0.4001][..], &[top - 0.0001][..]] {
+        assert_eq!(
+            layer_schedule(0.0, top, 0.4, events).err().unwrap().code,
+            ManufacturingErrorCode::UnsupportedGeometry
+        );
+    }
+}
+
+#[test]
+fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
+    let cancel = AtomicBool::new(false);
+    let mut query = support::AnchorWorkspace::default();
+    let anchors = [
+        DepositionPath {
+            kind: DepositionKind::SparseFill,
+            points_mm: vec![[2.0, 0.0, 0.4], [2.0, 10.0, 0.4]],
+        },
+        DepositionPath {
+            kind: DepositionKind::SparseFill,
+            points_mm: vec![[8.0, 0.0, 0.4], [8.0, 10.0, 0.4]],
+        },
+    ];
+    let gaps = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[0.0, 5.0, 0.8], [10.0, 5.0, 0.8]],
+                bead_width_mm: 0.6,
+            },
+            anchors.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(gaps.len(), 3);
+    assert!(((gaps[1].end - gaps[1].start) * 10.0 - 5.4).abs() < 1e-10);
+    let holed = [DepositionPath {
+        kind: DepositionKind::Perimeter,
+        points_mm: vec![
+            [4.0, 4.0, 0.4],
+            [6.0, 4.0, 0.4],
+            [6.0, 6.0, 0.4],
+            [4.0, 6.0, 0.4],
+            [4.0, 4.0, 0.4],
+        ],
+    }];
+    let gaps = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[3.0, 5.0, 0.8], [7.0, 5.0, 0.8]],
+                bead_width_mm: 0.6,
+            },
+            holed.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(gaps.len(), 3);
+    assert!(((gaps[1].end - gaps[1].start) * 4.0 - 1.4).abs() < 1e-10);
+}
+
+#[test]
+fn deposited_solid_non_grid_transition_has_actual_anchors_across_shrinking_wall() {
+    let cancel = AtomicBool::new(false);
+    let mut query = support::AnchorWorkspace::default();
+    let recipe = recipe(1.0);
+    let section = rectangle(20.0, 10.0);
+    let paths = classify(&section, &section, &section, &recipe, &cancel)
+        .unwrap()
+        .paths(3.15, 0.35, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
+        .unwrap()
+        .0;
+    let gaps = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[11.7, 0.3, 3.2], [11.7, 9.7, 3.2]],
+                bead_width_mm: recipe.bead_width_mm,
+            },
+            paths.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert!(
+        gaps.is_empty(),
+        "actual dense Y strokes plus walls leave unexpected shrinking-wall gaps {gaps:?}"
+    );
+}
+
+#[test]
+fn exact_deposited_capsules_keep_curved_caps_and_bounded_work() {
+    let cancel = AtomicBool::new(false);
+    let mut query = support::AnchorWorkspace::default();
+    let paths = [DepositionPath {
+        kind: DepositionKind::SparseFill,
+        points_mm: vec![[0.0, 0.0, 0.4], [0.0, 10.0, 0.4]],
+    }];
+    let gaps = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[-0.5, -0.1, 0.8], [0.5, -0.1, 0.8]],
+                bead_width_mm: 0.6,
+            },
+            paths.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    let extent = (0.3f64.powi(2) - 0.1f64.powi(2)).sqrt();
+    assert_eq!(gaps.len(), 2);
+    assert!((gaps[0].end - (0.5 - extent)).abs() < 1e-12);
+    assert!((gaps[1].start - (0.5 + extent)).abs() < 1e-12);
+    assert_eq!(
+        query
+            .gaps(
+                support::AnchorCandidate {
+                    endpoints_mm: [[-0.5, -0.1, 0.8], [0.5, -0.1, 0.8]],
+                    bead_width_mm: 0.6,
+                },
+                paths.iter(),
+                std::iter::empty(),
+                &mut 20_000_000,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        query
+            .gaps(
+                support::AnchorCandidate {
+                    endpoints_mm: [[-0.5, -0.1, 0.8], [0.5, -0.1, 0.8]],
+                    bead_width_mm: 0.6,
+                },
+                paths.iter(),
+                std::iter::empty(),
+                &mut 0,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled
+    );
+    query.set_budget(2);
+    assert_eq!(
+        query
+            .gaps(
+                support::AnchorCandidate {
+                    endpoints_mm: [[-0.5, -0.1, 0.8], [0.5, -0.1, 0.8]],
+                    bead_width_mm: 0.6,
+                },
+                paths.iter(),
+                std::iter::empty(),
+                &mut 0,
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
+    let cancel = AtomicBool::new(false);
+    let mut query = support::AnchorWorkspace::default();
+    let paths = [20.5, 21.5, 22.5].map(|x| DepositionPath {
+        kind: DepositionKind::Support,
+        points_mm: vec![[x, 0.3, 0.8], [x, 9.7, 0.8]],
+    });
+    let tangent = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[20.8, 0.715339455, 1.2], [22.2, 0.715339455, 1.2]],
+                bead_width_mm: 0.6,
+            },
+            paths.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert!(tangent[0].start < 1e-8);
+    assert!(((tangent[0].end - tangent[0].start) * 1.4 - 0.4).abs() < 1e-10);
+    assert!(tangent[0].left && tangent[0].right && tangent[0].direct_ends);
+    let entered = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[20.5, 0.715339455, 1.2], [22.5, 0.715339455, 1.2]],
+                bead_width_mm: 0.6,
+            },
+            paths.iter(),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert!(
+        entered
+            .iter()
+            .all(|gap| gap.start > 1e-8 && gap.end < 1.0 - 1e-8 && gap.direct_ends)
+    );
+    assert!(entered.iter().all(|gap| (gap.end - gap.start) * 2.0 <= 6.0));
+}
+
+#[test]
+fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
+    let previous = [DepositionPath {
+        kind: DepositionKind::BottomSkin,
+        points_mm: vec![[0.0, 0.0, 0.8], [2.0, 0.0, 0.8]],
+    }];
+    let contact = [DepositionPath {
+        kind: DepositionKind::SupportInterface,
+        points_mm: vec![[8.0, 0.0, 0.6], [10.0, 0.0, 0.6]],
+    }];
+    let mut query = super::support::AnchorWorkspace::default();
+    let cancel = AtomicBool::new(false);
+    let gap = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[0.0, 0.0, 1.2], [10.0, 0.0, 1.2]],
+                bead_width_mm: 0.6,
+            },
+            previous.iter(),
+            contact.iter(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(gap.len(), 1);
+    assert!((gap[0].start - 0.23).abs() < 1e-12);
+    assert!((gap[0].end - 0.77).abs() < 1e-12);
+    assert!(!gap[0].direct_ends);
+    let gap = query
+        .gaps(
+            support::AnchorCandidate {
+                endpoints_mm: [[0.0, 0.0, 1.2], [10.0, 0.0, 1.2]],
+                bead_width_mm: 0.6,
+            },
+            previous.iter().chain(contact.iter()),
+            std::iter::empty(),
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(gap.len(), 1);
+    assert!((gap[0].start - 0.23).abs() < 1e-12);
+    assert!((gap[0].end - 0.77).abs() < 1e-12);
+    assert!(gap[0].direct_ends);
 }
