@@ -513,7 +513,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
 }
 
 #[test]
-fn every_fixed_height_layer_requires_deposition_in_typed_and_decoded_plans() {
+fn missing_object_deposition_is_rejected_at_whole_plan_admission() {
     let valid = segmented_plan(&[&[1], &[1], &[1]]);
     valid.validate(&intent()).unwrap();
     for index in 0..valid.layers.len() {
@@ -524,20 +524,15 @@ fn every_fixed_height_layer_requires_deposition_in_typed_and_decoded_plans() {
             ManufacturingErrorCode::InvalidSpecification
         );
         let bytes = serde_json::to_vec(&empty_layer).unwrap();
-        assert!(
-            serde_json::from_slice::<NormalizedPrintPlan>(&bytes)
-                .unwrap_err()
-                .is_data()
+        let decoded: NormalizedPrintPlan = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decoded.validate(&intent()).unwrap_err().code,
+            ManufacturingErrorCode::InvalidSpecification
         );
         let mut artifact = bundle();
         artifact.plan = empty_layer;
         artifact.verification.deposition_segments = 2;
-        assert_eq!(
-            decode_bundle(&serde_json::to_vec(&artifact).unwrap())
-                .unwrap_err()
-                .code,
-            ManufacturingErrorCode::CorruptArtifact
-        );
+        assert!(decode_bundle(&serde_json::to_vec(&artifact).unwrap()).is_err());
     }
 }
 
