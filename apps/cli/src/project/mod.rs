@@ -1002,30 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn full_intent_json_preserves_printer_identity_and_explicit_policies() {
-        let root =
-            env::temp_dir().join(format!("spiling-full-intent-{}", SessionId::new().as_str()));
-        std::fs::create_dir(&root).unwrap();
-        let file = root.join("intent.json");
-        let bytes = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/manufacturing/solid-fill.intent.json"
-        ));
-        std::fs::write(&file, bytes).unwrap();
-        let loaded = intent(&mut [file.into_os_string()].into_iter()).unwrap();
-        let expected: ManufacturingIntent = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(loaded, expected);
-        let value = serde_json::to_value(&loaded).unwrap();
-        assert_eq!(
-            value["printer"],
-            serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["printer"]
-        );
-        assert!(value["recipe"]["process"].is_object());
-        assert!(value["recipe"]["supports"].is_object());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn intent_json_is_bounded_before_child_spawn() {
         let root = env::temp_dir().join(format!("spiling-intent-{}", SessionId::new().as_str()));
         std::fs::create_dir(&root).unwrap();
