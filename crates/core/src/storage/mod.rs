@@ -44,6 +44,7 @@ struct RecoveryRecord {
     manifest: ProjectManifest,
     revision_high_water: ProjectRevision,
     next_occurrence_high_water: u32,
+    next_surface_layer_high_water: u32,
 }
 #[derive(Debug)]
 pub struct Storage {
@@ -198,6 +199,7 @@ fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
     record.manifest.validate()?;
     if record.next_occurrence_high_water < record.manifest.next_occurrence
         || record.revision_high_water < record.manifest.revision
+        || record.next_surface_layer_high_water < record.manifest.next_surface_layer
     {
         return Err(invalid(
             "recovery high-water is below checkpoint identity counters",
@@ -559,6 +561,9 @@ pub fn open_reusing(
         manifest.next_occurrence = manifest
             .next_occurrence
             .max(record.next_occurrence_high_water);
+        manifest.next_surface_layer = manifest
+            .next_surface_layer
+            .max(record.next_surface_layer_high_water);
         (manifest, saved_revision)
     } else {
         let manifest = parse_manifest(&bytes)?;
@@ -581,6 +586,7 @@ pub fn open_reusing(
             .collect(),
         manufacturing_intent: manifest.manufacturing_intent.clone(),
         manufacturing_artifact: manufacturing_artifact.clone(),
+        surface_overlays: Arc::new(manifest.surface_overlays.clone()),
     };
     validate_snapshot(&snapshot, &manifest)?;
     cancelled(cancel)?;
@@ -758,6 +764,10 @@ pub fn save(
                 .manifest
                 .next_occurrence
                 .max(old_manifest.next_occurrence),
+            next_surface_layer_high_water: snapshot
+                .manifest
+                .next_surface_layer
+                .max(old_manifest.next_surface_layer),
             manifest: old_manifest,
         };
         let previous = serde_json::to_vec_pretty(&recovery).map_err(|e| invalid(e.to_string()))?;

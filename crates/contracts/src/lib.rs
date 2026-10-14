@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod manufacturing;
 pub mod native;
 pub mod project;
+pub mod surface;
 pub use native::{
     NativeOperationView, domain_error, domain_status, native_metadata, native_operation_view,
     native_result,
@@ -41,6 +42,10 @@ pub mod spiling {
 }
 pub use spiling::engine as rpc;
 
+pub const ENGINE_BUILD_ID: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    ";project3;manufacturing4;surface1"
+);
 pub const MAX_CONTROL_BYTES: u32 = 65_536;
 pub const MAX_BINARY_BYTES: u32 = 4_194_304;
 pub const MAX_ARTIFACT_BYTES: u32 = 262_144;

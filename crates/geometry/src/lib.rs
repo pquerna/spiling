@@ -25,6 +25,20 @@ pub use spiling_contracts::geometry::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Immutable native certificate for one full-height rectangular vertical wall.
+/// Coordinates and phase direction are source-local millimetres; the outward
+/// supporting normal comes from the oriented native face use. This certifies
+/// neither an entire invariant extrusion nor a manufactured texture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VerticalWallFace {
+    pub origin_mm: [f64; 3],
+    pub horizontal_direction: [f64; 3],
+    pub outward_normal: [f64; 3],
+    pub width_mm: f64,
+    pub min_z_mm: f64,
+    pub max_z_mm: f64,
+}
+
 /// One native section boundary, closed and canonically ordered in the plane frame.
 #[derive(Debug)]
 pub struct SectionLoopMm {

@@ -10,4 +10,6 @@ Provide CLI and desktop with responsive native evaluation of one core-owned dura
 
 The dedicated native dispatcher/worker boundary permits atomic import/open publication, cooperative cancellation and stale rejection even when upstream calls cannot be interrupted, without native work on Tokio. One durable Jobs ledger exposes Google Operations; Runtime private correlations only connect worker execution to that authority. After promotion ACK/core commit, immutable borrowed output bytes become authenticated artifact/ByteStream resources. History pins native resources so undo needs no source reread or fabricated native reopening. Save checkpoints preserve core history and report the committed outcome at the durable cancellation boundary.
 
+Whole-source-face finish authoring shares Core revisions/history/storage and typed Projects dispatch. Exact native face membership governs persistence; rectangular-wall manufacturing certification is a separate compiler gate, so an authorable source face need not be supported for rib construction.
+
 Numerical/native identity, actual child lifecycle, source-independent reopen, software manufacturing compilation/replay and consumer-visible failures govern acceptance. General assembly import, physical printer execution/printability, native plugins and alternate kernels are not responsibilities of this area.

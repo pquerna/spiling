@@ -1308,3 +1308,131 @@ fn manufacturing_symlink_asset_and_substituted_attached_directory_are_rejected()
     assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
     assert_eq!(fs::read(directory.join("foreign")).unwrap(), b"retained");
 }
+
+#[test]
+fn surface_save_open_dirty_history_read_only_and_recovery_preserve_document_and_ids() {
+    use spiling_contracts::{geometry::FaceId, surface::*};
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let add = |project: &mut Project| {
+        let prepared = project
+            .prepare(Edit::AddSurfaceFinish {
+                scope: SurfaceScope::Definition {
+                    definition_id: definition_id.clone(),
+                },
+                face_id: FaceId::from_step_entity(7).unwrap(),
+                finish: SurfaceFinish::VerticalRibs {
+                    depth_mm: 0.1,
+                    pitch_mm: 2.0,
+                    edge_margin_mm: 0.8,
+                    phase_mm: 0.25,
+                },
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+    };
+    add(&mut project);
+    save_project(&mut project, Some(sandbox.target()));
+    let first = project.capture().manifest;
+    let id = first.surface_overlays.layers[0].layer_id;
+    let prepared = project
+        .prepare(Edit::SetSurfaceFinishEnabled {
+            layer_id: id,
+            enabled: false,
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    assert!(project.info().dirty);
+    project.undo().unwrap();
+    assert!(!project.info().dirty);
+    project.redo().unwrap();
+    add(&mut project);
+    save_project(&mut project, None);
+    let current = project.capture().manifest;
+    let read_only =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert_eq!(read_only.info().surface_overlays, current.surface_overlays);
+    assert_eq!(
+        read_only
+            .prepare(Edit::RemoveSurfaceFinish { layer_id: id })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ReadOnly
+    );
+    assert_eq!(read_only.capture().manifest, current);
+    drop(read_only);
+    drop(project);
+    let reopened =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert!(!reopened.info().dirty);
+    assert_eq!(reopened.capture().manifest, current);
+    drop(reopened);
+    fs::write(sandbox.target().join(CURRENT), b"broken").unwrap();
+    let mut recovered =
+        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
+    assert_eq!(recovered.info().surface_overlays, first.surface_overlays);
+    assert_eq!(
+        recovered.capture().manifest.next_surface_layer,
+        current.next_surface_layer
+    );
+    add(&mut recovered);
+    assert_eq!(
+        recovered
+            .info()
+            .surface_overlays
+            .layers
+            .last()
+            .unwrap()
+            .layer_id
+            .get(),
+        current.next_surface_layer
+    );
+    save_project(&mut recovered, None);
+    assert!(!recovered.info().dirty);
+}
+
+#[test]
+fn surface_manifest_rejects_structurally_corrupt_targets_and_old_format() {
+    use spiling_contracts::{geometry::FaceId, surface::*};
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let prepared = project
+        .prepare(Edit::AddSurfaceFinish {
+            scope: SurfaceScope::Occurrence {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                expected_definition_id: definition_id,
+            },
+            face_id: FaceId::from_step_entity(7).unwrap(),
+            finish: SurfaceFinish::Smooth,
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    save_project(&mut project, Some(sandbox.target()));
+    let value = serde_json::to_value(project.capture().manifest).unwrap();
+    drop(project);
+    for (pointer, replacement) in [
+        (
+            "/surface_overlays/layers/0/scope/occurrence_id",
+            serde_json::json!(99),
+        ),
+        (
+            "/surface_overlays/layers/0/scope/expected_definition_id",
+            serde_json::json!(
+                spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32])
+            ),
+        ),
+        ("/next_surface_layer", serde_json::json!(1)),
+        ("/format_version", serde_json::json!(2)),
+    ] {
+        let mut corrupt = value.clone();
+        *corrupt.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(
+            sandbox.target().join(CURRENT),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    }
+}

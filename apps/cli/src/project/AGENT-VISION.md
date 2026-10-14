@@ -11,3 +11,5 @@ Provide a reproducible operator surface for source-backed native authoring throu
 Ordered actual-program motion export uses explicit fresh inspection and the same checked ByteStream client and shared exclusive filesystem transaction as the native shell. Its immutable descriptor and inspection provenance accompany operator reports without changing persistent Core state.
 
 Full inert intent preserves printer identity and capabilities. Ordered axis-aligned certified-bound bed placement and centering use normal authoritative pose transactions; explicit actionable preflight is safe in read-only reopen and never confers native slicing success or physical qualification. Operator JSON retains revision-bound checks and historical export identity.
+
+Explicit source-face finish flags add, remove and enable ordered definition/occurrence-scoped Smooth or VerticalRibs fills through the same project authority. Saving and fresh read-only inspection preserve the overlay and captured immutable manufacturing provenance; surface assignment alone neither remeshes nor claims compile eligibility.

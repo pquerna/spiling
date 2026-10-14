@@ -233,11 +233,13 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
             start: 0,
             end: 6,
             material: rectangle(20.0, 10.0),
+            source_area_mm2: 200.0,
         },
         SectionSpan {
             start: 6,
             end: 12,
             material: rectangle(10.0, 10.0),
+            source_area_mm2: 100.0,
         },
     ];
     let recipe = recipe(0.3);

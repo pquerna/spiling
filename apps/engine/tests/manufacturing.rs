@@ -1183,3 +1183,75 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
     reader.ping().await.unwrap();
     reader.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn surface_metadata_invalidates_active_bundle_without_scene_transfer_and_history_restores_it()
+{
+    use spiling_contracts::surface::{SurfaceFinish, SurfaceScopeKind};
+    let workspace = Workspace::new();
+    let mut client = spawn().await;
+    import(&mut client, &workspace.source("box-mm.step")).await;
+    set_intent(&mut client, intent()).await;
+    let original = compile(&mut client).await;
+    let before = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: before.session_id.clone(),
+            revision: before.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("occurrences");
+    };
+    let occurrence = &occurrences[0];
+    let GeometryResponse::FaceIndexPage { faces, .. } = client
+        .geometry(GeometryCommand::GetFaceIndexPage {
+            session_id: before.session_id.clone(),
+            definition_id: occurrence.definition_id.clone(),
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("source faces");
+    };
+    let (input, _) = status(&mut client).await;
+    let ProjectResponse::Status { info: authored } = client
+        .project(ProjectCommand::AddSurfaceFinish {
+            session_id: before.session_id.clone(),
+            base_revision: input.revision,
+            face_ref: FaceRef {
+                session_id: before.session_id.clone(),
+                scene_revision: before.revision,
+                occurrence_id: occurrence.occurrence_id,
+                definition_id: occurrence.definition_id.clone(),
+                face_id: faces[0].face_id.clone(),
+            },
+            scope: SurfaceScopeKind::Definition,
+            finish: SurfaceFinish::Smooth,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("metadata status");
+    };
+    assert!(status(&mut client).await.1.is_none());
+    assert_eq!(scene(&mut client).await, before);
+    history(&mut client, true).await;
+    assert_eq!(status(&mut client).await.1, Some(original.clone()));
+    assert_eq!(scene(&mut client).await, before);
+    history(&mut client, false).await;
+    assert!(status(&mut client).await.1.is_none());
+    let recaptured = compile(&mut client).await;
+    assert_ne!(recaptured.input_hash, original.input_hash);
+    let bundle = fetch_bundle(&mut client, &recaptured).await.unwrap();
+    assert_eq!(
+        bundle.provenance.surface_overlays,
+        authored.surface_overlays
+    );
+    assert_eq!(scene(&mut client).await, before);
+    client.shutdown().await.unwrap();
+}

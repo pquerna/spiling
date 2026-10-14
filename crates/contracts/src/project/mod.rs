@@ -5,11 +5,12 @@
 //! Persistent source-backed project contracts, independent of storage and BREP.
 use crate::geometry::*;
 use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
+use crate::surface::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
-pub const PROJECT_FORMAT_VERSION: u32 = 2;
+pub const PROJECT_FORMAT_VERSION: u32 = 3;
 pub const MAX_PROJECT_MANIFEST_BYTES: u32 = 1_048_576;
 pub const MAX_PROJECT_HISTORY: usize = 64;
 pub const MAX_PROJECT_STORED_SOURCE_BYTES: u64 = 268_435_456;
@@ -158,6 +159,8 @@ pub struct ProjectManifest {
     pub units: ProjectUnits,
     pub frame: ProjectFrame,
     pub next_occurrence: u32,
+    pub next_surface_layer: u32,
+    pub surface_overlays: SurfaceOverlays,
     pub definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
@@ -228,6 +231,11 @@ impl ProjectManifest {
                 "invalid next occurrence counter or unreferenced definition",
             ));
         }
+        self.surface_overlays.validate_targets(
+            &self.definitions,
+            &self.occurrences,
+            self.next_surface_layer,
+        )?;
         if let Some(intent) = &self.manufacturing_intent {
             intent.validate().map_err(|e| invalid(&e.message))?;
         }
@@ -247,6 +255,7 @@ impl ProjectManifest {
                 &self.definitions,
                 &self.occurrences,
                 intent,
+                &self.surface_overlays,
             )
             .map_err(|e| invalid(&e.message))?;
             if hash != record.input_hash {
@@ -269,6 +278,7 @@ pub struct ProjectInfo {
     pub recovered_previous: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub surface_overlays: SurfaceOverlays,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -301,6 +311,24 @@ pub enum ProjectCommand {
     Redo {
         session_id: SessionId,
         base_revision: SceneRevision,
+    },
+    AddSurfaceFinish {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        face_ref: FaceRef,
+        scope: SurfaceScopeKind,
+        finish: SurfaceFinish,
+    },
+    RemoveSurfaceFinish {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        layer_id: SurfaceLayerId,
+    },
+    SetSurfaceFinishEnabled {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        layer_id: SurfaceLayerId,
+        enabled: bool,
     },
 }
 #[expect(

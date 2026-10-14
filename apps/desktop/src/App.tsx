@@ -8,6 +8,7 @@ import licenseDocument from "../../../LICENSE.md?raw";
 import { IMPORT_PROFILE, type OccurrenceRecord, type RigidPoseMm } from "@spiling/protocol";
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
 import { ManufacturingPanel } from "./manufacturing/ManufacturingPanel.tsx";
+import { SurfaceFinishPanel } from "./surface/SurfaceFinishPanel.tsx";
 
 const assentKey = "spiling:license-assent:OSL-3.0:b0-1";
 const phaseDescriptions: Record<Phase, string> = {
@@ -781,6 +782,11 @@ function Workbench() {
           ) : (
             <p>Select an instance, then pick or select a native source face.</p>
           )}
+          <SurfaceFinishPanel
+            state={state}
+            inspect={workbench.inspect}
+            edit={workbench.editSurfaceFinish}
+          />
           <form
             className="geometry-form"
             onSubmit={(event) => {

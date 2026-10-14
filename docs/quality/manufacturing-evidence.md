@@ -43,14 +43,141 @@ or swept-bead physics. Physical qualification remains open until the frozen
 configuration passes supervised measurements; the workbench has no execution
 connector and must not infer permission from a verified report.
 
+## Source-face finish software gate — project 3 / manufacturing 4
+
+**Gate decision: the selected native-face vertical-rib workflow passed in software.**
+Physical texture/grip, printer qualification, swept-tool collision, real dialogs,
+GPU display/picking and distribution/platform durability remain open. This
+implementation uses the commit containing this section, based on public main
+`415342e`, Rust 1.99.0 (`b940084d7`), Linux x64, Node 24.15.0, pnpm 10.32.1
+and unchanged Monstertruck pin `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`.
+Project format 3, surface schema 1 and manufacturing/planner/emitter/verifier 4
+are a clean internal cutover; SPLR remains 3. Older formats are not migrated.
+
+### Decision and exercised interfaces
+
+Whole-face directional ribs were selected before random fuzzy skin, cylindrical
+knurling or image mapping: a source-local constant-Z additive domain can feed
+the existing native ownership, skins/infill and actual-anchor/support pipeline,
+instead of disguising perimeter jitter as derived geometry. No external texture
+implementation/catalog was copied; no speculative crate or inactive texture
+channel was introduced.
+
+Core owns bounded ordered finish documents, immutable history, monotonic layer
+IDs, source-deletion cascade and save/open/recovery. Typed project RPCs require
+current native FaceRef plus persistent ProjectRevision; scene identity and source
+BREP remain unchanged. Definition inheritance composes before occurrence
+overrides; Smooth/disable/remove reveal lower fills. Compiler capture, input
+fingerprints and exported/replayed provenance include the full document.
+
+Native certification admits only a full-height four-line rectangular exterior
+supporting wall; finishing additionally requires an upright bed-anchored
+invariant extrusion. The additive boundary matches the entire native sampled
+carrier chain, including ring wrapping. Original material remains included;
+untouched/protected coordinates and hole rings remain exact. New samples satisfy
+the source-local waveform and the fixed 0.001 mm construction bound. Original,
+realized and added areas are distinct; geometric addition is not extrusion or
+measured grip. Expanded exclusions are conservative nominal metadata checks.
+
+### Focused observed checks
+
+| Exercised surface | Result |
+| --- | --- |
+| Surface/manifest/fingerprint, required area/bound and typed protobuf contracts | 6 PASS |
+| Core transaction, cascade, allocator/capacity, persistence/recovery and artifact history | 6 PASS |
+| Native face identity, outward side, trim/height/recess/co-carrier refusal, corruption/cancellation | 4 PASS |
+| Shared client typed edits and mixed-build readiness rejection | 2 PASS |
+| Native ribs, phase/chord bound, protected holes, poses, multi-face/occurrence, scope/limits, actual-anchor/support and verifier gap ownership | 8 PASS |
+| Actual engine metadata revision/scene/invalidation and reused/rebuilt native-open targets | 2 PASS |
+| Actual CLI create→native face inspection→definition finish→Preflight/Compile/Verify→save/export→delete owned source→fresh read-only replay/export→Smooth/disable/remove | PASS; observed each engine reaped |
+| Generated TypeScript consumed by production frontend build | PASS |
+| Actual compiled CEF `surface-finish --diagnostic-no-gpu` scenario | PASS; observed native window and engine exit |
+
+Reproduction uses the selective `surface`, `wall`, `native_surface`,
+`certified_native_ribs`, `multiple_certified_finishes`, `finished_native_cantilever`,
+`support_only_layers` and `contact_gap_layer` filters, engine project/manufacturing
+`surface` cases, and the CLI project's explicitly ignored `ordered_surface_ribs`
+case with `SPILING_TEST_ENGINE` pointing to the fresh native engine. These are
+focused results, not a full-workspace or packaged-release acceptance claim.
+The [operator procedure](development.md#source-face-vertical-ribs) uses the same
+production controls/services as the actual CEF runner.
+
+### Frozen inputs and real workbench observation
+
+| Input | SHA-256 |
+| --- | --- |
+| Original native `box-mm.step` | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
+| Original protected-hole source | `eb2112f9ef4be523615f237b86b69569026cef8e1cafbc20e2fdca7e3459cb29` |
+| Schema-4 diagnostic solid intent | `99a5033a65020d206b673b70a572c41bcd60850610426e0215187ec52d2ddb29` |
+| Schema-4 complete sparse intent | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
+
+The actual CEF controls selected occurrence 1 / native face `step:25`, applied an
+occurrence layer with depth 0.1 mm, pitch 2 mm, protected margin 1 mm and phase
+0 mm, then exercised Undo/Redo with unchanged native FaceRef/material intent.
+Preflight, native Compile, fresh independent replay, no-overwrite export,
+metadata invalidation/history restoration, save, source-copy deletion, native
+restart, read-only reopen/export and cancellation completed. Every layer retained
+the native 200 mm² source footprint, positive bounded addition ≤2 mm² and exact
+source-plus-addition accounting. Screenshots visually showed the real selected
+native controls and disabled read-only controls; no GPU/picking proof is claimed.
+
+| Recorded complete-job observation | Value |
+| --- | --- |
+| Layers / paths | 40 / 749 |
+| Object deposition / travel segments | 14,429 / 977 |
+| Object volume / filament | 805.1545255017074 mm³ / 334.74435314 mm |
+| Support deposition | 0 |
+| Separate prime filament | 1.5 mm |
+| Retractions / retracted filament | 114 / 91.20000000000014 mm |
+| Actual replay events / packed bytes | 15,638 / 750,720 |
+| Bundle bytes / SHA-256 | 1,790,168 / `c1d1bbfc1a9f111cb217aac8c7950d76839448b1d3c52895c893e79947c57499` |
+| Input hash at project revision 10 | `5d59c779fd52acf8e3b78105c09e5d2b181c265af0459a22efca42effe176ce6` |
+
+Recorded hashes bind this run's project identity; separately created projects do
+not promise identical hashes. Fresh reopen compares immutable outputs within the
+same saved project. Complete lifecycle/modal checks are still software-only.
+
+### Corrected failures and resource envelope
+
+The first native compilation failed on unsupported cgmath array conversions;
+explicit physical XYZ extraction corrected it. Initial floating finish union
+re-quantized untouched protected-hole boundaries; strict retention correctly
+refused. Source-preserving sampled-chain construction replaced that union,
+including native line subdivisions rather than weakening containment tolerance.
+Two existing support/contact-gap fixtures required zero original source area
+when their object area is zero.
+
+The actual CLI then exposed an incompatible 0.8 mm margin for its 0.45 mm bead;
+the explicit operator preset was corrected to 1 mm without relaxing process
+limits. Uniform worst-taper sampling also exhausted the unchanged 20-million
+Boolean-pair limit in boundary-capsule construction. Region-local curvature
+sampling and exact monotone collinear *construction-primitive* coalescing removed
+redundant work; original material arrays, 0.001/0.005 mm bounds, point limits and
+the Boolean-pair cap were not weakened. The failing CLI passed afterward; native
+retention, phase/chord and support regressions also passed.
+
+Native compilation/checks were sequential, one Cargo/Rayon/test worker, no
+incremental/debug variants, under 3 GiB memory / 128 MiB swap / 64-task cgroups.
+The cached debug desktop build peaked at 1.4 GiB (1.6 MiB swap), without CEF
+download, release build or packaging. CEF ran separately under 1.5 GiB / 128 MiB
+swap / 256 tasks: 17.568 s, 873.2 MiB peak, zero swap. Upstream GTK/D-Bus and
+headless GPU-process warnings were retained; explicit diagnostic attachment did
+not substitute a renderer or establish hardware support. The actual CLI smoke
+completed in 11.40 s after compilation.
+
+Authorized workspace-only cache cleanup recovered 2.3 GiB before work. The final
+warm target measured 10 GiB, below the 11 GiB goal, with 2.1 GiB free disk. No
+installer, release/benchmark duplicate or additional native distribution was built.
+
+
 
 ## Schema-3 operator workflow software evidence
 
-**Gate decision: the frozen software operator workflow passed; physical and GPU
-qualification remain open.** Manufacturing, planner/emitter/verifier and SPLR
-are version 3; project storage remains format 2. Current native performance and
-workbench proofs below use published kernel
-`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`.
+**Historical gate decision: the frozen schema-3 software operator workflow passed;
+physical and GPU qualification remained open.** At that checkpoint,
+manufacturing/planner/emitter/verifier and SPLR were version 3; project storage
+was format 2. Native-performance and workbench proofs below retain their
+published kernel `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e` and original versions.
 Baseline focused checks, box, nonintegral and cantilever observations used
 `f6e8a88d08d998970ab17aefd53bd2946408363f`; prepared-native/contact-gap,
 shelf and ramp observations used `4dd2890a20b27b489c0f6d32490d90bb02727bc1`.

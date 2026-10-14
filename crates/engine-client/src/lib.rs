@@ -387,6 +387,32 @@ fn prost_types_duration(value: Duration) -> prost_types::Duration {
     }
 }
 
+fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
+    let required = [
+        (
+            &hello.geometry_capabilities,
+            "native_vertical_rectangular_wall_v1",
+        ),
+        (&hello.project_capabilities, "recoverable_projects_v3"),
+        (&hello.project_capabilities, "source_face_surface_finish_v1"),
+        (&hello.manufacturing_capabilities, "manufacturing_schema4"),
+        (
+            &hello.manufacturing_capabilities,
+            "bounded_vertical_rib_construction_v1",
+        ),
+    ];
+    if hello.engine_build != spiling_contracts::ENGINE_BUILD_ID
+        || required.iter().any(|(capabilities, expected)| {
+            !capabilities.iter().any(|value| value.as_str() == *expected)
+        })
+    {
+        return Err(ClientError::Protocol(
+            "engine build or source-surface format/API capabilities mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct EngineClient {
     child: Child,
     _liveness: ChildStdin,
@@ -482,6 +508,7 @@ impl EngineClient {
                 ));
             }
             let hello = Hello::try_from(info).map_err(ClientError::Protocol)?;
+            validate_engine_cutover(&hello)?;
             if hello.geometry_limits != spiling_contracts::geometry::GeometryLimits::FROZEN {
                 return Err(ClientError::Protocol(
                     "native geometry limits mismatch".into(),

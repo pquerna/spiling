@@ -1,0 +1,38 @@
+/* SPDX-FileCopyrightText: 2026 Spiling contributors
+ * SPDX-License-Identifier: OSL-3.0
+ * Licensed under the Open Software License version 3.0
+ */
+.surface-panel label {
+  display: grid;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
+}
+.surface-panel select,
+.surface-panel input {
+  width: 100%;
+  min-width: 0;
+}
+.surface-panel fieldset {
+  min-width: 0;
+}
+.surface-numbers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.surface-layers {
+  padding-left: 1.4rem;
+}
+.surface-layers li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid #344453;
+}
+.surface-layers span {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 0.3rem 0;
+}
+.surface-panel pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

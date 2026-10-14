@@ -193,6 +193,9 @@ impl SourceHash {
     }
 }
 impl DefinitionId {
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.0.capacity()
+    }
     pub fn from_source_sha256(source: &[u8; 32]) -> Self {
         let mut hash = Sha256::new();
         hash.update(b"spiling:definition:step-planar-cylindrical-v1\0");
@@ -274,6 +277,9 @@ impl FaceId {
     }
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.0.capacity()
     }
     pub fn step_entity(&self) -> u64 {
         self.0[5..].parse().expect("validated FaceId")

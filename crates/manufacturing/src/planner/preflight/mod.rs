@@ -1,16 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::{LAYER_QUANTIZATION_MM, forward, rotate, rotate_inverse};
+use super::{LAYER_QUANTIZATION_MM, forward, rotate, rotate_inverse, surface};
 use crate::{CompilerInput, check_cancel, error};
-use spiling_contracts::geometry::{AabbMm, FaceCarrier, MAX_DEFINITIONS, MAX_OCCURRENCES};
+use spiling_contracts::geometry::{
+    AabbMm, FaceCarrier, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId,
+};
 use spiling_contracts::manufacturing::*;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
 pub(super) struct Admission {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
     pub reuse_slabs: bool,
+    pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::RibField>>,
     pub report: PreflightReport,
 }
 
@@ -30,6 +34,7 @@ pub(super) fn admit(
         bounds: None,
         horizontal_events: Vec::new(),
         reuse_slabs: true,
+        surface_fields: BTreeMap::new(),
         report: PreflightReport {
             input_revision: input.revision,
             eligible: true,
@@ -101,6 +106,25 @@ pub(super) fn admit(
             ),
         }
     }
+    let mut surface_valid = match surface::validate_targets(input, cancel) {
+        Ok(()) => true,
+        Err(e) if e.code == ManufacturingErrorCode::Cancelled => return Err(e),
+        Err(e) => {
+            add(
+                if e.code == ManufacturingErrorCode::ResourceLimit {
+                    "resource_limit"
+                } else {
+                    "invalid_surface_targets"
+                },
+                e.message,
+                None,
+                None,
+            );
+            false
+        }
+    };
+    let mut occurrence_bounds = BTreeMap::new();
+    let mut surface_samples = 0usize;
     let envelope = input.intent.printer.build_envelope;
     for occurrence in input.occurrences.iter().take(MAX_OCCURRENCES as usize) {
         check_cancel(cancel)?;
@@ -199,11 +223,75 @@ pub(super) fn admit(
                 }
             }
         }
+        if surface_valid {
+            match surface::metadata(
+                input,
+                occurrence,
+                placed,
+                (MAX_DEPOSITION_SEGMENTS as usize / 4).saturating_sub(surface_samples),
+                cancel,
+            ) {
+                Ok(fields) => {
+                    let additional = fields
+                        .iter()
+                        .map(surface::RibField::sample_points)
+                        .sum::<usize>();
+                    surface_samples = surface_samples.saturating_add(additional);
+                    placed = surface::expanded(placed, &fields);
+                    if !fields.is_empty() {
+                        for component in &input.intent.printer.components {
+                            if surface::intersects(placed, surface::component_bounds(component)) {
+                                add(
+                                    "surface_component_exclusion",
+                                    format!(
+                                        "Finished material conservative bounds intersect fixed component {}; this lane does not certify swept-tool clearance",
+                                        component.id
+                                    ),
+                                    Some(occurrence.occurrence_id),
+                                    None,
+                                );
+                            }
+                        }
+                        if let JobWorkflow::CompleteMarlin { job } = &input.intent.printer.workflow
+                            && surface::prime_intersects(
+                                placed,
+                                job,
+                                input.intent.recipe.bead_width_mm,
+                            )
+                        {
+                            add("surface_prime_exclusion", "Finished material expanded XY envelope intersects the declared priming segment".into(), Some(occurrence.occurrence_id), None);
+                        }
+                        result
+                            .surface_fields
+                            .insert(occurrence.occurrence_id, fields);
+                    }
+                }
+                Err(e) if e.code == ManufacturingErrorCode::Cancelled => return Err(e),
+                Err(e) => {
+                    // A resource refusal is final; do not spend the remaining
+                    // occurrence budget sampling more finishes after exhaustion.
+                    if e.code == ManufacturingErrorCode::ResourceLimit {
+                        surface_valid = false;
+                    }
+                    add(
+                        if e.code == ManufacturingErrorCode::ResourceLimit {
+                            "resource_limit"
+                        } else {
+                            "unsupported_surface"
+                        },
+                        e.message,
+                        Some(occurrence.occurrence_id),
+                        None,
+                    );
+                }
+            }
+        }
+        occurrence_bounds.insert(occurrence.occurrence_id, placed);
         if (0..3).any(|a| {
             placed.min[a] < envelope.min[a] - LAYER_QUANTIZATION_MM
                 || placed.max[a] > envelope.max[a] + LAYER_QUANTIZATION_MM
         }) {
-            add("outside_envelope", "Placed analytic native extrema exceed the build envelope; change placement or printer".into(), Some(occurrence.occurrence_id), None);
+            add("outside_envelope", "Placed native extrema plus admitted surface-finish expansion exceed the build envelope; change placement, finish or printer".into(), Some(occurrence.occurrence_id), None);
         }
         if let Some(bounds) = &mut result.bounds {
             bounds
@@ -214,6 +302,28 @@ pub(super) fn admit(
                 .map_err(|e| error(ManufacturingErrorCode::UnsupportedGeometry, e.to_string()))?;
         } else {
             result.bounds = Some(placed);
+        }
+    }
+    let mut exclusion_work = 0usize;
+    for occurrence_id in result.surface_fields.keys() {
+        for (other, bounds) in &occurrence_bounds {
+            check_cancel(cancel)?;
+            if occurrence_id == other {
+                continue;
+            }
+            exclusion_work += 1;
+            if exclusion_work > super::MAX_BOOLEAN_PAIRS {
+                add(
+                    "resource_limit",
+                    "Surface occurrence exclusion work budget exceeded".into(),
+                    Some(*occurrence_id),
+                    None,
+                );
+                break;
+            }
+            if surface::intersects(occurrence_bounds[occurrence_id], *bounds) {
+                add("surface_occurrence_exclusion", "Finished occurrence conservative expanded bounds intersect another occurrence; overlapping finishes are not admitted".into(), Some(*occurrence_id), None);
+            }
         }
     }
     if let Some(bounds) = result.bounds
@@ -233,6 +343,18 @@ pub(super) fn admit(
             occurrence_id: None,
             face_id: None,
         });
+    }
+    for (occurrence_id, fields) in &result.surface_fields {
+        for field in fields {
+            if result.report.checks.len() >= 254 {
+                break;
+            }
+            result.report.checks.push(PreflightCheck {
+                code: "surface_construction_pending".into(), severity: PreflightSeverity::Info,
+                message: "Native whole-face rectangular certificate and bounded feature metadata admitted; Compile must still prove inward overlap, source/hole retention, realized offsets and actual deposited anchors. This is a manufacturing construction, not edited BREP or physical grip certification".into(),
+                occurrence_id: Some(*occurrence_id), face_id: Some(field.face_id.clone()),
+            });
+        }
     }
     for (occurrence_id, face_id) in pending_faces {
         if result.report.checks.len() >= 254 {

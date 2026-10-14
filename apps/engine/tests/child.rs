@@ -47,6 +47,31 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     assert!(client.status().await.unwrap());
     assert_eq!(client.hello().kernel, "monstertruck");
+    assert_eq!(
+        client.hello().engine_build,
+        spiling_contracts::ENGINE_BUILD_ID
+    );
+    for expected in ["recoverable_projects_v3", "source_face_surface_finish_v1"] {
+        assert!(
+            client
+                .hello()
+                .project_capabilities
+                .iter()
+                .any(|value| value == expected)
+        );
+    }
+    for expected in [
+        "manufacturing_schema4",
+        "bounded_vertical_rib_construction_v1",
+    ] {
+        assert!(
+            client
+                .hello()
+                .manufacturing_capabilities
+                .iter()
+                .any(|value| value == expected)
+        );
+    }
     assert!(
         client
             .hello()

@@ -1042,6 +1042,7 @@ mod tests {
             recovered_previous: false,
             can_undo: true,
             can_redo: false,
+            surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
         }
     }
 

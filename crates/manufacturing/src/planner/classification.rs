@@ -19,6 +19,9 @@ pub(super) struct WallLayout {
 }
 
 impl WallLayout {
+    pub(super) fn first_wall(&self) -> &MultiPolygon<f64> {
+        &self.wall_centers[0]
+    }
     pub(super) fn new(
         section: &MultiPolygon<f64>,
         recipe: &PlanarPrintRecipe,
@@ -117,6 +120,8 @@ impl ClassifiedRegions {
         let interior_area = interior.unsigned_area();
         let coverage = PlanarRegionCoverage {
             section_area_mm2: layout.section_area_mm2,
+            source_section_area_mm2: layout.section_area_mm2,
+            surface_added_area_mm2: 0.0,
             wall_area_mm2: layout.wall_area_mm2,
             bottom_skin_area_mm2: bottom.unsigned_area(),
             top_skin_area_mm2: top.unsigned_area(),

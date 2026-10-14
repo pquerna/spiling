@@ -1427,3 +1427,166 @@ async fn first_save_faults_do_not_strand_the_destination_or_overwrite_foreign_fi
     save(&mut client, Some(&workspace.path("retry"))).await;
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn source_face_surface_metadata_checks_identity_history_and_native_open_targets() {
+    use spiling_contracts::surface::{SurfaceFinish, SurfaceScope, SurfaceScopeKind};
+    let workspace = Workspace::new();
+    let source = workspace.source("box-mm.step");
+    let path = workspace.path("surface-project");
+    let mut client = spawn().await;
+    import(&mut client, &source, RigidPoseMm::IDENTITY).await;
+    let original_scene = scene(&mut client).await;
+    let original_native = native_snapshot(&mut client).await;
+    let face = reference(&mut client).await;
+    let initial = info(&mut client).await;
+    let mut invalid = vec![];
+    let mut wrong = face.clone();
+    wrong.session_id = SessionId::new();
+    invalid.push((wrong, ProjectErrorCode::StaleRevision));
+    let mut wrong = face.clone();
+    wrong.scene_revision = face.scene_revision.next().unwrap();
+    invalid.push((wrong, ProjectErrorCode::StaleRevision));
+    let mut wrong = face.clone();
+    wrong.occurrence_id = OccurrenceId::new(999).unwrap();
+    invalid.push((wrong, ProjectErrorCode::InvalidProject));
+    let mut wrong = face.clone();
+    wrong.definition_id = DefinitionId::parse("0".repeat(64)).unwrap();
+    invalid.push((wrong, ProjectErrorCode::InvalidProject));
+    let mut wrong = face.clone();
+    wrong.face_id = FaceId::parse("step:999999").unwrap();
+    invalid.push((wrong, ProjectErrorCode::InvalidProject));
+    for (face_ref, code) in invalid {
+        let result = client
+            .project(ProjectCommand::AddSurfaceFinish {
+                session_id: face.session_id.clone(),
+                base_revision: initial.revision,
+                face_ref,
+                scope: SurfaceScopeKind::Occurrence,
+                finish: SurfaceFinish::Smooth,
+            })
+            .await;
+        project_error(result, code);
+        assert_eq!(info(&mut client).await, initial);
+        assert_eq!(scene(&mut client).await, original_scene);
+    }
+    let ProjectResponse::Status { info: added } = client
+        .project(ProjectCommand::AddSurfaceFinish {
+            session_id: face.session_id.clone(),
+            base_revision: initial.revision,
+            face_ref: face.clone(),
+            scope: SurfaceScopeKind::Occurrence,
+            finish: SurfaceFinish::Smooth,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("surface metadata status");
+    };
+    assert!(added.revision > initial.revision);
+    assert_eq!(added.surface_overlays.layers.len(), 1);
+    let layer = added.surface_overlays.layers[0].clone();
+    assert_eq!(layer.face_id, face.face_id);
+    assert_eq!(
+        layer.scope,
+        SurfaceScope::Occurrence {
+            occurrence_id: face.occurrence_id,
+            expected_definition_id: face.definition_id.clone(),
+        }
+    );
+    assert_eq!(scene(&mut client).await, original_scene);
+    assert_eq!(native_snapshot(&mut client).await, original_native);
+    inspect(&mut client, face.clone()).await;
+    project_error(
+        client
+            .project(ProjectCommand::RemoveSurfaceFinish {
+                session_id: face.session_id.clone(),
+                base_revision: initial.revision,
+                layer_id: layer.layer_id,
+            })
+            .await,
+        ProjectErrorCode::StaleRevision,
+    );
+    assert_eq!(info(&mut client).await, added);
+    let ProjectResponse::Status { info: disabled } = client
+        .project(ProjectCommand::SetSurfaceFinishEnabled {
+            session_id: face.session_id.clone(),
+            base_revision: added.revision,
+            layer_id: layer.layer_id,
+            enabled: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("surface enable status");
+    };
+    assert!(!disabled.surface_overlays.layers[0].enabled);
+    let ProjectResponse::Status { info: undone } = client
+        .project(ProjectCommand::Undo {
+            session_id: face.session_id.clone(),
+            base_revision: original_scene.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("metadata-only undo status");
+    };
+    assert!(undone.surface_overlays.layers[0].enabled);
+    let ProjectResponse::Status { info: redone } = client
+        .project(ProjectCommand::Redo {
+            session_id: face.session_id.clone(),
+            base_revision: original_scene.revision,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("metadata-only redo status");
+    };
+    assert_eq!(redone.surface_overlays, disabled.surface_overlays);
+    assert_eq!(scene(&mut client).await, original_scene);
+    let saved = save(&mut client, Some(&path)).await;
+    std::fs::remove_file(source).unwrap();
+    let mut reader = spawn().await;
+    open(&mut reader, &path, true, false, false).await;
+    let read_info = info(&mut reader).await;
+    assert_eq!(read_info.surface_overlays, saved.surface_overlays);
+    let read_face = reference(&mut reader).await;
+    for command in [
+        ProjectCommand::AddSurfaceFinish {
+            session_id: read_face.session_id.clone(),
+            base_revision: read_info.revision,
+            face_ref: read_face.clone(),
+            scope: SurfaceScopeKind::Definition,
+            finish: SurfaceFinish::Smooth,
+        },
+        ProjectCommand::RemoveSurfaceFinish {
+            session_id: read_face.session_id.clone(),
+            base_revision: read_info.revision,
+            layer_id: layer.layer_id,
+        },
+        ProjectCommand::SetSurfaceFinishEnabled {
+            session_id: read_face.session_id.clone(),
+            base_revision: read_info.revision,
+            layer_id: layer.layer_id,
+            enabled: true,
+        },
+    ] {
+        project_error(reader.project(command).await, ProjectErrorCode::ReadOnly);
+        assert_eq!(info(&mut reader).await, read_info);
+    }
+    reader.shutdown().await.unwrap();
+    // Even a disabled, structurally canonical target must exist in the source table.
+    // Same-path open exercises reuse; a fresh reader exercises source rebuilding.
+    let mut corrupt = manifest(&path);
+    corrupt.surface_overlays.layers[0].face_id = FaceId::parse("step:999999").unwrap();
+    write_manifest(&path, &corrupt);
+    failed_open_preserves(&mut client, &path, ProjectErrorCode::InvalidProject).await;
+    let mut fresh = spawn().await;
+    let open_job = start_open(&mut fresh, &path, true, false, false).await;
+    project_job_error(
+        &wait_job(&mut fresh, open_job).await,
+        ProjectErrorCode::InvalidProject,
+    );
+    fresh.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}

@@ -7,6 +7,9 @@ use crate::{
     output::{OutputDirectory, OutputFile},
     set_once,
 };
+use spiling_contracts::surface::{
+    MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId, SurfaceScopeKind,
+};
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
 use spiling_engine_client::{EngineClient, prepare_bed_pose as bed_pose};
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
@@ -58,6 +61,9 @@ enum Operation {
     Pose(OccurrenceId, RigidPoseMm),
     PrepareBed(OccurrenceId, bool),
     Remove(OccurrenceId),
+    SurfaceFinish(OccurrenceId, FaceId, SurfaceScopeKind, SurfaceFinish),
+    RemoveSurfaceFinish(SurfaceLayerId),
+    SurfaceFinishEnabled(SurfaceLayerId, bool),
     Intent(Arc<ManufacturingIntent>),
     Preflight,
     Compile,
@@ -144,6 +150,43 @@ pub fn parse(
                     return Err("face inspection limit exceeded".into());
                 }
                 inspections.push((occurrence, face));
+            }
+            Some("--surface-finish") => {
+                let occurrence =
+                    OccurrenceId::new(text(&mut args, "--surface-finish occurrence")?.parse()?)?;
+                let face = FaceId::parse(text(&mut args, "--surface-finish face")?)?;
+                let scope = match text(&mut args, "--surface-finish scope")?.as_str() {
+                    "definition" => SurfaceScopeKind::Definition,
+                    "occurrence" => SurfaceScopeKind::Occurrence,
+                    _ => {
+                        return Err(
+                            "--surface-finish scope must be definition or occurrence".into()
+                        );
+                    }
+                };
+                let json = text(&mut args, "--surface-finish finish JSON")?;
+                if json.len() > MAX_SURFACE_DOCUMENT_BYTES {
+                    return Err("surface finish JSON exceeds the document byte limit".into());
+                }
+                let finish: SurfaceFinish = serde_json::from_str(&json)?;
+                finish.validate()?;
+                operations.push(Operation::SurfaceFinish(occurrence, face, scope, finish));
+            }
+            Some("--remove-surface-finish") => {
+                operations.push(Operation::RemoveSurfaceFinish(SurfaceLayerId::new(
+                    text(&mut args, "--remove-surface-finish")?.parse()?,
+                )?));
+            }
+            Some("--surface-finish-enabled") => {
+                let layer = SurfaceLayerId::new(
+                    text(&mut args, "--surface-finish-enabled layer")?.parse()?,
+                )?;
+                let enabled = match text(&mut args, "--surface-finish-enabled boolean")?.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("--surface-finish-enabled requires true or false".into()),
+                };
+                operations.push(Operation::SurfaceFinishEnabled(layer, enabled));
             }
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
             Some("--preflight") => operations.push(Operation::Preflight),
@@ -484,6 +527,70 @@ async fn execute(
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         match operation {
+            Operation::SurfaceFinish(occurrence_id, face_id, scope, finish) => {
+                label = "surface_finish";
+                let summary = geometry::scene(client, &session).await?;
+                let (_, occurrences) = geometry::records(client, &summary).await?;
+                let occurrence = occurrences
+                    .iter()
+                    .find(|row| row.occurrence_id == occurrence_id)
+                    .ok_or("surface target occurrence is not in the current project")?;
+                let face_ref = FaceRef {
+                    session_id: session.clone(),
+                    scene_revision: summary.revision,
+                    occurrence_id,
+                    definition_id: occurrence.definition_id.clone(),
+                    face_id,
+                };
+                match geometry::control(
+                    client,
+                    GeometryCommand::InspectFace {
+                        reference: face_ref.clone(),
+                    },
+                )
+                .await?
+                {
+                    GeometryResponse::FaceInspection { inspection }
+                        if inspection.reference == face_ref => {}
+                    _ => return Err("surface target native face inspection mismatch".into()),
+                }
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::AddSurfaceFinish {
+                        session_id: session.clone(),
+                        base_revision,
+                        face_ref,
+                        scope,
+                        finish,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::RemoveSurfaceFinish(layer_id) => {
+                label = "remove_surface_finish";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::RemoveSurfaceFinish {
+                        session_id: session.clone(),
+                        base_revision,
+                        layer_id,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::SurfaceFinishEnabled(layer_id, enabled) => {
+                label = "surface_finish_enabled";
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::SetSurfaceFinishEnabled {
+                        session_id: session.clone(),
+                        base_revision,
+                        layer_id,
+                        enabled,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
             Operation::Intent(intent) => {
                 label = "intent";
                 let base_revision = info(client).await?.revision;
@@ -842,6 +949,81 @@ mod tests {
         assert!(parse_args(&["inspect", "project", "--undo"]).is_err());
         assert!(parse_args(&["open", "project", "--add", "bad", "{}"]).is_err());
         assert!(parse_args(&["create", "project", "--section", "0,0,0:0,0,0"]).is_err());
+    }
+    #[test]
+    fn surface_flags_are_ordered_typed_and_rejected_read_only_before_spawn() {
+        let options = parse_args(&[
+            "open",
+            "project",
+            "--surface-finish",
+            "1",
+            "step:1",
+            "definition",
+            r#"{"kind":"smooth"}"#,
+            "--surface-finish-enabled",
+            "1",
+            "false",
+            "--remove-surface-finish",
+            "1",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project");
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::SurfaceFinish(_, _, SurfaceScopeKind::Definition, SurfaceFinish::Smooth),
+                Operation::SurfaceFinishEnabled(_, false),
+                Operation::RemoveSurfaceFinish(_),
+            ]
+        ));
+        for flags in [
+            vec![
+                "--surface-finish",
+                "1",
+                "step:1",
+                "occurrence",
+                r#"{"kind":"smooth"}"#,
+            ],
+            vec!["--surface-finish-enabled", "1", "true"],
+            vec!["--remove-surface-finish", "1"],
+        ] {
+            let mut args = vec!["open", "project"];
+            args.extend(flags);
+            args.push("--read-only");
+            assert!(parse_args(&args).is_err());
+        }
+        for flags in [
+            vec![
+                "--surface-finish",
+                "0",
+                "step:1",
+                "occurrence",
+                r#"{"kind":"smooth"}"#,
+            ],
+            vec![
+                "--surface-finish",
+                "1",
+                "step:1",
+                "both",
+                r#"{"kind":"smooth"}"#,
+            ],
+            vec![
+                "--surface-finish",
+                "1",
+                "step:1",
+                "occurrence",
+                r#"{"kind":"vertical_ribs","depth_mm":0,"pitch_mm":2,"edge_margin_mm":0.8,"phase_mm":0}"#,
+            ],
+            vec!["--surface-finish-enabled", "1", "yes"],
+            vec!["--remove-surface-finish", "0"],
+        ] {
+            let mut args = vec!["open", "project"];
+            args.extend(flags);
+            assert!(parse_args(&args).is_err());
+        }
     }
     #[test]
     fn manufacturing_flags_are_ordered_and_read_only_replay_is_allowed() {

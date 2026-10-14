@@ -5,6 +5,7 @@
 use super::{MAX_BOOLEAN_PAIRS, OFFSET_TOLERANCE_MM, boolean_budget, forward};
 use crate::{check_cancel, error};
 use geo::algorithm::buffer::{BufferStyle, LineJoin};
+use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::{
     Area, BooleanOps, BoundingRect, Buffer, Contains, ConvexHull, Coord, LineString, MultiPoint,
     MultiPolygon, Point, Polygon, unary_union,
@@ -173,8 +174,30 @@ fn boundary_tube(
     let mut primitives = MultiPolygon(Vec::new());
     let mut retained_points = 0usize;
     for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-        for segment in ring.0.windows(2) {
+        let mut start = 0;
+        while start + 1 < ring.0.len() {
             check_cancel(cancel)?;
+            let a = ring.0[start];
+            let mut end = start + 1;
+            // Collinear monotone partitions have exactly the same disk
+            // neighborhood as their full segment. Coalesce only construction
+            // capsules; never simplify or round the authoritative material ring.
+            while end + 1 < ring.0.len() {
+                check_cancel(cancel)?;
+                let b = ring.0[end];
+                let c = ring.0[end + 1];
+                if RobustKernel::orient2d(a, b, c) != Orientation::Collinear
+                    || b.x < a.x.min(c.x)
+                    || b.x > a.x.max(c.x)
+                    || b.y < a.y.min(c.y)
+                    || b.y > a.y.max(c.y)
+                {
+                    break;
+                }
+                end += 1;
+            }
+            let segment = [a, ring.0[end]];
+            start = end;
             // Only this convex construction primitive is hulled; authoritative
             // material rings are never simplified, snapped or replaced by a hull.
             let capsule = MultiPoint(

@@ -6,13 +6,14 @@ mod classification;
 mod preflight;
 mod region;
 mod support;
+mod surface;
 pub use preflight::preflight;
 #[cfg(test)]
 mod native_tests;
 #[cfg(test)]
 mod tests;
 use crate::{CompilerInput, check_cancel, error};
-use geo::{BooleanOps, BoundingRect, MultiPolygon};
+use geo::{Area, BooleanOps, BoundingRect, MultiPolygon};
 use spiling_contracts::geometry::{
     GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
@@ -42,9 +43,11 @@ pub(crate) fn plan(
         let code = match check.code.as_str() {
             "resource_limit" | "event_limit" => ManufacturingErrorCode::ResourceLimit,
             "empty_project" => ManufacturingErrorCode::EmptyProject,
-            "invalid_intent" | "source_identity" | "invalid_pose" | "missing_definition" => {
-                ManufacturingErrorCode::InvalidSpecification
-            }
+            "invalid_intent"
+            | "source_identity"
+            | "invalid_pose"
+            | "missing_definition"
+            | "invalid_surface_targets" => ManufacturingErrorCode::InvalidSpecification,
             _ => ManufacturingErrorCode::UnsupportedGeometry,
         };
         return Err(error(code, check.message.clone()));
@@ -88,6 +91,7 @@ pub(crate) fn plan(
     let mut retained_points = 0usize;
     let mut prepared_sources = BTreeMap::new();
     let mut remaining_prepared_bytes = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
+    let mut surface_work = 0usize;
     let mut index = 0u32;
     while index < count {
         check_cancel(cancel)?;
@@ -103,6 +107,9 @@ pub(crate) fn plan(
             index + 1
         };
         let mut next = MultiPolygon(Vec::new());
+        let mut finished_material = Vec::new();
+        let mut finished_points = 0usize;
+        let mut finished_source_area_mm2 = 0.0;
         for occurrence in &occurrences {
             check_cancel(cancel)?;
             let definition = &input.definitions[&occurrence.definition_id];
@@ -145,7 +152,37 @@ pub(crate) fn plan(
             if placed.0.is_empty() {
                 continue;
             }
-            if next.0.is_empty() {
+            let fields = admission.surface_fields.get(&occurrence.occurrence_id);
+            if fields.is_none() && !admission.surface_fields.is_empty() {
+                retained_points
+                    .checked_add(finished_points)
+                    .and_then(|v| v.checked_add(2 * region::point_count(&next)))
+                    .and_then(|v| v.checked_add(2 * region::point_count(&placed)))
+                    .filter(|v| *v <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "native plus finished occurrence staging point budget exceeded",
+                        )
+                    })?;
+            }
+            if let Some(fields) = fields {
+                finished_source_area_mm2 += placed.unsigned_area();
+                let finished = surface::realize(
+                    placed,
+                    fields,
+                    sample,
+                    retained_points + region::point_count(&next) + finished_points,
+                    &mut surface_work,
+                    cancel,
+                )?;
+                finished_points += region::point_count(&finished);
+                // Preflight proves finished occurrence XY bounds are disjoint
+                // (including ring contact) in every overlapping source Z slab.
+                // Append these exact native-preserving rings, never re-overlay
+                // them through a changed floating-coordinate Boolean frame.
+                finished_material.extend(finished.0);
+            } else if next.0.is_empty() {
                 next = placed;
             } else {
                 boolean_budget(&next, &placed)?;
@@ -154,7 +191,17 @@ pub(crate) fn plan(
             check_cancel(cancel)?;
             region::check_size(&next)?;
         }
+        let source_area_mm2 = next.unsigned_area() + finished_source_area_mm2;
+        next.0.extend(finished_material);
+        region::check_size(&next)?;
         region::canonicalize(&mut next);
+        let realized_area_mm2 = next.unsigned_area();
+        if realized_area_mm2 < source_area_mm2 {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "surface construction lost source material",
+            ));
+        }
         // Empty native intervals are retained for genuine floating material.
         // Their support paths are generated after actual object-anchor analysis.
         retained_points = retained_points
@@ -170,13 +217,14 @@ pub(crate) fn plan(
             start: index,
             end,
             material: next,
+            source_area_mm2,
         });
         index = end;
     }
     drop(prepared_sources);
     let mut layers = Vec::with_capacity(count as usize);
     let mut segments = 0usize;
-    let mut neighborhood_work = 0usize;
+    let mut neighborhood_work = surface_work;
     let mut key = None;
     let mut classified = None;
     let mut layout_span = None;
@@ -224,6 +272,18 @@ pub(crate) fn plan(
                     );
                     failure
                 })?));
+                for fields in admission.surface_fields.values() {
+                    surface::certify_first_wall(
+                        wall_layout
+                            .as_ref()
+                            .expect("current wall layout initialized")
+                            .first_wall(),
+                        fields,
+                        sample,
+                        recipe.bead_width_mm,
+                        cancel,
+                    )?;
+                }
                 layout_span = Some(current);
             }
             let lower = survival(&sections, current, below, &mut neighborhood_work, cancel)?;
@@ -282,13 +342,17 @@ pub(crate) fn plan(
                 points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
             });
         }
+        let mut coverage = coverage.clone();
+        coverage.source_section_area_mm2 = sections[current].source_area_mm2;
+        coverage.surface_added_area_mm2 =
+            coverage.section_area_mm2 - coverage.source_section_area_mm2;
         layers.push(PrintLayer {
             index,
             z_mm: z,
             height_mm: height,
             section_z_mm: sample,
             paths,
-            region_coverage: coverage.clone(),
+            region_coverage: coverage,
         });
     }
     drop(classified);
@@ -322,6 +386,15 @@ pub(crate) fn plan(
                 retained_points,
                 cancel,
             )?);
+            for fields in admission.surface_fields.values() {
+                surface::certify_first_wall(
+                    wall.first_wall(),
+                    fields,
+                    elevation.sample,
+                    recipe.bead_width_mm,
+                    cancel,
+                )?;
+            }
             let classified =
                 classification::ClassifiedRegions::new(wall, &lower, &upper, recipe, cancel)?;
             let paths = classified
@@ -350,6 +423,7 @@ pub(crate) fn plan(
         layers,
         sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
         offset_tolerance_mm: OFFSET_TOLERANCE_MM,
+        surface_tolerance_mm: surface::SURFACE_TOLERANCE_MM,
         layer_quantization_mm: LAYER_QUANTIZATION_MM,
     };
     result.validate(input.intent)?;
@@ -360,6 +434,7 @@ struct SectionSpan {
     start: u32,
     end: u32,
     material: MultiPolygon<f64>,
+    source_area_mm2: f64,
 }
 
 struct LayerElevation {
@@ -468,6 +543,8 @@ fn physical_neighbor(
 fn empty_coverage(fraction: f64) -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         section_area_mm2: 0.0,
+        source_section_area_mm2: 0.0,
+        surface_added_area_mm2: 0.0,
         wall_area_mm2: 0.0,
         bottom_skin_area_mm2: 0.0,
         top_skin_area_mm2: 0.0,

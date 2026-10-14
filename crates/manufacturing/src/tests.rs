@@ -61,6 +61,7 @@ struct Scene {
     definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
+    surface_overlays: spiling_contracts::surface::SurfaceOverlays,
 }
 impl Scene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
@@ -71,6 +72,7 @@ impl Scene {
         provenance.source_name = "operator captured source.step".into();
         Self {
             id: ProjectId::default(),
+            surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
                 provenance,
@@ -101,6 +103,7 @@ impl Scene {
             stored_definitions: &self.stored,
             occurrences: &self.occurrences,
             intent,
+            surface_overlays: &self.surface_overlays,
         }
     }
 }

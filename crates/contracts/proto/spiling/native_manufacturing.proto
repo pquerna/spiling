@@ -117,6 +117,7 @@ message ManufacturingInspectionProvenance {
   string planner_version = 5;
   string emitter_version = 6;
   string verifier_version = 7;
+  SurfaceOverlays surface_overlays = 8;
 }
 message ReplayDisplayInfo {
   uint32 schema_version = 1;

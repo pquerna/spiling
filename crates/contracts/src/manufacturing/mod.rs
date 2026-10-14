@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Bounded software-only manufacturing data. Profile declarations certify no machine.
+use crate::surface::SurfaceOverlays;
 use crate::{geometry::*, project::*};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,7 +17,7 @@ pub use job::*;
 mod process;
 pub use process::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 3;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 4;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -732,6 +733,8 @@ pub struct DepositionPath {
 #[serde(deny_unknown_fields)]
 pub struct PlanarRegionCoverage {
     pub section_area_mm2: f64,
+    pub source_section_area_mm2: f64,
+    pub surface_added_area_mm2: f64,
     pub wall_area_mm2: f64,
     pub bottom_skin_area_mm2: f64,
     pub top_skin_area_mm2: f64,
@@ -748,6 +751,8 @@ impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
         let values = [
             self.section_area_mm2,
+            self.source_section_area_mm2,
+            self.surface_added_area_mm2,
             self.wall_area_mm2,
             self.bottom_skin_area_mm2,
             self.top_skin_area_mm2,
@@ -766,8 +771,13 @@ impl PlanarRegionCoverage {
             + self.sparse_interior_area_mm2;
         let tolerance = 1e-7 * self.section_area_mm2.max(1.0);
         if values.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || (self.section_area_mm2 - self.source_section_area_mm2 - self.surface_added_area_mm2)
+                .abs()
+                > tolerance
             || (self.section_area_mm2 == 0.0
                 && (self.nominal_deposition_volume_mm3 != 0.0
+                    || self.source_section_area_mm2 != 0.0
+                    || self.surface_added_area_mm2 != 0.0
                     || partition != 0.0
                     || self.protected_hole_area_mm2 != 0.0
                     || self.intentional_void_area_mm2 != 0.0))
@@ -808,6 +818,7 @@ pub struct NormalizedPrintPlan {
     #[serde(deserialize_with = "layers")]
     pub layers: Vec<PrintLayer>,
     pub sampling_tolerance_mm: f64,
+    pub surface_tolerance_mm: f64,
     pub offset_tolerance_mm: f64,
     pub layer_quantization_mm: f64,
 }
@@ -851,9 +862,13 @@ impl NormalizedPrintPlan {
         }
         positive(&[
             self.sampling_tolerance_mm,
+            self.surface_tolerance_mm,
             self.offset_tolerance_mm,
             self.layer_quantization_mm,
         ])?;
+        if self.surface_tolerance_mm > 0.001 {
+            return Err(invalid("surface approximation bound exceeds 0.001 mm"));
+        }
         if self.layers.is_empty() {
             return Err(invalid("print plan is empty"));
         }
@@ -1070,6 +1085,7 @@ pub struct ManufacturingProvenance {
     #[serde(deserialize_with = "occurrences")]
     pub occurrences: Vec<OccurrenceRecord>,
     pub intent: ManufacturingIntent,
+    pub surface_overlays: SurfaceOverlays,
     pub kernel: KernelIdentity,
     pub planner_version: String,
     pub emitter_version: String,
@@ -1094,6 +1110,7 @@ impl ManufacturingProvenance {
             &self.definitions,
             &self.occurrences,
             &self.intent,
+            &self.surface_overlays,
         )?;
         if hash != self.input_hash {
             return Err(ManufacturingError::new(
@@ -1342,8 +1359,18 @@ pub fn input_fingerprint(
     definitions: &[StoredDefinition],
     occurrences: &[OccurrenceRecord],
     intent: &ManufacturingIntent,
+    surface_overlays: &SurfaceOverlays,
 ) -> Result<SourceHash, ManufacturingError> {
     intent.validate()?;
+    surface_overlays
+        .validate_targets(definitions, occurrences, u32::MAX)
+        .map_err(|e| {
+            if e.code == crate::project::ProjectErrorCode::ResourceLimit {
+                resource(&e.message)
+            } else {
+                invalid(&e.message)
+            }
+        })?;
     if definitions.len() > MAX_DEFINITIONS as usize || occurrences.len() > MAX_OCCURRENCES as usize
     {
         return Err(resource("input record budget exceeded"));
@@ -1390,6 +1417,7 @@ pub fn input_fingerprint(
         definitions: Vec<&'a StoredDefinition>,
         occurrences: Vec<&'a OccurrenceRecord>,
         intent: &'a ManufacturingIntent,
+        surface_overlays: &'a SurfaceOverlays,
     }
     struct HashWriter(Sha256);
     impl std::io::Write for HashWriter {
@@ -1409,6 +1437,7 @@ pub fn input_fingerprint(
         definitions: defs,
         occurrences: occs,
         intent,
+        surface_overlays,
     };
     let mut writer = HashWriter(Sha256::new());
     serde_json::to_writer(&mut writer, &semantic).map_err(|e| invalid(&e.to_string()))?;

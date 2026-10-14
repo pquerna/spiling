@@ -131,6 +131,7 @@ impl Runtime {
                         .collect(),
                     occurrences: snapshot.occurrences.values().cloned().collect(),
                     intent,
+                    surface_overlays: snapshot.surface_overlays.clone(),
                     byte_budget: 0,
                 };
                 self.start(Purpose::Preflight, 0, move |_, _, _| {
@@ -176,6 +177,7 @@ impl Runtime {
                     .map(|source| source.record.clone())
                     .collect();
                 let occurrences = snapshot.occurrences.values().cloned().collect();
+                let surface_overlays = snapshot.surface_overlays.clone();
                 let byte_budget = MAX_MANUFACTURING_RETAINED_BYTES
                     .checked_sub(self.manufacturing_bytes())
                     .filter(|budget| *budget > 0)
@@ -194,6 +196,7 @@ impl Runtime {
                             stored_definitions,
                             occurrences,
                             intent,
+                            surface_overlays,
                             byte_budget: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES as u64)
                                 as u32,
                         })

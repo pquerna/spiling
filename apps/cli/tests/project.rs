@@ -724,3 +724,153 @@ fn manufacturing_intent_and_export_keep_non_utf8_native_paths() {
     assert!(export.join("program.gcode").is_file());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
+fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal() {
+    let root = root();
+    let project = root.join("surface-project");
+    let source = root.join("box.step");
+    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let intent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/solid-fill.intent.json");
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(&intent)
+            .args(["--center-on-bed", "1", "--compile"])
+            .output()
+            .unwrap(),
+    );
+    let original_hash = created["manufacturing"]["artifact"]["input_hash"].clone();
+    let occurrence = created["occurrences"][0]["occurrence_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let mut query = cli("inspect", &project);
+    for face in created["definitions"][0]["faces"].as_array().unwrap() {
+        query
+            .arg("--inspect-face")
+            .arg(&occurrence)
+            .arg(face["face_id"].as_str().unwrap());
+    }
+    let inspected = report(query.output().unwrap());
+    let face = inspected["face_inspections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|inspection| {
+            let carrier = &inspection["face"]["carrier"];
+            carrier["kind"] == "plane"
+                && carrier["normal"][2]
+                    .as_f64()
+                    .is_some_and(|z| z.abs() < 1e-10)
+        })
+        .expect("box has source-backed vertical planar walls");
+    let face_id = face["reference"]["face_id"].as_str().unwrap();
+    let finish =
+        r#"{"kind":"vertical_ribs","depth_mm":0.1,"pitch_mm":2,"edge_margin_mm":1,"phase_mm":0}"#;
+    let export = root.join("rib-export");
+    let finished = report(
+        cli("edit", &project)
+            .args([
+                "--surface-finish",
+                &occurrence,
+                face_id,
+                "definition",
+                finish,
+                "--preflight",
+                "--compile",
+                "--verify",
+            ])
+            .arg("--manufacturing-out")
+            .arg(&export)
+            .output()
+            .unwrap(),
+    );
+    let overlays = finished["project"]["surface_overlays"].clone();
+    assert_eq!(overlays["layers"][0]["finish"]["kind"], "vertical_ribs");
+    assert_eq!(overlays["layers"][0]["scope"]["kind"], "definition");
+    assert_eq!(overlays["layers"][0]["face_id"], face_id);
+    assert_ne!(
+        finished["manufacturing"]["artifact"]["input_hash"],
+        original_hash
+    );
+    let provenance: Value =
+        serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
+    assert_eq!(provenance["surface_overlays"], overlays);
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(export.join("plan.json")).unwrap()).unwrap();
+    let mut added_area = 0.0;
+    for layer in plan["layers"].as_array().unwrap() {
+        let coverage = &layer["region_coverage"];
+        let added = coverage["surface_added_area_mm2"].as_f64().unwrap();
+        let source = coverage["source_section_area_mm2"].as_f64().unwrap();
+        let realized = coverage["section_area_mm2"].as_f64().unwrap();
+        assert!((realized - source - added).abs() < 1e-6);
+        added_area += added;
+    }
+    assert!(
+        added_area > 0.0,
+        "rib construction must add actual realized material"
+    );
+    std::fs::remove_file(source).unwrap();
+    let reopen_export = root.join("reopen-export");
+    let replay = root.join("reopen.splr");
+    let reopened = report(
+        cli("inspect", &project)
+            .args(["--preflight", "--verify"])
+            .arg("--manufacturing-out")
+            .arg(&reopen_export)
+            .arg("--replay-out")
+            .arg(&replay)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(reopened["project"]["surface_overlays"], overlays);
+    for file in ["plan.json", "program.gcode", "provenance.json"] {
+        assert_eq!(
+            std::fs::read(export.join(file)).unwrap(),
+            std::fs::read(reopen_export.join(file)).unwrap()
+        );
+    }
+    assert_eq!(
+        reopened["manufacturing_replay"]["provenance"]["surface_overlays"],
+        overlays
+    );
+    let revealed = report(
+        cli("edit", &project)
+            .args([
+                "--surface-finish",
+                &occurrence,
+                face_id,
+                "occurrence",
+                r#"{"kind":"smooth"}"#,
+                "--surface-finish-enabled",
+                "2",
+                "false",
+                "--surface-finish-enabled",
+                "2",
+                "true",
+                "--remove-surface-finish",
+                "2",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(revealed["project"]["surface_overlays"], overlays);
+    assert!(revealed["manufacturing"]["artifact"].is_null());
+    let failure = Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+        .arg("--engine")
+        .arg(root.join("nonexistent-engine"))
+        .args(["project", "inspect"])
+        .arg(&project)
+        .args(["--remove-surface-finish", "1"])
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("read-only"));
+    std::fs::remove_dir_all(root).unwrap();
+}

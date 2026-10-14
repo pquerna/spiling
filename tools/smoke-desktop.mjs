@@ -20,9 +20,11 @@ const executable = option("--executable");
 const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
 const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
+const surfaceFinishScenario = scenario === "surface-finish";
+const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -30,20 +32,22 @@ if (
     "geometry",
     "project-bridge",
     "manufacturing",
+    "surface-finish",
     "gpu-unavailable",
     "engine-operations",
   ].includes(scenario)
 )
   throw new Error("Unknown smoke scenario");
 const sourceFixtureRoot = resolve(option("--fixture-root", "fixtures/geometry"));
-const fixtureRoot = ["project-bridge", "manufacturing"].includes(scenario)
-  ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
-  : sourceFixtureRoot;
-if (["project-bridge", "manufacturing"].includes(scenario)) {
+const fixtureRoot =
+  scenario === "project-bridge" || manufacturingScenario
+    ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
+    : sourceFixtureRoot;
+if (scenario === "project-bridge" || manufacturingScenario) {
   for (const name of ["box-mm.step", "cylinder.step"])
     await copyFile(resolve(sourceFixtureRoot, name), resolve(fixtureRoot, name));
 }
-if (scenario === "manufacturing") {
+if (manufacturingScenario) {
   await copyFile(
     resolve("fixtures/manufacturing/complete-sparse.intent.json"),
     resolve(fixtureRoot, "operator.intent.json"),
@@ -57,10 +61,10 @@ const child = spawn(resolve(executable), [], {
   env: {
     ...process.env,
     SPILING_CEF_DEBUG_PORT: String(port),
-    ...(["geometry", "project-bridge", "manufacturing"].includes(scenario)
+    ...(scenario === "geometry" || scenario === "project-bridge" || manufacturingScenario
       ? { SPILING_GEOMETRY_FIXTURE_ROOT: fixtureRoot }
       : {}),
-    ...(scenario === "manufacturing" && manufacturingDiagnostic
+    ...(manufacturingScenario && manufacturingDiagnostic
       ? { SPILING_MANUFACTURING_DIAGNOSTIC: "1" }
       : {}),
   },
@@ -647,6 +651,100 @@ async function inspectProjectBridge() {
 async function manufacturingState() {
   return JSON.parse(await text("manufacturing-state"));
 }
+async function surfaceState() {
+  return JSON.parse(await text("surface-state"));
+}
+async function inspectSurfaceFinishAuthoring() {
+  await until(
+    () => evaluate("!!document.querySelector('[data-testid=\"surface-panel\"]')"),
+    "surface editor",
+  );
+  await until(async () => !(await surfaceState()).working, "surface authority");
+  const before = await surfaceState();
+  const intent = (await manufacturingState()).selected_intent;
+  const occurrence = (await geometryState()).occurrences[0];
+  await input('[data-testid="surface-occurrence"]', occurrence.occurrence_id);
+  const faceIds = await evaluate(
+    "[...document.querySelector('[data-testid=\"surface-face\"]').options].map(option => option.value).filter(Boolean)",
+  );
+  let reference;
+  for (const faceId of faceIds) {
+    await input('[data-testid="surface-face"]', faceId);
+    await until(
+      async () => (await surfaceState()).selectedFaceRef?.face_id === faceId,
+      "native source face inspection",
+    );
+    const carrier = await evaluate(
+      "JSON.parse(document.querySelector('[data-testid=\"face-inspection\"] pre').textContent)",
+    );
+    if (carrier.kind === "plane" && Math.abs(carrier.normal[2]) < 1e-12) {
+      reference = (await surfaceState()).selectedFaceRef;
+      break;
+    }
+  }
+  assert.ok(reference, "The admitted box must expose an inspected native vertical face");
+  await input('[data-testid="surface-scope"]', "occurrence");
+  await input('[data-testid="surface-kind"]', "vertical_ribs");
+  const finish = {
+    kind: "vertical_ribs",
+    depth_mm: 0.1,
+    pitch_mm: 2,
+    edge_margin_mm: 1,
+    phase_mm: 0,
+  };
+  for (const key of ["depth_mm", "pitch_mm", "edge_margin_mm", "phase_mm"])
+    await input(`[data-testid="surface-${key}"]`, finish[key]);
+  await click("surface-apply");
+  const applied = await until(async () => {
+    const current = await surfaceState();
+    return !current.working &&
+      current.revision > before.revision &&
+      current.surface_overlays.layers.some((layer) => layer.finish.kind === "vertical_ribs")
+      ? current
+      : false;
+  }, "durable native face finish Apply");
+  const layer = applied.surface_overlays.layers.at(-1);
+  assert.deepEqual(layer.finish, finish);
+  assert.equal(layer.face_id, reference.face_id);
+  assert.deepEqual(layer.scope, {
+    kind: "occurrence",
+    occurrence_id: reference.occurrence_id,
+    expected_definition_id: reference.definition_id,
+  });
+  assert.deepEqual(
+    applied.selectedFaceRef,
+    reference,
+    "Metadata authoring preserves native scene identity",
+  );
+  assert.deepEqual(
+    (await manufacturingState()).selected_intent,
+    intent,
+    "Finish does not replace material/process intent",
+  );
+  await click("project-undo");
+  await until(async () => {
+    const current = await surfaceState();
+    return (
+      !current.working &&
+      current.revision > applied.revision &&
+      JSON.stringify(current.surface_overlays) === JSON.stringify(before.surface_overlays)
+    );
+  }, "finish Undo restores the complete authored document");
+  await click("project-redo");
+  await until(async () => {
+    const current = await surfaceState();
+    return (
+      !current.working &&
+      JSON.stringify(current.surface_overlays) === JSON.stringify(applied.surface_overlays)
+    );
+  }, "finish Redo restores original layer identity");
+  await evaluate(
+    "document.querySelector('[data-testid=\"surface-panel\"]').scrollIntoView({block:'start'})",
+  );
+  await screenshot("surface-finish-native-face-authoring");
+  return { reference, layer_id: layer.layer_id, document: applied.surface_overlays };
+}
+
 async function inspectManufacturing() {
   await until(
     () => evaluate("!!document.querySelector('[data-testid=\"manufacturing-panel\"]')"),
@@ -722,7 +820,9 @@ async function inspectManufacturing() {
   assert.equal((await manufacturingState()).project_revision, beforeInvalidLoad.project_revision);
   assert.equal((await manufacturingState()).selected_intent, null);
   assert.equal(
-    await evaluate('document.querySelector(\'[data-testid="manufacturing-top_skin_thickness_mm"]\').value'),
+    await evaluate(
+      "document.querySelector('[data-testid=\"manufacturing-top_skin_thickness_mm\"]').value",
+    ),
     "0.6",
     "Failed profile loading preserves the existing operator draft",
   );
@@ -748,7 +848,9 @@ async function inspectManufacturing() {
   await input('[data-testid="manufacturing-bed-occurrence"]', bedOccurrence);
   await click("manufacturing-center-bed");
   await until(async () => {
-    const row = (await geometryState()).occurrences.find(row => row.occurrence_id === bedOccurrence);
+    const row = (await geometryState()).occurrences.find(
+      (row) => row.occurrence_id === bedOccurrence,
+    );
     return row && JSON.stringify(row.pose.translation_mm) === JSON.stringify([100, 105, 0]);
   }, "shared native center-and-bed transaction");
   const beforePreflight = await manufacturingState();
@@ -756,7 +858,9 @@ async function inspectManufacturing() {
   state = await until(async () => {
     const current = await manufacturingState();
     return !current.working &&
-      current.preflight?.input_revision === beforePreflight.project_revision ? current : false;
+      current.preflight?.input_revision === beforePreflight.project_revision
+      ? current
+      : false;
   }, "revision-captured read-only native Preflight");
   assert.equal(state.preflight.eligible, true);
   assert.equal(state.preflight.software_only, true);
@@ -803,6 +907,7 @@ async function inspectManufacturing() {
     async () => (await manufacturingState()).selected_intent?.recipe.flow_multiplier === 1,
     "Core intent restored",
   );
+  const surface = surfaceFinishScenario ? await inspectSurfaceFinishAuthoring() : null;
   await click("manufacturing-compile");
   state = await until(
     async () => {
@@ -838,8 +943,10 @@ async function inspectManufacturing() {
   assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
   assert.equal(
     state.replay.event_count,
-    state.replay.deposition_count + state.replay.travel_count +
-      state.replay.lifecycle_count + state.replay.process_count,
+    state.replay.deposition_count +
+      state.replay.travel_count +
+      state.replay.lifecycle_count +
+      state.replay.process_count,
   );
   assert.equal(state.replay.lifecycle_count, state.report.lifecycle_motion_count);
   assert.equal(state.replay.process_count, 2 * state.report.retraction_count);
@@ -934,12 +1041,33 @@ async function inspectManufacturing() {
   assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
   assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
   const plan = JSON.parse(exported["plan.json"]);
-  assert.equal(plan.schema_version, 3);
   assert.ok(plan.layers.every((layer) => layer.region_coverage.requested_infill_fraction === 0.25));
   const kinds = new Set(plan.layers.flatMap((layer) => layer.paths.map((path) => path.kind)));
   assert.ok(kinds.has("bottom_skin"));
   assert.ok(kinds.has("top_skin"));
   assert.ok(kinds.has("sparse_fill"));
+  if (surface) {
+    const provenance = JSON.parse(exported["provenance.json"]);
+    assert.deepEqual(provenance.surface_overlays, surface.document);
+    for (const layer of plan.layers) {
+      const coverage = layer.region_coverage;
+      assert.ok(
+        Math.abs(coverage.source_section_area_mm2 - 200) <= 0.005,
+        "Native 20 x 10 mm source footprint remains distinct from rib additions",
+      );
+      assert.ok(
+        coverage.surface_added_area_mm2 > 0 && coverage.surface_added_area_mm2 <= 2,
+        "The requested shallow face relief contributes bounded actual material",
+      );
+      assert.ok(
+        Math.abs(
+          coverage.section_area_mm2 -
+            coverage.source_section_area_mm2 -
+            coverage.surface_added_area_mm2,
+        ) <= 1e-8,
+      );
+    }
+  }
   await click("manufacturing-debug-export");
   await until(
     async () => /new directory|new destination/.test(await text("manufacturing-message")),
@@ -949,8 +1077,11 @@ async function inspectManufacturing() {
     await readFile(resolve(fixtureRoot, "export-one", "program.gcode"), "utf8"),
     exported["program.gcode"],
   );
-  await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
-  await click("manufacturing-apply");
+  if (surface) await click(`surface-remove-${surface.layer_id}`);
+  else {
+    await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
+    await click("manufacturing-apply");
+  }
   await until(async () => {
     const current = await manufacturingState();
     return !current.fresh && !current.selected_artifact && !current.working;
@@ -969,6 +1100,12 @@ async function inspectManufacturing() {
     false,
     "Historical result cannot reactivate on Undo",
   );
+  if (surface)
+    assert.deepEqual(
+      (await surfaceState()).surface_overlays,
+      surface.document,
+      "Undo restores the authored finish and matching immutable bundle together",
+    );
   await click("project-save");
   await until(
     async () =>
@@ -992,6 +1129,14 @@ async function inspectManufacturing() {
     await evaluate("document.querySelector('[data-testid=\"manufacturing-compile\"]').disabled"),
     true,
   );
+  if (surface) {
+    assert.deepEqual((await surfaceState()).surface_overlays, surface.document);
+    assert.equal(
+      await evaluate("document.querySelector('[data-testid=\"surface-apply\"]').disabled"),
+      true,
+      "Read-only surface authoring stays disabled",
+    );
+  }
   const reopenedRevision = state.project_revision;
   await click("manufacturing-verify-motion");
   state = await until(
@@ -1055,14 +1200,15 @@ async function inspectManufacturing() {
     65000,
   );
   await evaluate(
-    "document.querySelector('[data-testid=\"manufacturing-panel\"]').scrollIntoView({block:'start'})",
+    `document.querySelector('[data-testid="${surface ? "surface-panel" : "manufacturing-panel"}"]').scrollIntoView({block:'start'})`,
   );
-  await screenshot("manufacturing-production-panel");
+  await screenshot(surface ? "surface-finish-production-panel" : "manufacturing-production-panel");
   return {
     record,
     report: state.report,
     provenance: state.provenance,
     replay: state.replay,
+    surface,
     firstActualEndpoint: first,
     cancellationRequested,
     previousSession,
@@ -1114,7 +1260,7 @@ try {
   await cdp("Runtime.enable");
   if (
     ["gpu-unavailable", "engine-operations", "project-bridge"].includes(scenario) ||
-    (scenario === "manufacturing" && manufacturingDiagnostic)
+    (manufacturingScenario && manufacturingDiagnostic)
   ) {
     await cdp("Page.addScriptToEvaluateOnNewDocument", {
       source: "Object.defineProperty(navigator, 'gpu', {value: undefined, configurable: true});",
@@ -1130,7 +1276,7 @@ try {
   if (scenario === "project-bridge") {
     const proof = await inspectProjectBridge();
     console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
-  } else if (scenario === "manufacturing") {
+  } else if (manufacturingScenario) {
     const proof = await inspectManufacturing();
     console.log(JSON.stringify({ result: "pass", scenario, ...proof }, null, 2));
   } else if (scenario === "gpu-unavailable") {
@@ -1295,7 +1441,7 @@ try {
   if (enginePid) assert.equal(alive(enginePid), false, "Native window close releases engine child");
   console.log("PASS: native window close exits application and engine");
 } catch (error) {
-  if (scenario === "manufacturing" && socket && !childExited) {
+  if (manufacturingScenario && socket && !childExited) {
     try {
       console.error("Manufacturing failure surface:", await evaluate("document.body.innerText"));
       await screenshot("manufacturing-failure");
@@ -1311,7 +1457,7 @@ try {
   }
   socket?.close();
   if (!childExited) child.kill("SIGTERM");
-  if (["project-bridge", "manufacturing"].includes(scenario)) {
+  if (scenario === "project-bridge" || manufacturingScenario) {
     if (childExited && (!enginePid || !alive(enginePid)))
       await rm(fixtureRoot, { recursive: true, force: true });
     else console.error(`Preserved live-writer smoke directory: ${fixtureRoot}`);

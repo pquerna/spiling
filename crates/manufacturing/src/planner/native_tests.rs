@@ -11,6 +11,7 @@ struct NativeScene {
     definitions: BTreeMap<DefinitionId, Arc<spiling_geometry::Definition>>,
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
+    surface_overlays: spiling_contracts::surface::SurfaceOverlays,
 }
 impl NativeScene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
@@ -19,6 +20,7 @@ impl NativeScene {
         let id = native.id().clone();
         Self {
             project: ProjectId::default(),
+            surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
                 provenance: native.provenance().clone(),
@@ -62,6 +64,7 @@ impl NativeScene {
             stored_definitions: &self.stored,
             occurrences: &self.occurrences,
             intent,
+            surface_overlays: &self.surface_overlays,
         }
     }
 }
@@ -586,4 +589,668 @@ fn genuine_native_cantilever_clearance_and_floating_gap_limits_are_explicit() {
         interface_thickness_mm: 0.8,
     };
     assert!(compile(floating.input(&enabled), &AtomicBool::new(false)).is_err());
+}
+
+fn rib_layer(scene: &NativeScene, id: u32) -> spiling_contracts::surface::SurfaceLayer {
+    use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
+    let occurrence = &scene.occurrences[0];
+    let native = &scene.definitions[&occurrence.definition_id];
+    let face = native
+        .faces()
+        .iter()
+        .find(|face| {
+            native
+                .vertical_wall_face(&face.face_id)
+                .is_ok_and(|cert| cert.width_mm >= 8.0)
+        })
+        .expect("fixture must contain a genuinely certified full-height rectangular exterior face");
+    SurfaceLayer {
+        layer_id: SurfaceLayerId::new(id).unwrap(),
+        enabled: true,
+        scope: SurfaceScope::Definition {
+            definition_id: occurrence.definition_id.clone(),
+        },
+        face_id: face.face_id.clone(),
+        finish: SurfaceFinish::VerticalRibs {
+            depth_mm: 0.1,
+            pitch_mm: 2.4,
+            edge_margin_mm: 1.2,
+            phase_mm: 0.0,
+        },
+    }
+}
+
+fn assert_native_surface_retention(
+    source: &MultiPolygon<f64>,
+    derived: &MultiPolygon<f64>,
+    native: &spiling_geometry::Definition,
+    pose: &RigidPoseMm,
+    sample: f64,
+    layers: &[spiling_contracts::surface::SurfaceLayer],
+) {
+    use geo::{Intersects, Point};
+    use spiling_contracts::surface::SurfaceFinish;
+    let certificates = layers
+        .iter()
+        .map(|layer| {
+            (
+                native.vertical_wall_face(&layer.face_id).unwrap(),
+                &layer.finish,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut profile_vertices = 0usize;
+    for (original, finished) in source.0.iter().zip(&derived.0) {
+        assert_eq!(
+            original.interiors(),
+            finished.interiors(),
+            "native hole coordinates changed"
+        );
+        for point in &original.exterior().0 {
+            assert!(
+                finished.intersects(&Point(*point)),
+                "original native material point was excluded"
+            );
+            let local = inverse(pose, [point.x, point.y, sample]);
+            let active = certificates.iter().any(|(cert, finish)| {
+                let SurfaceFinish::VerticalRibs { edge_margin_mm, .. } = finish else {
+                    return false;
+                };
+                let delta = [local[0] - cert.origin_mm[0], local[1] - cert.origin_mm[1]];
+                let s = delta[0] * cert.horizontal_direction[0]
+                    + delta[1] * cert.horizontal_direction[1];
+                let outward = delta[0] * cert.outward_normal[0] + delta[1] * cert.outward_normal[1];
+                outward.abs() <= 1e-7 && s > *edge_margin_mm && s < cert.width_mm - edge_margin_mm
+            });
+            if !active {
+                assert!(
+                    finished.exterior().0.contains(point),
+                    "untargeted/protected native vertex changed"
+                );
+            }
+        }
+        for point in &finished.exterior().0 {
+            if original.exterior().0.contains(point) {
+                continue;
+            }
+            let local = inverse(pose, [point.x, point.y, sample]);
+            assert!(
+                certificates.iter().any(|(cert, finish)| {
+                    let SurfaceFinish::VerticalRibs {
+                        depth_mm,
+                        pitch_mm,
+                        edge_margin_mm,
+                        phase_mm,
+                    } = finish
+                    else {
+                        return false;
+                    };
+                    let delta = [local[0] - cert.origin_mm[0], local[1] - cert.origin_mm[1]];
+                    let s = delta[0] * cert.horizontal_direction[0]
+                        + delta[1] * cert.horizontal_direction[1];
+                    let outward =
+                        delta[0] * cert.outward_normal[0] + delta[1] * cert.outward_normal[1];
+                    let edge = (s - edge_margin_mm).min(cert.width_mm - edge_margin_mm - s);
+                    let taper = if edge <= 0.0 {
+                        0.0
+                    } else if edge >= pitch_mm / 2.0 {
+                        1.0
+                    } else {
+                        0.5 * (1.0 - (std::f64::consts::TAU * edge / pitch_mm).cos())
+                    };
+                    let expected = depth_mm
+                        * 0.5
+                        * (1.0 - (std::f64::consts::TAU * (s - phase_mm) / pitch_mm).cos())
+                        * taper;
+                    s >= edge_margin_mm - 1e-5
+                        && s <= cert.width_mm - edge_margin_mm + 1e-5
+                        && outward >= -1e-5
+                        && (outward - expected).abs() <= 1e-5
+                }),
+                "constructed chain sample changed the source-local waveform/phase"
+            );
+            profile_vertices += 1;
+        }
+        // Vertex agreement alone cannot detect an under-sampled curve. Check
+        // the manufactured polygon's chords between samples against the
+        // requested source-local relief, including both taper transitions.
+        for edge in finished.exterior().0.windows(2) {
+            for (cert, finish) in &certificates {
+                let SurfaceFinish::VerticalRibs {
+                    depth_mm,
+                    pitch_mm,
+                    edge_margin_mm,
+                    phase_mm,
+                } = finish
+                else {
+                    continue;
+                };
+                let local_edge = [edge[0], edge[1]].map(|point| {
+                    let local = inverse(pose, [point.x, point.y, sample]);
+                    let delta = [local[0] - cert.origin_mm[0], local[1] - cert.origin_mm[1]];
+                    (
+                        delta[0] * cert.horizontal_direction[0]
+                            + delta[1] * cert.horizontal_direction[1],
+                        delta[0] * cert.outward_normal[0] + delta[1] * cert.outward_normal[1],
+                    )
+                });
+                if local_edge.iter().any(|(s, outward)| {
+                    *s < -1e-5
+                        || *s > cert.width_mm + 1e-5
+                        || *outward < -1e-5
+                        || *outward > depth_mm + 1e-5
+                }) {
+                    continue;
+                }
+                for fraction in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875] {
+                    let s = local_edge[0].0 + fraction * (local_edge[1].0 - local_edge[0].0);
+                    let outward = local_edge[0].1 + fraction * (local_edge[1].1 - local_edge[0].1);
+                    let end_distance = (s - edge_margin_mm).min(cert.width_mm - edge_margin_mm - s);
+                    let taper = if end_distance <= 0.0 {
+                        0.0
+                    } else if end_distance >= pitch_mm / 2.0 {
+                        1.0
+                    } else {
+                        0.5 * (1.0 - (std::f64::consts::TAU * end_distance / pitch_mm).cos())
+                    };
+                    let requested = depth_mm
+                        * 0.5
+                        * (1.0 - (std::f64::consts::TAU * (s - phase_mm) / pitch_mm).cos())
+                        * taper;
+                    assert!(
+                        (outward - requested).abs() <= 0.001,
+                        "realized rib chord exceeds its declared 0.001 mm approximation budget"
+                    );
+                }
+            }
+        }
+    }
+    assert!(profile_vertices > 8, "no genuine sampled rib profile");
+}
+
+#[test]
+fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accounting() {
+    use crate::{inspect_bundle, verify_bundle};
+    use spiling_contracts::geometry::SourceHash;
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(false);
+    let original = compile(scene.input(&intent), &cancel).unwrap();
+    let layer = rib_layer(&scene, 1);
+    let face_id = layer.face_id.clone();
+    scene.surface_overlays.layers.push(layer);
+    let finished = compile(scene.input(&intent), &cancel).unwrap();
+    assert_ne!(original.program, finished.program);
+    assert_eq!(
+        finished.provenance.definitions,
+        original.provenance.definitions
+    );
+    assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let cert = native.vertical_wall_face(&face_id).unwrap();
+    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let sample = finished.plan.layers[0].section_z_mm;
+    let native_section = spiling_geometry::section_with_byte_limit(
+        native,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, sample],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    let source =
+        region::from_native(native_section, &RigidPoseMm::IDENTITY, sample, &cancel).unwrap();
+    let derived = surface::realize(
+        source.clone(),
+        &admitted.surface_fields[&scene.occurrences[0].occurrence_id],
+        sample,
+        0,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    assert_native_surface_retention(
+        &source,
+        &derived,
+        native,
+        &RigidPoseMm::IDENTITY,
+        sample,
+        &scene.surface_overlays.layers,
+    );
+    assert_eq!(source.0.len(), derived.0.len());
+    let added = derived.difference(&source);
+    assert!(added.unsigned_area() > 0.0);
+    for point in added.0.iter().flat_map(|polygon| &polygon.exterior().0) {
+        let dx = point.x - cert.origin_mm[0];
+        let dy = point.y - cert.origin_mm[1];
+        let s = dx * cert.horizontal_direction[0] + dy * cert.horizontal_direction[1];
+        let outward = dx * cert.outward_normal[0] + dy * cert.outward_normal[1];
+        assert!(
+            s >= 1.2 - 1e-6 && s <= cert.width_mm - 1.2 + 1e-6,
+            "protected corner band was filled"
+        );
+        assert!(
+            outward >= -1e-6 && outward <= 0.1 + 1e-6,
+            "addition exceeded the outward-only profile bounds"
+        );
+    }
+    let projected = |point: [f64; 3]| {
+        (point[0] - cert.origin_mm[0]) * cert.outward_normal[0]
+            + (point[1] - cert.origin_mm[1]) * cert.outward_normal[1]
+    };
+    for (plain, textured) in original.plan.layers.iter().zip(&finished.plan.layers) {
+        let coverage = &textured.region_coverage;
+        assert!((coverage.source_section_area_mm2 - 200.0).abs() < 1e-7);
+        assert!(coverage.surface_added_area_mm2 > 0.0);
+        assert!(
+            (coverage.section_area_mm2
+                - coverage.source_section_area_mm2
+                - coverage.surface_added_area_mm2)
+                .abs()
+                < 1e-9
+        );
+        let perimeter = textured
+            .paths
+            .iter()
+            .find(|p| p.kind == DepositionKind::Perimeter)
+            .unwrap();
+        assert_eq!(perimeter.points_mm.first(), perimeter.points_mm.last());
+        assert_ne!(
+            perimeter.points_mm,
+            plain
+                .paths
+                .iter()
+                .find(|p| p.kind == DepositionKind::Perimeter)
+                .unwrap()
+                .points_mm
+        );
+        let peak = perimeter
+            .points_mm
+            .iter()
+            .copied()
+            .map(projected)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((peak - (0.1 - intent.recipe.bead_width_mm / 2.0)).abs() <= 0.006);
+        let area = (intent.recipe.bead_width_mm - textured.height_mm) * textured.height_mm
+            + std::f64::consts::PI * (textured.height_mm / 2.0).powi(2);
+        let volume = textured
+            .paths
+            .iter()
+            .flat_map(|path| path.points_mm.windows(2))
+            .map(|p| (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]) * area)
+            .sum::<f64>();
+        assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
+    }
+    let bytes = serde_json::to_vec(&finished).unwrap();
+    let hash = SourceHash::from_bytes(&bytes);
+    let inspection = inspect_bundle(
+        &finished,
+        &hash,
+        VerificationOutput::ReportAndMotion,
+        &cancel,
+    )
+    .unwrap();
+    let replay = inspection.replay.unwrap();
+    let peak = replay.bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
+        .filter(|record| record[46] == 1)
+        .map(|record| {
+            projected(std::array::from_fn(|axis| {
+                f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
+            }))
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!((peak - (0.1 - intent.recipe.bead_width_mm / 2.0)).abs() <= 0.006001);
+    let decoded = decode_bundle(&bytes).unwrap();
+    assert_eq!(decoded.plan, finished.plan);
+    assert_eq!(
+        verify_bundle(&decoded, &cancel).unwrap(),
+        finished.verification
+    );
+    for field in ['X', 'E'] {
+        let mut mutated = decoded.clone();
+        let line = mutated
+            .program
+            .lines()
+            .find(|line| line.starts_with("G1 ") && line.contains(" X"))
+            .unwrap();
+        let altered = line
+            .split_whitespace()
+            .map(|token| {
+                if let Some(value) = token.strip_prefix(field) {
+                    format!("{field}{:.8}", value.parse::<f64>().unwrap() + 0.02)
+                } else {
+                    token.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        mutated.program = mutated.program.replacen(line, &altered, 1);
+        assert_eq!(
+            verify_bundle(&mutated, &cancel).unwrap_err().code,
+            ManufacturingErrorCode::VerificationFailed
+        );
+    }
+}
+
+#[test]
+fn native_surface_scope_smooth_disable_and_expanded_bounds_are_real_consumers() {
+    use spiling_contracts::surface::{SurfaceFinish, SurfaceScope};
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(false);
+    let original = compile(scene.input(&intent), &cancel).unwrap();
+    let definition_ribs = rib_layer(&scene, 2);
+    let mut smooth = rib_layer(&scene, 1);
+    smooth.scope = SurfaceScope::Occurrence {
+        occurrence_id: scene.occurrences[0].occurrence_id,
+        expected_definition_id: scene.occurrences[0].definition_id.clone(),
+    };
+    smooth.finish = SurfaceFinish::Smooth;
+    // Occurrence precedence is independent of relative stored array position.
+    scene.surface_overlays.layers = vec![smooth, definition_ribs];
+    let overridden = compile(scene.input(&intent), &cancel).unwrap();
+    assert_eq!(overridden.plan, original.plan);
+    assert_ne!(
+        overridden.provenance.input_hash,
+        original.provenance.input_hash
+    );
+    scene.surface_overlays.layers[0].enabled = false;
+    let revealed = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(
+        revealed.plan.layers[0]
+            .region_coverage
+            .surface_added_area_mm2
+            > 0.0
+    );
+    scene.surface_overlays.layers.remove(0);
+    let removed = compile(scene.input(&intent), &cancel).unwrap();
+    assert_eq!(removed.plan, revealed.plan);
+    assert_ne!(
+        removed.provenance.input_hash,
+        revealed.provenance.input_hash
+    );
+    let mut exact_envelope = intent.clone();
+    exact_envelope.printer.build_envelope =
+        AabbMm::new([0.0, 0.0, 0.0], [20.0, 10.0, 8.0]).unwrap();
+    let report = preflight(&scene.input(&exact_envelope), &cancel).unwrap();
+    assert!(!report.eligible);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.code == "outside_envelope")
+    );
+    assert_eq!(
+        compile(scene.input(&exact_envelope), &cancel)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::UnsupportedGeometry
+    );
+    scene.surface_overlays.layers[0].finish = SurfaceFinish::VerticalRibs {
+        depth_mm: 0.1,
+        pitch_mm: 1.0,
+        edge_margin_mm: 1.2,
+        phase_mm: 0.0,
+    };
+    assert_eq!(
+        compile(scene.input(&intent), &cancel).unwrap_err().code,
+        ManufacturingErrorCode::UnsupportedGeometry
+    );
+}
+
+#[test]
+fn native_surface_pose_holes_and_other_occurrence_exclusion_preserve_authority() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(HOLE, &[RigidPoseMm::IDENTITY]);
+    scene.surface_overlays.layers.push(rib_layer(&scene, 1));
+    let intent = intent(false);
+    let finished = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(
+        finished.plan.layers[0]
+            .region_coverage
+            .protected_hole_area_mm2
+            > 0.0
+    );
+    let source_area = finished.plan.layers[0]
+        .region_coverage
+        .source_section_area_mm2;
+    scene.occurrences[0].pose = translated(23.0, 17.0, 0.0);
+    let moved = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(
+        (moved.plan.layers[0].region_coverage.source_section_area_mm2 - source_area).abs() < 1e-7
+    );
+    assert!(
+        (moved.plan.layers[0].region_coverage.surface_added_area_mm2
+            - finished.plan.layers[0]
+                .region_coverage
+                .surface_added_area_mm2)
+            .abs()
+            < 1e-5
+    );
+    // Compare inverse-translated contour vertices, not source-only path counts.
+    for path in &finished.plan.layers[0].paths {
+        if path.kind != DepositionKind::Perimeter {
+            continue;
+        }
+        let counterpart = moved.plan.layers[0]
+            .paths
+            .iter()
+            .find(|p| {
+                p.kind == path.kind
+                    && p.points_mm.len() == path.points_mm.len()
+                    && (p.points_mm[0][0] - 23.0 - path.points_mm[0][0]).abs() < 1e-5
+                    && (p.points_mm[0][1] - 17.0 - path.points_mm[0][1]).abs() < 1e-5
+            })
+            .unwrap();
+        for (a, b) in path.points_mm.iter().zip(&counterpart.points_mm) {
+            assert!((a[0] - (b[0] - 23.0)).abs() < 1e-5 && (a[1] - (b[1] - 17.0)).abs() < 1e-5);
+        }
+    }
+    let quarter = std::f64::consts::FRAC_1_SQRT_2;
+    scene.occurrences[0].pose.rotation_xyzw = [0.0, 0.0, quarter, quarter];
+    let rotated = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(
+        (rotated.plan.layers[0]
+            .region_coverage
+            .surface_added_area_mm2
+            - finished.plan.layers[0]
+                .region_coverage
+                .surface_added_area_mm2)
+            .abs()
+            < 1e-5
+    );
+    scene.occurrences[0].pose.rotation_xyzw = [0.0, 0.0, 0.0, 1.0];
+    scene.occurrences[0].pose.translation_mm[2] = 1.0;
+    assert!(!preflight(&scene.input(&intent), &cancel).unwrap().eligible);
+    let mut overlapping =
+        NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 0.0)]);
+    overlapping
+        .surface_overlays
+        .layers
+        .push(rib_layer(&overlapping, 1));
+    let report = preflight(&overlapping.input(&intent), &cancel).unwrap();
+    assert!(
+        !report.eligible
+            && report
+                .checks
+                .iter()
+                .any(|check| check.code == "surface_occurrence_exclusion")
+    );
+}
+
+#[test]
+fn finished_native_cantilever_keeps_ribs_through_actual_anchor_support_realization() {
+    use geo::{Contains, Point};
+    use spiling_contracts::surface::SurfaceScope;
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY, translated(10.0, 0.0, 8.0)]);
+    let mut layer = rib_layer(&scene, 1);
+    layer.scope = SurfaceScope::Occurrence {
+        occurrence_id: scene.occurrences[0].occurrence_id,
+        expected_definition_id: scene.occurrences[0].definition_id.clone(),
+    };
+    let face_id = layer.face_id.clone();
+    scene.surface_overlays.layers.push(layer);
+    let enabled = intent(true);
+    let bundle = compile(scene.input(&enabled), &cancel).unwrap();
+    assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
+    let native = &scene.definitions[&scene.occurrences[0].definition_id];
+    let cert = native.vertical_wall_face(&face_id).unwrap();
+    let admitted = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+    let source = region::from_native(
+        spiling_geometry::section_with_byte_limit(
+            native,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 4.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            4 * 1024 * 1024,
+        )
+        .unwrap(),
+        &RigidPoseMm::IDENTITY,
+        4.0,
+        &cancel,
+    )
+    .unwrap();
+    let derived = surface::realize(
+        source,
+        &admitted.surface_fields[&scene.occurrences[0].occurrence_id],
+        4.0,
+        0,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    let exclusion = region::offset(&derived, 0.2, &cancel).unwrap();
+    for layer in &bundle.plan.layers {
+        if layer.section_z_mm < 8.0 {
+            assert!(layer.region_coverage.surface_added_area_mm2 > 0.0);
+            let peak = layer
+                .paths
+                .iter()
+                .filter(|p| p.kind == DepositionKind::Perimeter)
+                .flat_map(|p| &p.points_mm)
+                .map(|point| {
+                    (point[0] - cert.origin_mm[0]) * cert.outward_normal[0]
+                        + (point[1] - cert.origin_mm[1]) * cert.outward_normal[1]
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (peak - (0.1 - enabled.recipe.bead_width_mm / 2.0)).abs() <= 0.006,
+                "actual-anchor regeneration lost the lower occurrence's ribs"
+            );
+            for point in layer
+                .paths
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    )
+                })
+                .flat_map(|p| &p.points_mm)
+            {
+                assert!(
+                    !exclusion.contains(&Point::new(point[0], point[1])),
+                    "support entered the realized native-plus-rib clearance domain"
+                );
+            }
+        } else {
+            assert_eq!(layer.region_coverage.surface_added_area_mm2, 0.0);
+        }
+    }
+}
+
+#[test]
+fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_occurrences() {
+    use spiling_contracts::surface::SurfaceLayerId;
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(HOLE, &[RigidPoseMm::IDENTITY, translated(50.0, 0.0, 0.0)]);
+    let mut first = rib_layer(&scene, 1);
+    first.finish = spiling_contracts::surface::SurfaceFinish::VerticalRibs {
+        depth_mm: 0.02,
+        pitch_mm: 2.4,
+        edge_margin_mm: 1.2,
+        phase_mm: 0.37,
+    };
+    let native = scene.definitions[&scene.occurrences[0].definition_id].clone();
+    let second_face = native
+        .faces()
+        .iter()
+        .find(|face| {
+            face.face_id != first.face_id
+                && native
+                    .vertical_wall_face(&face.face_id)
+                    // Left-face native traversal crosses the canonical ring closure.
+                    .is_ok_and(|cert| cert.width_mm >= 8.0 && cert.outward_normal[0] < -0.9)
+        })
+        .unwrap();
+    let mut second = first.clone();
+    second.layer_id = SurfaceLayerId::new(2).unwrap();
+    second.face_id = second_face.face_id.clone();
+    scene.surface_overlays.layers = vec![first, second];
+    let intent = intent(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(bundle.plan.layers[0].region_coverage.surface_added_area_mm2 > 0.0);
+    assert!(
+        bundle.plan.layers[0]
+            .region_coverage
+            .protected_hole_area_mm2
+            > 0.0
+    );
+    let quarter = std::f64::consts::FRAC_1_SQRT_2;
+    scene.occurrences[0].pose.rotation_xyzw = [0.0, 0.0, quarter, quarter];
+    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    assert!(admitted.report.eligible);
+    for occurrence in &scene.occurrences {
+        let source = region::from_native(
+            spiling_geometry::section_with_byte_limit(
+                &native,
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, 2.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                &cancel,
+                4 * 1024 * 1024,
+            )
+            .unwrap(),
+            &occurrence.pose,
+            2.0,
+            &cancel,
+        )
+        .unwrap();
+        let derived = surface::realize(
+            source.clone(),
+            &admitted.surface_fields[&occurrence.occurrence_id],
+            2.0,
+            0,
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(source.0.len(), derived.0.len());
+        assert_native_surface_retention(
+            &source,
+            &derived,
+            &native,
+            &occurrence.pose,
+            2.0,
+            &scene.surface_overlays.layers,
+        );
+        assert!(derived.unsigned_area() > source.unsigned_area());
+    }
+    let posed = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(posed.verification.verified);
+    assert!(
+        (posed.plan.layers[0].region_coverage.surface_added_area_mm2
+            - bundle.plan.layers[0].region_coverage.surface_added_area_mm2)
+            .abs()
+            < 1e-5
+    );
 }

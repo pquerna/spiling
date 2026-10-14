@@ -15,6 +15,8 @@ fn manifest() -> ProjectManifest {
         units: ProjectUnits::Millimetres,
         frame: ProjectFrame::RightHanded,
         next_occurrence: 2,
+        next_surface_layer: 1,
+        surface_overlays: SurfaceOverlays::empty(),
         definitions: vec![StoredDefinition {
             definition_id: definition_id.clone(),
             provenance: SourceProvenance {
@@ -99,13 +101,18 @@ fn manifest_does_not_admit_runtime_handles_or_incompatible_coordinate_contracts(
 #[test]
 fn manifest_requires_explicit_current_format_manufacturing_fields() {
     let valid = serde_json::to_value(manifest()).unwrap();
-    for field in ["manufacturing_intent", "manufacturing_artifact"] {
+    for field in [
+        "manufacturing_intent",
+        "manufacturing_artifact",
+        "surface_overlays",
+        "next_surface_layer",
+    ] {
         let mut changed = valid.clone();
         changed.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<ProjectManifest>(changed).is_err());
     }
     let mut old = manifest();
-    old.format_version = 1;
+    old.format_version = 2;
     assert_eq!(
         old.validate().unwrap_err().code,
         ProjectErrorCode::UnsupportedFormat
@@ -136,4 +143,38 @@ fn project_errors_preserve_utf8_and_reject_unbounded_wire_messages() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn surface_manifest_references_counter_and_expected_source_are_authoritative() {
+    let mut value = manifest();
+    value.next_surface_layer = 2;
+    value.surface_overlays.layers.push(SurfaceLayer {
+        layer_id: SurfaceLayerId::new(1).unwrap(),
+        enabled: false,
+        scope: SurfaceScope::Occurrence {
+            occurrence_id: value.occurrences[0].occurrence_id,
+            expected_definition_id: value.definitions[0].definition_id.clone(),
+        },
+        face_id: FaceId::from_step_entity(7).unwrap(),
+        finish: SurfaceFinish::Smooth,
+    });
+    value.validate().unwrap();
+    let mut changed = value.clone();
+    changed.next_surface_layer = 1;
+    assert!(changed.validate().is_err());
+    changed = value.clone();
+    changed.surface_overlays.layers[0].scope = SurfaceScope::Occurrence {
+        occurrence_id: value.occurrences[0].occurrence_id,
+        expected_definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+    };
+    assert!(
+        changed.validate().is_err(),
+        "disabled targets still require source integrity"
+    );
+    changed = value;
+    changed.surface_overlays.layers[0].scope = SurfaceScope::Definition {
+        definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+    };
+    assert!(changed.validate().is_err());
 }

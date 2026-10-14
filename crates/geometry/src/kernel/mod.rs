@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod wall;
+
 use monstertruck_modeling::Solid;
 use spiling_contracts::geometry::{AabbMm, DefinitionId, FaceInfo, SourceProvenance};
 

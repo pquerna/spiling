@@ -9,4 +9,6 @@ Core alone owns persistent intent, revisions, history and bundle storage; manufa
 
 Explicit Preflight offers bounded occurrence/face-aware software input eligibility before compilation. It is a nonmutating durable native operation, not an artifact or a machine-readiness certificate; native analysis remains pending until Compile and physical qualification remains absent.
 
+Source-backed whole-face vertical ribs consume native rectangular-wall certification through the public compiler. Realized material includes bounded additions before path ownership; source area and added area remain distinct. The result is a software manufacturing construction, not a changed BREP or physical tactile qualification.
+
 Software support includes explicit diagnostic body-only output or complete declared Marlin 2 lifecycle/backend/independent replay, physical-thickness skins, sparse planar infill and per-layer material ownership. No physical printer connection, printability, heating/homing/startup/collision/firmware qualification, Blender support or alternate geometry path is provided. Actual firmware configuration/calibration measurements and supervised prints remain external gates. Acceptance requires real child-process durable artifacts and explicit failure/cleanup behavior, not persisted success flags or preview-only output.

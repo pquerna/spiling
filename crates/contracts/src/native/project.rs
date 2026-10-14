@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::{request_id, required, session_parent};
-use crate::{geometry::*, project::*, rpc};
+use crate::{geometry::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
     Execute(rpc::ProjectRequest),
@@ -73,6 +73,48 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
                 base_revision: base_revision.0,
             }),
         ),
+        ProjectCommand::AddSurfaceFinish {
+            session_id,
+            base_revision,
+            face_ref,
+            scope,
+            finish,
+        } => (
+            session_id,
+            C::AddSurfaceFinish(rpc::AddSurfaceFinishRequest {
+                base_revision: base_revision.0,
+                face_ref: Some(face_ref.try_into()?),
+                scope: match scope {
+                    SurfaceScopeKind::Definition => rpc::SurfaceScopeKind::Definition as i32,
+                    SurfaceScopeKind::Occurrence => rpc::SurfaceScopeKind::Occurrence as i32,
+                },
+                finish: Some(finish.try_into()?),
+            }),
+        ),
+        ProjectCommand::RemoveSurfaceFinish {
+            session_id,
+            base_revision,
+            layer_id,
+        } => (
+            session_id,
+            C::RemoveSurfaceFinish(rpc::RemoveSurfaceFinishRequest {
+                base_revision: base_revision.0,
+                layer_id: layer_id.get(),
+            }),
+        ),
+        ProjectCommand::SetSurfaceFinishEnabled {
+            session_id,
+            base_revision,
+            layer_id,
+            enabled,
+        } => (
+            session_id,
+            C::SetSurfaceFinishEnabled(rpc::SetSurfaceFinishEnabledRequest {
+                base_revision: base_revision.0,
+                layer_id: layer_id.get(),
+                enabled,
+            }),
+        ),
     };
     Ok(ProjectCall::Execute(rpc::ProjectRequest {
         parent: format!("sessions/{}", session_id.as_str()),
@@ -98,6 +140,32 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
             C::Redo(v) => Self::Redo {
                 session_id,
                 base_revision: SceneRevision(v.base_revision),
+            },
+            C::AddSurfaceFinish(v) => Self::AddSurfaceFinish {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                face_ref: required(v.face_ref, "surface source face")?.try_into()?,
+                scope: match rpc::SurfaceScopeKind::try_from(v.scope)
+                    .map_err(|_| "unknown surface scope")?
+                {
+                    rpc::SurfaceScopeKind::Definition => SurfaceScopeKind::Definition,
+                    rpc::SurfaceScopeKind::Occurrence => SurfaceScopeKind::Occurrence,
+                    rpc::SurfaceScopeKind::Unspecified => {
+                        return Err("missing surface scope".into());
+                    }
+                },
+                finish: required(v.finish, "surface finish")?.try_into()?,
+            },
+            C::RemoveSurfaceFinish(v) => Self::RemoveSurfaceFinish {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                layer_id: SurfaceLayerId::new(v.layer_id).map_err(|e| e.to_string())?,
+            },
+            C::SetSurfaceFinishEnabled(v) => Self::SetSurfaceFinishEnabled {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                layer_id: SurfaceLayerId::new(v.layer_id).map_err(|e| e.to_string())?,
+                enabled: v.enabled,
             },
         })
     }
@@ -128,6 +196,7 @@ impl TryFrom<rpc::SaveProjectRequest> for ProjectCommand {
     }
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
+    v.surface_overlays.validate().map_err(|e| e.to_string())?;
     if v.saved_revision.is_some_and(|r| r.0 > v.revision.0)
         || v.path_label.as_ref().is_some_and(|s| {
             s.is_empty() || s.len() > MAX_NATIVE_PATH_UNITS as usize * 4 || s.contains('\0')
@@ -153,6 +222,8 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
             recovered_previous: v.recovered_previous,
             can_undo: v.can_undo,
             can_redo: v.can_redo,
+            surface_overlays: required(v.surface_overlays, "project surface overlays")?
+                .try_into()?,
         };
         validate_project_info(&info)?;
         Ok(info)
@@ -173,6 +244,7 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             recovered_previous: v.recovered_previous,
             can_undo: v.can_undo,
             can_redo: v.can_redo,
+            surface_overlays: Some(v.surface_overlays.try_into()?),
         })
     }
 }
@@ -206,6 +278,134 @@ impl TryFrom<ProjectResponse> for rpc::ProjectReply {
                 }
                 _ => return Err("project response requires Operation or Status".into()),
             }),
+        })
+    }
+}
+
+impl TryFrom<rpc::SurfaceFinish> for SurfaceFinish {
+    type Error = String;
+    fn try_from(v: rpc::SurfaceFinish) -> Result<Self, String> {
+        use rpc::surface_finish::Kind;
+        let finish = match required(v.kind, "surface finish kind")? {
+            Kind::Smooth(_) => Self::Smooth,
+            Kind::VerticalRibs(v) => Self::VerticalRibs {
+                depth_mm: v.depth_mm,
+                pitch_mm: v.pitch_mm,
+                edge_margin_mm: v.edge_margin_mm,
+                phase_mm: v.phase_mm,
+            },
+        };
+        finish.validate().map_err(|e| e.to_string())?;
+        Ok(finish)
+    }
+}
+impl TryFrom<SurfaceFinish> for rpc::SurfaceFinish {
+    type Error = String;
+    fn try_from(v: SurfaceFinish) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        use rpc::surface_finish::Kind;
+        Ok(Self {
+            kind: Some(match v {
+                SurfaceFinish::Smooth => Kind::Smooth(rpc::SurfaceSmooth {}),
+                SurfaceFinish::VerticalRibs {
+                    depth_mm,
+                    pitch_mm,
+                    edge_margin_mm,
+                    phase_mm,
+                } => Kind::VerticalRibs(rpc::SurfaceVerticalRibs {
+                    depth_mm,
+                    pitch_mm,
+                    edge_margin_mm,
+                    phase_mm,
+                }),
+            }),
+        })
+    }
+}
+impl TryFrom<rpc::SurfaceScope> for SurfaceScope {
+    type Error = String;
+    fn try_from(v: rpc::SurfaceScope) -> Result<Self, String> {
+        use rpc::surface_scope::Kind;
+        Ok(match required(v.kind, "surface scope kind")? {
+            Kind::Definition(v) => Self::Definition {
+                definition_id: DefinitionId::parse(v.definition_id).map_err(|e| e.to_string())?,
+            },
+            Kind::Occurrence(v) => Self::Occurrence {
+                occurrence_id: OccurrenceId::new(v.occurrence_id).map_err(|e| e.to_string())?,
+                expected_definition_id: DefinitionId::parse(v.expected_definition_id)
+                    .map_err(|e| e.to_string())?,
+            },
+        })
+    }
+}
+impl TryFrom<SurfaceScope> for rpc::SurfaceScope {
+    type Error = String;
+    fn try_from(v: SurfaceScope) -> Result<Self, String> {
+        use rpc::surface_scope::Kind;
+        Ok(Self {
+            kind: Some(match v {
+                SurfaceScope::Definition { definition_id } => {
+                    Kind::Definition(rpc::SurfaceDefinitionScope {
+                        definition_id: definition_id.as_str().into(),
+                    })
+                }
+                SurfaceScope::Occurrence {
+                    occurrence_id,
+                    expected_definition_id,
+                } => Kind::Occurrence(rpc::SurfaceOccurrenceScope {
+                    occurrence_id: occurrence_id.get(),
+                    expected_definition_id: expected_definition_id.as_str().into(),
+                }),
+            }),
+        })
+    }
+}
+impl TryFrom<rpc::SurfaceOverlays> for SurfaceOverlays {
+    type Error = String;
+    fn try_from(v: rpc::SurfaceOverlays) -> Result<Self, String> {
+        if v.layers.len() > MAX_SURFACE_LAYERS {
+            return Err("surface layer budget exceeded".into());
+        }
+        let layers = v
+            .layers
+            .into_iter()
+            .map(|v| {
+                Ok(SurfaceLayer {
+                    layer_id: SurfaceLayerId::new(v.layer_id).map_err(|e| e.to_string())?,
+                    enabled: v.enabled,
+                    scope: required(v.scope, "surface scope")?.try_into()?,
+                    face_id: FaceId::parse(v.face_id).map_err(|e| e.to_string())?,
+                    finish: required(v.finish, "surface finish")?.try_into()?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let doc = Self {
+            schema_version: v.schema_version,
+            layers,
+        };
+        doc.validate().map_err(|e| e.to_string())?;
+        Ok(doc)
+    }
+}
+impl TryFrom<SurfaceOverlays> for rpc::SurfaceOverlays {
+    type Error = String;
+    fn try_from(v: SurfaceOverlays) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            schema_version: v.schema_version,
+            layers: v
+                .layers
+                .into_iter()
+                .map(|v| {
+                    Ok(rpc::SurfaceLayer {
+                        layer_id: v.layer_id.get(),
+                        enabled: v.enabled,
+                        scope: Some(v.scope.try_into()?),
+                        face_id: v.face_id.as_str().into(),
+                        finish: Some(v.finish.try_into()?),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
         })
     }
 }

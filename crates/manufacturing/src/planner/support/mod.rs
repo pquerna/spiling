@@ -93,6 +93,9 @@ fn merge_shared(
     Ok(())
 }
 
+// SectionSpan.material is the same admitted D (native M union finish A) used
+// by walls/classification and the raster callback. Never query native-only
+// sections here: actual-stroke anchors and corridor clearance must include ribs.
 pub(super) fn realize(
     layers: &mut [PrintLayer],
     sections: &[SectionSpan],
@@ -246,9 +249,9 @@ pub(super) fn realize(
         };
         contact_tops[demand.target] = Some(top);
         let interface_bottom = layers[top].z_mm - interface_thickness_mm;
-        // Source material is a conservative support candidate only AFTER real
-        // deposited strokes prove demand; it never becomes an anchor map.
-        // Native boundaries avoid artificial scalloped capsule-strip contours.
+        // Realized object D supplies a conservative support candidate only
+        // AFTER actual deposited strokes prove demand; it is never an anchor map.
+        // Original/derived boundaries avoid scalloped capsule-strip contours.
         let candidate = &sections[span_at(sections, demand.target as u32)].material;
         remaining_geometry_budget(
             retained,

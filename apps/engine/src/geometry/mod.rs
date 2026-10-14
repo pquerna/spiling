@@ -12,6 +12,7 @@ pub(crate) use execution::{Control, EngineJob, JobError, JobId, JobResult, JobSt
 use crate::session::Watchdog;
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::project::*;
+use spiling_contracts::surface::{SurfaceScope, SurfaceScopeKind};
 use spiling_contracts::{display::EncodedSection, geometry::*};
 use spiling_core::storage::SaveReceipt;
 use spiling_core::{Edit, PreparedEdit, Project};
@@ -1126,6 +1127,37 @@ impl Runtime {
         }
         Ok(())
     }
+    fn surface_base(&self, session: &SessionId, base: ProjectRevision) -> Result<(), ProjectError> {
+        if session != &self.session_id || base != self.project.info().revision {
+            return Err(project_error(
+                ProjectErrorCode::StaleRevision,
+                "session or project revision is stale",
+            ));
+        }
+        if self.project.info().read_only {
+            return Err(project_error(
+                ProjectErrorCode::ReadOnly,
+                "project is read-only",
+            ));
+        }
+        if self.active.as_ref().is_some_and(|active| {
+            active.deciding || matches!(active.purpose, Purpose::Open | Purpose::Save)
+        }) {
+            return Err(project_error(
+                ProjectErrorCode::Busy,
+                "a project job or promotion is active",
+            ));
+        }
+        Ok(())
+    }
+    fn commit_surface_edit(&mut self, edit: Edit) -> Result<Reply, ProjectError> {
+        let edit = self.project.prepare(edit)?;
+        self.project.commit(edit)?;
+        self.synchronize_native_pins();
+        Ok(Reply::Project(ProjectResponse::Status {
+            info: self.project.info(),
+        }))
+    }
     fn replace_allowed(&self, discard: bool) -> Result<(), ProjectError> {
         if self.active.is_some() {
             return Err(project_error(
@@ -1153,6 +1185,75 @@ impl Runtime {
                 Ok(Reply::Project(ProjectResponse::Status {
                     info: self.project.info(),
                 }))
+            }
+            ProjectCommand::AddSurfaceFinish {
+                session_id,
+                base_revision,
+                face_ref,
+                scope,
+                finish,
+            } => {
+                self.surface_base(&session_id, base_revision)?;
+                if face_ref.session_id != self.session_id
+                    || face_ref.scene_revision != self.revision
+                {
+                    return Err(project_error(
+                        ProjectErrorCode::StaleRevision,
+                        "surface target session or scene revision is stale",
+                    ));
+                }
+                let snapshot = self.project.snapshot();
+                let valid = snapshot
+                    .occurrences
+                    .get(&face_ref.occurrence_id)
+                    .is_some_and(|occurrence| occurrence.definition_id == face_ref.definition_id)
+                    && snapshot.sources.contains_key(&face_ref.definition_id)
+                    && self
+                        .definitions
+                        .get(&face_ref.definition_id)
+                        .is_some_and(|definition| {
+                            definition
+                                .faces
+                                .iter()
+                                .any(|face| face.face_id == face_ref.face_id)
+                        });
+                if !valid {
+                    return Err(project_error(
+                        ProjectErrorCode::InvalidProject,
+                        "surface target is not a live source occurrence and native face",
+                    ));
+                }
+                let scope = match scope {
+                    SurfaceScopeKind::Definition => SurfaceScope::Definition {
+                        definition_id: face_ref.definition_id,
+                    },
+                    SurfaceScopeKind::Occurrence => SurfaceScope::Occurrence {
+                        occurrence_id: face_ref.occurrence_id,
+                        expected_definition_id: face_ref.definition_id,
+                    },
+                };
+                self.commit_surface_edit(Edit::AddSurfaceFinish {
+                    scope,
+                    face_id: face_ref.face_id,
+                    finish,
+                })
+            }
+            ProjectCommand::RemoveSurfaceFinish {
+                session_id,
+                base_revision,
+                layer_id,
+            } => {
+                self.surface_base(&session_id, base_revision)?;
+                self.commit_surface_edit(Edit::RemoveSurfaceFinish { layer_id })
+            }
+            ProjectCommand::SetSurfaceFinishEnabled {
+                session_id,
+                base_revision,
+                layer_id,
+                enabled,
+            } => {
+                self.surface_base(&session_id, base_revision)?;
+                self.commit_surface_edit(Edit::SetSurfaceFinishEnabled { layer_id, enabled })
             }
             ProjectCommand::New {
                 session_id,
@@ -1261,13 +1362,13 @@ impl Runtime {
                 let revision = project_scene_revision(self.revision)?;
                 let before = self.project.snapshot();
                 self.project.undo()?;
+                self.synchronize_native_pins();
                 if same_geometry(&before, &self.project.snapshot()) {
                     return Ok(Reply::Project(ProjectResponse::Status {
                         info: self.project.info(),
                     }));
                 }
                 self.revision = revision;
-                self.synchronize_native_pins();
                 Ok(Reply::Project(ProjectResponse::SceneChanged {
                     info: self.project.info(),
                     summary: self.summary(),
@@ -1281,13 +1382,13 @@ impl Runtime {
                 let revision = project_scene_revision(self.revision)?;
                 let before = self.project.snapshot();
                 self.project.redo()?;
+                self.synchronize_native_pins();
                 if same_geometry(&before, &self.project.snapshot()) {
                     return Ok(Reply::Project(ProjectResponse::Status {
                         info: self.project.info(),
                     }));
                 }
                 self.revision = revision;
-                self.synchronize_native_pins();
                 Ok(Reply::Project(ProjectResponse::SceneChanged {
                     info: self.project.info(),
                     summary: self.summary(),

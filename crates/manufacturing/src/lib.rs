@@ -18,9 +18,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "3";
-pub const EMITTER_VERSION: &str = "3";
-pub const VERIFIER_VERSION: &str = "3";
+pub const PLANNER_VERSION: &str = "4";
+pub const EMITTER_VERSION: &str = "4";
+pub const VERIFIER_VERSION: &str = "4";
 const KERNEL_REVISION: &str = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e";
 
 pub struct CompilerInput<'a> {
@@ -30,6 +30,7 @@ pub struct CompilerInput<'a> {
     pub stored_definitions: &'a [StoredDefinition],
     pub occurrences: &'a [OccurrenceRecord],
     pub intent: &'a ManufacturingIntent,
+    pub surface_overlays: &'a spiling_contracts::surface::SurfaceOverlays,
 }
 
 pub fn compile(
@@ -90,6 +91,7 @@ pub fn compile(
         &definitions,
         input.occurrences,
         input.intent,
+        input.surface_overlays,
     )?;
     let provenance = ManufacturingProvenance {
         project_id: input.project_id.clone(),
@@ -98,6 +100,7 @@ pub fn compile(
         definitions,
         occurrences,
         intent: input.intent.clone(),
+        surface_overlays: input.surface_overlays.clone(),
         kernel: KernelIdentity {
             name: "monstertruck".into(),
             version: "0.4.1".into(),

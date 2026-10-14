@@ -13,3 +13,5 @@ Recoverable typed domain failures and fully received corrupt manufacturing bundl
 The shared client also owns checked actual-program replay retrieval and one exclusive export transaction used directly by CLI and native shell. Packed motion remains a bounded derived immutable display; shell-specific native dialog tokens and active-record freshness stay outside this crate.
 
 Explicit preflight observes native input eligibility through the existing durable operation facade without publishing artifacts or altering project state. It requires a selected full intent and keeps pending native compilation analysis and absent physical qualification visible to clients.
+
+Whole-face source-backed surface finish commands share the existing Projects route and authoritative ProjectInfo. The client conveys explicit scope, live FaceRef and persistent revision without owning layer allocation, persistence, native certification or rib construction.

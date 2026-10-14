@@ -187,10 +187,10 @@ fn native_operation_views_reject_wrong_any_session_and_terminal_invariants() {
 fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info() {
     let info = rpc::EngineInfo {
         instance_id: Uuid::new_v4().to_string(),
-        engine_build: env!("CARGO_PKG_VERSION").into(),
+        engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         kernel: "monstertruck".into(),
         geometry_capabilities: vec!["source_backed_geometry".into()],
-        project_capabilities: vec!["recoverable_projects_v2".into()],
+        project_capabilities: vec!["recoverable_projects_v3".into()],
         manufacturing_capabilities: vec!["planar_software_compile_v1".into()],
         max_message_bytes: MAX_CONTROL_BYTES,
         max_artifact_bytes: MAX_ARTIFACT_BYTES,
@@ -232,3 +232,94 @@ fn bed_preparation_rejects_extent_amplified_near_axis_rotation_without_snapping(
 }
 
 mod real;
+
+#[test]
+fn surface_commands_use_typed_project_execute_and_preserve_all_authored_fields() {
+    use prost::Message;
+    use spiling_contracts::{
+        native::{ProjectCall, project_call},
+        project::{ProjectCommand, ProjectRevision},
+        surface::{SurfaceFinish, SurfaceLayerId, SurfaceScopeKind},
+    };
+    let session = SessionId::new();
+    let layer_id = SurfaceLayerId::new(17).unwrap();
+    let commands = [
+        ProjectCommand::AddSurfaceFinish {
+            session_id: session.clone(),
+            base_revision: ProjectRevision(43),
+            face_ref: FaceRef {
+                session_id: session.clone(),
+                scene_revision: SceneRevision(9),
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                definition_id: DefinitionId::parse("a".repeat(64)).unwrap(),
+                face_id: FaceId::parse("step:24").unwrap(),
+            },
+            scope: SurfaceScopeKind::Occurrence,
+            finish: SurfaceFinish::VerticalRibs {
+                depth_mm: 0.1,
+                pitch_mm: 2.0,
+                edge_margin_mm: 0.8,
+                phase_mm: 0.25,
+            },
+        },
+        ProjectCommand::RemoveSurfaceFinish {
+            session_id: session.clone(),
+            base_revision: ProjectRevision(44),
+            layer_id,
+        },
+        ProjectCommand::SetSurfaceFinishEnabled {
+            session_id: session,
+            base_revision: ProjectRevision(45),
+            layer_id,
+            enabled: false,
+        },
+    ];
+    for command in commands {
+        let expected = serde_json::to_value(&command).unwrap();
+        let ProjectCall::Execute(request) =
+            project_call(command, &Uuid::new_v4().to_string()).unwrap()
+        else {
+            panic!("surface commands must use Projects.Execute");
+        };
+        let received = rpc::ProjectRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+        let decoded = ProjectCommand::try_from(received).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
+}
+
+#[test]
+fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabilities() {
+    let mut hello = Hello {
+        instance_id: Uuid::new_v4().to_string(),
+        engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
+        kernel: "monstertruck".into(),
+        geometry_capabilities: vec!["native_vertical_rectangular_wall_v1".into()],
+        project_capabilities: vec![
+            "recoverable_projects_v3".into(),
+            "source_face_surface_finish_v1".into(),
+        ],
+        manufacturing_capabilities: vec![
+            "manufacturing_schema4".into(),
+            "bounded_vertical_rib_construction_v1".into(),
+        ],
+        max_control_bytes: MAX_CONTROL_BYTES,
+        max_binary_bytes: MAX_ARTIFACT_BYTES,
+        pid: 123,
+        session_id: SessionId::new(),
+        kernel_identity: KernelIdentity {
+            name: "monstertruck".into(),
+            version: "0.4.1".into(),
+            revision: "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e".into(),
+        },
+        geometry_limits: GeometryLimits::FROZEN,
+    };
+    super::validate_engine_cutover(&hello).unwrap();
+    hello.engine_build = env!("CARGO_PKG_VERSION").into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.engine_build = spiling_contracts::ENGINE_BUILD_ID.into();
+    hello.project_capabilities[0] = "recoverable_projects_v2".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.project_capabilities[0] = "recoverable_projects_v3".into();
+    hello.manufacturing_capabilities.pop();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+}

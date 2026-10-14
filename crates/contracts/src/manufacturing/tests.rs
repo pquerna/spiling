@@ -104,6 +104,8 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
 fn coverage() -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         section_area_mm2: 50.0,
+        source_section_area_mm2: 50.0,
+        surface_added_area_mm2: 0.0,
         wall_area_mm2: 50.0,
         bottom_skin_area_mm2: 0.0,
         top_skin_area_mm2: 0.0,
@@ -121,6 +123,7 @@ fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sampling_tolerance_mm: 0.005,
+        surface_tolerance_mm: 0.001,
         offset_tolerance_mm: 0.005,
         layer_quantization_mm: 0.000001,
         layers: vec![PrintLayer {
@@ -144,7 +147,14 @@ fn plan() -> NormalizedPrintPlan {
 fn bundle() -> ManufacturingBundle {
     let (project_id, definitions, occurrences) = inputs();
     let intent = intent();
-    let input_hash = input_fingerprint(&project_id, &definitions, &occurrences, &intent).unwrap();
+    let input_hash = input_fingerprint(
+        &project_id,
+        &definitions,
+        &occurrences,
+        &intent,
+        &SurfaceOverlays::empty(),
+    )
+    .unwrap();
     ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance: ManufacturingProvenance {
@@ -154,6 +164,7 @@ fn bundle() -> ManufacturingBundle {
             definitions,
             occurrences,
             intent,
+            surface_overlays: SurfaceOverlays::empty(),
             kernel: KernelIdentity {
                 name: "native".into(),
                 version: "1".into(),
@@ -319,41 +330,101 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
     second.occurrence_id = OccurrenceId::new(2).unwrap();
     second.pose.translation_mm[0] = 10.0;
     occurrences.push(second);
-    let original = input_fingerprint(&project, &definitions, &occurrences, &intent).unwrap();
+    let original = input_fingerprint(
+        &project,
+        &definitions,
+        &occurrences,
+        &intent,
+        &SurfaceOverlays::empty(),
+    )
+    .unwrap();
     occurrences.reverse();
     assert_eq!(
         original,
-        input_fingerprint(&project, &definitions, &occurrences, &intent).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .unwrap()
     );
     occurrences[0].pose.translation_mm[0] += 1.0;
     assert_ne!(
         original,
-        input_fingerprint(&project, &definitions, &occurrences, &intent).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .unwrap()
     );
     occurrences[0].pose.translation_mm[0] -= 1.0;
     let mut renamed = definitions.clone();
     renamed[0].provenance.source_name = "retained-label.step".into();
     assert_ne!(
         original,
-        input_fingerprint(&project, &renamed, &occurrences, &intent).unwrap()
+        input_fingerprint(
+            &project,
+            &renamed,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .unwrap()
     );
     let mut units = definitions.clone();
     units[0].provenance.source_unit = SourceUnit::Inch;
     assert_ne!(
         original,
-        input_fingerprint(&project, &units, &occurrences, &intent).unwrap()
+        input_fingerprint(
+            &project,
+            &units,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .unwrap()
     );
     let mut changed_intent = intent.clone();
     changed_intent.recipe.flow_multiplier = 1.01;
     assert_ne!(
         original,
-        input_fingerprint(&project, &definitions, &occurrences, &changed_intent).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &changed_intent,
+            &SurfaceOverlays::empty()
+        )
+        .unwrap()
     );
     let mut invalid = definitions.clone();
     invalid[0].provenance.source_hash = SourceHash::from_bytes(b"foreign");
-    assert!(input_fingerprint(&project, &invalid, &occurrences, &intent).is_err());
+    assert!(
+        input_fingerprint(
+            &project,
+            &invalid,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .is_err()
+    );
     occurrences.push(occurrences[0].clone());
-    assert!(input_fingerprint(&project, &definitions, &occurrences, &intent).is_err());
+    assert!(
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &SurfaceOverlays::empty()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -399,12 +470,14 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let p = &bundle.provenance;
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let mut manifest = ProjectManifest {
-        format_version: 2,
+        format_version: crate::project::PROJECT_FORMAT_VERSION,
         project_id: p.project_id.clone(),
         revision: ProjectRevision(10),
         units: ProjectUnits::Millimetres,
         frame: ProjectFrame::RightHanded,
         next_occurrence: 2,
+        next_surface_layer: 1,
+        surface_overlays: SurfaceOverlays::empty(),
         definitions: p.definitions.clone(),
         occurrences: p.occurrences.clone(),
         manufacturing_intent: Some((p.intent.clone()).into()),
@@ -615,7 +688,7 @@ fn cumulative_segment_excess_is_rejected_before_decoding_later_points() {
 fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
     for points in ["[]", "[[10,10,5.2]]"] {
         let json = format!(
-            r#"{{"schema_version":{MANUFACTURING_SCHEMA_VERSION},"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
+            r#"{{"schema_version":{MANUFACTURING_SCHEMA_VERSION},"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
         );
         let error = serde_json::from_str::<NormalizedPrintPlan>(&json).unwrap_err();
         assert!(error.is_data(), "{error:?}");
@@ -633,7 +706,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     );
     let wrap = |layer: &str| {
         format!(
-            r#"{{"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
+            r#"{{"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
         )
     };
     assert_eq!(
@@ -715,7 +788,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
 }
 
 #[test]
-fn schema3_process_and_support_fields_are_required_without_defaults() {
+fn schema4_process_and_support_fields_are_required_without_defaults() {
     let original = serde_json::to_value(intent()).unwrap();
     for field in ["process", "supports"] {
         let mut missing = original.clone();
@@ -883,6 +956,7 @@ fn durable_contact_gap_admission_requires_whole_plan_support_context() {
     }
     let mut zero = coverage();
     zero.section_area_mm2 = 0.0;
+    zero.source_section_area_mm2 = 0.0;
     zero.wall_area_mm2 = 0.0;
     let support = &mut scheduled.layers[0];
     support.region_coverage = zero.clone();
@@ -914,4 +988,77 @@ fn durable_contact_gap_admission_requires_whole_plan_support_context() {
         interface_thickness_mm: 0.2,
     };
     assert!(admitted.validate(&data).is_err());
+}
+
+#[test]
+fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
+    use crate::surface::*;
+    let (project, definitions, occurrences) = inputs();
+    let intent = intent();
+    let scope = SurfaceScope::Definition {
+        definition_id: definitions[0].definition_id.clone(),
+    };
+    let mut doc = SurfaceOverlays {
+        schema_version: SURFACE_SCHEMA_VERSION,
+        layers: vec![
+            SurfaceLayer {
+                layer_id: SurfaceLayerId::new(1).unwrap(),
+                enabled: false,
+                scope: scope.clone(),
+                face_id: FaceId::from_step_entity(7).unwrap(),
+                finish: SurfaceFinish::Smooth,
+            },
+            SurfaceLayer {
+                layer_id: SurfaceLayerId::new(2).unwrap(),
+                enabled: true,
+                scope,
+                face_id: FaceId::from_step_entity(7).unwrap(),
+                finish: SurfaceFinish::VerticalRibs {
+                    depth_mm: 0.1,
+                    pitch_mm: 2.0,
+                    edge_margin_mm: 0.8,
+                    phase_mm: 0.0,
+                },
+            },
+        ],
+    };
+    let hash = input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap();
+    doc.layers.reverse();
+    assert_ne!(
+        hash,
+        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+    );
+    doc.layers.reverse();
+    doc.layers[0].enabled = true;
+    assert_ne!(
+        hash,
+        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+    );
+    doc.layers[0].enabled = false;
+    doc.layers.remove(0);
+    assert_ne!(
+        hash,
+        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+    );
+}
+#[test]
+fn realized_material_area_requires_exact_source_plus_addition_and_plan_bound_presence() {
+    let intent = intent();
+    let mut area = coverage();
+    area.source_section_area_mm2 = 49.0;
+    area.surface_added_area_mm2 = 1.0;
+    area.validate(&intent.recipe).unwrap();
+    area.surface_added_area_mm2 = 2.0;
+    assert!(area.validate(&intent.recipe).is_err());
+    area.surface_added_area_mm2 = -1.0;
+    assert!(area.validate(&intent.recipe).is_err());
+    let mut old = serde_json::to_value(plan()).unwrap();
+    old.as_object_mut().unwrap().remove("surface_tolerance_mm");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(old).is_err());
+    let mut weak_bound = plan();
+    weak_bound.surface_tolerance_mm = 0.002;
+    assert!(weak_bound.validate(&intent).is_err());
+    let mut old_profile = intent;
+    old_profile.printer.schema_version = 3;
+    assert!(old_profile.validate().is_err());
 }

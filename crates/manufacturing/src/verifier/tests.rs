@@ -31,6 +31,8 @@ G1 X2 Y6 Z2 E6 F600
 fn coverage() -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         section_area_mm2: 16.0,
+        source_section_area_mm2: 16.0,
+        surface_added_area_mm2: 0.0,
         wall_area_mm2: 16.0,
         bottom_skin_area_mm2: 0.0,
         top_skin_area_mm2: 0.0,
@@ -142,6 +144,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         sampling_tolerance_mm: 0.005,
         offset_tolerance_mm: 0.001,
+        surface_tolerance_mm: 0.001,
         layer_quantization_mm: 0.000_001,
         layers: vec![
             PrintLayer {
@@ -1145,6 +1148,7 @@ fn support_only_layers_are_real_and_not_object_accounting() {
     });
     let coverage = &mut plan.layers[0].region_coverage;
     coverage.section_area_mm2 = 0.0;
+    coverage.source_section_area_mm2 = 0.0;
     coverage.wall_area_mm2 = 0.0;
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -1166,6 +1170,7 @@ fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
         )
     });
     plan.layers[0].region_coverage.section_area_mm2 = 0.0;
+    plan.layers[0].region_coverage.source_section_area_mm2 = 0.0;
     plan.layers[0].region_coverage.wall_area_mm2 = 0.0;
     let mut gap = PrintLayer {
         index: 1,
@@ -1176,6 +1181,7 @@ fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
         region_coverage: coverage(),
     };
     gap.region_coverage.section_area_mm2 = 0.0;
+    gap.region_coverage.source_section_area_mm2 = 0.0;
     gap.region_coverage.wall_area_mm2 = 0.0;
     plan.layers[1].index = 2;
     plan.layers[1].height_mm = 0.25;

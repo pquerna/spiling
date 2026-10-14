@@ -402,6 +402,8 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
     let filament = volume / (std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2));
     let region_coverage = PlanarRegionCoverage {
         section_area_mm2,
+        source_section_area_mm2: section_area_mm2,
+        surface_added_area_mm2: 0.0,
         wall_area_mm2: 0.0,
         bottom_skin_area_mm2: section_area_mm2,
         top_skin_area_mm2: 0.0,
@@ -422,6 +424,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 &manifest.definitions,
                 &manifest.occurrences,
                 &intent,
+                &manifest.surface_overlays,
             )
             .unwrap(),
             project_id: manifest.project_id,
@@ -429,6 +432,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             definitions: manifest.definitions,
             occurrences: manifest.occurrences,
             intent,
+            surface_overlays: manifest.surface_overlays,
             kernel: KernelIdentity {
                 name: "storage-metadata-fixture".into(),
                 version: "1".into(),
@@ -441,6 +445,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         plan: NormalizedPrintPlan {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             sampling_tolerance_mm: 0.001,
+            surface_tolerance_mm: 0.001,
             offset_tolerance_mm: 0.001,
             layer_quantization_mm: 0.000001,
             layers: vec![PrintLayer {
@@ -596,6 +601,7 @@ fn manufacturing_publication_rejects_stale_foreign_and_semantic_mismatch_atomica
         &bundle.provenance.definitions,
         &bundle.provenance.occurrences,
         &bundle.provenance.intent,
+        &bundle.provenance.surface_overlays,
     )
     .unwrap();
     assert_eq!(
@@ -614,6 +620,7 @@ fn manufacturing_publication_rejects_stale_foreign_and_semantic_mismatch_atomica
         &bundle.provenance.definitions,
         &bundle.provenance.occurrences,
         &bundle.provenance.intent,
+        &bundle.provenance.surface_overlays,
     )
     .unwrap();
     assert_eq!(
@@ -736,4 +743,216 @@ fn manufacturing_retained_history_budget_is_separate_and_failed_publish_is_atomi
     assert_eq!(project.info(), before);
     project.undo().unwrap();
     assert!(project.snapshot().manufacturing_artifact.is_some());
+}
+
+fn surface_edit(project: &Project, scope: SurfaceScope, finish: SurfaceFinish) -> Edit {
+    assert!(!project.snapshot().sources.is_empty());
+    Edit::AddSurfaceFinish {
+        scope,
+        face_id: FaceId::from_step_entity(7).unwrap(),
+        finish,
+    }
+}
+fn definition_scope(project: &Project) -> SurfaceScope {
+    SurfaceScope::Definition {
+        definition_id: project.snapshot().sources.keys().next().unwrap().clone(),
+    }
+}
+#[test]
+fn surface_transactions_share_immutable_history_and_never_reuse_ids() {
+    let mut project = imported();
+    let original = project.snapshot().surface_overlays.clone();
+    let scope = definition_scope(&project);
+    let add = surface_edit(&project, scope.clone(), SurfaceFinish::Smooth);
+    edit(&mut project, add);
+    let authored = project.snapshot().surface_overlays.clone();
+    assert!(original.layers.is_empty());
+    assert!(!Arc::ptr_eq(&authored, &original));
+    assert_eq!(authored.layers[0].layer_id.get(), 1);
+    let prepared = project
+        .prepare(Edit::SetSurfaceFinishEnabled {
+            layer_id: authored.layers[0].layer_id,
+            enabled: false,
+        })
+        .unwrap();
+    edit(
+        &mut project,
+        Edit::SetPose {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    assert!(Arc::ptr_eq(&authored, &project.snapshot().surface_overlays));
+    assert_eq!(
+        project.commit(prepared).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
+    project.undo().unwrap();
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(&original, &project.snapshot().surface_overlays));
+    let add = surface_edit(&project, scope, SurfaceFinish::Smooth);
+    edit(&mut project, add);
+    assert_eq!(project.info().surface_overlays.layers[0].layer_id.get(), 2);
+    assert_eq!(project.capture().manifest.next_surface_layer, 3);
+    let before = project.info();
+    assert_eq!(
+        project
+            .prepare(Edit::RemoveSurfaceFinish {
+                layer_id: SurfaceLayerId::new(50).unwrap()
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    assert_eq!(project.info(), before);
+}
+#[test]
+fn surface_cascade_preserves_shared_definition_until_last_occurrence_and_undo_restores() {
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    edit(
+        &mut project,
+        Edit::Add {
+            definition_id: definition_id.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    let add = surface_edit(
+        &project,
+        SurfaceScope::Definition {
+            definition_id: definition_id.clone(),
+        },
+        SurfaceFinish::Smooth,
+    );
+    edit(&mut project, add);
+    let add = surface_edit(
+        &project,
+        SurfaceScope::Occurrence {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            expected_definition_id: definition_id,
+        },
+        SurfaceFinish::Smooth,
+    );
+    edit(&mut project, add);
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+        },
+    );
+    assert_eq!(project.info().surface_overlays.layers.len(), 1);
+    let definition_doc = project.snapshot().surface_overlays.clone();
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(2).unwrap(),
+        },
+    );
+    assert!(project.info().surface_overlays.layers.is_empty());
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(
+        &definition_doc,
+        &project.snapshot().surface_overlays
+    ));
+    project.undo().unwrap();
+    assert_eq!(project.info().surface_overlays.layers.len(), 2);
+}
+#[test]
+fn surface_limits_unknown_targets_and_allocator_exhaustion_are_atomic() {
+    let mut project = imported();
+    let unknown = SurfaceScope::Definition {
+        definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+    };
+    assert_eq!(
+        project
+            .prepare(surface_edit(&project, unknown, SurfaceFinish::Smooth))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    let scope = definition_scope(&project);
+    for _ in 0..MAX_SURFACE_LAYERS {
+        let add = surface_edit(&project, scope.clone(), SurfaceFinish::Smooth);
+        edit(&mut project, add);
+    }
+    let before = project.info();
+    assert_eq!(
+        project
+            .prepare(surface_edit(&project, scope, SurfaceFinish::Smooth))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    let mut project = imported();
+    project.next_surface_layer = u32::MAX;
+    assert_eq!(
+        project
+            .prepare(surface_edit(
+                &project,
+                definition_scope(&project),
+                SurfaceFinish::Smooth
+            ))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+}
+#[test]
+fn surface_edits_invalidate_exact_artifact_and_undo_restores_captured_provenance() {
+    let mut project = imported();
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: manufacturing_intent().into(),
+        },
+    );
+    let add = surface_edit(&project, definition_scope(&project), SurfaceFinish::Smooth);
+    edit(&mut project, add);
+    let bundle = manufacturing_bundle(&project);
+    let asset = bundle_asset(&bundle);
+    edit(
+        &mut project,
+        Edit::PublishManufacturing {
+            asset: asset.clone(),
+        },
+    );
+    let id = project.info().surface_overlays.layers[0].layer_id;
+    edit(
+        &mut project,
+        Edit::SetSurfaceFinishEnabled {
+            layer_id: id,
+            enabled: false,
+        },
+    );
+    assert!(project.snapshot().manufacturing_artifact.is_none());
+    assert!(!project.info().surface_overlays.layers[0].enabled);
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(
+        project.snapshot().manufacturing_artifact.as_ref().unwrap(),
+        &asset
+    ));
+    assert_eq!(
+        project.info().surface_overlays,
+        bundle.provenance.surface_overlays
+    );
+    let mut foreign = manufacturing_bundle(&project);
+    foreign.provenance.surface_overlays.layers[0].enabled = false;
+    foreign.provenance.input_hash = input_fingerprint(
+        &foreign.provenance.project_id,
+        &foreign.provenance.definitions,
+        &foreign.provenance.occurrences,
+        &foreign.provenance.intent,
+        &foreign.provenance.surface_overlays,
+    )
+    .unwrap();
+    assert_eq!(
+        project
+            .prepare(Edit::PublishManufacturing {
+                asset: bundle_asset(&foreign)
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
 }

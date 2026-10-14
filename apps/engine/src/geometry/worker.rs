@@ -10,6 +10,7 @@ use spiling_contracts::{
     geometry::*,
     manufacturing::*,
     project::{ProjectError, ProjectErrorCode, StoredDefinition},
+    surface::{SurfaceOverlays, SurfaceScope},
 };
 use spiling_core::{
     ManufacturingAsset, Project, SaveSnapshot, SourceAsset,
@@ -77,6 +78,7 @@ pub struct CompileRequest {
     pub stored_definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     pub intent: Arc<ManufacturingIntent>,
+    pub surface_overlays: Arc<SurfaceOverlays>,
     pub byte_budget: u32,
 }
 pub enum Work {
@@ -594,10 +596,12 @@ fn open(
             && let Some(resident) = definitions.get(id)
         {
             validate_provenance(&resident.definition, source)?;
+            validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
             imports.push(imported(&resident.definition, source.clone(), None));
         } else {
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
+            validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
             let mesh = capacity.tessellate(&definition, cancel)?;
             let resident = resident(definition, source, &mesh);
             imports.push(imported(&resident.definition, source.clone(), Some(mesh)));
@@ -615,6 +619,32 @@ fn open(
         imports,
         residents: pending,
     })
+}
+fn validate_surface_targets(
+    definition: &Definition,
+    overlays: &SurfaceOverlays,
+) -> Result<(), ProjectError> {
+    for layer in &overlays.layers {
+        let target = match &layer.scope {
+            SurfaceScope::Definition { definition_id } => definition_id,
+            SurfaceScope::Occurrence {
+                expected_definition_id,
+                ..
+            } => expected_definition_id,
+        };
+        if target == definition.id()
+            && !definition
+                .faces()
+                .iter()
+                .any(|face| face.face_id == layer.face_id)
+        {
+            return Err(ProjectError::new(
+                ProjectErrorCode::InvalidProject,
+                "stored surface target is absent from the authoritative native source face table",
+            ));
+        }
+    }
+    Ok(())
 }
 fn save(
     snapshot: SaveSnapshot,
@@ -843,6 +873,7 @@ fn preflight(
             stored_definitions: &request.stored_definitions,
             occurrences: &request.occurrences,
             intent: &request.intent,
+            surface_overlays: &request.surface_overlays,
         },
         cancel,
     )?)
@@ -860,6 +891,7 @@ fn compile(
         stored_definitions,
         occurrences,
         intent,
+        surface_overlays,
         byte_budget,
     } = request;
     let definitions = definition_ids
@@ -884,6 +916,7 @@ fn compile(
             stored_definitions: &stored_definitions,
             occurrences: &occurrences,
             intent: &intent,
+            surface_overlays: &surface_overlays,
         },
         cancel,
     )?;

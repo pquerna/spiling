@@ -105,6 +105,7 @@ fn clean_new_and_semantically_clean_undo_project_info_are_valid() {
         recovered_previous: false,
         can_undo: true,
         can_redo: true,
+        surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
     };
     let wire: rpc::ProjectInfo = info.clone().try_into().unwrap();
     assert_eq!(ProjectInfo::try_from(wire).unwrap(), info);
@@ -173,6 +174,7 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         recovered_previous: false,
         can_undo: true,
         can_redo: false,
+        surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
     };
     let result = JobResult::ProjectSaved { info: info.clone() };
     let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
@@ -290,4 +292,87 @@ fn failed_committed_save_keeps_operation_specific_uncertain_receipt() {
         native_operation_view(&op).is_err(),
         "receipt may accompany Failed only"
     );
+}
+
+#[test]
+fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults() {
+    use spiling_contracts::surface::*;
+    let session_id = SessionId::new();
+    let face_ref = FaceRef {
+        session_id: session_id.clone(),
+        scene_revision: SceneRevision(12),
+        occurrence_id: OccurrenceId::new(1).unwrap(),
+        definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+        face_id: FaceId::from_step_entity(9007199254740993).unwrap(),
+    };
+    let commands = [
+        ProjectCommand::AddSurfaceFinish {
+            session_id: session_id.clone(),
+            base_revision: ProjectRevision(8),
+            face_ref,
+            scope: SurfaceScopeKind::Occurrence,
+            finish: SurfaceFinish::VerticalRibs {
+                depth_mm: 0.1,
+                pitch_mm: 2.0,
+                edge_margin_mm: 0.8,
+                phase_mm: 0.2,
+            },
+        },
+        ProjectCommand::RemoveSurfaceFinish {
+            session_id: session_id.clone(),
+            base_revision: ProjectRevision(9),
+            layer_id: SurfaceLayerId::new(7).unwrap(),
+        },
+        ProjectCommand::SetSurfaceFinishEnabled {
+            session_id,
+            base_revision: ProjectRevision(10),
+            layer_id: SurfaceLayerId::new(7).unwrap(),
+            enabled: false,
+        },
+    ];
+    for command in commands {
+        let native::ProjectCall::Execute(wire) = native::project_call(command.clone(), "").unwrap()
+        else {
+            panic!("surface command must execute");
+        };
+        assert_eq!(ProjectCommand::try_from(wire.clone()).unwrap(), command);
+        if let Some(rpc::project_request::Command::AddSurfaceFinish(add)) = wire.command {
+            for scope in [0, 99] {
+                let mut malformed = add.clone();
+                malformed.scope = scope;
+                assert!(
+                    ProjectCommand::try_from(rpc::ProjectRequest {
+                        parent: wire.parent.clone(),
+                        command: Some(rpc::project_request::Command::AddSurfaceFinish(malformed))
+                    })
+                    .is_err()
+                );
+            }
+            let mut malformed = add;
+            malformed.finish = None;
+            assert!(
+                ProjectCommand::try_from(rpc::ProjectRequest {
+                    parent: wire.parent,
+                    command: Some(rpc::project_request::Command::AddSurfaceFinish(malformed))
+                })
+                .is_err()
+            );
+        }
+    }
+    let info = ProjectInfo {
+        project_id: ProjectId::new(),
+        revision: ProjectRevision(0),
+        saved_revision: None,
+        path_label: None,
+        dirty: false,
+        save_uncertain: false,
+        read_only: false,
+        recovered_previous: false,
+        can_undo: false,
+        can_redo: false,
+        surface_overlays: SurfaceOverlays::empty(),
+    };
+    let mut wire: rpc::ProjectInfo = info.try_into().unwrap();
+    wire.surface_overlays = None;
+    assert!(ProjectInfo::try_from(wire).is_err());
 }

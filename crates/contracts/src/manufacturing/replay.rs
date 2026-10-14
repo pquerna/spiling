@@ -25,6 +25,7 @@ pub struct ManufacturingInspectionProvenance {
     pub project_id: ProjectId,
     pub input_revision: ProjectRevision,
     pub input_hash: SourceHash,
+    pub surface_overlays: SurfaceOverlays,
     pub kernel: KernelIdentity,
     pub planner_version: String,
     pub emitter_version: String,
@@ -32,6 +33,9 @@ pub struct ManufacturingInspectionProvenance {
 }
 impl ManufacturingInspectionProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        self.surface_overlays
+            .validate()
+            .map_err(|e| invalid(&e.message))?;
         for value in [
             &self.kernel.name,
             &self.kernel.version,
@@ -62,6 +66,7 @@ impl From<&ManufacturingProvenance> for ManufacturingInspectionProvenance {
             project_id: p.project_id.clone(),
             input_revision: p.input_revision,
             input_hash: p.input_hash.clone(),
+            surface_overlays: p.surface_overlays.clone(),
             kernel: p.kernel.clone(),
             planner_version: p.planner_version.clone(),
             emitter_version: p.emitter_version.clone(),

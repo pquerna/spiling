@@ -92,6 +92,13 @@ export interface WorkbenchState {
   projectEpoch: number;
   replayDisplayed: boolean;
 }
+export type SurfaceFinishEdit =
+  | Omit<Extract<ProjectCommand, { op: "add_surface_finish" }>, "session_id" | "base_revision">
+  | Omit<Extract<ProjectCommand, { op: "remove_surface_finish" }>, "session_id" | "base_revision">
+  | Omit<
+      Extract<ProjectCommand, { op: "set_surface_finish_enabled" }>,
+      "session_id" | "base_revision"
+    >;
 export interface ManufacturingHost {
   state: WorkbenchState;
   run(operation: (token: number) => Promise<void>): Promise<void>;
@@ -455,12 +462,18 @@ export function useWorkbench(
   async function syncScene(summary: SceneSummary, token: number) {
     if (stateRef.current.diagnosticSession) {
       const pages = await scenePages(summary, token);
+      const definitions: GeometryDisplayDefinition[] = [];
+      for (const definition of pages.definitions)
+        definitions.push({
+          ...definition,
+          faces: await faces(definition, summary.session_id, token),
+        });
       ensure(token);
       sceneRef.current = summary;
       patch({
         scene: summary,
         occurrences: pages.occurrences,
-        definitions: pages.definitions.map((definition) => ({ ...definition, faces: [] })),
+        definitions,
         stale: false,
         inspection: null,
         section: null,
@@ -864,6 +877,51 @@ export function useWorkbench(
       }
     } else throw new Error("unexpected project response");
   }
+  const editSurfaceFinish = async (edit: SurfaceFinishEdit) => {
+    let applied = false;
+    let rejection: unknown;
+    await run(async (token) => {
+      try {
+        const snapshot = stateRef.current;
+        const project = snapshot.project;
+        const scene = sceneRef.current;
+        if (!project || !scene || snapshot.stale)
+          throw new DomainError(
+            "stale_revision",
+            "Resume the current native project before editing surface finish.",
+          );
+        if (project.read_only)
+          throw new DomainError("read_only", "Read-only snapshots cannot edit surface finish.");
+        if (
+          edit.op === "add_surface_finish" &&
+          (edit.face_ref.session_id !== scene.session_id ||
+            edit.face_ref.scene_revision !== scene.revision)
+        )
+          throw new DomainError("stale_revision", "Select a face from the current native scene.");
+        await applyProjectResponse(
+          await exchange(
+            () =>
+              native.project({
+                ...edit,
+                session_id: scene.session_id,
+                base_revision: project.revision,
+              }),
+            token,
+          ),
+          token,
+        );
+        applied = true;
+      } catch (error) {
+        rejection = error;
+        throw error;
+      }
+    });
+    if (rejection) throw rejection;
+    if (!applied)
+      throw new Error(
+        "Surface finish edit was not admitted; native session is busy or unavailable.",
+      );
+  };
   const projectControl = (op: "new" | "undo" | "redo", discardChanges = false) =>
     run(async (token) => {
       const summary = sceneRef.current!;
@@ -1315,6 +1373,7 @@ export function useWorkbench(
     importParts,
     debugImport,
     projectControl,
+    editSurfaceFinish,
     openProject,
     saveProject,
     resume,
@@ -1338,24 +1397,38 @@ export function useWorkbench(
       prepareBed: async (occurrenceId: number, center: boolean) => {
         let applied = false;
         let failureCause: unknown;
-        await run(async token => {
+        await run(async (token) => {
           try {
             const snapshot = stateRef.current;
             if (snapshot.project?.read_only)
               throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
             if (snapshot.stale || !sceneRef.current)
-              throw new DomainError("stale_revision", "Resume the native scene before preparing the bed.");
+              throw new DomainError(
+                "stale_revision",
+                "Resume the native scene before preparing the bed.",
+              );
             const summary = sceneRef.current;
-            const response = await exchange(() => native.prepareManufacturingBed(
-              summary.session_id, summary.revision, occurrenceId, center,
-            ), token);
+            const response = await exchange(
+              () =>
+                native.prepareManufacturingBed(
+                  summary.session_id,
+                  summary.revision,
+                  occurrenceId,
+                  center,
+                ),
+              token,
+            );
             if (response.type === "error" || response.type === "project_error")
               throw new DomainError(response.error.code, response.error.message);
-            if (response.type !== "scene_changed") throw new Error("Unexpected native bed preparation response.");
+            if (response.type !== "scene_changed")
+              throw new Error("Unexpected native bed preparation response.");
             await getProject(token);
             await syncScene(response.summary, token);
             applied = true;
-          } catch (error) { failureCause = error; throw error; }
+          } catch (error) {
+            failureCause = error;
+            throw error;
+          }
         });
         if (failureCause) throw failureCause;
         if (!applied) throw new Error("Bed preparation was not admitted.");

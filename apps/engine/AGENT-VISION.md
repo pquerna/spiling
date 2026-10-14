@@ -12,4 +12,6 @@ All long work is admitted into one SQLite Jobs ledger before acknowledgement, sc
 
 Manufacturing Preflight is a bounded, revision-captured software eligibility report on the same native worker and durable operation lifecycle. It is usable read-only, publishes no artifacts and mutates no Core state; explicit intent, native compilation analysis and independent actual-program inspection remain separate gates, with no physical qualification implied.
 
+Ordered source-backed whole-face finishes are durable Core metadata, scoped to definitions or occurrences. Compilation captures the same overlay as preflight and provenance; bounded vertical ribs are native-certified manufacturing additions, not BREP edits, appearance annotations or physical grip certification.
+
 Real-child ordered intent/preflight/compile/verify/save, workbench and CLI consumption, child shutdown, source-independent fresh inspect/replay/export, history/pin invalidation, writer/read-only lock/fault recovery and current diagnostic reconnect/auth/range behavior govern acceptance. General STEP assemblies/freeform geometry, alternate kernels, physical printer execution/printability and packaged hardware/graphics certification remain outside this service.

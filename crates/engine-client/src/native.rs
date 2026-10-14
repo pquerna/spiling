@@ -148,12 +148,22 @@ impl EngineRpc {
         command: ProjectCommand,
         request_id: &str,
     ) -> Result<ProjectResponse, ClientError> {
+        if let ProjectCommand::AddSurfaceFinish { finish, .. } = &command {
+            finish.validate()?;
+        }
         match &command {
             ProjectCommand::Open { path, .. } => path.validate(),
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
-            _ => Ok(()),
+            ProjectCommand::Get { .. }
+            | ProjectCommand::New { .. }
+            | ProjectCommand::Save { target: None, .. }
+            | ProjectCommand::Undo { .. }
+            | ProjectCommand::Redo { .. }
+            | ProjectCommand::AddSurfaceFinish { .. }
+            | ProjectCommand::RemoveSurfaceFinish { .. }
+            | ProjectCommand::SetSurfaceFinishEnabled { .. } => Ok(()),
         }
         .map_err(|error| ClientError::InvalidRequest(error.to_string()))?;
         let call =

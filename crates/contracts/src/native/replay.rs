@@ -35,6 +35,8 @@ impl TryFrom<rpc::ManufacturingInspectionProvenance> for ManufacturingInspection
             project_id: ProjectId::parse(v.project_id).map_err(|e| e.to_string())?,
             input_revision: ProjectRevision(v.input_revision),
             input_hash: SourceHash::parse(v.input_hash).map_err(|e| e.to_string())?,
+            surface_overlays: required(v.surface_overlays, "inspection surface overlays")?
+                .try_into()?,
             kernel: required(v.kernel, "inspection kernel")?.try_into()?,
             planner_version: v.planner_version,
             emitter_version: v.emitter_version,
@@ -52,6 +54,7 @@ impl TryFrom<ManufacturingInspectionProvenance> for rpc::ManufacturingInspection
             project_id: v.project_id.as_str().into(),
             input_revision: v.input_revision.get(),
             input_hash: v.input_hash.into(),
+            surface_overlays: Some(v.surface_overlays.try_into()?),
             kernel: Some(v.kernel.try_into()?),
             planner_version: v.planner_version,
             emitter_version: v.emitter_version,
@@ -235,6 +238,7 @@ mod tests {
             project_id: ProjectId::new(),
             input_revision: ProjectRevision(9),
             input_hash: record.input_hash.clone(),
+            surface_overlays: crate::surface::SurfaceOverlays::empty(),
             kernel: KernelIdentity {
                 name: "monstertruck".into(),
                 version: "0.4.1".into(),

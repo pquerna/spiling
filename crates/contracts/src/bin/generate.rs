@@ -6,7 +6,7 @@ use spiling_contracts::{
     ArtifactView, Hello, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, NativeOperationView, OperationView,
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
-use spiling_contracts::{display::*, geometry::*, manufacturing::*, project::*};
+use spiling_contracts::{display::*, geometry::*, manufacturing::*, project::*, surface::*};
 use std::{env, fs, path::Path};
 use ts_rs::TS;
 
@@ -70,6 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProjectUnits::decl(&config),
         ProjectFrame::decl(&config),
         StoredDefinition::decl(&config),
+        SurfaceLayerId::decl(&config),
+        SurfaceScopeKind::decl(&config),
+        SurfaceScope::decl(&config),
+        SurfaceFinish::decl(&config),
+        SurfaceLayer::decl(&config),
+        SurfaceOverlays::decl(&config),
         ProjectManifest::decl(&config),
         ProjectInfo::decl(&config),
         ProjectCommand::decl(&config),
@@ -201,6 +207,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MAX_PROJECT_STORED_ASSETS as u64,
         ),
         ("MAX_PROJECT_ERROR_BYTES", MAX_PROJECT_ERROR_BYTES as u64),
+        ("SURFACE_SCHEMA_VERSION", SURFACE_SCHEMA_VERSION as u64),
+        ("MAX_SURFACE_LAYERS", MAX_SURFACE_LAYERS as u64),
+        (
+            "MAX_SURFACE_DOCUMENT_BYTES",
+            MAX_SURFACE_DOCUMENT_BYTES as u64,
+        ),
+        (
+            "MAX_SURFACE_RETAINED_BYTES",
+            MAX_SURFACE_RETAINED_BYTES as u64,
+        ),
         (
             "MANUFACTURING_SCHEMA_VERSION",
             u64::from(MANUFACTURING_SCHEMA_VERSION),
