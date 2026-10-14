@@ -13,6 +13,7 @@ repository.workspace = true
 [dependencies]
 spiling-contracts.workspace = true
 spiling-geometry.workspace = true
+spiling-surface-fields.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 geo.workspace = true

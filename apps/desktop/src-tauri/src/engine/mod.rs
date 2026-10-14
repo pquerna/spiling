@@ -13,9 +13,9 @@ use serde::Serialize;
 use spiling_contracts::{
     ArtifactView, Hello, NativeOperationView, OperationView,
     geometry::{
-        ArtifactChunkMetadata, ArtifactSummary, GeometryCommand, GeometryError, GeometryErrorCode,
-        GeometryResponse, JobResult, JobStatus, MAX_DISPLAY_LABEL_BYTES, NativePath, RigidPoseMm,
-        SceneRevision, SelectedSource, SessionId, bounded_text,
+        ArtifactChunkMetadata, ArtifactSummary, FaceRef, GeometryCommand, GeometryError,
+        GeometryErrorCode, GeometryResponse, JobResult, JobStatus, MAX_DISPLAY_LABEL_BYTES,
+        NativePath, RigidPoseMm, SceneRevision, SelectedSource, SessionId, bounded_text,
     },
     operation_view,
     project::{
@@ -23,6 +23,7 @@ use spiling_contracts::{
         SelectedProjectPath,
     },
     rpc::RunDiagnosticRequest,
+    surface::{ImageReliefParameters, SurfaceImageRecord, SurfaceScopeKind},
 };
 use spiling_engine_client::{ClientError, EngineClient, EngineRpc};
 use tauri::{AppHandle, Manager, State};
@@ -101,6 +102,7 @@ pub struct Supervisor {
     message: Option<String>,
     sources: Vec<SelectedSourceEntry>,
     project_paths: Vec<SelectedProjectEntry>,
+    image_source: Option<SelectedSourceEntry>,
     attached_project: Option<AttachedProject>,
     pending_project: Option<(String, AttachedProject, bool)>,
     manufacturing: manufacturing::ManufacturingSession,
@@ -122,6 +124,8 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
         | Some(JobResult::ManufacturingCompiled { .. })
         | Some(JobResult::ManufacturingVerified { .. })
         | Some(JobResult::ManufacturingPreflight { .. })
+        | Some(JobResult::SurfaceImageImported { .. })
+        | Some(JobResult::SurfaceImagePrepared { .. })
         | None => false,
     }
 }
@@ -187,6 +191,7 @@ impl Supervisor {
                     self.pending_project = None;
                     self.sources.clear();
                     self.project_paths.clear();
+                    self.image_source = None;
                     self.manufacturing.clear();
                 }
                 Ok(response)
@@ -220,6 +225,7 @@ impl Supervisor {
             Ok(false) => {
                 self.sources.clear();
                 self.project_paths.clear();
+                self.image_source = None;
                 self.pending_project = None;
                 self.manufacturing.clear();
                 self.client = None;
@@ -236,6 +242,7 @@ impl Supervisor {
     async fn disconnect(&mut self, mut reason: String) -> String {
         self.sources.clear();
         self.project_paths.clear();
+        self.image_source = None;
         self.pending_project = None;
         self.manufacturing.clear();
         if let Some(mut client) = self.client.take()
@@ -279,6 +286,7 @@ impl Supervisor {
     pub async fn stop(&mut self) -> Result<(), String> {
         self.sources.clear();
         self.project_paths.clear();
+        self.image_source = None;
         self.pending_project = None;
         self.manufacturing.clear();
         let mut note = None;
@@ -468,6 +476,7 @@ pub async fn engine_native_operation(
         if replacing {
             supervisor.sources.clear();
             supervisor.project_paths.clear();
+            supervisor.image_source = None;
         }
     }
     Ok(operation)
@@ -532,6 +541,7 @@ pub async fn engine_interrupt(state: State<'_, EngineState>) -> Result<(), Strin
     supervisor.refresh().await;
     supervisor.sources.clear();
     supervisor.project_paths.clear();
+    supervisor.image_source = None;
     supervisor.pending_project = None;
     supervisor.manufacturing.clear();
     let mut client = supervisor.client.take().ok_or("engine is not running")?;
@@ -759,6 +769,134 @@ fn resolve_fixture_sources(
         .collect()
 }
 
+async fn install_image_selection(
+    state: &EngineState,
+    session: SessionId,
+    path: PathBuf,
+) -> Result<SelectedSource, String> {
+    let mut entries = selected_sources(vec![path], session.clone())?;
+    let entry = entries.pop().ok_or("image selection is empty")?;
+    let selection = entry.selection.clone();
+    let mut supervisor = state.active().await?;
+    supervisor.refresh().await;
+    if supervisor
+        .client
+        .as_ref()
+        .map(|client| &client.hello().session_id)
+        != Some(&session)
+    {
+        return Err("stale_revision: engine changed while selecting an image".into());
+    }
+    supervisor.image_source = Some(entry);
+    Ok(selection)
+}
+
+#[tauri::command]
+pub async fn surface_image_select(
+    app: AppHandle,
+    state: State<'_, EngineState>,
+) -> Result<Option<SelectedSource>, String> {
+    let session = selection_session(&state).await?;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    // Keep portal work on the application thread and outside lifecycle ownership.
+    app.run_on_main_thread(move || {
+        let path = rfd::FileDialog::new()
+            .set_title("Choose a height image")
+            .add_filter("Height images", &["png", "pgm"])
+            .pick_file();
+        let _ = send.send(path);
+    })
+    .map_err(|error| error.to_string())?;
+    match receive
+        .await
+        .map_err(|_| "image picker closed without a result")?
+    {
+        None => Ok(None), // Preserve the previous unconsumed image token.
+        Some(path) => install_image_selection(&state, session, path)
+            .await
+            .map(Some),
+    }
+}
+
+#[tauri::command]
+pub async fn surface_image_debug_select(
+    state: State<'_, EngineState>,
+    relative_path: String,
+) -> Result<SelectedSource, String> {
+    let root = state
+        .fixture_root
+        .as_ref()
+        .ok_or("image fixture selection is disabled")?;
+    let session = selection_session(&state).await?;
+    let mut paths = resolve_fixture_sources(root, vec![relative_path])?;
+    let path = paths.pop().ok_or("image fixture selection is empty")?;
+    install_image_selection(&state, session, path).await
+}
+
+#[tauri::command]
+pub async fn surface_image_import(
+    state: State<'_, EngineState>,
+    token: String,
+    session_id: SessionId,
+    base_revision: spiling_contracts::project::ProjectRevision,
+    reference: FaceRef,
+    scope: SurfaceScopeKind,
+    parameters: ImageReliefParameters,
+) -> Result<ProjectResponse, String> {
+    let mut supervisor = state.active().await?;
+    supervisor.refresh().await;
+    let Some(entry) = supervisor
+        .image_source
+        .as_ref()
+        .filter(|entry| entry.selection.token == token && entry.selection.session_id == session_id)
+    else {
+        return Ok(project_error(
+            ProjectErrorCode::InvalidProject,
+            "unknown selected image; choose the image again",
+        ));
+    };
+    if supervisor
+        .client
+        .as_ref()
+        .map(|client| &client.hello().session_id)
+        != Some(&session_id)
+    {
+        return Ok(project_error(
+            ProjectErrorCode::StaleRevision,
+            "selected image belongs to an old engine session",
+        ));
+    }
+    let source = entry.path.clone();
+    let response = supervisor
+        .project(ProjectCommand::ImportSurfaceImageFinish {
+            session_id,
+            base_revision,
+            reference,
+            scope,
+            source,
+            parameters,
+        })
+        .await?;
+    if matches!(response, ProjectResponse::OperationAccepted { .. }) {
+        supervisor.image_source = None;
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub async fn surface_image_bytes(
+    state: State<'_, EngineState>,
+    record: SurfaceImageRecord,
+    resource: ArtifactView,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = rpc(&state)
+        .await?
+        .fetch_surface_image(&record, &resource)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[derive(Clone)]
 struct AttachedProject {
     path: NativePath,
@@ -855,11 +993,13 @@ pub async fn project_control(
 ) -> Result<ProjectResponse, String> {
     if matches!(
         command,
-        ProjectCommand::Open { .. } | ProjectCommand::Save { .. }
+        ProjectCommand::Open { .. }
+            | ProjectCommand::Save { .. }
+            | ProjectCommand::ImportSurfaceImageFinish { .. }
     ) {
         return Ok(project_error(
             ProjectErrorCode::InvalidProject,
-            "use the token-only project open/save bridge",
+            "use the token-only project open/save or image import bridge",
         ));
     }
     state.active().await?.project(command).await
@@ -1142,6 +1282,8 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                surface_resolution:
+                    spiling_contracts::manufacturing::SurfaceResolutionTotals::empty(),
                 software_only: true,
             },
         };

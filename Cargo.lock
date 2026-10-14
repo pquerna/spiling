@@ -4819,6 +4819,7 @@ dependencies = [
  "fs2",
  "libc",
  "parking_lot",
+ "png 0.18.1",
  "prost",
  "prost-types",
  "rusqlite",
@@ -4830,6 +4831,7 @@ dependencies = [
  "spiling-engine-client",
  "spiling-geometry",
  "spiling-manufacturing",
+ "spiling-surface-fields",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -4881,6 +4883,16 @@ dependencies = [
  "sha2",
  "spiling-contracts",
  "spiling-geometry",
+ "spiling-surface-fields",
+]
+
+[[package]]
+name = "spiling-surface-fields"
+version = "0.1.0"
+dependencies = [
+ "png 0.18.1",
+ "serde_json",
+ "spiling-contracts",
 ]
 
 [[package]]

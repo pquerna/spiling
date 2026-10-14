@@ -112,7 +112,7 @@ fn manifest_requires_explicit_current_format_manufacturing_fields() {
         assert!(serde_json::from_value::<ProjectManifest>(changed).is_err());
     }
     let mut old = manifest();
-    old.format_version = 2;
+    old.format_version = 3;
     assert_eq!(
         old.validate().unwrap_err().code,
         ProjectErrorCode::UnsupportedFormat

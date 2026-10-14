@@ -8,6 +8,8 @@ pub enum ProjectCall {
     Execute(rpc::ProjectRequest),
     Open(rpc::OpenProjectRequest),
     Save(rpc::SaveProjectRequest),
+    ImportSurfaceImageFinish(rpc::ImportSurfaceImageFinishRequest),
+    GetSurfaceImage(rpc::GetSurfaceImageRequest),
 }
 pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, String> {
     request_id(id)?;
@@ -41,6 +43,45 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
                 request_id: id.into(),
                 base_revision: base_revision.0,
                 target: target.map(TryInto::try_into).transpose()?,
+            }));
+        }
+        ProjectCommand::ImportSurfaceImageFinish {
+            session_id,
+            base_revision,
+            reference,
+            scope,
+            source,
+            parameters,
+        } => {
+            parameters.validate().map_err(|e| e.to_string())?;
+            if reference.session_id != session_id {
+                return Err("image face session mismatch".into());
+            }
+            return Ok(ProjectCall::ImportSurfaceImageFinish(
+                rpc::ImportSurfaceImageFinishRequest {
+                    parent: format!("sessions/{}", session_id.as_str()),
+                    request_id: id.into(),
+                    base_revision: base_revision.0,
+                    reference: Some(reference.try_into()?),
+                    scope: match scope {
+                        SurfaceScopeKind::Definition => rpc::SurfaceScopeKind::Definition as i32,
+                        SurfaceScopeKind::Occurrence => rpc::SurfaceScopeKind::Occurrence as i32,
+                    },
+                    source: Some(source.try_into()?),
+                    parameters: Some(parameters.try_into()?),
+                },
+            ));
+        }
+        ProjectCommand::GetSurfaceImage {
+            session_id,
+            base_revision,
+            image_hash,
+        } => {
+            return Ok(ProjectCall::GetSurfaceImage(rpc::GetSurfaceImageRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.0,
+                image_hash: image_hash.into(),
             }));
         }
         ProjectCommand::Get { session_id } => (session_id, C::Get(rpc::GetProjectRequest {})),
@@ -195,6 +236,42 @@ impl TryFrom<rpc::SaveProjectRequest> for ProjectCommand {
         })
     }
 }
+impl TryFrom<rpc::ImportSurfaceImageFinishRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(v: rpc::ImportSurfaceImageFinishRequest) -> Result<Self, String> {
+        request_id(&v.request_id)?;
+        let session_id = session_parent(&v.parent)?;
+        let reference: FaceRef = required(v.reference, "image source face")?.try_into()?;
+        if reference.session_id != session_id {
+            return Err("image face session mismatch".into());
+        }
+        let scope =
+            match rpc::SurfaceScopeKind::try_from(v.scope).map_err(|_| "unknown surface scope")? {
+                rpc::SurfaceScopeKind::Definition => SurfaceScopeKind::Definition,
+                rpc::SurfaceScopeKind::Occurrence => SurfaceScopeKind::Occurrence,
+                rpc::SurfaceScopeKind::Unspecified => return Err("missing surface scope".into()),
+            };
+        Ok(Self::ImportSurfaceImageFinish {
+            session_id,
+            base_revision: ProjectRevision(v.base_revision),
+            reference,
+            scope,
+            source: required(v.source, "image source path")?.try_into()?,
+            parameters: required(v.parameters, "image relief parameters")?.try_into()?,
+        })
+    }
+}
+impl TryFrom<rpc::GetSurfaceImageRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(v: rpc::GetSurfaceImageRequest) -> Result<Self, String> {
+        request_id(&v.request_id)?;
+        Ok(Self::GetSurfaceImage {
+            session_id: session_parent(&v.parent)?,
+            base_revision: ProjectRevision(v.base_revision),
+            image_hash: SourceHash::parse(v.image_hash).map_err(|e| e.to_string())?,
+        })
+    }
+}
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
     if v.saved_revision.is_some_and(|r| r.0 > v.revision.0)
@@ -299,6 +376,10 @@ impl TryFrom<rpc::SurfaceFinish> for SurfaceFinish {
                 rib_count: v.rib_count,
                 phase_fraction: v.phase_fraction,
             },
+            Kind::ImageRelief(v) => Self::ImageRelief {
+                image_hash: SourceHash::parse(v.image_hash).map_err(|e| e.to_string())?,
+                parameters: required(v.parameters, "image relief parameters")?.try_into()?,
+            },
         };
         finish.validate().map_err(|e| e.to_string())?;
         Ok(finish)
@@ -331,6 +412,13 @@ impl TryFrom<SurfaceFinish> for rpc::SurfaceFinish {
                     depth_mm,
                     rib_count,
                     phase_fraction,
+                }),
+                SurfaceFinish::ImageRelief {
+                    image_hash,
+                    parameters,
+                } => Kind::ImageRelief(rpc::SurfaceImageRelief {
+                    image_hash: image_hash.into(),
+                    parameters: Some(parameters.try_into()?),
                 }),
             }),
         })
@@ -377,7 +465,7 @@ impl TryFrom<SurfaceScope> for rpc::SurfaceScope {
 impl TryFrom<rpc::SurfaceOverlays> for SurfaceOverlays {
     type Error = String;
     fn try_from(v: rpc::SurfaceOverlays) -> Result<Self, String> {
-        if v.layers.len() > MAX_SURFACE_LAYERS {
+        if v.layers.len() > MAX_SURFACE_LAYERS || v.images.len() > MAX_SURFACE_IMAGES {
             return Err("surface layer budget exceeded".into());
         }
         let layers = v
@@ -395,6 +483,11 @@ impl TryFrom<rpc::SurfaceOverlays> for SurfaceOverlays {
             .collect::<Result<Vec<_>, String>>()?;
         let doc = Self {
             schema_version: v.schema_version,
+            images: v
+                .images
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, String>>()?,
             layers,
         };
         doc.validate().map_err(|e| e.to_string())?;
@@ -407,6 +500,11 @@ impl TryFrom<SurfaceOverlays> for rpc::SurfaceOverlays {
         v.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             schema_version: v.schema_version,
+            images: v
+                .images
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, String>>()?,
             layers: v
                 .layers
                 .into_iter()
@@ -422,4 +520,95 @@ impl TryFrom<SurfaceOverlays> for rpc::SurfaceOverlays {
                 .collect::<Result<Vec<_>, String>>()?,
         })
     }
+}
+
+impl TryFrom<rpc::ImageReliefParameters> for ImageReliefParameters {
+    type Error = String;
+    fn try_from(v: rpc::ImageReliefParameters) -> Result<Self, String> {
+        let parameters = Self {
+            depth_mm: v.depth_mm,
+            u_repeats: v.u_repeats,
+            u_phase_fraction: v.u_phase_fraction,
+            z_period_mm: v.z_period_mm,
+            z_phase_mm: v.z_phase_mm,
+            edge_margin_mm: v.edge_margin_mm,
+            vertical_error_mm: v.vertical_error_mm,
+        };
+        parameters.validate().map_err(|e| e.to_string())?;
+        Ok(parameters)
+    }
+}
+impl TryFrom<ImageReliefParameters> for rpc::ImageReliefParameters {
+    type Error = String;
+    fn try_from(v: ImageReliefParameters) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            depth_mm: v.depth_mm,
+            u_repeats: v.u_repeats,
+            u_phase_fraction: v.u_phase_fraction,
+            z_period_mm: v.z_period_mm,
+            z_phase_mm: v.z_phase_mm,
+            edge_margin_mm: v.edge_margin_mm,
+            vertical_error_mm: v.vertical_error_mm,
+        })
+    }
+}
+impl TryFrom<rpc::SurfaceImageRecord> for SurfaceImageRecord {
+    type Error = String;
+    fn try_from(v: rpc::SurfaceImageRecord) -> Result<Self, String> {
+        let record = Self {
+            image_hash: SourceHash::parse(v.image_hash).map_err(|e| e.to_string())?,
+            width: v.width,
+            height: v.height,
+            byte_count: v.byte_count,
+            source_hash: SourceHash::parse(v.source_hash).map_err(|e| e.to_string())?,
+            source_name: v.source_name,
+        };
+        record.validate().map_err(|e| e.to_string())?;
+        Ok(record)
+    }
+}
+impl TryFrom<SurfaceImageRecord> for rpc::SurfaceImageRecord {
+    type Error = String;
+    fn try_from(v: SurfaceImageRecord) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            image_hash: v.image_hash.into(),
+            width: v.width,
+            height: v.height,
+            byte_count: v.byte_count,
+            source_hash: v.source_hash.into(),
+            source_name: v.source_name,
+        })
+    }
+}
+pub fn validate_surface_image_prepared_binding(
+    project_id: &ProjectId,
+    _captured_revision: ProjectRevision,
+    record: &SurfaceImageRecord,
+    resource: &crate::ArtifactView,
+) -> Result<(), String> {
+    ProjectId::parse(project_id.as_str()).map_err(|e| e.to_string())?;
+    record.validate().map_err(|e| e.to_string())?;
+    let size = super::validate_artifact_view(resource, MAX_SURFACE_IMAGE_BYTES as u64)?;
+    if size != record.byte_count
+        || resource.sha256 != record.image_hash.as_str()
+        || resource.media_type != SURFACE_IMAGE_MEDIA_TYPE
+    {
+        return Err("image resource disagrees with canonical record".into());
+    }
+    Ok(())
+}
+pub fn validate_surface_image_imported_binding(
+    info: &ProjectInfo,
+    image: &SurfaceImageRecord,
+    layer_id: SurfaceLayerId,
+) -> Result<(), String> {
+    validate_project_info(info)?;
+    image.validate().map_err(|e| e.to_string())?;
+    if info.read_only || !info.surface_overlays.images.iter().any(|record| record == image)
+        || !info.surface_overlays.layers.last().is_some_and(|layer| layer.enabled && layer.layer_id == layer_id && matches!(&layer.finish, SurfaceFinish::ImageRelief { image_hash, .. } if image_hash == &image.image_hash)) {
+        return Err("imported image result disagrees with project metadata".into());
+    }
+    Ok(())
 }

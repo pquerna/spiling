@@ -118,5 +118,7 @@ message NativeOperationResult {
     ManufacturingCompiledResult manufacturing_compiled = 4;
     ManufacturingVerifiedResult manufacturing_verified = 5;
     ManufacturingPreflightResult manufacturing_preflight = 6;
+    SurfaceImageImportedResult surface_image_imported = 7;
+    SurfaceImagePreparedResult surface_image_prepared = 8;
   }
 }

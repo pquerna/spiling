@@ -9,7 +9,7 @@ import diagnosticPrinter from "./software-cartesian.printer.ts";
 const printer = {
   ...diagnosticPrinter,
   id: "software-marlin2-reference",
-  revision: "3",
+  revision: "4",
   name: "Complete Marlin 2 software reference — physically unqualified",
   capabilities: {
     ...diagnosticPrinter.capabilities,

@@ -6,7 +6,7 @@
 mod os;
 use super::{
     MAX_RETAINED_SOURCE_BYTES, MAX_SOURCE_BYTES, ManufacturingAsset, SaveSnapshot, Snapshot,
-    SourceAsset, error, invalid, validate_snapshot,
+    SourceAsset, SurfaceImageAsset, error, invalid, validate_snapshot,
 };
 use os::Directory;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use spiling_contracts::{
     geometry::{DefinitionId, SourceHash},
     manufacturing::{MAX_MANUFACTURING_BUNDLE_BYTES, MAX_MANUFACTURING_RETAINED_BYTES},
     project::*,
+    surface::{MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_RETAINED_BYTES, SurfaceImageRecord},
 };
 use std::{
     collections::BTreeMap,
@@ -32,6 +33,7 @@ const PREVIOUS: &str = "previous.json";
 const LOCK: &str = "writer.lock";
 const SOURCES: &str = "sources";
 const MANUFACTURING: &str = "manufacturing";
+const IMAGES: &str = "images";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
     AssetsSynced,
@@ -52,6 +54,7 @@ pub struct Storage {
     directory: Directory,
     sources: Directory,
     manufacturing: Directory,
+    images: Directory,
     // Never unlink/recreate this inode. File's OS lock is released by RAII.
     _writer_lock: Option<File>,
     operation: Mutex<()>,
@@ -79,6 +82,13 @@ impl Storage {
         {
             return Err(invalid("attached manufacturing directory was substituted"));
         }
+        if !self
+            .images
+            .same(&self.directory.child(IMAGES).map_err(io)?)
+            .map_err(io)?
+        {
+            return Err(invalid("attached image directory was substituted"));
+        }
         if let Some(lock) = &self._writer_lock
             && !self.directory.same_entry(LOCK, lock).map_err(io)?
         {
@@ -93,6 +103,7 @@ pub struct LoadedProject {
     pub saved_revision: ProjectRevision,
     pub sources: BTreeMap<DefinitionId, Arc<SourceAsset>>,
     pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
+    pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
     pub storage: Arc<Storage>,
     pub recovered_previous: bool,
 }
@@ -187,13 +198,39 @@ fn bounded_read_exact(
     }
     Ok(bytes)
 }
+#[derive(Deserialize)]
+struct ManifestVersion {
+    format_version: u32,
+}
+#[derive(Deserialize)]
+struct RecoveryVersion {
+    manifest: ManifestVersion,
+}
+fn validate_format(bytes: &[u8], recovery: bool) -> Result<(), ProjectError> {
+    let version = if recovery {
+        serde_json::from_slice::<RecoveryVersion>(bytes)
+            .map(|record| record.manifest.format_version)
+    } else {
+        serde_json::from_slice::<ManifestVersion>(bytes).map(|record| record.format_version)
+    }
+    .map_err(|e| invalid(format!("invalid checkpoint version: {e}")))?;
+    if version != PROJECT_FORMAT_VERSION {
+        return Err(error(
+            ProjectErrorCode::UnsupportedFormat,
+            "only project format 4 is supported",
+        ));
+    }
+    Ok(())
+}
 fn parse_manifest(bytes: &[u8]) -> Result<ProjectManifest, ProjectError> {
+    validate_format(bytes, false)?;
     let manifest: ProjectManifest =
         serde_json::from_slice(bytes).map_err(|e| invalid(format!("invalid manifest: {e}")))?;
     manifest.validate()?;
     Ok(manifest)
 }
 fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
+    validate_format(bytes, true)?;
     let record: RecoveryRecord = serde_json::from_slice(bytes)
         .map_err(|e| invalid(format!("invalid recovery checkpoint: {e}")))?;
     record.manifest.validate()?;
@@ -239,6 +276,92 @@ fn load_sources(
     }
     Ok(result)
 }
+fn load_images(
+    manifest: &ProjectManifest,
+    directory: &Directory,
+    budget: usize,
+    cancel: &AtomicBool,
+) -> Result<BTreeMap<SourceHash, Arc<SurfaceImageAsset>>, ProjectError> {
+    let budget = budget.min(MAX_SURFACE_IMAGE_RETAINED_BYTES);
+    let mut result = BTreeMap::new();
+    let mut total = 0usize;
+    for record in &manifest.surface_overlays.images {
+        cancelled(cancel)?;
+        let bytes = bounded_read_exact(
+            directory,
+            &format!("{}.pgm", record.image_hash.as_str()),
+            MAX_SURFACE_IMAGE_BYTES.min(budget - total),
+            ProjectErrorCode::MissingAsset,
+            Some(record.byte_count as usize),
+        )?;
+        total += bytes.capacity();
+        result.insert(
+            record.image_hash.clone(),
+            Arc::new(SurfaceImageAsset::new(record.clone(), bytes)?),
+        );
+    }
+    Ok(result)
+}
+fn validate_stored_images(
+    manifest: &ProjectManifest,
+    directory: &Directory,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    for record in &manifest.surface_overlays.images {
+        validate_stored_image(directory, record, None, cancel)?;
+    }
+    Ok(())
+}
+fn validate_stored_image(
+    directory: &Directory,
+    record: &SurfaceImageRecord,
+    expected: Option<&[u8]>,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    cancelled(cancel)?;
+    let name = format!("{}.pgm", record.image_hash.as_str());
+    let mut file = directory.read(&name).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            error(ProjectErrorCode::MissingAsset, "missing immutable image")
+        } else {
+            io(e)
+        }
+    })?;
+    let size = file.metadata().map_err(io)?.len();
+    if size != record.byte_count || size > MAX_SURFACE_IMAGE_BYTES as u64 {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "stored image length differs from record",
+        ));
+    }
+    // Validate existing content without a second retained heap allocation.
+    let mut buffer = [0u8; MAX_SURFACE_IMAGE_BYTES];
+    let bytes = &mut buffer[..size as usize];
+    file.read_exact(bytes).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            error(
+                ProjectErrorCode::CorruptAsset,
+                "stored image shrank during validation",
+            )
+        } else {
+            io(e)
+        }
+    })?;
+    if file.read(&mut [0u8; 1]).map_err(io)? != 0 {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "stored image grew during validation",
+        ));
+    }
+    record.validate_content(bytes)?;
+    if expected.is_some_and(|expected| expected != bytes) {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "stored image differs from captured content",
+        ));
+    }
+    Ok(())
+}
 fn load_manufacturing(
     manifest: &ProjectManifest,
     directory: &Directory,
@@ -283,6 +406,7 @@ fn validate_stored_manufacturing(
                     .manufacturing_intent
                     .as_deref()
                     .ok_or_else(|| invalid("artifact has no intent"))?
+            || provenance.surface_overlays != manifest.surface_overlays
             || provenance.definitions.len() != manifest.definitions.len()
             || provenance.occurrences.len() != manifest.occurrences.len()
             || provenance
@@ -308,7 +432,7 @@ fn validate_root(directory: &Directory) -> Result<(), ProjectError> {
             CURRENT | PREVIOUS | LOCK => {
                 directory.read(&name).map_err(io)?;
             }
-            SOURCES | MANUFACTURING => {
+            SOURCES | MANUFACTURING | IMAGES => {
                 directory.child(&name).map_err(io)?;
             }
             _ if temporary_name(&name) => match directory.read(&name) {
@@ -492,6 +616,7 @@ pub fn open(
         None,
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
 }
 /// Same-path staged writer reopen retains the original lock until publication.
@@ -504,6 +629,7 @@ pub fn open_reusing(
     existing: Option<Arc<Storage>>,
     source_budget: usize,
     manufacturing_budget: usize,
+    image_budget: usize,
 ) -> Result<LoadedProject, ProjectError> {
     cancelled(cancel)?;
     let directory = Directory::open(path).map_err(io)?;
@@ -517,19 +643,28 @@ pub fn open_reusing(
         }
         _ => {
             validate_root(&directory)?;
-            let sources = directory.child(SOURCES).map_err(io)?;
-            let manufacturing = directory.child(MANUFACTURING).map_err(io)?;
             directory.read(LOCK).map_err(io)?;
             let lock = if read_only {
                 None
             } else {
                 Some(writer_lock(&directory)?)
             };
+            let version_bytes = bounded_read(
+                &directory,
+                if recover_previous { PREVIOUS } else { CURRENT },
+                MAX_PROJECT_MANIFEST_BYTES as usize,
+                ProjectErrorCode::InvalidProject,
+            )?;
+            validate_format(&version_bytes, recover_previous)?;
+            let sources = directory.child(SOURCES).map_err(io)?;
+            let manufacturing = directory.child(MANUFACTURING).map_err(io)?;
+            let images = directory.child(IMAGES).map_err(io)?;
             Arc::new(Storage {
                 path: canonical,
                 directory,
                 sources,
                 manufacturing,
+                images,
                 _writer_lock: lock,
                 operation: Mutex::new(()),
             })
@@ -547,6 +682,7 @@ pub fn open_reusing(
         ".json",
         MAX_MANUFACTURING_BUNDLE_BYTES as usize,
     )?;
+    asset_budget(&storage.images, ".pgm", MAX_SURFACE_IMAGE_BYTES)?;
     let bytes = bounded_read(
         &storage.directory,
         if recover_previous { PREVIOUS } else { CURRENT },
@@ -571,6 +707,7 @@ pub fn open_reusing(
         (manifest, saved_revision)
     };
     let sources = load_sources(&manifest, &storage.sources, source_budget, cancel)?;
+    let surface_images = load_images(&manifest, &storage.images, image_budget, cancel)?;
     let manufacturing_artifact = load_manufacturing(
         &manifest,
         &storage.manufacturing,
@@ -587,6 +724,7 @@ pub fn open_reusing(
         manufacturing_intent: manifest.manufacturing_intent.clone(),
         manufacturing_artifact: manufacturing_artifact.clone(),
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
+        surface_images: surface_images.clone(),
     };
     validate_snapshot(&snapshot, &manifest)?;
     cancelled(cancel)?;
@@ -597,6 +735,7 @@ pub fn open_reusing(
         saved_revision,
         sources,
         manufacturing_artifact,
+        surface_images,
         storage,
         recovered_previous: recover_previous,
     })
@@ -650,6 +789,7 @@ struct Stage {
     directory: Directory,
     sources: Directory,
     manufacturing: Option<Directory>,
+    images: Option<Directory>,
     parent: Directory,
     name: String,
     published: bool,
@@ -665,6 +805,10 @@ impl Drop for Stage {
             let _ = self
                 .directory
                 .remove_child_owned(MANUFACTURING, manufacturing);
+        }
+        if let Some(images) = &self.images {
+            let _ = images.clean_owned();
+            let _ = self.directory.remove_child_owned(IMAGES, images);
         }
         let _ = self.directory.clean_owned();
         let _ = self.directory.remove_child_owned(SOURCES, &self.sources);
@@ -732,6 +876,7 @@ pub fn save(
             for record in &manifest.definitions {
                 validate_stored_source(&storage.sources, record, None, cancel)?;
             }
+            validate_stored_images(&manifest, &storage.images, cancel)?;
             validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
             Ok(manifest)
         });
@@ -748,6 +893,7 @@ pub fn save(
                 for record in &manifest.definitions {
                     validate_stored_source(&storage.sources, record, None, cancel)?;
                 }
+                validate_stored_images(&manifest, &storage.images, cancel)?;
                 validate_stored_manufacturing(&manifest, &storage.manufacturing, cancel)?;
                 manifest
             }
@@ -779,6 +925,7 @@ pub fn save(
         }
         save_assets(&snapshot.snapshot, &storage.sources, cancel)?;
         save_manufacturing(&snapshot.snapshot, &storage.manufacturing, cancel)?;
+        save_images(&snapshot.snapshot, &storage.images, cancel)?;
         observe(SaveStage::AssetsSynced);
         cancelled(cancel)?;
         if storage.directory.exists(PREVIOUS).map_err(io)? {
@@ -797,6 +944,7 @@ pub fn save(
             for record in &prior.manifest.definitions {
                 validate_stored_source(&storage.sources, record, None, cancel)?;
             }
+            validate_stored_images(&prior.manifest, &storage.images, cancel)?;
             validate_stored_manufacturing(&prior.manifest, &storage.manufacturing, cancel)?;
         }
         let temporary = Temporary::write(&storage.directory, &bytes)?;
@@ -841,11 +989,13 @@ pub fn save(
             directory,
             sources,
             manufacturing: None,
+            images: None,
             parent,
             name: stage_name,
             published: false,
         };
         stage.manufacturing = Some(stage.directory.create_child(MANUFACTURING).map_err(io)?);
+        stage.images = Some(stage.directory.create_child(IMAGES).map_err(io)?);
         let lock = writer_lock(&stage.directory)?;
         let path = stage.parent.path().join(&name);
         let directory = stage.directory.relocated(path.clone()).map_err(io)?;
@@ -854,8 +1004,11 @@ pub fn save(
         let manufacturing = staged_manufacturing
             .relocated(path.join(MANUFACTURING))
             .map_err(io)?;
+        let staged_images = stage.images.as_ref().expect("created directory");
+        let images = staged_images.relocated(path.join(IMAGES)).map_err(io)?;
         save_assets(&snapshot.snapshot, &stage.sources, cancel)?;
         save_manufacturing(&snapshot.snapshot, staged_manufacturing, cancel)?;
+        save_images(&snapshot.snapshot, staged_images, cancel)?;
         observe(SaveStage::AssetsSynced);
         cancelled(cancel)?;
         let temporary = Temporary::write(&stage.directory, &bytes)?;
@@ -879,6 +1032,12 @@ pub fn save(
                 .map_err(io)?
                 .same(staged_manufacturing)
                 .map_err(io)?
+            || !stage
+                .directory
+                .child(IMAGES)
+                .map_err(io)?
+                .same(staged_images)
+                .map_err(io)?
         {
             return Err(invalid(
                 "owned first-save staging directory was substituted",
@@ -899,6 +1058,7 @@ pub fn save(
             directory,
             sources,
             manufacturing,
+            images,
             _writer_lock: Some(lock),
             operation: Mutex::new(()),
         });
@@ -972,6 +1132,40 @@ fn save_manufacturing(
                 ));
             }
             Temporary::write(directory, asset.bytes.as_slice())?.publish_asset(&name)?;
+        }
+    }
+    directory.sync().map_err(io)
+}
+fn save_images(
+    snapshot: &Snapshot,
+    directory: &Directory,
+    cancel: &AtomicBool,
+) -> Result<(), ProjectError> {
+    let (mut count, mut total, scratch_bytes) =
+        asset_budget(directory, ".pgm", MAX_SURFACE_IMAGE_BYTES)?;
+    for asset in snapshot.surface_images.values() {
+        cancelled(cancel)?;
+        let name = format!("{}.pgm", asset.record().image_hash.as_str());
+        if directory.exists(&name).map_err(io)? {
+            validate_stored_image(
+                directory,
+                asset.record(),
+                Some(asset.bytes().as_slice()),
+                cancel,
+            )?;
+        } else {
+            count += 1;
+            total += asset.bytes().len() as u64;
+            if count > MAX_PROJECT_STORED_ASSETS
+                || total > MAX_PROJECT_STORED_SOURCE_BYTES
+                || scratch_bytes + asset.bytes().len() as u64 > MAX_SURFACE_IMAGE_BYTES as u64
+            {
+                return Err(error(
+                    ProjectErrorCode::ResourceLimit,
+                    "persisted image asset/scratch budget exhausted",
+                ));
+            }
+            Temporary::write(directory, asset.bytes().as_slice())?.publish_asset(&name)?;
         }
     }
     directory.sync().map_err(io)

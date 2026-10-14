@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
-pub const PROJECT_FORMAT_VERSION: u32 = 3;
+pub const PROJECT_FORMAT_VERSION: u32 = 4;
 pub const MAX_PROJECT_MANIFEST_BYTES: u32 = 1_048_576;
 pub const MAX_PROJECT_HISTORY: usize = 64;
 pub const MAX_PROJECT_STORED_SOURCE_BYTES: u64 = 268_435_456;
@@ -311,6 +311,19 @@ pub enum ProjectCommand {
     Redo {
         session_id: SessionId,
         base_revision: SceneRevision,
+    },
+    ImportSurfaceImageFinish {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        reference: FaceRef,
+        scope: SurfaceScopeKind,
+        source: NativePath,
+        parameters: ImageReliefParameters,
+    },
+    GetSurfaceImage {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        image_hash: SourceHash,
     },
     AddSurfaceFinish {
         session_id: SessionId,

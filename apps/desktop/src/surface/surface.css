@@ -36,3 +36,20 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.surface-panel [data-testid="surface-images"] {
+  overflow-wrap: anywhere;
+}
+.surface-panel [data-testid="surface-images"] code,
+.surface-panel [data-testid="surface-images"] span {
+  display: block;
+  margin: 0.3rem 0;
+}
+.surface-panel [data-testid="surface-image-preview-canvas"] {
+  width: min(100%, 256px);
+  height: auto;
+  image-rendering: pixelated;
+  border: 1px solid #8191a0;
+}
+.surface-panel figure {
+  margin: 0.75rem 0;
+}

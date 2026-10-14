@@ -126,6 +126,7 @@ fn plan() -> NormalizedPrintPlan {
         surface_tolerance_mm: 0.001,
         offset_tolerance_mm: 0.005,
         layer_quantization_mm: 0.000001,
+        surface_resolution: vec![],
         layers: vec![PrintLayer {
             index: 0,
             z_mm: 5.2,
@@ -165,12 +166,13 @@ fn bundle() -> ManufacturingBundle {
             occurrences,
             intent,
             surface_overlays: SurfaceOverlays::empty(),
+            surface_images: vec![],
             kernel: KernelIdentity {
                 name: "native".into(),
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "5".into(),
+            planner_version: "6".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -706,7 +708,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     );
     let wrap = |layer: &str| {
         format!(
-            r#"{{"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
+            r#"{{"surface_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
         )
     };
     assert_eq!(
@@ -788,7 +790,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
 }
 
 #[test]
-fn schema4_process_and_support_fields_are_required_without_defaults() {
+fn schema5_process_and_support_fields_are_required_without_defaults() {
     let original = serde_json::to_value(intent()).unwrap();
     for field in ["process", "supports"] {
         let mut missing = original.clone();
@@ -1000,6 +1002,7 @@ fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
     };
     let mut doc = SurfaceOverlays {
         schema_version: SURFACE_SCHEMA_VERSION,
+        images: vec![],
         layers: vec![
             SurfaceLayer {
                 layer_id: SurfaceLayerId::new(1).unwrap(),
@@ -1097,6 +1100,279 @@ fn realized_material_area_requires_exact_source_plus_addition_and_plan_bound_pre
     weak_bound.surface_tolerance_mm = 0.002;
     assert!(weak_bound.validate(&intent).is_err());
     let mut old_profile = intent;
-    old_profile.printer.schema_version = 3;
+    old_profile.printer.schema_version = 4;
     assert!(old_profile.validate().is_err());
+}
+
+fn image_bundle() -> ManufacturingBundle {
+    use crate::surface::*;
+    let mut bundle = bundle();
+    let bytes: Arc<Vec<u8>> = [b"P5\n2 2\n255\n".as_slice(), &[0, 64, 128, 255]]
+        .concat()
+        .into();
+    let image = SurfaceImageRecord {
+        image_hash: SourceHash::from_bytes(&bytes),
+        width: 2,
+        height: 2,
+        byte_count: bytes.len() as u64,
+        source_hash: SourceHash::from_bytes(b"encoded png"),
+        source_name: "height.png".into(),
+    };
+    let parameters = ImageReliefParameters {
+        depth_mm: 1.0,
+        u_repeats: 3,
+        u_phase_fraction: 0.125,
+        z_period_mm: 2.0,
+        z_phase_mm: 0.25,
+        edge_margin_mm: 0.8,
+        vertical_error_mm: 0.025,
+    };
+    bundle.provenance.surface_overlays = SurfaceOverlays {
+        schema_version: SURFACE_SCHEMA_VERSION,
+        images: vec![image.clone()],
+        layers: vec![SurfaceLayer {
+            layer_id: SurfaceLayerId::new(1).unwrap(),
+            enabled: true,
+            scope: SurfaceScope::Definition {
+                definition_id: bundle.provenance.definitions[0].definition_id.clone(),
+            },
+            face_id: FaceId::from_step_entity(7).unwrap(),
+            finish: SurfaceFinish::ImageRelief {
+                image_hash: image.image_hash.clone(),
+                parameters,
+            },
+        }],
+    };
+    bundle.provenance.surface_images = vec![SurfaceImageContent {
+        image_hash: image.image_hash.clone(),
+        bytes,
+    }];
+    bundle.provenance.input_hash = input_fingerprint(
+        &bundle.provenance.project_id,
+        &bundle.provenance.definitions,
+        &bundle.provenance.occurrences,
+        &bundle.provenance.intent,
+        &bundle.provenance.surface_overlays,
+    )
+    .unwrap();
+    bundle.plan.surface_resolution = vec![SurfaceResolution {
+        surface_layer_id: SurfaceLayerId::new(1).unwrap(),
+        occurrence_id: bundle.provenance.occurrences[0].occurrence_id,
+        face_id: FaceId::from_step_entity(7).unwrap(),
+        image_hash: image.image_hash,
+        layer_index: 0,
+        source_z_mm: 5.1,
+        evaluated_witnesses: 2,
+        resolved: 0,
+        ambiguous: 1,
+        below_nominal_resolution: 1,
+        unavailable: 0,
+        coverage_complete: true,
+        representatives_truncated: false,
+        max_residual_lower_mm: 0.2,
+        max_residual_upper_mm: 0.3,
+        representatives: vec![
+            SurfaceFeatureResolution {
+                source_u: 0.25,
+                source_z_mm: 5.1,
+                cell: 0,
+                repeat: 0,
+                classification: SurfaceFeatureClass::Ambiguous,
+                residual_lower_mm: 0.0,
+                residual_upper_mm: 0.1,
+            },
+            SurfaceFeatureResolution {
+                source_u: 0.75,
+                source_z_mm: 5.1,
+                cell: 1,
+                repeat: 2,
+                classification: SurfaceFeatureClass::BelowNominalResolution,
+                residual_lower_mm: 0.2,
+                residual_upper_mm: 0.3,
+            },
+        ],
+    }];
+    bundle
+}
+#[test]
+fn image_bundle_is_self_contained_and_inspection_never_carries_pixels() {
+    let bundle = image_bundle();
+    bundle.validate().unwrap();
+    let cloned = bundle.clone();
+    assert!(Arc::ptr_eq(
+        &bundle.provenance.surface_images[0].bytes,
+        &cloned.provenance.surface_images[0].bytes
+    ));
+    let decoded = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+    assert_eq!(decoded, bundle);
+    assert_eq!(
+        bundle.summary().surface_resolution,
+        SurfaceResolutionTotals {
+            evaluated_witnesses: 2,
+            resolved: 0,
+            ambiguous: 1,
+            below_nominal_resolution: 1,
+            unavailable: 0,
+            coverage_complete: true
+        }
+    );
+    let inspection = ManufacturingInspectionProvenance::from(&bundle.provenance);
+    let value = serde_json::to_value(&inspection).unwrap();
+    assert!(value.get("surface_images").is_none());
+    assert_eq!(
+        value["surface_overlays"]["images"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        value["surface_overlays"]["images"][0]
+            .get("bytes")
+            .is_none()
+    );
+    let wire: crate::rpc::ManufacturingInspectionProvenance =
+        inspection.clone().try_into().unwrap();
+    assert_eq!(
+        ManufacturingInspectionProvenance::try_from(wire).unwrap(),
+        inspection
+    );
+    let mut missing = bundle.clone();
+    missing.provenance.surface_images.clear();
+    assert!(missing.validate().is_err());
+    let mut corrupt = bundle.clone();
+    Arc::make_mut(&mut corrupt.provenance.surface_images[0].bytes)[11] ^= 1;
+    assert!(corrupt.validate().is_err());
+    let mut unknown = bundle.clone();
+    unknown.provenance.surface_images[0].image_hash = SourceHash::from_bytes(b"unknown");
+    assert!(unknown.validate().is_err());
+    let mut old = serde_json::to_value(&bundle).unwrap();
+    old["schema_version"] = serde_json::json!(4);
+    old["provenance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("surface_images");
+    old["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("surface_resolution");
+    assert_eq!(
+        decode_bundle(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    let mut oversized = serde_json::to_value(&bundle.provenance).unwrap();
+    oversized["surface_images"] = serde_json::json!(vec![
+        serde_json::to_value(
+            &bundle.provenance.surface_images[0]
+        )
+        .unwrap();
+        crate::surface::MAX_SURFACE_IMAGES + 1
+    ]);
+    assert!(serde_json::from_value::<ManufacturingProvenance>(oversized).is_err());
+}
+#[test]
+fn image_fingerprint_binds_every_mapping_and_first_admission_provenance_even_disabled() {
+    use crate::surface::SurfaceFinish;
+    let bundle = image_bundle();
+    let original = bundle.provenance.input_hash.clone();
+    let fingerprint = |overlays: &SurfaceOverlays| {
+        input_fingerprint(
+            &bundle.provenance.project_id,
+            &bundle.provenance.definitions,
+            &bundle.provenance.occurrences,
+            &bundle.provenance.intent,
+            overlays,
+        )
+        .unwrap()
+    };
+    let mut disabled = bundle.provenance.surface_overlays.clone();
+    disabled.layers[0].enabled = false;
+    assert_ne!(fingerprint(&disabled), original);
+    let disabled_hash = fingerprint(&disabled);
+    for field in 0..7 {
+        let mut changed = disabled.clone();
+        let SurfaceFinish::ImageRelief { parameters, .. } = &mut changed.layers[0].finish else {
+            unreachable!()
+        };
+        match field {
+            0 => parameters.depth_mm += 0.1,
+            1 => parameters.u_repeats += 1,
+            2 => parameters.u_phase_fraction += 0.01,
+            3 => parameters.z_period_mm += 0.1,
+            4 => parameters.z_phase_mm += 0.1,
+            5 => parameters.edge_margin_mm += 0.1,
+            _ => parameters.vertical_error_mm += 0.001,
+        }
+        assert_ne!(fingerprint(&changed), disabled_hash);
+    }
+    let mut changed = disabled.clone();
+    changed.images[0].source_hash = SourceHash::from_bytes(b"different encoded alpha provenance");
+    assert_ne!(fingerprint(&changed), disabled_hash);
+    let mut changed = disabled;
+    changed.images[0].source_name = "renamed.png".into();
+    assert_ne!(fingerprint(&changed), disabled_hash);
+}
+#[test]
+fn resolution_validation_is_strict_and_advisory_attribution_cannot_drift() {
+    let bundle = image_bundle();
+    let record = &bundle.plan.surface_resolution[0];
+    record.validate().unwrap();
+    for field in 0..10 {
+        let mut changed = record.clone();
+        match field {
+            0 => changed.evaluated_witnesses += 1,
+            1 => changed.resolved = u32::MAX,
+            2 => changed.max_residual_lower_mm = -0.1,
+            3 => changed.max_residual_upper_mm = f64::NAN,
+            4 => changed.representatives_truncated = true,
+            5 => changed.representatives[0].source_z_mm += 0.1,
+            6 => changed.representatives[0].classification = SurfaceFeatureClass::Resolved,
+            7 => changed.representatives[1].residual_lower_mm = 0.0,
+            8 => changed.representatives[0].source_u = 1.0,
+            _ => changed.representatives = vec![changed.representatives[0].clone(); 9],
+        }
+        assert!(changed.validate().is_err());
+    }
+    for field in 0..7 {
+        let mut changed = bundle.clone();
+        let record = &mut changed.plan.surface_resolution[0];
+        match field {
+            0 => record.layer_index = 1,
+            1 => record.occurrence_id = OccurrenceId::new(2).unwrap(),
+            2 => record.surface_layer_id = crate::surface::SurfaceLayerId::new(2).unwrap(),
+            3 => record.face_id = FaceId::from_step_entity(8).unwrap(),
+            4 => record.image_hash = SourceHash::from_bytes(b"other image"),
+            5 => record.representatives[0].cell = 2,
+            _ => record.representatives[0].repeat = 3,
+        }
+        assert!(changed.validate().is_err());
+    }
+    let mut duplicate = bundle.clone();
+    duplicate.plan.surface_resolution.push(record.clone());
+    assert!(duplicate.validate().is_err());
+    let mut blank = record.clone();
+    blank.evaluated_witnesses = 0;
+    blank.ambiguous = 0;
+    blank.below_nominal_resolution = 0;
+    blank.max_residual_lower_mm = 0.0;
+    blank.max_residual_upper_mm = 0.0;
+    blank.representatives.clear();
+    blank.validate().unwrap();
+    let mut unavailable = blank;
+    unavailable.evaluated_witnesses = 1;
+    unavailable.unavailable = 1;
+    unavailable.representatives_truncated = true;
+    assert!(unavailable.validate().is_err());
+    unavailable.coverage_complete = false;
+    unavailable.validate().unwrap();
+    let mut totals = SurfaceResolutionTotals::from_records(&[unavailable]);
+    totals.validate().unwrap();
+    totals.evaluated_witnesses += 1;
+    assert!(totals.validate().is_err());
+    assert_eq!(
+        self::bundle().summary().surface_resolution,
+        SurfaceResolutionTotals::empty()
+    );
 }

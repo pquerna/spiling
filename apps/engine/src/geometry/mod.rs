@@ -6,13 +6,16 @@ mod execution;
 mod manufacturing;
 mod placement;
 mod source;
+mod surface_image;
 mod worker;
 pub(crate) use execution::{Control, EngineJob, JobError, JobId, JobResult, JobStatus, Reply};
 
 use crate::session::Watchdog;
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::project::*;
-use spiling_contracts::surface::{SurfaceScope, SurfaceScopeKind};
+use spiling_contracts::surface::{
+    ImageReliefParameters, SurfaceImageRecord, SurfaceLayerId, SurfaceScope, SurfaceScopeKind,
+};
 use spiling_contracts::{display::EncodedSection, geometry::*};
 use spiling_core::storage::SaveReceipt;
 use spiling_core::{Edit, PreparedEdit, Project};
@@ -106,13 +109,21 @@ impl Artifact {
     }
 }
 enum Purpose {
-    Import { pose: RigidPoseMm },
+    Import {
+        pose: RigidPoseMm,
+    },
     Section,
     Open,
     Save,
     Compile,
     Preflight,
     Verify,
+    ImportSurfaceImage {
+        reference: FaceRef,
+        scope: SurfaceScopeKind,
+        parameters: ImageReliefParameters,
+    },
+    GetSurfaceImage,
 }
 struct Publication {
     kind: PublicationKind,
@@ -135,6 +146,12 @@ enum PublicationKind {
         revision: SceneRevision,
     },
     Save(SaveReceipt),
+    SurfaceImageImported {
+        edit: PreparedEdit,
+        image: SurfaceImageRecord,
+        layer_id: SurfaceLayerId,
+    },
+    SurfaceImagePrepared(Arc<spiling_core::SurfaceImageAsset>),
     Section,
     Manufacturing {
         edit: PreparedEdit,
@@ -171,6 +188,7 @@ pub struct Runtime {
     // One <=16 MiB replay allocation is staged by the sole worker, then borrowed
     // into the terminal ledger transaction after ACK and released immediately.
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
+    image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
@@ -192,6 +210,7 @@ impl Runtime {
             artifacts: BTreeMap::new(),
             replay_publication: None,
             released: VecDeque::new(),
+            image_publication: None,
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
             next_job: 0,
@@ -321,7 +340,11 @@ impl Runtime {
                 } else if active.base != self.revision
                     || (matches!(
                         active.purpose,
-                        Purpose::Compile | Purpose::Preflight | Purpose::Verify
+                        Purpose::Compile
+                            | Purpose::Preflight
+                            | Purpose::Verify
+                            | Purpose::ImportSurfaceImage { .. }
+                            | Purpose::GetSurfaceImage
                     ) && active.project_base != self.project.info().revision)
                 {
                     Err(
@@ -332,6 +355,15 @@ impl Runtime {
                             ManufacturingError::new(
                                 ManufacturingErrorCode::StaleRevision,
                                 "manufacturing input revision is stale",
+                            )
+                            .into()
+                        } else if matches!(
+                            active.purpose,
+                            Purpose::ImportSurfaceImage { .. } | Purpose::GetSurfaceImage
+                        ) {
+                            project_error(
+                                ProjectErrorCode::StaleRevision,
+                                "surface image input revision is stale",
                             )
                             .into()
                         } else {
@@ -446,6 +478,32 @@ impl Runtime {
                                 info: self.project.info(),
                             })
                         }
+                        PublicationKind::SurfaceImageImported {
+                            edit,
+                            image,
+                            layer_id,
+                        } => {
+                            self.project
+                                .commit(edit)
+                                .map_err(|e| format!("core surface image ACK invariant: {e}"))?;
+                            Some(JobResult::SurfaceImageImported {
+                                info: self.project.info(),
+                                image,
+                                layer_id,
+                            })
+                        }
+                        PublicationKind::SurfaceImagePrepared(asset) => {
+                            if self.image_publication.is_some() {
+                                return Err("unreleased surface image publication".into());
+                            }
+                            let record = asset.record().clone();
+                            self.image_publication = Some((job, asset));
+                            Some(JobResult::SurfaceImagePrepared {
+                                project_id: self.project.info().project_id,
+                                captured_revision: active.project_base,
+                                record,
+                            })
+                        }
                         PublicationKind::Manufacturing { edit, record } => {
                             self.project
                                 .commit(edit)
@@ -520,6 +578,18 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (
+                Purpose::ImportSurfaceImage {
+                    reference,
+                    scope,
+                    parameters,
+                },
+                Product::SurfaceImage(asset),
+            ) => self.prepare_surface_image(reference, *scope, parameters, asset),
+            (Purpose::GetSurfaceImage, Product::SurfaceImage(asset)) => Ok(Publication {
+                kind: PublicationKind::SurfaceImagePrepared(asset),
+                artifact: None,
+            }),
             (Purpose::Import { pose }, Product::Import(imported)) => {
                 let revision = self.revision.next()?;
                 placement::placed_bounds(*pose, imported.bounds)?;
@@ -1186,6 +1256,26 @@ impl Runtime {
                     info: self.project.info(),
                 }))
             }
+            ProjectCommand::ImportSurfaceImageFinish {
+                session_id,
+                base_revision,
+                reference,
+                scope,
+                source,
+                parameters,
+            } => self.import_surface_image(
+                &session_id,
+                base_revision,
+                reference,
+                scope,
+                source,
+                parameters,
+            ),
+            ProjectCommand::GetSurfaceImage {
+                session_id,
+                base_revision,
+                image_hash,
+            } => self.get_surface_image(&session_id, base_revision, &image_hash),
             ProjectCommand::AddSurfaceFinish {
                 session_id,
                 base_revision,
@@ -1194,35 +1284,7 @@ impl Runtime {
                 finish,
             } => {
                 self.surface_base(&session_id, base_revision)?;
-                if face_ref.session_id != self.session_id
-                    || face_ref.scene_revision != self.revision
-                {
-                    return Err(project_error(
-                        ProjectErrorCode::StaleRevision,
-                        "surface target session or scene revision is stale",
-                    ));
-                }
-                let snapshot = self.project.snapshot();
-                let valid = snapshot
-                    .occurrences
-                    .get(&face_ref.occurrence_id)
-                    .is_some_and(|occurrence| occurrence.definition_id == face_ref.definition_id)
-                    && snapshot.sources.contains_key(&face_ref.definition_id)
-                    && self
-                        .definitions
-                        .get(&face_ref.definition_id)
-                        .is_some_and(|definition| {
-                            definition
-                                .faces
-                                .iter()
-                                .any(|face| face.face_id == face_ref.face_id)
-                        });
-                if !valid {
-                    return Err(project_error(
-                        ProjectErrorCode::InvalidProject,
-                        "surface target is not a live source occurrence and native face",
-                    ));
-                }
+                self.live_surface_target(&face_ref)?;
                 let scope = match scope {
                     SurfaceScopeKind::Definition => SurfaceScope::Definition {
                         definition_id: face_ref.definition_id,
@@ -1288,6 +1350,7 @@ impl Runtime {
                 let allowed_reuse = self.definitions.keys().cloned().collect();
                 let retained_source_bytes = self.retained_source_bytes;
                 let retained_manufacturing_bytes = self.manufacturing_bytes();
+                let retained_surface_image_bytes = self.surface_image_bytes()?;
                 let budget = worker::MeshBudget {
                     vertices: MAX_DISPLAY_VERTICES
                         - self.definitions.values().map(|d| d.vertices).sum::<u32>(),
@@ -1307,6 +1370,7 @@ impl Runtime {
                             budget,
                             retained_source_bytes,
                             retained_manufacturing_bytes,
+                            retained_surface_image_bytes,
                         })
                     })
                     .map_err(project_geometry_error)?;
@@ -1426,6 +1490,8 @@ impl Runtime {
             Purpose::Compile => "compiling_manufacturing",
             Purpose::Preflight => "preflighting_manufacturing",
             Purpose::Verify => "verifying_manufacturing",
+            Purpose::ImportSurfaceImage { .. } => "importing_surface_image",
+            Purpose::GetSurfaceImage => "preparing_surface_image",
         };
         self.watchdog.start(job, cancel.clone());
         let work = work(job, artifact, &self.watchdog);
@@ -1500,6 +1566,7 @@ fn project_geometry_error(error: GeometryError) -> ProjectError {
         GeometryErrorCode::StaleRevision => ProjectErrorCode::StaleRevision,
         GeometryErrorCode::ResourceLimit => ProjectErrorCode::ResourceLimit,
         GeometryErrorCode::Cancelled => ProjectErrorCode::Cancelled,
+        GeometryErrorCode::SourceIo | GeometryErrorCode::SourceChanged => ProjectErrorCode::Io,
         _ => ProjectErrorCode::InvalidProject,
     };
     ProjectError::new(code, error.message)
@@ -1524,7 +1591,10 @@ fn cancelled(purpose: &Purpose) -> JobError {
             "manufacturing job cancelled before publication",
         )
         .into(),
-        Purpose::Open | Purpose::Save => project_error(
+        Purpose::Open
+        | Purpose::Save
+        | Purpose::ImportSurfaceImage { .. }
+        | Purpose::GetSurfaceImage => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",
         )

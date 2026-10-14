@@ -226,11 +226,11 @@ async fn history(client: &mut EngineClient, redo: bool) -> (ProjectInfo, SceneSu
             base_revision: summary.revision,
         }
     };
-    let ProjectResponse::SceneChanged { info, summary } = client.project(command).await.unwrap()
-    else {
-        panic!("expected history transaction");
-    };
-    (info, summary)
+    match client.project(command).await.unwrap() {
+        ProjectResponse::SceneChanged { info, summary } => (info, summary),
+        ProjectResponse::Status { info } => (info, scene(client).await),
+        _ => panic!("expected history transaction"),
+    }
 }
 async fn import(client: &mut EngineClient, source: &Path, pose: RigidPoseMm) -> SceneSummary {
     let summary = scene(client).await;
@@ -1588,5 +1588,374 @@ async fn source_face_surface_metadata_checks_identity_history_and_native_open_ta
         ProjectErrorCode::InvalidProject,
     );
     fresh.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+fn image_parameters() -> spiling_contracts::surface::ImageReliefParameters {
+    spiling_contracts::surface::ImageReliefParameters {
+        depth_mm: 0.12,
+        u_repeats: 2,
+        u_phase_fraction: 0.125,
+        z_period_mm: 2.0,
+        z_phase_mm: 0.25,
+        edge_margin_mm: 1.0,
+        vertical_error_mm: 0.02,
+    }
+}
+
+async fn start_image_import(client: &mut EngineClient, path: &Path) -> String {
+    let reference = reference(client).await;
+    let before = info(client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::ImportSurfaceImageFinish {
+            session_id: reference.session_id.clone(),
+            base_revision: before.revision,
+            reference,
+            scope: spiling_contracts::surface::SurfaceScopeKind::Occurrence,
+            source: native(path),
+            parameters: image_parameters(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("image import operation");
+    };
+    operation.name
+}
+
+async fn start_image_get(client: &mut EngineClient, hash: &SourceHash) -> String {
+    let before = info(client).await;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::GetSurfaceImage {
+            session_id: client.hello().session_id.clone(),
+            base_revision: before.revision,
+            image_hash: hash.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("image retrieval operation");
+    };
+    operation.name
+}
+
+#[tokio::test]
+async fn image_finish_atomic_history_and_fresh_read_only_asset_resource() {
+    let workspace = Workspace::new();
+    let source = workspace.source("box-mm.step");
+    let image_path = workspace.path("asymmetric.png");
+    let canonical = b"P5\n3 2\n255\n\x00\x20\xff\x80\x01\x40";
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, 3, 2);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&canonical[11..])
+            .unwrap();
+    }
+    std::fs::write(&image_path, encoded).unwrap();
+    let checkpoint = workspace.path("image-project");
+    let mut client = spawn().await;
+    import(&mut client, &source, RigidPoseMm::IDENTITY).await;
+    let before = info(&mut client).await;
+    let before_scene = scene(&mut client).await;
+    let before_native = native_snapshot(&mut client).await;
+    let id = start_image_import(&mut client, &image_path).await;
+    let completed = wait_job(&mut client, id).await;
+    assert_eq!(completed.status, JobStatus::Completed, "{completed:?}");
+    assert!(
+        completed.outputs.is_empty(),
+        "authoring receipt must not transfer scene or pixels"
+    );
+    let Some(JobResult::SurfaceImageImported {
+        info: authored,
+        image,
+        layer_id,
+    }) = completed.result
+    else {
+        panic!("image authoring receipt");
+    };
+    assert!(authored.revision > before.revision);
+    assert_eq!(authored.surface_overlays.images, vec![image.clone()]);
+    assert_eq!(authored.surface_overlays.layers[0].layer_id, layer_id);
+    image.validate_content(canonical).unwrap();
+    assert_eq!(info(&mut client).await, authored);
+    assert_eq!(scene(&mut client).await, before_scene);
+    assert_eq!(native_snapshot(&mut client).await, before_native);
+    let (undone, _) = history(&mut client, false).await;
+    assert!(undone.surface_overlays.images.is_empty() && undone.surface_overlays.layers.is_empty());
+    let (redone, _) = history(&mut client, true).await;
+    assert_eq!(redone.surface_overlays, authored.surface_overlays);
+    // Equal pixels under another selected filename reuse the complete retained
+    // first-admission provenance, not merely the hash or dimensions.
+    let duplicate = workspace.path("different-name.pgm");
+    std::fs::write(&duplicate, canonical).unwrap();
+    let id = start_image_import(&mut client, &duplicate).await;
+    let duplicate_result = wait_job(&mut client, id).await;
+    let Some(JobResult::SurfaceImageImported {
+        image: retained, ..
+    }) = duplicate_result.result
+    else {
+        panic!("deduplicated image receipt");
+    };
+    assert_eq!(retained, image);
+    let saved = save(&mut client, Some(&checkpoint)).await;
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(image_path).unwrap();
+    std::fs::remove_file(duplicate).unwrap();
+
+    let mut reader = spawn().await;
+    open(&mut reader, &checkpoint, true, false, false).await;
+    let before_read = info(&mut reader).await;
+    let reader_scene = scene(&mut reader).await;
+    assert!(before_read.read_only);
+    assert_eq!(before_read.surface_overlays, saved.surface_overlays);
+    let id = start_image_get(&mut reader, &image.image_hash).await;
+    let prepared = wait_job(&mut reader, id.clone()).await;
+    assert_eq!(prepared.status, JobStatus::Completed, "{prepared:?}");
+    let Some(JobResult::SurfaceImagePrepared {
+        project_id,
+        captured_revision,
+        record,
+        resource,
+    }) = &prepared.result
+    else {
+        panic!("image retrieval receipt");
+    };
+    assert_eq!(project_id, &before_read.project_id);
+    assert_eq!(*captured_revision, before_read.revision);
+    assert_eq!(record, &image);
+    assert_eq!(prepared.outputs, vec![resource.clone()]);
+    assert_eq!(
+        resource.name,
+        format!("artifacts/{}", image.image_hash.as_str())
+    );
+    assert_eq!(resource.media_type, "image/x-portable-graymap");
+    assert_eq!(resource.size_bytes, canonical.len().to_string());
+    assert_eq!(
+        reader.fetch_surface_image(record, resource).await.unwrap(),
+        canonical
+    );
+    assert_eq!(
+        info(&mut reader).await,
+        before_read,
+        "read-only asset publication must not mutate Core/history"
+    );
+    assert_eq!(scene(&mut reader).await, reader_scene);
+    reader.cancel_operation(&id).await.unwrap();
+    assert_eq!(reader.native_operation(&id).await.unwrap(), prepared);
+    let face = reference(&mut reader).await;
+    project_rejection(
+        &mut reader,
+        ProjectCommand::ImportSurfaceImageFinish {
+            session_id: face.session_id.clone(),
+            base_revision: before_read.revision,
+            reference: face,
+            scope: spiling_contracts::surface::SurfaceScopeKind::Definition,
+            source: native(&workspace.path("deleted-source.pgm")),
+            parameters: image_parameters(),
+        },
+        ProjectErrorCode::ReadOnly,
+    )
+    .await;
+    assert_eq!(info(&mut reader).await, before_read);
+    reader.shutdown().await.unwrap();
+
+    // Stored canonical bytes, including disabled/history-independent image
+    // assets, are validated on fresh open before replacing the active state.
+    let stored = checkpoint
+        .join("images")
+        .join(format!("{}.pgm", image.image_hash.as_str()));
+    let mut corrupt = canonical.to_vec();
+    *corrupt.last_mut().unwrap() ^= 1;
+    std::fs::write(stored, corrupt).unwrap();
+    let mut fresh = spawn().await;
+    let unchanged = info(&mut fresh).await;
+    let id = start_open(&mut fresh, &checkpoint, true, false, false).await;
+    let rejected = wait_job(&mut fresh, id).await;
+    assert_eq!(rejected.status, JobStatus::Failed);
+    assert!(rejected.result.is_none() && rejected.outputs.is_empty());
+    assert!(matches!(rejected.error, Some(JobError::Project { .. })));
+    assert_eq!(info(&mut fresh).await, unchanged);
+    fresh.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn image_import_errors_queued_cancel_and_stale_preserve_committed_state() {
+    use spiling_contracts::rpc::{DiagnosticState, RunDiagnosticRequest};
+    use spiling_contracts::surface::SurfaceScopeKind;
+    let workspace = Workspace::new();
+    let mut client = spawn().await;
+    import(
+        &mut client,
+        &workspace.source("box-mm.step"),
+        RigidPoseMm::IDENTITY,
+    )
+    .await;
+    let valid = workspace.path("valid.pgm");
+    std::fs::write(&valid, b"P5\n2 2\n255\n\x00\xff\x40\x80").unwrap();
+    let before = info(&mut client).await;
+    let original_scene = scene(&mut client).await;
+    let face = reference(&mut client).await;
+    for (name, bytes, code) in [
+        (
+            "malformed.pgm",
+            b"P5\n2 2\n255\n\xff".to_vec(),
+            ProjectErrorCode::InvalidProject,
+        ),
+        (
+            "oversized.png",
+            vec![0; 1024 * 1024 + 1],
+            ProjectErrorCode::ResourceLimit,
+        ),
+    ] {
+        let path = workspace.path(name);
+        std::fs::write(&path, bytes).unwrap();
+        let id = start_image_import(&mut client, &path).await;
+        project_job_error(&wait_job(&mut client, id).await, code);
+        assert_eq!(info(&mut client).await, before);
+        assert_eq!(scene(&mut client).await, original_scene);
+    }
+    for path in [workspace.path("missing.png"), workspace.0.clone()] {
+        let id = start_image_import(&mut client, &path).await;
+        let rejected = wait_job(&mut client, id).await;
+        assert_eq!(rejected.status, JobStatus::Failed);
+        assert!(matches!(rejected.error, Some(JobError::Project { .. })));
+        assert!(rejected.result.is_none() && rejected.outputs.is_empty());
+        assert_eq!(info(&mut client).await, before);
+    }
+    let mut wrong = face.clone();
+    wrong.face_id = FaceId::parse("step:999999").unwrap();
+    project_rejection(
+        &mut client,
+        ProjectCommand::ImportSurfaceImageFinish {
+            session_id: face.session_id.clone(),
+            base_revision: before.revision,
+            reference: wrong,
+            scope: SurfaceScopeKind::Definition,
+            source: native(&valid),
+            parameters: image_parameters(),
+        },
+        ProjectErrorCode::InvalidProject,
+    )
+    .await;
+    assert_eq!(info(&mut client).await, before);
+    let rpc = client.rpc();
+    let blocker = rpc
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/image-boundary".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if spiling_contracts::metadata(&operation).unwrap().state
+                == DiagnosticState::Running as i32
+            {
+                break;
+            }
+            assert!(!operation.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let id = start_image_import(&mut client, &valid).await;
+    client.cancel_operation(&id).await.unwrap();
+    let cancelled = wait_job(&mut client, id).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    assert_eq!(info(&mut client).await, before);
+    let id = start_image_import(&mut client, &valid).await;
+    let ProjectResponse::Status { info: changed } = client
+        .project(ProjectCommand::AddSurfaceFinish {
+            session_id: face.session_id.clone(),
+            base_revision: before.revision,
+            face_ref: face,
+            scope: SurfaceScopeKind::Definition,
+            finish: spiling_contracts::surface::SurfaceFinish::Smooth,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("metadata revision change");
+    };
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait_job(&mut client, id).await;
+    project_job_error(&stale, ProjectErrorCode::StaleRevision);
+    assert!(stale.outputs.is_empty());
+    assert_eq!(info(&mut client).await, changed);
+    assert!(changed.surface_overlays.images.is_empty());
+    assert_eq!(scene(&mut client).await, original_scene);
+    let id = start_image_import(&mut client, &valid).await;
+    let imported = wait_job(&mut client, id).await;
+    let Some(JobResult::SurfaceImageImported {
+        image,
+        info: with_image,
+        layer_id,
+    }) = imported.result
+    else {
+        panic!("valid image import after failures");
+    };
+    let blocker = rpc
+        .run_diagnostic(RunDiagnosticRequest {
+            parent: "diagnostics/image-read-boundary".into(),
+            request_id: String::new(),
+            chunk_count: 4,
+            delay_ms: 1000,
+            chunk_bytes: 64,
+            input_revision: "hold-native-permit".into(),
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let operation = rpc.get_operation(&blocker.name).await.unwrap();
+            if spiling_contracts::metadata(&operation).unwrap().state
+                == DiagnosticState::Running as i32
+            {
+                break;
+            }
+            assert!(!operation.done);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let id = start_image_get(&mut client, &image.image_hash).await;
+    client.cancel_operation(&id).await.unwrap();
+    let cancelled = wait_job(&mut client, id).await;
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+    assert!(cancelled.result.is_none() && cancelled.outputs.is_empty());
+    assert_eq!(info(&mut client).await, with_image);
+    let id = start_image_get(&mut client, &image.image_hash).await;
+    let ProjectResponse::Status { info: disabled } = client
+        .project(ProjectCommand::SetSurfaceFinishEnabled {
+            session_id: original_scene.session_id.clone(),
+            base_revision: with_image.revision,
+            layer_id,
+            enabled: false,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("disable image layer");
+    };
+    rpc.cancel_operation(&blocker.name).await.unwrap();
+    let stale = wait_job(&mut client, id).await;
+    project_job_error(&stale, ProjectErrorCode::StaleRevision);
+    assert!(stale.outputs.is_empty());
+    assert_eq!(info(&mut client).await, disabled);
+    assert_eq!(scene(&mut client).await, original_scene);
     client.shutdown().await.unwrap();
 }

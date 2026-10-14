@@ -10,6 +10,105 @@ import { dirname, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { decodeMesh, validateMeshManifest } from "../packages/protocol/src/index.ts";
 import { setTimeout as delay } from "node:timers/promises";
+import { crc32, deflateSync } from "node:zlib";
+import { createHash } from "node:crypto";
+
+// Original acceptance image encoding; production image interpretation stays native.
+function grayPng(pattern) {
+  const chunk = (name, data) => {
+    const type = Buffer.from(name, "ascii");
+    const output = Buffer.alloc(12 + data.length);
+    output.writeUInt32BE(data.length);
+    type.copy(output, 4);
+    data.copy(output, 8);
+    output.writeUInt32BE(crc32(output.subarray(4, 8 + data.length)), 8 + data.length);
+    return output;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(pattern.width, 0);
+  header.writeUInt32BE(pattern.height, 4);
+  header[8] = 8;
+  header[9] = 0;
+  const rows = Buffer.concat(pattern.pixels.map((row) => Buffer.from([0, ...row])));
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(rows)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function imageRowHeights(sourceZ, parameters) {
+  const y = -imagePattern.height * ((sourceZ + parameters.z_phase_mm) / parameters.z_period_mm);
+  const row = Math.floor(y);
+  const fraction = y - row;
+  const wrap = (value, size) => ((value % size) + size) % size;
+  return imagePattern.pixels[0].map((_, column) => parameters.depth_mm / 255 * (
+    imagePattern.pixels[wrap(row, imagePattern.height)][column] * (1 - fraction) +
+    imagePattern.pixels[wrap(row + 1, imagePattern.height)][column] * fraction
+  ));
+}
+
+// Independent fixture geometry reference, not a second production mapper.
+function imageReferenceAdded(sourceZ, carrier, parameters) {
+  const heights = imageRowHeights(sourceZ, parameters);
+  const variation = heights.reduce((sum, a, i) => sum + Math.abs(a - heights[(i + 1) % heights.length]), 0);
+  if (carrier.kind === "cylinder") {
+    const radius = carrier.radius_mm;
+    const area = heights.reduce((sum, a, i) => {
+      const b = heights[(i + 1) % heights.length];
+      return sum + radius * (a + b) / 2 + (a * a + a * b + b * b) / 6;
+    }, 0) * 2 * Math.PI / heights.length;
+    const bound = 0.005 * 2 * Math.PI * parameters.depth_mm +
+      0.001 * (2 * Math.PI * (radius + parameters.depth_mm) + parameters.u_repeats * variation) +
+      Math.PI * 0.001 ** 2 + 0.00001;
+    return { area, bound };
+  }
+  // This runner's original box is20x10x8; no production code uses these dimensions.
+  const width = Math.abs(carrier.normal[0]) > 0.5 ? 10 : 20;
+  const margin = parameters.edge_margin_mm;
+  const active = width - 2 * margin;
+  const value = (s) => {
+    const e = Math.min(s - margin, width - margin - s);
+    if (e <= 0) return 0;
+    const taper = e >= margin ? 1 : (1 - Math.cos(Math.PI * e / margin)) / 2;
+    const x = heights.length * (parameters.u_repeats * (s - margin) / active + parameters.u_phase_fraction);
+    const column = Math.floor(x);
+    const fraction = x - column;
+    const wrap = (i) => ((i % heights.length) + heights.length) % heights.length;
+    return taper * (heights[wrap(column)] * (1 - fraction) + heights[wrap(column + 1)] * fraction);
+  };
+  const intervals = 4096;
+  const step = active / intervals;
+  let area = value(margin) + value(width - margin);
+  for (let i = 1; i < intervals; i++) area += (i % 2 ? 4 : 2) * value(margin + i * step);
+  return {
+    area: area * step / 3,
+    bound: 0.001 * (2 * width + 4 * parameters.depth_mm + parameters.u_repeats * variation) + 0.00001,
+  };
+}
+
+async function inspectCanonicalImagePreview(record, reload = false) {
+  if (reload) {
+    await until(async () => !(await surfaceState()).working, "idle native image preview");
+    await click("surface-image-preview");
+  }
+  const state = await until(async () => {
+    const current = await surfaceState();
+    return !current.working && current.imagePreview?.record.image_hash === record.image_hash
+      ? current : false;
+  }, "canonical owned image preview", 65000);
+  assert.equal(state.imagePreview.width, imagePattern.width);
+  assert.equal(state.imagePreview.height, imagePattern.height);
+  const canvas = await evaluate(`(() => {
+    const canvas = document.querySelector('[data-testid="surface-image-preview-canvas"]');
+    return {width:canvas.width,height:canvas.height,pixels:Array.from(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data)};
+  })()`);
+  assert.equal(canvas.width, imagePattern.width);
+  assert.equal(canvas.height, imagePattern.height);
+  assert.deepEqual(canvas.pixels, imagePattern.pixels.flat().flatMap((value) => [value, value, value, 255]));
+  return state;
+}
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -20,15 +119,16 @@ const executable = option("--executable");
 const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
 const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
-const cylindricalFinishScenario = scenario === "cylindrical-finish";
-const surfaceFinishScenario = scenario === "surface-finish" || cylindricalFinishScenario;
+const imageReliefScenario = scenario === "image-relief" || scenario === "image-relief-planar";
+const cylindricalFinishScenario = scenario === "cylindrical-finish" || scenario === "image-relief";
+const surfaceFinishScenario = scenario === "surface-finish" || cylindricalFinishScenario || imageReliefScenario;
 const manufacturingSource = cylindricalFinishScenario
   ? "independent-exporters/occt-cylinder-mm.step"
   : "box-mm.step";
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -38,12 +138,17 @@ if (
     "manufacturing",
     "surface-finish",
     "cylindrical-finish",
+    "image-relief",
+    "image-relief-planar",
     "gpu-unavailable",
     "engine-operations",
   ].includes(scenario)
 )
   throw new Error("Unknown smoke scenario");
 const sourceFixtureRoot = resolve(option("--fixture-root", "fixtures/geometry"));
+const imagePattern = imageReliefScenario
+  ? JSON.parse(await readFile(resolve("fixtures/manufacturing/image-relief.pattern.json"), "utf8"))
+  : null;
 const fixtureRoot =
   scenario === "project-bridge" || manufacturingScenario
     ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
@@ -63,12 +168,22 @@ if (manufacturingScenario) {
   );
   await writeFile(resolve(fixtureRoot, "invalid.intent.json"), "{");
 }
+if (imageReliefScenario) {
+  await writeFile(resolve(fixtureRoot, "operator-relief.png"), grayPng(imagePattern));
+}
 const scenePath = resolve(option("--scene", "fixtures/geometry/scenes/two-parts.scene.json"));
 const recipe = scenario === "geometry" ? JSON.parse(await readFile(scenePath, "utf8")) : null;
+// Linux app-local storage contains the durable bounded operations ledger.
+// Keep restart/deduplication inside this run without consuming the operator's
+// retained history or inheriting capacity exhaustion from earlier smoke runs.
+const smokeDataRoot = process.platform === "linux"
+  ? await mkdtemp(resolve(tmpdir(), "spiling-desktop-data-"))
+  : null;
 
 const child = spawn(resolve(executable), [], {
   env: {
     ...process.env,
+    ...(smokeDataRoot ? { XDG_DATA_HOME: smokeDataRoot } : {}),
     SPILING_CEF_DEBUG_PORT: String(port),
     ...(scenario === "geometry" || scenario === "project-bridge" || manufacturingScenario
       ? { SPILING_GEOMETRY_FIXTURE_ROOT: fixtureRoot }
@@ -699,12 +814,22 @@ async function inspectSurfaceFinishAuthoring() {
   }
   assert.ok(reference, "The admitted source must expose the requested inspected native carrier");
   await input('[data-testid="surface-scope"]', "occurrence");
-  const finish = cylindricalFinishScenario
-    ? { kind: "cylindrical_ribs", depth_mm: 0.1, rib_count: 8, phase_fraction: 0 }
-    : { kind: "vertical_ribs", depth_mm: 0.1, pitch_mm: 2, edge_margin_mm: 1, phase_mm: 0 };
+  const parameters = imageReliefScenario
+    ? { ...imagePattern.parameters, edge_margin_mm: cylindricalFinishScenario ? 0 : 1 }
+    : null;
+  const finish = imageReliefScenario
+    ? { kind: "image_relief", parameters }
+    : cylindricalFinishScenario
+      ? { kind: "cylindrical_ribs", depth_mm: 0.1, rib_count: 8, phase_fraction: 0 }
+      : { kind: "vertical_ribs", depth_mm: 0.1, pitch_mm: 2, edge_margin_mm: 1, phase_mm: 0 };
   await input('[data-testid="surface-kind"]', finish.kind);
-  for (const key of Object.keys(finish).filter((key) => key !== "kind"))
-    await input(`[data-testid="surface-${key}"]`, finish[key]);
+  if (imageReliefScenario) {
+    await input('[data-testid="surface-image-path"]', "operator-relief.png");
+    await click("surface-image-debug-select");
+    await until(async () => (await surfaceState()).selectedImage, "native single-use image selection");
+  }
+  const fields = parameters ?? Object.fromEntries(Object.entries(finish).filter(([key]) => key !== "kind"));
+  for (const [key, value] of Object.entries(fields)) await input(`[data-testid="surface-${key}"]`, value);
   await click("surface-apply");
   const applied = await until(async () => {
     const current = await surfaceState();
@@ -715,7 +840,18 @@ async function inspectSurfaceFinishAuthoring() {
       : false;
   }, "durable native face finish Apply");
   const layer = applied.surface_overlays.layers.at(-1);
-  assert.deepEqual(layer.finish, finish);
+  if (imageReliefScenario) {
+    assert.deepEqual(layer.finish.parameters, parameters);
+    const image = applied.surface_overlays.images.find((image) => image.image_hash === layer.finish.image_hash);
+    assert.ok(image);
+    const canonical = Buffer.concat([Buffer.from(`P5\n${imagePattern.width} ${imagePattern.height}\n255\n`), Buffer.from(imagePattern.pixels.flat())]);
+    assert.equal(image.image_hash, createHash("sha256").update(canonical).digest("hex"));
+    assert.equal(image.source_hash, createHash("sha256").update(await readFile(resolve(fixtureRoot, "operator-relief.png"))).digest("hex"));
+    assert.equal(image.byte_count, canonical.length);
+    await inspectCanonicalImagePreview(image);
+    await evaluate("document.querySelector('[data-testid=\"surface-image-display\"]').scrollIntoView({block:'start'})");
+    await screenshot(`${scenario}-owned-image-preview`);
+  } else assert.deepEqual(layer.finish, finish);
   assert.equal(layer.face_id, reference.face_id);
   assert.deepEqual(layer.scope, {
     kind: "occurrence",
@@ -749,6 +885,26 @@ async function inspectSurfaceFinishAuthoring() {
       JSON.stringify(current.surface_overlays) === JSON.stringify(applied.surface_overlays)
     );
   }, "finish Redo restores original layer identity");
+  if (imageReliefScenario) {
+    // Stored mapping must remain editable after the operator's original file disappears.
+    await rm(resolve(fixtureRoot, "operator-relief.png"));
+    await input('[data-testid="surface-image-asset"]', layer.finish.image_hash);
+    const changedPhase = (parameters.u_phase_fraction + 0.25) % 1;
+    await input('[data-testid="surface-u_phase_fraction"]', changedPhase);
+    const beforeRemap = await surfaceState();
+    await click("surface-apply");
+    const remapped = await until(async () => {
+      const current = await surfaceState();
+      return !current.working && current.revision > beforeRemap.revision &&
+        current.surface_overlays.layers.at(-1)?.finish.parameters?.u_phase_fraction === changedPhase
+        ? current : false;
+    }, "source-independent stored image remapping");
+    assert.deepEqual(remapped.surface_overlays.images, applied.surface_overlays.images, "Remapping shares the sole captured image record");
+    assert.deepEqual(remapped.selectedFaceRef, reference, "Stored image remapping preserves native face identity");
+    await click("project-undo");
+    await until(async () => JSON.stringify((await surfaceState()).surface_overlays) === JSON.stringify(applied.surface_overlays),
+      "stored mapping Undo restores complete original intent");
+  }
   await evaluate(
     "document.querySelector('[data-testid=\"surface-face\"]').scrollIntoView({block:'start'})",
   );
@@ -933,7 +1089,7 @@ async function inspectManufacturing() {
     "Core intent restored",
   );
   let baseline = null;
-  if (cylindricalFinishScenario) {
+  if (cylindricalFinishScenario || imageReliefScenario) {
     await click("manufacturing-compile");
     await until(
       async () => {
@@ -1114,29 +1270,49 @@ async function inspectManufacturing() {
         "Finish changes actual emitted bytes",
       );
       assert.notDeepEqual(
-        plan.layers[0].paths,
-        baseline.plan.layers[0].paths,
+        (imageReliefScenario ? plan.layers.find((layer) => layer.region_coverage.surface_added_area_mm2 > 1e-8) : plan.layers[0]).paths.map((path) => ({kind:path.kind,points:path.points_mm.map((point) => point.slice(0,2))})),
+        baseline.plan.layers[0].paths.map((path) => ({kind:path.kind,points:path.points_mm.map((point) => point.slice(0,2))})),
         "Finish changes manufactured paths, not only provenance",
       );
     }
     for (const [index, layer] of plan.layers.entries()) {
       const coverage = layer.region_coverage;
       const originalArea = baseline
-        ? baseline.plan.layers[index].region_coverage.section_area_mm2
+        ? baseline.plan.layers[imageReliefScenario ? 0 : index].region_coverage.section_area_mm2
         : 200;
-      assert.ok(
-        Math.abs(coverage.source_section_area_mm2 - originalArea) <= 1e-8,
-        "Original native footprint remains distinct from derived relief",
-      );
-      const depth = surface.document.layers.at(-1).finish.depth_mm;
+      if (imageReliefScenario && cylindricalFinishScenario) {
+        // Image events change native sample Z. Independent native sections may
+        // choose different certified chords; compare each to the source
+        // circle's declared sampling envelope, not bitwise to another sample.
+        const radius = surface.carrier.radius_mm;
+        const tolerance = plan.sampling_tolerance_mm;
+        const lower = Math.PI * Math.max(0, radius - tolerance) ** 2;
+        const upper = Math.PI * (radius + tolerance) ** 2;
+        for (const area of [originalArea, coverage.source_section_area_mm2]) {
+          assert.ok(area >= lower && area <= upper,
+            "Native source area stays inside its independent sampling certificate");
+        }
+        assert.equal(
+          coverage.source_section_area_mm2,
+          plan.layers[0].region_coverage.source_section_area_mm2,
+          "Captured invariant native source footprint does not follow varying relief",
+        );
+      } else {
+        assert.ok(
+          Math.abs(coverage.source_section_area_mm2 - originalArea) <= 1e-8,
+          "Original native footprint remains distinct from derived relief",
+        );
+      }
+      const depth = imageReliefScenario ? surface.document.layers.at(-1).finish.parameters.depth_mm : surface.document.layers.at(-1).finish.depth_mm;
       const additionBound = cylindricalFinishScenario
         ? Math.PI *
           ((surface.carrier.radius_mm + depth + 0.00001) ** 2 -
             (surface.carrier.radius_mm - 0.005) ** 2)
-        : 2;
+        : imageReliefScenario ? 20 * depth : 2;
       assert.ok(
-        coverage.surface_added_area_mm2 > 0 && coverage.surface_added_area_mm2 <= additionBound,
-        "Requested shallow relief contributes bounded actual material",
+        coverage.surface_added_area_mm2 >= 0 && coverage.surface_added_area_mm2 <= additionBound &&
+          (imageReliefScenario || coverage.surface_added_area_mm2 > 0),
+        "Requested relief contributes bounded actual material; blank image rows remain unchanged",
       );
       assert.ok(
         Math.abs(
@@ -1145,6 +1321,24 @@ async function inspectManufacturing() {
             coverage.surface_added_area_mm2,
         ) <= 1e-8,
       );
+      if (imageReliefScenario) {
+        const sourceZ = layer.section_z_mm;
+        const expected = imageReferenceAdded(sourceZ, surface.carrier, surface.document.layers.at(-1).finish.parameters);
+        assert.ok(Math.abs(coverage.surface_added_area_mm2 - expected.area) <= expected.bound,
+          `Mapped source-Z ${sourceZ} must agree with the independently integrated image area`);
+        if (expected.area === 0) assert.ok(Math.abs(coverage.surface_added_area_mm2) <= 1e-8, "Blank rows preserve exact original material");
+      }
+    }
+    if (imageReliefScenario) {
+      const areas = plan.layers.map((layer) => layer.region_coverage.surface_added_area_mm2);
+      assert.ok(Math.min(...areas) <= 1e-8 && Math.max(...areas) > 0.01, "Real zero and raised image bands must reach manufacturing");
+      assert.ok(new Set(areas.map((area) => Math.round(area * 1e6))).size >= 3, "Native extrusion reuse must not flatten a spatial image");
+      assert.ok(plan.layers.some((layer) => Math.abs(layer.height_mm - state.selected_intent.recipe.layer_height_mm) > 1e-7), "Non-grid image events affect the actual scheduled layers");
+      const contents = provenance.surface_images;
+      assert.equal(contents.length, 1);
+      assert.equal(contents[0].image_hash, surface.document.images[0].image_hash);
+      assert.deepEqual(contents[0].bytes, [...Buffer.from(`P5\n${imagePattern.width} ${imagePattern.height}\n255\n`), ...imagePattern.pixels.flat()]);
+      assert.ok(state.selected_artifact.summary.surface_resolution.evaluated_witnesses > 0, "Nominal feature diagnostics remain separate from emitted-byte verification");
     }
   }
   await click("manufacturing-debug-export");
@@ -1193,6 +1387,7 @@ async function inspectManufacturing() {
     "completed checkpoint before reopen",
   );
   await rm(resolve(fixtureRoot, manufacturingSource));
+  if (imageReliefScenario) await rm(resolve(fixtureRoot, "operator-relief.png"), {force:true});
   await click("project-read-only");
   await click("project-debug-open");
   state = await until(
@@ -1215,6 +1410,11 @@ async function inspectManufacturing() {
       true,
       "Read-only surface authoring stays disabled",
     );
+  }
+  if (imageReliefScenario) {
+    const beforePreview = (await surfaceState()).revision;
+    await inspectCanonicalImagePreview(surface.document.images[0], true);
+    assert.equal((await surfaceState()).revision, beforePreview, "Read-only image retrieval does not edit the project");
   }
   const reopenedRevision = state.project_revision;
   await click("manufacturing-verify-motion");
@@ -1278,6 +1478,13 @@ async function inspectManufacturing() {
     "fresh session-independent replay after restart",
     65000,
   );
+  if (imageReliefScenario) {
+    const beforePreview = (await surfaceState()).revision;
+    await inspectCanonicalImagePreview(surface.document.images[0], true);
+    assert.equal((await surfaceState()).revision, beforePreview);
+    await evaluate("document.querySelector('[data-testid=\"surface-image-display\"]').scrollIntoView({block:'start'})");
+    await screenshot(`${scenario}-fresh-readonly-image-preview`);
+  }
   await evaluate(
     "document.querySelector('[data-testid=\"manufacturing-inspection\"]').scrollIntoView({block:'start'})",
   );
@@ -1540,5 +1747,10 @@ try {
     if (childExited && (!enginePid || !alive(enginePid)))
       await rm(fixtureRoot, { recursive: true, force: true });
     else console.error(`Preserved live-writer smoke directory: ${fixtureRoot}`);
+  }
+  if (smokeDataRoot) {
+    if (childExited && (!enginePid || !alive(enginePid)))
+      await rm(smokeDataRoot, { recursive: true, force: true });
+    else console.error(`Preserved live-writer smoke app data: ${smokeDataRoot}`);
   }
 }

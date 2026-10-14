@@ -51,7 +51,11 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         client.hello().engine_build,
         spiling_contracts::ENGINE_BUILD_ID
     );
-    for expected in ["recoverable_projects_v3", "source_face_surface_finish_v2"] {
+    for expected in [
+        "recoverable_projects_v4",
+        "source_face_surface_finish_v3",
+        "surface_image_assets_v1",
+    ] {
         assert!(
             client
                 .hello()
@@ -61,7 +65,9 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         );
     }
     for expected in [
-        "manufacturing_schema4",
+        "manufacturing_schema5",
+        "mapped_image_relief_v1",
+        "varying_z_material_domains_v1",
         "bounded_vertical_rib_construction_v1",
         "bounded_cylindrical_rib_construction_v1",
     ] {

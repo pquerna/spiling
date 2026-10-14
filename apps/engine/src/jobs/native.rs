@@ -147,7 +147,7 @@ impl Jobs {
         if let Some(op) = existing {
             return Ok(op);
         }
-        let (session, scene, project) = host.capture().await?;
+        let (session, scene, project) = host.capture_admission(&admission.command).await?;
         if admission.parent != format!("sessions/{}", session.as_str()) {
             return Err(crate::native::domain_tonic(
                 spiling_contracts::geometry::GeometryError::new(

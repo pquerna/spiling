@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 //! Bounded software-only manufacturing data. Profile declarations certify no machine.
-use crate::surface::SurfaceOverlays;
+use crate::surface::{
+    SurfaceImageContent, SurfaceOverlays, bounded_image_contents, validate_image_contents,
+};
 use crate::{geometry::*, project::*};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,8 +18,10 @@ mod job;
 pub use job::*;
 mod process;
 pub use process::*;
+mod resolution;
+pub use resolution::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 4;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 5;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -821,6 +825,8 @@ pub struct NormalizedPrintPlan {
     pub surface_tolerance_mm: f64,
     pub offset_tolerance_mm: f64,
     pub layer_quantization_mm: f64,
+    #[serde(deserialize_with = "resolution::records")]
+    pub surface_resolution: Vec<SurfaceResolution>,
 }
 /// Conservative object XY ownership envelope, padded for command serialization.
 pub type PrimeExclusionBoundsMm = [[f64; 2]; 2]; // [minimum XY, maximum XY]
@@ -860,6 +866,39 @@ impl NormalizedPrintPlan {
         if self.schema_version != MANUFACTURING_SCHEMA_VERSION {
             return Err(invalid("unsupported plan schema"));
         }
+        if self.surface_resolution.len() > MAX_SURFACE_RESOLUTION_RECORDS
+            || self.surface_resolution.capacity() > MAX_SURFACE_RESOLUTION_RECORDS
+            || self.surface_resolution.capacity() * std::mem::size_of::<SurfaceResolution>()
+                + self
+                    .surface_resolution
+                    .iter()
+                    .map(|r| r.allocated_bytes() - std::mem::size_of::<SurfaceResolution>())
+                    .sum::<usize>()
+                > MAX_MANUFACTURING_BUNDLE_BYTES as usize
+        {
+            return Err(resource("surface resolution allocation budget exceeded"));
+        }
+        let mut resolution_ids = BTreeSet::new();
+        for record in &self.surface_resolution {
+            record.validate()?;
+            if self
+                .layers
+                .get(record.layer_index as usize)
+                .is_none_or(|layer| layer.index != record.layer_index)
+                || !resolution_ids.insert((
+                    record.layer_index,
+                    record.occurrence_id,
+                    record.surface_layer_id,
+                    &record.face_id,
+                    &record.image_hash,
+                ))
+            {
+                return Err(invalid(
+                    "surface resolution has duplicate or unknown plan attribution",
+                ));
+            }
+        }
+        SurfaceResolutionTotals::from_records(&self.surface_resolution).validate()?;
         positive(&[
             self.sampling_tolerance_mm,
             self.surface_tolerance_mm,
@@ -1086,6 +1125,8 @@ pub struct ManufacturingProvenance {
     pub occurrences: Vec<OccurrenceRecord>,
     pub intent: ManufacturingIntent,
     pub surface_overlays: SurfaceOverlays,
+    #[serde(deserialize_with = "bounded_image_contents")]
+    pub surface_images: Vec<SurfaceImageContent>,
     pub kernel: KernelIdentity,
     pub planner_version: String,
     pub emitter_version: String,
@@ -1093,6 +1134,24 @@ pub struct ManufacturingProvenance {
 }
 impl ManufacturingProvenance {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self.surface_images.capacity() > crate::surface::MAX_SURFACE_IMAGES {
+            return Err(resource(
+                "surface image content table allocation budget exceeded",
+            ));
+        }
+        if self
+            .surface_images
+            .iter()
+            .map(|image| image.image_hash.allocated_bytes())
+            .sum::<usize>()
+            > crate::surface::MAX_SURFACE_DOCUMENT_BYTES
+        {
+            return Err(resource(
+                "surface image content identity allocation budget exceeded",
+            ));
+        }
+        validate_image_contents(&self.surface_overlays.images, &self.surface_images)
+            .map_err(|e| invalid(&e.message))?;
         label(&self.kernel.name)?;
         label(&self.kernel.version)?;
         label(&self.kernel.revision)?;
@@ -1206,9 +1265,11 @@ pub struct ManufacturingSummary {
     pub support_deposited_volume_mm3: f64,
     pub support_filament_length_mm: f64,
     pub software_only: bool,
+    pub surface_resolution: SurfaceResolutionTotals,
 }
 impl ManufacturingSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
+        self.surface_resolution.validate()?;
         if self.layers == 0
             || self.layers > MAX_PRINT_LAYERS
             || self.paths == 0
@@ -1258,6 +1319,11 @@ impl ManufacturingBundle {
         }
         self.provenance.validate()?;
         self.plan.validate(&self.provenance.intent)?;
+        resolution::validate_attribution(
+            &self.plan.surface_resolution,
+            &self.provenance.surface_overlays,
+            &self.provenance.occurrences,
+        )?;
         self.verification.validate()?;
         if self.program.is_empty() || self.program.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
             return Err(resource("manufacturing program size is invalid"));
@@ -1297,6 +1363,9 @@ impl ManufacturingBundle {
             support_deposited_volume_mm3: self.verification.support_deposited_volume_mm3,
             support_filament_length_mm: self.verification.support_filament_length_mm,
             software_only: true,
+            surface_resolution: SurfaceResolutionTotals::from_records(
+                &self.plan.surface_resolution,
+            ),
         }
     }
     /// Match metadata on an already validated bundle; caller checks exact byte hash/size.
@@ -1344,6 +1413,16 @@ pub fn decode_intent(bytes: &[u8]) -> Result<ManufacturingIntent, ManufacturingE
 pub fn decode_bundle(bytes: &[u8]) -> Result<ManufacturingBundle, ManufacturingError> {
     if bytes.is_empty() || bytes.len() > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
         return Err(resource("bundle byte limit exceeded"));
+    }
+    #[derive(Deserialize)]
+    struct BundleVersion {
+        schema_version: u32,
+    }
+    let version: BundleVersion = serde_json::from_slice(bytes).map_err(|e| {
+        ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())
+    })?;
+    if version.schema_version != MANUFACTURING_SCHEMA_VERSION {
+        return Err(invalid("unsupported manufacturing bundle schema"));
     }
     let bundle: ManufacturingBundle = serde_json::from_slice(bytes).map_err(|e| {
         ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, e.to_string())

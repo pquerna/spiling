@@ -1,0 +1,4 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+
+Original asymmetric Gray8 relief pattern with blank rows, unequal horizontal wrap borders and a non-grid vertical period. Encoded as a real PNG by the native-workbench acceptance harness; not a production geometry recipe or recognized shape.

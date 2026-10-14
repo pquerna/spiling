@@ -8,7 +8,7 @@ use geo::{Area, BooleanOps, MultiPolygon};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
-/// Cached only for the current native span. Sharing never clones its polygons.
+/// One admitted erosion per realized D span, shared by both raster axes.
 pub(super) struct WallLayout {
     wall_centers: Vec<MultiPolygon<f64>>,
     fill: MultiPolygon<f64>,
@@ -19,19 +19,29 @@ pub(super) struct WallLayout {
 }
 
 impl WallLayout {
+    pub(super) fn point_count(&self) -> usize {
+        self.retained_points
+    }
     pub(super) fn first_wall(&self) -> &MultiPolygon<f64> {
         &self.wall_centers[0]
     }
     pub(super) fn new(
         section: &MultiPolygon<f64>,
+        required_material: &region::RequiredMaterial<'_>,
         recipe: &PlanarPrintRecipe,
-        retained_native_points: usize,
+        retained_geometry_points: usize,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
-        retained_budget(retained_native_points, &[])?;
-        let wall_centers = region::wall_centers(section, recipe, retained_native_points, cancel)?;
+        retained_budget(retained_geometry_points, &[])?;
+        let wall_centers = region::wall_centers(
+            section,
+            required_material,
+            recipe,
+            retained_geometry_points,
+            cancel,
+        )?;
         let wall_points = wall_centers.iter().map(region::point_count).sum::<usize>();
-        let base_points = retained_native_points
+        let base_points = retained_geometry_points
             .checked_add(wall_points)
             .ok_or_else(|| {
                 error(
@@ -46,7 +56,7 @@ impl WallLayout {
             cancel,
         )?;
         retained_budget(base_points, &[&fill])?;
-        let retained_points = base_points + region::point_count(&fill);
+        let retained_points = wall_points + region::point_count(&fill);
         let section_area_mm2 = section.unsigned_area();
         let wall_area_mm2 = (section_area_mm2 - fill.unsigned_area()).max(0.0);
         let protected_hole_area_mm2 = section
@@ -73,7 +83,7 @@ impl WallLayout {
     }
 }
 
-/// Immutable ownership between native material sections and deposition generation.
+/// Immutable ownership between realized D sections and deposition generation.
 /// Wall centers are separate from the disjoint interior ownership domains. Holes
 /// remain excluded by every Boolean operation; sparse void is a nominal fraction
 /// of its interior domain, not a manufactured geometry or strength assertion.
@@ -90,12 +100,13 @@ impl ClassifiedRegions {
         layout: Arc<WallLayout>,
         survives_below: &MultiPolygon<f64>,
         survives_above: &MultiPolygon<f64>,
+        mut admit_scratch: impl FnMut(usize) -> Result<(), ManufacturingError>,
         recipe: &PlanarPrintRecipe,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
         check_cancel(cancel)?;
         let bottom = difference(&layout.fill, survives_below, cancel)?;
-        retained_budget(layout.retained_points, &[&bottom])?;
+        admit_scratch(scratch_points(&[&bottom])?)?;
         let remaining = if bottom.0.is_empty() {
             layout.fill.clone()
         } else {
@@ -103,10 +114,10 @@ impl ClassifiedRegions {
             // frame, never a newly quantized subtraction of the rounded mask.
             intersection(&layout.fill, survives_below, cancel)?
         };
-        retained_budget(layout.retained_points, &[&bottom, &remaining])?;
+        admit_scratch(scratch_points(&[&bottom, &remaining])?)?;
         // Bottom ownership wins when physical skin thicknesses overlap.
         let top = difference(&remaining, survives_above, cancel)?;
-        retained_budget(layout.retained_points, &[&bottom, &remaining, &top])?;
+        admit_scratch(scratch_points(&[&bottom, &remaining, &top])?)?;
         let interior = if top.0.is_empty() {
             remaining
         } else {
@@ -116,7 +127,7 @@ impl ClassifiedRegions {
             drop(remaining);
             result
         };
-        retained_budget(layout.retained_points, &[&bottom, &top, &interior])?;
+        admit_scratch(scratch_points(&[&bottom, &top, &interior])?)?;
         let interior_area = interior.unsigned_area();
         let coverage = PlanarRegionCoverage {
             section_area_mm2: layout.section_area_mm2,
@@ -226,7 +237,7 @@ impl ClassifiedRegions {
         Ok((paths, coverage))
     }
 
-    /// Whole rows remain clipped by native perimeter-owned fill. They are only
+    /// Whole rows remain clipped by realized perimeter-owned fill. They are only
     /// candidates for joining already-required hatch pieces, never extra fill.
     pub(super) fn whole_rows(
         &self,
@@ -261,19 +272,29 @@ pub(super) fn intersection(
     b: &MultiPolygon<f64>,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    operation(a, b, true, cancel)
+    operation(a, b, true, None, cancel)
+}
+
+pub(super) fn intersection_accumulated(
+    a: &MultiPolygon<f64>,
+    b: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    operation(a, b, true, Some(work), cancel)
 }
 fn difference(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    operation(a, b, false, cancel)
+    operation(a, b, false, None, cancel)
 }
 fn operation(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
     intersect: bool,
+    work: Option<&mut usize>,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     check_cancel(cancel)?;
@@ -289,7 +310,10 @@ fn operation(
         check_cancel(cancel)?;
         return Ok(result);
     }
-    boolean_budget(a, b, cancel)?;
+    match work {
+        Some(work) => super::boolean::budget_accumulated(a, b, work, cancel)?,
+        None => boolean_budget(a, b, cancel)?,
+    }
     let mut result = if intersect {
         a.intersection(b)
     } else {
@@ -301,27 +325,41 @@ fn operation(
     Ok(result)
 }
 
-fn retained_budget(
-    wall_points: usize,
-    regions: &[&MultiPolygon<f64>],
-) -> Result<(), ManufacturingError> {
-    let mut total = wall_points;
-    if total > MAX_DEPOSITION_SEGMENTS as usize {
-        return Err(error(
-            ManufacturingErrorCode::ResourceLimit,
-            "retained classified region point limit exceeded",
-        ));
-    }
-    for domain in regions {
-        total = total
-            .checked_add(region::point_count(domain))
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+/// Fixed authority for consumers with no reclaimable derived geometry.
+pub(super) fn fixed_point_budget(
+    retained_points: usize,
+) -> impl FnMut(usize) -> Result<(), ManufacturingError> {
+    move |scratch| {
+        retained_points
+            .checked_add(scratch)
+            .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+            .map(|_| ())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
                     "retained classified region point limit exceeded",
                 )
-            })?;
+            })
     }
-    Ok(())
+}
+
+fn scratch_points(regions: &[&MultiPolygon<f64>]) -> Result<usize, ManufacturingError> {
+    regions.iter().try_fold(0usize, |points, domain| {
+        points
+            .checked_add(region::point_count(domain))
+            .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "classified scratch point limit exceeded",
+                )
+            })
+    })
+}
+
+fn retained_budget(
+    retained_points: usize,
+    regions: &[&MultiPolygon<f64>],
+) -> Result<(), ManufacturingError> {
+    fixed_point_budget(retained_points)(scratch_points(regions)?)
 }

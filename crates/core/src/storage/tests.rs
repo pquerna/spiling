@@ -5,7 +5,7 @@
 use super::*;
 use crate::{
     Edit, Project,
-    tests::{asset, imported},
+    tests::{asset, image_asset, image_edit, imported},
 };
 use spiling_contracts::geometry::{OccurrenceId, RigidPoseMm};
 use std::{fs, sync::atomic::Ordering};
@@ -142,6 +142,7 @@ fn os_writer_lock_readonly_snapshot_and_reused_writer_are_independent() {
         writer.storage(),
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap();
     assert!(Arc::ptr_eq(&reused.storage, &writer.storage().unwrap()));
@@ -402,6 +403,7 @@ fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comp
         project.storage(),
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -746,6 +748,7 @@ fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
             project.storage(),
             MAX_RETAINED_SOURCE_BYTES,
             MAX_MANUFACTURING_RETAINED_BYTES as usize,
+            MAX_SURFACE_IMAGE_RETAINED_BYTES,
         )
         .unwrap_err()
         .code,
@@ -785,6 +788,7 @@ fn same_session_reopen_cannot_clear_known_durability_uncertainty() {
         project.storage(),
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -848,6 +852,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         project.storage(),
         bytes - 1,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap_err();
     assert_eq!(error.code, ProjectErrorCode::ResourceLimit);
@@ -866,6 +871,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         project.storage(),
         bytes,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap();
     assert_eq!(loaded.manifest, project.capture().manifest);
@@ -1045,7 +1051,8 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             &flag(),
             project.storage(),
             MAX_RETAINED_SOURCE_BYTES,
-            count - 1
+            count - 1,
+            MAX_SURFACE_IMAGE_RETAINED_BYTES,
         )
         .unwrap_err()
         .code,
@@ -1066,6 +1073,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
         project.storage(),
         MAX_RETAINED_SOURCE_BYTES,
         count,
+        MAX_SURFACE_IMAGE_RETAINED_BYTES,
     )
     .unwrap();
     assert_eq!(
@@ -1435,4 +1443,566 @@ fn surface_manifest_rejects_structurally_corrupt_targets_and_old_format() {
         .unwrap();
         assert!(open(&sandbox.target(), true, false, &flag()).is_err());
     }
+}
+
+fn add_image(project: &mut Project, image: Arc<SurfaceImageAsset>) {
+    let prepared = project.prepare(image_edit(project, image)).unwrap();
+    project.commit(prepared).unwrap();
+}
+
+#[test]
+fn image_save_open_and_readonly_capture_do_not_need_original_files() {
+    let sandbox = Sandbox::new();
+    let source_path = sandbox.0.join("owned.step");
+    let image_path = sandbox.0.join("owned.pgm");
+    fs::write(&source_path, b"independently captured STEP").unwrap();
+    fs::write(&image_path, b"P5\n2 2\n255\n\x00\x40\x80\xff").unwrap();
+    let mut project = Project::new();
+    let prepared = project
+        .prepare(Edit::Import {
+            source: asset(fs::read(&source_path).unwrap(), "owned.step"),
+            pose: RigidPoseMm::IDENTITY,
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    let bytes = fs::read(&image_path).unwrap();
+    let record = SurfaceImageRecord {
+        image_hash: SourceHash::from_bytes(&bytes),
+        width: 2,
+        height: 2,
+        byte_count: bytes.len() as u64,
+        source_hash: SourceHash::from_bytes(&bytes),
+        source_name: "owned.pgm".into(),
+    };
+    let image = Arc::new(SurfaceImageAsset::new(record.clone(), bytes).unwrap());
+    add_image(&mut project, image.clone());
+    save_project(&mut project, Some(sandbox.target()));
+    let manifest = project.capture().manifest;
+    fs::remove_file(source_path).unwrap();
+    fs::remove_file(image_path).unwrap();
+    let stored = sandbox
+        .target()
+        .join(IMAGES)
+        .join(format!("{}.pgm", record.image_hash.as_str()));
+    assert_eq!(fs::read(stored).unwrap(), *image.bytes().as_ref());
+    let mut reader =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reader.capture().manifest, manifest);
+    assert_eq!(
+        reader.surface_images()[&record.image_hash].record(),
+        &record
+    );
+    assert_eq!(
+        reader.surface_images()[&record.image_hash]
+            .bytes()
+            .as_slice(),
+        image.bytes().as_slice()
+    );
+    let before = reader.info();
+    assert_eq!(
+        reader.prepare(image_edit(&reader, image)).unwrap_err().code,
+        ProjectErrorCode::ReadOnly
+    );
+    assert_eq!(reader.undo().unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(reader.info(), before);
+    drop(reader);
+    drop(project);
+    let reopened =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reopened.capture().manifest, manifest);
+    assert_eq!(
+        reopened.surface_images()[&record.image_hash].record(),
+        &record
+    );
+}
+
+#[test]
+fn images_are_durable_before_manifest_and_cancellation_preserves_complete_snapshots() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let old = project.capture().manifest;
+    let image = image_asset([0, 40, 80, 255], "boundary.pgm");
+    add_image(&mut project, image.clone());
+    let current = project.capture().manifest;
+    let stored = sandbox
+        .target()
+        .join(IMAGES)
+        .join(format!("{}.pgm", image.record().image_hash.as_str()));
+    for stop in [SaveStage::AssetsSynced, SaveStage::BeforeManifestReplace] {
+        let cancel = flag();
+        let failure = save(
+            project.capture(),
+            project.storage(),
+            None,
+            &cancel,
+            |stage| {
+                assert_eq!(fs::read(&stored).unwrap(), *image.bytes().as_ref());
+                if stage == stop {
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, ProjectErrorCode::Cancelled);
+        let loaded = open(&sandbox.target(), true, false, &flag()).unwrap();
+        assert_eq!(loaded.manifest, old);
+        assert!(loaded.surface_images.is_empty());
+    }
+    let cancel = flag();
+    let receipt = save(
+        project.capture(),
+        project.storage(),
+        None,
+        &cancel,
+        |stage| {
+            if stage == SaveStage::AfterManifestReplace {
+                cancel.store(true, Ordering::Release);
+            }
+        },
+    )
+    .unwrap();
+    project.mark_saved(receipt).unwrap();
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap()
+            .manifest,
+        current
+    );
+    let save_as = sandbox.0.join("copy");
+    let receipt = save(
+        project.capture(),
+        project.storage(),
+        Some(save_as.clone()),
+        &flag(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(
+            save_as
+                .join(IMAGES)
+                .join(format!("{}.pgm", image.record().image_hash.as_str()))
+        )
+        .unwrap(),
+        *image.bytes().as_ref()
+    );
+    assert_eq!(receipt.manifest, current);
+}
+
+#[test]
+fn disabled_image_corruption_and_metadata_disagreement_never_open_smooth() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let image = image_asset([1, 33, 127, 255], "disabled.pgm");
+    add_image(&mut project, image.clone());
+    let layer_id = project.info().surface_overlays.layers[0].layer_id;
+    project
+        .commit(
+            project
+                .prepare(Edit::SetSurfaceFinishEnabled {
+                    layer_id,
+                    enabled: false,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+    save_project(&mut project, Some(sandbox.target()));
+    let original_manifest = fs::read(sandbox.target().join(CURRENT)).unwrap();
+    let path = sandbox
+        .target()
+        .join(IMAGES)
+        .join(format!("{}.pgm", image.record().image_hash.as_str()));
+    for bytes in [
+        b"P5\n2 2\n255\n\x01\x21\x7f\xfe".to_vec(),
+        b"P5\n3 2\n255\n\x01\x21\x7f\xff".to_vec(),
+        b"P5\n2 2\n255\n\x01\x21\x7f".to_vec(),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            open(&sandbox.target(), true, false, &flag())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::CorruptAsset
+        );
+    }
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::MissingAsset
+    );
+    fs::write(&path, image.bytes().as_slice()).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+    for (pointer, replacement) in [
+        ("/surface_overlays/images/0/width", serde_json::json!(3)),
+        (
+            "/surface_overlays/images/0/image_hash",
+            serde_json::json!(SourceHash::from_bytes(b"foreign image")),
+        ),
+        ("/surface_overlays/images", serde_json::json!([])),
+        (
+            "/surface_overlays/layers/0/finish",
+            serde_json::json!({"kind":"smooth"}),
+        ),
+    ] {
+        let mut corrupt = value.clone();
+        *corrupt.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(
+            sandbox.target().join(CURRENT),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    }
+    fs::write(sandbox.target().join(CURRENT), original_manifest).unwrap();
+    assert!(open(&sandbox.target(), true, false, &flag()).is_ok());
+}
+
+#[test]
+fn previous_checkpoint_keeps_image_bytes_and_artifact_coherently_after_pruning() {
+    let sandbox = Sandbox::new();
+    let mut project = crate::tests::manufactured();
+    let image = image_asset([0, 127, 255, 44], "recovery.pgm");
+    add_image(&mut project, image.clone());
+    let artifact = crate::tests::bundle_asset(&crate::tests::manufacturing_bundle(&project));
+    project
+        .commit(
+            project
+                .prepare(Edit::PublishManufacturing {
+                    asset: artifact.clone(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+    save_project(&mut project, Some(sandbox.target()));
+    let previous = project.capture().manifest;
+    let layer_id = project.info().surface_overlays.layers[0].layer_id;
+    project
+        .commit(
+            project
+                .prepare(Edit::RemoveSurfaceFinish { layer_id })
+                .unwrap(),
+        )
+        .unwrap();
+    save_project(&mut project, None);
+    let current = project.capture().manifest;
+    assert!(current.surface_overlays.images.is_empty());
+    let path = sandbox
+        .target()
+        .join(IMAGES)
+        .join(format!("{}.pgm", image.record().image_hash.as_str()));
+    assert_eq!(fs::read(&path).unwrap(), *image.bytes().as_ref());
+    drop(project);
+    fs::write(sandbox.target().join(CURRENT), b"corrupt current").unwrap();
+    assert!(open(&sandbox.target(), false, false, &flag()).is_err());
+    let recovered =
+        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
+    assert_eq!(recovered.info().surface_overlays, previous.surface_overlays);
+    assert_eq!(
+        recovered.surface_images()[&image.record().image_hash]
+            .bytes()
+            .as_slice(),
+        image.bytes().as_slice()
+    );
+    assert_eq!(
+        recovered
+            .snapshot()
+            .manufacturing_artifact
+            .as_ref()
+            .unwrap()
+            .record,
+        artifact.record
+    );
+    assert!(recovered.info().revision > current.revision);
+    assert_eq!(
+        recovered.capture().manifest.next_surface_layer,
+        current.next_surface_layer
+    );
+    drop(recovered);
+    fs::write(path, b"corrupt image").unwrap();
+    assert!(open(&sandbox.target(), false, true, &flag()).is_err());
+}
+
+#[test]
+fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let image = image_asset([0, 1, 2, 3], "budget.pgm");
+    add_image(&mut project, image.clone());
+    save_project(&mut project, Some(sandbox.target()));
+    let before = project.info();
+    let size = image.bytes().len();
+    assert_eq!(
+        open_reusing(
+            &sandbox.target(),
+            false,
+            false,
+            &flag(),
+            project.storage(),
+            MAX_RETAINED_SOURCE_BYTES,
+            MAX_MANUFACTURING_RETAINED_BYTES as usize,
+            size - 1,
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &image
+    ));
+    assert_eq!(
+        open(&sandbox.target(), false, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ProjectLocked
+    );
+    let loaded = open_reusing(
+        &sandbox.target(),
+        false,
+        false,
+        &flag(),
+        project.storage(),
+        MAX_RETAINED_SOURCE_BYTES,
+        MAX_MANUFACTURING_RETAINED_BYTES as usize,
+        size,
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.surface_images.values().next().unwrap().bytes().len(),
+        size
+    );
+}
+
+#[test]
+fn image_file_directory_and_scratch_budgets_are_not_bypassed_by_unreferenced_files() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let directory = sandbox.target().join(IMAGES);
+    let oversized = directory.join(format!(
+        "{}.pgm",
+        SourceHash::from_bytes(b"oversized").as_str()
+    ));
+    File::create(&oversized)
+        .unwrap()
+        .set_len(MAX_SURFACE_IMAGE_BYTES as u64 + 1)
+        .unwrap();
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    fs::remove_file(oversized).unwrap();
+    let first = directory.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let second = directory.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    File::create(&first)
+        .unwrap()
+        .set_len(MAX_SURFACE_IMAGE_BYTES as u64)
+        .unwrap();
+    fs::write(&second, b"x").unwrap();
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    fs::remove_file(first).unwrap();
+    fs::remove_file(second).unwrap();
+    for tag in 0..MAX_PROJECT_STORED_ASSETS {
+        fs::write(
+            directory.join(format!(
+                "{}.pgm",
+                SourceHash::from_bytes(format!("stored-{tag}").as_bytes()).as_str()
+            )),
+            b"x",
+        )
+        .unwrap();
+    }
+    let image = image_asset([1, 2, 3, 4], "new.pgm");
+    add_image(&mut project, image);
+    let before = project.info();
+    assert_eq!(
+        save(project.capture(), project.storage(), None, &flag(), |_| {})
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    assert_eq!(
+        fs::read_dir(&directory).unwrap().count(),
+        MAX_PROJECT_STORED_ASSETS
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn image_symlinks_nonregular_files_and_attached_directory_substitution_fail_closed() {
+    use std::os::unix::fs::symlink;
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let image = image_asset([0, 32, 128, 255], "owned.pgm");
+    add_image(&mut project, image.clone());
+    save_project(&mut project, Some(sandbox.target()));
+    let directory = sandbox.target().join(IMAGES);
+    let path = directory.join(format!("{}.pgm", image.record().image_hash.as_str()));
+    let foreign = sandbox.0.join("foreign.pgm");
+    fs::write(&foreign, image.bytes().as_slice()).unwrap();
+    fs::remove_file(&path).unwrap();
+    symlink(&foreign, &path).unwrap();
+    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, image.bytes().as_slice()).unwrap();
+    fs::rename(&directory, sandbox.0.join("original-images")).unwrap();
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("foreign"), b"retained").unwrap();
+    assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
+    assert_eq!(fs::read(&foreign).unwrap(), *image.bytes().as_ref());
+    assert_eq!(fs::read(directory.join("foreign")).unwrap(), b"retained");
+}
+
+#[test]
+fn old_project_without_image_directory_is_explicitly_refused() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    save_project(&mut project, Some(sandbox.target()));
+    let mut old = serde_json::to_value(project.capture().manifest).unwrap();
+    drop(project);
+    old["format_version"] = serde_json::json!(3);
+    old["surface_overlays"]["schema_version"] = serde_json::json!(2);
+    old["surface_overlays"]
+        .as_object_mut()
+        .unwrap()
+        .remove("images");
+    fs::remove_dir(sandbox.target().join(IMAGES)).unwrap();
+    fs::write(
+        sandbox.target().join(CURRENT),
+        serde_json::to_vec(&old).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        open(&sandbox.target(), true, false, &flag())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::UnsupportedFormat
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn first_save_checks_image_directory_identity_and_never_cleans_a_substitute() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    add_image(&mut project, image_asset([1, 2, 3, 4], "stage.pgm"));
+    let mut substituted = None;
+    let failure = save(
+        project.capture(),
+        None,
+        Some(sandbox.target()),
+        &flag(),
+        |stage| {
+            if stage == SaveStage::AssetsSynced {
+                let owned_stage = fs::read_dir(&sandbox.0)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let images = owned_stage.join(IMAGES);
+                fs::rename(&images, sandbox.0.join("original-images")).unwrap();
+                fs::create_dir(&images).unwrap();
+                fs::write(images.join("foreign"), b"foreign marker").unwrap();
+                substituted = Some(images);
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.code, ProjectErrorCode::InvalidProject);
+    assert_eq!(
+        fs::read(substituted.unwrap().join("foreign")).unwrap(),
+        b"foreign marker"
+    );
+    assert!(!sandbox.target().exists());
+}
+
+#[test]
+fn first_image_save_cancellation_leaves_no_published_project_and_can_retry() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let image = image_asset([10, 20, 30, 40], "cancelled.pgm");
+    add_image(&mut project, image.clone());
+    let before = project.info();
+    let cancel = flag();
+    assert_eq!(
+        save(
+            project.capture(),
+            None,
+            Some(sandbox.target()),
+            &cancel,
+            |stage| {
+                if stage == SaveStage::AssetsSynced {
+                    cancel.store(true, Ordering::Release);
+                }
+            }
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::Cancelled
+    );
+    assert!(!sandbox.target().exists());
+    assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 0);
+    assert_eq!(project.info(), before);
+    save_project(&mut project, Some(sandbox.target()));
+    let loaded = open(&sandbox.target(), true, false, &flag()).unwrap();
+    assert_eq!(
+        loaded.surface_images.values().next().unwrap().record(),
+        image.record()
+    );
+}
+
+#[test]
+fn removing_current_image_cannot_publish_over_a_corrupt_recovery_dependency() {
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let image = image_asset([0, 3, 9, 27], "checkpoint.pgm");
+    add_image(&mut project, image.clone());
+    save_project(&mut project, Some(sandbox.target()));
+    let committed = fs::read(sandbox.target().join(CURRENT)).unwrap();
+    let layer_id = project.info().surface_overlays.layers[0].layer_id;
+    project
+        .commit(
+            project
+                .prepare(Edit::RemoveSurfaceFinish { layer_id })
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(project.surface_images().is_empty());
+    let before = project.info();
+    let path = sandbox
+        .target()
+        .join(IMAGES)
+        .join(format!("{}.pgm", image.record().image_hash.as_str()));
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        save(project.capture(), project.storage(), None, &flag(), |_| {})
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::MissingAsset
+    );
+    assert_eq!(project.info(), before);
+    assert_eq!(fs::read(sandbox.target().join(CURRENT)).unwrap(), committed);
+    fs::write(&path, image.bytes().as_slice()).unwrap();
+    save_project(&mut project, None);
+    let recovered = open(&sandbox.target(), true, true, &flag()).unwrap();
+    assert_eq!(
+        recovered.surface_images.values().next().unwrap().record(),
+        image.record()
+    );
 }

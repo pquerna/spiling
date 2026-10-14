@@ -78,8 +78,13 @@ pub fn emit(
         .map_err(limit)?;
         position = Some(end);
     }
-    let (last, _) =
-        crate::realization::stream(plan, intent, cancel, position, extrusion, |event| {
+    let (last, _) = crate::realization::stream(
+        plan,
+        intent,
+        cancel,
+        position,
+        extrusion,
+        |event| {
             use crate::realization::Event;
             match event {
                 Event::Fan(pwm) => writeln!(program, "M106 S{pwm}").map_err(limit)?,
@@ -132,7 +137,9 @@ pub fn emit(
                         if !rounded.is_finite() || length <= 0.0 || delta <= 0.0 {
                             return Err(error(
                                 ManufacturingErrorCode::UnsupportedGeometry,
-                                "deposition collapses at serialized precision",
+                                format!(
+                                    "deposition collapses at serialized precision: from={from:?}, target={target:?}, rounded={to:?}, filament_delta={delta:.12}, filament={e:.12}"
+                                ),
                             ));
                         }
                         let flow = delta * filament_area * feed / 60.0 / length;
@@ -166,7 +173,8 @@ pub fn emit(
                 }
             }
             Ok(())
-        })?;
+        },
+    )?;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         let last = last.unwrap();
         let lift = [last[0], last[1], job.park_position_mm[2]].map(round_xyz);

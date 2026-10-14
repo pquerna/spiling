@@ -5,12 +5,12 @@ use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
 use geo::{Area, BooleanOps, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
-use std::borrow::Cow;
 use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
 pub(super) use anchors::{AnchorCandidate, AnchorWorkspace};
 mod strokes;
 pub(super) use strokes::StrokeRuns;
+mod raster;
 
 struct Demand {
     target: usize,
@@ -95,7 +95,7 @@ fn merge_shared(
 
 // SectionSpan.material is the same admitted D (native M union finish A) used
 // by walls/classification and the raster callback. Never query native-only
-// sections here: actual-stroke anchors and corridor clearance must include ribs.
+// sections here: actual-stroke anchors and all lower corridor clearance use final D.
 pub(super) fn realize(
     layers: &mut [PrintLayer],
     sections: &[SectionSpan],
@@ -107,6 +107,7 @@ pub(super) fn realize(
         usize,
         region::HatchAxis,
         &mut usize,
+        usize,
     ) -> Result<RasterCandidate, ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
     let width = recipe.bead_width_mm;
@@ -137,12 +138,12 @@ pub(super) fn realize(
         )?;
         if admission.failure.is_some() {
             // Test both allowed axes against actual strokes. A joined bridge row
-            // uses only already-required pieces of native perimeter-owned fill.
+            // uses only already-required pieces of realized perimeter-owned fill.
             let without_old = *segments - path_segments(&layer.paths);
             for axis in [axes[index], axes[index].orthogonal()] {
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut candidate = raster(index, axis, &mut staged_segments)?;
+                let mut candidate = raster(index, axis, &mut staged_segments, 0)?;
                 let joined = coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
@@ -353,99 +354,79 @@ pub(super) fn realize(
         let (prior, remaining) = layers.split_at_mut(i);
         let layer = &mut remaining[0];
         let interface = interfaces[i].as_ref();
-        let ordinary = if interface.0.is_empty() {
-            Cow::Borrowed(support_regions[i].as_ref())
-        } else if Arc::ptr_eq(&support_regions[i], &interfaces[i]) {
-            Cow::Owned(MultiPolygon(Vec::new()))
-        } else {
-            charge_boolean(&support_regions[i], interface, &mut work, cancel)?;
-            Cow::Owned(support_regions[i].difference(interface))
-        };
+        let retained_domains = MAX_DEPOSITION_SEGMENTS as usize
+            - remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+        let domains = raster::Domains::new(
+            &support_regions[i],
+            interface,
+            Arc::ptr_eq(&support_regions[i], &interfaces[i]),
+            width,
+            retained_domains,
+            &mut work,
+            cancel,
+        )?;
+        let preferred = region::HatchAxis::preferred(layer.index);
         let mut paths = Vec::new();
-        for (domain, kind, fraction) in [
-            (ordinary.as_ref(), DepositionKind::Support, density),
-            (interface, DepositionKind::SupportInterface, 1.0),
-        ] {
-            let centers = region::offset(domain, -width * 0.5, cancel)?;
-            remaining_geometry_budget(
-                retained,
-                &support_regions,
-                &interfaces,
-                &[&protected, &ordinary, &centers],
-            )?;
-            let wall_start = paths.len();
-            region::wall_paths(&centers, layer.z_mm, &mut paths, segments, cancel)?;
-            for path in &mut paths[wall_start..] {
-                path.kind = kind;
-            }
-            // Hatch enters at its own wall centers, giving positive overlap
-            // with prior wall beads rather than a tangent-only endpoint.
-            // Both hatch and wall nominal beads remain in the clipped domain.
-            region::hatch(
-                &centers,
-                kind,
-                fraction,
+        for axis in [preferred, preferred.orthogonal()] {
+            anchors.set_budget(0);
+            paths = domains.paths(
+                interface,
+                density,
                 &region::HatchLayer {
                     z: layer.z_mm,
                     height: layer.height_mm,
-                    axis: region::HatchAxis::preferred(layer.index),
+                    axis,
                     recipe,
                 },
-                &mut paths,
-                segments,
+                *segments,
+                &mut work,
                 cancel,
             )?;
-        }
-        anchors.set_budget(remaining_geometry_budget(
-            retained,
-            &support_regions,
-            &interfaces,
-            &[&protected, &ordinary],
-        )?);
-        if !support_regions[i].0.is_empty() && paths.is_empty() {
-            return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
-                format!("layer {i}: support clearance leaves no printable bead-width support"),
-            ));
-        }
-        if i != 0 {
-            for path in &paths {
-                for (first, last) in StrokeRuns::new(&path.points_mm) {
-                    let a = path.points_mm[first];
-                    let b = path.points_mm[last];
-                    let length = (b[0] - a[0]).hypot(b[1] - a[1]);
-                    for gap in anchors.gaps(
-                        AnchorCandidate {
-                            endpoints_mm: [a, b],
-                            bead_width_mm: width,
-                        },
-                        prior[i - 1]
-                            .paths
-                            .iter()
-                            .filter(|path| support_role(path.kind)),
-                        std::iter::empty(),
-                        &mut work,
-                        cancel,
-                    )? {
-                        let start = gap.start;
-                        let end = gap.end;
-                        let span = (end - start) * length;
-                        if matches!(
-                            strokes::gap_kind(gap, span, width, recipe.process.max_bridge_span_mm),
-                            strokes::GapKind::Demand
-                        ) {
-                            return Err(error(
-                                ManufacturingErrorCode::UnsupportedGeometry,
-                                format!(
-                                    "layer {i}: support/interface raster exceeds deposited-anchor bridge limits; role {:?}, stroke {:?} to {:?}, gap ({start:.12},{end:.12}) span {span:.12}; increase support density or revise support corridor",
-                                    path.kind, a, b
-                                ),
-                            ));
-                        }
-                    }
-                }
+            if !support_regions[i].0.is_empty() && paths.is_empty() {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    format!("layer {i}: support clearance leaves no printable bead-width support"),
+                ));
             }
+            if i == 0 {
+                break;
+            }
+            anchors.set_budget(domains.anchor_budget(&paths)?);
+            let failure = raster::failure(
+                &paths,
+                prior[i - 1]
+                    .paths
+                    .iter()
+                    .filter(|path| support_role(path.kind)),
+                recipe,
+                &mut anchors,
+                &mut work,
+                cancel,
+            )?;
+            let Some(failure) = failure else {
+                break;
+            };
+            if axis != preferred {
+                let path = &paths[failure.path];
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    format!(
+                        "layer {i}: neither orthogonal support/interface raster has bounded deposited anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; increase support density or revise support corridor",
+                        path.kind,
+                        path.points_mm[failure.first],
+                        path.points_mm[failure.last],
+                        failure.start,
+                        failure.end,
+                        failure.span,
+                    ),
+                ));
+            }
+            // Release failed paths and anchor records before staging the other
+            // axis. Neither attempt changes object or support ownership.
+            paths = Vec::new();
         }
+        *segments += path_segments(&paths);
+        anchors.set_budget(0);
         let bead_area = bead_area(layer, recipe);
         layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
         layer.region_coverage.support_nominal_deposition_volume_mm3 = paths
@@ -464,6 +445,14 @@ pub(super) fn realize(
     }
     let retained_regions = MAX_DEPOSITION_SEGMENTS as usize
         - remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    // Raster staging must include these live support/protected domains without
+    // counting the caller's object/cache reservation twice.
+    let retained_support_points = retained_regions.checked_sub(retained).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "support retained point accounting underflow",
+        )
+    })?;
     anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
     for index in 1..layers.len() {
         let (prior, remaining) = layers.split_at_mut(index);
@@ -480,7 +469,12 @@ pub(super) fn realize(
             let without_old = *segments - path_segments(&layer.paths[begin..]);
             let mut staged_segments = without_old;
             anchors.set_budget(0);
-            let mut candidate = raster(index, axes[index], &mut staged_segments)?;
+            let mut candidate = raster(
+                index,
+                axes[index],
+                &mut staged_segments,
+                retained_support_points,
+            )?;
             coalesce_bridge_rows(
                 &mut candidate,
                 BridgeRowContext {
@@ -513,7 +507,8 @@ pub(super) fn realize(
             for axis in [axes[index], axes[index].orthogonal()] {
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut candidate = raster(index, axis, &mut staged_segments)?;
+                let mut candidate =
+                    raster(index, axis, &mut staged_segments, retained_support_points)?;
                 coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {

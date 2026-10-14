@@ -26,6 +26,11 @@ import type {
   ManufacturingIntent,
   ManufacturingArtifactRecord,
   ReplayDisplayDescriptor,
+  ProjectRevision,
+  FaceRef,
+  SurfaceScopeKind,
+  ImageReliefParameters,
+  SurfaceImageRecord,
 } from "@spiling/protocol";
 
 export interface RuntimeInfo {
@@ -98,6 +103,26 @@ export const native = {
     invoke<ProjectResponse>("project_save", { sessionId, baseRevision, token }),
   reopenProject: (sessionId: SessionId, baseRevision: SceneRevision) =>
     invoke<ProjectResponse>("project_reopen", { sessionId, baseRevision }),
+  selectSurfaceImage: () => invoke<SelectedSource | null>("surface_image_select"),
+  debugSelectSurfaceImage: (relativePath: string) =>
+    invoke<SelectedSource>("surface_image_debug_select", { relativePath }),
+  importSurfaceImage: (
+    selection: SelectedSource,
+    baseRevision: ProjectRevision,
+    reference: FaceRef,
+    scope: SurfaceScopeKind,
+    parameters: ImageReliefParameters,
+  ) =>
+    invoke<ProjectResponse>("surface_image_import", {
+      token: selection.token,
+      sessionId: selection.session_id,
+      baseRevision,
+      reference,
+      scope,
+      parameters,
+    }),
+  surfaceImageBytes: (record: SurfaceImageRecord, resource: ArtifactView) =>
+    invoke<ArrayBuffer>("surface_image_bytes", { record, resource }),
   importSource: (source: SelectedSource, baseRevision: SceneRevision, initialPose: RigidPoseMm) =>
     invoke<GeometryResponse>("geometry_import_source", {
       token: source.token,

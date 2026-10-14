@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+[package]
+name = "spiling-surface-fields"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+png = ["dep:png"]
+
+[dependencies]
+spiling-contracts.workspace = true
+png = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

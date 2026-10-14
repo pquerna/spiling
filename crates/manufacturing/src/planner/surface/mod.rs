@@ -15,9 +15,15 @@ use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 pub(super) const SURFACE_TOLERANCE_MM: f64 = 0.001;
 const SURFACE_ROUNDING_MM: f64 = 0.00001;
 mod cylindrical;
+mod image;
 mod profile;
 mod proof;
+mod resolution;
 mod splice;
+use image::ImageMapping;
+pub(super) use resolution::collect_resolution;
+#[cfg(test)]
+mod tests;
 use profile::PeriodicProfile;
 
 /// The planner sees only identity, bounds and accounting; carrier data stays here.
@@ -29,6 +35,12 @@ enum PreparedShape {
     Cylindrical(cylindrical::CylinderField),
 }
 impl PreparedFinish {
+    pub(super) fn is_image(&self) -> bool {
+        match &self.shape {
+            PreparedShape::Planar(field) => field.image.is_some(),
+            PreparedShape::Cylindrical(field) => field.image.is_some(),
+        }
+    }
     pub(super) fn sample_points(&self) -> usize {
         match &self.shape {
             PreparedShape::Planar(field) => field.sample_points(),
@@ -71,6 +83,7 @@ struct RibField {
     ramp_samples: usize,
     interior_samples: usize,
     peak_mm: f64,
+    image: Option<ImageMapping>,
 }
 
 /// Validate even disabled/shadowed targets: saved native identity remains authority.
@@ -78,16 +91,6 @@ pub(super) fn validate_targets(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    input.surface_overlays.validate().map_err(|e| {
-        error(
-            if e.code == spiling_contracts::project::ProjectErrorCode::ResourceLimit {
-                ManufacturingErrorCode::ResourceLimit
-            } else {
-                ManufacturingErrorCode::InvalidSpecification
-            },
-            e.to_string(),
-        )
-    })?;
     for layer in &input.surface_overlays.layers {
         check_cancel(cancel)?;
         let definition_id = match &layer.scope {
@@ -215,11 +218,41 @@ pub(super) fn metadata(
         if !candidates.contains(&face.face_id) {
             continue;
         }
-        let finish = input.surface_overlays.effective_finish(
+        let layer = input.surface_overlays.effective_layer(
             &occurrence.definition_id,
             occurrence.occurrence_id,
             &face.face_id,
         );
+        let finish = layer.map(|layer| &layer.finish);
+        if let Some(SurfaceFinish::ImageRelief {
+            image_hash,
+            parameters,
+        }) = finish
+        {
+            if matches!(face.carrier, FaceCarrier::Cylinder { .. }) {
+                let field = cylindrical::metadata(
+                    input,
+                    occurrence,
+                    source_bounds,
+                    &face.face_id,
+                    parameters.depth_mm,
+                    parameters.u_repeats,
+                    parameters.u_phase_fraction,
+                    sample_limit.saturating_sub(samples),
+                    cancel,
+                    Some((
+                        image_hash,
+                        parameters,
+                        layer.expect("effective layer").layer_id,
+                    )),
+                )?;
+                samples += field.samples;
+                result.push(PreparedFinish {
+                    shape: PreparedShape::Cylindrical(field),
+                });
+                continue;
+            }
+        }
         if let Some(SurfaceFinish::CylindricalRibs {
             depth_mm,
             rib_count,
@@ -236,6 +269,7 @@ pub(super) fn metadata(
                 *phase_fraction,
                 sample_limit.saturating_sub(samples),
                 cancel,
+                None,
             )?;
             samples += field.samples;
             result.push(PreparedFinish {
@@ -243,24 +277,37 @@ pub(super) fn metadata(
             });
             continue;
         }
-        let Some(SurfaceFinish::VerticalRibs {
-            depth_mm,
-            pitch_mm,
-            edge_margin_mm,
-            phase_mm,
-        }) = finish
-        else {
-            continue;
+        let (depth_mm, pitch_mm, edge_margin_mm, phase_mm, image_parameters) = match finish {
+            Some(SurfaceFinish::VerticalRibs {
+                depth_mm,
+                pitch_mm,
+                edge_margin_mm,
+                phase_mm,
+            }) => (*depth_mm, *pitch_mm, *edge_margin_mm, *phase_mm, None),
+            Some(SurfaceFinish::ImageRelief {
+                image_hash,
+                parameters,
+            }) => (
+                parameters.depth_mm,
+                2.0 * parameters.edge_margin_mm,
+                parameters.edge_margin_mm,
+                0.0,
+                Some((image_hash, parameters)),
+            ),
+            _ => continue,
         };
+        let (depth_mm, pitch_mm, edge_margin_mm, phase_mm) =
+            (&depth_mm, &pitch_mm, &edge_margin_mm, &phase_mm);
         let width = input.intent.recipe.bead_width_mm;
-        if *pitch_mm < 4.0 * width
-            || *edge_margin_mm < 2.0 * width
-            || *depth_mm < 4.0 * SURFACE_TOLERANCE_MM
-            || *depth_mm > 0.5 * width
+        if *edge_margin_mm < 2.0 * width
+            || (image_parameters.is_none()
+                && (*pitch_mm < 4.0 * width
+                    || *depth_mm < 4.0 * SURFACE_TOLERANCE_MM
+                    || *depth_mm > 0.5 * width))
         {
             return Err(unsupported(
                 &face.face_id,
-                "ribs require pitch >= 4 bead widths, protected edge margin >= 2 bead widths, depth >= 4 finish approximation bounds and depth <= half a bead width",
+                "ribs require process-admitted pitch/depth; all planar fields require protected edge margin >= two beads",
             ));
         }
         let cert = native
@@ -284,6 +331,25 @@ pub(super) fn metadata(
             cert.max_z_mm,
             cancel,
         )?;
+        let image = image_parameters
+            .map(|(hash, parameters)| {
+                ImageMapping::new(
+                    input,
+                    occurrence,
+                    hash,
+                    parameters,
+                    layer.expect("effective layer").layer_id,
+                    cert.min_z_mm,
+                    cert.max_z_mm,
+                )
+            })
+            .transpose()?;
+        if image.is_some() && cert.width_mm <= 4.0 * edge_margin_mm {
+            return Err(unsupported(
+                &face.face_id,
+                "planar image width must exceed four protected margins",
+            ));
+        }
         let active = cert.width_mm - 2.0 * edge_margin_mm;
         if !active.is_finite() || active < *pitch_mm {
             return Err(unsupported(
@@ -298,9 +364,13 @@ pub(super) fn metadata(
             PeriodicProfile::new(*depth_mm, k, std::f64::consts::TAU * phase_mm / pitch_mm);
         let ramp = pitch_mm / 2.0;
         let t = std::f64::consts::PI / ramp;
-        let curvature = profile.second_derivative_bound()
-            + 2.0 * profile.first_derivative_bound() * t
-            + 0.5 * profile.maximum() * t * t;
+        let curvature = if let Some(image) = &image {
+            2.0 * image.global_du() / active * t + 0.5 * image.parameters.depth_mm * t * t
+        } else {
+            profile.second_derivative_bound()
+                + 2.0 * profile.first_derivative_bound() * t
+                + 0.5 * profile.maximum() * t * t
+        };
         let chord_budget = SURFACE_TOLERANCE_MM - SURFACE_ROUNDING_MM;
         let ramp_count = (ramp * (curvature / (8.0 * chord_budget)).sqrt())
             .ceil()
@@ -308,18 +378,27 @@ pub(super) fn metadata(
         // Away from the two taper ramps, amplitude is constant. Its second
         // derivative bound is four times smaller; do not oversample the whole
         // face using the worst taper curvature.
-        let interior_count = ((active - 2.0 * ramp)
-            * (profile.second_derivative_bound() / (8.0 * chord_budget)).sqrt())
-        .ceil();
+        let interior_count = if image.is_some() {
+            1.0
+        } else {
+            ((active - 2.0 * ramp)
+                * (profile.second_derivative_bound() / (8.0 * chord_budget)).sqrt())
+            .ceil()
+        };
         let count = 2.0 * ramp_count + interior_count;
-        if !count.is_finite() || count > (MAX_DEPOSITION_SEGMENTS as usize / 4) as f64 {
+        let image_events = image.as_ref().map_or(0, |i| {
+            i.image.record().width as usize * i.parameters.u_repeats as usize + 2
+        });
+        if !count.is_finite()
+            || count + 3.0 * image_events as f64 > (MAX_DEPOSITION_SEGMENTS as usize / 4) as f64
+        {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "surface profile sampling budget exceeded",
             ));
         }
         samples = samples
-            .checked_add(count as usize + 9)
+            .checked_add(count as usize + 3 * image_events + 9)
             .filter(|v| *v <= sample_limit)
             .ok_or_else(|| {
                 error(
@@ -336,7 +415,17 @@ pub(super) fn metadata(
             .chain(occurrence.pose.translation_mm)
             .chain([cert.width_mm, cert.min_z_mm, cert.max_z_mm, *depth_mm])
             .fold(1.0f64, |scale, value| scale.max(value.abs()));
-        if 4096.0 * f64::EPSILON * scale > SURFACE_ROUNDING_MM / 2.0 {
+        let sensitivity = image.as_ref().map_or(1.0, |image| {
+            1.0 + image.global_du() / active
+                + std::f64::consts::PI * image.parameters.depth_mm / (2.0 * edge_margin_mm)
+        });
+        if 4096.0 * f64::EPSILON * scale * sensitivity
+            > if image.is_some() {
+                SURFACE_ROUNDING_MM * 3.0 / 8.0
+            } else {
+                SURFACE_ROUNDING_MM / 2.0
+            }
+        {
             return Err(unsupported(
                 &face.face_id,
                 "source/pose arithmetic cannot fit the reserved profile construction bound",
@@ -372,11 +461,12 @@ pub(super) fn metadata(
             ramp_samples: ramp_count as usize,
             interior_samples: interior_count as usize,
             peak_mm: 0.0,
+            image,
         };
         for index in 0..=field.samples {
             check_cancel(cancel)?;
             let s = field.sample_parameter(index);
-            field.peak_mm = field.peak_mm.max(field.displacement(s));
+            field.peak_mm = field.peak_mm.max(field.displacement(s, (z0 + z1) / 2.0));
         }
         for s in [field.margin, field.width - field.margin] {
             for distance in [0.0, field.depth] {
@@ -405,7 +495,11 @@ pub(super) fn metadata(
 
 impl RibField {
     pub(super) fn sample_points(&self) -> usize {
-        self.samples + 9
+        self.samples
+            + 9
+            + self.image.as_ref().map_or(0, |i| {
+                3 * (i.image.record().width as usize * i.parameters.u_repeats as usize + 2)
+            })
     }
     fn sample_parameter(&self, index: usize) -> f64 {
         if index == self.samples {
@@ -431,10 +525,42 @@ impl RibField {
             y: self.origin[1] + s * self.horizontal[1] + d * self.normal[1],
         }
     }
-    fn displacement(&self, s: f64) -> f64 {
+    fn image_piece_derivative(&self, s: f64, lo: f64, hi: f64, sample: f64) -> f64 {
+        let image = self.image.as_ref().expect("image piece");
+        let a = image.value(
+            (lo - self.margin) / (self.width - 2.0 * self.margin),
+            sample,
+        );
+        let b = image.value(
+            (hi - self.margin) / (self.width - 2.0 * self.margin),
+            sample,
+        );
+        let slope = (b - a) / (hi - lo);
+        let h = a + slope * (s - lo);
         let edge = (s - self.margin).min(self.width - self.margin - s);
         if edge <= 0.0 {
             return 0.0;
+        }
+        if edge >= self.margin {
+            return slope;
+        }
+        let k = std::f64::consts::PI / self.margin;
+        let sign = if s < self.width / 2.0 { 1.0 } else { -1.0 };
+        slope * (1.0 - (k * edge).cos()) / 2.0 + h * sign * k * (k * edge).sin() / 2.0
+    }
+    fn displacement(&self, s: f64, sample: f64) -> f64 {
+        let edge = (s - self.margin).min(self.width - self.margin - s);
+        if edge <= 0.0 {
+            return 0.0;
+        }
+        if let Some(image) = &self.image {
+            let taper = if edge >= self.margin {
+                1.0
+            } else {
+                (1.0 - (std::f64::consts::PI * edge / self.margin).cos()) / 2.0
+            };
+            return image.value((s - self.margin) / (self.width - 2.0 * self.margin), sample)
+                * taper;
         }
         let taper = if edge >= self.pitch / 2.0 {
             1.0
@@ -451,6 +577,17 @@ impl RibField {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RealizationPolicy {
+    Requested,
+    Required,
+}
+impl RealizationPolicy {
+    fn includes(self, field: &PreparedFinish) -> bool {
+        matches!(self, Self::Requested) || !field.is_image()
+    }
+}
+
 /// D = M union A, constructed over an attributed native sampled-face chain.
 pub(super) fn realize(
     source: MultiPolygon<f64>,
@@ -460,8 +597,48 @@ pub(super) fn realize(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    let mut material = splice::realize(source, fields, sample, retained, work, cancel)?;
-    for field in fields {
+    realize_with_policy(
+        source,
+        fields,
+        sample,
+        retained,
+        work,
+        cancel,
+        RealizationPolicy::Requested,
+    )
+}
+
+/// C = native M plus every non-image addition; image displacement alone is advisory.
+pub(super) fn realize_required(
+    source: MultiPolygon<f64>,
+    fields: &[PreparedFinish],
+    sample: f64,
+    retained: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    realize_with_policy(
+        source,
+        fields,
+        sample,
+        retained,
+        work,
+        cancel,
+        RealizationPolicy::Required,
+    )
+}
+
+fn realize_with_policy(
+    source: MultiPolygon<f64>,
+    fields: &[PreparedFinish],
+    sample: f64,
+    retained: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+    policy: RealizationPolicy,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    let mut material = splice::realize(source, fields, sample, retained, work, cancel, policy)?;
+    for field in fields.iter().filter(|field| policy.includes(field)) {
         if let PreparedShape::Cylindrical(field) = &field.shape {
             material = cylindrical::realize(material, field, sample, retained, work, cancel)?;
         }
@@ -479,8 +656,15 @@ pub(super) fn certify_first_wall(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
+    let strict_fields = fields
+        .iter()
+        .filter(|field| field.image().is_none())
+        .count();
+    if strict_fields == 0 {
+        return Ok(());
+    }
     let comparisons = region::point_count(centers)
-        .checked_mul(fields.len())
+        .checked_mul(strict_fields)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -489,6 +673,9 @@ pub(super) fn certify_first_wall(
         })?;
     proof::charge(&mut 0, comparisons)?;
     for field in fields {
+        if field.image().is_some() {
+            continue;
+        } // Image feature loss is reported by attributed resolution witnesses.
         let field = match &field.shape {
             PreparedShape::Planar(field) => field,
             PreparedShape::Cylindrical(field) => {

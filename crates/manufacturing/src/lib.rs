@@ -18,7 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "5";
+pub const PLANNER_VERSION: &str = "6";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 const KERNEL_REVISION: &str = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e";
@@ -31,6 +31,10 @@ pub struct CompilerInput<'a> {
     pub occurrences: &'a [OccurrenceRecord],
     pub intent: &'a ManufacturingIntent,
     pub surface_overlays: &'a spiling_contracts::surface::SurfaceOverlays,
+    pub surface_images: &'a BTreeMap<
+        spiling_contracts::geometry::SourceHash,
+        Arc<spiling_surface_fields::HeightImage>,
+    >,
 }
 
 pub fn compile(
@@ -38,50 +42,10 @@ pub fn compile(
     cancel: &AtomicBool,
 ) -> Result<ManufacturingBundle, ManufacturingError> {
     check_cancel(cancel)?;
-    input.intent.validate()?;
-    if input.definitions.len() > spiling_contracts::geometry::MAX_DEFINITIONS as usize
-        || input.occurrences.len() > spiling_contracts::geometry::MAX_OCCURRENCES as usize
-    {
-        return Err(error(
-            ManufacturingErrorCode::ResourceLimit,
-            "compiler native input record budget exceeded",
-        ));
-    }
-    if input.definitions.is_empty() || input.occurrences.is_empty() {
-        return Err(error(
-            ManufacturingErrorCode::EmptyProject,
-            "compilation requires native definitions and occurrences",
-        ));
-    }
-    if input.definitions.len() != input.stored_definitions.len() {
-        return Err(error(
-            ManufacturingErrorCode::InvalidSpecification,
-            "stored/native definition sets differ",
-        ));
-    }
-    for stored in input.stored_definitions {
-        check_cancel(cancel)?;
-        let definition = input
-            .definitions
-            .get(&stored.definition_id)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::InvalidSpecification,
-                    "stored definition has no native definition",
-                )
-            })?;
-        let native = definition.provenance();
-        if definition.id() != &stored.definition_id
-            || native.source_hash != stored.provenance.source_hash
-            || native.source_unit != stored.provenance.source_unit
-            || native.uncertainty_mm != stored.provenance.uncertainty_mm
-        {
-            return Err(error(
-                ManufacturingErrorCode::InvalidSpecification,
-                "stored/native source identity or units mismatch",
-            ));
-        }
-    }
+    // Shared admission validates intent, native identity and the complete image
+    // table before planning or provenance allocation. Do not hash/copy assets or
+    // prepare the same native/field schedule through a second compile-only lane.
+    let mut plan = planner::plan(&input, cancel)?;
     let mut definitions = input.stored_definitions.to_vec();
     definitions.sort_by(|a, b| a.definition_id.cmp(&b.definition_id));
     let mut occurrences = input.occurrences.to_vec();
@@ -101,6 +65,16 @@ pub fn compile(
         occurrences,
         intent: input.intent.clone(),
         surface_overlays: input.surface_overlays.clone(),
+        surface_images: input
+            .surface_images
+            .iter()
+            .map(
+                |(image_hash, image)| spiling_contracts::surface::SurfaceImageContent {
+                    image_hash: image_hash.clone(),
+                    bytes: Arc::clone(image.bytes()),
+                },
+            )
+            .collect(),
         kernel: KernelIdentity {
             name: "monstertruck".into(),
             version: "0.4.1".into(),
@@ -110,7 +84,6 @@ pub fn compile(
         emitter_version: EMITTER_VERSION.into(),
         verifier_version: VERIFIER_VERSION.into(),
     };
-    let mut plan = planner::plan(&input, cancel)?;
     realization::canonicalize(&mut plan, input.intent, cancel)?;
     let program = backend::emit(&plan, input.intent, cancel)?;
     let verification = verifier::verify(&program, &plan, input.intent, cancel)?;
@@ -235,6 +208,72 @@ fn validate_inspection_bundle(
             ManufacturingErrorCode::UnsupportedCapability,
             "bundle algorithm/kernel version is not supported",
         ));
+    }
+    Ok(())
+}
+
+/// HeightImage construction validates immutable content once; admission binds
+/// those checked allocations to the sole metadata table, including disabled layers.
+pub(crate) fn validate_surface_images(
+    input: &CompilerInput<'_>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use spiling_contracts::surface::{
+        MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_TOTAL_BYTES, MAX_SURFACE_IMAGES,
+    };
+    input.surface_overlays.validate().map_err(|e| {
+        let code = if e.code == spiling_contracts::project::ProjectErrorCode::ResourceLimit {
+            ManufacturingErrorCode::ResourceLimit
+        } else {
+            ManufacturingErrorCode::InvalidSpecification
+        };
+        error(code, e.to_string())
+    })?;
+    if input.surface_images.len() > MAX_SURFACE_IMAGES {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "captured surface image count budget exceeded",
+        ));
+    }
+    if input.surface_images.len() != input.surface_overlays.images.len() {
+        return Err(error(
+            ManufacturingErrorCode::InvalidSpecification,
+            "captured surface image table differs from overlay metadata",
+        ));
+    }
+    let mut bytes = 0usize;
+    for record in &input.surface_overlays.images {
+        check_cancel(cancel)?;
+        let image = input
+            .surface_images
+            .get(&record.image_hash)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "missing captured surface image",
+                )
+            })?;
+        if image.record() != record {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "captured surface image provenance differs from overlay metadata",
+            ));
+        }
+        if image.bytes().capacity() > MAX_SURFACE_IMAGE_BYTES {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "captured surface image allocation budget exceeded",
+            ));
+        }
+        bytes = bytes
+            .checked_add(image.bytes().capacity())
+            .filter(|n| *n <= MAX_SURFACE_IMAGE_TOTAL_BYTES)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "captured surface image byte budget exceeded",
+                )
+            })?;
     }
     Ok(())
 }

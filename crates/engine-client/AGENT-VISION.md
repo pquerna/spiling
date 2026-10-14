@@ -15,3 +15,5 @@ The shared client also owns checked actual-program replay retrieval and one excl
 Explicit preflight observes native input eligibility through the existing durable operation facade without publishing artifacts or altering project state. It requires a selected full intent and keeps pending native compilation analysis and absent physical qualification visible to clients.
 
 Whole-face source-backed surface finish commands share the existing Projects route and authoritative ProjectInfo. The client conveys explicit scope, live FaceRef and persistent revision without owning layer allocation, persistence, native certification or rib construction.
+
+Spatial image authoring and fresh read-only canonical image retrieval share that same authority and checked ByteStream boundary. Image bytes are immutable canonical PGM, never a client-owned decoder, persistent source path or alternate asset store.

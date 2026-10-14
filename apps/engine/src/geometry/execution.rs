@@ -62,6 +62,16 @@ pub(crate) enum JobResult {
     ProjectSaved {
         info: ProjectInfo,
     },
+    SurfaceImageImported {
+        info: ProjectInfo,
+        image: spiling_contracts::surface::SurfaceImageRecord,
+        layer_id: spiling_contracts::surface::SurfaceLayerId,
+    },
+    SurfaceImagePrepared {
+        project_id: ProjectId,
+        captured_revision: ProjectRevision,
+        record: spiling_contracts::surface::SurfaceImageRecord,
+    },
     ManufacturingCompiled {
         info: ProjectInfo,
         record: ManufacturingArtifactRecord,

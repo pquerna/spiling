@@ -372,6 +372,50 @@ impl projects_server::Projects for Service {
             self.jobs.start_native(self.native.clone(), input).await?,
         ))
     }
+    async fn import_surface_image_finish(
+        &self,
+        req: Request<ImportSurfaceImageFinishRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.ImportSurfaceImageFinish", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::project_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Project(command),
+            reservation: 0,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
+    async fn get_surface_image(
+        &self,
+        req: Request<GetSurfaceImageRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Projects.GetSurfaceImage", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::project_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Project(command),
+            reservation: spiling_contracts::surface::MAX_SURFACE_IMAGE_BYTES as u64,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
 }
 #[tonic::async_trait]
 impl manufacturing_server::Manufacturing for Service {
@@ -578,10 +622,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(jobs::internal)?,
         ),
         project_capabilities: [
-            "recoverable_projects_v3",
+            "recoverable_projects_v4",
             "project_transactions_v1",
             "project_read_only_v1",
-            "source_face_surface_finish_v2",
+            "source_face_surface_finish_v3",
+            "surface_image_assets_v1",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -590,7 +635,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "planar_software_compile_v1",
             "independent_program_replay_v1",
             "immutable_bundle_bytestream_v1",
-            "manufacturing_schema4",
+            "manufacturing_schema5",
+            "mapped_image_relief_v1",
+            "varying_z_material_domains_v1",
             "bounded_vertical_rib_construction_v1",
             "bounded_cylindrical_rib_construction_v1",
         ]

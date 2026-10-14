@@ -387,3 +387,234 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
     wire.surface_overlays = None;
     assert!(ProjectInfo::try_from(wire).is_err());
 }
+
+fn canonical_image_record() -> spiling_contracts::surface::SurfaceImageRecord {
+    let bytes = [b"P5\n2 2\n255\n".as_slice(), &[0, 64, 128, 255]].concat();
+    spiling_contracts::surface::SurfaceImageRecord {
+        image_hash: SourceHash::from_bytes(&bytes),
+        width: 2,
+        height: 2,
+        byte_count: bytes.len() as u64,
+        source_hash: SourceHash::from_bytes(b"original png"),
+        source_name: "height.png".into(),
+    }
+}
+fn canonical_image_parameters() -> spiling_contracts::surface::ImageReliefParameters {
+    spiling_contracts::surface::ImageReliefParameters {
+        depth_mm: 1.0,
+        u_repeats: 3,
+        u_phase_fraction: 0.125,
+        z_period_mm: 2.0,
+        z_phase_mm: 0.25,
+        edge_margin_mm: 0.8,
+        vertical_error_mm: 0.025,
+    }
+}
+#[test]
+fn image_operations_are_typed_revision_bound_and_reject_malformed_wrapping() {
+    use spiling_contracts::surface::*;
+    let session_id = SessionId::new();
+    let command = ProjectCommand::ImportSurfaceImageFinish {
+        session_id: session_id.clone(),
+        base_revision: ProjectRevision(9),
+        reference: FaceRef {
+            session_id: session_id.clone(),
+            scene_revision: SceneRevision(12),
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+            face_id: FaceId::from_step_entity(9007199254740993).unwrap(),
+        },
+        scope: SurfaceScopeKind::Occurrence,
+        source: NativePath::from_os_str(std::ffi::OsStr::new("height.png")).unwrap(),
+        parameters: canonical_image_parameters(),
+    };
+    let id = SessionId::new();
+    let native::ProjectCall::ImportSurfaceImageFinish(request) =
+        native::project_call(command.clone(), id.as_str()).unwrap()
+    else {
+        panic!("typed image import call required")
+    };
+    assert_eq!(request.request_id, id.as_str());
+    assert_eq!(request.base_revision, 9);
+    assert_eq!(ProjectCommand::try_from(request.clone()).unwrap(), command);
+    for field in 0..6 {
+        let mut malformed = request.clone();
+        match field {
+            0 => malformed.scope = 0,
+            1 => malformed.scope = 99,
+            2 => malformed.parameters = None,
+            3 => {
+                malformed.reference.as_mut().unwrap().session_id = SessionId::new().as_str().into()
+            }
+            4 => malformed.source = None,
+            _ => malformed.request_id = "not-a-uuid".into(),
+        }
+        assert!(ProjectCommand::try_from(malformed).is_err());
+    }
+    let get = ProjectCommand::GetSurfaceImage {
+        session_id,
+        base_revision: ProjectRevision(9),
+        image_hash: canonical_image_record().image_hash,
+    };
+    let native::ProjectCall::GetSurfaceImage(request) =
+        native::project_call(get.clone(), id.as_str()).unwrap()
+    else {
+        panic!("typed canonical image retrieval required")
+    };
+    assert_eq!(ProjectCommand::try_from(request.clone()).unwrap(), get);
+    let mut malformed = request;
+    malformed.image_hash = "A".repeat(64);
+    assert!(ProjectCommand::try_from(malformed).is_err());
+}
+#[test]
+fn prepared_image_requires_exact_descriptor_and_ack_published_captured_revision() {
+    use spiling_contracts::surface::*;
+    let record = canonical_image_record();
+    let resource = ArtifactView {
+        name: format!("artifacts/{}", record.image_hash.as_str()),
+        size_bytes: record.byte_count.to_string(),
+        sha256: record.image_hash.as_str().into(),
+        media_type: SURFACE_IMAGE_MEDIA_TYPE.into(),
+    };
+    let result = JobResult::SurfaceImagePrepared {
+        project_id: ProjectId::new(),
+        captured_revision: ProjectRevision(9),
+        record: record.clone(),
+        resource: resource.clone(),
+    };
+    let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
+    assert_eq!(JobResult::try_from(wire.clone()).unwrap(), result);
+    for field in 0..5 {
+        let mut malformed = wire.clone();
+        let rpc::native_operation_result::Result::SurfaceImagePrepared(prepared) =
+            malformed.result.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        match field {
+            0 => prepared.resource.as_mut().unwrap().size_bytes += 1,
+            1 => prepared.resource.as_mut().unwrap().media_type = "image/png".into(),
+            2 => {
+                prepared.resource.as_mut().unwrap().sha256 =
+                    SourceHash::from_bytes(b"other pixels").as_str().into()
+            }
+            3 => prepared.record.as_mut().unwrap().width = 3,
+            _ => prepared.project_id = "not-a-uuid".into(),
+        }
+        assert!(JobResult::try_from(malformed).is_err());
+    }
+    let mut op = operation();
+    let mut meta = native_metadata(&op).unwrap();
+    meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
+    meta.completed_units = meta.total_units;
+    meta.captured_project_revision = 9;
+    meta.end_time = meta.update_time;
+    op.done = true;
+    op.result = Some(google::longrunning::operation::Result::Response(
+        prost_types::Any {
+            type_url: NATIVE_RESULT_TYPE.into(),
+            value: wire.encode_to_vec(),
+        },
+    ));
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert!(native_operation_view(&op).is_err()); // A staged result is not a published resource.
+    meta.outputs =
+        vec![native::artifact_from_view(resource, MAX_SURFACE_IMAGE_BYTES as u64).unwrap()];
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert_eq!(native_operation_view(&op).unwrap().result, Some(result));
+    meta.captured_project_revision = 10;
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert!(native_operation_view(&op).is_err());
+}
+#[test]
+fn imported_image_receipt_matches_authoritative_metadata_and_new_layer() {
+    use spiling_contracts::surface::*;
+    let image = canonical_image_record();
+    let layer_id = SurfaceLayerId::new(1).unwrap();
+    let info = ProjectInfo {
+        project_id: ProjectId::new(),
+        revision: ProjectRevision(1),
+        saved_revision: None,
+        path_label: None,
+        dirty: true,
+        save_uncertain: false,
+        read_only: false,
+        recovered_previous: false,
+        can_undo: true,
+        can_redo: false,
+        surface_overlays: SurfaceOverlays {
+            schema_version: SURFACE_SCHEMA_VERSION,
+            images: vec![image.clone()],
+            layers: vec![SurfaceLayer {
+                layer_id,
+                enabled: true,
+                scope: SurfaceScope::Definition {
+                    definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+                },
+                face_id: FaceId::from_step_entity(7).unwrap(),
+                finish: SurfaceFinish::ImageRelief {
+                    image_hash: image.image_hash.clone(),
+                    parameters: canonical_image_parameters(),
+                },
+            }],
+        },
+    };
+    let result = JobResult::SurfaceImageImported {
+        info,
+        image,
+        layer_id,
+    };
+    let wire: rpc::NativeOperationResult = result.clone().try_into().unwrap();
+    assert_eq!(JobResult::try_from(wire.clone()).unwrap(), result);
+    for field in 0..5 {
+        let mut malformed = wire.clone();
+        let rpc::native_operation_result::Result::SurfaceImageImported(imported) =
+            malformed.result.as_mut().unwrap()
+        else {
+            unreachable!()
+        };
+        match field {
+            0 => imported.layer_id = 2,
+            1 => imported.image.as_mut().unwrap().source_name = "rewritten.png".into(),
+            2 => imported
+                .info
+                .as_mut()
+                .unwrap()
+                .surface_overlays
+                .as_mut()
+                .unwrap()
+                .images
+                .clear(),
+            3 => imported.info.as_mut().unwrap().read_only = true,
+            _ => {
+                imported
+                    .info
+                    .as_mut()
+                    .unwrap()
+                    .surface_overlays
+                    .as_mut()
+                    .unwrap()
+                    .layers[0]
+                    .enabled = false
+            }
+        }
+        assert!(JobResult::try_from(malformed).is_err());
+    }
+    let mut op = operation();
+    let mut meta = native_metadata(&op).unwrap();
+    meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
+    meta.completed_units = meta.total_units;
+    meta.end_time = meta.update_time;
+    op.done = true;
+    op.result = Some(google::longrunning::operation::Result::Response(
+        prost_types::Any {
+            type_url: NATIVE_RESULT_TYPE.into(),
+            value: wire.encode_to_vec(),
+        },
+    ));
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert_eq!(native_operation_view(&op).unwrap().result, Some(result));
+    meta.captured_project_revision = 1;
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert!(native_operation_view(&op).is_err());
+}

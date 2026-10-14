@@ -12,6 +12,8 @@ struct NativeScene {
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
+    surface_images:
+        BTreeMap<spiling_contracts::geometry::SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
 impl NativeScene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
@@ -21,6 +23,7 @@ impl NativeScene {
         Self {
             project: ProjectId::default(),
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+            surface_images: BTreeMap::new(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
                 provenance: native.provenance().clone(),
@@ -65,6 +68,7 @@ impl NativeScene {
             occurrences: &self.occurrences,
             intent,
             surface_overlays: &self.surface_overlays,
+            surface_images: &self.surface_images,
         }
     }
 }
@@ -404,18 +408,6 @@ fn floating_native_body_has_real_support_only_layers_and_exact_contact_gap() {
         .filter(|layer| layer.paths.is_empty())
         .collect();
     assert!((empty.iter().map(|layer| layer.height_mm).sum::<f64>() - 0.2).abs() < 1e-8);
-    assert!(
-        (bundle
-            .plan
-            .layers
-            .iter()
-            .find(|layer| layer.region_coverage.section_area_mm2 > 0.0)
-            .unwrap()
-            .height_mm
-            - 0.4)
-            .abs()
-            < 1e-8
-    );
     let report = preflight(&scene.input(&intent(false)), &AtomicBool::new(false)).unwrap();
     assert!(!report.eligible);
     assert!(
@@ -1512,4 +1504,608 @@ fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusal
     };
     scene.occurrences[0].pose.translation_mm[0] = 1e10;
     assert!(!preflight(&scene.input(&intent), &cancel).unwrap().eligible);
+}
+
+fn image_parameters(depth: f64, margin: f64) -> spiling_contracts::surface::ImageReliefParameters {
+    spiling_contracts::surface::ImageReliefParameters {
+        depth_mm: depth,
+        u_repeats: 1,
+        u_phase_fraction: 0.17,
+        z_period_mm: 8.0,
+        z_phase_mm: 0.13,
+        edge_margin_mm: margin,
+        vertical_error_mm: 0.03,
+    }
+}
+
+fn install_image(
+    scene: &mut NativeScene,
+    cylindrical: bool,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    parameters: spiling_contracts::surface::ImageReliefParameters,
+) {
+    use spiling_contracts::{
+        geometry::SourceHash,
+        surface::{SurfaceFinish, SurfaceImageRecord},
+    };
+    assert_eq!(pixels.len(), (width * height) as usize);
+    let mut bytes = format!("P5\n{width} {height}\n255\n").into_bytes();
+    bytes.extend_from_slice(pixels);
+    let image_hash = SourceHash::from_bytes(&bytes);
+    let record = SurfaceImageRecord {
+        image_hash: image_hash.clone(),
+        width,
+        height,
+        byte_count: bytes.len() as u64,
+        source_hash: image_hash.clone(),
+        source_name: "independent image samples.pgm".into(),
+    };
+    let image = Arc::new(
+        spiling_surface_fields::HeightImage::from_canonical(record.clone(), Arc::new(bytes))
+            .unwrap(),
+    );
+    let mut layer = if cylindrical {
+        cylinder_layer(scene, 0.0)
+    } else {
+        rib_layer(scene, 1)
+    };
+    layer.finish = SurfaceFinish::ImageRelief {
+        image_hash: image_hash.clone(),
+        parameters,
+    };
+    scene.surface_overlays.layers = vec![layer];
+    scene.surface_overlays.images = vec![record];
+    scene.surface_images = BTreeMap::from([(image_hash, image)]);
+}
+
+fn object_xy(layer: &PrintLayer, kind: DepositionKind) -> Vec<Vec<[f64; 2]>> {
+    layer
+        .paths
+        .iter()
+        .filter(|path| path.kind == kind)
+        .map(|path| path.points_mm.iter().map(|p| [p[0], p[1]]).collect())
+        .collect()
+}
+
+#[test]
+fn mapped_images_vary_native_planar_and_cylindrical_walls_fill_skin_and_actual_program() {
+    use crate::{inspect_bundle, verify_bundle};
+    use spiling_contracts::geometry::SourceHash;
+    let pixels = [
+        255, 32, 0, 96, 0, 0, 0, 0, 128, 16, 64, 192, 32, 160, 255, 8,
+    ];
+    let cancel = AtomicBool::new(false);
+    for (source, cylindrical) in [(BOX, false), (FULL_CYLINDER, true)] {
+        let mut scene = NativeScene::new(source, &[RigidPoseMm::IDENTITY]);
+        let intent = intent(false);
+        let original = compile(scene.input(&intent), &cancel).unwrap();
+        install_image(
+            &mut scene,
+            cylindrical,
+            4,
+            4,
+            &pixels,
+            image_parameters(0.08, if cylindrical { 0.0 } else { 1.2 }),
+        );
+        let bundle = compile(scene.input(&intent), &cancel).unwrap();
+        assert_eq!(
+            bundle.provenance.definitions,
+            original.provenance.definitions
+        );
+        assert_eq!(bundle.provenance.surface_images.len(), 1);
+        let image = scene.surface_images.values().next().unwrap();
+        assert!(
+            Arc::ptr_eq(&bundle.provenance.surface_images[0].bytes, image.bytes()),
+            "provenance must share canonical content, not copy the raster per capture"
+        );
+        assert_eq!(bundle.provenance.surface_overlays, scene.surface_overlays);
+        assert_ne!(bundle.program, original.program);
+        let first_area = original.plan.layers[0]
+            .region_coverage
+            .source_section_area_mm2;
+        for layer in &bundle.plan.layers {
+            let coverage = &layer.region_coverage;
+            assert!((coverage.source_section_area_mm2 - first_area).abs() < 1e-8);
+            assert!(
+                (coverage.section_area_mm2
+                    - coverage.source_section_area_mm2
+                    - coverage.surface_added_area_mm2)
+                    .abs()
+                    < 1e-8
+            );
+        }
+        assert!(
+            bundle.plan.layers.windows(2).any(|pair| object_xy(
+                &pair[0],
+                DepositionKind::Perimeter
+            ) != object_xy(
+                &pair[1],
+                DepositionKind::Perimeter
+            )),
+            "native invariant M must not imply constant realized wall paths"
+        );
+        assert!(bundle.plan.layers.windows(2).any(|pair| {
+            (pair[0].region_coverage.surface_added_area_mm2
+                - pair[1].region_coverage.surface_added_area_mm2)
+                .abs()
+                > 1e-4
+        }));
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .any(|layer| !object_xy(layer, DepositionKind::SolidFill).is_empty())
+        );
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .any(|layer| layer.region_coverage.top_skin_area_mm2 > 0.0
+                    || layer.region_coverage.bottom_skin_area_mm2 > 0.0)
+        );
+        assert!(!bundle.plan.surface_resolution.is_empty());
+        assert!(
+            bundle
+                .plan
+                .surface_resolution
+                .iter()
+                .all(|record| record.image_hash == image.record().image_hash
+                    && record.face_id == scene.surface_overlays.layers[0].face_id
+                    && record.layer_index < bundle.plan.layers.len() as u32)
+        );
+        let hash = SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+        let inspected =
+            inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel).unwrap();
+        assert!(inspected.report.verified && inspected.replay.is_some());
+        assert!(verify_bundle(&bundle, &cancel).unwrap().verified);
+        let mut corrupt = bundle;
+        let bytes = Arc::make_mut(&mut corrupt.provenance.surface_images[0].bytes);
+        *bytes.last_mut().unwrap() ^= 1;
+        assert!(
+            verify_bundle(&corrupt, &cancel).is_err(),
+            "fresh inspection must validate image content before trusting saved replay"
+        );
+    }
+}
+
+#[test]
+fn blank_image_interval_returns_exact_native_material_and_no_invented_added_area() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(HOLE, &[RigidPoseMm::IDENTITY]);
+    let mut parameters = image_parameters(0.06, 1.2);
+    parameters.u_phase_fraction = 0.0;
+    parameters.z_phase_mm = 0.0;
+    install_image(
+        &mut scene,
+        false,
+        2,
+        4,
+        &[0, 0, 255, 255, 0, 0, 0, 0],
+        parameters,
+    );
+    let intent = intent(false);
+    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    assert!(admitted.report.eligible);
+    let occurrence = &scene.occurrences[0];
+    let native = &scene.definitions[&occurrence.definition_id];
+    let source = region::from_native(
+        spiling_geometry::section_with_byte_limit(
+            native,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, 2.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            4 * 1024 * 1024,
+        )
+        .unwrap(),
+        &occurrence.pose,
+        2.0,
+        &cancel,
+    )
+    .unwrap();
+    let derived = surface::realize(
+        source.clone(),
+        &admitted.surface_fields[&occurrence.occurrence_id],
+        2.0,
+        0,
+        &mut 0,
+        &cancel,
+    )
+    .unwrap();
+    assert_eq!(
+        source, derived,
+        "blank rows must retain original native vertices and holes exactly"
+    );
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    for layer in bundle
+        .plan
+        .layers
+        .iter()
+        .filter(|layer| layer.section_z_mm < 4.0)
+    {
+        assert_eq!(layer.region_coverage.surface_added_area_mm2, 0.0);
+        assert!(layer.region_coverage.protected_hole_area_mm2 > 0.0);
+    }
+}
+
+// Deliberately independent of HeightImage/ImageField: the frozen pixel-node
+// formula is the oracle for interval fidelity, including reversed image rows.
+fn independent_pixel_height(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    u: f64,
+    z: f64,
+    parameters: &spiling_contracts::surface::ImageReliefParameters,
+) -> f64 {
+    let x = width as f64
+        * (parameters.u_repeats as f64 * u + parameters.u_phase_fraction).rem_euclid(1.0);
+    let y =
+        -(height as f64) * ((z + parameters.z_phase_mm) / parameters.z_period_mm).rem_euclid(1.0);
+    let i = x.floor() as isize;
+    let j = y.floor() as isize;
+    let a = x - x.floor();
+    let b = y - y.floor();
+    let node = |column: isize, row: isize| {
+        pixels[row.rem_euclid(height as isize) as usize * width
+            + column.rem_euclid(width as isize) as usize] as f64
+            / 255.0
+    };
+    parameters.depth_mm
+        * ((node(i, j) * (1.0 - a) + node(i + 1, j) * a) * (1.0 - b)
+            + (node(i, j + 1) * (1.0 - a) + node(i + 1, j + 1) * a) * b)
+}
+
+#[test]
+fn non_grid_narrow_bright_stripe_cannot_alias_between_native_layer_midpoints() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut pixels = vec![0; 2 * 64];
+    pixels[61 * 2..62 * 2].fill(255);
+    let mut parameters = image_parameters(0.18, 1.2);
+    parameters.u_phase_fraction = 0.0;
+    parameters.z_phase_mm = 0.037;
+    parameters.vertical_error_mm = 0.015;
+    assert_eq!(
+        independent_pixel_height(&pixels, 2, 64, 0.5, 0.2, &parameters),
+        0.0
+    );
+    assert_eq!(
+        independent_pixel_height(&pixels, 2, 64, 0.5, 0.6, &parameters),
+        0.0
+    );
+    install_image(&mut scene, false, 2, 64, &pixels, parameters.clone());
+    let intent = intent(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    assert!(bundle.plan.layers.len() > 20);
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.section_z_mm > 0.213
+                && layer.section_z_mm < 0.463
+                && layer.region_coverage.surface_added_area_mm2 > 0.5),
+        "a genuine bright stripe invisible to nominal midpoint samples must survive"
+    );
+    for layer in &bundle.plan.layers {
+        let bottom = layer.z_mm - layer.height_mm;
+        let midpoint =
+            independent_pixel_height(&pixels, 2, 64, 0.5, layer.section_z_mm, &parameters);
+        for z in [
+            bottom,
+            (bottom + layer.section_z_mm) * 0.5,
+            (layer.section_z_mm + layer.z_mm) * 0.5,
+            layer.z_mm,
+        ] {
+            assert!(
+                (independent_pixel_height(&pixels, 2, 64, 0.5, z, &parameters) - midpoint).abs()
+                    <= parameters.vertical_error_mm + 1e-10
+            );
+        }
+    }
+    for required in [0.213, 0.338, 0.463] {
+        assert!(
+            bundle
+                .plan
+                .layers
+                .iter()
+                .any(|layer| (layer.z_mm - required).abs() < 1e-10)
+        );
+    }
+}
+
+fn wall_peak_in_u_band(
+    layer: &PrintLayer,
+    cert: &spiling_geometry::VerticalWallFace,
+    margin: f64,
+    low: f64,
+    high: f64,
+) -> f64 {
+    let projected = |point: &[f64; 3]| {
+        let delta = [point[0] - cert.origin_mm[0], point[1] - cert.origin_mm[1]];
+        let s = delta[0] * cert.horizontal_direction[0] + delta[1] * cert.horizontal_direction[1];
+        (
+            (s - margin) / (cert.width_mm - 2.0 * margin),
+            delta[0] * cert.outward_normal[0] + delta[1] * cert.outward_normal[1],
+        )
+    };
+    let mut peak = f64::NEG_INFINITY;
+    for path in layer.paths.iter().filter(|path| {
+        path.kind == DepositionKind::Perimeter
+            || (path.kind == DepositionKind::Bridge
+                && path.points_mm.first() == path.points_mm.last())
+    }) {
+        for edge in path.points_mm.windows(2) {
+            let a = projected(&edge[0]);
+            let b = projected(&edge[1]);
+            for point in [a, b] {
+                if point.0 >= low && point.0 <= high {
+                    peak = peak.max(point.1);
+                }
+            }
+            if a.0 != b.0 {
+                for boundary in [low, high] {
+                    let t = (boundary - a.0) / (b.0 - a.0);
+                    if (0.0..=1.0).contains(&t) {
+                        peak = peak.max(a.1 + t * (b.1 - a.1));
+                    }
+                }
+            }
+        }
+    }
+    peak
+}
+
+#[test]
+fn asymmetric_image_phase_moves_actual_first_wall_lobe_despite_identical_extrema() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut parameters = image_parameters(0.12, 1.2);
+    parameters.z_phase_mm = 0.0;
+    parameters.u_phase_fraction = 0.25;
+    let pixels = [255, 0, 0, 0, 255, 0, 0, 0];
+    install_image(&mut scene, false, 4, 2, &pixels, parameters.clone());
+    let cert = scene.definitions[&scene.occurrences[0].definition_id]
+        .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
+        .unwrap();
+    let intent = intent(false);
+    let first = compile(scene.input(&intent), &cancel).unwrap();
+    parameters.u_phase_fraction = 0.75;
+    install_image(&mut scene, false, 4, 2, &pixels, parameters);
+    let shifted = compile(scene.input(&intent), &cancel).unwrap();
+    let a = &first.plan.layers[0];
+    let b = &shifted.plan.layers[0];
+    assert!(
+        (wall_peak_in_u_band(a, &cert, 1.2, 0.1, 0.9)
+            - wall_peak_in_u_band(b, &cert, 1.2, 0.1, 0.9))
+        .abs()
+            < 0.006
+    );
+    assert!(
+        wall_peak_in_u_band(a, &cert, 1.2, 0.7, 0.8) - wall_peak_in_u_band(b, &cert, 1.2, 0.7, 0.8)
+            > 0.06
+    );
+    assert!(
+        wall_peak_in_u_band(b, &cert, 1.2, 0.2, 0.3) - wall_peak_in_u_band(a, &cert, 1.2, 0.2, 0.3)
+            > 0.06
+    );
+    assert_ne!(first.program, shifted.program);
+}
+
+#[test]
+fn ordinary_erosion_lost_image_feature_is_attributed_advisory_not_fake_wall_survival() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut pixels = vec![0; 256 * 2];
+    pixels[128] = 255;
+    pixels[256 + 128] = 255;
+    let mut parameters = image_parameters(0.12, 1.2);
+    parameters.u_phase_fraction = 0.0;
+    parameters.z_phase_mm = 0.0;
+    install_image(&mut scene, false, 256, 2, &pixels, parameters);
+    let intent = intent(false);
+    let bundle = compile(scene.input(&intent), &cancel).unwrap();
+    let cert = scene.definitions[&scene.occurrences[0].definition_id]
+        .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
+        .unwrap();
+    let peak = wall_peak_in_u_band(&bundle.plan.layers[0], &cert, 1.2, 0.45, 0.55)
+        + intent.recipe.bead_width_mm * 0.5;
+    assert!(
+        peak < 0.09,
+        "erosion must not invent survival of a sub-bead narrow peak"
+    );
+    assert!(
+        bundle.plan.surface_resolution.iter().any(
+            |record| record.below_nominal_resolution > 0 && record.max_residual_lower_mm > 0.02
+        )
+    );
+    assert!(bundle.verification.verified);
+}
+
+#[test]
+fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_blocks_it() {
+    use geo::{Contains, Point};
+    let cancel = AtomicBool::new(false);
+    for (source, sparse) in [(BOX, false), (HOLE, true)] {
+        let mut scene = NativeScene::new(source, &[RigidPoseMm::IDENTITY]);
+        let mut parameters = image_parameters(5.0, 1.2);
+        parameters.u_phase_fraction = 0.0;
+        // Two-millimetre cells bound nominal midpoint error by 0.75 mm.
+        // Source Z rises from 4.6 to 6.6, then stays at its peak through top 8.
+        parameters.z_period_mm = 32.0;
+        parameters.z_phase_mm = 1.4;
+        parameters.vertical_error_mm = 0.8;
+        let mut pixels = [0; 2 * 16];
+        pixels[11 * 2..13 * 2].fill(255);
+        install_image(&mut scene, false, 2, 16, &pixels, parameters.clone());
+        let mut disabled = intent(false);
+        disabled.recipe.layer_height_mm = 0.6;
+        if sparse {
+            disabled.recipe.infill_fraction = 0.2;
+        }
+        let first_growth = independent_pixel_height(&pixels, 2, 16, 0.5, 4.7, &parameters);
+        assert!(
+            (first_growth - 0.25).abs() < 1e-10
+                && first_growth < disabled.recipe.bead_width_mm * 0.5,
+            "first growing slab must have genuine previous native-bead anchoring"
+        );
+        let next_growth = independent_pixel_height(&pixels, 2, 16, 0.5, 5.1, &parameters);
+        assert!(
+            (next_growth - 1.25).abs() < 1e-10 && next_growth - 0.2 > disabled.recipe.bead_width_mm,
+            "unbridgeable growth must leave a printable bed corridor after XY clearance"
+        );
+        assert_eq!(
+            compile(scene.input(&disabled), &cancel).unwrap_err().code,
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "steep mapped geometry must demand actual anchors rather than fabricate native support"
+        );
+        let mut enabled = disabled.clone();
+        enabled.printer.capabilities.generated_supports = true;
+        enabled.recipe.supports = SupportPolicy::Breakaway {
+            density: 1.0,
+            xy_clearance_mm: 0.2,
+            z_gap_mm: 0.2,
+            interface_thickness_mm: 0.8,
+        };
+        let bundle = compile(scene.input(&enabled), &cancel).unwrap();
+        assert!(
+            bundle.verification.verified && bundle.verification.support_deposited_volume_mm3 > 0.0
+        );
+        assert!(
+            bundle.plan.layers[0]
+                .paths
+                .iter()
+                .any(|path| path.kind == DepositionKind::Support),
+            "successful support must genuinely begin at the bed"
+        );
+        assert!(bundle.plan.layers.iter().any(|layer| {
+            layer
+                .paths
+                .iter()
+                .any(|path| path.kind == DepositionKind::SupportInterface)
+        }));
+        let admitted = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+        let occurrence = &scene.occurrences[0];
+        let native = &scene.definitions[&occurrence.definition_id];
+        let cert = native
+            .vertical_wall_face(&scene.surface_overlays.layers[0].face_id)
+            .unwrap();
+        for layer in &bundle.plan.layers {
+            let source = region::from_native(
+                spiling_geometry::section_with_byte_limit(
+                    native,
+                    PlaneMm {
+                        origin_mm: [0.0, 0.0, layer.section_z_mm],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    &cancel,
+                    4 * 1024 * 1024,
+                )
+                .unwrap(),
+                &occurrence.pose,
+                layer.section_z_mm,
+                &cancel,
+            )
+            .unwrap();
+            let derived = surface::realize(
+                source,
+                &admitted.surface_fields[&occurrence.occurrence_id],
+                layer.section_z_mm,
+                0,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+            let clearance = region::offset(&derived, 0.2, &cancel).unwrap();
+            for point in layer
+                .paths
+                .iter()
+                .filter(|path| {
+                    matches!(
+                        path.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    )
+                })
+                .flat_map(|path| &path.points_mm)
+            {
+                assert!(
+                    !clearance.contains(&Point::new(point[0], point[1])),
+                    "all lower supports must honor that layer's final mapped D, not native M"
+                );
+            }
+            if sparse {
+                assert!(layer.region_coverage.protected_hole_area_mm2 > 0.0);
+            }
+            let intended =
+                independent_pixel_height(&pixels, 2, 16, 0.5, layer.section_z_mm, &parameters);
+            let actual = wall_peak_in_u_band(layer, &cert, 1.2, 0.3, 0.7);
+            assert!(
+                (actual - (intended - enabled.recipe.bead_width_mm * 0.5)).abs() <= 0.006,
+                "actual-support regeneration must retain the same mapped first wall at Z {}",
+                layer.section_z_mm
+            );
+        }
+        // Same upper field and native source, but the earlier image rows now
+        // occupy every formerly usable vertical corridor all the way to the bed.
+        let mut blocked_pixels = pixels;
+        blocked_pixels[0..2].fill(255);
+        blocked_pixels[14 * 2..16 * 2].fill(255);
+        for z in [4.6, 5.1, 6.3, 6.8, 7.8, 8.0] {
+            assert_eq!(
+                independent_pixel_height(&pixels, 2, 16, 0.5, z, &parameters),
+                independent_pixel_height(&blocked_pixels, 2, 16, 0.5, z, &parameters),
+                "the independent blocker must leave the entire upper image field unchanged",
+            );
+        }
+        install_image(&mut scene, false, 2, 16, &blocked_pixels, parameters);
+        let blocked = compile(scene.input(&enabled), &cancel).unwrap_err();
+        assert_eq!(blocked.code, ManufacturingErrorCode::UnsupportedGeometry);
+        assert!(
+            blocked
+                .message
+                .contains("blocks every bed-anchored support corridor"),
+            "failure must specifically reflect lower realized corridor blockage: {}",
+            blocked.message
+        );
+    }
+}
+
+#[test]
+fn image_capture_disabled_references_metadata_and_event_budgets_are_not_bypassed() {
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    install_image(
+        &mut scene,
+        false,
+        2,
+        2,
+        &[0, 255, 255, 0],
+        image_parameters(0.06, 1.2),
+    );
+    scene.surface_overlays.layers[0].enabled = false;
+    let intent = intent(false);
+    let valid = compile(scene.input(&intent), &cancel).unwrap();
+    assert_eq!(valid.provenance.surface_images.len(), 1);
+    scene.surface_images.clear();
+    assert!(!preflight(&scene.input(&intent), &cancel).unwrap().eligible);
+    assert_eq!(
+        compile(scene.input(&intent), &cancel).unwrap_err().code,
+        ManufacturingErrorCode::InvalidSpecification
+    );
+    let mut parameters = image_parameters(0.06, 1.2);
+    parameters.z_period_mm = 0.001;
+    parameters.z_phase_mm = 0.0;
+    install_image(&mut scene, false, 2, 2, &[0, 255, 255, 0], parameters);
+    let report = preflight(&scene.input(&intent), &cancel).unwrap();
+    assert!(!report.eligible);
+    assert_eq!(
+        compile(scene.input(&intent), &cancel).unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
 }

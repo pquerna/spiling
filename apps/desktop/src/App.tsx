@@ -786,6 +786,10 @@ function Workbench() {
             state={state}
             inspect={workbench.inspect}
             edit={workbench.editSurfaceFinish}
+            selectImage={workbench.selectSurfaceImage}
+            importImage={workbench.importSurfaceImage}
+            previewImage={workbench.previewSurfaceImage}
+            cancel={workbench.cancel}
           />
           <form
             className="geometry-form"

@@ -16,6 +16,7 @@ pub(super) struct Admission {
     pub reuse_slabs: bool,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
+    pub schedule: Option<Vec<super::LayerElevation>>,
 }
 
 pub fn preflight(
@@ -35,6 +36,7 @@ pub(super) fn admit(
         horizontal_events: Vec::new(),
         reuse_slabs: true,
         surface_fields: BTreeMap::new(),
+        schedule: None,
         report: PreflightReport {
             input_revision: input.revision,
             eligible: true,
@@ -106,7 +108,9 @@ pub(super) fn admit(
             ),
         }
     }
-    let mut surface_valid = match surface::validate_targets(input, cancel) {
+    let mut surface_valid = match crate::validate_surface_images(input, cancel)
+        .and_then(|()| surface::validate_targets(input, cancel))
+    {
         Ok(()) => true,
         Err(e) if e.code == ManufacturingErrorCode::Cancelled => return Err(e),
         Err(e) => {
@@ -333,6 +337,78 @@ pub(super) fn admit(
         add("floating_without_support", "Native material starts above the bed; enable breakaway supports or place it on the bed".into(), None, None);
     }
     drop(add);
+    if result.report.eligible {
+        match super::scheduled_layers(input, &result, cancel) {
+            Ok(schedule) => {
+                let bed = envelope.min[2];
+                let top = result.bounds.expect("eligible geometry has bounds").max[2];
+                let mut retained_samples = 0usize;
+                for fields in result.surface_fields.values() {
+                    for field in fields {
+                        let copies = if field.is_z_invariant(bed, top)? {
+                            1
+                        } else {
+                            schedule.len()
+                        };
+                        // D, each wall center and fill erosion are retained once
+                        // per realized span; one native carrier remains for witnesses.
+                        let owners = copies
+                            .checked_mul(input.intent.recipe.perimeter_count as usize + 2)
+                            .and_then(|n| n.checked_add(1))
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "retained image geometry estimate overflow",
+                                )
+                            })?;
+                        retained_samples = retained_samples
+                            .checked_add(field.sample_points().checked_mul(owners).ok_or_else(
+                                || {
+                                    error(
+                                        ManufacturingErrorCode::ResourceLimit,
+                                        "retained image sample estimate overflow",
+                                    )
+                                },
+                            )?)
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "retained image sample estimate overflow",
+                                )
+                            })?;
+                    }
+                }
+                if retained_samples > MAX_DEPOSITION_SEGMENTS as usize {
+                    result.report.eligible = false;
+                    result.report.checks.push(PreflightCheck {
+                        code: "resource_limit".into(),
+                        severity: PreflightSeverity::Error,
+                        message: "Refined surface sample estimate exceeds retained geometry budget"
+                            .into(),
+                        occurrence_id: None,
+                        face_id: None,
+                    });
+                }
+                result.schedule = Some(schedule);
+            }
+            Err(e) if e.code == ManufacturingErrorCode::Cancelled => return Err(e),
+            Err(e) => {
+                result.report.eligible = false;
+                result.report.checks.push(PreflightCheck {
+                    code: if e.code == ManufacturingErrorCode::ResourceLimit {
+                        "resource_limit"
+                    } else {
+                        "unresolved_layer_schedule"
+                    }
+                    .into(),
+                    severity: PreflightSeverity::Error,
+                    message: e.message,
+                    occurrence_id: None,
+                    face_id: None,
+                });
+            }
+        }
+    }
     if result.report.checks.len() == 253 {
         result.report.checks.push(PreflightCheck {
             code: "additional_errors".into(),

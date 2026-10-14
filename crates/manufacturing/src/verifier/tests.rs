@@ -142,6 +142,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     };
     let mut plan = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        surface_resolution: Vec::new(),
         sampling_tolerance_mm: 0.005,
         offset_tolerance_mm: 0.001,
         surface_tolerance_mm: 0.001,

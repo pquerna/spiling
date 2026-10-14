@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     ArtifactView, NATIVE_METADATA_TYPE, NATIVE_RESULT_TYPE, geometry::*, google, manufacturing::*,
-    project::*, rpc,
+    project::*, rpc, surface::*,
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,7 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
             Ok(u64::from(MAX_MANUFACTURING_BUNDLE_BYTES))
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
+        SURFACE_IMAGE_MEDIA_TYPE => Ok(MAX_SURFACE_IMAGE_BYTES as u64),
         _ => Err("unexpected native artifact media type".into()),
     }
 }
@@ -218,6 +219,46 @@ pub fn native_operation_view(
     };
     if let Some(result) = &result {
         match result {
+            JobResult::SurfaceImageImported {
+                info,
+                image,
+                layer_id,
+            } => {
+                super::validate_surface_image_imported_binding(info, image, *layer_id)?;
+                if info.revision.0
+                    != meta
+                        .captured_project_revision
+                        .checked_add(1)
+                        .ok_or("image import revision overflow")?
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("image import revision or output mismatch".into());
+                }
+            }
+            JobResult::SurfaceImagePrepared {
+                project_id,
+                captured_revision,
+                record,
+                resource,
+            } => {
+                super::validate_surface_image_prepared_binding(
+                    project_id,
+                    *captured_revision,
+                    record,
+                    resource,
+                )?;
+                if captured_revision.0 != meta.captured_project_revision
+                    || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|a| {
+                        a.name == resource.name
+                            && a.size_bytes == record.byte_count
+                            && a.sha256 == resource.sha256
+                            && a.media_type == resource.media_type
+                    })
+                {
+                    return Err("prepared image revision or published output mismatch".into());
+                }
+            }
             JobResult::ManufacturingPreflight { report } => {
                 if report.input_revision != ProjectRevision(meta.captured_project_revision)
                     || !meta.outputs.is_empty()
@@ -311,6 +352,38 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::ProjectSaved(info) => Self::ProjectSaved {
                 info: info.try_into()?,
             },
+            R::SurfaceImageImported(v) => {
+                let info = required(v.info, "image import project info")?.try_into()?;
+                let image = required(v.image, "imported image metadata")?.try_into()?;
+                let layer_id = SurfaceLayerId::new(v.layer_id).map_err(|e| e.to_string())?;
+                super::validate_surface_image_imported_binding(&info, &image, layer_id)?;
+                Self::SurfaceImageImported {
+                    info,
+                    image,
+                    layer_id,
+                }
+            }
+            R::SurfaceImagePrepared(v) => {
+                let project_id = ProjectId::parse(v.project_id).map_err(|e| e.to_string())?;
+                let captured_revision = ProjectRevision(v.captured_revision);
+                let record = required(v.record, "prepared image metadata")?.try_into()?;
+                let resource = artifact_to_view(
+                    required(v.resource, "prepared image resource")?,
+                    MAX_SURFACE_IMAGE_BYTES as u64,
+                )?;
+                super::validate_surface_image_prepared_binding(
+                    &project_id,
+                    captured_revision,
+                    &record,
+                    &resource,
+                )?;
+                Self::SurfaceImagePrepared {
+                    project_id,
+                    captured_revision,
+                    record,
+                    resource,
+                }
+            }
             R::ManufacturingPreflight(v) => Self::ManufacturingPreflight {
                 report: required(v.report, "preflight report")?.try_into()?,
             },
@@ -362,6 +435,40 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
             JobResult::ProjectSaved { info } => R::ProjectSaved(info.try_into()?),
+            JobResult::SurfaceImageImported {
+                info,
+                image,
+                layer_id,
+            } => {
+                super::validate_surface_image_imported_binding(&info, &image, layer_id)?;
+                R::SurfaceImageImported(rpc::SurfaceImageImportedResult {
+                    info: Some(info.try_into()?),
+                    image: Some(image.try_into()?),
+                    layer_id: layer_id.get(),
+                })
+            }
+            JobResult::SurfaceImagePrepared {
+                project_id,
+                captured_revision,
+                record,
+                resource,
+            } => {
+                super::validate_surface_image_prepared_binding(
+                    &project_id,
+                    captured_revision,
+                    &record,
+                    &resource,
+                )?;
+                R::SurfaceImagePrepared(rpc::SurfaceImagePreparedResult {
+                    project_id: project_id.as_str().into(),
+                    captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?),
+                    resource: Some(artifact_from_view(
+                        resource,
+                        MAX_SURFACE_IMAGE_BYTES as u64,
+                    )?),
+                })
+            }
             JobResult::ManufacturingPreflight { report } => {
                 R::ManufacturingPreflight(rpc::ManufacturingPreflightResult {
                     report: Some(report.try_into()?),

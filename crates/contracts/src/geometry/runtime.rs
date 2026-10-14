@@ -129,6 +129,17 @@ pub enum JobResult {
     ProjectSaved {
         info: crate::project::ProjectInfo,
     },
+    SurfaceImageImported {
+        info: crate::project::ProjectInfo,
+        image: crate::surface::SurfaceImageRecord,
+        layer_id: crate::surface::SurfaceLayerId,
+    },
+    SurfaceImagePrepared {
+        project_id: crate::project::ProjectId,
+        captured_revision: crate::project::ProjectRevision,
+        record: crate::surface::SurfaceImageRecord,
+        resource: crate::ArtifactView,
+    },
     ManufacturingPreflight {
         report: crate::manufacturing::PreflightReport,
     },

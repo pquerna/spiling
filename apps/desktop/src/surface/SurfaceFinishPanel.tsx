@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: OSL-3.0
  * Licensed under the Open Software License version 3.0
  */
-import { useEffect, useState, type FormEvent } from "react";
-import type { FaceRef, SurfaceFinish, SurfaceScopeKind } from "@spiling/protocol";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type {
+  FaceRef, ImageReliefParameters, SurfaceFinish, SurfaceImageRecord, SurfaceScopeKind,
+} from "@spiling/protocol";
 import type { SurfaceFinishEdit, WorkbenchState } from "../useWorkbench.ts";
 import "./surface.css";
 
@@ -21,29 +23,55 @@ const cylinderLabels = [
   "Ribs around circumference",
   "Phase (fraction of one rib cycle)",
 ];
+const imageFields = [
+  "depth_mm", "u_repeats", "u_phase_fraction", "z_period_mm", "z_phase_mm",
+  "edge_margin_mm", "vertical_error_mm",
+] as const satisfies readonly (keyof ImageReliefParameters)[];
+const imageLabels = [
+  "Maximum additive depth (mm)", "Repeats across source U (integer)",
+  "U phase (fraction of an image cycle)", "Source Z period (mm)",
+  "Source Z phase (mm)", "Protected planar edge margin (mm; cylinder: 0)",
+  "Layer approximation displacement error (mm)",
+];
 const finishLabels: Record<SurfaceFinish["kind"], string> = {
   smooth: "Smooth",
   vertical_ribs: "Planar vertical ribs",
   cylindrical_ribs: "Cylindrical vertical ribs",
+  image_relief: "Image relief",
 };
 
 export function SurfaceFinishPanel({
   state,
   inspect,
   edit,
+  selectImage,
+  importImage,
+  previewImage,
+  cancel,
 }: {
   state: WorkbenchState;
   inspect(reference: FaceRef | null): Promise<void>;
   edit(command: SurfaceFinishEdit): Promise<void>;
+  selectImage(relativePath?: string): Promise<void>;
+  importImage(reference: FaceRef, scope: SurfaceScopeKind, parameters: ImageReliefParameters): Promise<SurfaceImageRecord>;
+  previewImage(imageHash: string): Promise<void>;
+  cancel(): void;
 }) {
   const [occurrenceId, setOccurrenceId] = useState<number | null>(null);
   const [scope, setScope] = useState<SurfaceScopeKind>("occurrence");
   const [kind, setKind] = useState<SurfaceFinish["kind"]>("vertical_ribs");
   const [values, setValues] = useState(["0.1", "2", "1", "0"]);
   const [cylinderValues, setCylinderValues] = useState(["0.1", "8", "0"]);
+  const [imageValues, setImageValues] = useState(["0.5", "1", "0", "10", "0", "1", "0.05"]);
+  const [imagePath, setImagePath] = useState("");
+  const [storedImageHash, setStoredImageHash] = useState("");
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const project = state.project;
+  const storedImage = project?.surface_overlays.images.find((image) => image.image_hash === storedImageHash);
+  const lastImageHash = project?.surface_overlays.layers.reduce<string | null>(
+    (hash, layer) => layer.finish.kind === "image_relief" ? layer.finish.image_hash : hash, null,
+  ) ?? null;
   const reference = state.inspection?.reference ?? null;
   useEffect(() => {
     if (reference) setOccurrenceId(reference.occurrence_id);
@@ -51,6 +79,7 @@ export function SurfaceFinishPanel({
   useEffect(() => {
     setOccurrenceId(null);
     setMessage("");
+    setStoredImageHash("");
   }, [state.scene?.session_id, state.scene?.revision, state.projectEpoch]);
   const occurrence = state.occurrences.find((row) => row.occurrence_id === occurrenceId);
   const definition = state.definitions.find(
@@ -84,9 +113,65 @@ export function SurfaceFinishPanel({
       setWorking(false);
     }
   }
+  async function chooseImage(relativePath?: string) {
+    setWorking(true);
+    setMessage("");
+    try { await selectImage(relativePath); }
+    catch (error) { setMessage(`Image selection failed: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setWorking(false); }
+  }
+  async function showImage(imageHash: string) {
+    setWorking(true);
+    setMessage("");
+    try {
+      await previewImage(imageHash);
+      setMessage("Canonical captured height image loaded. This is source image data, not a manufactured-shape preview.");
+    } catch (error) {
+      setMessage(`Image preview failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setWorking(false); }
+  }
+  async function applyImage(parameters: ImageReliefParameters) {
+    if (!currentFace) return;
+    setWorking(true);
+    setMessage("");
+    let committed = false;
+    try {
+      const record = await importImage(currentFace, scope, parameters);
+      committed = true;
+      setStoredImageHash(record.image_hash);
+      await previewImage(record.image_hash);
+      setMessage(`Image layer committed using authoritative asset ${record.source_name}. Canonical captured preview loaded; undo is available before Compile.`);
+    } catch (error) {
+      setMessage(`${committed ? "Image layer committed, but preview failed" : "Image import rejected"}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setWorking(false); }
+  }
   function apply(event: FormEvent) {
     event.preventDefault();
     if (!writable || !currentFace) return;
+    if (kind === "image_relief") {
+      if (!storedImage && !state.selectedImage) { setMessage("Choose a new image or an existing captured image first."); return; }
+      if (imageValues.some((value) => value.trim() === "" || !Number.isFinite(Number(value)))) {
+        setMessage("Enter finite values for all seven image mapping controls."); return;
+      }
+      const [depth, repeats, uPhase, period, zPhase, margin, error] = imageValues.map(Number);
+      if (depth! <= 0 || !Number.isInteger(repeats) || repeats! < 1 || repeats! > 256 ||
+          uPhase! < 0 || uPhase! >= 1 || period! <= 0 || zPhase! < 0 || zPhase! >= period! ||
+          margin! < 0 || error! <= 0) {
+        setMessage("Depth, Z period and error must be positive; repeats integer 1–256; U phase [0,1), Z phase [0,period), margin nonnegative.");
+        return;
+      }
+      const parameters: ImageReliefParameters = {
+        depth_mm: depth!, u_repeats: repeats!, u_phase_fraction: uPhase!,
+        z_period_mm: period!, z_phase_mm: zPhase!, edge_margin_mm: margin!, vertical_error_mm: error!,
+      };
+      if (storedImage) {
+        void transact({
+          op: "add_surface_finish", face_ref: currentFace, scope,
+          finish: {kind: "image_relief", image_hash: storedImage.image_hash, parameters},
+        });
+      } else void applyImage(parameters);
+      return;
+    }
     let finish: SurfaceFinish = { kind: "smooth" };
     if (kind === "vertical_ribs") {
       if (values.some((value) => value.trim() === "" || !Number.isFinite(Number(value)))) {
@@ -234,9 +319,10 @@ export function SurfaceFinishPanel({
               <option value="vertical_ribs">Planar vertical ribs</option>
               <option value="cylindrical_ribs">Cylindrical vertical ribs</option>
               <option value="smooth">Smooth override</option>
+              <option value="image_relief">Image relief — PNG / canonical PGM</option>
             </select>
           </label>
-          {kind !== "smooth" && (
+          {kind !== "smooth" && kind !== "image_relief" && (
             <div className="surface-numbers">
               {(kind === "cylindrical_ribs" ? cylinderFields : fields).map((field, index) => (
                 <label key={field}>
@@ -263,8 +349,82 @@ export function SurfaceFinishPanel({
               or helical knurling.
             </p>
           )}
-          <button type="submit" data-testid="surface-apply" disabled={!writable || !currentFace}>
-            Apply — append layer
+          {kind === "image_relief" && (
+            <>
+              <label>
+                Height image
+                <select data-testid="surface-image-asset" value={storedImage?.image_hash ?? ""}
+                  onChange={(event) => setStoredImageHash(event.target.value)}>
+                  <option value="">Import a new image file</option>
+                  {project?.surface_overlays.images.map((image) => (
+                    <option key={image.image_hash} value={image.image_hash}>
+                      Captured: {image.source_name} ({image.width} × {image.height})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {storedImage && <p>Reuse captured samples with these mapping parameters on the selected face. This appends an undoable metadata-only layer; the original image file is not required.</p>}
+              {!storedImage && (
+              <>
+              <div className="geometry-buttons">
+                <button type="button" data-testid="surface-image-select" onClick={() => void chooseImage()}>
+                  Choose PNG / PGM image
+                </button>
+                <span data-testid="surface-image-selection">
+                  {state.selectedImage ? state.selectedImage.label : "No image selected"}
+                </span>
+              </div>
+              {state.runtime?.geometry_debug_enabled && (
+                <details>
+                  <summary>Confined height image fixture admission</summary>
+                  <input data-testid="surface-image-path" value={imagePath}
+                    aria-label="Height image fixture relative path"
+                    onChange={(event) => setImagePath(event.target.value)} />
+                  <button type="button" data-testid="surface-image-debug-select"
+                    disabled={!imagePath} onClick={() => void chooseImage(imagePath)}>
+                    Select fixture image using production token
+                  </button>
+                </details>
+              )}
+              </>
+              )}
+              <div className="surface-numbers">
+                {imageFields.map((field, index) => (
+                  <label key={field}>
+                    {imageLabels[index]}
+                    <input type="number" step={field === "u_repeats" ? "1" : "any"}
+                      data-testid={`surface-${field}`} value={imageValues[index]}
+                      onChange={(event) => setImageValues((old) => old.map(
+                        (value, i) => i === index ? event.target.value : value,
+                      ))} />
+                  </label>
+                ))}
+              </div>
+              <p>
+                Black is zero added height; white is maximum depth. Import image and apply captures
+                normalized immutable samples and appends one undoable layer; its canonical preview
+                appears after authoring, before Compile. No original image path enters the workbench.
+              </p>
+              <p>
+                Mapping is fixed in the source frame, including flipped source Z. Cylinder U starts
+                at source +X and turns right-handed about +Z, independent of native UV/seams.
+                Planar U follows the certified tangent from its canonical lower endpoint.
+                Both U and source Z wrap bilinearly from last to first pixel nodes with no half-pixel
+                shift. Image top points toward +source Z; positive phase advances the sampled coordinate.
+              </p>
+              <p>
+                Z period and phase are physical source millimetres relative to the certified minimum Z.
+                Vertical error bounds layer-approximation displacement, separately from the 0.001 mm XY
+                chord certificate and physical accuracy. Planar margin must be at least two bead widths,
+                with face width greater than four margins; protected bands and smooth end ramps preserve
+                native edges. For a cylinder the unused margin must be zero. Compile owns these hard
+                carrier, process, schedule and support checks; no silent untextured fallback.
+              </p>
+            </>
+          )}
+          <button type="submit" data-testid="surface-apply"
+            disabled={!writable || !currentFace || (kind === "image_relief" && !storedImage && !state.selectedImage)}>
+            {kind === "image_relief" ? storedImage ? "Apply captured image — append layer" : "Import image and apply" : "Apply — append layer"}
           </button>
         </fieldset>
       </form>
@@ -280,6 +440,34 @@ export function SurfaceFinishPanel({
           {message}
         </p>
       )}
+      {state.activeJob && (
+        <div role="status" data-testid="surface-image-progress">
+          {state.activeJob.stage}: {state.activeJob.completed_units}/{state.activeJob.total_units} · {state.activeJob.status}
+          <button type="button" data-testid="surface-image-cancel" onClick={cancel}
+            disabled={state.activeJob.status === "cancelling"}>Cancel native operation</button>
+        </div>
+      )}
+      <h4>Captured height image assets</h4>
+      <p>Preview reads canonical Gray8 bytes from the current project, including fresh read-only opens without the original PNG. It does not preview displaced geometry; Compile and fresh actual-program replay do that.</p>
+      <button type="button" data-testid="surface-image-preview"
+        disabled={!available || !lastImageHash}
+        onClick={() => { if (lastImageHash) void showImage(lastImageHash); }}>
+        Preview last authored captured height image
+      </button>
+      <ul data-testid="surface-images">
+        {project?.surface_overlays.images.map((image) => (
+          <li key={image.image_hash}>
+            <strong>{image.source_name}</strong> · {image.width} × {image.height} · {image.byte_count} B
+            <code>{image.image_hash}</code>
+            <span>Original source SHA-256: {image.source_hash}</span>
+            <button type="button" data-testid={`surface-image-preview-${image.image_hash}`}
+              disabled={!available} onClick={() => void showImage(image.image_hash)}>
+              Preview captured height image
+            </button>
+          </li>
+        ))}
+      </ul>
+      {state.imagePreview && <HeightImagePreview preview={state.imagePreview} />}
       <h4>Authoritative ordered layers</h4>
       <p>
         Enabled definition layers apply first, then enabled occurrence layers; last matching layer
@@ -309,6 +497,14 @@ export function SurfaceFinishPanel({
               <span>
                 Depth {layer.finish.depth_mm} mm · {layer.finish.rib_count} ribs · phase{" "}
                 {layer.finish.phase_fraction} of one rib cycle
+              </span>
+            )}
+            {layer.finish.kind === "image_relief" && (
+              <span>
+                Image {layer.finish.image_hash} · depth {layer.finish.parameters.depth_mm} mm · U repeats{" "}
+                {layer.finish.parameters.u_repeats} · U phase {layer.finish.parameters.u_phase_fraction} · Z period{" "}
+                {layer.finish.parameters.z_period_mm} mm · Z phase {layer.finish.parameters.z_phase_mm} mm · margin{" "}
+                {layer.finish.parameters.edge_margin_mm} mm · vertical error {layer.finish.parameters.vertical_error_mm} mm
               </span>
             )}
             <div className="geometry-buttons">
@@ -350,6 +546,14 @@ export function SurfaceFinishPanel({
               read_only: project?.read_only ?? null,
               working: working || state.busy,
               stale: state.stale,
+              selectedImage: state.selectedImage,
+              previewImageHash: state.imagePreview?.record.image_hash ?? null,
+              imagePreview: state.imagePreview ? {
+                record: state.imagePreview.record,
+                width: state.imagePreview.image.width,
+                height: state.imagePreview.image.height,
+                pixelCount: state.imagePreview.image.pixels.length,
+              } : null,
             },
             null,
             2,
@@ -357,5 +561,35 @@ export function SurfaceFinishPanel({
         </pre>
       </details>
     </section>
+  );
+}
+
+function HeightImagePreview({ preview }: { preview: NonNullable<WorkbenchState["imagePreview"]> }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [canvasError, setCanvasError] = useState("");
+  useEffect(() => {
+    const context = canvas.current?.getContext("2d");
+    if (!context) {
+      setCanvasError("Canonical image decoded, but Canvas 2D is unavailable; no preview was rendered.");
+      return;
+    }
+    setCanvasError("");
+    const { image } = preview;
+    const rgba = context.createImageData(image.width, image.height);
+    for (let i = 0; i < image.pixels.length; i++) {
+      rgba.data[i * 4] = image.pixels[i]!;
+      rgba.data[i * 4 + 1] = image.pixels[i]!;
+      rgba.data[i * 4 + 2] = image.pixels[i]!;
+      rgba.data[i * 4 + 3] = 255;
+    }
+    context.putImageData(rgba, 0, 0);
+  }, [preview]);
+  return (
+    <figure data-testid="surface-image-display">
+      <canvas ref={canvas} width={preview.image.width} height={preview.image.height}
+        data-testid="surface-image-preview-canvas" aria-label={`Canonical height image ${preview.record.source_name}`} />
+      {canvasError && <p role="alert" data-testid="surface-image-canvas-error">{canvasError}</p>}
+      <figcaption>Captured canonical height samples: {preview.record.source_name}; source image top is +source Z, black 0 / white 255. Not manufactured geometry or a printability certificate.</figcaption>
+    </figure>
   );
 }

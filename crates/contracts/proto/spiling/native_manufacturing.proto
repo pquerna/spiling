@@ -302,7 +302,10 @@ message ManufacturingSummary {
   uint32 support_deposition_segments = 7;
   double support_deposited_volume_mm3 = 8;
   double support_filament_length_mm = 9;
+  SurfaceResolutionTotals surface_resolution = 10;
 }
+// Sampled nominal-bead advisory counts, not an emitted-verification certificate.
+message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }
 message VerificationReport {
   bool verified = 1;
   repeated string coverage = 2;

@@ -6,7 +6,7 @@
 //! edge sweep, not whole-capsule Cartesian products. No material is changed.
 use super::MAX_BOOLEAN_PAIRS;
 use crate::{check_cancel, error};
-use geo::MultiPolygon;
+use geo::{MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::{
     MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
 };
@@ -113,19 +113,62 @@ pub(super) fn budget(
     } else {
         &b.0[..]
     };
-    let polygons = || a.0.iter().chain(other.iter());
+    polygon_budget(
+        a.0.iter().chain(other.iter()),
+        &mut 0,
+        MAX_BOOLEAN_PAIRS,
+        cancel,
+    )
+}
+
+/// Charge a sequence of overlays against one ceiling without billing remote
+/// boundary pairs as though every pair intersected at every layer.
+pub(super) fn budget_accumulated(
+    a: &MultiPolygon<f64>,
+    b: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let other = if std::ptr::eq(a, b) {
+        &b.0[..0]
+    } else {
+        &b.0[..]
+    };
+    polygon_budget(a.0.iter().chain(other.iter()), work, 256, cancel)
+}
+
+/// Borrowed required-material pieces share the ordinary Boolean admission proof.
+pub(super) fn budget_parts(
+    parts: &[&Polygon<f64>],
+    other: &MultiPolygon<f64>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    polygon_budget(
+        parts.iter().copied().chain(other.0.iter()),
+        &mut 0,
+        MAX_BOOLEAN_PAIRS,
+        cancel,
+    )
+}
+
+fn polygon_budget<'a>(
+    polygons: impl Iterator<Item = &'a Polygon<f64>> + Clone,
+    work: &mut usize,
+    coarse_pair_limit: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
     let mut count = 0usize;
-    let mut work = 0usize;
     let mut min = [f64::INFINITY; 2];
     let mut max = [f64::NEG_INFINITY; 2];
-    for polygon in polygons() {
+    for polygon in polygons.clone() {
         for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
             count = count
                 .checked_add(ring.0.len().saturating_sub(1))
                 .ok_or_else(|| resource("Boolean boundary count overflow"))?;
             for point in &ring.0 {
                 check_cancel(cancel)?;
-                charge(&mut work, 1)?;
+                charge(work, 1)?;
                 if !point.x.is_finite() || !point.y.is_finite() {
                     return Err(error(
                         ManufacturingErrorCode::UnsupportedGeometry,
@@ -143,11 +186,13 @@ pub(super) fn budget(
         return Ok(());
     }
     let padding = overlay_padding(min, max)?;
-    if count
-        .checked_mul(count)
-        .and_then(|v| v.checked_add(work))
-        .is_some_and(|v| v <= MAX_BOOLEAN_PAIRS)
-    {
+    if let Some(pairs) = count.checked_mul(count).filter(|pairs| {
+        *pairs <= coarse_pair_limit
+            && work
+                .checked_add(*pairs)
+                .is_some_and(|total| total <= MAX_BOOLEAN_PAIRS)
+    }) {
+        charge(work, pairs)?;
         return Ok(()); // Every unordered candidate is covered by this coarse bound.
     }
     if count > MAX_DEPOSITION_SEGMENTS as usize {
@@ -173,11 +218,11 @@ pub(super) fn budget(
         ));
     }
     let mut edges = Vec::with_capacity(count);
-    for polygon in polygons() {
+    for polygon in polygons.clone() {
         for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
             for edge in ring.0.windows(2) {
                 check_cancel(cancel)?;
-                charge(&mut work, 2)?; // Construct the box and its eventual active index.
+                charge(work, 2)?; // Construct the box and its eventual active index.
                 let [p, q] = [edge[0], edge[1]];
                 let lo = [
                     (p.x.min(q.x) - padding).next_down(),
@@ -194,21 +239,21 @@ pub(super) fn budget(
             }
         }
     }
-    sort(&mut edges, &mut work, cancel)?;
+    sort(&mut edges, work, cancel)?;
     let mut active = Vec::<usize>::with_capacity(count);
     for (index, edge) in edges.iter().enumerate() {
         let mut position = 0;
         while position < active.len() {
             check_cancel(cancel)?;
-            charge(&mut work, 1)?; // Includes expiration and every rejected box.
+            charge(work, 1)?; // Includes expiration and every rejected box.
             let previous = &edges[active[position]];
             if previous.max[0] < edge.min[0] {
-                charge(&mut work, 1)?;
+                charge(work, 1)?;
                 active.swap_remove(position);
                 continue;
             }
             if previous.min[1] <= edge.max[1] && edge.min[1] <= previous.max[1] {
-                charge(&mut work, 1)?; // EVERY intra- and cross-operand predicate candidate.
+                charge(work, 1)?; // EVERY intra- and cross-operand predicate candidate.
             }
             position += 1;
         }

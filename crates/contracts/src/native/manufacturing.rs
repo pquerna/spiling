@@ -809,6 +809,11 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
                 support_deposition_segments: value.support_deposition_segments,
                 support_deposited_volume_mm3: value.support_deposited_volume_mm3,
                 support_filament_length_mm: value.support_filament_length_mm,
+                surface_resolution: required(
+                    value.surface_resolution,
+                    "surface resolution totals",
+                )?
+                .try_into()?,
             },
             Self::validate,
         )
@@ -828,6 +833,7 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
             support_deposition_segments: value.support_deposition_segments,
             support_deposited_volume_mm3: value.support_deposited_volume_mm3,
             support_filament_length_mm: value.support_filament_length_mm,
+            surface_resolution: Some(value.surface_resolution.try_into()?),
         })
     }
 }
@@ -1162,6 +1168,7 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                surface_resolution: SurfaceResolutionTotals::empty(),
             },
         };
         let wire = rpc::ManufacturingArtifactRecord::try_from(record.clone()).unwrap();
@@ -1293,5 +1300,35 @@ mod job_wire_tests {
             job.nozzle_temperature_c = f64::NAN;
         }
         assert!(ManufacturingIntent::try_from(invalid).is_err());
+    }
+}
+
+impl TryFrom<rpc::SurfaceResolutionTotals> for SurfaceResolutionTotals {
+    type Error = String;
+    fn try_from(v: rpc::SurfaceResolutionTotals) -> Result<Self, String> {
+        let totals = Self {
+            evaluated_witnesses: v.evaluated_witnesses,
+            resolved: v.resolved,
+            ambiguous: v.ambiguous,
+            below_nominal_resolution: v.below_nominal_resolution,
+            unavailable: v.unavailable,
+            coverage_complete: v.coverage_complete,
+        };
+        totals.validate().map_err(|e| e.to_string())?;
+        Ok(totals)
+    }
+}
+impl TryFrom<SurfaceResolutionTotals> for rpc::SurfaceResolutionTotals {
+    type Error = String;
+    fn try_from(v: SurfaceResolutionTotals) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            evaluated_witnesses: v.evaluated_witnesses,
+            resolved: v.resolved,
+            ambiguous: v.ambiguous,
+            below_nominal_resolution: v.below_nominal_resolution,
+            unavailable: v.unavailable,
+            coverage_complete: v.coverage_complete,
+        })
     }
 }

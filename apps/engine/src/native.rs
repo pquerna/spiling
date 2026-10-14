@@ -20,7 +20,7 @@ use tonic::Status;
 
 type Capture = (SessionId, SceneRevision, ProjectRevision);
 enum Command {
-    Capture(oneshot::Sender<Result<Capture, Status>>),
+    Capture(Option<Control>, oneshot::Sender<Result<Capture, Status>>),
     Execute(Control, oneshot::Sender<Result<Reply, Status>>),
     Start(
         String,
@@ -71,7 +71,12 @@ impl NativeHost {
                     Err(mpsc::RecvTimeoutError::Disconnected) => { let _ = runtime.shutdown(); break; }
                 };
                 match command {
-                    Command::Capture(tx) => { let (scene,project)=runtime.revisions(); let _=tx.send(Ok((runtime.session_id.clone(),scene,project))); }
+                    Command::Capture(command,tx) => {
+                        let result = command.as_ref().map_or(Ok(()), |command| {
+                            runtime.validate_image_admission(command).map_err(|error| domain_tonic(error.into()))
+                        }).map(|()| { let (scene,project)=runtime.revisions(); (runtime.session_id.clone(),scene,project) });
+                        let _=tx.send(result);
+                    }
                     Command::Execute(command,tx) => {
                         let mut reply=runtime.execute(command);
                         let result=decorate(&mut reply,&resources).map(|_|reply);
@@ -125,7 +130,21 @@ impl NativeHost {
     }
     pub async fn capture(&self) -> Result<Capture, Status> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Capture(tx))?;
+        self.send(Command::Capture(None, tx))?;
+        rx.await.map_err(crate::jobs::internal)?
+    }
+    pub async fn capture_admission(&self, command: &Control) -> Result<Capture, Status> {
+        let image = match command {
+            Control::Project(
+                command @ (spiling_contracts::project::ProjectCommand::ImportSurfaceImageFinish {
+                    ..
+                }
+                | spiling_contracts::project::ProjectCommand::GetSurfaceImage { .. }),
+            ) => Some(Control::Project(command.clone())),
+            _ => None,
+        };
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::Capture(image, tx))?;
         rx.await.map_err(crate::jobs::internal)?
     }
     pub async fn execute(&self, command: Control) -> Result<Reply, Status> {
@@ -179,7 +198,7 @@ impl NativeHost {
         &self,
     ) -> Result<oneshot::Receiver<Result<Capture, Status>>, Status> {
         let (tx, rx) = oneshot::channel();
-        self.send(Command::Capture(tx))?;
+        self.send(Command::Capture(None, tx))?;
         Ok(rx)
     }
 }
@@ -261,6 +280,46 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
+    if let geometry::JobResult::SurfaceImagePrepared {
+        project_id,
+        captured_revision,
+        record,
+    } = &private
+    {
+        let asset = runtime
+            .image_publication(id)
+            .ok_or_else(|| Status::internal("ACK surface image bytes missing"))?;
+        if asset.record() != record {
+            return Err(Status::data_loss("ACK surface image metadata mismatch"));
+        }
+        let artifact = jobs.describe_native_artifact(
+            asset.bytes().as_slice(),
+            "image/x-portable-graymap",
+            spiling_contracts::surface::MAX_SURFACE_IMAGE_BYTES as u64,
+        )?;
+        let resource = view(&artifact)?;
+        spiling_contracts::native::validate_surface_image_prepared_binding(
+            project_id,
+            *captured_revision,
+            record,
+            &resource,
+        )
+        .map_err(Status::data_loss)?;
+        let result = spiling_contracts::geometry::JobResult::SurfaceImagePrepared {
+            project_id: project_id.clone(),
+            captured_revision: *captured_revision,
+            record: record.clone(),
+            resource,
+        };
+        jobs.native_finish(name, Ok(result), vec![(artifact, asset.bytes().as_slice())])?;
+        runtime.release_image_publication(id);
+        return Ok(true);
+    }
+    if matches!(&private, geometry::JobResult::SurfaceImageImported { .. }) {
+        let result = public_result(private, resources, None)?;
+        jobs.native_finish(name, Ok(result), vec![])?;
+        return Ok(true);
+    }
     if matches!(&private, geometry::JobResult::ManufacturingPreflight { .. }) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
@@ -453,6 +512,20 @@ fn public_result(
         geometry::JobResult::Scene { summary } => Public::Scene { summary },
         geometry::JobResult::Section { artifact_id } => Public::Section { artifact_id },
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
+        geometry::JobResult::SurfaceImageImported {
+            info,
+            image,
+            layer_id,
+        } => Public::SurfaceImageImported {
+            info,
+            image,
+            layer_id,
+        },
+        geometry::JobResult::SurfaceImagePrepared { .. } => {
+            return Err(Status::internal(
+                "surface image requires ACK-bound blob publication",
+            ));
+        }
         geometry::JobResult::ManufacturingPreflight { report } => {
             Public::ManufacturingPreflight { report }
         }

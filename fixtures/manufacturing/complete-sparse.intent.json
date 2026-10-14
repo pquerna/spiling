@@ -1,8 +1,8 @@
 {
   "printer": {
-    "schema_version": 4,
+    "schema_version": 5,
     "id": "software-marlin2-reference",
-    "revision": "3",
+    "revision": "4",
     "name": "Complete Marlin 2 software reference — physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {

@@ -83,6 +83,7 @@ fn candidate(
     field: &RibField,
     work: &mut usize,
     cancel: &AtomicBool,
+    retain_parameters: bool,
 ) -> Result<Option<Chain>, ManufacturingError> {
     let count = ring.0.len() - 1;
     let edges = (end + count - start) % count;
@@ -97,7 +98,8 @@ fn candidate(
     if !square.is_finite() || square <= 0.0 {
         return Ok(None);
     }
-    let mut parameters = Vec::with_capacity(edges + 1);
+    let mut parameters = Vec::with_capacity(if retain_parameters { edges + 1 } else { 0 });
+    let mut previous_parameter = None;
     for offset in 0..=edges {
         check_cancel(cancel)?;
         charge(work, 1)?;
@@ -112,9 +114,7 @@ fn candidate(
         if !parameter.is_finite()
             || parameter < 0.0
             || parameter > field.width
-            || parameters
-                .last()
-                .is_some_and(|previous| parameter <= *previous)
+            || previous_parameter.is_some_and(|previous| parameter <= previous)
         {
             return Ok(None);
         }
@@ -141,7 +141,10 @@ fn candidate(
                 return Ok(None);
             }
         }
-        parameters.push(parameter);
+        previous_parameter = Some(parameter);
+        if retain_parameters {
+            parameters.push(parameter);
+        }
     }
     Ok(Some(Chain {
         polygon,
@@ -157,52 +160,93 @@ fn matched_chain(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Chain, ManufacturingError> {
-    let lo = field.point(0.0, 0.0);
-    let hi = field.point(field.width, 0.0);
     let mut found = None;
     for (polygon, material) in source.0.iter().enumerate() {
-        if material.signed_area() <= 0.0 {
-            return Err(unsupported(
-                &field.face_id,
-                "native outer ring does not have material-left winding",
-            ));
-        }
-        let ring = material.exterior();
-        let mut lo_index = None;
-        let mut hi_index = None;
-        for (index, point) in ring.0[..ring.0.len() - 1].iter().enumerate() {
-            check_cancel(cancel)?;
-            charge(work, 1)?;
-            if matches(*point, lo, field.width) && lo_index.replace(index).is_some() {
+        if let Some(chain) = matched_polygon(material, polygon, field, true, work, cancel)? {
+            if found.is_some() {
                 return Err(unsupported(
                     &field.face_id,
-                    "certified native face start has ambiguous source samples",
+                    "certified face does not match one unique full-span sampled exterior chain",
                 ));
             }
-            if matches(*point, hi, field.width) && hi_index.replace(index).is_some() {
-                return Err(unsupported(
-                    &field.face_id,
-                    "certified native face end has ambiguous source samples",
-                ));
-            }
-        }
-        if let (Some(lo), Some(hi)) = (lo_index, hi_index) {
-            for (start, end, forward) in [(lo, hi, true), (hi, lo, false)] {
-                if let Some(chain) =
-                    candidate(ring, polygon, start, end, forward, field, work, cancel)?
-                {
-                    if found.is_some() {
-                        return Err(unsupported(
-                            &field.face_id,
-                            "certified face does not match one unique full-span sampled exterior chain",
-                        ));
-                    }
-                    found = Some(chain);
-                }
-            }
+            found = Some(chain);
         }
     }
     found.ok_or_else(|| unsupported(&field.face_id, "certified full-span native endpoints do not bound a unique monotone supporting-face chain"))
+}
+
+fn matched_polygon(
+    material: &Polygon<f64>,
+    polygon: usize,
+    field: &RibField,
+    retain_parameters: bool,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Option<Chain>, ManufacturingError> {
+    if material.signed_area() <= 0.0 {
+        return Err(unsupported(
+            &field.face_id,
+            "native outer ring does not have material-left winding",
+        ));
+    }
+    let ring = material.exterior();
+    if ring.0.len() < 4 || ring.0.first() != ring.0.last() {
+        return Ok(None);
+    }
+    let lo = field.point(0.0, 0.0);
+    let hi = field.point(field.width, 0.0);
+    let mut lo_index = None;
+    let mut hi_index = None;
+    for (index, point) in ring.0[..ring.0.len() - 1].iter().enumerate() {
+        check_cancel(cancel)?;
+        charge(work, 1)?;
+        if matches(*point, lo, field.width) && lo_index.replace(index).is_some() {
+            return Err(unsupported(
+                &field.face_id,
+                "certified native face start has ambiguous source samples",
+            ));
+        }
+        if matches(*point, hi, field.width) && hi_index.replace(index).is_some() {
+            return Err(unsupported(
+                &field.face_id,
+                "certified native face end has ambiguous source samples",
+            ));
+        }
+    }
+    let mut found = None;
+    if let (Some(lo), Some(hi)) = (lo_index, hi_index) {
+        for (start, end, forward) in [(lo, hi, true), (hi, lo, false)] {
+            if let Some(chain) = candidate(
+                ring,
+                polygon,
+                start,
+                end,
+                forward,
+                field,
+                work,
+                cancel,
+                retain_parameters,
+            )? {
+                if found.is_some() {
+                    return Err(unsupported(
+                        &field.face_id,
+                        "certified face does not match one unique full-span sampled exterior chain",
+                    ));
+                }
+                found = Some(chain);
+            }
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn owns_native_island(
+    material: &Polygon<f64>,
+    field: &RibField,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    Ok(matched_polygon(material, 0, field, false, work, cancel)?.is_some())
 }
 
 // This predicate is exact for the stored source coordinates. A native vertex's
@@ -363,6 +407,7 @@ fn certify_collar(
 fn replacement(
     source: &MultiPolygon<f64>,
     field: &RibField,
+    sample: f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Replacement, ManufacturingError> {
@@ -374,7 +419,7 @@ fn replacement(
         field.normal[1] / normal_length,
     ];
     certify_collar(source, field, &chain, normal, work, cancel)?;
-    let mut nodes = Vec::with_capacity(chain.parameters.len() + field.samples + 1);
+    let mut nodes = Vec::with_capacity(chain.parameters.len() + field.sample_points());
     for (offset, parameter) in chain.parameters.iter().enumerate() {
         nodes.push(Node {
             parameter: *parameter,
@@ -389,12 +434,87 @@ fn replacement(
             native: None,
         });
     }
+    if let Some(image) = &field.image {
+        let mut events = Vec::new();
+        image
+            .field()?
+            .append_u_events(0.0, 1.0, &mut events, field.sample_points(), cancel)
+            .map_err(super::image::map_error)?;
+        for u in events {
+            let s = field.margin + u * (field.width - 2.0 * field.margin);
+            nodes.push(Node {
+                parameter: if chain.forward { s } else { field.width - s },
+                native: None,
+            });
+        }
+        for s in [
+            field.margin,
+            2.0 * field.margin,
+            field.width - 2.0 * field.margin,
+            field.width - field.margin,
+        ] {
+            nodes.push(Node {
+                parameter: if chain.forward { s } else { field.width - s },
+                native: None,
+            });
+        }
+    }
     nodes.sort_by(|a, b| {
         a.parameter
             .total_cmp(&b.parameter)
             .then(b.native.is_some().cmp(&a.native.is_some()))
     });
     nodes.dedup_by(|a, b| a.parameter == b.parameter); // equal uniform/native parameter uses the native anchor
+    if field.image.is_some() {
+        let original = nodes.len();
+        for index in 0..original - 1 {
+            check_cancel(cancel)?;
+            let a = nodes[index].parameter;
+            let b = nodes[index + 1].parameter;
+            let (lo, hi) = if chain.forward {
+                (a, b)
+            } else {
+                (field.width - b, field.width - a)
+            };
+            if lo < field.margin || hi > field.width - field.margin || lo == hi {
+                continue;
+            }
+            let inset = (hi - lo) / 67_108_864.0;
+            let left = field.image_piece_derivative(lo + inset, lo, hi, sample);
+            let right = field.image_piece_derivative(hi - inset, lo, hi, sample);
+            if left * right >= 0.0 {
+                continue;
+            }
+            charge(work, 64)?;
+            let (mut low, mut high) = (lo, hi);
+            for _ in 0..64 {
+                let middle = low + (high - low) / 2.0;
+                let derivative = field.image_piece_derivative(middle, lo, hi, sample);
+                if derivative.signum() == left.signum() {
+                    low = middle
+                } else {
+                    high = middle
+                }
+            }
+            let s = low + (high - low) / 2.0;
+            if nodes.len() >= chain.parameters.len() + field.sample_points() {
+                return Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "image extrema partition exceeds admitted samples",
+                ));
+            }
+            nodes.push(Node {
+                parameter: if chain.forward { s } else { field.width - s },
+                native: None,
+            });
+        }
+        nodes.sort_by(|a, b| {
+            a.parameter
+                .total_cmp(&b.parameter)
+                .then(b.native.is_some().cmp(&a.native.is_some()))
+        });
+        nodes.dedup_by(|a, b| a.parameter == b.parameter);
+    }
     let mut points = Vec::with_capacity(nodes.len());
     let full_start = chain.vertex(ring, 0);
     let full_end = chain.vertex(ring, chain.edges);
@@ -415,7 +535,7 @@ fn replacement(
         } else {
             field.width - node.parameter
         };
-        let depth = field.displacement(s);
+        let depth = field.displacement(s, sample);
         let edge = Line::new(
             chain.vertex(ring, interval),
             chain.vertex(ring, interval + 1),
@@ -505,9 +625,11 @@ pub(super) fn realize(
     retained: usize,
     work: &mut usize,
     cancel: &AtomicBool,
+    policy: super::RealizationPolicy,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     if !fields
         .iter()
+        .filter(|field| policy.includes(field))
         .any(|field| matches!(&field.shape, PreparedShape::Planar(_)))
     {
         return Ok(source);
@@ -515,14 +637,15 @@ pub(super) fn realize(
     let source_points = region::point_count(&source);
     let profile_points = fields
         .iter()
+        .filter(|field| policy.includes(field))
         .filter_map(|field| match &field.shape {
             PreparedShape::Planar(field) => Some(field.sample_points()),
             PreparedShape::Cylindrical(_) => None,
         })
         .sum::<usize>();
     retained
-        .checked_add(6 * source_points)
-        .and_then(|v| v.checked_add(4 * profile_points))
+        .checked_add(14 * source_points)
+        .and_then(|v| v.checked_add(8 * profile_points))
         .filter(|v| *v <= MAX_DEPOSITION_SEGMENTS as usize)
         .ok_or_else(|| {
             error(
@@ -531,19 +654,27 @@ pub(super) fn realize(
             )
         })?;
     let source_area = source.unsigned_area();
-    let mut replacements = Vec::<Replacement>::with_capacity(fields.len());
-    for field in fields {
+    let selected_fields = fields.iter().filter(|field| policy.includes(field)).count();
+    let mut replacements = Vec::<Replacement>::with_capacity(selected_fields);
+    for field in fields.iter().filter(|field| policy.includes(field)) {
         let PreparedShape::Planar(field) = &field.shape else {
             continue;
         };
         check_cancel(cancel)?;
+        if field
+            .image
+            .as_ref()
+            .is_some_and(|image| image.zero_row(sample))
+        {
+            continue;
+        }
         if sample <= field.bounds.min[2] || sample >= field.bounds.max[2] {
             return Err(unsupported(
                 &field.face_id,
                 "section lies outside the certified full-height rib interval",
             ));
         }
-        let next = replacement(&source, field, work, cancel)?;
+        let next = replacement(&source, field, sample, work, cancel)?;
         let edge_count = source.0[next.polygon].exterior().0.len() - 1;
         for previous in &replacements {
             if previous.polygon == next.polygon {
@@ -563,6 +694,9 @@ pub(super) fn realize(
             }
         }
         replacements.push(next);
+    }
+    if replacements.is_empty() {
+        return Ok(source);
     }
     replacements.sort_by_key(|r| (r.polygon, r.start));
     let mut replacements = replacements.into_iter();
@@ -661,4 +795,72 @@ pub(super) fn realize(
         ));
     }
     Ok(result)
+}
+
+/// Lift a diagnostic witness through the SAME native-edge evaluator/rounding
+/// predicates as construction; no second realized polygon or erosion is built.
+pub(super) fn witness(
+    field: &RibField,
+    ring: &LineString<f64>,
+    point: Coord<f64>,
+    sample: f64,
+    cancel: &AtomicBool,
+) -> Result<Option<(Coord<f64>, f64)>, ManufacturingError> {
+    let s = (point.x - field.origin[0]) * field.horizontal[0]
+        + (point.y - field.origin[1]) * field.horizontal[1];
+    let count = ring.0.len().saturating_sub(1);
+    for (index, edge) in ring.0.windows(2).enumerate() {
+        check_cancel(cancel)?;
+        let projected = |p: Coord<f64>| {
+            (p.x - field.origin[0]) * field.horizontal[0]
+                + (p.y - field.origin[1]) * field.horizontal[1]
+        };
+        let distance = |p: Coord<f64>| {
+            (p.x - field.origin[0]) * field.normal[0] + (p.y - field.origin[1]) * field.normal[1]
+        };
+        if distance(edge[0]).abs() > FRAME_MM || distance(edge[1]).abs() > FRAME_MM {
+            continue;
+        }
+        let a = projected(edge[0]);
+        let b = projected(edge[1]);
+        if a == b || s < a.min(b) - FRAME_MM || s > a.max(b) + FRAME_MM {
+            continue;
+        }
+        let t = ((s - a) / (b - a)).clamp(0.0, 1.0);
+        let source = if t == 0.0 {
+            edge[0]
+        } else if t == 1.0 {
+            edge[1]
+        } else {
+            base(edge[0], edge[1], t)
+        };
+        let depth = field.displacement(s, sample);
+        if depth == 0.0 {
+            return Ok(Some((source, index as f64 + t)));
+        }
+        let normal_length = field.normal[0].hypot(field.normal[1]);
+        let normal = [
+            field.normal[0] / normal_length,
+            field.normal[1] / normal_length,
+        ];
+        let own = Line::new(edge[0], edge[1]);
+        let adjacent = if t == 0.0 {
+            Line::new(ring.0[(index + count - 1) % count], edge[0])
+        } else if t == 1.0 {
+            Line::new(edge[1], ring.0[(index + 2) % count])
+        } else {
+            own
+        };
+        let lifted = round_outward(
+            Coord {
+                x: source.x + depth * normal[0],
+                y: source.y + depth * normal[1],
+            },
+            &[own, adjacent],
+            normal,
+            field,
+        )?;
+        return Ok(Some((lifted, index as f64 + t)));
+    }
+    Ok(None)
 }

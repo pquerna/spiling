@@ -62,6 +62,8 @@ struct Scene {
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
+    surface_images:
+        BTreeMap<spiling_contracts::geometry::SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
 impl Scene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
@@ -73,6 +75,7 @@ impl Scene {
         Self {
             id: ProjectId::default(),
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+            surface_images: BTreeMap::new(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
                 provenance,
@@ -104,6 +107,7 @@ impl Scene {
             occurrences: &self.occurrences,
             intent,
             surface_overlays: &self.surface_overlays,
+            surface_images: &self.surface_images,
         }
     }
 }

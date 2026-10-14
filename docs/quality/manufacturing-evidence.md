@@ -43,17 +43,170 @@ or swept-bead physics. Physical qualification remains open until the frozen
 configuration passes supervised measurements; the workbench has no execution
 connector and must not infer permission from a verified report.
 
-## Cylindrical finish and shared construction — surface 2 / planner 5
+## Spatial image relief — project 4 / surface 3 / planner 6
+
+**Software workflow gate passed:** genuine PNG import and source-local U/Z
+mapping on native planar and full-cylinder carriers, immutable captured images,
+ordinary walls/fill/skin/support, G-code and independent actual-program replay,
+history/save, source deletion, stored-image remapping and fresh read-only
+preview/export. Physical printer, GPU/picking/dialog and packaged-platform gates
+remain open. No arbitrary freeform carrier, brush/material painting, fuzzy skin,
+helical/crossed texture, branching support or fin planner is claimed.
+
+This implementation is based on public main `3a4011a`; its reproducible source
+is the commit containing this section. The accepted
+[mini-RFC](../adr/003-spatial-image-relief.md) preceded implementation and was
+iterated against independent review and actual failures. Environment:
+Linux7.0.14-23-pve x64, Rust1.99.0 (`b940084d7`,2026-09-28), Node24.15.0,
+pnpm10.32.1. Monstertruck remains
+`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Current identities are project4,
+surface3, manufacturing5, planner6, emitter/verifier4 and SPLR3. Old formats
+have no compatibility reader.
+
+### Frozen inputs and procedure
+
+| Input | SHA-256 |
+|---|---|
+| `fixtures/geometry/box-mm.step` | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
+| `fixtures/geometry/independent-exporters/occt-cylinder-mm.step` | `21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a` |
+| `fixtures/manufacturing/image-relief.pattern.json` | `a2bc3a7ece26cdcb15f9819148d78de1df9ca75014b418ec8d857ad279eace0b` |
+| `fixtures/manufacturing/solid-fill.intent.json` | `f0638ecdadb8b50e85af8af4c8c8da26aaa61d9e6972ceee67de14f853448d4f` |
+| `fixtures/manufacturing/complete-sparse.intent.json` | `b91e7054907216e4ea6ecaf472cadeea950fb20e642586d4be15815893918c77` |
+
+The CEF runner encodes the checked-in8×8 pattern as a genuine PNG. Canonical
+Gray8 PGM is75 bytes, SHA-256
+`c33953fe2846c40a4d81b0c84a9eca0fba830575592e4c689aecd5befb16da99`;
+source PNG SHA-256 is
+`5437a77302079c7223693deb4ac71d261f6fb3029b84f048057afe8b1d04aae0`.
+Mapping is depth0.35mm, U repeat1/phase0.125, Z period7.3mm/phase0,
+vertical error0.05mm, planar margin1mm or cylinder margin0.
+
+Run the resource-capped native/CEF procedures in
+[development.md](development.md). Actual CLI integration cases are
+`planar_image_relief_survives_source_deletion_and_fresh_readonly_retrieval`
+and `cylindrical_image_relief_survives_source_deletion_and_fresh_readonly_retrieval`
+in `apps/cli/tests/project.rs` (ignored real-child scenarios, explicitly run).
+Their unchanged demanding4×32 asymmetric PNG uses depth0.08mm, U repeat2/
+phase0.137, Z period3.7mm/phase0.213 and error0.01mm; rows include a black
+interval and a narrow bright band. Both workflows passed. The final cylinder
+case took68.87s, peak84.6MiB.
+
+Actual CEF `image-relief-planar` and `image-relief` scenarios exercised the
+production controls/native bridge, canonical Canvas pixels, Undo/Redo, PNG
+deletion followed by stored-image remapping, Compile, fresh ReportAndMotion,
+cancellation, save/export, STEP deletion, read-only reopen, engine restart and
+native-window shutdown. The planar diagnostic passed in17.017s/857.5MiB.
+The final cylinder diagnostic passed in63.295s/672.7MiB using owned Linux app
+data; native close exited both application and engine. The fresh read-only
+canonical image and disabled mutation controls were visually inspected.
+CEF used explicit unsandboxed/SwiftShader/no-GPU diagnostic settings. GTK/DBus
+and GPU-process-exit11 messages were present; this proves the actual panel and
+2D Canvas workflow, not hardware rendering, picking, dialogs or normal-sandbox
+packaging.
+
+### Observed final cylindrical CEF output
+
+| Property | Observed value |
+|---|---|
+| Immutable bundle SHA-256 | `7f8a2e88de239f465512f48d56f8f5ac6700173e32e415e46c067de0c781723f` |
+| Bundle bytes | 2223740 |
+| Layers / paths / object deposition segments | 44 /425 /17600 |
+| Nominal object volume | 343.65968622023036mm³ |
+| Filament | 142.87709467mm |
+| Replay events / packed bytes | 18813 /903120 |
+| Maximum decoded position / extrusion error | 7.011189039420439e-7mm /9.966481183745768e-9mm |
+| Nominal surface witnesses | 10850 ambiguous;0 resolved/below-resolution/unavailable; coverage complete |
+
+These are one captured artifact's values, not universal deterministic hashes
+across new project IDs or native sampling choices. Ambiguous surface witnesses
+are honest bounded-error advisories, not physical feature-survival certificates.
+
+### Geometry, support and interface proof
+
+`steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_blocks_it`
+passed through public native compilation and independent replay for both solid
+box and protected-hole/sparse objects: disabled support refuses; enabled support
+deposits real bed-anchored Support and SupportInterface; changing only lower
+image rows blocks the previously usable upper corridor. Final run127.54s,
+peak8.7MiB. Parameters remain depth5mm, protected margin1.2mm,2×16 image,
+Z period32mm/phase1.4mm, vertical error0.8mm, nominal height/bead0.6mm,
+support density1, XY/Z gaps0.2mm and interface0.8mm. All relevant lower D
+participates; no last-N-mm shortcut or native-M anchor substitution exists.
+Z gap remains a conservative minimum, not an exact physical attachment claim.
+
+Focused properties passed for periodic seam roundoff, PNG/canonical limits,
+source retention/protected holes/actual native cylinder chords, asymmetric
+phase placement and non-grid vertical bands, requested versus mandatory mixed
+image/rib material, physical skin horizons with changing outer rings/holes,
+charged range-cache eviction and pinned operands, simultaneous classification
+scratch, balanced event scheduling/decimal shifted-bed arithmetic, and shared
+support-role transitions. The three new private support raster properties
+passed; existing native cantilever/separate-volume, exact floating contact-gap
+and blocked-plus-valid-component regressions also passed. The obsolete floating
+test's fixed first-object-layer0.4mm grid pin was deleted; physical interface
+height0.8mm and contact gap0.2mm checks remain unchanged.
+
+Actual engine cases passed for atomic image history/read-only retrieval,
+error/cancel/stale non-mutation, canonical-budget admission, and
+`spatial_image_compilation_captures_self_contained_content_and_fresh_replay`
+(2.70s actual-child runtime). Core's initial71-case run found two failures;
+both were fixed and their targeted regressions passed. Contract generation,
+generated drift checking, protocol canonical-image checks, desktop frontend
+build and native desktop build were exercised successfully. No full workspace,
+release or packaging sweep was run.
+
+### Failures corrected without weakening gates
+
+- Cylindrical boundary proof and repeated skin horizons exhausted cumulative
+  work. Exact boundary broad-phase admission, padded Boolean candidate accounting
+  and immutable final-D aligned-range reuse remove redundant work; the20M cap
+  is unchanged.
+- Cache retention and classified scratch exhausted staging. Reclaim only
+  unpinned optional ranges, retain/count live operands, freeze the support cache
+  pool and include all live support/query/classification geometry exactly once.
+  Geometry/segment limits remain unchanged.
+- A global nominal-grid/event union created needless thin slabs and zero E8
+  extrusion. Balanced subdivision of genuine event intervals removes those
+  artificial slivers; exact events, native minimum thickness, XYZ6/E8 precision,
+  strict bead height and independent positive-deposition checks remain intact.
+- Independent support/interface erosion erased a0.425mm role strip and left a
+  real15.924mm unanchored stroke. Erode physical S once, assign centerline roles
+  across I without fake seam walls, and prove staged axes against actual prior
+  deposition. The same native box/hole fixture now passes without changing its
+  parameters or bridge/clearance/anchor limits.
+- Mixed image/rib admission had accidentally made ribs on another face advisory.
+  Required C now preserves native M plus every non-image finish addition; only
+  image-added sub-bead detail is advisory, with unchanged reachability.
+- Tiny negative periodic coordinates rounded to the wrapped image extent.
+  Modular integer-node addressing fixes seam indexing without clamping the field.
+- Vec geometric growth and retained source-history expectations failed Core
+  limits; exact admission/capacity handling and real pinned-history refusal were
+  corrected, not bypassed.
+- CEF's exact baseline-area assertion compared different certified native sample
+  planes. The oracle now uses the declared source-circle sampling certificate
+  and invariant captured source accounting, not bitwise cross-sample geometry.
+- Repeated CEF runs filled the operator's existing128-operation durable ledger.
+  Linux smoke runs now isolate owned app data while preserving intra-run restart
+  history; the operator ledger and admission cap were not cleared or increased.
+
+Native commands ran serially with one Cargo/Rayon/test worker, enforced3GiB
+RAM/128MiB swap/64 tasks; CEF separately used1536MiB/128MiB/256 tasks.
+Largest observed build peak was1.3GiB (native desktop); no OOM was observed.
+Final warm target10797400KiB (10.30GiB) remains below the11GiB ceiling;
+filesystem headroom was1706MiB before owned failed-smoke cleanup. No target
+clean, second target, release build or unrelated data deletion was needed.
+
+## Historical cylindrical checkpoint `3a4011a` — surface 2 / planner 5
 
 **Software gate passed:** native full-cylinder face authoring through actual CLI
 and CEF, ordinary manufacturing, fresh independent actual-program replay,
 history, durable save/source removal/read-only reopen and immutable export.
-This change is based on public main `0b8a09b`; its reproducible implementation
-is the commit containing this section. Rust 1.99.0 (`b940084d7`), Linux x64
-7.0.14-23-pve, Node24.15.0 and pnpm10.32.1 were exercised. Monstertruck remains
-`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Current identities are project3,
-surface2, manufacturing4, planner5, emitter/verifier4 and SPLR3; old
-surface1/planner4 inputs are intentionally refused rather than migrated.
+This checkpoint was based on public main `0b8a09b` and recorded in `3a4011a`.
+Rust 1.99.0 (`b940084d7`), Linux x64 7.0.14-23-pve, Node24.15.0 and
+pnpm10.32.1 were exercised. Monstertruck was pinned to
+`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Checkpoint identities were project3,
+surface2, manufacturing4, planner5, emitter/verifier4 and SPLR3; its measured
+results below are historical, not current schema support claims.
 
 The [reviewed mini-RFC](../adr/002-cylindrical-grip-ribs.md) preceded code and
 was revised after independent geometry/data-flow review. This is not an

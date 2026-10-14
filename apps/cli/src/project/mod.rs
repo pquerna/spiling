@@ -8,7 +8,8 @@ use crate::{
     set_once,
 };
 use spiling_contracts::surface::{
-    MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId, SurfaceScopeKind,
+    ImageReliefParameters, MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId,
+    SurfaceScopeKind,
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
 use spiling_engine_client::{EngineClient, prepare_bed_pose as bed_pose};
@@ -62,6 +63,14 @@ enum Operation {
     PrepareBed(OccurrenceId, bool),
     Remove(OccurrenceId),
     SurfaceFinish(OccurrenceId, FaceId, SurfaceScopeKind, SurfaceFinish),
+    SurfaceImage(
+        OccurrenceId,
+        FaceId,
+        SurfaceScopeKind,
+        NativePath,
+        ImageReliefParameters,
+    ),
+    ExportSurfaceImage(SourceHash),
     RemoveSurfaceFinish(SurfaceLayerId),
     SurfaceFinishEnabled(SurfaceLayerId, bool),
     Intent(Arc<ManufacturingIntent>),
@@ -118,6 +127,7 @@ pub fn parse(
     let mut output = None;
     let mut manufacturing_output = None;
     let mut replay_output = None;
+    let mut surface_image_output = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -171,6 +181,41 @@ pub fn parse(
                 let finish: SurfaceFinish = serde_json::from_str(&json)?;
                 finish.validate()?;
                 operations.push(Operation::SurfaceFinish(occurrence, face, scope, finish));
+            }
+            Some("--surface-image") => {
+                let occurrence =
+                    OccurrenceId::new(text(&mut args, "--surface-image occurrence")?.parse()?)?;
+                let face = FaceId::parse(text(&mut args, "--surface-image face")?)?;
+                let scope = match text(&mut args, "--surface-image scope")?.as_str() {
+                    "definition" => SurfaceScopeKind::Definition,
+                    "occurrence" => SurfaceScopeKind::Occurrence,
+                    _ => {
+                        return Err("--surface-image scope must be definition or occurrence".into());
+                    }
+                };
+                let source = path(&mut args, "--surface-image source")?;
+                let json = text(&mut args, "--surface-image parameters JSON")?;
+                if json.len() > MAX_SURFACE_DOCUMENT_BYTES {
+                    return Err("surface image parameters exceed the document byte limit".into());
+                }
+                let parameters: ImageReliefParameters = serde_json::from_str(&json)?;
+                parameters.validate()?;
+                operations.push(Operation::SurfaceImage(
+                    occurrence, face, scope, source, parameters,
+                ));
+            }
+            Some("--surface-image-out") => {
+                let hash = SourceHash::parse(text(&mut args, "--surface-image-out hash")?)?;
+                let destination = args
+                    .next()
+                    .ok_or("--surface-image-out requires a native destination")?;
+                NativePath::from_os_str(&destination)?;
+                set_once(
+                    &mut surface_image_output,
+                    PathBuf::from(destination),
+                    "--surface-image-out",
+                )?;
+                operations.push(Operation::ExportSurfaceImage(hash));
             }
             Some("--remove-surface-finish") => {
                 operations.push(Operation::RemoveSurfaceFinish(SurfaceLayerId::new(
@@ -256,6 +301,7 @@ pub fn parse(
                         | Operation::Verify
                         | Operation::ExportManufacturing
                         | Operation::ExportReplay
+                        | Operation::ExportSurfaceImage(_)
                 )
             }))
     {
@@ -300,6 +346,7 @@ pub fn parse(
             output,
             manufacturing_output,
             replay_output,
+            surface_image_output,
         },
         engine: engine.unwrap_or(
             env::current_exe()?
@@ -454,6 +501,7 @@ pub async fn run(
     output: Option<&mut OutputDirectory>,
     manufacturing_output: Option<&mut OutputDirectory>,
     replay_output: Option<&mut OutputFile>,
+    surface_image_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     match execute(
         client,
@@ -462,6 +510,7 @@ pub async fn run(
         output,
         manufacturing_output,
         replay_output,
+        surface_image_output,
     )
     .await
     {
@@ -490,6 +539,7 @@ async fn execute(
     output: Option<&mut OutputDirectory>,
     mut manufacturing_output: Option<&mut OutputDirectory>,
     mut replay_output: Option<&mut OutputFile>,
+    mut surface_image_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     let session = client.hello().session_id.clone();
     let summary = geometry::scene(client, &session).await?;
@@ -522,11 +572,120 @@ async fn execute(
     let mut verification = None;
     let mut export_evidence = None;
     let mut replay_evidence = None;
+    let mut image_evidence = None;
     let mut preflight_report = None;
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         match operation {
+            Operation::SurfaceImage(occurrence_id, face_id, scope, source, parameters) => {
+                label = "surface_image";
+                let summary = geometry::scene(client, &session).await?;
+                let (_, occurrences) = geometry::records(client, &summary).await?;
+                let occurrence = occurrences
+                    .iter()
+                    .find(|row| row.occurrence_id == occurrence_id)
+                    .ok_or("surface target occurrence is not in the current project")?;
+                let reference = FaceRef {
+                    session_id: session.clone(),
+                    scene_revision: summary.revision,
+                    occurrence_id,
+                    definition_id: occurrence.definition_id.clone(),
+                    face_id,
+                };
+                match geometry::control(
+                    client,
+                    GeometryCommand::InspectFace {
+                        reference: reference.clone(),
+                    },
+                )
+                .await?
+                {
+                    GeometryResponse::FaceInspection { inspection }
+                        if inspection.reference == reference => {}
+                    _ => return Err("surface target native face inspection mismatch".into()),
+                }
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::ImportSurfaceImageFinish {
+                        session_id: session.clone(),
+                        base_revision,
+                        reference,
+                        scope,
+                        source,
+                        parameters,
+                    })
+                    .await?;
+                match response {
+                    ProjectResponse::OperationAccepted { operation } => {
+                        match geometry::wait_operation(client, &session, operation).await? {
+                            JobResult::SurfaceImageImported {
+                                info: receipt,
+                                image,
+                                layer_id,
+                            } => {
+                                image.validate()?;
+                                if info(client).await? != receipt {
+                                    return Err("surface image receipt disagrees with authoritative project".into());
+                                }
+                                image_evidence = Some(serde_json::json!({
+                                    "project": receipt, "image": image, "layer_id": layer_id,
+                                }));
+                            }
+                            _ => return Err("unexpected surface image import result".into()),
+                        }
+                    }
+                    _ => return Err("surface image import did not return an operation".into()),
+                }
+            }
+            Operation::ExportSurfaceImage(image_hash) => {
+                label = "surface_image_export";
+                let captured = info(client).await?;
+                let response = client
+                    .project(ProjectCommand::GetSurfaceImage {
+                        session_id: session.clone(),
+                        base_revision: captured.revision,
+                        image_hash: image_hash.clone(),
+                    })
+                    .await?;
+                let ProjectResponse::OperationAccepted { operation } = response else {
+                    return Err("surface image retrieval did not return an operation".into());
+                };
+                match geometry::wait_operation(client, &session, operation).await? {
+                    JobResult::SurfaceImagePrepared {
+                        project_id,
+                        captured_revision,
+                        record,
+                        resource,
+                    } => {
+                        spiling_contracts::native::validate_surface_image_prepared_binding(
+                            &project_id,
+                            captured_revision,
+                            &record,
+                            &resource,
+                        )
+                        .map_err(spiling_engine_client::ClientError::Protocol)?;
+                        if project_id != captured.project_id
+                            || captured_revision != captured.revision
+                            || record.image_hash != image_hash
+                        {
+                            return Err(
+                                "surface image result disagrees with captured project".into()
+                            );
+                        }
+                        let bytes = client.fetch_surface_image(&record, &resource).await?;
+                        surface_image_output
+                            .as_deref_mut()
+                            .ok_or("surface image output was not admitted")?
+                            .write(&bytes)?;
+                        image_evidence = Some(serde_json::json!({
+                            "project_id": project_id, "captured_revision": captured_revision,
+                            "record": record, "resource": resource,
+                        }));
+                    }
+                    _ => return Err("unexpected surface image retrieval result".into()),
+                }
+            }
             Operation::SurfaceFinish(occurrence_id, face_id, scope, finish) => {
                 label = "surface_finish";
                 let summary = geometry::scene(client, &session).await?;
@@ -924,6 +1083,9 @@ async fn execute(
     if let Some(replay_evidence) = replay_evidence {
         report["manufacturing_replay"] = replay_evidence;
     }
+    if let Some(evidence) = image_evidence {
+        report["surface_image"] = evidence;
+    }
     Ok(report)
 }
 
@@ -932,6 +1094,114 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn image_flags_validate_before_spawn_and_export_is_readonly_safe() {
+        let parameters = r#"{"depth_mm":0.08,"u_repeats":2,"u_phase_fraction":0.137,"z_period_mm":3.7,"z_phase_mm":0.213,"edge_margin_mm":1,"vertical_error_mm":0.01}"#;
+        assert!(
+            parse_args(&[
+                "inspect",
+                "project",
+                "--surface-image",
+                "1",
+                "step:1",
+                "definition",
+                "image.png",
+                parameters
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_args(&[
+                "open",
+                "project",
+                "--surface-image",
+                "1",
+                "step:1",
+                "definition",
+                "image.png",
+                "{}"
+            ])
+            .is_err()
+        );
+        let hash = "a".repeat(64);
+        assert!(
+            parse_args(&[
+                "inspect",
+                "project",
+                "--surface-image-out",
+                &hash,
+                "fresh.pgm"
+            ])
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            parse_args(&[
+                "inspect",
+                "project",
+                "--surface-image-out",
+                "invalid",
+                "fresh.pgm"
+            ])
+            .is_err()
+        );
+        let options = parse_args(&[
+            "open",
+            "project",
+            "--surface-image",
+            "1",
+            "step:1",
+            "definition",
+            "image.png",
+            parameters,
+            "--undo",
+            "--redo",
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project workflow");
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [
+                Operation::SurfaceImage(..),
+                Operation::Undo,
+                Operation::Redo
+            ]
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn image_source_keeps_native_non_utf8_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let source = OsString::from_vec(b"image-\xff.png".to_vec());
+        let parameters = r#"{"depth_mm":0.08,"u_repeats":2,"u_phase_fraction":0.137,"z_period_mm":3.7,"z_phase_mm":0.213,"edge_margin_mm":1,"vertical_error_mm":0.01}"#;
+        let mut args: Vec<OsString> = [
+            "open",
+            "project",
+            "--surface-image",
+            "1",
+            "step:1",
+            "definition",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        args.push(source.clone());
+        args.push(parameters.into());
+        let options = parse(args.into_iter(), None, None).unwrap().unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project workflow");
+        };
+        let Operation::SurfaceImage(_, _, _, native, _) = &workflow.operations[0] else {
+            panic!("image operation");
+        };
+        assert_eq!(
+            native,
+            &NativePath::from_os_str(std::ffi::OsStr::from_bytes(source.as_bytes())).unwrap()
+        );
     }
     #[test]
     fn authoring_is_validated_before_child_spawn() {

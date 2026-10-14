@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use spiling_contracts::{geometry::*, manufacturing::*, project::*, surface::*};
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex, Weak},
 };
 use storage::{LoadedProject, SaveReceipt, Storage};
 
@@ -20,6 +20,34 @@ pub(crate) fn invalid(message: impl AsRef<str>) -> ProjectError {
 }
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Checked immutable canonical PGM content. Original encoded paths never enter Core.
+#[derive(Debug)]
+pub struct SurfaceImageAsset {
+    record: SurfaceImageRecord,
+    bytes: Arc<Vec<u8>>,
+}
+impl SurfaceImageAsset {
+    pub fn new(record: SurfaceImageRecord, bytes: Vec<u8>) -> Result<Self, ProjectError> {
+        record.validate_content(&bytes)?;
+        if bytes.capacity() > MAX_SURFACE_IMAGE_RETAINED_BYTES {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "image allocation exceeds retained budget",
+            ));
+        }
+        Ok(Self {
+            record,
+            bytes: Arc::new(bytes),
+        })
+    }
+    pub fn record(&self) -> &SurfaceImageRecord {
+        &self.record
+    }
+    pub fn bytes(&self) -> &Arc<Vec<u8>> {
+        &self.bytes
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SourceAsset {
@@ -120,6 +148,7 @@ pub struct Snapshot {
     pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
     pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
     pub surface_overlays: Arc<SurfaceOverlays>,
+    pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
@@ -149,6 +178,12 @@ pub enum Edit {
         face_id: FaceId,
         finish: SurfaceFinish,
     },
+    AddImageSurfaceFinish {
+        asset: Arc<SurfaceImageAsset>,
+        scope: SurfaceScope,
+        face_id: FaceId,
+        parameters: ImageReliefParameters,
+    },
     RemoveSurfaceFinish {
         layer_id: SurfaceLayerId,
     },
@@ -168,6 +203,12 @@ pub struct PreparedEdit {
 impl PreparedEdit {
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.snapshot.clone()
+    }
+    pub fn surface_overlays(&self) -> &SurfaceOverlays {
+        &self.snapshot.surface_overlays
+    }
+    pub fn surface_images(&self) -> &BTreeMap<SourceHash, Arc<SurfaceImageAsset>> {
+        &self.snapshot.surface_images
     }
 }
 #[derive(Debug, Clone)]
@@ -230,6 +271,7 @@ pub struct Project {
     current: Arc<Snapshot>,
     undo: VecDeque<Arc<Snapshot>>,
     redo: Vec<Arc<Snapshot>>,
+    staged_images: Mutex<Vec<Weak<Vec<u8>>>>,
     saved: Option<(ProjectRevision, Content)>,
     storage: Option<Arc<Storage>>,
     recovered_previous: bool,
@@ -251,6 +293,7 @@ impl Project {
             current: Arc::new(Snapshot::default()),
             undo: VecDeque::new(),
             redo: Vec::new(),
+            staged_images: Mutex::new(Vec::new()),
             saved: None,
             storage: None,
             recovered_previous: false,
@@ -270,6 +313,7 @@ impl Project {
             manufacturing_intent: loaded.manifest.manufacturing_intent.clone(),
             manufacturing_artifact: loaded.manufacturing_artifact,
             surface_overlays: Arc::new(loaded.manifest.surface_overlays.clone()),
+            surface_images: loaded.surface_images,
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
         let mut project = Self::new();
@@ -315,6 +359,41 @@ impl Project {
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current.clone()
+    }
+    pub fn surface_images(&self) -> &BTreeMap<SourceHash, Arc<SurfaceImageAsset>> {
+        &self.current.surface_images
+    }
+    pub fn retained_surface_images(&self) -> Vec<Arc<SurfaceImageAsset>> {
+        let mut images = BTreeMap::new();
+        for snapshot in std::iter::once(&self.current)
+            .chain(self.undo.iter())
+            .chain(self.redo.iter())
+        {
+            for (hash, asset) in &snapshot.surface_images {
+                images.entry(hash.clone()).or_insert_with(|| asset.clone());
+            }
+        }
+        images.into_values().collect()
+    }
+    /// Includes live prepared candidates, even after their project revision becomes stale.
+    pub fn retained_surface_image_bytes(&self) -> Result<usize, ProjectError> {
+        let mut allocations = BTreeMap::new();
+        for snapshot in std::iter::once(&self.current)
+            .chain(self.undo.iter())
+            .chain(self.redo.iter())
+        {
+            for asset in snapshot.surface_images.values() {
+                allocations.insert(Arc::as_ptr(asset.bytes()), asset.bytes().capacity());
+            }
+        }
+        let staged = self
+            .staged_images
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "image staging lock poisoned"))?;
+        for bytes in staged.iter().filter_map(Weak::upgrade) {
+            allocations.insert(Arc::as_ptr(&bytes), bytes.capacity());
+        }
+        Ok(allocations.values().sum())
     }
     pub fn storage(&self) -> Option<Arc<Storage>> {
         self.storage.clone()
@@ -379,6 +458,10 @@ impl Project {
         let mut snapshot = (*self.current).clone();
         let mut next_occurrence = self.next_occurrence;
         let mut next_surface_layer = self.next_surface_layer;
+        let incoming_image = match &edit {
+            Edit::AddImageSurfaceFinish { asset, .. } => Some(asset.bytes().clone()),
+            _ => None,
+        };
         // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
         if !matches!(&edit, Edit::PublishManufacturing { .. }) {
             snapshot.manufacturing_artifact = None;
@@ -499,29 +582,52 @@ impl Project {
                 face_id,
                 finish,
             } => {
-                finish.validate()?;
-                if snapshot.surface_overlays.layers.len() == MAX_SURFACE_LAYERS {
-                    return Err(error(
-                        ProjectErrorCode::ResourceLimit,
-                        "surface layer budget exceeded",
-                    ));
-                }
-                let layer_id = SurfaceLayerId::new(next_surface_layer)?;
-                next_surface_layer = next_surface_layer.checked_add(1).ok_or_else(|| {
-                    error(
-                        ProjectErrorCode::ResourceLimit,
-                        "surface layer allocator exhausted",
-                    )
-                })?;
-                let doc = Arc::make_mut(&mut snapshot.surface_overlays);
-                doc.layers.reserve_exact(1);
-                doc.layers.push(SurfaceLayer {
-                    layer_id,
-                    enabled: true,
+                add_surface_layer(
+                    &mut snapshot,
                     scope,
                     face_id,
                     finish,
-                });
+                    &mut next_surface_layer,
+                )?;
+            }
+            Edit::AddImageSurfaceFinish {
+                mut asset,
+                scope,
+                face_id,
+                parameters,
+            } => {
+                parameters.validate()?;
+                if let Some(retained) = std::iter::once(&self.current)
+                    .chain(self.undo.iter())
+                    .chain(self.redo.iter())
+                    .find_map(|snapshot| snapshot.surface_images.get(&asset.record.image_hash))
+                {
+                    if !Arc::ptr_eq(retained.bytes(), asset.bytes())
+                        && retained.bytes().as_slice() != asset.bytes().as_slice()
+                    {
+                        return Err(error(
+                            ProjectErrorCode::CorruptAsset,
+                            "conflicting image content identity",
+                        ));
+                    }
+                    // Canonical content owns complete first-admission provenance.
+                    asset = retained.clone();
+                }
+                let image_hash = asset.record.image_hash.clone();
+                snapshot
+                    .surface_images
+                    .entry(image_hash.clone())
+                    .or_insert(asset);
+                add_surface_layer(
+                    &mut snapshot,
+                    scope,
+                    face_id,
+                    SurfaceFinish::ImageRelief {
+                        image_hash,
+                        parameters,
+                    },
+                    &mut next_surface_layer,
+                )?;
             }
             Edit::RemoveSurfaceFinish { layer_id } => {
                 let index = snapshot
@@ -544,6 +650,7 @@ impl Project {
                 Arc::make_mut(&mut snapshot.surface_overlays).layers[index].enabled = enabled;
             }
         }
+        synchronize_surface_images(&mut snapshot)?;
         snapshot.surface_overlays.validate()?;
         for layer in &snapshot.surface_overlays.layers {
             let target_exists = match &layer.scope {
@@ -569,6 +676,47 @@ impl Project {
                 .chain(self.undo.iter().skip(skip).map(Arc::as_ref))
                 .chain(self.redo.iter().map(Arc::as_ref)),
         )?;
+        let mut staged = self
+            .staged_images
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "image staging lock poisoned"))?;
+        staged.retain(|bytes| bytes.strong_count() != 0);
+        let mut allocations = BTreeMap::new();
+        for state in std::iter::once(&snapshot)
+            .chain(std::iter::once(self.current.as_ref()))
+            .chain(self.undo.iter().map(Arc::as_ref))
+            .chain(self.redo.iter().map(Arc::as_ref))
+        {
+            for asset in state.surface_images.values() {
+                allocations.insert(Arc::as_ptr(asset.bytes()), asset.bytes().capacity());
+            }
+        }
+        for bytes in staged
+            .iter()
+            .filter_map(Weak::upgrade)
+            .chain(incoming_image.iter().cloned())
+        {
+            allocations.insert(Arc::as_ptr(&bytes), bytes.capacity());
+        }
+        if allocations.values().sum::<usize>() > MAX_SURFACE_IMAGE_RETAINED_BYTES {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged image allocation budget exceeded",
+            ));
+        }
+        for asset in snapshot.surface_images.values() {
+            if !staged
+                .iter()
+                .any(|bytes| bytes.as_ptr() == Arc::as_ptr(asset.bytes()))
+            {
+                staged.push(Arc::downgrade(asset.bytes()));
+            }
+        }
+        if let Some(bytes) = incoming_image
+            && !staged.iter().any(|old| old.as_ptr() == Arc::as_ptr(&bytes))
+        {
+            staged.push(Arc::downgrade(&bytes));
+        }
         Ok(PreparedEdit {
             owner: self.owner.clone(),
             revision: self.revision,
@@ -715,11 +863,129 @@ fn add_occurrence(
     );
     Ok(())
 }
+fn add_surface_layer(
+    snapshot: &mut Snapshot,
+    scope: SurfaceScope,
+    face_id: FaceId,
+    finish: SurfaceFinish,
+    next: &mut u32,
+) -> Result<(), ProjectError> {
+    finish.validate()?;
+    if let SurfaceFinish::ImageRelief { image_hash, .. } = &finish
+        && !snapshot.surface_images.contains_key(image_hash)
+    {
+        return Err(invalid("image finish references unknown current image"));
+    }
+    if snapshot.surface_overlays.layers.len() == MAX_SURFACE_LAYERS {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "surface layer budget exceeded",
+        ));
+    }
+    let layer_id = SurfaceLayerId::new(*next)?;
+    *next = next.checked_add(1).ok_or_else(|| {
+        error(
+            ProjectErrorCode::ResourceLimit,
+            "surface layer allocator exhausted",
+        )
+    })?;
+    let doc = Arc::make_mut(&mut snapshot.surface_overlays);
+    doc.layers.reserve_exact(1);
+    doc.layers.push(SurfaceLayer {
+        layer_id,
+        enabled: true,
+        scope,
+        face_id,
+        finish,
+    });
+    Ok(())
+}
+fn synchronize_surface_images(snapshot: &mut Snapshot) -> Result<(), ProjectError> {
+    let layers = &snapshot.surface_overlays.layers;
+    snapshot.surface_images.retain(|hash, _| {
+        layers.iter().any(|layer| {
+        matches!(&layer.finish, SurfaceFinish::ImageRelief { image_hash, .. } if image_hash == hash)
+    })
+    });
+    validate_surface_image_budget(snapshot)?;
+    if snapshot.surface_images.len() != snapshot.surface_overlays.images.len()
+        || snapshot
+            .surface_images
+            .values()
+            .zip(&snapshot.surface_overlays.images)
+            .any(|(asset, record)| asset.record() != record)
+    {
+        let doc = Arc::make_mut(&mut snapshot.surface_overlays);
+        doc.images
+            .retain(|record| snapshot.surface_images.contains_key(&record.image_hash));
+        for (hash, asset) in &snapshot.surface_images {
+            if let Err(index) = doc
+                .images
+                .binary_search_by(|record| record.image_hash.cmp(hash))
+            {
+                doc.images.reserve_exact(1);
+                doc.images.insert(index, asset.record.clone());
+            }
+        }
+    }
+    Ok(())
+}
+fn validate_surface_images(snapshot: &Snapshot) -> Result<(), ProjectError> {
+    if snapshot.surface_images.len() != snapshot.surface_overlays.images.len() {
+        return Err(error(
+            ProjectErrorCode::CorruptAsset,
+            "image metadata and captured assets disagree",
+        ));
+    }
+    for ((hash, asset), record) in snapshot
+        .surface_images
+        .iter()
+        .zip(&snapshot.surface_overlays.images)
+    {
+        if hash != &record.image_hash || asset.record() != record {
+            return Err(error(
+                ProjectErrorCode::CorruptAsset,
+                "image record differs from captured content",
+            ));
+        }
+    }
+    validate_surface_image_budget(snapshot)
+}
+fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError> {
+    if snapshot.surface_images.len() > MAX_SURFACE_IMAGES
+        || snapshot
+            .surface_images
+            .values()
+            .map(|asset| asset.bytes().len())
+            .sum::<usize>()
+            > MAX_SURFACE_IMAGE_TOTAL_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "live image budget exceeded",
+        ));
+    }
+    Ok(())
+}
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
     let mut sources: BTreeMap<&DefinitionId, &Arc<SourceAsset>> = BTreeMap::new();
     let mut manufacturing: BTreeMap<&SourceHash, &Arc<ManufacturingAsset>> = BTreeMap::new();
     let mut surface = BTreeMap::new();
+    let mut images = BTreeMap::new();
+    let mut image_allocations = BTreeMap::new();
     for snapshot in snapshots {
+        validate_surface_images(snapshot)?;
+        for (hash, asset) in &snapshot.surface_images {
+            if let Some(old) = images.insert(hash, asset)
+                && old.record() != asset.record()
+            {
+                return Err(error(
+                    ProjectErrorCode::CorruptAsset,
+                    "conflicting retained image provenance",
+                ));
+            }
+            image_allocations.insert(Arc::as_ptr(asset.bytes()), asset.bytes().capacity());
+        }
         if let std::collections::btree_map::Entry::Vacant(entry) =
             surface.entry(Arc::as_ptr(&snapshot.surface_overlays))
         {
@@ -743,6 +1009,12 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
         {
             return Err(invalid("conflicting retained manufacturing identity"));
         }
+    }
+    if image_allocations.values().sum::<usize>() > MAX_SURFACE_IMAGE_RETAINED_BYTES {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained image allocation budget exceeded",
+        ));
     }
     if sources.len() > MAX_DEFINITIONS as usize
         || sources.values().map(|s| s.bytes.len()).sum::<usize>() > MAX_RETAINED_SOURCE_BYTES
@@ -831,6 +1103,13 @@ fn validate_manufacturing_input(
         || provenance.surface_overlays != *snapshot.surface_overlays
         || provenance.definitions.len() != definitions.len()
         || provenance.occurrences.len() != occurrences.len()
+        || provenance.surface_images.len() != snapshot.surface_images.len()
+        || provenance.surface_images.iter().any(|content| {
+            snapshot
+                .surface_images
+                .get(&content.image_hash)
+                .is_none_or(|asset| content.bytes.as_slice() != asset.bytes().as_slice())
+        })
         || provenance.definitions.iter().any(|r| {
             snapshot
                 .sources

@@ -1,0 +1,4 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+
+Original asymmetric 3x2 Gray8 pixel-node image and exact canonical PGM bytes for independent Rust/TypeScript content, hash, descriptor and row-order admission.

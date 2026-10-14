@@ -13,7 +13,7 @@ use spiling_contracts::{
     surface::{SurfaceOverlays, SurfaceScope},
 };
 use spiling_core::{
-    ManufacturingAsset, Project, SaveSnapshot, SourceAsset,
+    ManufacturingAsset, Project, SaveSnapshot, SourceAsset, SurfaceImageAsset,
     storage::{self, SaveReceipt, SaveStage, Storage},
 };
 use spiling_geometry::{Definition, MeshArtifact, NativeSection};
@@ -65,6 +65,7 @@ pub struct OpenRequest {
     pub retained_source_bytes: u32,
     pub retained_manufacturing_bytes: u64,
     pub budget: MeshBudget,
+    pub retained_surface_image_bytes: usize,
 }
 struct Opened {
     project: Project,
@@ -80,12 +81,20 @@ pub struct CompileRequest {
     pub intent: Arc<ManufacturingIntent>,
     pub surface_overlays: Arc<SurfaceOverlays>,
     pub byte_budget: u32,
+    pub surface_images: BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
 pub enum Work {
     Import {
         source: NativePath,
         allowed_reuse: BTreeSet<DefinitionId>,
         budget: MeshBudget,
+    },
+    ImportSurfaceImage {
+        source: NativePath,
+        canonical_budget: usize,
+    },
+    GetSurfaceImage {
+        asset: Arc<SurfaceImageAsset>,
     },
     Open(OpenRequest),
     Save {
@@ -159,6 +168,7 @@ pub enum Product {
         imports: Vec<Imported>,
     },
     Saved(SaveReceipt),
+    SurfaceImage(Arc<SurfaceImageAsset>),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
     Preflight(PreflightReport),
@@ -261,6 +271,21 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
         let result = match work {
+            Work::ImportSurfaceImage {
+                source,
+                canonical_budget,
+            } => import_surface_image(source, canonical_budget, &cancel).map(Product::SurfaceImage),
+            Work::GetSurfaceImage { asset } => check_cancel(&cancel)
+                .map_err(super::project_geometry_error)
+                .and_then(|()| {
+                    asset
+                        .record()
+                        .validate_content(asset.bytes().as_slice())
+                        .map(|_| ())
+                })
+                .and_then(|()| check_cancel(&cancel).map_err(super::project_geometry_error))
+                .map(|()| Product::SurfaceImage(asset))
+                .map_err(JobError::from),
             Work::Import {
                 source,
                 allowed_reuse,
@@ -547,6 +572,24 @@ fn import(
     check_cancel(cancel)?;
     Ok((imported, Some(resident)))
 }
+fn import_surface_image(
+    source: NativePath,
+    canonical_budget: usize,
+    cancel: &AtomicBool,
+) -> Result<Arc<SurfaceImageAsset>, JobError> {
+    let captured =
+        source::capture(source, 1024 * 1024, cancel).map_err(super::project_geometry_error)?;
+    let (record, bytes) = spiling_surface_fields::normalize(
+        &captured.bytes,
+        captured.label,
+        canonical_budget,
+        cancel,
+    )?;
+    check_cancel(cancel).map_err(super::project_geometry_error)?;
+    SurfaceImageAsset::new(record, bytes)
+        .map(Arc::new)
+        .map_err(JobError::from)
+}
 fn project_path(path: NativePath) -> Result<PathBuf, ProjectError> {
     path.to_os_string()
         .map(PathBuf::from)
@@ -566,6 +609,7 @@ fn open(
         retained_source_bytes,
         retained_manufacturing_bytes,
         budget,
+        retained_surface_image_bytes,
     } = request;
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
@@ -586,6 +630,14 @@ fn open(
         existing,
         source_budget as usize,
         (MAX_MANUFACTURING_RETAINED_BYTES - retained_manufacturing_bytes) as usize,
+        spiling_contracts::surface::MAX_SURFACE_IMAGE_RETAINED_BYTES
+            .checked_sub(retained_surface_image_bytes)
+            .ok_or_else(|| {
+                ProjectError::new(
+                    ProjectErrorCode::ResourceLimit,
+                    "retained surface image budget exceeded",
+                )
+            })?,
     )?;
     let mut capacity = Capacity::new(definitions, budget);
     let mut pending = BTreeMap::new();
@@ -874,6 +926,7 @@ fn preflight(
             occurrences: &request.occurrences,
             intent: &request.intent,
             surface_overlays: &request.surface_overlays,
+            surface_images: &request.surface_images,
         },
         cancel,
     )?)
@@ -892,6 +945,7 @@ fn compile(
         occurrences,
         intent,
         surface_overlays,
+        surface_images,
         byte_budget,
     } = request;
     let definitions = definition_ids
@@ -917,6 +971,7 @@ fn compile(
             occurrences: &occurrences,
             intent: &intent,
             surface_overlays: &surface_overlays,
+            surface_images: &surface_images,
         },
         cancel,
     )?;
@@ -949,4 +1004,50 @@ fn compile(
         .map(Arc::new)
         .map_err(super::manufacturing::project_error)
         .map_err(JobError::from)
+}
+
+#[cfg(test)]
+mod image_import_tests {
+    use super::*;
+
+    #[test]
+    fn captured_canonical_budget_rejects_before_retained_asset_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("budget.pgm");
+        let canonical = b"P5\n2 2\n255\n\x00\x40\x80\xff";
+        std::fs::write(&path, canonical).unwrap();
+        let native = NativePath::from_os_str(path.as_os_str()).unwrap();
+        let cancel = AtomicBool::new(false);
+        // The canonical copy is separate from the bounded encoded-source
+        // allocation, including when those bytes happen to be identical PGM.
+        let rejected = import_surface_image(native.clone(), canonical.len() - 1, &cancel);
+        assert!(
+            matches!(rejected, Err(JobError::Project { error }) if error.code == ProjectErrorCode::ResourceLimit)
+        );
+        let admitted = import_surface_image(native, canonical.len(), &cancel).unwrap();
+        assert_eq!(admitted.bytes().as_slice(), canonical);
+        assert!(admitted.bytes().capacity() <= canonical.len());
+
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 2, 2);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&canonical[11..])
+                .unwrap();
+        }
+        let path = directory.path().join("budget.png");
+        std::fs::write(&path, png_bytes).unwrap();
+        let native = NativePath::from_os_str(path.as_os_str()).unwrap();
+        let rejected = import_surface_image(native.clone(), canonical.len() - 1, &cancel);
+        assert!(
+            matches!(rejected, Err(JobError::Project { error }) if error.code == ProjectErrorCode::ResourceLimit)
+        );
+        let admitted = import_surface_image(native, canonical.len(), &cancel).unwrap();
+        assert_eq!(admitted.bytes().as_slice(), canonical);
+        assert!(admitted.bytes().capacity() <= canonical.len());
+    }
 }

@@ -14,6 +14,12 @@ service Projects {
  rpc Save(SaveProjectRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }
+ rpc ImportSurfaceImageFinish(ImportSurfaceImageFinishRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+ rpc GetSurfaceImage(GetSurfaceImageRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
 }
 message ProjectRequest {
  string parent = 1;
@@ -38,14 +44,22 @@ message SurfaceScope { oneof kind { SurfaceDefinitionScope definition = 1; Surfa
 message SurfaceSmooth {}
 message SurfaceVerticalRibs { double depth_mm = 1; double pitch_mm = 2; double edge_margin_mm = 3; double phase_mm = 4; }
 message SurfaceCylindricalRibs { double depth_mm = 1; uint32 rib_count = 2; double phase_fraction = 3; }
-message SurfaceFinish { oneof kind { SurfaceSmooth smooth = 1; SurfaceVerticalRibs vertical_ribs = 2; SurfaceCylindricalRibs cylindrical_ribs = 3; } }
+// Millimetres are explicit; U is repeat-cycle fraction, Z phase is physical source Z.
+message ImageReliefParameters { double depth_mm = 1; uint32 u_repeats = 2; double u_phase_fraction = 3; double z_period_mm = 4; double z_phase_mm = 5; double edge_margin_mm = 6; double vertical_error_mm = 7; }
+message SurfaceImageRelief { string image_hash = 1; ImageReliefParameters parameters = 2; }
+message SurfaceImageRecord { string image_hash = 1; uint32 width = 2; uint32 height = 3; uint64 byte_count = 4; string source_hash = 5; string source_name = 6; }
+message SurfaceFinish { oneof kind { SurfaceSmooth smooth = 1; SurfaceVerticalRibs vertical_ribs = 2; SurfaceCylindricalRibs cylindrical_ribs = 3; SurfaceImageRelief image_relief = 4; } }
 message SurfaceLayer { uint32 layer_id = 1; bool enabled = 2; SurfaceScope scope = 3; string face_id = 4; SurfaceFinish finish = 5; }
-message SurfaceOverlays { uint32 schema_version = 1; repeated SurfaceLayer layers = 2; }
+message SurfaceOverlays { uint32 schema_version = 1; repeated SurfaceLayer layers = 2; repeated SurfaceImageRecord images = 3; }
 message AddSurfaceFinishRequest { uint32 base_revision = 1; FaceRef face_ref = 2; SurfaceScopeKind scope = 3; SurfaceFinish finish = 4; }
 message RemoveSurfaceFinishRequest { uint32 base_revision = 1; uint32 layer_id = 2; }
 message SetSurfaceFinishEnabledRequest { uint32 base_revision = 1; uint32 layer_id = 2; bool enabled = 3; }
 message OpenProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath path = 4; bool read_only = 5; bool recover_previous = 6; bool discard_changes = 7;}
 message SaveProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath target = 4;}
+message ImportSurfaceImageFinishRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; FaceRef reference = 4; SurfaceScopeKind scope = 5; NativePath source = 6; ImageReliefParameters parameters = 7; }
+message GetSurfaceImageRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string image_hash = 4; }
+message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord image = 2; uint32 layer_id = 3; }
+message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
 message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
 message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2;}}

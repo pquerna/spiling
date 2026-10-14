@@ -231,6 +231,7 @@ mod tests {
                 support_deposition_segments: 0,
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
+                surface_resolution: SurfaceResolutionTotals::empty(),
             },
         };
         descriptor.validate_for_record(&record).unwrap();

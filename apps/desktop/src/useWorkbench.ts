@@ -8,6 +8,11 @@ import {
   decodeMesh,
   decodeSection,
   validateMeshManifest,
+  decodeSurfaceImage,
+  type DecodedSurfaceImage,
+  type SurfaceImageRecord,
+  type ImageReliefParameters,
+  type SurfaceScopeKind,
   validateSectionManifest,
   JOB_POLL_INTERVAL_MS,
   MAX_SCENE_MESH_BYTES,
@@ -91,6 +96,8 @@ export interface WorkbenchState {
   diagnosticSession: boolean;
   projectEpoch: number;
   replayDisplayed: boolean;
+  selectedImage: SelectedSource | null;
+  imagePreview: { record: SurfaceImageRecord; image: DecodedSurfaceImage } | null;
 }
 export type SurfaceFinishEdit =
   | Omit<Extract<ProjectCommand, { op: "add_surface_finish" }>, "session_id" | "base_revision">
@@ -159,6 +166,8 @@ const initial: WorkbenchState = {
   diagnosticSession: false,
   projectEpoch: 0,
   replayDisplayed: false,
+  selectedImage: null,
+  imagePreview: null,
 };
 
 export function useWorkbench(
@@ -695,6 +704,10 @@ export function useWorkbench(
               return result;
             case "section":
             case "project_saved":
+            case "surface_image_prepared":
+              return result;
+            case "surface_image_imported":
+              patch({ project: result.info });
               return result;
             case "manufacturing_compiled":
               patch({ project: result.info });
@@ -868,6 +881,9 @@ export function useWorkbench(
           break;
         case "section":
           throw new Error("unexpected section result for a project job");
+        case "surface_image_prepared":
+        case "surface_image_imported":
+          throw new Error("image operations require the image-specific workbench workflow");
         case "manufacturing_compiled":
         case "manufacturing_verified":
         case "manufacturing_preflight":
@@ -921,6 +937,109 @@ export function useWorkbench(
       throw new Error(
         "Surface finish edit was not admitted; native session is busy or unavailable.",
       );
+  };
+  const selectSurfaceImage = async (relativePath?: string) => {
+    let admitted = false;
+    let rejection: unknown;
+    await run(async (token) => {
+      try {
+        const snapshot = stateRef.current;
+        if (!snapshot.project || snapshot.stale)
+          throw new DomainError("stale_revision", "Resume the current project before choosing an image.");
+        if (snapshot.project.read_only)
+          throw new DomainError("read_only", "Read-only snapshots cannot choose an image for import.");
+        const selection = await exchange(
+          () => relativePath === undefined ? native.selectSurfaceImage()
+            : native.debugSelectSurfaceImage(relativePath),
+          token,
+        );
+        if (selection) {
+          if (selection.session_id !== helloRef.current?.session_id)
+            throw new DomainError("stale_revision", "Image selection belongs to another session.");
+          patch({ selectedImage: selection, message: "Image selected. Import image and apply captures the normalized height image atomically." });
+        }
+        admitted = true; // Dialog cancellation deliberately leaves the old selection intact.
+      } catch (error) { rejection = error; throw error; }
+    });
+    if (rejection) throw rejection;
+    if (!admitted) throw new Error("Image selection was not admitted; session is busy or unavailable.");
+  };
+  async function prepareSurfaceImage(imageHash: string, token: number) {
+    const captured = await getProject(token);
+    const expected = captured.surface_overlays.images.find((record) => record.image_hash === imageHash);
+    if (!expected) throw new DomainError("invalid_project", "Image is not referenced by the current project.");
+    const result = await waitJob(await exchange(() => native.project({
+      op: "get_surface_image",
+      session_id: helloRef.current!.session_id,
+      base_revision: captured.revision,
+      image_hash: imageHash,
+    }), token), token);
+    if (
+      result.kind !== "surface_image_prepared" || result.project_id !== captured.project_id ||
+      result.captured_revision !== captured.revision ||
+      result.record.image_hash !== expected.image_hash || result.record.width !== expected.width ||
+      result.record.height !== expected.height || result.record.byte_count !== expected.byte_count ||
+      result.record.source_hash !== expected.source_hash || result.record.source_name !== expected.source_name
+    ) throw new DomainError("stale_revision", "Image preview receipt does not match the captured project.");
+    const bytes = await native.surfaceImageBytes(result.record, result.resource);
+    ensure(token);
+    const image = await decodeSurfaceImage(bytes, result.record, result.resource);
+    ensure(token);
+    const currentProject = await getProject(token);
+    if (currentProject.project_id !== captured.project_id || currentProject.revision !== captured.revision)
+      throw new DomainError("stale_revision", "Project changed while retrieving its height image.");
+    patch({ imagePreview: { record: result.record, image } });
+  }
+  const previewSurfaceImage = async (imageHash: string) => {
+    let prepared = false;
+    let rejection: unknown;
+    await run(async (token) => {
+      try {
+        if (stateRef.current.stale)
+          throw new DomainError("stale_revision", "Resume the current project before loading an image.");
+        await prepareSurfaceImage(imageHash, token);
+        prepared = true;
+      } catch (error) { rejection = error; throw error; }
+    });
+    if (rejection) throw rejection;
+    if (!prepared) throw new Error("Image preview was not admitted; session is busy or unavailable.");
+  };
+  const importSurfaceImage = async (
+    reference: FaceRef, scope: SurfaceScopeKind, parameters: ImageReliefParameters,
+  ): Promise<SurfaceImageRecord> => {
+    let imported: SurfaceImageRecord | null = null;
+    let rejection: unknown;
+    await run(async (token) => {
+      try {
+        const snapshot = stateRef.current;
+        const project = snapshot.project;
+        const scene = sceneRef.current;
+        const selection = snapshot.selectedImage;
+        if (!project || !scene || snapshot.stale || !selection ||
+          reference.session_id !== scene.session_id || reference.scene_revision !== scene.revision ||
+          selection.session_id !== scene.session_id)
+          throw new DomainError("stale_revision", "Select an image and a face from the current native project.");
+        if (project.read_only)
+          throw new DomainError("read_only", "Read-only snapshots cannot import images.");
+        const response = await exchange(() => native.importSurfaceImage(
+          selection, project.revision, reference, scope, parameters,
+        ), token);
+        if (response.type === "operation_accepted") patch({ selectedImage: null });
+        const result = await waitJob(response, token);
+        if (result.kind !== "surface_image_imported")
+          throw new Error("Image import did not return an authoritative image layer receipt.");
+        if (result.info.project_id !== project.project_id ||
+          !result.info.surface_overlays.layers.some((layer) => layer.layer_id === result.layer_id &&
+            layer.finish.kind === "image_relief" && layer.finish.image_hash === result.image.image_hash))
+          throw new Error("Image import receipt is not bound to its authoritative layer.");
+        // Metadata only: retain native scene leases, face selection and section buffers.
+        patch({ project: result.info, message: `Imported ${result.image.source_name}; layer ${result.layer_id}. Compile to inspect manufactured paths.` });
+        imported = result.image;
+      } catch (error) { rejection = error; throw error; }
+    });
+    if (rejection) throw rejection;
+    if (!imported) throw new Error("Image import was not admitted; session is busy or unavailable.");
+    return imported;
   };
   const projectControl = (op: "new" | "undo" | "redo", discardChanges = false) =>
     run(async (token) => {
@@ -1364,6 +1483,14 @@ export function useWorkbench(
       window.clearInterval(timer);
     };
   }, [state.phase, disposeViewport]);
+  useEffect(() => {
+    patch({ selectedImage: null, imagePreview: null });
+  }, [state.hello?.session_id, state.projectEpoch, state.phase]);
+  useEffect(() => {
+    if (state.imagePreview && !state.project?.surface_overlays.images.some(
+      (record) => record.image_hash === state.imagePreview!.record.image_hash,
+    )) patch({ imagePreview: null });
+  }, [state.project, state.imagePreview]);
 
   return {
     state,
@@ -1374,6 +1501,9 @@ export function useWorkbench(
     debugImport,
     projectControl,
     editSurfaceFinish,
+    selectSurfaceImage,
+    importSurfaceImage,
+    previewSurfaceImage,
     openProject,
     saveProject,
     resume,

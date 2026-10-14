@@ -14,6 +14,27 @@ use spiling_contracts::geometry::RigidPoseMm;
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
+/// Borrowed mandatory coverage operand. Requested relief may contain fine
+/// additions, but these source/ordinary material pieces must remain reachable.
+pub(super) struct RequiredMaterial<'a> {
+    pub(super) polygons: Vec<&'a Polygon<f64>>,
+}
+impl<'a> RequiredMaterial<'a> {
+    pub(super) fn from_section(section: &'a MultiPolygon<f64>) -> Self {
+        Self {
+            polygons: section.0.iter().collect(),
+        }
+    }
+}
+impl BooleanOps for RequiredMaterial<'_> {
+    type Scalar = f64;
+    fn rings(&self) -> impl Iterator<Item = &LineString<f64>> {
+        self.polygons
+            .iter()
+            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+    }
+}
+
 pub(super) fn from_native(
     native: spiling_geometry::NativeSection,
     pose: &RigidPoseMm,
@@ -293,10 +314,16 @@ fn ring_compare(a: &LineString<f64>, b: &LineString<f64>) -> std::cmp::Ordering 
 
 pub(super) fn wall_centers(
     section: &MultiPolygon<f64>,
+    required_material: &RequiredMaterial<'_>,
     recipe: &PlanarPrintRecipe,
     retained_native_points: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<MultiPolygon<f64>>, ManufacturingError> {
+    if required_material.polygons.is_empty() && !section.0.is_empty() {
+        return Err(unsupported(
+            "nonempty requested material requires a mandatory coverage operand",
+        ));
+    }
     let width = recipe.bead_width_mm;
     let mut walls = Vec::with_capacity(recipe.perimeter_count as usize);
     let mut retained_points = retained_native_points;
@@ -341,8 +368,10 @@ pub(super) fn wall_centers(
             );
             check_cancel(cancel)?;
             check_size(&reachable)?;
-            boolean_budget(section, &reachable, cancel)?;
-            let unreachable_area = section.difference(&reachable).unsigned_area();
+            super::boolean::budget_parts(&required_material.polygons, &reachable, cancel)?;
+            let unreachable = required_material.difference(&reachable);
+            check_size(&unreachable)?;
+            let unreachable_area = unreachable.unsigned_area();
             check_cancel(cancel)?;
             if unreachable_area > OFFSET_TOLERANCE_MM.powi(2) {
                 return Err(unsupported(

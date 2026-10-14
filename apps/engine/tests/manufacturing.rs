@@ -1255,3 +1255,133 @@ async fn surface_metadata_invalidates_active_bundle_without_scene_transfer_and_h
     assert_eq!(scene(&mut client).await, before);
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn spatial_image_compilation_captures_self_contained_content_and_fresh_replay() {
+    use spiling_contracts::surface::{ImageReliefParameters, SurfaceScopeKind};
+    let workspace = Workspace::new();
+    let source = workspace.source("box-mm.step");
+    let image_path = workspace.0.join("field.pgm");
+    let canonical = b"P5\n3 2\n255\n\x00\x40\xff\x80\x20\x00";
+    std::fs::write(&image_path, canonical).unwrap();
+    let checkpoint = workspace.0.join("image-bundle-project");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    let original = compile(&mut client).await;
+    let before_scene = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: before_scene.session_id.clone(),
+            revision: before_scene.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("occurrences");
+    };
+    let occurrence = &occurrences[0];
+    let GeometryResponse::FaceIndexPage { faces, .. } = client
+        .geometry(GeometryCommand::GetFaceIndexPage {
+            session_id: before_scene.session_id.clone(),
+            definition_id: occurrence.definition_id.clone(),
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("faces");
+    };
+    let mut target = None;
+    for face in faces {
+        let reference = FaceRef {
+            session_id: before_scene.session_id.clone(),
+            scene_revision: before_scene.revision,
+            occurrence_id: occurrence.occurrence_id,
+            definition_id: occurrence.definition_id.clone(),
+            face_id: face.face_id,
+        };
+        let GeometryResponse::FaceInspection { inspection } = client
+            .geometry(GeometryCommand::InspectFace {
+                reference: reference.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("face inspection");
+        };
+        if matches!(inspection.face.carrier, FaceCarrier::Plane { normal, .. } if normal[2].abs() < 1e-12)
+        {
+            target = Some(reference);
+            break;
+        }
+    }
+    let before = status(&mut client).await.0;
+    let ProjectResponse::OperationAccepted { operation } = client
+        .project(ProjectCommand::ImportSurfaceImageFinish {
+            session_id: before_scene.session_id.clone(),
+            base_revision: before.revision,
+            reference: target.expect("native vertical wall"),
+            scope: SurfaceScopeKind::Definition,
+            source: native(&image_path),
+            parameters: ImageReliefParameters {
+                depth_mm: 0.04,
+                u_repeats: 1,
+                u_phase_fraction: 0.125,
+                z_period_mm: 2.0,
+                z_phase_mm: 0.25,
+                edge_margin_mm: 1.0,
+                vertical_error_mm: 0.02,
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("image import");
+    };
+    let imported = wait(&mut client, operation.name).await;
+    assert_eq!(imported.status, JobStatus::Completed, "{imported:?}");
+    let Some(JobResult::SurfaceImageImported { image, .. }) = imported.result else {
+        panic!("image receipt");
+    };
+    assert!(
+        status(&mut client).await.1.is_none(),
+        "atomic image authoring invalidates the old bundle"
+    );
+    assert_eq!(scene(&mut client).await, before_scene);
+    history(&mut client, true).await;
+    assert_eq!(status(&mut client).await.1, Some(original.clone()));
+    history(&mut client, false).await;
+    assert!(status(&mut client).await.1.is_none());
+    let compiled = compile(&mut client).await;
+    assert_ne!(compiled.input_hash, original.input_hash);
+    let bundle = fetch_bundle(&mut client, &compiled).await.unwrap();
+    assert_eq!(bundle.provenance.surface_images.len(), 1);
+    assert_eq!(
+        bundle.provenance.surface_images[0].image_hash,
+        image.image_hash
+    );
+    assert_eq!(
+        bundle.provenance.surface_images[0].bytes.as_slice(),
+        canonical
+    );
+    assert_eq!(bundle.provenance.surface_overlays.images, vec![image]);
+    assert_eq!(
+        bundle.provenance.surface_overlays,
+        status(&mut client).await.0.surface_overlays
+    );
+    assert!(bundle.verification.verified);
+    assert_eq!(scene(&mut client).await, before_scene);
+    save(&mut client, &checkpoint).await;
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(image_path).unwrap();
+    let mut reader = spawn().await;
+    let opened = open(&mut reader, &checkpoint, true).await;
+    assert_eq!(opened.status, JobStatus::Completed, "{opened:?}");
+    assert_eq!(inspect(&mut reader).await.0, compiled);
+    assert_eq!(fetch_bundle(&mut reader, &compiled).await.unwrap(), bundle);
+    reader.shutdown().await.unwrap();
+}

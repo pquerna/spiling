@@ -21,6 +21,46 @@ pub(crate) fn asset(bytes: Vec<u8>, name: &str) -> Arc<SourceAsset> {
         .unwrap(),
     )
 }
+pub(crate) fn image_asset(pixels: [u8; 4], name: &str) -> Arc<SurfaceImageAsset> {
+    image_asset_with_capacity(pixels, name, 15)
+}
+fn image_asset_with_capacity(
+    pixels: [u8; 4],
+    name: &str,
+    capacity: usize,
+) -> Arc<SurfaceImageAsset> {
+    let mut bytes = Vec::with_capacity(capacity);
+    bytes.extend_from_slice(b"P5\n2 2\n255\n");
+    bytes.extend_from_slice(&pixels);
+    let record = SurfaceImageRecord {
+        image_hash: SourceHash::from_bytes(&bytes),
+        width: 2,
+        height: 2,
+        byte_count: bytes.len() as u64,
+        source_hash: SourceHash::from_bytes(name.as_bytes()),
+        source_name: name.to_owned(),
+    };
+    Arc::new(SurfaceImageAsset::new(record, bytes).unwrap())
+}
+pub(crate) fn image_parameters() -> ImageReliefParameters {
+    ImageReliefParameters {
+        depth_mm: 0.4,
+        u_repeats: 2,
+        u_phase_fraction: 0.125,
+        z_period_mm: 3.0,
+        z_phase_mm: 0.5,
+        edge_margin_mm: 0.0,
+        vertical_error_mm: 0.05,
+    }
+}
+pub(crate) fn image_edit(project: &Project, asset: Arc<SurfaceImageAsset>) -> Edit {
+    Edit::AddImageSurfaceFinish {
+        asset,
+        scope: definition_scope(project),
+        face_id: FaceId::from_step_entity(7).unwrap(),
+        parameters: image_parameters(),
+    }
+}
 pub(crate) fn imported() -> Project {
     let mut project = Project::new();
     let edit = project
@@ -244,6 +284,34 @@ fn source_history_budget_rejects_without_mutation_and_releases_pruned_pins() {
         project.undo().unwrap();
     }
     assert!(project.snapshot().occurrences.is_empty());
+    // Redo still owns 32 distinct sources: admission cannot drop them first.
+    let before = project.info();
+    assert_eq!(
+        project
+            .prepare(Edit::Import {
+                source: asset(vec![99], "new.step"),
+                pose: RigidPoseMm::IDENTITY,
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    // Reuse an already-owned allocation for a fitting transaction that clears redo.
+    let retained = project.retained_sources().pop().unwrap();
+    edit(
+        &mut project,
+        Edit::Import {
+            source: retained.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    assert_eq!(project.retained_sources().len(), 1);
+    assert!(Arc::ptr_eq(
+        project.snapshot().sources.values().next().unwrap(),
+        &retained
+    ));
+    assert!(!project.info().can_redo);
     edit(
         &mut project,
         Edit::Import {
@@ -251,7 +319,7 @@ fn source_history_budget_rejects_without_mutation_and_releases_pruned_pins() {
             pose: RigidPoseMm::IDENTITY,
         },
     );
-    assert_eq!(project.retained_sources().len(), 1);
+    assert_eq!(project.retained_sources().len(), 2);
     assert!(!project.info().can_redo);
 }
 #[test]
@@ -433,12 +501,20 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             occurrences: manifest.occurrences,
             intent,
             surface_overlays: manifest.surface_overlays,
+            surface_images: project
+                .surface_images()
+                .values()
+                .map(|asset| SurfaceImageContent {
+                    image_hash: asset.record().image_hash.clone(),
+                    bytes: asset.bytes().clone(),
+                })
+                .collect(),
             kernel: KernelIdentity {
                 name: "storage-metadata-fixture".into(),
                 version: "1".into(),
                 revision: "1".into(),
             },
-            planner_version: "5".into(),
+            planner_version: "6".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -448,6 +524,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             surface_tolerance_mm: 0.001,
             offset_tolerance_mm: 0.001,
             layer_quantization_mm: 0.000001,
+            surface_resolution: vec![],
             layers: vec![PrintLayer {
                 index: 0,
                 z_mm: 0.2,
@@ -955,4 +1032,516 @@ fn surface_edits_invalidate_exact_artifact_and_undo_restores_captured_provenance
             .code,
         ProjectErrorCode::CorruptAsset
     );
+}
+
+#[test]
+fn image_factory_validates_exact_canonical_content_without_copying() {
+    let bytes = b"P5\n2 2\n255\n\x00\x7f\xff\x01".to_vec();
+    let pointer = bytes.as_ptr();
+    let record = SurfaceImageRecord {
+        image_hash: SourceHash::from_bytes(&bytes),
+        width: 2,
+        height: 2,
+        byte_count: bytes.len() as u64,
+        source_hash: SourceHash::from_bytes(b"original PNG"),
+        source_name: "source.png".into(),
+    };
+    let image = SurfaceImageAsset::new(record.clone(), bytes).unwrap();
+    assert_eq!(image.bytes().as_ptr(), pointer);
+    let mut corrupt = image.bytes().as_ref().clone();
+    corrupt[14] ^= 1;
+    assert_eq!(
+        SurfaceImageAsset::new(record.clone(), corrupt)
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
+    let mut wrong_dimensions = record;
+    wrong_dimensions.width = 3;
+    assert!(SurfaceImageAsset::new(wrong_dimensions, image.bytes().as_ref().clone()).is_err());
+}
+
+#[test]
+fn image_reimport_preserves_first_admission_across_current_undo_and_redo() {
+    let mut project = imported();
+    let first = image_asset([0, 64, 128, 255], "first.png");
+    let incoming = image_asset([0, 64, 128, 255], "other-encoding.png");
+    assert_ne!(first.record(), incoming.record());
+    let add = image_edit(&project, first.clone());
+    edit(&mut project, add);
+    let add = image_edit(&project, incoming.clone());
+    let prepared = project.prepare(add).unwrap();
+    assert!(Arc::ptr_eq(
+        prepared.surface_images().values().next().unwrap(),
+        &first
+    ));
+    assert_eq!(
+        prepared.surface_overlays().images,
+        vec![first.record().clone()]
+    );
+    project.commit(prepared).unwrap();
+    for id in [1, 2] {
+        edit(
+            &mut project,
+            Edit::RemoveSurfaceFinish {
+                layer_id: SurfaceLayerId::new(id).unwrap(),
+            },
+        );
+    }
+    assert!(project.surface_images().is_empty());
+    let add = image_edit(&project, incoming.clone());
+    edit(&mut project, add);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &first
+    ));
+    project.undo().unwrap();
+    assert!(project.surface_images().is_empty());
+    let add = image_edit(&project, incoming);
+    edit(&mut project, add);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &first
+    ));
+    assert_eq!(
+        project.info().surface_overlays.images,
+        vec![first.record().clone()]
+    );
+    assert_eq!(project.retained_surface_images().len(), 1);
+    assert_eq!(project.info().surface_overlays.layers[0].layer_id.get(), 4);
+    // In a fresh project after one undo, only redo owns this image.
+    let mut project = imported();
+    let add = image_edit(&project, first.clone());
+    edit(&mut project, add);
+    project.undo().unwrap();
+    assert!(project.current.surface_images.is_empty());
+    assert!(
+        project
+            .undo
+            .iter()
+            .all(|snapshot| snapshot.surface_images.is_empty())
+    );
+    let prepared = project
+        .prepare(image_edit(
+            &project,
+            image_asset([0, 64, 128, 255], "redo-reimport.png"),
+        ))
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        prepared.surface_images().values().next().unwrap(),
+        &first
+    ));
+    assert_eq!(
+        prepared.surface_overlays().images,
+        vec![first.record().clone()]
+    );
+}
+
+#[test]
+fn image_references_are_sorted_include_disabled_and_prune_only_current() {
+    let mut project = imported();
+    let first = image_asset([1, 2, 3, 4], "one.pgm");
+    let second = image_asset([4, 3, 2, 1], "two.pgm");
+    for asset in [first.clone(), second.clone(), first.clone()] {
+        let add = image_edit(&project, asset);
+        edit(&mut project, add);
+    }
+    edit(
+        &mut project,
+        Edit::SetSurfaceFinishEnabled {
+            layer_id: SurfaceLayerId::new(2).unwrap(),
+            enabled: false,
+        },
+    );
+    let doc = project.info().surface_overlays;
+    assert_eq!(doc.images.len(), 2);
+    assert!(
+        doc.images
+            .windows(2)
+            .all(|records| records[0].image_hash < records[1].image_hash)
+    );
+    edit(
+        &mut project,
+        Edit::RemoveSurfaceFinish {
+            layer_id: SurfaceLayerId::new(1).unwrap(),
+        },
+    );
+    assert_eq!(project.surface_images().len(), 2);
+    edit(
+        &mut project,
+        Edit::RemoveSurfaceFinish {
+            layer_id: SurfaceLayerId::new(3).unwrap(),
+        },
+    );
+    assert_eq!(project.surface_images().len(), 1);
+    assert!(
+        project
+            .surface_images()
+            .contains_key(&second.record().image_hash)
+    );
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+        },
+    );
+    assert!(project.surface_images().is_empty());
+    assert!(project.info().surface_overlays.images.is_empty());
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &second
+    ));
+    assert!(!project.info().surface_overlays.layers[0].enabled);
+    assert_eq!(project.retained_surface_images().len(), 2);
+}
+
+#[test]
+fn unknown_image_finish_and_invalid_mapping_fail_atomically() {
+    let project = imported();
+    let before = project.info();
+    let finish = SurfaceFinish::ImageRelief {
+        image_hash: SourceHash::from_bytes(b"unknown"),
+        parameters: image_parameters(),
+    };
+    assert_eq!(
+        project
+            .prepare(surface_edit(&project, definition_scope(&project), finish))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    let mut parameters = image_parameters();
+    parameters.z_phase_mm = parameters.z_period_mm;
+    assert_eq!(
+        project
+            .prepare(Edit::AddImageSurfaceFinish {
+                asset: image_asset([0; 4], "invalid.pgm"),
+                scope: definition_scope(&project),
+                face_id: FaceId::from_step_entity(7).unwrap(),
+                parameters,
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    assert_eq!(project.info(), before);
+}
+
+#[test]
+fn image_capacity_budget_counts_history_and_incoming_before_deduplication() {
+    let mut project = imported();
+    for tag in 0..4 {
+        let add = image_edit(
+            &project,
+            image_asset_with_capacity([tag; 4], "capacity.pgm", 1024 * 1024),
+        );
+        edit(&mut project, add);
+        let layer_id = project.info().surface_overlays.layers[0].layer_id;
+        edit(&mut project, Edit::RemoveSurfaceFinish { layer_id });
+    }
+    assert!(project.surface_images().is_empty());
+    assert_eq!(
+        project.retained_surface_image_bytes().unwrap(),
+        MAX_SURFACE_IMAGE_RETAINED_BYTES
+    );
+    let before = project.info();
+    let add = image_edit(
+        &project,
+        image_asset([0; 4], "same-content-new-admission.pgm"),
+    );
+    assert_eq!(
+        project.prepare(add).unwrap_err().code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    let retained = project.retained_surface_images().pop().unwrap();
+    let add = image_edit(&project, retained.clone());
+    edit(&mut project, add);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &retained
+    ));
+    assert_eq!(
+        project.retained_surface_image_bytes().unwrap(),
+        MAX_SURFACE_IMAGE_RETAINED_BYTES
+    );
+}
+
+#[test]
+fn image_budget_includes_concurrent_prepared_candidates_until_released() {
+    let project = imported();
+    let before = project.info();
+    let first = project
+        .prepare(image_edit(
+            &project,
+            image_asset_with_capacity([1; 4], "one.pgm", 2 * 1024 * 1024),
+        ))
+        .unwrap();
+    let second = project
+        .prepare(image_edit(
+            &project,
+            image_asset_with_capacity([2; 4], "two.pgm", 2 * 1024 * 1024),
+        ))
+        .unwrap();
+    assert_eq!(
+        project.retained_surface_image_bytes().unwrap(),
+        MAX_SURFACE_IMAGE_RETAINED_BYTES
+    );
+    assert_eq!(
+        project
+            .prepare(image_edit(&project, image_asset([3; 4], "three.pgm")))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    drop(first);
+    let third = project
+        .prepare(image_edit(&project, image_asset([3; 4], "three.pgm")))
+        .unwrap();
+    assert_eq!(
+        project.retained_surface_image_bytes().unwrap(),
+        2 * 1024 * 1024 + 15
+    );
+    drop(second);
+    drop(third);
+    assert_eq!(project.retained_surface_image_bytes().unwrap(), 0);
+}
+
+#[test]
+fn live_image_count_and_payload_are_independent_bounded_admission_gates() {
+    let mut project = imported();
+    for tag in 0..MAX_SURFACE_IMAGES {
+        let add = image_edit(&project, image_asset([tag as u8; 4], "live.pgm"));
+        edit(&mut project, add);
+        let snapshot = project.snapshot();
+        assert_eq!(snapshot.surface_images.len(), tag + 1);
+        assert_eq!(snapshot.surface_overlays.images.len(), tag + 1);
+        assert!(snapshot.surface_overlays.images.capacity() <= MAX_SURFACE_IMAGES);
+    }
+    let before = project.info();
+    assert_eq!(
+        project
+            .prepare(image_edit(
+                &project,
+                image_asset([255; 4], "seventeenth.pgm")
+            ))
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.info(), before);
+    let mut project = imported();
+    for tag in 0..16u8 {
+        let mut bytes = Vec::with_capacity(MAX_SURFACE_IMAGE_BYTES);
+        bytes.extend_from_slice(b"P5\n256 256\n255\n");
+        bytes.resize(MAX_SURFACE_IMAGE_BYTES, tag);
+        let record = SurfaceImageRecord {
+            image_hash: SourceHash::from_bytes(&bytes),
+            width: 256,
+            height: 256,
+            byte_count: bytes.len() as u64,
+            source_hash: SourceHash::from_bytes(&[tag]),
+            source_name: "maximum.pgm".into(),
+        };
+        let asset = Arc::new(SurfaceImageAsset::new(record, bytes).unwrap());
+        let before = project.info();
+        let result = project.prepare(image_edit(&project, asset));
+        if tag == 15 {
+            assert_eq!(result.unwrap_err().code, ProjectErrorCode::ResourceLimit);
+            assert_eq!(project.info(), before);
+        } else {
+            project.commit(result.unwrap()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn image_history_restores_asset_and_coherent_bundle_content_provenance() {
+    let mut project = manufactured();
+    let image = image_asset([0, 128, 255, 32], "relief.png");
+    let add = image_edit(&project, image.clone());
+    edit(&mut project, add);
+    let bundle = manufacturing_bundle(&project);
+    assert!(Arc::ptr_eq(
+        &bundle.provenance.surface_images[0].bytes,
+        image.bytes()
+    ));
+    let artifact = bundle_asset(&bundle);
+    edit(
+        &mut project,
+        Edit::PublishManufacturing {
+            asset: artifact.clone(),
+        },
+    );
+    let layer_id = project.info().surface_overlays.layers[0].layer_id;
+    edit(&mut project, Edit::RemoveSurfaceFinish { layer_id });
+    assert!(project.surface_images().is_empty());
+    assert!(project.snapshot().manufacturing_artifact.is_none());
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &image
+    ));
+    assert!(Arc::ptr_eq(
+        project.snapshot().manufacturing_artifact.as_ref().unwrap(),
+        &artifact
+    ));
+    let mut wrong_input = manufacturing_bundle(&project);
+    wrong_input.provenance.surface_overlays.images[0].source_name = "foreign.png".into();
+    wrong_input.provenance.input_hash = input_fingerprint(
+        &wrong_input.provenance.project_id,
+        &wrong_input.provenance.definitions,
+        &wrong_input.provenance.occurrences,
+        &wrong_input.provenance.intent,
+        &wrong_input.provenance.surface_overlays,
+    )
+    .unwrap();
+    let before = project.info();
+    assert_eq!(
+        project
+            .prepare(Edit::PublishManufacturing {
+                asset: bundle_asset(&wrong_input)
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
+    assert_eq!(project.info(), before);
+}
+
+#[test]
+fn occurrence_image_cascade_preserves_shared_definition_image_until_final_target() {
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    edit(
+        &mut project,
+        Edit::Add {
+            definition_id: definition_id.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    let definition_image = image_asset([1, 4, 8, 16], "definition.pgm");
+    let occurrence_image = image_asset([16, 8, 4, 1], "occurrence.pgm");
+    let add = image_edit(&project, definition_image.clone());
+    edit(&mut project, add);
+    edit(
+        &mut project,
+        Edit::AddImageSurfaceFinish {
+            asset: occurrence_image.clone(),
+            scope: SurfaceScope::Occurrence {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                expected_definition_id: definition_id,
+            },
+            face_id: FaceId::from_step_entity(7).unwrap(),
+            parameters: image_parameters(),
+        },
+    );
+    let original = project.snapshot();
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+        },
+    );
+    assert_eq!(project.surface_images().len(), 1);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &definition_image
+    ));
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(2).unwrap(),
+        },
+    );
+    assert!(project.surface_images().is_empty());
+    project.undo().unwrap();
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(&project.snapshot(), &original));
+    assert!(Arc::ptr_eq(
+        &project.surface_images()[&occurrence_image.record().image_hash],
+        &occurrence_image
+    ));
+}
+
+#[test]
+fn stale_image_candidate_cannot_replace_authoritative_assets_or_advance_allocators() {
+    let mut project = imported();
+    let first = project
+        .prepare(image_edit(
+            &project,
+            image_asset_with_capacity([1; 4], "stale.pgm", 2 * 1024 * 1024),
+        ))
+        .unwrap();
+    let second_image = image_asset_with_capacity([2; 4], "committed.pgm", 2 * 1024 * 1024);
+    let second = project
+        .prepare(image_edit(&project, second_image.clone()))
+        .unwrap();
+    project.commit(second).unwrap();
+    let before = project.capture().manifest;
+    assert_eq!(
+        project.commit(first).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
+    assert_eq!(project.capture().manifest, before);
+    assert!(Arc::ptr_eq(
+        project.surface_images().values().next().unwrap(),
+        &second_image
+    ));
+    assert_eq!(
+        project.retained_surface_image_bytes().unwrap(),
+        2 * 1024 * 1024
+    );
+}
+
+#[test]
+fn bundle_image_content_is_complete_even_for_disabled_layers_and_old_formats_fail() {
+    let mut project = manufactured();
+    let add = image_edit(&project, image_asset([0, 127, 255, 33], "bundle.pgm"));
+    edit(&mut project, add);
+    edit(
+        &mut project,
+        Edit::SetSurfaceFinishEnabled {
+            layer_id: SurfaceLayerId::new(1).unwrap(),
+            enabled: false,
+        },
+    );
+    let bundle = manufacturing_bundle(&project);
+    let check_rejected = |value: &serde_json::Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        let record = ManufacturingArtifactRecord {
+            hash: SourceHash::from_bytes(&bytes),
+            input_hash: bundle.provenance.input_hash.clone(),
+            byte_count: bytes.len() as u32,
+            summary: bundle.summary(),
+        };
+        assert_eq!(
+            ManufacturingAsset::new(record, bytes).unwrap_err().code,
+            ProjectErrorCode::CorruptAsset
+        );
+    };
+    let original = serde_json::to_value(&bundle).unwrap();
+    let mut missing = original.clone();
+    missing["provenance"]["surface_images"] = serde_json::json!([]);
+    check_rejected(&missing);
+    let mut corrupt = original.clone();
+    corrupt["provenance"]["surface_images"][0]["bytes"][14] = serde_json::json!(34);
+    check_rejected(&corrupt);
+    let mut disagreement = original.clone();
+    disagreement["provenance"]["surface_images"][0]["image_hash"] =
+        serde_json::json!(SourceHash::from_bytes(b"wrong"));
+    check_rejected(&disagreement);
+    let mut old = original;
+    old["schema_version"] = serde_json::json!(4);
+    old["provenance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("surface_images");
+    old["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("surface_resolution");
+    check_rejected(&old);
 }

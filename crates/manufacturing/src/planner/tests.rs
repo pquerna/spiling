@@ -63,11 +63,20 @@ fn classify(
 ) -> Result<ClassifiedRegions, ManufacturingError> {
     let layout = Arc::new(WallLayout::new(
         section,
+        &region::RequiredMaterial::from_section(section),
         recipe,
         region::point_count(section),
         cancel,
     )?);
-    ClassifiedRegions::new(layout, below, above, recipe, cancel)
+    let retained_points = region::point_count(section) + layout.point_count();
+    ClassifiedRegions::new(
+        layout,
+        below,
+        above,
+        classification::fixed_point_budget(retained_points),
+        recipe,
+        cancel,
+    )
 }
 fn output(
     section: &MultiPolygon<f64>,
@@ -300,15 +309,28 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         Some(0)
     );
     let cancel = AtomicBool::new(false);
-    let mut work = 0;
+    let retained_points = sections
+        .iter()
+        .map(|span| region::point_count(&span.material))
+        .sum();
+    let mut neighborhoods = SkinNeighborhoods::new(&sections, 0).unwrap();
     for index in 0..12u32 {
         let current = span_at(&sections, index);
         let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
         let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
-        let lower = survival(&sections, current, below, &mut work, &cancel).unwrap();
-        let upper = survival(&sections, current, above, &mut work, &cancel).unwrap();
+        let lower = neighborhoods
+            .survival(current, below, retained_points, &cancel)
+            .unwrap();
+        let upper = neighborhoods
+            .survival(
+                current,
+                above,
+                skin_query_retained_points(retained_points, &[&lower]).unwrap(),
+                &cancel,
+            )
+            .unwrap();
         let (_, coverage) = output(&sections[current].material, &lower, &upper, 0.3, index);
         partition(&coverage);
         if index < 2 {
@@ -505,7 +527,14 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
     let recipe = recipe(0.25);
     let cancel = AtomicBool::new(false);
     let layout = Arc::new(
-        WallLayout::new(&section, &recipe, region::point_count(&section), &cancel).unwrap(),
+        WallLayout::new(
+            &section,
+            &region::RequiredMaterial::from_section(&section),
+            &recipe,
+            region::point_count(&section),
+            &cancel,
+        )
+        .unwrap(),
     );
     for (below, above) in [
         (&void, &section),
@@ -515,18 +544,26 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
         (&section, &void),
     ] {
         for index in 0..2 {
-            let cached =
-                ClassifiedRegions::new(Arc::clone(&layout), below, above, &recipe, &cancel)
-                    .unwrap()
-                    .paths(
-                        0.4 * (index + 1) as f64,
-                        0.4,
-                        region::HatchAxis::preferred(index),
-                        &recipe,
-                        &mut 0,
-                        &cancel,
-                    )
-                    .unwrap();
+            let cached = ClassifiedRegions::new(
+                Arc::clone(&layout),
+                below,
+                above,
+                classification::fixed_point_budget(
+                    region::point_count(&section) + layout.point_count(),
+                ),
+                &recipe,
+                &cancel,
+            )
+            .unwrap()
+            .paths(
+                0.4 * (index + 1) as f64,
+                0.4,
+                region::HatchAxis::preferred(index),
+                &recipe,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
             let uncached = output(&section, below, above, 0.25, index);
             assert_eq!(cached, uncached);
             partition(&cached.1);
@@ -537,20 +574,34 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
 #[test]
 fn true_height_schedule_and_physical_skin_neighborhoods_are_bounded() {
     let schedule = layer_schedule(0.0, 1.05, 0.4, &[0.55]).unwrap();
-    assert_eq!(schedule.len(), 4);
-    for (layer, (z, h)) in
-        schedule
+    let mut previous = 0.0;
+    for layer in &schedule {
+        assert!(layer.height > 0.0 && layer.height <= 0.4);
+        assert_eq!(layer.sample, previous + (layer.z - previous) * 0.5);
+        assert!(layer.sample > previous && layer.sample < layer.z);
+        previous = layer.z;
+    }
+    assert!(schedule.iter().any(|layer| layer.z == 0.55));
+    assert_eq!(schedule.last().unwrap().z, 1.05);
+    for (start, end) in [(0.0, 0.55), (0.55, 1.05)] {
+        let mut minimum = f64::INFINITY;
+        let mut maximum = 0.0_f64;
+        for layer in schedule
             .iter()
-            .zip([(0.4, 0.4), (0.55, 0.15), (0.8, 0.25), (1.05, 0.25)])
-    {
-        assert!((layer.z - z).abs() < 1e-12);
-        assert!((layer.height - h).abs() < 1e-12);
-        assert!((layer.sample - (z - h * 0.5)).abs() < 1e-12);
+            .filter(|layer| layer.z > start && layer.z <= end)
+        {
+            minimum = minimum.min(layer.height);
+            maximum = maximum.max(layer.height);
+        }
+        assert!(maximum - minimum <= 4.0 * f64::EPSILON);
     }
     assert_eq!(physical_neighbor(&schedule, 3, 0.3, false), Some(1));
     assert_eq!(physical_neighbor(&schedule, 0, 0.3, true), Some(2));
     assert_eq!(
-        layer_schedule(0.0, 1.0, 0.4, &[0.4001]).err().unwrap().code,
+        layer_schedule(0.0, 1.0, 0.4, &[0.4, 0.4001])
+            .err()
+            .unwrap()
+            .code,
         ManufacturingErrorCode::UnsupportedGeometry
     );
     assert_eq!(
@@ -560,26 +611,82 @@ fn true_height_schedule_and_physical_skin_neighborhoods_are_bounded() {
 }
 
 #[test]
-fn native_event_roundoff_identity_includes_bed_grid_and_exact_top() {
+fn native_event_roundoff_identity_preserves_genuine_events_and_exact_top() {
     let top = 1.05;
+    let first = 0.4 - f64::EPSILON;
+    let second = 0.8 + f64::EPSILON;
     let events = [
         f64::EPSILON * 0.125,
-        0.4 - f64::EPSILON,
-        0.8 + f64::EPSILON,
+        first,
+        0.4 + f64::EPSILON,
+        second,
         top - f64::EPSILON,
     ];
     let schedule = layer_schedule(0.0, top, 0.4, &events).unwrap();
-    assert_eq!(
-        schedule.iter().map(|layer| layer.z).collect::<Vec<_>>(),
-        [0.4, 0.8, top]
-    );
-    assert_eq!(schedule[0].height, 0.4);
-    for events in [&[0.0001][..], &[0.4001][..], &[top - 0.0001][..]] {
+    assert_eq!(schedule.len(), 3, "arithmetic identity must not add slabs");
+    assert!(schedule.iter().any(|layer| layer.z == first));
+    assert!(schedule.iter().any(|layer| layer.z == second));
+    assert_eq!(schedule.last().unwrap().z, top);
+    for events in [&[0.0001][..], &[0.4, 0.4001][..], &[top - 0.0001][..]] {
         assert_eq!(
             layer_schedule(0.0, top, 0.4, events).err().unwrap().code,
             ManufacturingErrorCode::UnsupportedGeometry
         );
     }
+}
+
+#[test]
+fn phase_offset_dense_row_events_do_not_create_nominal_grid_slivers() {
+    // A 3.7-mm, 32-row image has this row spacing. Offset its genuine
+    // boundaries so some fall only 0.000125 mm above the old nominal grid.
+    let top = 8.0;
+    let events: Vec<_> = (0..70)
+        .map(|row| 0.100125 + row as f64 * (3.7 / 32.0))
+        .filter(|event| *event < top)
+        .collect();
+    assert!((events[32] - 3.8 - 0.000125).abs() < 1e-12);
+    let schedule = layer_schedule(0.0, top, 0.2, &events).unwrap();
+    let mut previous = 0.0;
+    for layer in &schedule {
+        assert!(layer.height > 0.03, "no artificial nominal-grid sliver");
+        assert!(layer.height <= 0.2);
+        assert_eq!(layer.sample, previous + (layer.z - previous) * 0.5);
+        assert!(layer.sample > previous && layer.sample < layer.z);
+        previous = layer.z;
+    }
+    for event in events {
+        assert!(schedule.iter().any(|layer| layer.z == event));
+    }
+    assert_eq!(schedule.last().unwrap().z, top);
+}
+
+#[test]
+fn integral_decimal_ratios_use_roundoff_safe_layer_budget_admission() {
+    for bed in [0.0, 17.0, -17.0] {
+        for count in [3, 170, MAX_PRINT_LAYERS as usize] {
+            let top = bed + count as f64 * 0.2;
+            let schedule = layer_schedule(bed, top, 0.2, &[]).unwrap();
+            assert_eq!(schedule.len(), count, "roundoff must not add a layer");
+            assert_eq!(schedule.last().unwrap().z, top);
+            let construction_roundoff =
+                4.0 * f64::EPSILON * bed.abs().max(top.abs()).max((top - bed).abs()).max(1.0);
+            let mut previous = bed;
+            for layer in schedule {
+                assert!(layer.height > 0.0 && layer.height <= 0.2);
+                assert!((layer.z - previous - layer.height).abs() <= construction_roundoff);
+                assert_eq!(layer.sample, previous + (layer.z - previous) * 0.5);
+                previous = layer.z;
+            }
+        }
+    }
+    let events: Vec<_> = (1..=MAX_PRINT_LAYERS).map(|index| index as f64).collect();
+    assert_eq!(
+        layer_schedule(0.0, MAX_PRINT_LAYERS as f64 + 1.0, 1.0, &events)
+            .err()
+            .unwrap()
+            .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
 }
 
 #[test]
@@ -827,4 +934,629 @@ fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
     assert!((gap[0].start - 0.23).abs() < 1e-12);
     assert!((gap[0].end - 0.77).abs() < 1e-12);
     assert!(gap[0].direct_ends);
+}
+
+#[test]
+fn decimal_nominal_bead_height_keeps_strict_limit_and_exact_event_endpoints() {
+    for bed in [0.0, 17.0, -17.0] {
+        let events = [bed + 4.0, bed + 6.0, bed + 7.0, bed + 7.8];
+        let schedule = layer_schedule(bed, bed + 8.0, 0.6, &events).unwrap();
+        let mut previous = bed;
+        for layer in &schedule {
+            assert!(
+                layer.height <= 0.6,
+                "subdivision roundoff must not exceed the strict bead cap"
+            );
+            let allowance = 4.0 * f64::EPSILON * layer.z.abs().max(previous.abs()).max(1.0);
+            assert!((layer.z - previous - layer.height).abs() <= allowance);
+            assert_eq!(layer.sample, previous + (layer.z - previous) * 0.5);
+            assert!(layer.sample > previous && layer.sample < layer.z);
+            previous = layer.z;
+        }
+        assert_eq!(schedule.last().unwrap().z, bed + 8.0);
+        for event in events {
+            assert!(schedule.iter().any(|layer| layer.z == event));
+        }
+    }
+}
+
+#[test]
+fn required_coverage_keeps_native_thin_regions_hard_and_requested_fine_lobes_advisory() {
+    let cancel = AtomicBool::new(false);
+    let recipe = recipe(1.0);
+    let shape = |points: &[[f64; 2]]| {
+        MultiPolygon(vec![Polygon::new(
+            LineString(
+                points
+                    .iter()
+                    .map(|point| Coord {
+                        x: point[0],
+                        y: point[1],
+                    })
+                    .collect(),
+            ),
+            Vec::new(),
+        )])
+    };
+    let native = rectangle(20.0, 10.0);
+    let requested = shape(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 10.0],
+        [10.1, 10.0],
+        [10.0, 10.3],
+        [9.9, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    let retained = region::point_count(&native) + region::point_count(&requested);
+    WallLayout::new(
+        &requested,
+        &region::RequiredMaterial::from_section(&native),
+        &recipe,
+        retained,
+        &cancel,
+    )
+    .unwrap();
+    let strict = WallLayout::new(
+        &requested,
+        &region::RequiredMaterial::from_section(&requested),
+        &recipe,
+        retained,
+        &cancel,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        strict.code,
+        ManufacturingErrorCode::UnsupportedGeometry,
+        "the same produced erosion must still refuse unreachable REQUIRED material"
+    );
+    let native_thin = shape(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 10.0],
+        [6.05, 10.0],
+        [6.05, 12.0],
+        [5.95, 12.0],
+        [5.95, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    let requested_thin = shape(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 10.0],
+        [10.1, 10.0],
+        [10.0, 10.3],
+        [9.9, 10.0],
+        [6.05, 10.0],
+        [6.05, 12.0],
+        [5.95, 12.0],
+        [5.95, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    let thin = WallLayout::new(
+        &requested_thin,
+        &region::RequiredMaterial::from_section(&native_thin),
+        &recipe,
+        region::point_count(&native_thin) + region::point_count(&requested_thin),
+        &cancel,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        thin.code,
+        ManufacturingErrorCode::UnsupportedGeometry,
+        "a requested fine addition must not disable native-M thin-region admission"
+    );
+}
+
+#[test]
+fn mixed_face_required_coverage_keeps_ribs_hard_on_the_image_owned_island() {
+    let cancel = AtomicBool::new(false);
+    let recipe = recipe(1.0);
+    let polygon = |points: &[[f64; 2]]| {
+        Polygon::new(
+            LineString(
+                points
+                    .iter()
+                    .map(|point| Coord {
+                        x: point[0],
+                        y: point[1],
+                    })
+                    .collect(),
+            ),
+            Vec::new(),
+        )
+    };
+    let native = rectangle(20.0, 10.0);
+    let unrelated = polygon(&[
+        [40.0, 0.0],
+        [60.0, 0.0],
+        [60.0, 10.0],
+        [40.0, 10.0],
+        [40.0, 0.0],
+    ]);
+    let fine_image = polygon(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 10.0],
+        [10.1, 10.0],
+        [10.0, 10.3],
+        [9.9, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    // The narrow rib is on the right face of the SAME island whose top face
+    // carries advisory fine image detail. It is not an image displacement.
+    let rib = polygon(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 4.95],
+        [22.0, 4.95],
+        [22.0, 5.05],
+        [20.0, 5.05],
+        [20.0, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    let mixed = polygon(&[
+        [0.0, 0.0],
+        [20.0, 0.0],
+        [20.0, 4.95],
+        [22.0, 4.95],
+        [22.0, 5.05],
+        [20.0, 5.05],
+        [20.0, 10.0],
+        [10.1, 10.0],
+        [10.0, 10.3],
+        [9.9, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ]);
+    let id = spiling_contracts::geometry::OccurrenceId::new(1).unwrap();
+    let original = Arc::new(MultiPolygon(vec![unrelated.clone(), native.0[0].clone()]));
+    let mut span = NativeSurfaceSpan {
+        start: 0,
+        end: 1,
+        occurrences: vec![(id, Arc::clone(&original))],
+        image_islands: vec![(id, 1)],
+        required: BTreeMap::from([(id, Arc::clone(&original))]),
+    };
+    let mut work = 0;
+    let image_requested = MultiPolygon(vec![fine_image, unrelated.clone()]);
+    let required = required_material(&image_requested, Some(&span), &mut work, &cancel).unwrap();
+    WallLayout::new(&image_requested, &required, &recipe, 100, &cancel).unwrap();
+
+    // C and D deliberately use a different order from original M. Attribution
+    // must follow M's exact witness, not matching polygon indices.
+    span.required
+        .insert(id, Arc::new(MultiPolygon(vec![rib, unrelated.clone()])));
+    let requested = MultiPolygon(vec![mixed, unrelated]);
+    let required = required_material(&requested, Some(&span), &mut work, &cancel).unwrap();
+    let failure = WallLayout::new(&requested, &required, &recipe, 100, &cancel)
+        .err()
+        .expect("unreachable non-image rib material must refuse compilation");
+    assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedGeometry);
+    assert!(
+        failure.message.contains("thin regions unreachable"),
+        "mixed rib coverage must fail the actual hard reachability gate: {}",
+        failure.message
+    );
+}
+
+#[test]
+fn skin_horizon_intersects_varying_local_boundaries_under_cumulative_work_cap() {
+    use geo::{Contains, Point};
+    let cancel = AtomicBool::new(false);
+    let sections: Vec<_> = (0..96)
+        .map(|index| {
+            let radius = 10.0 - index as f64 * 0.01;
+            let mut exterior: Vec<_> = (0..512)
+                .map(|vertex| {
+                    let angle = std::f64::consts::TAU * vertex as f64 / 512.0;
+                    Coord {
+                        x: radius * angle.cos(),
+                        y: radius * angle.sin(),
+                    }
+                })
+                .collect();
+            exterior.push(exterior[0]);
+            let material = MultiPolygon(vec![Polygon::new(
+                LineString(exterior),
+                vec![ring(-1.0, -1.0, 2.0, 2.0)],
+            )]);
+            SectionSpan {
+                start: index,
+                end: index + 1,
+                source_area_mm2: material.unsigned_area(),
+                material,
+            }
+        })
+        .collect();
+    // A whole-ring Cartesian estimate exceeds20M for this horizon, although
+    // nearby annular boundaries have bounded local overlay candidates.
+    let retained_points = sections
+        .iter()
+        .map(|span| region::point_count(&span.material))
+        .sum();
+    let mut neighborhoods = SkinNeighborhoods::new(&sections, 0).unwrap();
+    let actual = neighborhoods
+        .survival(0, Some(sections.len() - 1), retained_points, &cancel)
+        .unwrap();
+    let radius = 10.0 - 95.0 * 0.01;
+    let expected = 256.0 * radius * radius * (std::f64::consts::TAU / 512.0).sin() - 4.0;
+    assert!(
+        (actual.unsigned_area() - expected).abs() < 0.0001,
+        "the complete horizon must retain exactly its smallest material domain"
+    );
+    assert!(actual.contains(&Point::new(2.0, 0.0)));
+    assert!(
+        !actual.contains(&Point::new(0.0, 0.0)),
+        "protected hole must survive every overlay"
+    );
+}
+
+#[test]
+fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
+    use geo::{Contains, Point};
+    use std::borrow::Cow;
+
+    const VERTICES: usize = 512;
+    const LAYERS: usize = 64;
+    fn radius(index: usize) -> f64 {
+        9.0 + ((index * 13) % 29) as f64 * 0.025
+    }
+    fn annulus(radius: f64) -> MultiPolygon<f64> {
+        let mut exterior: Vec<_> = (0..VERTICES)
+            .map(|vertex| {
+                let angle = std::f64::consts::TAU * vertex as f64 / VERTICES as f64;
+                Coord {
+                    x: radius * angle.cos(),
+                    y: radius * angle.sin(),
+                }
+            })
+            .collect();
+        exterior.push(exterior[0]);
+        MultiPolygon(vec![Polygon::new(
+            LineString(exterior),
+            vec![ring(-1.0, -1.0, 2.0, 2.0)],
+        )])
+    }
+    let sections: Vec<_> = (0..LAYERS)
+        .map(|index| {
+            let material = annulus(radius(index));
+            SectionSpan {
+                start: index as u32,
+                end: index as u32 + 1,
+                source_area_mm2: material.unsigned_area(),
+                material,
+            }
+        })
+        .collect();
+    let cancel = AtomicBool::new(false);
+    let mut recipe = recipe(0.3);
+    recipe.bottom_skin_thickness_mm = 3.2;
+    recipe.top_skin_thickness_mm = 3.2;
+    let schedule = layer_schedule(0.0, 12.8, 0.2, &[]).unwrap();
+    assert_eq!(schedule.len(), LAYERS);
+    // Exact nominal physical endpoints include every intervening D, not a
+    // native-slab identity or a fixed number of cached source footprints.
+    assert_eq!(physical_neighbor(&schedule, 16, 3.2, false), Some(0));
+    assert_eq!(physical_neighbor(&schedule, 16, 3.2, true), Some(32));
+    let mut retained_points: usize = sections
+        .iter()
+        .map(|span| region::point_count(&span.material))
+        .sum();
+    let mut wall_layouts = BTreeMap::new();
+    let initial_work = 100_000;
+    let mut neighborhoods = SkinNeighborhoods::new(&sections, initial_work).unwrap();
+    let mut old_cartesian_work = 0usize;
+    let mut uncached_work = initial_work;
+    let mut uncached_refused = false;
+    for index in 0..LAYERS {
+        let below = physical_neighbor(&schedule, index as u32, 3.2, false)
+            .map(|layer| span_at(&sections, layer));
+        let above = physical_neighbor(&schedule, index as u32, 3.2, true)
+            .map(|layer| span_at(&sections, layer));
+        let lower = neighborhoods
+            .survival(index, below, retained_points, &cancel)
+            .unwrap();
+        let upper = neighborhoods
+            .survival(
+                index,
+                above,
+                skin_query_retained_points(retained_points, &[&lower]).unwrap(),
+                &cancel,
+            )
+            .unwrap();
+        let mut expected = Vec::new();
+        for (neighbor, actual) in [(below, &lower), (above, &upper)] {
+            let Some(neighbor) = neighbor else {
+                assert!(actual.0.is_empty());
+                expected.push(empty());
+                continue;
+            };
+            let first = index.min(neighbor);
+            let last = index.max(neighbor);
+            let minimum_radius = (first..=last).map(radius).min_by(f64::total_cmp).unwrap();
+            let expected_area = 0.5
+                * VERTICES as f64
+                * minimum_radius.powi(2)
+                * (std::f64::consts::TAU / VERTICES as f64).sin()
+                - 4.0;
+            assert!(
+                (actual.unsigned_area() - expected_area).abs() < 0.0001,
+                "layer {index}, horizon {first}..={last}: expected {expected_area}, got {}",
+                actual.unsigned_area()
+            );
+            assert_eq!(actual.0.len(), 1);
+            assert_eq!(actual.0[0].interiors().len(), 1);
+            assert!(
+                !actual.contains(&Point::new(0.0, 0.0)),
+                "protected hole is never material"
+            );
+            assert!(actual.contains(&Point::new(minimum_radius - 0.001, 0.0)));
+            assert!(!actual.contains(&Point::new(minimum_radius + 0.001, 0.0)));
+            for point in &actual.0[0].exterior().0 {
+                assert!(
+                    point.x.hypot(point.y) <= minimum_radius + 0.000001,
+                    "horizon must discard additions outside its minimum D radius"
+                );
+            }
+            expected.push(annulus(minimum_radius));
+            old_cartesian_work += (last - first) * (VERTICES + 4).pow(2);
+            if !uncached_refused {
+                let mut uncached = Cow::Borrowed(&sections[index].material);
+                for other in first..=last {
+                    if other == index {
+                        continue;
+                    }
+                    match classification::intersection_accumulated(
+                        &uncached,
+                        &sections[other].material,
+                        &mut uncached_work,
+                        &cancel,
+                    ) {
+                        Ok(material) => uncached = Cow::Owned(material),
+                        Err(failure) => {
+                            assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+                            uncached_refused = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Exercise ownership and emitted hatch consumers against independently
+        // constructed mathematical horizons, sharing the one admitted erosion.
+        if [16, 32, 47].contains(&index) {
+            let layout = Arc::new(
+                WallLayout::new(
+                    &sections[index].material,
+                    &region::RequiredMaterial::from_section(&sections[index].material),
+                    &recipe,
+                    skin_retained_points(
+                        retained_points + expected.iter().map(region::point_count).sum::<usize>(),
+                        &neighborhoods,
+                        &[&lower, &upper],
+                    )
+                    .unwrap(),
+                    &cancel,
+                )
+                .unwrap(),
+            );
+            retained_points += layout.point_count();
+            wall_layouts.insert(index, Arc::clone(&layout));
+            let staging = skin_retained_points(
+                retained_points + expected.iter().map(region::point_count).sum::<usize>(),
+                &neighborhoods,
+                &[&lower, &upper],
+            )
+            .unwrap();
+            let actual = ClassifiedRegions::new(
+                Arc::clone(&layout),
+                &lower,
+                &upper,
+                |scratch| {
+                    admit_skin_scratch(
+                        retained_points + expected.iter().map(region::point_count).sum::<usize>(),
+                        &mut neighborhoods,
+                        &[&lower, &upper],
+                        scratch,
+                        &cancel,
+                    )
+                },
+                &recipe,
+                &cancel,
+            )
+            .unwrap();
+            let actual_coverages: Vec<_> = [region::HatchAxis::X, region::HatchAxis::Y]
+                .into_iter()
+                .map(|axis| {
+                    actual
+                        .paths(
+                            schedule[index].z,
+                            schedule[index].height,
+                            axis,
+                            &recipe,
+                            &mut 0,
+                            &cancel,
+                        )
+                        .unwrap()
+                        .1
+                })
+                .collect();
+            drop(actual);
+            let expected = ClassifiedRegions::new(
+                layout,
+                &expected[0],
+                &expected[1],
+                classification::fixed_point_budget(staging),
+                &recipe,
+                &cancel,
+            )
+            .unwrap();
+            for (axis, actual_coverage) in [region::HatchAxis::X, region::HatchAxis::Y]
+                .into_iter()
+                .zip(actual_coverages)
+            {
+                let (_, expected_coverage) = expected
+                    .paths(
+                        schedule[index].z,
+                        schedule[index].height,
+                        axis,
+                        &recipe,
+                        &mut 0,
+                        &cancel,
+                    )
+                    .unwrap();
+                partition(&actual_coverage);
+                assert!(
+                    (actual_coverage.bottom_skin_area_mm2 - expected_coverage.bottom_skin_area_mm2)
+                        .abs()
+                        < 0.0001
+                );
+                assert!(
+                    (actual_coverage.top_skin_area_mm2 - expected_coverage.top_skin_area_mm2).abs()
+                        < 0.0001
+                );
+                assert!(
+                    (actual_coverage.sparse_interior_area_mm2
+                        - expected_coverage.sparse_interior_area_mm2)
+                        .abs()
+                        < 0.0001
+                );
+                assert!((actual_coverage.protected_hole_area_mm2 - 4.0).abs() < 0.0001);
+            }
+        }
+    }
+    assert!(old_cartesian_work > MAX_BOOLEAN_PAIRS);
+    assert!(
+        uncached_refused,
+        "repeated uncached padded overlays must exhaust the same20M cap"
+    );
+    assert!(
+        *neighborhoods.work_mut() > initial_work,
+        "surface/attribution work is not reset"
+    );
+    assert!(*neighborhoods.work_mut() <= MAX_BOOLEAN_PAIRS);
+    // Both post-support raster alternatives must reuse the same final-D nodes.
+    let retained_cache_points = neighborhoods.retained_points();
+    for index in [16, 32, 47] {
+        let below =
+            physical_neighbor(&schedule, index, 3.2, false).map(|layer| span_at(&sections, layer));
+        let above =
+            physical_neighbor(&schedule, index, 3.2, true).map(|layer| span_at(&sections, layer));
+        for axis in [region::HatchAxis::X, region::HatchAxis::Y] {
+            let lower = neighborhoods
+                .survival(index as usize, below, retained_points, &cancel)
+                .unwrap();
+            let upper = neighborhoods
+                .survival(
+                    index as usize,
+                    above,
+                    skin_query_retained_points(retained_points, &[&lower]).unwrap(),
+                    &cancel,
+                )
+                .unwrap();
+            let classified = ClassifiedRegions::new(
+                Arc::clone(&wall_layouts[&(index as usize)]),
+                &lower,
+                &upper,
+                |scratch| {
+                    admit_skin_scratch(
+                        retained_points,
+                        &mut neighborhoods,
+                        &[&lower, &upper],
+                        scratch,
+                        &cancel,
+                    )
+                },
+                &recipe,
+                &cancel,
+            )
+            .unwrap();
+            let (_, coverage) = classified
+                .paths(
+                    schedule[index as usize].z,
+                    schedule[index as usize].height,
+                    axis,
+                    &recipe,
+                    &mut 0,
+                    &cancel,
+                )
+                .unwrap();
+            partition(&coverage);
+            assert!((coverage.protected_hole_area_mm2 - 4.0).abs() < 0.0001);
+        }
+    }
+    assert_eq!(neighborhoods.retained_points(), retained_cache_points);
+    assert!(*neighborhoods.work_mut() <= MAX_BOOLEAN_PAIRS);
+}
+
+#[test]
+fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
+    let cancel = AtomicBool::new(false);
+    let recipe = recipe(1.0);
+    let section = rectangle(20.0, 10.0);
+    let sections: Vec<_> = (0..2)
+        .map(|index| SectionSpan {
+            start: index,
+            end: index + 1,
+            material: section.clone(),
+            source_area_mm2: 200.0,
+        })
+        .collect();
+    let mut neighborhoods = neighborhood::SkinNeighborhoods::new(&sections, 0).unwrap();
+    drop(neighborhoods.survival(0, Some(1), 0, &cancel).unwrap());
+    let layout = Arc::new(
+        WallLayout::new(
+            &section,
+            &region::RequiredMaterial::from_section(&section),
+            &recipe,
+            region::point_count(&section),
+            &cancel,
+        )
+        .unwrap(),
+    );
+    let lower = neighborhoods.survival(0, Some(0), 0, &cancel).unwrap();
+    let upper = neighborhoods.survival(1, Some(1), 0, &cancel).unwrap();
+    let retained = MAX_DEPOSITION_SEGMENTS as usize - 5;
+    let failure = ClassifiedRegions::new(
+        Arc::clone(&layout),
+        &lower,
+        &upper,
+        classification::fixed_point_budget(retained + neighborhoods.retained_points()),
+        &recipe,
+        &cancel,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+    let classified = ClassifiedRegions::new(
+        layout,
+        &lower,
+        &upper,
+        |scratch| {
+            admit_skin_scratch(
+                retained,
+                &mut neighborhoods,
+                &[&lower, &upper],
+                scratch,
+                &cancel,
+            )
+        },
+        &recipe,
+        &cancel,
+    )
+    .unwrap();
+    let (_, coverage) = classified
+        .paths(0.4, 0.4, region::HatchAxis::X, &recipe, &mut 0, &cancel)
+        .unwrap();
+    assert!((coverage.solid_interior_area_mm2 - 18.8 * 8.8).abs() < 0.5);
+    assert_eq!(coverage.section_area_mm2, 200.0);
+    assert_eq!(coverage.protected_hole_area_mm2, 0.0);
 }

@@ -73,6 +73,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SurfaceLayerId::decl(&config),
         SurfaceScopeKind::decl(&config),
         SurfaceScope::decl(&config),
+        SurfaceImageRecord::decl(&config),
+        SurfaceImageContent::decl(&config),
+        ImageReliefParameters::decl(&config),
         SurfaceFinish::decl(&config),
         SurfaceLayer::decl(&config),
         SurfaceOverlays::decl(&config),
@@ -116,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ManufacturingInspectionProvenance::decl(&config),
         ReplayDisplayInfo::decl(&config),
         ReplayDisplayDescriptor::decl(&config),
+        SurfaceFeatureClass::decl(&config),
+        SurfaceFeatureResolution::decl(&config),
+        SurfaceResolution::decl(&config),
+        SurfaceResolutionTotals::decl(&config),
         ManufacturingSummary::decl(&config),
         ManufacturingBundle::decl(&config),
         ManufacturingArtifactRecord::decl(&config),
@@ -208,6 +215,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("MAX_PROJECT_ERROR_BYTES", MAX_PROJECT_ERROR_BYTES as u64),
         ("SURFACE_SCHEMA_VERSION", SURFACE_SCHEMA_VERSION as u64),
+        ("MAX_SURFACE_IMAGE_BYTES", MAX_SURFACE_IMAGE_BYTES as u64),
+        ("MAX_SURFACE_IMAGES", MAX_SURFACE_IMAGES as u64),
+        (
+            "MAX_SURFACE_IMAGE_TOTAL_BYTES",
+            MAX_SURFACE_IMAGE_TOTAL_BYTES as u64,
+        ),
+        (
+            "MAX_SURFACE_IMAGE_RETAINED_BYTES",
+            MAX_SURFACE_IMAGE_RETAINED_BYTES as u64,
+        ),
+        (
+            "MAX_SURFACE_IMAGE_SOURCE_NAME_BYTES",
+            MAX_SURFACE_IMAGE_SOURCE_NAME_BYTES as u64,
+        ),
+        (
+            "MAX_SURFACE_RESOLUTION_REPRESENTATIVES",
+            MAX_SURFACE_RESOLUTION_REPRESENTATIVES as u64,
+        ),
+        (
+            "MAX_SURFACE_RESOLUTION_RECORDS",
+            MAX_SURFACE_RESOLUTION_RECORDS as u64,
+        ),
         ("MAX_SURFACE_LAYERS", MAX_SURFACE_LAYERS as u64),
         (
             "MAX_SURFACE_DOCUMENT_BYTES",
@@ -268,6 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, value) in [
         ("IMPORT_PROFILE", IMPORT_PROFILE),
         ("MESH_PROFILE", MESH_PROFILE),
+        ("SURFACE_IMAGE_MEDIA_TYPE", SURFACE_IMAGE_MEDIA_TYPE),
     ] {
         output.push_str(&format!("export const {name} = {value:?} as const;\n"));
     }

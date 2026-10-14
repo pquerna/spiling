@@ -96,7 +96,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
+export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
 
@@ -120,17 +120,23 @@ export type SurfaceScopeKind = "definition" | "occurrence";
 
 export type SurfaceScope = { "kind": "definition", definition_id: DefinitionId, } | { "kind": "occurrence", occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, };
 
-export type SurfaceFinish = { "kind": "smooth" } | { "kind": "vertical_ribs", depth_mm: number, pitch_mm: number, edge_margin_mm: number, phase_mm: number, } | { "kind": "cylindrical_ribs", depth_mm: number, rib_count: number, phase_fraction: number, };
+export type SurfaceImageRecord = { image_hash: SourceHash, width: number, height: number, byte_count: number, source_hash: SourceHash, source_name: string, };
+
+export type SurfaceImageContent = { image_hash: SourceHash, bytes: Array<number>, };
+
+export type ImageReliefParameters = { depth_mm: number, u_repeats: number, u_phase_fraction: number, z_period_mm: number, z_phase_mm: number, edge_margin_mm: number, vertical_error_mm: number, };
+
+export type SurfaceFinish = { "kind": "smooth" } | { "kind": "vertical_ribs", depth_mm: number, pitch_mm: number, edge_margin_mm: number, phase_mm: number, } | { "kind": "cylindrical_ribs", depth_mm: number, rib_count: number, phase_fraction: number, } | { "kind": "image_relief", image_hash: SourceHash, parameters: ImageReliefParameters, };
 
 export type SurfaceLayer = { layer_id: SurfaceLayerId, enabled: boolean, scope: SurfaceScope, face_id: FaceId, finish: SurfaceFinish, };
 
-export type SurfaceOverlays = { schema_version: number, layers: Array<SurfaceLayer>, };
+export type SurfaceOverlays = { schema_version: number, images: Array<SurfaceImageRecord>, layers: Array<SurfaceLayer>, };
 
 export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
 
 export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, };
 
-export type ProjectCommand = { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
+export type ProjectCommand = { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
 
 export type ProjectResponse = { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
 
@@ -202,9 +208,9 @@ export type PlanarRegionCoverage = { section_area_mm2: number, source_section_ar
 
 export type PrintLayer = { index: number, z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
-export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, };
+export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, };
 
-export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
+export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
 export type VerificationReport = { verified: boolean, coverage: Array<string>, limitations: Array<string>, deposition_segments: number, travel_segments: number, deposited_volume_mm3: number, filament_length_mm: number, max_position_error_mm: number, max_extrusion_error_mm: number, lifecycle_motion_count: number, priming_filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, retraction_count: number, retracted_filament_mm: number, };
 
@@ -216,7 +222,15 @@ export type ReplayDisplayInfo = { schema_version: number, bundle_hash: SourceHas
 
 export type ReplayDisplayDescriptor = { info: ReplayDisplayInfo, resource: ArtifactView, };
 
-export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, };
+export type SurfaceFeatureClass = "resolved" | "ambiguous" | "below_nominal_resolution" | "unavailable";
+
+export type SurfaceFeatureResolution = { source_u: number, source_z_mm: number, cell: number, repeat: number, classification: SurfaceFeatureClass, residual_lower_mm: number, residual_upper_mm: number, };
+
+export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_id: OccurrenceId, face_id: FaceId, image_hash: SourceHash, layer_index: number, source_z_mm: number, evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, representatives_truncated: boolean, max_residual_lower_mm: number, max_residual_upper_mm: number, representatives: Array<SurfaceFeatureResolution>, };
+
+export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
+
+export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 
@@ -267,17 +281,24 @@ export const JOB_CANCEL_AFTER_MS = 60000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 3 as const;
+export const PROJECT_FORMAT_VERSION = 4 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
 export const MAX_PROJECT_STORED_ASSETS = 128 as const;
 export const MAX_PROJECT_ERROR_BYTES = 2048 as const;
-export const SURFACE_SCHEMA_VERSION = 2 as const;
+export const SURFACE_SCHEMA_VERSION = 3 as const;
+export const MAX_SURFACE_IMAGE_BYTES = 65551 as const;
+export const MAX_SURFACE_IMAGES = 16 as const;
+export const MAX_SURFACE_IMAGE_TOTAL_BYTES = 1048576 as const;
+export const MAX_SURFACE_IMAGE_RETAINED_BYTES = 4194304 as const;
+export const MAX_SURFACE_IMAGE_SOURCE_NAME_BYTES = 256 as const;
+export const MAX_SURFACE_RESOLUTION_REPRESENTATIVES = 8 as const;
+export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 4 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 5 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;
@@ -296,3 +317,4 @@ export const POSE_NORM_TOLERANCE = 0.0000000001 as const;
 export const NORMAL_NORM_TOLERANCE = 0.0001 as const;
 export const IMPORT_PROFILE = "step-planar-cylindrical-v1" as const;
 export const MESH_PROFILE = "mesh-mm-0.05-v1" as const;
+export const SURFACE_IMAGE_MEDIA_TYPE = "image/x-portable-graymap" as const;

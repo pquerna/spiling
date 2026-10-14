@@ -151,8 +151,12 @@ impl EngineRpc {
         if let ProjectCommand::AddSurfaceFinish { finish, .. } = &command {
             finish.validate()?;
         }
+        if let ProjectCommand::ImportSurfaceImageFinish { parameters, .. } = &command {
+            parameters.validate()?;
+        }
         match &command {
             ProjectCommand::Open { path, .. } => path.validate(),
+            ProjectCommand::ImportSurfaceImageFinish { source, .. } => source.validate(),
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
@@ -162,6 +166,7 @@ impl EngineRpc {
             | ProjectCommand::Undo { .. }
             | ProjectCommand::Redo { .. }
             | ProjectCommand::AddSurfaceFinish { .. }
+            | ProjectCommand::GetSurfaceImage { .. }
             | ProjectCommand::RemoveSurfaceFinish { .. }
             | ProjectCommand::SetSurfaceFinishEnabled { .. } => Ok(()),
         }
@@ -197,6 +202,28 @@ impl EngineRpc {
             ProjectCall::Save(request) => {
                 let operation = client
                     .save(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::ImportSurfaceImageFinish(request) => {
+                let operation = client
+                    .import_surface_image_finish(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::GetSurfaceImage(request) => {
+                let operation = client
+                    .get_surface_image(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -443,6 +470,32 @@ impl EngineRpc {
         decode_manufacturing_artifact(&bytes, record)
     }
 
+    /// Retrieve canonical image bytes only from the checked immutable descriptor.
+    pub async fn fetch_surface_image(
+        &self,
+        record: &spiling_contracts::surface::SurfaceImageRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<Vec<u8>, ClientError> {
+        record.validate()?;
+        let limit = spiling_contracts::surface::MAX_SURFACE_IMAGE_BYTES as u64;
+        let size =
+            native::validate_artifact_view(descriptor, limit).map_err(ClientError::Protocol)?;
+        if size != record.byte_count
+            || descriptor.sha256 != record.image_hash.as_str()
+            || descriptor.name.strip_prefix("artifacts/") != Some(record.image_hash.as_str())
+            || descriptor.media_type != "image/x-portable-graymap"
+        {
+            return Err(ClientError::Protocol(
+                "surface image descriptor disagrees with record".into(),
+            ));
+        }
+        let bytes = self
+            .read_bounded_artifact(&descriptor.name, size, &descriptor.sha256, limit)
+            .await?;
+        record.validate_content(&bytes)?;
+        Ok(bytes)
+    }
+
     /// Pull one immutable actual-program display, bound to its verified bundle.
     /// ByteStream fragments are bounded to 1 MiB; no per-event RPCs are issued.
     pub async fn fetch_replay_display(
@@ -524,6 +577,13 @@ impl EngineClient {
         self.rpc
             .fetch_manufacturing_bundle(record, descriptor)
             .await
+    }
+    pub async fn fetch_surface_image(
+        &self,
+        record: &spiling_contracts::surface::SurfaceImageRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<Vec<u8>, ClientError> {
+        self.rpc.fetch_surface_image(record, descriptor).await
     }
     pub async fn fetch_replay_display(
         &self,

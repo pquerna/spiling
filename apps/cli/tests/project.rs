@@ -824,7 +824,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
             .unwrap(),
     );
     let overlays = finished["project"]["surface_overlays"].clone();
-    assert_eq!(overlays["schema_version"], 2);
+    assert_eq!(overlays["schema_version"], 3);
     assert_eq!(
         overlays["layers"][0]["finish"],
         serde_json::to_value(
@@ -857,7 +857,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
     let provenance: Value =
         serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
     assert_eq!(provenance["surface_overlays"], overlays);
-    assert_eq!(provenance["planner_version"], "5");
+    assert_eq!(provenance["planner_version"], "6");
     let baseline_provenance: Value =
         serde_json::from_slice(&std::fs::read(baseline_export.join("provenance.json")).unwrap())
             .unwrap();
@@ -1086,5 +1086,273 @@ fn cylindrical_finish_refuses_split_native_face_without_smooth_fallback() {
         reopened["manufacturing"]["artifact"],
         created["manufacturing"]["artifact"]
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual native image CLI regression; requires SPILING_TEST_ENGINE"]
+fn planar_image_relief_survives_source_deletion_and_fresh_readonly_retrieval() {
+    image_operator_workflow("box-mm.step", false);
+}
+
+#[test]
+#[ignore = "actual native image CLI regression; requires SPILING_TEST_ENGINE"]
+fn cylindrical_image_relief_survives_source_deletion_and_fresh_readonly_retrieval() {
+    image_operator_workflow("independent-exporters/occt-cylinder-mm.step", true);
+}
+
+// A real PNG with asymmetric U/Z nodes, unequal wrap borders and a black row.
+// Stored DEFLATE avoids introducing an image decoder into the CLI test consumer.
+fn image_png() -> Vec<u8> {
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb88320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+    fn chunk(png: &mut Vec<u8>, kind: &[u8; 4], bytes: &[u8]) {
+        png.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(bytes);
+        let checksum = crc(&png[start..]);
+        png.extend_from_slice(&checksum.to_be_bytes());
+    }
+    let pixels: Vec<u8> = (0..32)
+        .flat_map(|row| {
+            if row == 7 {
+                [0, 0, 0, 0]
+            } else if row == 19 {
+                [250, 10, 255, 160]
+            } else {
+                [0, 40 + row * 3, 70, 20]
+            }
+        })
+        .collect();
+    let mut raw = Vec::new();
+    for row in pixels.chunks_exact(4) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let mut zlib = vec![0x78, 0x01, 0x01];
+    zlib.extend_from_slice(&(raw.len() as u16).to_le_bytes());
+    zlib.extend_from_slice(&(!(raw.len() as u16)).to_le_bytes());
+    zlib.extend_from_slice(&raw);
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in raw {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut png, b"IHDR", &[0, 0, 0, 4, 0, 0, 0, 32, 8, 0, 0, 0, 0]);
+    chunk(&mut png, b"IDAT", &zlib);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+fn image_operator_workflow(source_fixture: &str, cylindrical: bool) {
+    let root = root();
+    let project = root.join("image-project");
+    let source = root.join("original.step");
+    let png = root.join("original.png");
+    std::fs::copy(fixture(source_fixture), &source).unwrap();
+    std::fs::write(&png, image_png()).unwrap();
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(manufacturing_intent_fixture())
+            .args(["--center-on-bed", "1", "--compile"])
+            .output()
+            .unwrap(),
+    );
+    let mut query = cli("inspect", &project);
+    for face in created["definitions"][0]["faces"].as_array().unwrap() {
+        query.args(["--inspect-face", "1", face["face_id"].as_str().unwrap()]);
+    }
+    let inspected = report(query.output().unwrap());
+    let face = inspected["face_inspections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|face| {
+            let carrier = &face["face"]["carrier"];
+            if cylindrical {
+                carrier["kind"] == "cylinder"
+            } else {
+                carrier["kind"] == "plane"
+                    && carrier["normal"][2]
+                        .as_f64()
+                        .is_some_and(|z| z.abs() < 1e-10)
+            }
+        })
+        .unwrap()["reference"]["face_id"]
+        .as_str()
+        .unwrap();
+    let parameters = serde_json::json!({
+        "depth_mm":0.08, "u_repeats":2, "u_phase_fraction":0.137,
+        "z_period_mm":3.7, "z_phase_mm":0.213,
+        "edge_margin_mm":if cylindrical {0.0} else {1.0}, "vertical_error_mm":0.01
+    })
+    .to_string();
+    let export = root.join("image-export");
+    let authored = report(
+        cli("edit", &project)
+            .args(["--surface-image", "1", face, "definition"])
+            .arg(&png)
+            .arg(&parameters)
+            .args(["--undo", "--redo", "--compile", "--verify"])
+            .arg("--manufacturing-out")
+            .arg(&export)
+            .output()
+            .unwrap(),
+    );
+    fn persistent_native_identity(definitions: &Value) -> Vec<[&Value; 5]> {
+        definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|definition| {
+                let record = &definition["record"];
+                [
+                    &record["definition_id"],
+                    &record["bounds_mm"],
+                    &record["face_count"],
+                    &record["provenance"],
+                    &definition["faces"],
+                ]
+            })
+            .collect()
+    }
+    assert_eq!(
+        persistent_native_identity(&authored["definitions"]),
+        persistent_native_identity(&created["definitions"]),
+        "image authoring must preserve stored source records and native face identities"
+    );
+    assert_eq!(
+        authored["occurrences"], created["occurrences"],
+        "image authoring must not modify native placements"
+    );
+    let overlays = &authored["project"]["surface_overlays"];
+    let hash = overlays["images"][0]["image_hash"].as_str().unwrap();
+    let provenance: Value =
+        serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
+    assert_eq!(provenance["surface_overlays"], *overlays);
+    assert_eq!(provenance["surface_images"].as_array().unwrap().len(), 1);
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(export.join("plan.json")).unwrap()).unwrap();
+    let layers = plan["layers"].as_array().unwrap();
+    let added: Vec<_> = layers
+        .iter()
+        .map(|layer| {
+            let coverage = &layer["region_coverage"];
+            let source = coverage["source_section_area_mm2"].as_f64().unwrap();
+            let realized = coverage["section_area_mm2"].as_f64().unwrap();
+            let added = coverage["surface_added_area_mm2"].as_f64().unwrap();
+            assert!((realized - source - added).abs() < 1e-6);
+            added
+        })
+        .collect();
+    assert!(added.iter().any(|a| *a > 0.0));
+    assert!(
+        added.windows(2).any(|a| (a[0] - a[1]).abs() > 1e-5),
+        "actual material must vary across physical Z, not merely the provenance hash"
+    );
+    let exteriors: Vec<Vec<[f64; 2]>> = layers
+        .iter()
+        .map(|layer| {
+            layer["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|path| path["kind"] == "perimeter")
+                .flat_map(|path| path["points_mm"].as_array().unwrap())
+                .map(|point| {
+                    assert!(
+                        (point[2].as_f64().unwrap() - layer["z_mm"].as_f64().unwrap()).abs() < 1e-8
+                    );
+                    [point[0].as_f64().unwrap(), point[1].as_f64().unwrap()]
+                })
+                .collect()
+        })
+        .collect();
+    assert!(exteriors.iter().all(|points| !points.is_empty()));
+    assert!(
+        exteriors.windows(2).any(|pair| pair[0] != pair[1]),
+        "actual attributed wall feature locations must vary with Z"
+    );
+    let program = std::fs::read(export.join("program.gcode")).unwrap();
+    assert!(
+        program.windows(2).any(|bytes| bytes == b" Z"),
+        "actual emitted path must carry physical Z"
+    );
+    let history = authored["operations"].as_array().unwrap();
+    let undo = history
+        .iter()
+        .find(|row| row["operation"] == "undo")
+        .unwrap();
+    assert!(
+        undo["project"]["surface_overlays"]["images"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_file(&source).unwrap();
+    std::fs::remove_file(&png).unwrap();
+    let pgm = root.join("fresh.pgm");
+    let motion = root.join("fresh.splr");
+    let fresh_export = root.join("fresh-export");
+    let reopened = report(
+        cli("inspect", &project)
+            .args(["--surface-image-out", hash])
+            .arg(&pgm)
+            .arg("--manufacturing-out")
+            .arg(&fresh_export)
+            .arg("--replay-out")
+            .arg(&motion)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        reopened["project"]["revision"],
+        authored["project"]["revision"]
+    );
+    assert_eq!(reopened["project"]["surface_overlays"], *overlays);
+    let record: spiling_contracts::surface::SurfaceImageRecord =
+        serde_json::from_value(overlays["images"][0].clone()).unwrap();
+    let canonical = std::fs::read(pgm).unwrap();
+    let view = record.validate_content(&canonical).unwrap();
+    assert_eq!((view.width, view.height), (4, 32));
+    assert_eq!(&view.pixels[7 * 4..8 * 4], &[0, 0, 0, 0]);
+    assert_eq!(&view.pixels[19 * 4..20 * 4], &[250, 10, 255, 160]);
+    assert_eq!(
+        std::fs::read(fresh_export.join("program.gcode")).unwrap(),
+        program
+    );
+    let descriptor =
+        serde_json::from_value(reopened["manufacturing_replay"]["replay_display"].clone()).unwrap();
+    spiling_contracts::manufacturing::validate_replay_display(
+        &std::fs::read(motion).unwrap(),
+        &descriptor,
+    )
+    .unwrap();
+    let failure = Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+        .arg("--engine")
+        .arg(root.join("missing-engine"))
+        .args(["project", "inspect"])
+        .arg(&project)
+        .args(["--surface-image", "1", face, "definition"])
+        .arg(&png)
+        .arg(parameters)
+        .output()
+        .unwrap();
+    assert!(!failure.status.success());
+    assert!(String::from_utf8_lossy(&failure.stderr).contains("read-only"));
     std::fs::remove_dir_all(root).unwrap();
 }

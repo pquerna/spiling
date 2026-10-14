@@ -1,0 +1,19 @@
+{
+  "record": {
+    "image_hash": "3e3fa3680ccd7a4a3e93904f48f14661d07486d5c835cf2ffffb9e9427a6051c",
+    "width": 3,
+    "height": 2,
+    "byte_count": 17,
+    "source_hash": "3e3fa3680ccd7a4a3e93904f48f14661d07486d5c835cf2ffffb9e9427a6051c",
+    "source_name": "golden-asymmetric.pgm"
+  },
+  "resource": {
+    "name": "artifacts/3e3fa3680ccd7a4a3e93904f48f14661d07486d5c835cf2ffffb9e9427a6051c",
+    "size_bytes": "17",
+    "sha256": "3e3fa3680ccd7a4a3e93904f48f14661d07486d5c835cf2ffffb9e9427a6051c",
+    "media_type": "image/x-portable-graymap"
+  },
+  "encoding": "hex",
+  "data": "50350a3320320a3235350a0001ff804011",
+  "pixels": [0, 1, 255, 128, 64, 17]
+}

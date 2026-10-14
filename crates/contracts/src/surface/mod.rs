@@ -4,14 +4,17 @@
 
 //! Ordered source-face finishes; native geometry admission belongs to the engine.
 use crate::{
-    geometry::{DefinitionId, FaceId, OccurrenceId, OccurrenceRecord},
+    geometry::{DefinitionId, FaceId, OccurrenceId, OccurrenceRecord, SourceHash},
     project::{ProjectError, ProjectErrorCode, StoredDefinition},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
-pub const SURFACE_SCHEMA_VERSION: u32 = 2;
+mod image;
+pub use image::*;
+
+pub const SURFACE_SCHEMA_VERSION: u32 = 3;
 pub const MAX_SURFACE_LAYERS: usize = 64;
 pub const MAX_SURFACE_DOCUMENT_BYTES: usize = 32 * 1024;
 pub const MAX_SURFACE_RETAINED_BYTES: usize = 16 * 1024 * 1024;
@@ -74,9 +77,16 @@ pub enum SurfaceFinish {
         rib_count: u32,
         phase_fraction: f64,
     },
+    ImageRelief {
+        image_hash: SourceHash,
+        parameters: ImageReliefParameters,
+    },
 }
 impl SurfaceFinish {
     pub fn validate(&self) -> Result<(), ProjectError> {
+        if let Self::ImageRelief { parameters, .. } = self {
+            parameters.validate()?;
+        }
         if let Self::VerticalRibs {
             depth_mm,
             pitch_mm,
@@ -130,14 +140,42 @@ pub struct SurfaceLayer {
 #[serde(deny_unknown_fields)]
 pub struct SurfaceOverlays {
     pub schema_version: u32,
+    pub images: Vec<SurfaceImageRecord>,
     pub layers: Vec<SurfaceLayer>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSurfaceOverlays {
     schema_version: u32,
+    #[serde(deserialize_with = "bounded_images")]
+    images: Vec<SurfaceImageRecord>,
     #[serde(deserialize_with = "bounded_layers")]
     layers: Vec<SurfaceLayer>,
+}
+fn bounded_images<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<SurfaceImageRecord>, D::Error> {
+    struct Images;
+    impl<'de> serde::de::Visitor<'de> for Images {
+        type Value = Vec<SurfaceImageRecord>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 16 image records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut images = Vec::new();
+            while let Some(image) = seq.next_element()? {
+                if images.len() == MAX_SURFACE_IMAGES {
+                    return Err(serde::de::Error::custom("image metadata budget exceeded"));
+                }
+                images.push(image);
+            }
+            Ok(images)
+        }
+    }
+    d.deserialize_seq(Images)
 }
 fn bounded_layers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SurfaceLayer>, D::Error> {
     struct Layers;
@@ -167,6 +205,7 @@ impl<'de> Deserialize<'de> for SurfaceOverlays {
         let raw = RawSurfaceOverlays::deserialize(d)?;
         let doc = Self {
             schema_version: raw.schema_version,
+            images: raw.images,
             layers: raw.layers,
         };
         doc.validate().map_err(serde::de::Error::custom)?;
@@ -182,6 +221,7 @@ impl SurfaceOverlays {
     pub fn empty() -> Self {
         Self {
             schema_version: SURFACE_SCHEMA_VERSION,
+            images: Vec::new(),
             layers: Vec::new(),
         }
     }
@@ -191,6 +231,42 @@ impl SurfaceOverlays {
         }
         if self.layers.len() > MAX_SURFACE_LAYERS || self.layers.capacity() > MAX_SURFACE_LAYERS {
             return Err(resource("surface layer allocation budget exceeded"));
+        }
+        if self.images.len() > MAX_SURFACE_IMAGES || self.images.capacity() > MAX_SURFACE_IMAGES {
+            return Err(resource("image metadata allocation budget exceeded"));
+        }
+        let mut previous = None;
+        let mut total = 0u64;
+        for image in &self.images {
+            image.validate()?;
+            if previous.is_some_and(|hash| hash >= &image.image_hash) {
+                return Err(invalid(
+                    "image metadata must be canonical-hash sorted and unique",
+                ));
+            }
+            previous = Some(&image.image_hash);
+            total += image.byte_count;
+        }
+        if total > MAX_SURFACE_IMAGE_TOTAL_BYTES as u64 {
+            return Err(resource("image metadata payload budget exceeded"));
+        }
+        let used: BTreeSet<_> = self
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.finish {
+                SurfaceFinish::ImageRelief { image_hash, .. } => Some(image_hash),
+                _ => None,
+            })
+            .collect();
+        if used.len() != self.images.len()
+            || !used
+                .iter()
+                .copied()
+                .eq(self.images.iter().map(|image| &image.image_hash))
+        {
+            return Err(invalid(
+                "image metadata must exactly equal enabled and disabled layer references",
+            ));
         }
         let mut ids = BTreeSet::new();
         for layer in &self.layers {
@@ -252,12 +328,12 @@ impl SurfaceOverlays {
         }
         Ok(())
     }
-    pub fn effective_finish(
+    pub fn effective_layer(
         &self,
         definition_id: &DefinitionId,
         occurrence_id: OccurrenceId,
         face_id: &FaceId,
-    ) -> Option<&SurfaceFinish> {
+    ) -> Option<&SurfaceLayer> {
         let mut result = None;
         for occurrence_scope in [false, true] {
             for layer in &self.layers {
@@ -275,7 +351,7 @@ impl SurfaceOverlays {
                     }
                 };
                 if layer.enabled && &layer.face_id == face_id && matches {
-                    result = Some(&layer.finish);
+                    result = Some(layer);
                 }
             }
         }
@@ -288,6 +364,12 @@ impl SurfaceOverlays {
             .iter()
             .map(|layer| {
                 layer.face_id.allocated_bytes()
+                    + match &layer.finish {
+                        SurfaceFinish::ImageRelief { image_hash, .. } => {
+                            image_hash.allocated_bytes()
+                        }
+                        _ => 0,
+                    }
                     + match &layer.scope {
                         SurfaceScope::Definition { definition_id } => {
                             definition_id.allocated_bytes()
@@ -301,6 +383,16 @@ impl SurfaceOverlays {
             .sum::<usize>();
         std::mem::size_of::<Self>()
             + self.layers.capacity() * std::mem::size_of::<SurfaceLayer>()
+            + self.images.capacity() * std::mem::size_of::<SurfaceImageRecord>()
+            + self
+                .images
+                .iter()
+                .map(|image| {
+                    image.source_name.capacity()
+                        + image.image_hash.allocated_bytes()
+                        + image.source_hash.allocated_bytes()
+                })
+                .sum::<usize>()
             + strings
     }
 }

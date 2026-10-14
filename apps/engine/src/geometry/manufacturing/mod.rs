@@ -26,6 +26,23 @@ fn geometry_error(error: GeometryError) -> ManufacturingError {
     ManufacturingError::new(code, error.message)
 }
 impl Runtime {
+    fn capture_surface_images(
+        &self,
+    ) -> Result<BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>, ManufacturingError>
+    {
+        self.project
+            .surface_images()
+            .iter()
+            .map(|(hash, asset)| {
+                spiling_surface_fields::HeightImage::from_canonical(
+                    asset.record().clone(),
+                    asset.bytes().clone(),
+                )
+                .map(|image| (hash.clone(), Arc::new(image)))
+                .map_err(project_error)
+            })
+            .collect()
+    }
     pub(super) fn manufacturing_bytes(&self) -> u64 {
         self.project
             .retained_manufacturing_assets()
@@ -120,6 +137,7 @@ impl Runtime {
                         "an explicit printer specification and recipe are required",
                     )
                 })?;
+                let surface_images = self.capture_surface_images()?;
                 let request = super::worker::CompileRequest {
                     project_id: self.project.info().project_id,
                     revision: base_revision,
@@ -133,6 +151,7 @@ impl Runtime {
                     intent,
                     surface_overlays: snapshot.surface_overlays.clone(),
                     byte_budget: 0,
+                    surface_images,
                 };
                 self.start(Purpose::Preflight, 0, move |_, _, _| {
                     Work::Preflight(request)
@@ -178,6 +197,7 @@ impl Runtime {
                     .collect();
                 let occurrences = snapshot.occurrences.values().cloned().collect();
                 let surface_overlays = snapshot.surface_overlays.clone();
+                let surface_images = self.capture_surface_images()?;
                 let byte_budget = MAX_MANUFACTURING_RETAINED_BYTES
                     .checked_sub(self.manufacturing_bytes())
                     .filter(|budget| *budget > 0)
@@ -197,6 +217,7 @@ impl Runtime {
                             occurrences,
                             intent,
                             surface_overlays,
+                            surface_images,
                             byte_budget: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES as u64)
                                 as u32,
                         })

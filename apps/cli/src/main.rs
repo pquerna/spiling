@@ -9,7 +9,7 @@ use spiling_engine_client::{EngineClient, export as output};
 use std::{env, ffi::OsString, io::Write, path::PathBuf, process::ExitCode, time::Instant};
 use uuid::Uuid;
 type Error = Box<dyn std::error::Error>;
-const USAGE: &str = "usage: spiling-cli [--engine PATH] [--store PATH] diagnose | triangle [--output FILE] | job [--request-id UUID] [--chunks N] [--delay-ms N] [--chunk-bytes N] [--input-revision TEXT]\n       spiling-cli geometry (--scene SCENE_JSON | --source PATH...) [--section ox,oy,oz:nx,ny,nz] [--out DIRECTORY] [--engine PATH]\n       spiling-cli project (create|edit|save|open|inspect|recover) PATH [--import STEP] [--add DEFINITION_ID POSE_JSON] [--pose OCCURRENCE_ID POSE_JSON] [--remove ID] [--surface-finish OCCURRENCE FACE_ID SCOPE FINISH_JSON] [--remove-surface-finish LAYER_ID] [--surface-finish-enabled LAYER_ID true|false] [--undo] [--redo] [--intent JSON_FILE] [--place-on-bed OCCURRENCE_ID] [--center-on-bed OCCURRENCE_ID] [--preflight] [--compile] [--verify] [--manufacturing-out NEW_DIRECTORY] [--replay-out NEW_FILE] [--save] [--save-as PATH] [--read-only] [--inspect-face OCCURRENCE_ID FACE_ID] [--section PLANE] [--out NEW_DIRECTORY] [--engine PATH]\nProject operations execute in flag order. Surface scope is definition or occurrence; finish JSON is smooth, vertical_ribs (depth_mm, pitch_mm, edge_margin_mm, phase_mm), or cylindrical_ribs (depth_mm, integer rib_count in 2..=256, phase_fraction in [0,1) of one rib cycle). Cylindrical phase is source +X/right-handed local +Z, independent of native seam/UV. Surface assignment validates the current native face; compile requires certified full-height exterior rectangular vertical walls or complete vertical cylinders under an upright bed-anchored pose and bounded shallow additive ribs. Bed preparation requires an explicit full intent and axis-aligned native certified bounds. --preflight reports actionable input checks, not native slicing or physical qualification. --replay-out on create/inspect requests fresh actual-program motion. Manufacturing output is SOFTWARE ONLY, NOT MACHINE READY; --intent reads bounded inert JSON, not executable TypeScript.";
+const USAGE: &str = "usage: spiling-cli [--engine PATH] [--store PATH] diagnose | triangle [--output FILE] | job [--request-id UUID] [--chunks N] [--delay-ms N] [--chunk-bytes N] [--input-revision TEXT]\n       spiling-cli geometry (--scene SCENE_JSON | --source PATH...) [--section ox,oy,oz:nx,ny,nz] [--out DIRECTORY] [--engine PATH]\n       spiling-cli project (create|edit|save|open|inspect|recover) PATH [--import STEP] [--add DEFINITION_ID POSE_JSON] [--pose OCCURRENCE_ID POSE_JSON] [--remove ID] [--surface-finish OCC FACE SCOPE FINISH_JSON] [--surface-image OCC FACE SCOPE IMAGE_PATH PARAMETERS_JSON] [--surface-image-out HASH NEW_FILE] [--remove-surface-finish LAYER_ID] [--surface-finish-enabled LAYER_ID true|false] [--undo] [--redo] [--intent JSON_FILE] [--place-on-bed OCC] [--center-on-bed OCC] [--preflight] [--compile] [--verify] [--manufacturing-out NEW_DIRECTORY] [--replay-out NEW_FILE] [--save] [--save-as PATH] [--read-only] [--inspect-face OCC FACE] [--section PLANE] [--out NEW_DIRECTORY] [--engine PATH]\nProject operations execute in flag order. Surface scope is definition or occurrence. Finish JSON is smooth, vertical_ribs, cylindrical_ribs or a checked current image_relief reference. --surface-image imports bounded PNG/PGM through the engine with explicit depth_mm, u_repeats, u_phase_fraction, z_period_mm, z_phase_mm, edge_margin_mm and vertical_error_mm. Image U wraps periodically; image top faces positive source Z; mapping is source-relative, not native seam/UV or world-layer indexed. --surface-image-out retrieves canonical PGM through a fresh revision-bound read-only operation. Surface assignment validates the current native face; compilation requires certified full-height exterior rectangular walls or complete vertical cylinders and checked process/pose/resource admission. Bed preparation requires explicit full intent and axis-aligned native certified bounds. --preflight is input eligibility, not native slicing or physical qualification. --replay-out on create/inspect requests fresh actual-program motion. Manufacturing output is SOFTWARE ONLY, NOT MACHINE READY; --intent reads bounded inert JSON, not executable TypeScript.";
 
 struct Options {
     command: Command,
@@ -35,6 +35,7 @@ enum Command {
         output: Option<PathBuf>,
         manufacturing_output: Option<PathBuf>,
         replay_output: Option<PathBuf>,
+        surface_image_output: Option<PathBuf>,
     },
 }
 fn set_once<T>(target: &mut Option<T>, value: T, name: &str) -> Result<(), Error> {
@@ -200,6 +201,13 @@ async fn run(options: Options) -> Result<(), Error> {
         } => Some(output::OutputFile::create(path)?),
         _ => None,
     };
+    let mut surface_image_output = match &options.command {
+        Command::Project {
+            surface_image_output: Some(path),
+            ..
+        } => Some(output::OutputFile::create(path)?),
+        _ => None,
+    };
     let start = Instant::now();
     let mut client = if let Some(store) = &options.store {
         EngineClient::spawn_in(&options.engine, store).await?
@@ -251,12 +259,13 @@ async fn run(options: Options) -> Result<(), Error> {
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
-            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path } => {
-                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut()).await?;
+            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path, surface_image_output: image_path } => {
+                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut(), surface_image_output.as_mut()).await?;
                 report["transfer_and_jobs_us"] = serde_json::json!(transfer.elapsed().as_micros());
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report["manufacturing_output"] = serde_json::json!(manufacturing_path.as_ref().map(|path| path.to_string_lossy()));
                 report["replay_output"] = serde_json::json!(replay_path.as_ref().map(|path| path.to_string_lossy()));
+                report["surface_image_output"] = serde_json::json!(image_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
         };
@@ -294,6 +303,9 @@ async fn run(options: Options) -> Result<(), Error> {
         output.commit();
     }
     if let Some(output) = &mut replay_output {
+        output.commit();
+    }
+    if let Some(output) = &mut surface_image_output {
         output.commit();
     }
     Ok(())

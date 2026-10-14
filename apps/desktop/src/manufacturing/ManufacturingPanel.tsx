@@ -403,6 +403,31 @@ export function ManufacturingPanel({
           </small>
         </details>
       )}
+      {status?.artifact && (
+        <section className="surface-resolution-advisory" data-testid="manufacturing-surface-resolution">
+          <h3>Sampled image feature resolution — advisory</h3>
+          <dl>
+            <dt>Evaluated witnesses</dt>
+            <dd>{status.artifact.summary.surface_resolution.evaluated_witnesses}</dd>
+            <dt>Resolved / ambiguous / below nominal bead resolution / unavailable</dt>
+            <dd>
+              {status.artifact.summary.surface_resolution.resolved} /{" "}
+              {status.artifact.summary.surface_resolution.ambiguous} /{" "}
+              {status.artifact.summary.surface_resolution.below_nominal_resolution} /{" "}
+              {status.artifact.summary.surface_resolution.unavailable}
+            </dd>
+            <dt>Sampled diagnostic coverage</dt>
+            <dd>{status.artifact.summary.surface_resolution.coverage_complete ? "Complete for admitted witnesses" : "Incomplete — unavailable or work-limited samples"}</dd>
+          </dl>
+          <p>
+            Bounded first-wall distance samples and nominal bead width can reveal lost fine details.
+            Correct erosion can remove small features. This is not universal Hausdorff coverage,
+            physical accuracy or guaranteed feature survival, and is separate from fresh independent
+            emitted-program verification below. Field, chord, retention, Z error and support failures
+            remain hard errors, never downgraded by this advisory.
+          </p>
+        </section>
+      )}
       {result && (
         <div
           className={fresh ? "manufacturing-inspection" : "manufacturing-inspection historical"}
@@ -463,8 +488,8 @@ export function ManufacturingPanel({
             <dd>{result.report.max_extrusion_error_mm} mm</dd>
           </dl>
           <p>
-            Surface ribs are bounded additions to source material, not an edited BREP or physical
-            grip qualification. Exported plan coverage separates source section area and surface
+            Surface ribs and mapped image relief add material before ordinary path/support planning,
+            not an edited BREP or physical grip qualification. Exported plan coverage separates source section area and surface
             added area; their sum is realized material area. Added geometric volume is construction
             accounting, not measured extrusion. Inspect fresh actual emitted replay for changed
             paths.

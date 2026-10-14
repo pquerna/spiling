@@ -32,6 +32,7 @@ pub(super) struct CylinderField {
     count: u32,
     phase: f64,
     arithmetic: f64,
+    pub(super) image: Option<super::ImageMapping>,
 }
 
 fn resource(message: &str) -> ManufacturingError {
@@ -60,6 +61,11 @@ pub(super) fn metadata(
     phase: f64,
     sample_limit: usize,
     cancel: &AtomicBool,
+    image: Option<(
+        &spiling_contracts::geometry::SourceHash,
+        &spiling_contracts::surface::ImageReliefParameters,
+        spiling_contracts::surface::SurfaceLayerId,
+    )>,
 ) -> Result<CylinderField, ManufacturingError> {
     check_cancel(cancel)?;
     let native = &input.definitions[&occurrence.definition_id];
@@ -75,15 +81,32 @@ pub(super) fn metadata(
                 format!("surface face {}: {e}", face_id.as_str()),
             )
         })?;
+    let image = image
+        .map(|(hash, parameters, layer_id)| {
+            super::ImageMapping::new(
+                input,
+                occurrence,
+                hash,
+                parameters,
+                layer_id,
+                cert.min_z_mm,
+                cert.max_z_mm,
+            )
+        })
+        .transpose()?;
     let bead = input.intent.recipe.bead_width_mm;
-    if count < 2
-        || count > 256
-        || !depth.is_finite()
-        || !phase.is_finite()
-        || !(0.0..1.0).contains(&phase)
-        || depth <= 0.022
-        || depth > 0.5 * bead
-        || TAU * cert.radius_mm / (count as f64) < 4.0 * bead
+    if image
+        .as_ref()
+        .is_some_and(|image| image.parameters.edge_margin_mm != 0.0)
+        || (image.is_none()
+            && (count < 2
+                || count > 256
+                || !depth.is_finite()
+                || !phase.is_finite()
+                || !(0.0..1.0).contains(&phase)
+                || depth <= 0.022
+                || depth > 0.5 * bead
+                || TAU * cert.radius_mm / (count as f64) < 4.0 * bead))
     {
         return Err(unsupported(
             face_id,
@@ -116,6 +139,9 @@ pub(super) fn metadata(
         .chain([cert.radius_mm, cert.min_z_mm, cert.max_z_mm, depth])
         .fold(1.0f64, |a, b| a.max(b.abs()));
     let arithmetic = 4096.0 * f64::EPSILON * scale;
+    let count = image
+        .as_ref()
+        .map_or(count, |i| i.image.record().width * i.parameters.u_repeats);
     let min_radius = cert.radius_mm - SECTION_SAMPLING_TOLERANCE_MM - 4.0 * arithmetic;
     let theta_error = 8.0 * arithmetic / min_radius + 64.0 * f64::EPSILON;
     let endpoint_error = 5.0 * arithmetic
@@ -133,7 +159,12 @@ pub(super) fn metadata(
     if !frame_ok
         || min_radius <= 0.0
         || !endpoint_error.is_finite()
-        || endpoint_error > SURFACE_ROUNDING_MM / 2.0
+        || endpoint_error
+            > if image.is_some() {
+                SURFACE_ROUNDING_MM * 3.0 / 8.0
+            } else {
+                SURFACE_ROUNDING_MM / 2.0
+            }
     {
         return Err(unsupported(
             face_id,
@@ -144,9 +175,13 @@ pub(super) fn metadata(
     // endpoints are charged separately when the actual section arrives.
     let n = count as f64;
     let profile = PeriodicProfile::new(depth, n, TAU * phase);
-    let lifted_bound = profile.second_derivative_bound()
-        + 4.0 * profile.first_derivative_bound()
-        + 3.0 * profile.maximum();
+    let lifted_bound = if let Some(image) = &image {
+        4.0 * image.global_du() / TAU + 3.0 * depth
+    } else {
+        profile.second_derivative_bound()
+            + 4.0 * profile.first_derivative_bound()
+            + 3.0 * profile.maximum()
+    };
     let factor = (lifted_bound / (8.0 * (SURFACE_TOLERANCE_MM - SURFACE_ROUNDING_MM))).sqrt();
     let required = (TAU * (cert.radius_mm + SECTION_SAMPLING_TOLERANCE_MM + arithmetic) * factor
         / min_radius)
@@ -185,11 +220,59 @@ pub(super) fn metadata(
         count,
         phase,
         arithmetic,
+        image,
     })
 }
 impl CylinderField {
     fn profile(&self) -> PeriodicProfile {
         PeriodicProfile::new(self.depth, self.count as f64, TAU * self.phase)
+    }
+    fn displacement(&self, theta: f64, sample: f64) -> f64 {
+        self.image.as_ref().map_or_else(
+            || self.profile().value(theta),
+            |i| i.value(theta / TAU, sample),
+        )
+    }
+    fn derivative_bounds(&self) -> (f64, f64, f64) {
+        if let Some(i) = &self.image {
+            (i.global_du() / TAU, 0.0, self.depth)
+        } else {
+            let p = self.profile();
+            (
+                p.first_derivative_bound(),
+                p.second_derivative_bound(),
+                p.maximum(),
+            )
+        }
+    }
+    pub(super) fn source_u(&self, point: Coord<f64>) -> f64 {
+        (self.angle(point) / TAU).rem_euclid(1.0)
+    }
+    pub(super) fn owns_realized(
+        &self,
+        polygon: &Polygon<f64>,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        let mut turn = 0.0;
+        for edge in polygon.exterior().0.windows(2) {
+            check_cancel(cancel)?;
+            let a = sub(edge[0], self.center);
+            let b = sub(edge[1], self.center);
+            let delta = cross(a, b).atan2(a.x * b.x + a.y * b.y);
+            turn += delta;
+            let r = norm(a);
+            if delta <= 0.0
+                || delta >= PI / 2.0
+                || r < self.radius - SECTION_SAMPLING_TOLERANCE_MM - SURFACE_ROUNDING_MM
+                || r > self.radius
+                    + self.depth
+                    + SECTION_SAMPLING_TOLERANCE_MM
+                    + SURFACE_ROUNDING_MM
+            {
+                return Ok(false);
+            }
+        }
+        Ok((turn - TAU).abs() <= 256.0 * f64::EPSILON * polygon.exterior().0.len() as f64)
     }
     fn angle(&self, point: Coord<f64>) -> f64 {
         let v = sub(point, self.center);
@@ -224,11 +307,8 @@ impl CylinderField {
                 "native cylindrical edge has no conditioned positive axis distance",
             ));
         }
-        let profile = self.profile();
-        let bound = (length / distance).powi(2)
-            * (profile.second_derivative_bound()
-                + 4.0 * profile.first_derivative_bound()
-                + 3.0 * profile.maximum());
+        let (first, second, maximum) = self.derivative_bounds();
+        let bound = (length / distance).powi(2) * (second + 4.0 * first + 3.0 * maximum);
         let count = (bound / (8.0 * (SURFACE_TOLERANCE_MM - SURFACE_ROUNDING_MM)))
             .sqrt()
             .ceil()
@@ -250,42 +330,49 @@ fn owner(
 ) -> Result<usize, ManufacturingError> {
     let mut owner = None;
     for (index, polygon) in source.0.iter().enumerate() {
-        let ring = polygon.exterior();
-        if ring.0.len() < 4 || ring.0.first() != ring.0.last() {
-            continue;
-        }
-        proof::charge(work, ring.0.len())?;
-        let mut valid = true;
-        let mut turn = 0.0;
-        for (i, edge) in ring.0.windows(2).enumerate() {
-            check_cancel(cancel)?;
-            let a = sub(edge[0], field.center);
-            let b = sub(edge[1], field.center);
-            let next = ring.0[(i + 2) % (ring.0.len() - 1)];
-            let (_, d) = field.edge_geometry(edge[0], edge[1]);
-            let delta = cross(a, b).atan2(a.x * b.x + a.y * b.y);
-            valid &= RobustKernel::orient2d(edge[0], edge[1], field.center)
-                == Orientation::CounterClockwise
-                && RobustKernel::orient2d(edge[0], edge[1], next) != Orientation::Clockwise
-                && delta > 0.0
-                && delta < PI / 2.0
-                && RobustKernel::dot_product_sign(a, b) == Orientation::CounterClockwise
-                && norm(a) <= field.radius + SECTION_SAMPLING_TOLERANCE_MM - field.arithmetic
-                && d >= field.radius - SECTION_SAMPLING_TOLERANCE_MM;
-            turn += delta;
-        }
-        valid &=
-            turn.is_finite() && (turn - TAU).abs() <= 256.0 * f64::EPSILON * ring.0.len() as f64;
-        if valid {
-            if owner.replace(index).is_some() {
-                return Err(unsupported(
-                    &field.face_id,
-                    "cylindrical certificate matches more than one native exterior ring",
-                ));
-            }
+        if owns_native_island(polygon, field, work, cancel)? && owner.replace(index).is_some() {
+            return Err(unsupported(
+                &field.face_id,
+                "cylindrical certificate matches more than one native exterior ring",
+            ));
         }
     }
     owner.ok_or_else(|| unsupported(&field.face_id, "full cylindrical native exterior is not convex, full-turn, axis-interior and within the native radial envelope"))
+}
+
+pub(super) fn owns_native_island(
+    polygon: &Polygon<f64>,
+    field: &CylinderField,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    let ring = polygon.exterior();
+    if ring.0.len() < 4 || ring.0.first() != ring.0.last() {
+        return Ok(false);
+    }
+    proof::charge(work, ring.0.len())?;
+    let mut valid = true;
+    let mut turn = 0.0;
+    for (i, edge) in ring.0.windows(2).enumerate() {
+        check_cancel(cancel)?;
+        let a = sub(edge[0], field.center);
+        let b = sub(edge[1], field.center);
+        let next = ring.0[(i + 2) % (ring.0.len() - 1)];
+        let (_, d) = field.edge_geometry(edge[0], edge[1]);
+        let delta = cross(a, b).atan2(a.x * b.x + a.y * b.y);
+        valid &= RobustKernel::orient2d(edge[0], edge[1], field.center)
+            == Orientation::CounterClockwise
+            && RobustKernel::orient2d(edge[0], edge[1], next) != Orientation::Clockwise
+            && delta > 0.0
+            && delta < PI / 2.0
+            && RobustKernel::dot_product_sign(a, b) == Orientation::CounterClockwise
+            && norm(a) <= field.radius + SECTION_SAMPLING_TOLERANCE_MM - field.arithmetic
+            && d >= field.radius - SECTION_SAMPLING_TOLERANCE_MM;
+        turn += delta;
+    }
+    Ok(valid
+        && turn.is_finite()
+        && (turn - TAU).abs() <= 256.0 * f64::EPSILON * ring.0.len() as f64)
 }
 
 fn evaluate(
@@ -294,6 +381,7 @@ fn evaluate(
     b: Coord<f64>,
     t: f64,
     previous: Coord<f64>,
+    sample: f64,
 ) -> Result<Coord<f64>, ManufacturingError> {
     let base = if t == 0.0 {
         a
@@ -305,7 +393,10 @@ fn evaluate(
     };
     let radial = sub(base, field.center);
     let radius = norm(radial);
-    let depth = field.profile().value(field.angle(base));
+    let depth = field.displacement(field.angle(base), sample);
+    if depth == 0.0 && t == 0.0 {
+        return Ok(a);
+    }
     let mut point = Coord {
         x: base.x + depth * radial.x / radius,
         y: base.y + depth * radial.y / radius,
@@ -353,6 +444,9 @@ pub(super) fn realize(
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
     check_cancel(cancel)?;
+    if field.image.as_ref().is_some_and(|i| i.zero_row(sample)) {
+        return Ok(source);
+    }
     if sample <= field.bounds.min[2] || sample >= field.bounds.max[2] {
         return Err(unsupported(
             &field.face_id,
@@ -368,29 +462,23 @@ pub(super) fn realize(
         .checked_add(edges)
         .ok_or_else(|| resource("cylindrical point accounting overflow"))?;
     retained
-        .checked_add(6 * source_points)
-        .and_then(|v| v.checked_add(4 * capacity))
+        .checked_add(14 * source_points)
+        .and_then(|v| v.checked_add(8 * capacity))
         .filter(|v| *v <= MAX_DEPOSITION_SEGMENTS as usize)
         .ok_or_else(|| resource("native cylindrical construction staging point budget exceeded"))?;
-    // Pre-admit every global proof and all scratch before growing output.
-    let total = source_points
-        .checked_add(capacity)
-        .ok_or_else(|| resource("cylindrical proof size overflow"))?;
+    // Sampling is pre-admitted; mandatory robust boundary proofs subsequently
+    // admit their bounded index/sort and charge every exact candidate predicate.
+    // A global Cartesian product is not the work performed by that proof.
     let sampling_work = edges
         .checked_mul(field.count as usize * 16)
         .and_then(|v| v.checked_add(capacity))
         .ok_or_else(|| resource("cylindrical sampling work overflow"))?;
-    let proof = total
-        .checked_mul(total)
-        .and_then(|v| v.checked_add(9 * edges * capacity))
-        .and_then(|v| v.checked_add(sampling_work))
-        .ok_or_else(|| resource("cylindrical proof work overflow"))?;
     if work
-        .checked_add(proof)
+        .checked_add(sampling_work)
         .is_none_or(|v| v > super::super::MAX_BOOLEAN_PAIRS)
     {
         return Err(resource(
-            "cumulative cylindrical boundary proof work budget exceeded",
+            "cumulative cylindrical sampling work budget exceeded",
         ));
     }
     let mut points = Vec::with_capacity(capacity);
@@ -402,12 +490,18 @@ pub(super) fn realize(
         proof::charge(work, field.count as usize * 16 + intervals)?;
         let v = sub(edge[1], edge[0]);
         let (edge_length, edge_distance) = field.edge_geometry(edge[0], edge[1]);
-        let profile = field.profile();
-        let speed = edge_length
-            + (profile.first_derivative_bound() + profile.maximum()) * edge_length / edge_distance;
+        let (first, _, maximum) = field.derivative_bounds();
+        let speed = edge_length + (first + maximum) * edge_length / edge_distance;
         for peak in 0..field.count {
             check_cancel(cancel)?;
-            let ray = field.ray(TAU * (peak as f64 + field.phase + 0.5) / field.count as f64);
+            let theta = if let Some(image) = &field.image {
+                TAU * (peak as f64 / image.image.record().width as f64
+                    - image.parameters.u_phase_fraction)
+                    / image.parameters.u_repeats as f64
+            } else {
+                TAU * (peak as f64 + field.phase + 0.5) / field.count as f64
+            };
+            let ray = field.ray(theta);
             let denominator = cross(v, ray);
             if denominator == 0.0 {
                 continue;
@@ -418,7 +512,7 @@ pub(super) fn realize(
                 // existing node, never a snapped source parameter. The Lipschitz
                 // lifted-profile uncertainty is reserved in endpoint_error.
                 let nearest = (t * intervals as f64).round() / intervals as f64;
-                if (t - nearest).abs() * speed <= field.arithmetic {
+                if field.image.is_none() && (t - nearest).abs() * speed <= field.arithmetic {
                     continue;
                 }
                 let p = Coord {
@@ -454,7 +548,7 @@ pub(super) fn realize(
                 ));
             }
             let previous = old.0[(i + edges - 1) % edges];
-            let point = evaluate(field, edge[0], edge[1], t, previous)?;
+            let point = evaluate(field, edge[0], edge[1], t, previous, sample)?;
             if let Some(last) = points.last().copied() {
                 // All endpoints remain outside their one owning native segment.
                 // At the start of an edge the prior point belongs to the prior
@@ -574,9 +668,56 @@ pub(super) fn certify_first_wall(
     Ok(())
 }
 
+pub(super) fn witness(
+    field: &CylinderField,
+    ring: &LineString<f64>,
+    point: Coord<f64>,
+    sample: f64,
+    cancel: &AtomicBool,
+) -> Result<Option<(Coord<f64>, f64)>, ManufacturingError> {
+    let ray = sub(point, field.center);
+    let count = ring.0.len().saturating_sub(1);
+    for (index, edge) in ring.0.windows(2).enumerate() {
+        check_cancel(cancel)?;
+        let v = sub(edge[1], edge[0]);
+        let denominator = cross(v, ray);
+        if denominator == 0.0 {
+            continue;
+        }
+        let parameter = cross(sub(field.center, edge[0]), ray) / denominator;
+        let t = parameter.clamp(0.0, 1.0);
+        if (t - parameter).abs() * norm(v) > field.arithmetic {
+            continue;
+        }
+        let base = Coord {
+            x: edge[0].x + t * v.x,
+            y: edge[0].y + t * v.y,
+        };
+        let radial = sub(base, field.center);
+        if radial.x * ray.x + radial.y * ray.y <= 0.0 {
+            continue;
+        }
+        let previous = ring.0[(index + count - 1) % count];
+        let lifted = if t == 1.0 {
+            evaluate(
+                field,
+                edge[1],
+                ring.0[(index + 2) % count],
+                0.0,
+                edge[0],
+                sample,
+            )?
+        } else {
+            evaluate(field, edge[0], edge[1], t, previous, sample)?
+        };
+        return Ok(Some((lifted, index as f64 + t)));
+    }
+    Ok(None)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geo::MapCoords;
 
     // An algorithm fixture, not evidence that imported cylindrical holes are
     // certified. Unequal endpoint radii exercise the actual-edge L/d bound.
@@ -616,11 +757,157 @@ mod tests {
             count: 7,
             phase: 0.31,
             arithmetic: 4096.0 * f64::EPSILON * 8.0,
+            image: None,
         };
         (
             MultiPolygon(vec![Polygon::new(LineString(outer), vec![hole])]),
             field,
         )
+    }
+
+    #[test]
+    fn required_policy_preserves_cylindrical_ribs_but_not_image_additions() {
+        use super::super::{PreparedFinish, PreparedShape, realize_required};
+        use geo::{Intersects, Point};
+        let (source, rib) = closed_native_ring(128, 19);
+        let cancel = AtomicBool::new(false);
+        let fields = [PreparedFinish {
+            shape: PreparedShape::Cylindrical(rib),
+        }];
+        assert!(!fields[0].is_image());
+        let required = realize_required(source.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap();
+        assert!(required.unsigned_area() > source.unsigned_area());
+        assert_eq!(required.0[0].interiors(), source.0[0].interiors());
+        for point in &source.0[0].exterior().0 {
+            assert!(required.0[0].intersects(&Point(*point)));
+        }
+        // Independently evaluate each strict rib peak in its source XY frame.
+        for peak in 0..7 {
+            let angle = (TAU * 0.31 + std::f64::consts::PI + TAU * peak as f64) / 7.0;
+            let point = Point::new(3.0 + 5.11 * angle.cos(), -2.0 + 5.11 * angle.sin());
+            assert!(required.0[0].intersects(&point));
+        }
+        let (source, mut image) = closed_native_ring(128, 19);
+        image.image = Some(super::super::tests::mapping(image.depth, 0.0));
+        let fields = [PreparedFinish {
+            shape: PreparedShape::Cylindrical(image),
+        }];
+        assert!(fields[0].is_image());
+        assert_eq!(
+            source,
+            realize_required(source.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap()
+        );
+        let requested =
+            super::super::realize(source.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap();
+        assert!(requested.unsigned_area() > source.unsigned_area());
+    }
+
+    #[test]
+    fn image_rows_native_chords_phase_wrap_and_holes_are_not_analytic_circle_substitutes() {
+        let (source, mut field) = closed_native_ring(128, 19);
+        field.image = Some(super::super::tests::mapping(field.depth, 0.0));
+        field.count = 3;
+        field.phase = 0.17;
+        let cancel = AtomicBool::new(false);
+        assert!(owns_native_island(&source.0[0], &field, &mut 0, &cancel).unwrap());
+        let other_island = source.0[0].map_coords(|point| Coord {
+            x: point.x + 0.01,
+            y: point.y,
+        });
+        assert!(!owns_native_island(&other_island, &field, &mut 0, &cancel).unwrap());
+        let blank = realize(source.clone(), &field, 0.5, 0, &mut 0, &cancel).unwrap();
+        assert_eq!(blank, source);
+        let derived = realize(source.clone(), &field, 2.0, 0, &mut 0, &cancel).unwrap();
+        assert_eq!(source.0[0].interiors(), derived.0[0].interiors());
+        assert_eq!(
+            derived.0[0].exterior().0.first(),
+            derived.0[0].exterior().0.last()
+        );
+        for p in &source.0[0].exterior().0 {
+            assert!(derived.0[0].intersects(&Point(*p)));
+        }
+        for chord in derived.0[0].exterior().0.windows(2) {
+            let middle = Coord {
+                x: (chord[0].x + chord[1].x) / 2.0,
+                y: (chord[0].y + chord[1].y) / 2.0,
+            };
+            let ray = sub(middle, field.center);
+            let edge = source.0[0]
+                .exterior()
+                .0
+                .windows(2)
+                .find(|edge| {
+                    cross(sub(edge[0], field.center), ray) >= 0.0
+                        && cross(ray, sub(edge[1], field.center)) >= 0.0
+                })
+                .unwrap();
+            let v = sub(edge[1], edge[0]);
+            let base = |point: Coord<f64>| {
+                let ray = sub(point, field.center);
+                let multiplier = cross(sub(edge[0], field.center), v) / cross(ray, v);
+                Coord {
+                    x: field.center.x + multiplier * ray.x,
+                    y: field.center.y + multiplier * ray.y,
+                }
+            };
+            let a = base(chord[0]);
+            let b = base(chord[1]);
+            for t in [0.125, 0.25, 0.5, 0.75, 0.875] {
+                let p = Coord {
+                    x: a.x + t * (b.x - a.x),
+                    y: a.y + t * (b.y - a.y),
+                };
+                let radial = sub(p, field.center);
+                let height = field
+                    .image
+                    .as_ref()
+                    .unwrap()
+                    .value(field.angle(p) / TAU, 2.0);
+                let exact = Coord {
+                    x: p.x + height * radial.x / norm(radial),
+                    y: p.y + height * radial.y / norm(radial),
+                };
+                let chord_point = Coord {
+                    x: chord[0].x + t * (chord[1].x - chord[0].x),
+                    y: chord[0].y + t * (chord[1].y - chord[0].y),
+                };
+                assert!(norm(sub(exact, chord_point)) <= SURFACE_TOLERANCE_MM);
+            }
+        }
+        let mut flipped = super::super::tests::mapping(field.depth, 0.0);
+        flipped.translation_z = 3.0;
+        flipped.sigma = -1.0;
+        field.image = Some(flipped);
+        let reversed = realize(source.clone(), &field, 1.0, 0, &mut 0, &cancel).unwrap();
+        assert_eq!(reversed, derived);
+        let placed_source = source.map_coords(|point| Coord {
+            x: -point.y + 11.0,
+            y: point.x - 7.0,
+        });
+        field.center = Coord {
+            x: -field.center.y + 11.0,
+            y: field.center.x - 7.0,
+        };
+        field.x = [0.0, 1.0];
+        field.y = [-1.0, 0.0];
+        field.arithmetic = 4096.0 * f64::EPSILON * 16.0;
+        let placed = realize(placed_source, &field, 1.0, 0, &mut 0, &cancel).unwrap();
+        let expected = derived.map_coords(|point| Coord {
+            x: -point.y + 11.0,
+            y: point.x - 7.0,
+        });
+        assert_eq!(
+            placed.0[0].exterior().0.len(),
+            expected.0[0].exterior().0.len()
+        );
+        for (actual, expected) in placed.0[0]
+            .exterior()
+            .0
+            .iter()
+            .zip(&expected.0[0].exterior().0)
+        {
+            assert!(norm(sub(*actual, *expected)) <= SURFACE_ROUNDING_MM);
+        }
     }
 
     #[test]
