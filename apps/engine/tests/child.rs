@@ -51,7 +51,7 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         client.hello().engine_build,
         spiling_contracts::ENGINE_BUILD_ID
     );
-    for expected in ["recoverable_projects_v3", "source_face_surface_finish_v1"] {
+    for expected in ["recoverable_projects_v3", "source_face_surface_finish_v2"] {
         assert!(
             client
                 .hello()
@@ -63,6 +63,7 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
     for expected in [
         "manufacturing_schema4",
         "bounded_vertical_rib_construction_v1",
+        "bounded_cylindrical_rib_construction_v1",
     ] {
         assert!(
             client
@@ -78,6 +79,13 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
             .geometry_capabilities
             .iter()
             .any(|capability| capability == "step_planar_cylindrical_v1")
+    );
+    assert!(
+        client
+            .hello()
+            .geometry_capabilities
+            .iter()
+            .any(|capability| capability == "native_vertical_cylinder_face_v1")
     );
     client.ping().await.unwrap();
     assert_eq!(client.triangle().await.unwrap(), synthetic_triangle());

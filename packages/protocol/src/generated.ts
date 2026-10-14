@@ -120,7 +120,7 @@ export type SurfaceScopeKind = "definition" | "occurrence";
 
 export type SurfaceScope = { "kind": "definition", definition_id: DefinitionId, } | { "kind": "occurrence", occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, };
 
-export type SurfaceFinish = { "kind": "smooth" } | { "kind": "vertical_ribs", depth_mm: number, pitch_mm: number, edge_margin_mm: number, phase_mm: number, };
+export type SurfaceFinish = { "kind": "smooth" } | { "kind": "vertical_ribs", depth_mm: number, pitch_mm: number, edge_margin_mm: number, phase_mm: number, } | { "kind": "cylindrical_ribs", depth_mm: number, rib_count: number, phase_fraction: number, };
 
 export type SurfaceLayer = { layer_id: SurfaceLayerId, enabled: boolean, scope: SurfaceScope, face_id: FaceId, finish: SurfaceFinish, };
 
@@ -273,7 +273,7 @@ export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
 export const MAX_PROJECT_STORED_ASSETS = 128 as const;
 export const MAX_PROJECT_ERROR_BYTES = 2048 as const;
-export const SURFACE_SCHEMA_VERSION = 1 as const;
+export const SURFACE_SCHEMA_VERSION = 2 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;

@@ -126,11 +126,20 @@ Select a current native occurrence and source face in **Surface Finish**, then e
 CLI uses the same typed engine route. Discover admitted face IDs through `project inspect ... --inspect-face OCCURRENCE FACE_ID`; do not infer them from STEP entity numbers or display triangles. For a certified full-height rectangular exterior vertical planar face in an upright bed-anchored native extrusion:
 
 ```sh
-"$CLI" project edit EXISTING_PRINT_PROJECT --surface-finish 1 ADMITTED_FACE_ID occurrence '{"kind":"vertical_ribs","depth_mm":0.1,"pitch_mm":2,"edge_margin_mm":1,"phase_mm":0}' --preflight --compile --verify --manufacturing-out NEW_RIB_EXPORT --replay-out NEW_RIB_MOTION.splr --engine "$ENGINE"
+"$CLI" project edit EXISTING_PRINT_PROJECT --surface-finish 1 ADMITTED_FACE_ID occurrence '{"kind":"vertical_ribs","depth_mm":0.1,"pitch_mm":2,"edge_margin_mm":1,"phase_mm":0}' --preflight --compile --verify --manufacturing-out NEW_RIB_EXPORT --engine "$ENGINE"
+"$CLI" project inspect EXISTING_PRINT_PROJECT --verify --replay-out NEW_RIB_MOTION.splr --engine "$ENGINE"
 "$CLI" project edit EXISTING_PRINT_PROJECT --surface-finish-enabled 1 false --undo --remove-surface-finish 1 --engine "$ENGINE"
 ```
 
-Layer IDs come from authoritative project status. Native source material and protected holes remain separate from bounded outward finish additions. Depth/pitch/margin, selected-face trim, pose, work and nominal exclusion constraints may refuse the request explicitly; no untextured success fallback exists. The changed domain feeds walls, skins, infill and actual-anchor/support analysis before ordinary emission/replay. This is neither random fuzzy skin, image relief, material/color painting nor measured grip. Project format 3 / surface schema 1 / manufacturing schema 4 are a clean internal cutover; SPLR remains schema 3.
+For a native complete exterior cylindrical face, choose **Cylindrical vertical ribs**, depth/count/phase fraction, or use the same command route:
+
+```sh
+"$CLI" project edit EXISTING_PRINT_PROJECT --surface-finish 1 ADMITTED_CYLINDER_FACE occurrence '{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":8,"phase_fraction":0}' --preflight --compile --verify --manufacturing-out NEW_CYLINDER_EXPORT --engine "$ENGINE"
+```
+
+Cylinder phase is measured from source-local +X about +Z as a fraction of one rib cycle, independent of the native seam/UV and instance pose. Integer count closes the circumference; manufacturing derives pitch from the certified source radius. A split pair of half-cylinder source faces is not one full-face target. Source BREP, history and scopes are independent of the carrier-specific numeric controls.
+
+Layer IDs come from authoritative project status. Native source material and protected holes remain separate from bounded outward finish additions. Selected trim, pose, depth/pitch/count/margin, numerical conditioning, work and nominal exclusions may refuse explicitly; no untextured fallback exists. The changed domain feeds walls, skins, infill and actual-anchor/support analysis before ordinary emission/replay. This is neither random fuzzy skin, image relief, material/color painting, helical/crossed knurling nor measured grip. Project3 / surface2 / manufacturing4 / planner5 is a clean cutover; emitter/verifier4 and SPLR3 remain unchanged. Old surface1 documents and planner4 bundles are intentionally unsupported. The [mini-RFC](../adr/002-cylindrical-grip-ribs.md) separates reusable analytic trims, scalar profiles and proofs from the current admission envelope.
 
 Run the real production authoring→compile→fresh replay→save→source-deletion→read-only reopen/export scenario against the freshly built native shell and matching engine:
 
@@ -138,6 +147,8 @@ Run the real production authoring→compile→fresh replay→save→source-delet
 SPILING_ENGINE_PATH="$PWD/target/debug/spiling-engine" SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 \
   xvfb-run -a node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" --scenario surface-finish --diagnostic-no-gpu --port 9222
 ```
+
+Use `--scenario cylindrical-finish` for the curved workflow. It admits the unchanged full-face `independent-exporters/occt-cylinder-mm.step` through the same confined native tokens, compares untextured versus finished real paths/program, then exercises history, source-copy deletion and fresh saved read-only inspection/export. These are diagnostic native-control workflows, not GPU, real-dialog or hardware qualification.
 
 Use the resource controls below; do not run CEF beside native compilation. Before a direct desktop Cargo build, stage the fresh target-suffixed engine sidecar and build the current frontend; otherwise shell staging can replace a current engine with an older cached sidecar.
 

@@ -1322,11 +1322,10 @@ fn surface_save_open_dirty_history_read_only_and_recovery_preserve_document_and_
                     definition_id: definition_id.clone(),
                 },
                 face_id: FaceId::from_step_entity(7).unwrap(),
-                finish: SurfaceFinish::VerticalRibs {
+                finish: SurfaceFinish::CylindricalRibs {
                     depth_mm: 0.1,
-                    pitch_mm: 2.0,
-                    edge_margin_mm: 0.8,
-                    phase_mm: 0.25,
+                    rib_count: 16,
+                    phase_fraction: 0.25,
                 },
             })
             .unwrap();
@@ -1425,6 +1424,7 @@ fn surface_manifest_rejects_structurally_corrupt_targets_and_old_format() {
         ),
         ("/next_surface_layer", serde_json::json!(1)),
         ("/format_version", serde_json::json!(2)),
+        ("/surface_overlays/schema_version", serde_json::json!(1)),
     ] {
         let mut corrupt = value.clone();
         *corrupt.pointer_mut(pointer).unwrap() = replacement;

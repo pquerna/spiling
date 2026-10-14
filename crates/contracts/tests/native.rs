@@ -309,13 +309,24 @@ fn surface_commands_have_checked_typed_roundtrips_and_no_missing_kind_defaults()
         ProjectCommand::AddSurfaceFinish {
             session_id: session_id.clone(),
             base_revision: ProjectRevision(8),
-            face_ref,
+            face_ref: face_ref.clone(),
             scope: SurfaceScopeKind::Occurrence,
             finish: SurfaceFinish::VerticalRibs {
                 depth_mm: 0.1,
                 pitch_mm: 2.0,
                 edge_margin_mm: 0.8,
                 phase_mm: 0.2,
+            },
+        },
+        ProjectCommand::AddSurfaceFinish {
+            session_id: session_id.clone(),
+            base_revision: ProjectRevision(8),
+            face_ref,
+            scope: SurfaceScopeKind::Definition,
+            finish: SurfaceFinish::CylindricalRibs {
+                depth_mm: 0.1,
+                rib_count: 16,
+                phase_fraction: 0.25,
             },
         },
         ProjectCommand::RemoveSurfaceFinish {

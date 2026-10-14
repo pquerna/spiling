@@ -557,6 +557,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "mesh_chunks_v1",
             "native_plane_section_v1",
             "native_vertical_rectangular_wall_v1",
+            "native_vertical_cylinder_face_v1",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -580,7 +581,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "recoverable_projects_v3",
             "project_transactions_v1",
             "project_read_only_v1",
-            "source_face_surface_finish_v1",
+            "source_face_surface_finish_v2",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -591,6 +592,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "immutable_bundle_bytestream_v1",
             "manufacturing_schema4",
             "bounded_vertical_rib_construction_v1",
+            "bounded_cylindrical_rib_construction_v1",
         ]
         .into_iter()
         .map(str::to_owned)

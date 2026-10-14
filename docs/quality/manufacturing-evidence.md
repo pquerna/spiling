@@ -43,16 +43,124 @@ or swept-bead physics. Physical qualification remains open until the frozen
 configuration passes supervised measurements; the workbench has no execution
 connector and must not infer permission from a verified report.
 
-## Source-face finish software gate — project 3 / manufacturing 4
+## Cylindrical finish and shared construction — surface 2 / planner 5
 
-**Gate decision: the selected native-face vertical-rib workflow passed in software.**
-Physical texture/grip, printer qualification, swept-tool collision, real dialogs,
-GPU display/picking and distribution/platform durability remain open. This
-implementation uses the commit containing this section, based on public main
-`415342e`, Rust 1.99.0 (`b940084d7`), Linux x64, Node 24.15.0, pnpm 10.32.1
-and unchanged Monstertruck pin `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`.
-Project format 3, surface schema 1 and manufacturing/planner/emitter/verifier 4
-are a clean internal cutover; SPLR remains 3. Older formats are not migrated.
+**Software gate passed:** native full-cylinder face authoring through actual CLI
+and CEF, ordinary manufacturing, fresh independent actual-program replay,
+history, durable save/source removal/read-only reopen and immutable export.
+This change is based on public main `0b8a09b`; its reproducible implementation
+is the commit containing this section. Rust 1.99.0 (`b940084d7`), Linux x64
+7.0.14-23-pve, Node24.15.0 and pnpm10.32.1 were exercised. Monstertruck remains
+`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Current identities are project3,
+surface2, manufacturing4, planner5, emitter/verifier4 and SPLR3; old
+surface1/planner4 inputs are intentionally refused rather than migrated.
+
+The [reviewed mini-RFC](../adr/002-cylindrical-grip-ribs.md) preceded code and
+was revised after independent geometry/data-flow review. This is not an
+exporter/face-number recognizer: the importer retains generic native
+face/wire/oriented-coedge analytic references before modeled circles become
+NURBS. Planar and cylindrical construction share one allocation-free periodic
+profile, robust material-retention/simplicity proofs and a private prepared
+carrier boundary. One realized material domain feeds ordinary walls,
+fill/skins, anchor/support reasoning, emission and independent verification.
+The first cylindrical consumer remains deliberately bounded to a complete
+outward, full-height cylinder in an upright bed-anchored invariant extrusion.
+Split/partial/recessed faces, bores, unknown identities and unsafe combinations
+refuse; no helical/crossed knurling, arbitrary painting or physical grip claim.
+
+Frozen inputs, unchanged during evaluation:
+
+| Input | SHA-256 |
+| --- | --- |
+| `geometry/independent-exporters/occt-cylinder-mm.step` — admitted full face | `21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a` |
+| `geometry/cylinder.step` — two native half-faces, explicit refusal | `95df1da444dc9c49529054f1825c9013c135301df677e30269c3a789ee2b464b` |
+| `manufacturing/solid-fill.intent.json` — actual CLI | `99a5033a65020d206b673b70a572c41bcd60850610426e0215187ec52d2ddb29` |
+| `manufacturing/complete-sparse.intent.json` — actual CEF | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
+
+Focused properties passed: five contract, six Core, two client and eleven
+selected geometry cases; eleven native manufacturing cases; two new Boolean
+admission cases. Evidence covers typed parameter/storage/history boundaries,
+native ownership/corruption refusal, translated/phased/radius/axis variations,
+three-/seven-part native rim subdivisions, short-step refusal, native polygon
+inclusion, exact protected holes, unequal-radius edge derivative/chord bounds,
+copied cyclic closure, phase/seam independence, ordinary first-wall survival,
+actual replay and bounded precision/work/cancellation failures. Synthetic
+hole-ring proofs are not an imported annular-cylinder support claim.
+
+The first actual CLI run exposed a production integration failure missed by
+the smaller native configuration: the two-wall fill offset's capsule self-union
+hit the coarse Boolean bound. A temporary diagnostic observed `region.rs:232`,
+314 capsules /14758 points per operand and19998077 accumulated whole-ring pairs
+before the next47×47 charge. General edge broad-phase admission now tightens
+that conservative estimate without changing the20M work ceiling, material
+coordinates, sampling or native/finish/offset tolerances. Input/index growth,
+cancellable heapsort, every active scan and intra-/cross-operand candidate are
+charged. Independent review caught and closed shared integer-adapter
+quantization in comparison boxes. Dense/near-grid refusal and thick-neighborhood
+exterior/hole/clearance properties pass. The diagnostic was removed. Separately,
+an invalid generated stepped-cylinder test source used the wrong revolution-axis
+anchor; its source construction was corrected, not the native admission gate.
+
+Actual CLI tests
+`ordered_cylindrical_ribs_compile_history_save_fresh_read_only_motion_and_reveal`
+and `ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal`
+both pass against the rebuilt engine. Cylindrical parameters are depth0.1 mm,
+count12 and phase0.25; the formerly failing parameters were retained.
+`cylindrical_finish_refuses_split_native_face_without_smooth_fallback` also passes.
+The workflow compares actual baseline/finished paths and program bytes, checks
+original/realized/added material accounting, then exercises history, checkpoint,
+owned source removal, fresh read-only replay/motion/export and engine reaping.
+
+Actual CEF `cylindrical-finish --diagnostic-no-gpu` passed using the production
+panel/native bridge and confined native source admission. It inspected the real
+radius5 mm carrier (`step:17` in this source), authored occurrence depth0.1 mm /
+count8 / phase0, compiled and independently inspected/exported, tested
+cancellation/invalidation/history, removed the owned source and reopened
+read-only with a fresh engine. Source identity/material remain unchanged.
+Measured output:40 layers,395 paths,22195 object deposition segments,
+335.23185258662926 mm³ nominal object deposition,23286 replay events and
+1117824 packed replay bytes; support deposition was zero. The fresh report
+was verified with maximum position error7.000453293648492e-7 mm and maximum
+extrusion error9.983345534807231e-9 mm. The native close exited both app and
+engine. Actual authoring and fresh-inspection PNGs in
+`artifacts/cylindrical-finish-{native-face-authoring,production-panel}.png`
+were visually inspected; these are local ignored artifacts, not committed
+binary evidence.
+
+One warm target, one Cargo/Rayon/test worker, incremental/debug info disabled;
+no release/package/full-workspace sweep. Native gates used 3 GiB RAM / 128 MiB
+swap / 64 tasks; frontend 2 GiB / 128 MiB / 64 tasks; CEF separately 1536 MiB /
+128 MiB / 256 tasks. No builds ran concurrently.
+
+| Observed stage | Wall time | Unit memory peak | Unit swap |
+| --- | ---: | ---: | ---: |
+| Geometry retry + eleven native manufacturing properties | 232.014 s | 440.1 MiB | 0 |
+| Two causal/adversarial Boolean properties | 4.386 s | 434.9 MiB | 0 |
+| Corrected engine build + both actual CLI workflows | 69.346 s | 505.3 MiB | 0 |
+| TypeScript + production Vite build | 1.523 s | 356.1 MiB | 0 |
+| Matching native CEF debug build | 16.617 s | 1.2 GiB, systemd-rounded | 0 |
+| Actual CEF cylindrical workflow | 54.454 s | 860 MiB | 0 |
+| Smoke syntax + `pnpm contracts --check` (no generated drift) | 1.329 s | 141.7 MiB | 0 |
+
+Observed target usage rose from 10430356 to 10551188 KiB, below the 11 GiB
+ceiling at each stage check; filesystem headroom finished at 2.0 GiB.
+These are stage observations, not a continuous disk-peak measurement.
+The CEF run was explicitly unsandboxed software-GPU/no-WebGPU diagnostic
+under Xvfb; GPU process failures and absent desktop D-Bus services were visible.
+No hardware rendering/picking, real OS dialogs, packaging/platform durability,
+machine execution, measured texture/grip or physical printability was established.
+
+
+## Planar source-face finish checkpoint — surface 1 / planner 4 (historical)
+
+**Historical gate decision: the selected native-face planar-rib workflow passed
+in software at `0b8a09b`.** Physical texture/grip, printer qualification,
+swept-tool collision, real dialogs, GPU display/picking and distribution/platform
+durability remained open. This checkpoint was based on public main `415342e`,
+Rust 1.99.0 (`b940084d7`), Linux x64, Node 24.15.0, pnpm 10.32.1 and unchanged
+Monstertruck pin `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Its project format
+was3, surface schema1, manufacturing/planner/emitter/verifier4 and SPLR3.
+Measurements below retain those original identities, not the current cutover.
 
 ### Decision and exercised interfaces
 

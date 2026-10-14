@@ -142,7 +142,7 @@ pub(super) fn offset(
             check_cancel(cancel)?;
             let tube = boundary_tube(polygon, &disk, cancel)?;
             let source = MultiPolygon(vec![polygon.clone()]);
-            boolean_budget(&source, &tube)?;
+            boolean_budget(&source, &tube, cancel)?;
             let mut eroded = source.difference(&tube);
             check_cancel(cancel)?;
             check_size(&eroded)?;
@@ -153,7 +153,7 @@ pub(super) fn offset(
         let mut expanded = region.clone();
         for polygon in &region.0 {
             let tube = boundary_tube(polygon, &disk, cancel)?;
-            boolean_budget(&expanded, &tube)?;
+            boolean_budget(&expanded, &tube, cancel)?;
             expanded = expanded.union(&tube);
             check_cancel(cancel)?;
             check_size(&expanded)?;
@@ -229,7 +229,7 @@ fn boundary_tube(
         }
     }
     check_size(&primitives)?;
-    boolean_budget(&primitives, &primitives)?;
+    boolean_budget(&primitives, &primitives, cancel)?;
     check_cancel(cancel)?;
     // One overlay coordinate frame for all boundary capsules. Incremental
     // unions repeatedly quantize prior results and can create sub-grid edges.
@@ -334,14 +334,14 @@ pub(super) fn wall_centers(
             if point_count(&centers) > MAX_DEPOSITION_SEGMENTS as usize / 2 {
                 return Err(resource("miter dilation expanded point budget exceeded"));
             }
-            boolean_budget(&centers, &centers)?;
+            boolean_budget(&centers, &centers, cancel)?;
             let reachable = centers.buffer_with_style(
                 BufferStyle::new(width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM)
                     .line_join(LineJoin::Miter(0.01)),
             );
             check_cancel(cancel)?;
             check_size(&reachable)?;
-            boolean_budget(section, &reachable)?;
+            boolean_budget(section, &reachable, cancel)?;
             let unreachable_area = section.difference(&reachable).unsigned_area();
             check_cancel(cancel)?;
             if unreachable_area > OFFSET_TOLERANCE_MM.powi(2) {

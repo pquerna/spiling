@@ -262,6 +262,23 @@ fn surface_commands_use_typed_project_execute_and_preserve_all_authored_fields()
                 phase_mm: 0.25,
             },
         },
+        ProjectCommand::AddSurfaceFinish {
+            session_id: session.clone(),
+            base_revision: ProjectRevision(43),
+            face_ref: FaceRef {
+                session_id: session.clone(),
+                scene_revision: SceneRevision(9),
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                definition_id: DefinitionId::parse("a".repeat(64)).unwrap(),
+                face_id: FaceId::parse("step:24").unwrap(),
+            },
+            scope: SurfaceScopeKind::Definition,
+            finish: SurfaceFinish::CylindricalRibs {
+                depth_mm: 0.1,
+                rib_count: 12,
+                phase_fraction: 0.25,
+            },
+        },
         ProjectCommand::RemoveSurfaceFinish {
             session_id: session.clone(),
             base_revision: ProjectRevision(44),
@@ -293,14 +310,18 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
         instance_id: Uuid::new_v4().to_string(),
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         kernel: "monstertruck".into(),
-        geometry_capabilities: vec!["native_vertical_rectangular_wall_v1".into()],
+        geometry_capabilities: vec![
+            "native_vertical_rectangular_wall_v1".into(),
+            "native_vertical_cylinder_face_v1".into(),
+        ],
         project_capabilities: vec![
             "recoverable_projects_v3".into(),
-            "source_face_surface_finish_v1".into(),
+            "source_face_surface_finish_v2".into(),
         ],
         manufacturing_capabilities: vec![
             "manufacturing_schema4".into(),
             "bounded_vertical_rib_construction_v1".into(),
+            "bounded_cylindrical_rib_construction_v1".into(),
         ],
         max_control_bytes: MAX_CONTROL_BYTES,
         max_binary_bytes: MAX_ARTIFACT_BYTES,
@@ -320,6 +341,14 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     hello.project_capabilities[0] = "recoverable_projects_v2".into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[0] = "recoverable_projects_v3".into();
+    hello.project_capabilities[1] = "source_face_surface_finish_v1".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.project_capabilities[1] = "source_face_surface_finish_v2".into();
+    hello.geometry_capabilities.pop();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello
+        .geometry_capabilities
+        .push("native_vertical_cylinder_face_v1".into());
     hello.manufacturing_capabilities.pop();
     assert!(super::validate_engine_cutover(&hello).is_err());
 }

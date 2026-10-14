@@ -24,7 +24,9 @@ export function ManufacturingPanel({
 }: {
   host: ManufacturingHost;
   cancel: () => void;
-  diagnosticImport: () => Promise<void>;
+  diagnosticImport: (
+    source: "box-mm.step" | "independent-exporters/occt-cylinder-mm.step",
+  ) => Promise<void>;
 }) {
   const manufacturing = useManufacturing(host);
   const [exportPath, setExportPath] = useState("manufacturing-export");
@@ -74,15 +76,26 @@ export function ManufacturingPanel({
         </p>
       )}
       {host.state.diagnosticSession && host.state.runtime?.geometry_debug_enabled && (
-        <button
-          data-testid="manufacturing-diagnostic-import"
-          disabled={!writable || !!host.state.occurrences.length}
-          onClick={() => {
-            void diagnosticImport();
-          }}
-        >
-          Admit box-mm STEP fixture through native tokens
-        </button>
+        <div className="geometry-buttons">
+          <button
+            data-testid="manufacturing-diagnostic-import"
+            disabled={!writable || !!host.state.occurrences.length}
+            onClick={() => {
+              void diagnosticImport("box-mm.step");
+            }}
+          >
+            Admit box-mm STEP fixture through native tokens
+          </button>
+          <button
+            data-testid="manufacturing-diagnostic-cylinder-import"
+            disabled={!writable || !!host.state.occurrences.length}
+            onClick={() => {
+              void diagnosticImport("independent-exporters/occt-cylinder-mm.step");
+            }}
+          >
+            Admit full-face OCCT cylinder fixture through native tokens
+          </button>
+        </div>
       )}
       <button
         data-testid="manufacturing-load-intent"

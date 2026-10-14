@@ -14,7 +14,7 @@ pub(super) struct Admission {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
     pub reuse_slabs: bool,
-    pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::RibField>>,
+    pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
 }
 
@@ -234,7 +234,7 @@ pub(super) fn admit(
                 Ok(fields) => {
                     let additional = fields
                         .iter()
-                        .map(surface::RibField::sample_points)
+                        .map(surface::PreparedFinish::sample_points)
                         .sum::<usize>();
                     surface_samples = surface_samples.saturating_add(additional);
                     placed = surface::expanded(placed, &fields);
@@ -351,8 +351,8 @@ pub(super) fn admit(
             }
             result.report.checks.push(PreflightCheck {
                 code: "surface_construction_pending".into(), severity: PreflightSeverity::Info,
-                message: "Native whole-face rectangular certificate and bounded feature metadata admitted; Compile must still prove inward overlap, source/hole retention, realized offsets and actual deposited anchors. This is a manufacturing construction, not edited BREP or physical grip certification".into(),
-                occurrence_id: Some(*occurrence_id), face_id: Some(field.face_id.clone()),
+                message: format!("Native {} certificate and bounded feature metadata admitted; Compile must still prove native material/hole retention, realized offsets and actual deposited anchors. This is a manufacturing construction, not edited BREP or physical grip certification", field.certificate_description()),
+                occurrence_id: Some(*occurrence_id), face_id: Some(field.face_id().clone()),
             });
         }
     }

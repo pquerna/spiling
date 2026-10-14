@@ -393,12 +393,20 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
             &hello.geometry_capabilities,
             "native_vertical_rectangular_wall_v1",
         ),
+        (
+            &hello.geometry_capabilities,
+            "native_vertical_cylinder_face_v1",
+        ),
         (&hello.project_capabilities, "recoverable_projects_v3"),
-        (&hello.project_capabilities, "source_face_surface_finish_v1"),
+        (&hello.project_capabilities, "source_face_surface_finish_v2"),
         (&hello.manufacturing_capabilities, "manufacturing_schema4"),
         (
             &hello.manufacturing_capabilities,
             "bounded_vertical_rib_construction_v1",
+        ),
+        (
+            &hello.manufacturing_capabilities,
+            "bounded_cylindrical_rib_construction_v1",
         ),
     ];
     if hello.engine_build != spiling_contracts::ENGINE_BUILD_ID

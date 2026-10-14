@@ -14,9 +14,48 @@ use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 
 pub(super) const SURFACE_TOLERANCE_MM: f64 = 0.001;
 const SURFACE_ROUNDING_MM: f64 = 0.00001;
+mod cylindrical;
+mod profile;
+mod proof;
 mod splice;
+use profile::PeriodicProfile;
 
-pub(super) struct RibField {
+/// The planner sees only identity, bounds and accounting; carrier data stays here.
+pub(super) struct PreparedFinish {
+    shape: PreparedShape,
+}
+enum PreparedShape {
+    Planar(RibField),
+    Cylindrical(cylindrical::CylinderField),
+}
+impl PreparedFinish {
+    pub(super) fn sample_points(&self) -> usize {
+        match &self.shape {
+            PreparedShape::Planar(field) => field.sample_points(),
+            PreparedShape::Cylindrical(field) => field.samples,
+        }
+    }
+    pub(super) fn face_id(&self) -> &FaceId {
+        match &self.shape {
+            PreparedShape::Planar(field) => &field.face_id,
+            PreparedShape::Cylindrical(field) => &field.face_id,
+        }
+    }
+    fn bounds(&self) -> AabbMm {
+        match &self.shape {
+            PreparedShape::Planar(field) => field.bounds,
+            PreparedShape::Cylindrical(field) => field.bounds,
+        }
+    }
+    pub(super) fn certificate_description(&self) -> &'static str {
+        match &self.shape {
+            PreparedShape::Planar(_) => "rectangular supporting-face",
+            PreparedShape::Cylindrical(_) => "full-turn exterior cylindrical-face",
+        }
+    }
+}
+
+struct RibField {
     pub face_id: FaceId,
     pub bounds: AabbMm,
     origin: [f64; 3],
@@ -84,6 +123,58 @@ pub(super) fn validate_targets(
     Ok(())
 }
 
+fn admit_extrusion(
+    input: &CompilerInput<'_>,
+    occurrence: &OccurrenceRecord,
+    source_bounds: AabbMm,
+    face_id: &FaceId,
+    min_z: f64,
+    max_z: f64,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let vertical = rotate(&occurrence.pose, [0.0, 0.0, 1.0]);
+    if !vertical.iter().all(|v| v.is_finite())
+        || vertical[0] != 0.0
+        || vertical[1] != 0.0
+        || (vertical[2].abs() - 1.0).abs() > 8.0 * f64::EPSILON
+    {
+        return Err(unsupported(
+            face_id,
+            "vertical ribs require source local Z to map to positive or negative build Z without tilt",
+        ));
+    }
+    if (source_bounds.min[2] - input.intent.printer.build_envelope.min[2]).abs()
+        > super::LAYER_QUANTIZATION_MM
+    {
+        return Err(unsupported(
+            face_id,
+            "vertical ribs require a bed-anchored native extrusion",
+        ));
+    }
+    for carrier in input.definitions[&occurrence.definition_id].faces() {
+        check_cancel(cancel)?;
+        let invariant = match &carrier.carrier {
+            FaceCarrier::Plane { origin_mm, normal } => {
+                normal[2] == 0.0
+                    || (normal[0] == 0.0
+                        && normal[1] == 0.0
+                        && ((origin_mm[2] - min_z).abs() <= super::LAYER_QUANTIZATION_MM
+                            || (origin_mm[2] - max_z).abs() <= super::LAYER_QUANTIZATION_MM))
+            }
+            FaceCarrier::Cylinder { axis_direction, .. } => {
+                axis_direction[0] == 0.0 && axis_direction[1] == 0.0
+            }
+        };
+        if !invariant {
+            return Err(unsupported(
+                face_id,
+                "vertical ribs require an invariant native extrusion with no intermediate shelf or sloped carrier",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Native metadata only: this does not prove the section/offset/anchor gates.
 pub(super) fn metadata(
     input: &CompilerInput<'_>,
@@ -91,7 +182,7 @@ pub(super) fn metadata(
     source_bounds: AabbMm,
     sample_limit: usize,
     cancel: &AtomicBool,
-) -> Result<Vec<RibField>, ManufacturingError> {
+) -> Result<Vec<PreparedFinish>, ManufacturingError> {
     let native = &input.definitions[&occurrence.definition_id];
     let mut result = Vec::new();
     let mut samples = 0usize;
@@ -124,16 +215,40 @@ pub(super) fn metadata(
         if !candidates.contains(&face.face_id) {
             continue;
         }
+        let finish = input.surface_overlays.effective_finish(
+            &occurrence.definition_id,
+            occurrence.occurrence_id,
+            &face.face_id,
+        );
+        if let Some(SurfaceFinish::CylindricalRibs {
+            depth_mm,
+            rib_count,
+            phase_fraction,
+        }) = finish
+        {
+            let field = cylindrical::metadata(
+                input,
+                occurrence,
+                source_bounds,
+                &face.face_id,
+                *depth_mm,
+                *rib_count,
+                *phase_fraction,
+                sample_limit.saturating_sub(samples),
+                cancel,
+            )?;
+            samples += field.samples;
+            result.push(PreparedFinish {
+                shape: PreparedShape::Cylindrical(field),
+            });
+            continue;
+        }
         let Some(SurfaceFinish::VerticalRibs {
             depth_mm,
             pitch_mm,
             edge_margin_mm,
             phase_mm,
-        }) = input.surface_overlays.effective_finish(
-            &occurrence.definition_id,
-            occurrence.occurrence_id,
-            &face.face_id,
-        )
+        }) = finish
         else {
             continue;
         };
@@ -148,24 +263,6 @@ pub(super) fn metadata(
                 "ribs require pitch >= 4 bead widths, protected edge margin >= 2 bead widths, depth >= 4 finish approximation bounds and depth <= half a bead width",
             ));
         }
-        let vertical = rotate(&occurrence.pose, [0.0, 0.0, 1.0]);
-        if vertical[0] != 0.0
-            || vertical[1] != 0.0
-            || (vertical[2].abs() - 1.0).abs() > 8.0 * f64::EPSILON
-        {
-            return Err(unsupported(
-                &face.face_id,
-                "vertical ribs require source local Z to map to positive or negative build Z without tilt",
-            ));
-        }
-        if (source_bounds.min[2] - input.intent.printer.build_envelope.min[2]).abs()
-            > super::LAYER_QUANTIZATION_MM
-        {
-            return Err(unsupported(
-                &face.face_id,
-                "vertical ribs require a bed-anchored native extrusion",
-            ));
-        }
         let cert = native
             .vertical_wall_face_with_cancel(&face.face_id, cancel)
             .map_err(|e| {
@@ -178,36 +275,15 @@ pub(super) fn metadata(
                     format!("surface face {}: {e}", face.face_id.as_str()),
                 )
             })?;
-        // Restrict the whole source to invariant extrusion carriers. Intermediate
-        // horizontal shelves and tilted cylinders cannot inherit a face certificate.
-        if result.is_empty() {
-            for carrier in native.faces() {
-                check_cancel(cancel)?;
-                let invariant = match &carrier.carrier {
-                    FaceCarrier::Plane { origin_mm, normal } => {
-                        if normal[2] == 0.0 {
-                            true
-                        } else {
-                            normal[0] == 0.0
-                                && normal[1] == 0.0
-                                && ((origin_mm[2] - cert.min_z_mm).abs()
-                                    <= super::LAYER_QUANTIZATION_MM
-                                    || (origin_mm[2] - cert.max_z_mm).abs()
-                                        <= super::LAYER_QUANTIZATION_MM)
-                        }
-                    }
-                    FaceCarrier::Cylinder { axis_direction, .. } => {
-                        axis_direction[0] == 0.0 && axis_direction[1] == 0.0
-                    }
-                };
-                if !invariant {
-                    return Err(unsupported(
-                        &face.face_id,
-                        "vertical ribs require an invariant native extrusion with no intermediate shelf or sloped carrier",
-                    ));
-                }
-            }
-        }
+        admit_extrusion(
+            input,
+            occurrence,
+            source_bounds,
+            &face.face_id,
+            cert.min_z_mm,
+            cert.max_z_mm,
+            cancel,
+        )?;
         let active = cert.width_mm - 2.0 * edge_margin_mm;
         if !active.is_finite() || active < *pitch_mm {
             return Err(unsupported(
@@ -218,9 +294,13 @@ pub(super) fn metadata(
         // Chord error <=0.00099 mm plus native-frame agreement/directed rounding
         // <=0.00001 mm retains the fixed total 0.001 mm construction bound.
         let k = std::f64::consts::TAU / pitch_mm;
+        let profile =
+            PeriodicProfile::new(*depth_mm, k, std::f64::consts::TAU * phase_mm / pitch_mm);
         let ramp = pitch_mm / 2.0;
         let t = std::f64::consts::PI / ramp;
-        let curvature = depth_mm * (0.5 * k * k + k * t + 0.5 * t * t);
+        let curvature = profile.second_derivative_bound()
+            + 2.0 * profile.first_derivative_bound() * t
+            + 0.5 * profile.maximum() * t * t;
         let chord_budget = SURFACE_TOLERANCE_MM - SURFACE_ROUNDING_MM;
         let ramp_count = (ramp * (curvature / (8.0 * chord_budget)).sqrt())
             .ceil()
@@ -228,8 +308,9 @@ pub(super) fn metadata(
         // Away from the two taper ramps, amplitude is constant. Its second
         // derivative bound is four times smaller; do not oversample the whole
         // face using the worst taper curvature.
-        let interior_count =
-            ((active - 2.0 * ramp) * (0.5 * depth_mm * k * k / (8.0 * chord_budget)).sqrt()).ceil();
+        let interior_count = ((active - 2.0 * ramp)
+            * (profile.second_derivative_bound() / (8.0 * chord_budget)).sqrt())
+        .ceil();
         let count = 2.0 * ramp_count + interior_count;
         if !count.is_finite() || count > (MAX_DEPOSITION_SEGMENTS as usize / 4) as f64 {
             return Err(error(
@@ -315,7 +396,9 @@ pub(super) fn metadata(
         }
         field.bounds.min[2] = z0.min(z1);
         field.bounds.max[2] = z0.max(z1);
-        result.push(field);
+        result.push(PreparedFinish {
+            shape: PreparedShape::Planar(field),
+        });
     }
     Ok(result)
 }
@@ -356,11 +439,14 @@ impl RibField {
         let taper = if edge >= self.pitch / 2.0 {
             1.0
         } else {
-            0.5 * (1.0 - (std::f64::consts::TAU * edge / self.pitch).cos())
+            PeriodicProfile::new(1.0, std::f64::consts::TAU / self.pitch, 0.0).value(edge)
         };
-        self.depth
-            * 0.5
-            * (1.0 - (std::f64::consts::TAU * (s - self.phase) / self.pitch).cos())
+        PeriodicProfile::new(
+            self.depth,
+            std::f64::consts::TAU / self.pitch,
+            std::f64::consts::TAU * self.phase / self.pitch,
+        )
+        .value(s)
             * taper
     }
 }
@@ -368,25 +454,48 @@ impl RibField {
 /// D = M union A, constructed over an attributed native sampled-face chain.
 pub(super) fn realize(
     source: MultiPolygon<f64>,
-    fields: &[RibField],
+    fields: &[PreparedFinish],
     sample: f64,
     retained: usize,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    splice::realize(source, fields, sample, retained, work, cancel)
+    let mut material = splice::realize(source, fields, sample, retained, work, cancel)?;
+    for field in fields {
+        if let PreparedShape::Cylindrical(field) = &field.shape {
+            material = cylindrical::realize(material, field, sample, retained, work, cancel)?;
+        }
+    }
+    Ok(material)
 }
 
 /// The first ordinary wall must retain a resolvable rib peak after erosion.
 /// This bounded offset check does not claim exact swept-bead surface physics.
 pub(super) fn certify_first_wall(
     centers: &MultiPolygon<f64>,
-    fields: &[RibField],
+    fields: &[PreparedFinish],
     sample: f64,
     bead: f64,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    let comparisons = region::point_count(centers)
+        .checked_mul(fields.len())
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "first-wall measurement work overflow",
+            )
+        })?;
+    proof::charge(&mut 0, comparisons)?;
     for field in fields {
+        let field = match &field.shape {
+            PreparedShape::Planar(field) => field,
+            PreparedShape::Cylindrical(field) => {
+                cylindrical::certify_first_wall(centers, field, sample, bead, cancel)?;
+                continue;
+            }
+        };
         if sample <= field.bounds.min[2] || sample >= field.bounds.max[2] {
             continue;
         }
@@ -428,12 +537,13 @@ pub(super) fn certify_first_wall(
     Ok(())
 }
 
-pub(super) fn expanded(bounds: AabbMm, fields: &[RibField]) -> AabbMm {
+pub(super) fn expanded(bounds: AabbMm, fields: &[PreparedFinish]) -> AabbMm {
     let mut result = bounds;
     for field in fields {
+        let bounds = field.bounds();
         for a in 0..3 {
-            result.min[a] = result.min[a].min(field.bounds.min[a]);
-            result.max[a] = result.max[a].max(field.bounds.max[a]);
+            result.min[a] = result.min[a].min(bounds.min[a]);
+            result.max[a] = result.max[a].max(bounds.max[a]);
         }
     }
     result

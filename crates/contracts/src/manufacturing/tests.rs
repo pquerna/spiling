@@ -170,9 +170,9 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "1".into(),
-            emitter_version: "1".into(),
-            verifier_version: "1".into(),
+            planner_version: "5".into(),
+            emitter_version: "4".into(),
+            verifier_version: "4".into(),
         },
         plan: plan(),
         program: "; arbitrary bytes do not imply replay success\n".into(),
@@ -1035,6 +1035,44 @@ fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
         input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
     );
     doc.layers[0].enabled = false;
+    let mut cylindrical_hashes = std::collections::BTreeSet::new();
+    for finish in [
+        SurfaceFinish::CylindricalRibs {
+            depth_mm: 0.1,
+            rib_count: 16,
+            phase_fraction: 0.0,
+        },
+        SurfaceFinish::CylindricalRibs {
+            depth_mm: 0.2,
+            rib_count: 16,
+            phase_fraction: 0.0,
+        },
+        SurfaceFinish::CylindricalRibs {
+            depth_mm: 0.1,
+            rib_count: 17,
+            phase_fraction: 0.0,
+        },
+        SurfaceFinish::CylindricalRibs {
+            depth_mm: 0.1,
+            rib_count: 16,
+            phase_fraction: 0.25,
+        },
+    ] {
+        doc.layers[1].finish = finish;
+        let current =
+            input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap();
+        assert_ne!(hash, current);
+        assert!(
+            cylindrical_hashes.insert(current.as_str().to_owned()),
+            "depth/count/phase must each change the cylindrical fingerprint"
+        );
+        doc.layers[0].finish = doc.layers[1].finish.clone();
+        assert_ne!(
+            current,
+            input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+        );
+        doc.layers[0].finish = SurfaceFinish::Smooth;
+    }
     doc.layers.remove(0);
     assert_ne!(
         hash,

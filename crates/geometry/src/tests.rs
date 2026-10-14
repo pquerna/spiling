@@ -482,3 +482,310 @@ fn wall_certificate_refuses_nonfinite_native_witnesses_and_bad_oriented_source_m
         GeometryErrorCode::KernelFailure
     );
 }
+
+#[test]
+fn unchanged_occt_full_cylinder_has_source_owned_certificate_without_mutation() {
+    let definition = load("independent-exporters/occt-cylinder-mm.step");
+    let before = serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+    let provenance = definition.provenance().clone();
+    let face_ids: Vec<_> = definition
+        .faces()
+        .iter()
+        .map(|f| f.face_id.clone())
+        .collect();
+    let side = definition
+        .faces()
+        .iter()
+        .find(|face| matches!(face.carrier, FaceCarrier::Cylinder { .. }))
+        .unwrap();
+    let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
+    assert_eq!(cert.center_mm, [0.0, 0.0]);
+    close(cert.radius_mm, 5.0, 1e-7);
+    close(cert.min_z_mm, 0.0, 1e-7);
+    close(cert.max_z_mm, 8.0, 1e-7);
+    assert_eq!(
+        cert,
+        definition.vertical_cylinder_face(&side.face_id).unwrap()
+    );
+    assert_eq!(
+        cert,
+        definition
+            .vertical_cylinder_face_with_cancel(&side.face_id, &AtomicBool::new(false))
+            .unwrap()
+    );
+    assert_eq!(
+        definition
+            .vertical_cylinder_face_with_cancel(&side.face_id, &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::Cancelled
+    );
+    assert_eq!(
+        definition
+            .vertical_cylinder_face(&FaceId::from_step_entity(999_999).unwrap())
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::UnknownHandle
+    );
+    assert_eq!(
+        before,
+        serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap()
+    );
+    assert_eq!(&provenance, definition.provenance());
+    assert_eq!(
+        face_ids,
+        definition
+            .faces()
+            .iter()
+            .map(|f| f.face_id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn split_cylinders_bores_and_planar_faces_do_not_acquire_full_cylinder_certificates() {
+    for name in [
+        "cylinder.step",
+        "through-hole.step",
+        "independent-exporters/occt-through-hole-mm.step",
+        "box-mm.step",
+    ] {
+        let definition = load(name);
+        for face in definition.faces() {
+            assert_eq!(
+                definition
+                    .vertical_cylinder_face(&face.face_id)
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::UnsupportedGeometry,
+                "{name} {:?}",
+                face.face_id
+            );
+        }
+    }
+}
+
+/// Export genuine transformed analytic STEP, then exercise normal byte admission.
+/// No certificate or modeled NURBS fitting is involved in constructing this input.
+fn transformed_periodic_cylinder_source(
+    matrix: monstertruck_modeling::base::Matrix4,
+) -> Definition {
+    use monstertruck_io::step::{
+        load::Table,
+        save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
+    };
+    let bytes = source("independent-exporters/occt-cylinder-mm.step");
+    let exchange = step_p21::parser::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+    let table = Table::from_data_section(&exchange.data[0]);
+    let (compressed, reports) = table
+        .to_compressed_solid_reported(table.manifold_solid_brep.values().next().unwrap())
+        .unwrap();
+    assert!(reports.iter().all(|r| r.is_lossless()));
+    let native = monstertruck_topology::Solid::extract(compressed).unwrap();
+    let transformed = monstertruck_modeling::builder::transformed(&native, matrix);
+    let bytes = CompleteStepDisplay::new(
+        StepModel::from(&transformed.compress()),
+        StepHeaderDescriptor {
+            file_name: "transformed-periodic-cylinder-regression.step".into(),
+            time_stamp: "2026-01-01T00:00:00".into(),
+            authors: vec!["Spiling contributors".into()],
+            organization: vec!["Spiling".into()],
+            organization_system: "Native analytic transformation regression".into(),
+            authorization: "OSL-3.0".into(),
+        },
+    )
+    .to_string();
+    import_step(bytes.as_bytes(), &AtomicBool::new(false)).unwrap()
+}
+
+#[test]
+fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign() {
+    use monstertruck_modeling::base::*;
+    for rotation in [
+        Matrix4::from_angle_z(Rad(0.713)),
+        Matrix4::from_angle_x(Rad(std::f64::consts::PI)),
+    ] {
+        let matrix = Matrix4::from_translation(Vector3::new(13.0, -7.0, 2.0))
+            * rotation
+            * Matrix4::from_scale(0.5);
+        let definition = transformed_periodic_cylinder_source(matrix);
+        let side = definition
+            .faces()
+            .iter()
+            .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+            .unwrap();
+        let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
+        close(cert.center_mm[0], 13.0, 1e-7);
+        close(cert.center_mm[1], -7.0, 1e-7);
+        close(cert.radius_mm, 2.5, 1e-7);
+        let expected = if rotation == Matrix4::from_angle_z(Rad(0.713)) {
+            [2.0, 6.0]
+        } else {
+            [-2.0, 2.0]
+        };
+        close(cert.min_z_mm, expected[0], 1e-7);
+        close(cert.max_z_mm, expected[1], 1e-7);
+    }
+    let sloped = transformed_periodic_cylinder_source(Matrix4::from_angle_y(Rad(0.2)));
+    let side = sloped
+        .faces()
+        .iter()
+        .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+        .unwrap();
+    assert_eq!(
+        sloped
+            .vertical_cylinder_face(&side.face_id)
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::UnsupportedGeometry
+    );
+}
+
+#[test]
+fn cylinder_certificate_refuses_corrupt_positional_and_analytic_authority() {
+    let mut definition = load("independent-exporters/occt-cylinder-mm.step");
+    let index = definition
+        .faces()
+        .iter()
+        .position(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+        .unwrap();
+    let face = definition.faces[index].face_id.clone();
+    definition.face_boundaries[index].wires[0][0].witness = usize::MAX;
+    assert_eq!(
+        definition.vertical_cylinder_face(&face).unwrap_err().code,
+        GeometryErrorCode::KernelFailure
+    );
+    let mut definition = load("independent-exporters/occt-cylinder-mm.step");
+    definition
+        .face_boundaries
+        .swap(index, (index + 1) % definition.faces.len());
+    assert_eq!(
+        definition.vertical_cylinder_face(&face).unwrap_err().code,
+        GeometryErrorCode::KernelFailure
+    );
+    let mut definition = load("independent-exporters/occt-cylinder-mm.step");
+    let witness = definition.face_boundaries[index].wires[0][0].witness;
+    if let crate::kernel::BoundaryCurveMm::CircleArc { u_mm, .. } =
+        &mut definition.boundary_curves[witness]
+    {
+        u_mm[0] = f64::NAN;
+    } else {
+        panic!("first lateral coedge is an analytic rim");
+    }
+    assert_eq!(
+        definition.vertical_cylinder_face(&face).unwrap_err().code,
+        GeometryErrorCode::KernelFailure
+    );
+}
+
+/// Genuine original analytic source: one periodic cylindrical face per step,
+/// with shared native seams and arbitrary exact circular rim subdivisions.
+fn original_periodic_cylinder_source(subdivisions: usize, stepped: bool) -> Definition {
+    use monstertruck_io::step::{
+        load::step_geometry::{Curve3D, ElementarySurface, Surface, re_exports::*},
+        save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
+    };
+    use monstertruck_modeling::builder;
+    use monstertruck_topology::{Face, Shell, Solid, Wire};
+    type StepWire = Wire<Point3, Curve3D>;
+    type StepFace = Face<Point3, Curve3D, Surface>;
+    let circle = |radius: f64, z: f64| -> StepWire {
+        builder::revolve(
+            &builder::vertex((radius, 0.0, z)),
+            Point3::new(0.0, 0.0, z),
+            Vector3::unit_z(),
+            builder::SweepAngle::Closed,
+            subdivisions,
+        )
+    };
+    let side =
+        |bottom: &StepWire, top: &StepWire, radius: f64, min_z: f64, max_z: f64| -> StepFace {
+            let seam = builder::line::<Curve3D>(bottom[0].front(), top[0].front());
+            let wire = bottom
+                .iter()
+                .cloned()
+                .chain(std::iter::once(seam.clone()))
+                .chain(top.inverse())
+                .chain(std::iter::once(seam.inverse()))
+                .collect();
+            let mut carrier = Processor::new(RevolutionSurface::by_revolution(
+                Line(
+                    Point3::new(radius, 0.0, min_z),
+                    Point3::new(radius, 0.0, max_z),
+                ),
+                Point3::new(0.0, 0.0, min_z),
+                Vector3::unit_z(),
+            ));
+            let point = carrier.subs(0.37, 0.73);
+            if carrier
+                .normal(0.37, 0.73)
+                .dot(Vector3::new(point.x, point.y, 0.0))
+                < 0.0
+            {
+                carrier.invert();
+            }
+            Face::try_new(
+                vec![wire],
+                Surface::ElementarySurface(ElementarySurface::CylindricalSurface(carrier)),
+            )
+            .unwrap()
+        };
+    let bottom = circle(5.0, 0.0);
+    let shoulder_outer = circle(5.0, 8.0);
+    let bottom_cap: StepFace = builder::try_attach_plane(vec![bottom.clone()]).unwrap();
+    let mut faces = vec![
+        bottom_cap.inverse(),
+        side(&bottom, &shoulder_outer, 5.0, 0.0, 8.0),
+    ];
+    if stepped {
+        let shoulder_inner = circle(3.0, 8.0);
+        let top = circle(3.0, 12.0);
+        faces.push(
+            builder::try_attach_plane(vec![shoulder_outer, shoulder_inner.inverse()]).unwrap(),
+        );
+        faces.push(side(&shoulder_inner, &top, 3.0, 8.0, 12.0));
+        faces.push(builder::try_attach_plane(vec![top]).unwrap());
+    } else {
+        faces.push(builder::try_attach_plane(vec![shoulder_outer]).unwrap());
+    }
+    let shell: Shell<_, _, _> = faces.into_iter().collect();
+    let solid = Solid::try_new(vec![shell]).unwrap();
+    let bytes = CompleteStepDisplay::new(
+        StepModel::from(&solid.compress()),
+        StepHeaderDescriptor {
+            file_name: "original-periodic-cylinder-regression.step".into(),
+            time_stamp: "2026-01-01T00:00:00".into(),
+            authors: vec!["Spiling contributors".into()],
+            organization: vec!["Spiling".into()],
+            organization_system: "Original analytic periodic topology regression".into(),
+            authorization: "OSL-3.0".into(),
+        },
+    )
+    .to_string();
+    import_step(bytes.as_bytes(), &AtomicBool::new(false)).unwrap()
+}
+
+#[test]
+fn arbitrary_native_rim_subdivisions_preserve_full_face_but_short_steps_refuse() {
+    for subdivisions in [3, 7] {
+        let definition = original_periodic_cylinder_source(subdivisions, false);
+        let side = definition
+            .faces()
+            .iter()
+            .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+            .unwrap();
+        let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
+        close(cert.radius_mm, 5.0, 1e-7);
+        close(cert.min_z_mm, 0.0, 1e-7);
+        close(cert.max_z_mm, 8.0, 1e-7);
+        let stepped = original_periodic_cylinder_source(subdivisions, true);
+        for side in stepped
+            .faces()
+            .iter()
+            .filter(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+        {
+            let error = stepped.vertical_cylinder_face(&side.face_id).unwrap_err();
+            assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
+        }
+    }
+}

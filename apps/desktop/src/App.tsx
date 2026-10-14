@@ -409,7 +409,7 @@ function Workbench() {
           <ManufacturingPanel
             host={workbench.manufacturingHost}
             cancel={workbench.cancel}
-            diagnosticImport={() => workbench.debugImport(["box-mm.step"])}
+            diagnosticImport={(source) => workbench.debugImport([source])}
           />
           <button
             className="primary"

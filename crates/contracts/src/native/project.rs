@@ -294,6 +294,11 @@ impl TryFrom<rpc::SurfaceFinish> for SurfaceFinish {
                 edge_margin_mm: v.edge_margin_mm,
                 phase_mm: v.phase_mm,
             },
+            Kind::CylindricalRibs(v) => Self::CylindricalRibs {
+                depth_mm: v.depth_mm,
+                rib_count: v.rib_count,
+                phase_fraction: v.phase_fraction,
+            },
         };
         finish.validate().map_err(|e| e.to_string())?;
         Ok(finish)
@@ -317,6 +322,15 @@ impl TryFrom<SurfaceFinish> for rpc::SurfaceFinish {
                     pitch_mm,
                     edge_margin_mm,
                     phase_mm,
+                }),
+                SurfaceFinish::CylindricalRibs {
+                    depth_mm,
+                    rib_count,
+                    phase_fraction,
+                } => Kind::CylindricalRibs(rpc::SurfaceCylindricalRibs {
+                    depth_mm,
+                    rib_count,
+                    phase_fraction,
                 }),
             }),
         })

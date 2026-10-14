@@ -438,9 +438,9 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "1".into(),
             },
-            planner_version: "1".into(),
-            emitter_version: "1".into(),
-            verifier_version: "1".into(),
+            planner_version: "5".into(),
+            emitter_version: "4".into(),
+            verifier_version: "4".into(),
         },
         plan: NormalizedPrintPlan {
             schema_version: MANUFACTURING_SCHEMA_VERSION,

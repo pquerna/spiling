@@ -47,7 +47,7 @@ fn merge(
     if into.0.is_empty() {
         *into = other.clone();
     } else {
-        boolean_budget(into, other)?;
+        boolean_budget(into, other, cancel)?;
         *into = into.union(other);
     }
     check_cancel(cancel)?;
@@ -79,7 +79,7 @@ fn merge_shared(
         *into = Arc::clone(&cached.result);
         return Ok(());
     }
-    charge_boolean(into, other, work)?;
+    charge_boolean(into, other, work, cancel)?;
     let mut result = into.as_ref().union(other.as_ref());
     region::check_size(&result)?;
     region::canonicalize(&mut result);
@@ -219,7 +219,7 @@ pub(super) fn realize(
             for hole in polygon.interiors() {
                 let hole = MultiPolygon(vec![Polygon::new(hole.clone(), vec![])]);
                 remaining_geometry_budget(retained, &[], &[], &[&protected, &hole])?;
-                charge_boolean(&protected, &hole, &mut work)?;
+                charge_boolean(&protected, &hole, &mut work, cancel)?;
                 merge(&mut protected, &hole, cancel)?;
                 remaining_geometry_budget(retained, &[], &[], &[&protected])?;
             }
@@ -264,7 +264,7 @@ pub(super) fn realize(
         // Top-down publication before lower clipping leaves floating components.
         for section in &sections[..=span_at(sections, top as u32)] {
             check_cancel(cancel)?;
-            charge_boolean(&section.material, &section.material, &mut work)?;
+            charge_boolean(&section.material, &section.material, &mut work, cancel)?;
             let clearance = region::offset(&section.material, xy_clearance_mm, cancel)?;
             remaining_geometry_budget(
                 retained,
@@ -272,7 +272,7 @@ pub(super) fn realize(
                 &interfaces,
                 &[&protected, &column, &clearance],
             )?;
-            charge_boolean(&column, &clearance, &mut work)?;
+            charge_boolean(&column, &clearance, &mut work, cancel)?;
             column = column.difference(&clearance);
             region::check_size(&column)?;
             remaining_geometry_budget(
@@ -282,7 +282,7 @@ pub(super) fn realize(
                 &[&protected, &column, &clearance],
             )?;
         }
-        charge_boolean(&column, &protected, &mut work)?;
+        charge_boolean(&column, &protected, &mut work, cancel)?;
         column = column.difference(&protected);
         region::check_size(&column)?;
         if column.0.is_empty() {
@@ -358,7 +358,7 @@ pub(super) fn realize(
         } else if Arc::ptr_eq(&support_regions[i], &interfaces[i]) {
             Cow::Owned(MultiPolygon(Vec::new()))
         } else {
-            charge_boolean(&support_regions[i], interface, &mut work)?;
+            charge_boolean(&support_regions[i], interface, &mut work, cancel)?;
             Cow::Owned(support_regions[i].difference(interface))
         };
         let mut paths = Vec::new();
@@ -875,8 +875,9 @@ fn charge_boolean(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
     work: &mut usize,
+    cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    boolean_budget(a, b)?;
+    boolean_budget(a, b, cancel)?;
     let pairs = region::point_count(a)
         .checked_mul(region::point_count(b))
         .ok_or_else(|| {

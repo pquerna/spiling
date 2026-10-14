@@ -9,7 +9,7 @@ mod units;
 
 use crate::{
     check_cancel,
-    kernel::{BoundaryCurveMm, Definition},
+    kernel::{BoundaryCoedgeRef, BoundaryCurveMm, Definition, FaceBoundaryRefs},
 };
 use ast::*;
 use monstertruck_io::step::load::{
@@ -27,7 +27,11 @@ use spiling_contracts::geometry::{
     AabbMm, DefinitionId, FaceCarrier, FaceId, FaceInfo, GeometryError, GeometryErrorCode,
     MAX_NATIVE_FACES, MAX_SOURCE_BYTES, SourceHash, SourceProvenance,
 };
-use std::{collections::BTreeSet, sync::atomic::AtomicBool};
+use std::{
+    collections::{BTreeSet, HashMap},
+    hash::Hash,
+    sync::atomic::AtomicBool,
+};
 use step_p21::ast::Parameter;
 
 fn error(code: GeometryErrorCode, message: &str) -> GeometryError {
@@ -391,6 +395,26 @@ fn modeling_curve(curve: &Curve3D) -> Option<Curve> {
     }
 }
 
+fn bind_native_identity<S: Copy + Eq + Hash, N: Copy + Eq + Hash>(
+    source: S,
+    native: N,
+    forward: &mut HashMap<S, N>,
+    reverse: &mut HashMap<N, S>,
+) -> Result<(), GeometryError> {
+    if forward
+        .insert(source, native)
+        .is_some_and(|previous| previous != native)
+        || reverse
+            .insert(native, source)
+            .is_some_and(|previous| previous != source)
+    {
+        return Err(kernel(
+            "modeling conversion split or merged source topology identity",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn import_step(
     bytes: &[u8],
     cancel: &AtomicBool,
@@ -509,6 +533,49 @@ pub(crate) fn import_step(
             end_mm: p,
         });
     }
+    // Preserve exact positional face/wire/coedge attribution before the STEP
+    // line/circle curves become modeled NURBS. Shared geometry stays in the one
+    // boundary witness store. Periodic subdivision is already complete here.
+    let mut coedge_count = 0usize;
+    let mut wire_count = 0usize;
+    let proof_cap = 2 * spiling_contracts::geometry::MAX_STEP_ENTITIES as usize;
+    for face in &shell.faces {
+        check_cancel(cancel)?;
+        wire_count = wire_count
+            .checked_add(face.boundaries.len())
+            .ok_or_else(|| kernel("native trim reference count overflow"))?;
+        for wire in &face.boundaries {
+            check_cancel(cancel)?;
+            coedge_count = coedge_count
+                .checked_add(wire.len())
+                .ok_or_else(|| kernel("native coedge reference count overflow"))?;
+        }
+        if coedge_count > proof_cap || wire_count > proof_cap {
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "native analytic trim reference cap exceeded",
+            ));
+        }
+    }
+    let mut trim_slots = Vec::with_capacity(shell.faces.len());
+    for face in &shell.faces {
+        check_cancel(cancel)?;
+        let mut wires = Vec::with_capacity(face.boundaries.len());
+        for wire in &face.boundaries {
+            let mut coedges = Vec::with_capacity(wire.len());
+            for coedge in wire {
+                check_cancel(cancel)?;
+                let endpoints = shell
+                    .edges
+                    .get(coedge.index)
+                    .ok_or_else(|| kernel("source coedge refers to a missing edge"))?
+                    .vertices;
+                coedges.push((*coedge, endpoints));
+            }
+            wires.push(coedges);
+        }
+        trim_slots.push(wires);
+    }
     // Retain the source positional surface/flag for assertions across extraction.
     let slots = shell
         .faces
@@ -615,6 +682,85 @@ pub(crate) fn import_step(
         info.orientation = dot > 0.0;
         info.validate()?;
     }
+    let mut face_boundaries = Vec::with_capacity(faces.len());
+    let mut source_edges = HashMap::new();
+    let mut native_edges = HashMap::new();
+    let mut source_vertices = HashMap::new();
+    let mut native_vertices = HashMap::new();
+    for (face, slots) in solid.boundaries()[0].iter().zip(&trim_slots) {
+        check_cancel(cancel)?;
+        let wires = face.absolute_boundaries();
+        if wires.len() != slots.len() {
+            return Err(kernel("modeling conversion changed positional trim wires"));
+        }
+        let mut retained = Vec::with_capacity(wires.len());
+        for (wire, slots) in wires.iter().zip(slots) {
+            check_cancel(cancel)?;
+            if wire.len() != slots.len() {
+                return Err(kernel("modeling conversion changed positional coedges"));
+            }
+            let mut refs = Vec::with_capacity(wire.len());
+            for (edge, (slot, source_endpoints)) in wire.iter().zip(slots) {
+                check_cancel(cancel)?;
+                let witness = boundary_curves
+                    .get(slot.index)
+                    .ok_or_else(|| kernel("native coedge witness is missing"))?;
+                let (mut a, mut b) = witness.endpoints();
+                if !slot.orientation {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                let front: [f64; 3] = edge.front().point().into();
+                let back: [f64; 3] = edge.back().point().into();
+                let distance =
+                    |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).hypot(p[1] - q[1]).hypot(p[2] - q[2]);
+                if edge.orientation() != slot.orientation
+                    || !a.iter().chain(&b).all(|v| v.is_finite())
+                    || distance(a, front) > 1e-7
+                    || distance(b, back) > 1e-7
+                {
+                    return Err(kernel(
+                        "modeling conversion changed analytic coedge endpoints",
+                    ));
+                }
+                bind_native_identity(slot.index, edge.id(), &mut source_edges, &mut native_edges)?;
+                let (source_front, source_back) = if slot.orientation {
+                    *source_endpoints
+                } else {
+                    (source_endpoints.1, source_endpoints.0)
+                };
+                bind_native_identity(
+                    source_front,
+                    edge.front().id(),
+                    &mut source_vertices,
+                    &mut native_vertices,
+                )?;
+                bind_native_identity(
+                    source_back,
+                    edge.back().id(),
+                    &mut source_vertices,
+                    &mut native_vertices,
+                )?;
+                refs.push(BoundaryCoedgeRef {
+                    witness: slot.index,
+                    orientation: slot.orientation,
+                    edge: edge.id(),
+                });
+            }
+            retained.push(refs);
+        }
+        face_boundaries.push(FaceBoundaryRefs {
+            face: face.id(),
+            wires: retained,
+        });
+    }
+    drop((
+        trim_slots,
+        source_edges,
+        native_edges,
+        source_vertices,
+        native_vertices,
+        slots,
+    ));
     check_cancel(cancel)?;
     let bounds = certified_solid_bounding_box(&solid)
         .ok_or_else(|| invalid("native solid has no certified bounds"))?;
@@ -638,5 +784,6 @@ pub(crate) fn import_step(
         bounds,
         source_bytes: bytes.len() as u32,
         boundary_curves,
+        face_boundaries,
     })
 }

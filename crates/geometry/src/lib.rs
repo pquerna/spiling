@@ -39,6 +39,17 @@ pub struct VerticalWallFace {
     pub max_z_mm: f64,
 }
 
+/// Exact full-turn exterior cylindrical source-face certificate. Angles use
+/// source +X and right-handed +Z, not the native carrier's seam or UV chart.
+/// Manufacturing separately certifies posed invariant-extrusion eligibility.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VerticalCylinderFace {
+    pub center_mm: [f64; 2],
+    pub radius_mm: f64,
+    pub min_z_mm: f64,
+    pub max_z_mm: f64,
+}
+
 /// One native section boundary, closed and canonically ordered in the plane frame.
 #[derive(Debug)]
 pub struct SectionLoopMm {

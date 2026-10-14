@@ -728,19 +728,41 @@ fn manufacturing_intent_and_export_keep_non_utf8_native_paths() {
 #[test]
 #[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
 fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal() {
+    surface_operator_workflow("box-mm.step", false);
+}
+
+#[test]
+#[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
+fn ordered_cylindrical_ribs_compile_history_save_fresh_read_only_motion_and_reveal() {
+    surface_operator_workflow("independent-exporters/occt-cylinder-mm.step", true);
+}
+
+fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
     let root = root();
     let project = root.join("surface-project");
-    let source = root.join("box.step");
-    std::fs::copy(fixture("box-mm.step"), &source).unwrap();
+    let source = root.join("owned-source.step");
+    std::fs::copy(fixture(source_fixture), &source).unwrap();
     let intent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/manufacturing/solid-fill.intent.json");
+    let baseline_export = root.join("baseline-export");
+    let baseline_replay = root.join("baseline.splr");
     let created = report(
         cli("create", &project)
             .arg("--import")
             .arg(&source)
             .arg("--intent")
             .arg(&intent)
-            .args(["--center-on-bed", "1", "--compile"])
+            .args([
+                "--center-on-bed",
+                "1",
+                "--preflight",
+                "--compile",
+                "--verify",
+            ])
+            .arg("--manufacturing-out")
+            .arg(&baseline_export)
+            .arg("--replay-out")
+            .arg(&baseline_replay)
             .output()
             .unwrap(),
     );
@@ -763,15 +785,25 @@ fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal(
         .iter()
         .find(|inspection| {
             let carrier = &inspection["face"]["carrier"];
-            carrier["kind"] == "plane"
-                && carrier["normal"][2]
-                    .as_f64()
-                    .is_some_and(|z| z.abs() < 1e-10)
+            if cylindrical {
+                carrier["kind"] == "cylinder"
+            } else {
+                carrier["kind"] == "plane"
+                    && carrier["normal"][2]
+                        .as_f64()
+                        .is_some_and(|z| z.abs() < 1e-10)
+            }
         })
-        .expect("box has source-backed vertical planar walls");
+        .expect("fixture must expose the actual native carrier for the requested finish");
     let face_id = face["reference"]["face_id"].as_str().unwrap();
-    let finish =
-        r#"{"kind":"vertical_ribs","depth_mm":0.1,"pitch_mm":2,"edge_margin_mm":1,"phase_mm":0}"#;
+    if cylindrical {
+        assert_eq!(face["face"]["carrier"]["radius_mm"], 5.0);
+    }
+    let finish = if cylindrical {
+        r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":12,"phase_fraction":0.25}"#
+    } else {
+        r#"{"kind":"vertical_ribs","depth_mm":0.1,"pitch_mm":2,"edge_margin_mm":1,"phase_mm":0}"#
+    };
     let export = root.join("rib-export");
     let finished = report(
         cli("edit", &project)
@@ -787,20 +819,61 @@ fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal(
             ])
             .arg("--manufacturing-out")
             .arg(&export)
+            .args(["--undo", "--redo", "--save"])
             .output()
             .unwrap(),
     );
     let overlays = finished["project"]["surface_overlays"].clone();
-    assert_eq!(overlays["layers"][0]["finish"]["kind"], "vertical_ribs");
+    assert_eq!(overlays["schema_version"], 2);
+    assert_eq!(
+        overlays["layers"][0]["finish"],
+        serde_json::to_value(
+            serde_json::from_str::<spiling_contracts::surface::SurfaceFinish>(finish).unwrap()
+        )
+        .unwrap()
+    );
     assert_eq!(overlays["layers"][0]["scope"]["kind"], "definition");
     assert_eq!(overlays["layers"][0]["face_id"], face_id);
     assert_ne!(
         finished["manufacturing"]["artifact"]["input_hash"],
         original_hash
     );
+    assert!(
+        finished["manufacturing"]["verified_artifact_hash"].is_null(),
+        "history must not restore fresh replay authorization"
+    );
+    let operations = finished["operations"].as_array().unwrap();
+    let undo = operations
+        .iter()
+        .position(|row| row["operation"] == "undo")
+        .unwrap();
+    assert!(operations[undo]["manufacturing"]["artifact"].is_null());
+    assert_eq!(operations[undo + 1]["operation"], "redo");
+    assert_eq!(
+        operations[undo + 1]["manufacturing"]["artifact"],
+        finished["manufacturing"]["artifact"]
+    );
+    assert_eq!(finished["project"]["dirty"], false);
     let provenance: Value =
         serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
     assert_eq!(provenance["surface_overlays"], overlays);
+    assert_eq!(provenance["planner_version"], "5");
+    let baseline_provenance: Value =
+        serde_json::from_slice(&std::fs::read(baseline_export.join("provenance.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        provenance["definitions"],
+        baseline_provenance["definitions"]
+    );
+    assert_eq!(
+        provenance["occurrences"],
+        baseline_provenance["occurrences"]
+    );
+    assert_ne!(
+        std::fs::read(baseline_export.join("program.gcode")).unwrap(),
+        std::fs::read(export.join("program.gcode")).unwrap(),
+        "finish must change actual emitted machine motion"
+    );
     let plan: Value =
         serde_json::from_slice(&std::fs::read(export.join("plan.json")).unwrap()).unwrap();
     let mut added_area = 0.0;
@@ -810,7 +883,21 @@ fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal(
         let source = coverage["source_section_area_mm2"].as_f64().unwrap();
         let realized = coverage["section_area_mm2"].as_f64().unwrap();
         assert!((realized - source - added).abs() < 1e-6);
+        assert!(added > 0.0);
+        if cylindrical {
+            assert!(
+                (source - 25.0 * std::f64::consts::PI).abs() < 0.2,
+                "unchanged OCCT cylinder source radius is five millimetres"
+            );
+            assert!(layer["z_mm"].as_f64().unwrap() <= 8.0);
+        }
         added_area += added;
+    }
+    if cylindrical {
+        assert_eq!(
+            plan["layers"].as_array().unwrap().last().unwrap()["z_mm"],
+            8.0
+        );
     }
     assert!(
         added_area > 0.0,
@@ -840,6 +927,30 @@ fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal(
         reopened["manufacturing_replay"]["provenance"]["surface_overlays"],
         overlays
     );
+    let display: spiling_contracts::manufacturing::ReplayDisplayDescriptor =
+        serde_json::from_value(reopened["manufacturing_replay"]["replay_display"].clone()).unwrap();
+    let record: spiling_contracts::manufacturing::ManufacturingArtifactRecord =
+        serde_json::from_value(reopened["manufacturing"]["artifact"].clone()).unwrap();
+    display.validate_for_record(&record).unwrap();
+    let actual_motion = std::fs::read(&replay).unwrap();
+    spiling_contracts::manufacturing::validate_replay_display(&actual_motion, &display).unwrap();
+    assert_ne!(
+        &actual_motion[spiling_contracts::manufacturing::REPLAY_HEADER_BYTES..],
+        &std::fs::read(&baseline_replay).unwrap()
+            [spiling_contracts::manufacturing::REPLAY_HEADER_BYTES..],
+        "actual decoded motion records, not only provenance headers, must change"
+    );
+    let fresh_verification: Value =
+        serde_json::from_slice(&std::fs::read(reopen_export.join("verification.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        fresh_verification,
+        reopened["manufacturing"]["verification"]
+    );
+    assert_eq!(
+        reopened["project"]["revision"],
+        finished["project"]["revision"]
+    );
     let revealed = report(
         cli("edit", &project)
             .args([
@@ -862,15 +973,118 @@ fn ordered_surface_ribs_compile_save_fresh_read_only_export_and_metadata_reveal(
     );
     assert_eq!(revealed["project"]["surface_overlays"], overlays);
     assert!(revealed["manufacturing"]["artifact"].is_null());
-    let failure = Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
-        .arg("--engine")
-        .arg(root.join("nonexistent-engine"))
-        .args(["project", "inspect"])
-        .arg(&project)
-        .args(["--remove-surface-finish", "1"])
-        .output()
-        .unwrap();
-    assert!(!failure.status.success());
-    assert!(String::from_utf8_lossy(&failure.stderr).contains("read-only"));
+    let reveal_operations = revealed["operations"].as_array().unwrap();
+    assert_eq!(
+        reveal_operations[1]["project"]["surface_overlays"]["layers"][1]["finish"]["kind"],
+        "smooth"
+    );
+    assert_eq!(
+        reveal_operations[2]["project"]["surface_overlays"]["layers"][1]["enabled"],
+        false
+    );
+    assert_eq!(
+        reveal_operations[3]["project"]["surface_overlays"]["layers"][1]["enabled"],
+        true
+    );
+    for flags in [
+        vec![
+            "--surface-finish",
+            &occurrence,
+            face_id,
+            "occurrence",
+            finish,
+        ],
+        vec!["--surface-finish-enabled", "1", "false"],
+        vec!["--remove-surface-finish", "1"],
+        vec!["--compile"],
+        vec!["--save"],
+    ] {
+        let failure = Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+            .arg("--engine")
+            .arg(root.join("nonexistent-engine"))
+            .args(["project", "inspect"])
+            .arg(&project)
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(!failure.status.success());
+        assert!(String::from_utf8_lossy(&failure.stderr).contains("read-only"));
+    }
+    let after_rejected = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(
+        after_rejected["project"]["revision"],
+        revealed["project"]["revision"]
+    );
+    assert_eq!(after_rejected["project"]["surface_overlays"], overlays);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
+fn cylindrical_finish_refuses_split_native_face_without_smooth_fallback() {
+    let root = root();
+    let project = root.join("split-cylinder-project");
+    let source = root.join("owned-split-cylinder.step");
+    std::fs::copy(fixture("cylinder.step"), &source).unwrap();
+    let intent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/solid-fill.intent.json");
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(intent)
+            .args(["--center-on-bed", "1", "--compile"])
+            .output()
+            .unwrap(),
+    );
+    let occurrence = created["occurrences"][0]["occurrence_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let mut query = cli("inspect", &project);
+    for face in created["definitions"][0]["faces"].as_array().unwrap() {
+        query
+            .arg("--inspect-face")
+            .arg(&occurrence)
+            .arg(face["face_id"].as_str().unwrap());
+    }
+    let inspected = report(query.output().unwrap());
+    let faces: Vec<_> = inspected["face_inspections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|face| face["face"]["carrier"]["kind"] == "cylinder")
+        .collect();
+    assert_eq!(
+        faces.len(),
+        2,
+        "original fixture has split lateral native faces"
+    );
+    for face in faces {
+        let failure = terminal_error(cli("edit", &project)
+            .args(["--surface-finish", &occurrence, face["reference"]["face_id"].as_str().unwrap(),
+                "definition", r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":12,"phase_fraction":0.25}"#,
+                "--compile"])
+            .output().unwrap());
+        assert_eq!(failure["domain"], "manufacturing");
+        assert_eq!(failure["error"]["code"], "unsupported_geometry");
+        assert!(
+            failure["manufacturing"]["artifact"].is_null(),
+            "unsupported split faces cannot publish an untextured fallback"
+        );
+    }
+    let reopened = report(cli("inspect", &project).output().unwrap());
+    assert!(
+        reopened["project"]["surface_overlays"]["layers"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "failed edit workflow must not checkpoint metadata"
+    );
+    assert_eq!(
+        reopened["manufacturing"]["artifact"],
+        created["manufacturing"]["artifact"]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

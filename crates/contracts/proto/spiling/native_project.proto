@@ -37,7 +37,8 @@ message SurfaceOccurrenceScope { uint32 occurrence_id = 1; string expected_defin
 message SurfaceScope { oneof kind { SurfaceDefinitionScope definition = 1; SurfaceOccurrenceScope occurrence = 2; } }
 message SurfaceSmooth {}
 message SurfaceVerticalRibs { double depth_mm = 1; double pitch_mm = 2; double edge_margin_mm = 3; double phase_mm = 4; }
-message SurfaceFinish { oneof kind { SurfaceSmooth smooth = 1; SurfaceVerticalRibs vertical_ribs = 2; } }
+message SurfaceCylindricalRibs { double depth_mm = 1; uint32 rib_count = 2; double phase_fraction = 3; }
+message SurfaceFinish { oneof kind { SurfaceSmooth smooth = 1; SurfaceVerticalRibs vertical_ribs = 2; SurfaceCylindricalRibs cylindrical_ribs = 3; } }
 message SurfaceLayer { uint32 layer_id = 1; bool enabled = 2; SurfaceScope scope = 3; string face_id = 4; SurfaceFinish finish = 5; }
 message SurfaceOverlays { uint32 schema_version = 1; repeated SurfaceLayer layers = 2; }
 message AddSurfaceFinishRequest { uint32 base_revision = 1; FaceRef face_ref = 2; SurfaceScopeKind scope = 3; SurfaceFinish finish = 4; }

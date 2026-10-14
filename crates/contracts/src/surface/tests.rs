@@ -111,7 +111,17 @@ fn checked_ids_parameters_presence_and_allocation_bounds_reject_invalid_document
     assert!(
         serde_json::from_str::<SurfaceOverlays>(r#"{"schema_version":0,"layers":[]}"#).is_err()
     );
-    assert!(serde_json::from_str::<SurfaceOverlays>(r#"{"schema_version":1}"#).is_err());
+    assert!(serde_json::from_str::<SurfaceOverlays>(r#"{"schema_version":2}"#).is_err());
+    assert!(
+        serde_json::from_str::<SurfaceOverlays>(r#"{"schema_version":1,"layers":[]}"#).is_err()
+    );
+    assert!(
+        SurfaceOverlays::try_from(crate::rpc::SurfaceOverlays {
+            schema_version: 1,
+            layers: vec![],
+        })
+        .is_err()
+    );
     let scope = SurfaceScope::Definition {
         definition_id: DefinitionId::from_source_sha256(&[1; 32]),
     };
@@ -128,7 +138,7 @@ fn checked_ids_parameters_presence_and_allocation_bounds_reject_invalid_document
     );
     let repeated = vec![serde_json::to_value(sample).unwrap(); MAX_SURFACE_LAYERS + 1];
     let error = serde_json::from_value::<SurfaceOverlays>(
-        serde_json::json!({"schema_version":1,"layers":repeated}),
+        serde_json::json!({"schema_version":SURFACE_SCHEMA_VERSION,"layers":repeated}),
     )
     .unwrap_err();
     assert!(error.to_string().contains("surface layer budget"));
@@ -147,4 +157,63 @@ fn checked_ids_parameters_presence_and_allocation_bounds_reject_invalid_document
         doc.validate().unwrap_err().code,
         ProjectErrorCode::ResourceLimit
     );
+}
+
+#[test]
+fn cylindrical_ribs_check_integer_count_depth_phase_and_typed_roundtrip() {
+    for count in [2, 256] {
+        for phase in [0.0, 0.999999] {
+            let finish = SurfaceFinish::CylindricalRibs {
+                depth_mm: 0.1,
+                rib_count: count,
+                phase_fraction: phase,
+            };
+            let wire = crate::rpc::SurfaceFinish::try_from(finish.clone()).unwrap();
+            assert_eq!(SurfaceFinish::try_from(wire).unwrap(), finish);
+            let json = serde_json::to_string(&finish).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SurfaceFinish>(&json).unwrap(),
+                finish
+            );
+        }
+    }
+    for (depth, count, phase) in [
+        (f64::NAN, 16, 0.0),
+        (f64::INFINITY, 16, 0.0),
+        (0.0, 16, 0.0),
+        (-0.1, 16, 0.0),
+        (0.1, 0, 0.0),
+        (0.1, 1, 0.0),
+        (0.1, 257, 0.0),
+        (0.1, u32::MAX, 0.0),
+        (0.1, 16, -0.1),
+        (0.1, 16, 1.0),
+        (0.1, 16, f64::NAN),
+        (0.1, 16, f64::INFINITY),
+    ] {
+        let finish = SurfaceFinish::CylindricalRibs {
+            depth_mm: depth,
+            rib_count: count,
+            phase_fraction: phase,
+        };
+        assert!(finish.validate().is_err());
+        assert!(crate::rpc::SurfaceFinish::try_from(finish).is_err());
+        let wire = crate::rpc::SurfaceFinish {
+            kind: Some(crate::rpc::surface_finish::Kind::CylindricalRibs(
+                crate::rpc::SurfaceCylindricalRibs {
+                    depth_mm: depth,
+                    rib_count: count,
+                    phase_fraction: phase,
+                },
+            )),
+        };
+        assert!(SurfaceFinish::try_from(wire).is_err());
+    }
+    for json in [
+        r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":2.5,"phase_fraction":0}"#,
+        r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":16}"#,
+        r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":16,"phase_fraction":0,"radius_mm":5}"#,
+    ] {
+        assert!(serde_json::from_str::<SurfaceFinish>(json).is_err());
+    }
 }

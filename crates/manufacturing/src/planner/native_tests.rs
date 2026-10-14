@@ -1254,3 +1254,262 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
             < 1e-5
     );
 }
+
+const FULL_CYLINDER: &[u8] =
+    include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step");
+
+fn cylinder_layer(scene: &NativeScene, phase: f64) -> spiling_contracts::surface::SurfaceLayer {
+    use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer, SurfaceLayerId, SurfaceScope};
+    let occurrence = &scene.occurrences[0];
+    let native = &scene.definitions[&occurrence.definition_id];
+    let face = native
+        .faces()
+        .iter()
+        .find(|face| native.vertical_cylinder_face(&face.face_id).is_ok())
+        .expect("independent native full-turn cylindrical source face");
+    SurfaceLayer {
+        layer_id: SurfaceLayerId::new(1).unwrap(),
+        enabled: true,
+        scope: SurfaceScope::Definition {
+            definition_id: occurrence.definition_id.clone(),
+        },
+        face_id: face.face_id.clone(),
+        finish: SurfaceFinish::CylindricalRibs {
+            depth_mm: 0.12,
+            rib_count: 12,
+            phase_fraction: phase,
+        },
+    }
+}
+
+#[test]
+fn independent_cylindrical_ribs_change_ordinary_walls_accounting_and_actual_replay() {
+    use crate::{inspect_bundle, verify_bundle};
+    use spiling_contracts::geometry::SourceHash;
+    let cancel = AtomicBool::new(false);
+    let mut scene = NativeScene::new(FULL_CYLINDER, &[RigidPoseMm::IDENTITY]);
+    let intent = intent(false);
+    let original = compile(scene.input(&intent), &cancel).unwrap();
+    scene
+        .surface_overlays
+        .layers
+        .push(cylinder_layer(&scene, 0.25));
+    let finished = compile(scene.input(&intent), &cancel).unwrap();
+    assert_ne!(original.program, finished.program);
+    assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
+    assert_eq!(
+        finished.provenance.definitions,
+        original.provenance.definitions
+    );
+    for (plain, textured) in original.plan.layers.iter().zip(&finished.plan.layers) {
+        let coverage = &textured.region_coverage;
+        assert!(
+            (coverage.source_section_area_mm2 - plain.region_coverage.section_area_mm2).abs()
+                < 1e-8
+        );
+        assert!(coverage.surface_added_area_mm2 > 0.0);
+        assert!(
+            (coverage.section_area_mm2
+                - coverage.source_section_area_mm2
+                - coverage.surface_added_area_mm2)
+                .abs()
+                < 1e-9
+        );
+        let wall = textured
+            .paths
+            .iter()
+            .find(|p| p.kind == DepositionKind::Perimeter)
+            .unwrap();
+        let old = plain
+            .paths
+            .iter()
+            .find(|p| p.kind == DepositionKind::Perimeter)
+            .unwrap();
+        assert_eq!(wall.points_mm.first(), wall.points_mm.last());
+        assert_ne!(wall.points_mm, old.points_mm);
+        let peak = wall
+            .points_mm
+            .iter()
+            .map(|p| p[0].hypot(p[1]))
+            .fold(0.0f64, f64::max);
+        assert!((peak - (5.0 + 0.12 - intent.recipe.bead_width_mm / 2.0)).abs() <= 0.011);
+        let area = (intent.recipe.bead_width_mm - textured.height_mm) * textured.height_mm
+            + std::f64::consts::PI * (textured.height_mm / 2.0).powi(2);
+        let volume = textured
+            .paths
+            .iter()
+            .flat_map(|p| p.points_mm.windows(2))
+            .map(|p| (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]) * area)
+            .sum::<f64>();
+        assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
+    }
+    let hash = SourceHash::from_bytes(&serde_json::to_vec(&finished).unwrap());
+    let inspection = inspect_bundle(
+        &finished,
+        &hash,
+        VerificationOutput::ReportAndMotion,
+        &cancel,
+    )
+    .unwrap();
+    assert!(inspection.report.verified);
+    assert!(inspection.replay.is_some());
+    assert!(verify_bundle(&finished, &cancel).unwrap().verified);
+    let mut stale = finished;
+    stale.provenance.planner_version = "4".into();
+    assert!(
+        verify_bundle(&stale, &cancel).is_err(),
+        "old planner artifacts must not retain inspection authority"
+    );
+}
+
+#[test]
+fn cylindrical_source_phase_pose_and_flipped_z_preserve_native_closed_material() {
+    use geo::{Intersects, Point};
+    let cancel = AtomicBool::new(false);
+    let intent = intent(false);
+    let poses = [
+        RigidPoseMm::IDENTITY,
+        RigidPoseMm {
+            translation_mm: [17.0, 11.0, 0.0],
+            rotation_xyzw: [
+                0.0,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+        },
+        RigidPoseMm {
+            translation_mm: [17.0, 11.0, 8.0],
+            rotation_xyzw: [1.0, 0.0, 0.0, 0.0],
+        },
+    ];
+    for pose in poses {
+        for phase in [0.0, 0.25, 0.999] {
+            let mut scene = NativeScene::new(FULL_CYLINDER, &[pose]);
+            scene
+                .surface_overlays
+                .layers
+                .push(cylinder_layer(&scene, phase));
+            let native = &scene.definitions[&scene.occurrences[0].definition_id];
+            let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+            assert!(admitted.report.eligible);
+            let sample = 2.0;
+            let local_z = inverse(&pose, [0.0, 0.0, sample])[2];
+            let section = spiling_geometry::section_with_byte_limit(
+                native,
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, local_z],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                &cancel,
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+            let source = region::from_native(section, &pose, sample, &cancel).unwrap();
+            let derived = surface::realize(
+                source.clone(),
+                &admitted.surface_fields[&scene.occurrences[0].occurrence_id],
+                sample,
+                0,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap();
+            assert_eq!(source.0.len(), derived.0.len());
+            for (old, new) in source.0.iter().zip(&derived.0) {
+                assert_eq!(old.interiors(), new.interiors());
+                assert_eq!(new.exterior().0.first(), new.exterior().0.last());
+                assert!(old.exterior().0.iter().all(|p| new.intersects(&Point(*p))));
+                let mut observed_peak = 0.0f64;
+                for p in &new.exterior().0 {
+                    let local = inverse(&pose, [p.x, p.y, sample]);
+                    let theta = local[1].atan2(local[0]);
+                    let radius = local[0].hypot(local[1]);
+                    let expected =
+                        0.06 * (1.0 - (12.0 * theta - std::f64::consts::TAU * phase).cos());
+                    // Native polygon's radial deviation remains a separate bound.
+                    assert!(
+                        (radius - 5.0 - expected).abs() <= SECTION_SAMPLING_TOLERANCE_MM + 0.00001
+                    );
+                    observed_peak = observed_peak.max(expected);
+                }
+                assert!(observed_peak > 0.11999);
+            }
+        }
+    }
+}
+
+#[test]
+fn cylindrical_native_partial_resource_precision_and_cancel_are_explicit_refusals() {
+    use spiling_contracts::surface::SurfaceFinish;
+    let cancel = AtomicBool::new(false);
+    let intent = intent(false);
+    let mut partial = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/cylinder.step"),
+        &[RigidPoseMm::IDENTITY],
+    );
+    let native = &partial.definitions[&partial.occurrences[0].definition_id];
+    let face = native
+        .faces()
+        .iter()
+        .find(|f| {
+            matches!(
+                f.carrier,
+                spiling_contracts::geometry::FaceCarrier::Cylinder { .. }
+            )
+        })
+        .unwrap();
+    let mut layer = cylinder_layer(
+        &NativeScene::new(FULL_CYLINDER, &[RigidPoseMm::IDENTITY]),
+        0.0,
+    );
+    layer.face_id = face.face_id.clone();
+    layer.scope = spiling_contracts::surface::SurfaceScope::Definition {
+        definition_id: native.id().clone(),
+    };
+    partial.surface_overlays.layers.push(layer);
+    assert!(
+        !preflight(&partial.input(&intent), &cancel)
+            .unwrap()
+            .eligible
+    );
+    let mut scene = NativeScene::new(FULL_CYLINDER, &[RigidPoseMm::IDENTITY]);
+    scene
+        .surface_overlays
+        .layers
+        .push(cylinder_layer(&scene, 0.0));
+    assert_eq!(
+        surface::metadata(
+            &scene.input(&intent),
+            &scene.occurrences[0],
+            AabbMm::new([-5.0, -5.0, 0.0], [5.0, 5.0, 8.0]).unwrap(),
+            1,
+            &cancel
+        )
+        .err()
+        .unwrap()
+        .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        compile(scene.input(&intent), &AtomicBool::new(true))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::Cancelled
+    );
+    for depth in [0.022, 0.301] {
+        scene.surface_overlays.layers[0].finish = SurfaceFinish::CylindricalRibs {
+            depth_mm: depth,
+            rib_count: 12,
+            phase_fraction: 0.0,
+        };
+        assert!(!preflight(&scene.input(&intent), &cancel).unwrap().eligible);
+    }
+    scene.surface_overlays.layers[0].finish = SurfaceFinish::CylindricalRibs {
+        depth_mm: 0.12,
+        rib_count: 12,
+        phase_fraction: 0.0,
+    };
+    scene.occurrences[0].pose.translation_mm[0] = 1e10;
+    assert!(!preflight(&scene.input(&intent), &cancel).unwrap().eligible);
+}

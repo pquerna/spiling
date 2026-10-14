@@ -160,6 +160,53 @@ fn native_cap_disappearing_offset_supports_preserve_material_and_bead_clearance(
 }
 
 #[test]
+fn thick_sampled_boundary_neighborhood_preserves_expected_exterior_hole_and_clearance() {
+    use geo::{Contains, Point};
+    let cancel = AtomicBool::new(false);
+    for center in [[0.0, 0.0], [110.0, 110.0]] {
+        let circle = |radius: f64, samples: usize| {
+            let mut points = (0..samples)
+                .map(|i| {
+                    let theta = std::f64::consts::TAU * i as f64 / samples as f64;
+                    Coord {
+                        x: center[0] + radius * theta.cos(),
+                        y: center[1] + radius * theta.sin(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            points.push(points[0]);
+            LineString(points)
+        };
+        let mut material =
+            MultiPolygon(vec![Polygon::new(circle(5.0, 314), vec![circle(1.0, 96)])]);
+        region::canonicalize(&mut material);
+        let original = material.clone();
+        let eroded = region::offset(&material, -0.9, &cancel).unwrap();
+        assert_eq!(material, original);
+        assert_eq!(eroded.0.len(), 1);
+        assert_eq!(eroded.0[0].interiors().len(), 1);
+        assert!(!eroded.contains(&Point(Coord {
+            x: center[0],
+            y: center[1]
+        })));
+        for (ring, expected) in std::iter::once((eroded.0[0].exterior(), 4.1))
+            .chain(eroded.0[0].interiors().iter().map(|ring| (ring, 1.9)))
+        {
+            for point in &ring.0 {
+                let radius = (point.x - center[0]).hypot(point.y - center[1]);
+                // Source polygon sagitta stays below.001 independently of the
+                // unchanged.005 native offset policy.
+                assert!((radius - expected).abs() <= OFFSET_TOLERANCE_MM + 0.001);
+                assert!(material.contains(&Point(*point)));
+            }
+        }
+        let expected_area = std::f64::consts::PI * (4.1f64.powi(2) - 1.9f64.powi(2));
+        let radial_area_bound = std::f64::consts::TAU * (4.1 + 1.9) * (OFFSET_TOLERANCE_MM + 0.001);
+        assert!((eroded.unsigned_area() - expected_area).abs() <= radial_area_bound);
+    }
+}
+
+#[test]
 fn protected_holes_and_islands_have_no_duplicate_or_void_crossing_paths() {
     let mut section = MultiPolygon(vec![
         Polygon::new(ring(0.0, 0.0, 20.0, 12.0), vec![ring(7.0, 4.0, 6.0, 4.0)]),

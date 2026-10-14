@@ -289,7 +289,7 @@ fn operation(
         check_cancel(cancel)?;
         return Ok(result);
     }
-    boolean_budget(a, b)?;
+    boolean_budget(a, b, cancel)?;
     let mut result = if intersect {
         a.intersection(b)
     } else {

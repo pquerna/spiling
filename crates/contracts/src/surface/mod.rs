@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
-pub const SURFACE_SCHEMA_VERSION: u32 = 1;
+pub const SURFACE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_SURFACE_LAYERS: usize = 64;
 pub const MAX_SURFACE_DOCUMENT_BYTES: usize = 32 * 1024;
 pub const MAX_SURFACE_RETAINED_BYTES: usize = 16 * 1024 * 1024;
@@ -69,6 +69,11 @@ pub enum SurfaceFinish {
         edge_margin_mm: f64,
         phase_mm: f64,
     },
+    CylindricalRibs {
+        depth_mm: f64,
+        rib_count: u32,
+        phase_fraction: f64,
+    },
 }
 impl SurfaceFinish {
     pub fn validate(&self) -> Result<(), ProjectError> {
@@ -88,6 +93,24 @@ impl SurfaceFinish {
             {
                 return Err(invalid(
                     "vertical ribs require finite positive depth, pitch and edge margin, and phase in [0,pitch)",
+                ));
+            }
+        }
+        if let Self::CylindricalRibs {
+            depth_mm,
+            rib_count,
+            phase_fraction,
+        } = self
+        {
+            if !depth_mm.is_finite()
+                || *depth_mm <= 0.0
+                || !(2..=256).contains(rib_count)
+                || !phase_fraction.is_finite()
+                || *phase_fraction < 0.0
+                || *phase_fraction >= 1.0
+            {
+                return Err(invalid(
+                    "cylindrical ribs require finite positive depth, count in 2..=256, and phase fraction in [0,1)",
                 ));
             }
         }

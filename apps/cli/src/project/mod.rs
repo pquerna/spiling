@@ -979,6 +979,29 @@ mod tests {
                 Operation::RemoveSurfaceFinish(_),
             ]
         ));
+        let options = parse_args(&[
+            "open",
+            "project",
+            "--surface-finish",
+            "1",
+            "step:1",
+            "occurrence",
+            r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":12,"phase_fraction":0.25}"#,
+        ])
+        .unwrap()
+        .unwrap();
+        let Command::Project { workflow, .. } = options.command else {
+            panic!("project");
+        };
+        assert!(matches!(
+            workflow.operations.as_slice(),
+            [Operation::SurfaceFinish(
+                _,
+                _,
+                SurfaceScopeKind::Occurrence,
+                SurfaceFinish::CylindricalRibs { rib_count: 12, .. }
+            ),]
+        ));
         for flags in [
             vec![
                 "--surface-finish",
@@ -1016,6 +1039,20 @@ mod tests {
                 "step:1",
                 "occurrence",
                 r#"{"kind":"vertical_ribs","depth_mm":0,"pitch_mm":2,"edge_margin_mm":0.8,"phase_mm":0}"#,
+            ],
+            vec![
+                "--surface-finish",
+                "1",
+                "step:1",
+                "occurrence",
+                r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":1,"phase_fraction":0}"#,
+            ],
+            vec![
+                "--surface-finish",
+                "1",
+                "step:1",
+                "occurrence",
+                r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":12,"phase_fraction":1}"#,
             ],
             vec!["--surface-finish-enabled", "1", "yes"],
             vec!["--remove-surface-finish", "0"],

@@ -15,6 +15,17 @@ const labels = [
   "Protected edge margin (mm)",
   "Source-local phase (mm)",
 ];
+const cylinderFields = ["depth_mm", "rib_count", "phase_fraction"] as const;
+const cylinderLabels = [
+  "Depth (mm)",
+  "Ribs around circumference",
+  "Phase (fraction of one rib cycle)",
+];
+const finishLabels: Record<SurfaceFinish["kind"], string> = {
+  smooth: "Smooth",
+  vertical_ribs: "Planar vertical ribs",
+  cylindrical_ribs: "Cylindrical vertical ribs",
+};
 
 export function SurfaceFinishPanel({
   state,
@@ -27,8 +38,9 @@ export function SurfaceFinishPanel({
 }) {
   const [occurrenceId, setOccurrenceId] = useState<number | null>(null);
   const [scope, setScope] = useState<SurfaceScopeKind>("occurrence");
-  const [kind, setKind] = useState<"vertical_ribs" | "smooth">("vertical_ribs");
+  const [kind, setKind] = useState<SurfaceFinish["kind"]>("vertical_ribs");
   const [values, setValues] = useState(["0.1", "2", "1", "0"]);
+  const [cylinderValues, setCylinderValues] = useState(["0.1", "8", "0"]);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const project = state.project;
@@ -96,6 +108,32 @@ export function SurfaceFinishPanel({
         phase_mm: phase!,
       };
     }
+    if (kind === "cylindrical_ribs") {
+      if (cylinderValues.some((value) => value.trim() === "" || !Number.isFinite(Number(value)))) {
+        setMessage("Enter finite values for depth, rib count and phase fraction.");
+        return;
+      }
+      const [depth, count, phase] = cylinderValues.map(Number);
+      if (
+        depth! <= 0 ||
+        !Number.isInteger(count) ||
+        count! < 2 ||
+        count! > 256 ||
+        phase! < 0 ||
+        phase! >= 1
+      ) {
+        setMessage(
+          "Depth must be positive; rib count an integer from 2 to 256; phase fraction at least zero and less than one.",
+        );
+        return;
+      }
+      finish = {
+        kind: "cylindrical_ribs",
+        depth_mm: depth!,
+        rib_count: count!,
+        phase_fraction: phase!,
+      };
+    }
     void transact({ op: "add_surface_finish", face_ref: currentFace, scope, finish });
   }
   return (
@@ -110,11 +148,11 @@ export function SurfaceFinishPanel({
         with no grip or physical-print qualification.
       </p>
       <p>
-        Vertical ribs require a native certified full-height rectangular exterior vertical planar
-        face, upright local Z and bed contact. No cylindrical, sloped, partial-height or
-        hole-trimmed target faces. Existing protected holes in eligible bodies remain native.
-        Compile checks bead-width/depth/pitch/margin, topology and nominal clearance limits;
-        authoring alone does not certify eligibility.
+        Planar ribs require a native certified full-height rectangular exterior vertical wall.
+        Cylindrical ribs require one full-turn exterior cylinder face, not an inward bore or
+        separate half-faces. Both require upright local Z and bed contact. Protected native holes
+        remain unchanged. Compile checks process, topology, work and nominal clearance; authoring
+        alone does not certify eligibility.
       </p>
       <label>
         Native occurrence
@@ -193,22 +231,23 @@ export function SurfaceFinishPanel({
               value={kind}
               onChange={(event) => setKind(event.target.value as typeof kind)}
             >
-              <option value="vertical_ribs">Vertical ribs</option>
+              <option value="vertical_ribs">Planar vertical ribs</option>
+              <option value="cylindrical_ribs">Cylindrical vertical ribs</option>
               <option value="smooth">Smooth override</option>
             </select>
           </label>
-          {kind === "vertical_ribs" && (
+          {kind !== "smooth" && (
             <div className="surface-numbers">
-              {fields.map((field, index) => (
+              {(kind === "cylindrical_ribs" ? cylinderFields : fields).map((field, index) => (
                 <label key={field}>
-                  {labels[index]}
+                  {(kind === "cylindrical_ribs" ? cylinderLabels : labels)[index]}
                   <input
                     data-testid={`surface-${field}`}
                     type="number"
-                    step="any"
-                    value={values[index]}
+                    step={field === "rib_count" ? "1" : "any"}
+                    value={(kind === "cylindrical_ribs" ? cylinderValues : values)[index]}
                     onChange={(event) =>
-                      setValues((old) =>
+                      (kind === "cylindrical_ribs" ? setCylinderValues : setValues)((old) =>
                         old.map((value, i) => (i === index ? event.target.value : value)),
                       )
                     }
@@ -216,6 +255,13 @@ export function SurfaceFinishPanel({
                 </label>
               ))}
             </div>
+          )}
+          {kind === "cylindrical_ribs" && (
+            <p>
+              Phase is measured from source-local +X about +Z, independent of the native seam.
+              Integer rib count closes the circumference. This is straight grip ribbing, not crossed
+              or helical knurling.
+            </p>
           )}
           <button type="submit" data-testid="surface-apply" disabled={!writable || !currentFace}>
             Apply — append layer
@@ -244,8 +290,8 @@ export function SurfaceFinishPanel({
         {project?.surface_overlays.layers.map((layer) => (
           <li key={layer.layer_id}>
             <strong>
-              Layer {layer.layer_id}: {layer.finish.kind === "smooth" ? "Smooth" : "Vertical ribs"}{" "}
-              · {layer.enabled ? "enabled" : "disabled"}
+              Layer {layer.layer_id}: {finishLabels[layer.finish.kind]} ·{" "}
+              {layer.enabled ? "enabled" : "disabled"}
             </strong>
             <span>
               {layer.scope.kind === "definition"
@@ -257,6 +303,12 @@ export function SurfaceFinishPanel({
               <span>
                 Depth {layer.finish.depth_mm} mm · pitch {layer.finish.pitch_mm} mm · margin{" "}
                 {layer.finish.edge_margin_mm} mm · phase {layer.finish.phase_mm} mm
+              </span>
+            )}
+            {layer.finish.kind === "cylindrical_ribs" && (
+              <span>
+                Depth {layer.finish.depth_mm} mm · {layer.finish.rib_count} ribs · phase{" "}
+                {layer.finish.phase_fraction} of one rib cycle
               </span>
             )}
             <div className="geometry-buttons">

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod boolean;
+use boolean::budget as boolean_budget;
 mod classification;
 mod preflight;
 mod region;
@@ -13,7 +15,7 @@ mod native_tests;
 #[cfg(test)]
 mod tests;
 use crate::{CompilerInput, check_cancel, error};
-use geo::{Area, BooleanOps, BoundingRect, MultiPolygon};
+use geo::{Area, BooleanOps, MultiPolygon};
 use spiling_contracts::geometry::{
     GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
@@ -185,7 +187,7 @@ pub(crate) fn plan(
             } else if next.0.is_empty() {
                 next = placed;
             } else {
-                boolean_budget(&next, &placed)?;
+                boolean_budget(&next, &placed, cancel)?;
                 next = next.union(&placed);
             }
             check_cancel(cancel)?;
@@ -611,49 +613,6 @@ fn survival<'a>(
         }
     }
     Ok(survives)
-}
-
-pub(super) fn boolean_budget(
-    a: &MultiPolygon<f64>,
-    b: &MultiPolygon<f64>,
-) -> Result<(), ManufacturingError> {
-    let mut pairs = 0usize;
-    for left in &a.0 {
-        let Some(l) = left.bounding_rect() else {
-            continue;
-        };
-        let left_points =
-            left.exterior().0.len() + left.interiors().iter().map(|r| r.0.len()).sum::<usize>();
-        for right in &b.0 {
-            let Some(r) = right.bounding_rect() else {
-                continue;
-            };
-            if l.min().x > r.max().x
-                || r.min().x > l.max().x
-                || l.min().y > r.max().y
-                || r.min().y > l.max().y
-            {
-                continue;
-            }
-            let right_points = right.exterior().0.len()
-                + right.interiors().iter().map(|r| r.0.len()).sum::<usize>();
-            pairs = pairs
-                .checked_add(left_points.checked_mul(right_points).ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "Boolean work overflow",
-                    )
-                })?)
-                .filter(|n| *n <= MAX_BOOLEAN_PAIRS)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "planar Boolean work budget exceeded",
-                    )
-                })?;
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn rotate(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
