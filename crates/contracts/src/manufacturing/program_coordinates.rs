@@ -15,7 +15,10 @@ use super::{ManufacturingError, ManufacturingErrorCode};
 pub const MAX_XYZ6_COORDINATE_MM: f64 = (1u64 << 52) as f64 / 1_000_000.0;
 
 fn conditioning(message: &'static str) -> ManufacturingError {
-    ManufacturingError::new(ManufacturingErrorCode::NativeConditioningFailure, message)
+    ManufacturingError::new(
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+        message,
+    )
 }
 
 /// Sole projection to the current Cartesian XYZ6 command representation.
@@ -76,6 +79,16 @@ pub fn project_xyz6_bead_height_mm(
     ])
 }
 
+/// Closed vertical hull of both actual XYZ6 segment endpoint beads.
+pub fn project_xyz6_segment_bead_height_mm(
+    start_z_mm: f64,
+    end_z_mm: f64,
+    height_mm: f64,
+) -> Result<[f64; 2], ManufacturingError> {
+    let start = project_xyz6_bead_height_mm(start_z_mm, height_mm)?;
+    let end = project_xyz6_bead_height_mm(end_z_mm, height_mm)?;
+    Ok([start[0].min(end[0]), start[1].max(end[1])])
+}
 /// Lower bound on the gap between an already enclosed lower/upper program
 /// height pair. Error-free TwoDiff keeps exactly representable contact gaps
 /// admissible; only a negative residual requires outward rounding.

@@ -164,10 +164,14 @@ fn emit(
     }
     Ok(true)
 }
+pub(in crate::planner) struct ResolutionGeometry<'a> {
+    pub firstwall: &'a MultiPolygon<f64>,
+    pub material: &'a MultiPolygon<f64>,
+    pub native: &'a MultiPolygon<f64>,
+}
+
 pub(in crate::planner) fn collect_resolution(
-    firstwall: &MultiPolygon<f64>,
-    material: &MultiPolygon<f64>,
-    native: &MultiPolygon<f64>,
+    geometry: ResolutionGeometry<'_>,
     fields: &[PreparedFinish],
     sample: f64,
     layer_index: u32,
@@ -175,6 +179,11 @@ pub(in crate::planner) fn collect_resolution(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<SurfaceResolution>, ManufacturingError> {
+    let ResolutionGeometry {
+        firstwall,
+        material,
+        native,
+    } = geometry;
     let mut records = Vec::new();
     for field in fields {
         let Some(image) = field.image() else { continue };

@@ -88,7 +88,7 @@ fn varying_native_edge_layers_preserve_exact_holes_without_cartesian_work() {
         certify_retention(&native, &derived, &mut work, &cancel).unwrap();
         let material = MultiPolygon(vec![Polygon::new(derived, vec![hole.clone()])]);
         certify_simple(&material, &mut work, &cancel).unwrap();
-        assert_eq!(material.0[0].interiors(), &[hole.clone()]);
+        assert_eq!(material.0[0].interiors(), std::slice::from_ref(&hole));
     }
     assert!(work < super::super::super::MAX_BOOLEAN_PAIRS);
 }

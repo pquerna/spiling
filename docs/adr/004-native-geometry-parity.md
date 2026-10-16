@@ -254,6 +254,50 @@ inventory, candidate and output capacities coexist under the shared allowance.
 Native winding scratch receives the current query allowance even when its
 original trim domain was prepared earlier with more free capacity.
 
+### 5.2 Affine-plane reduction inside native continuation
+
+Repeated section queries must be affordable under the unchanged whole-job work
+and deadline limits, not only individually certifiable. A generated face/plane
+curve currently solves four native UV unknowns, although one original carrier
+is an affine plane. Eliminate that plane's two dependent UV coordinates inside
+Native; do not introduce a second Root section implementation or an analytic
+replacement for the source geometry.
+
+For source carrier `S(u,v)`, actual native plane `P(a,b)=p+A*a+B*b`,
+and the existing guide-coordinate plane `g(t)·x=d(t)`, the reduced equations are
+`cross(A,B)·(S(u,v)-p)=0` and `g(t)·S(u,v)-d(t)=0`. The second equation uses the
+unchanged native guide/projection jet and raw parameter. It is equivalent to
+the four-variable system's averaged-point equation on an actual common root;
+no native parameter gauge is replaced by arc length, angle or sampled leaders.
+
+A distinct private proof authority must certify whole-span two-dimensional
+existence, uniqueness and transversality, then reconstruct the actual plane UV
+enclosure through a nonsingular native affine chart. Reconstructed four-UV
+roots must retain the original binding, admitted domains and endpoint/trim
+association. Position, first and second derivatives come from the same reduced
+implicit system with outward arithmetic; evaluating a smaller span cannot
+certify derivatives on the requested whole span. Original source/plane
+residuals, continuation, full-face completeness, endpoint sealing and material
+proofs remain mandatory. Existing constructive extrusion authority remains
+separate.
+
+This is an internal specialization of the existing prepared-curve API for
+every supported source family against a qualified affine plane. Keep the
+generic two-carrier system for genuinely non-affine carrier pairs. Qualify
+actual plane coefficients, injective chart and original guide equation, not
+family labels or nearby plane fits. Unsupported exact reduction must not
+invent success or lose previously supported branches.
+
+Use fixed-size stack proof data; admit retained metadata/scratch, charge actual
+construction, contraction, derivatives, reconstruction and failed attempts,
+and propagate cancellation under existing limits. Fewer computations and
+tighter proof domains may reduce charged work; changing counter weights,
+budgets, tolerances or deadlines is not an optimization. Adoption requires
+independent jet/root oracles, reversed/posed gauges, invalid-transversality and
+resource/cancellation properties, followed by the unchanged full fitting and
+housing operator workflows. This planned specialization is not qualification
+of those workflows.
+
 ## 6. Generic geometry substrate and necessary specializations
 
 ### 6.1 Bounded domains and rational conditioning

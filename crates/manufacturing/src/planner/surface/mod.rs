@@ -24,7 +24,7 @@ mod proof;
 mod resolution;
 mod splice;
 use image::ImageMapping;
-pub(super) use resolution::collect_resolution;
+pub(super) use resolution::{ResolutionGeometry, collect_resolution};
 #[cfg(test)]
 mod tests;
 use profile::PeriodicProfile;
@@ -328,11 +328,7 @@ pub(super) fn metadata(
                 "effective finish has no realization for this native source family; generic material admission does not authorize a planar or cylindrical finish",
             ));
         }
-        if let Some(SurfaceFinish::ImageRelief {
-            image_hash,
-            parameters,
-        }) = finish
-        {
+        if let Some(SurfaceFinish::ImageRelief { .. }) = finish {
             if matches!(
                 face.geometry.analytic,
                 Some(AnalyticSurfaceDescription::Cylinder { .. })
@@ -341,17 +337,9 @@ pub(super) fn metadata(
                     input,
                     occurrence,
                     source_bounds,
-                    &face.face_id,
-                    parameters.depth_mm,
-                    parameters.u_repeats,
-                    parameters.u_phase_fraction,
+                    layer.expect("effective layer"),
                     sample_limit.saturating_sub(samples),
                     cancel,
-                    Some((
-                        image_hash,
-                        parameters,
-                        layer.expect("effective layer").layer_id,
-                    )),
                 )?;
                 samples += field.samples;
                 result.push(PreparedFinish {
@@ -369,23 +357,14 @@ pub(super) fn metadata(
                 ));
             }
         }
-        if let Some(SurfaceFinish::CylindricalRibs {
-            depth_mm,
-            rib_count,
-            phase_fraction,
-        }) = finish
-        {
+        if let Some(SurfaceFinish::CylindricalRibs { .. }) = finish {
             let field = cylindrical::metadata(
                 input,
                 occurrence,
                 source_bounds,
-                &face.face_id,
-                *depth_mm,
-                *rib_count,
-                *phase_fraction,
+                layer.expect("effective layer"),
                 sample_limit.saturating_sub(samples),
                 cancel,
-                None,
             )?;
             samples += field.samples;
             result.push(PreparedFinish {
@@ -887,9 +866,9 @@ pub(super) fn component_bounds(component: &MachineComponent) -> AabbMm {
                 }
             }),
         );
-        for a in 0..3 {
-            result.min[a] = result.min[a].min(p[a]);
-            result.max[a] = result.max[a].max(p[a]);
+        for (a, coordinate) in p.into_iter().enumerate() {
+            result.min[a] = result.min[a].min(coordinate);
+            result.max[a] = result.max[a].max(coordinate);
         }
     }
     result

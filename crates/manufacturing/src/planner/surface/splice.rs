@@ -71,20 +71,31 @@ fn base(a: Coord<f64>, b: Coord<f64>, fraction: f64) -> Coord<f64> {
     }
 }
 
-// Endpoint identity, a single contiguous monotone full-span chain and its native
-// frame agreement are all required in addition to the immutable FaceId certificate.
-// Native straight faces may have many samples; none is epsilon-flattened away.
-fn candidate(
-    ring: &LineString<f64>,
+struct CandidateChain<'a> {
+    ring: &'a LineString<f64>,
     polygon: usize,
     start: usize,
     end: usize,
     forward: bool,
+}
+
+// Endpoint identity, a single contiguous monotone full-span chain and its native
+// frame agreement are all required in addition to the immutable FaceId certificate.
+// Native straight faces may have many samples; none is epsilon-flattened away.
+fn candidate(
+    query: CandidateChain<'_>,
     field: &RibField,
     work: &mut usize,
     cancel: &AtomicBool,
     retain_parameters: bool,
 ) -> Result<Option<Chain>, ManufacturingError> {
+    let CandidateChain {
+        ring,
+        polygon,
+        start,
+        end,
+        forward,
+    } = query;
     let count = ring.0.len() - 1;
     let edges = (end + count - start) % count;
     if edges == 0 {
@@ -217,11 +228,13 @@ fn matched_polygon(
     if let (Some(lo), Some(hi)) = (lo_index, hi_index) {
         for (start, end, forward) in [(lo, hi, true), (hi, lo, false)] {
             if let Some(chain) = candidate(
-                ring,
-                polygon,
-                start,
-                end,
-                forward,
+                CandidateChain {
+                    ring,
+                    polygon,
+                    start,
+                    end,
+                    forward,
+                },
                 field,
                 work,
                 cancel,

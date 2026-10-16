@@ -1325,13 +1325,14 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
             old_cartesian_work += (last - first) * (VERTICES + 4).pow(2);
             if !uncached_refused {
                 let mut uncached = Cow::Borrowed(&sections[index].material);
-                for other in first..=last {
+                for (other, other_section) in sections.iter().enumerate().take(last + 1).skip(first)
+                {
                     if other == index {
                         continue;
                     }
                     match classification::intersection_accumulated(
                         &uncached,
-                        &sections[other].material,
+                        &other_section.material,
                         &mut uncached_work,
                         &cancel,
                     ) {

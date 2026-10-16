@@ -22,7 +22,9 @@ use geo::{Area, Intersects, MultiPolygon, Point};
 use spiling_contracts::geometry::{
     DefinitionId, GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
-use spiling_contracts::manufacturing::program_coordinates::project_xyz6_coordinate_mm;
+use spiling_contracts::manufacturing::program_coordinates::{
+    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
+};
 use spiling_contracts::manufacturing::*;
 use std::{
     collections::BTreeMap,
@@ -488,9 +490,9 @@ pub(crate) fn plan(
         let sample = elevation.sample;
         let height = elevation.height;
         let current = span_at(&sections, index);
-        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
+        let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
+        let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
         if sections[current].material.0.is_empty() {
             layers.push(PrintLayer {
@@ -595,12 +597,14 @@ pub(crate) fn plan(
                     continue;
                 };
                 let records = surface::collect_resolution(
-                    wall_layout
-                        .as_ref()
-                        .expect("current wall layout initialized")
-                        .first_wall(),
-                    &sections[current].material,
-                    native,
+                    surface::ResolutionGeometry {
+                        firstwall: wall_layout
+                            .as_ref()
+                            .expect("current wall layout initialized")
+                            .first_wall(),
+                        material: &sections[current].material,
+                        native,
+                    },
                     fields,
                     sample,
                     index,
@@ -757,14 +761,14 @@ pub(crate) fn plan(
             let elevation = &schedule[index];
             let current = span_at(&sections, index as u32);
             let below = physical_neighbor(
-                &schedule,
+                schedule,
                 index as u32,
                 recipe.bottom_skin_thickness_mm,
                 false,
             )
             .map(|i| span_at(&sections, i));
             let above =
-                physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
+                physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true)
                     .map(|i| span_at(&sections, i));
             let lower = neighborhoods.survival(current, below, live_retained_points, cancel)?;
             let upper = neighborhoods.survival(
@@ -1063,14 +1067,12 @@ fn scheduled_layers(
                 continue;
             }
             let mut stop = project_xyz6_coordinate_mm(upper - half_quantum)?;
-            if native::emitted_bead_height(&[[0.0, 0.0, stop]; 2], 0.0)?[1] > upper {
+            if project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
                 stop = project_xyz6_coordinate_mm(stop - 1.0 / 1_000_000.0)?;
             }
-            if !stop.is_finite()
-                || native::emitted_bead_height(&[[0.0, 0.0, stop]; 2], 0.0)?[1] > upper
-            {
+            if !stop.is_finite() || project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
                 return Err(error(
-                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
                     "support stop cannot enclose the emitter's coordinate representation",
                 ));
             }

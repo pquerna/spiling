@@ -8,7 +8,8 @@ use spiling_contracts::geometry::{
     DefinitionId, GeometryErrorCode, OccurrenceId, OccurrenceRecord, RigidPoseMm,
 };
 use spiling_contracts::manufacturing::program_coordinates::{
-    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm, xyz6_coordinate_error_mm,
+    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm, project_xyz6_segment_bead_height_mm,
+    xyz6_coordinate_error_mm,
 };
 use spiling_contracts::manufacturing::*;
 use std::{
@@ -2313,7 +2314,8 @@ fn certify_polygon_capsules(
             }
             for edge in path.points_mm.windows(2) {
                 charge_support_clearance(support_work, cancel)?;
-                let [lower, upper] = emitted_bead_height(edge, layer.height_mm)?;
+                let [lower, upper] =
+                    project_xyz6_segment_bead_height_mm(edge[0][2], edge[1][2], layer.height_mm)?;
                 let relevant = match scope {
                     spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
                         lower_mm <= upper && upper_mm >= lower
@@ -2353,18 +2355,6 @@ fn certify_polygon_capsules(
         }
     }
     Ok(())
-}
-
-pub(super) fn emitted_bead_height(
-    edge: &[[f64; 3]],
-    height: f64,
-) -> Result<[f64; 2], ManufacturingError> {
-    let a = project_xyz6_bead_height_mm(edge[0][2], height)?;
-    if edge[0][2] == edge[1][2] {
-        return Ok(a);
-    }
-    let b = project_xyz6_bead_height_mm(edge[1][2], height)?;
-    Ok([a[0].min(b[0]), a[1].max(b[1])])
 }
 
 fn emitted_xy_segment(edge: &[[f64; 3]]) -> Result<([[f64; 2]; 2], f64), ManufacturingError> {
@@ -2436,7 +2426,7 @@ fn deposition_vertical_extensions(
     }
     if extensions.iter().any(|value| !value.is_finite()) {
         return Err(error(
-            ManufacturingErrorCode::NativeConditioningFailure,
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
             "actual emitted deposition vertical representation cannot be enclosed",
         ));
     }
@@ -2542,7 +2532,11 @@ fn certify_deposited_clearance(
                 applicable.expect("actual support selected a complete applicable layer slice");
             for support_edge in support.points_mm.windows(2) {
                 charge_support_clearance(work, cancel)?;
-                let support_height = emitted_bead_height(support_edge, support_layer.height_mm)?;
+                let support_height = project_xyz6_segment_bead_height_mm(
+                    support_edge[0][2],
+                    support_edge[1][2],
+                    support_layer.height_mm,
+                )?;
                 let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
                 for object_layer in objects {
                     charge_support_clearance(work, cancel)?;
@@ -2556,8 +2550,11 @@ fn certify_deposited_clearance(
                         }
                         for object_edge in object.points_mm.windows(2) {
                             charge_support_clearance(work, cancel)?;
-                            let object_height =
-                                emitted_bead_height(object_edge, object_layer.height_mm)?;
+                            let object_height = project_xyz6_segment_bead_height_mm(
+                                object_edge[0][2],
+                                object_edge[1][2],
+                                object_layer.height_mm,
+                            )?;
                             let above = program_coordinates::enclosed_vertical_gap_mm(
                                 object_height[0],
                                 support_height[1],

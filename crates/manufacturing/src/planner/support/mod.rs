@@ -247,15 +247,15 @@ pub(super) fn realize(
     remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     for demand in &demands {
         check_cancel(cancel)?;
-        let floor = super::native::emitted_bead_height(
-            &[[0.0, 0.0, layers[demand.target].z_mm]; 2],
+        let floor = program_coordinates::project_xyz6_bead_height_mm(
+            layers[demand.target].z_mm,
             layers[demand.target].height_mm,
         )?[0];
         let mut contact_top = None;
         for i in (0..demand.target).rev() {
             super::native::charge_support_clearance(&mut work, cancel)?;
-            let upper = super::native::emitted_bead_height(
-                &[[0.0, 0.0, layers[i].z_mm]; 2],
+            let upper = program_coordinates::project_xyz6_bead_height_mm(
+                layers[i].z_mm,
                 layers[i].height_mm,
             )?[1];
             if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
@@ -695,8 +695,13 @@ pub(super) fn realize(
             }
             for edge in path.points_mm.windows(2) {
                 super::native::charge_support_clearance(&mut work, cancel)?;
-                object_bottom = object_bottom
-                    .min(super::native::emitted_bead_height(edge, layers[target].height_mm)?[0]);
+                object_bottom = object_bottom.min(
+                    program_coordinates::project_xyz6_segment_bead_height_mm(
+                        edge[0][2],
+                        edge[1][2],
+                        layers[target].height_mm,
+                    )?[0],
+                );
             }
         }
         for path in &layers[top].paths {
@@ -705,8 +710,13 @@ pub(super) fn realize(
             }
             for edge in path.points_mm.windows(2) {
                 super::native::charge_support_clearance(&mut work, cancel)?;
-                support_top = support_top
-                    .max(super::native::emitted_bead_height(edge, layers[top].height_mm)?[1]);
+                support_top = support_top.max(
+                    program_coordinates::project_xyz6_segment_bead_height_mm(
+                        edge[0][2],
+                        edge[1][2],
+                        layers[top].height_mm,
+                    )?[1],
+                );
             }
         }
         if !object_bottom.is_finite()
@@ -714,7 +724,7 @@ pub(super) fn realize(
             || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)? < z_gap_mm
         {
             return Err(error(
-                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
                 format!(
                     "layer {target}: actual emitted contact does not prove the minimum Z gap {z_gap_mm} mm"
                 ),

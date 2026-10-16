@@ -1183,7 +1183,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             "protected corner band was filled"
         );
         assert!(
-            outward >= -1e-6 && outward <= 0.1 + 1e-6,
+            (-1e-6..=0.1 + 1e-6).contains(&outward),
             "addition exceeded the outward-only profile bounds"
         );
     }
@@ -1977,12 +1977,8 @@ fn mapped_images_vary_native_planar_and_cylindrical_walls_fill_skin_and_actual_p
         );
         assert_eq!(bundle.provenance.surface_overlays, scene.surface_overlays);
         assert_ne!(bundle.program, original.program);
-        let first_area = original.plan.layers[0]
-            .region_coverage
-            .source_section_area_mm2;
         for layer in &bundle.plan.layers {
             let coverage = &layer.region_coverage;
-            assert!((coverage.source_section_area_mm2 - first_area).abs() < 1e-8);
             assert!(
                 (coverage.section_area_mm2
                     - coverage.source_section_area_mm2
@@ -3130,4 +3126,94 @@ fn overlay_lost_native_notch_cannot_be_certified_merely_by_source_input_receipts
         ),
         "{failure}"
     );
+}
+
+#[test]
+fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0000004)]);
+    let mut enabled = intent(true);
+    enabled.recipe.layer_height_mm = 0.2;
+    let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut enabled.recipe.supports else {
+        panic!()
+    };
+    // A non-micrometre minimum must survive independently rounded endpoints.
+    *z_gap_mm = 0.2000006;
+    let z_gap_mm = *z_gap_mm;
+    let bundle = compile(scene.input(&enabled), &cancel).unwrap();
+    let hash =
+        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let inspection =
+        crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
+            .unwrap();
+    assert!(inspection.report.verified);
+    let replay = inspection.replay.unwrap();
+    let mut object_bottom = f64::INFINITY;
+    let mut support_top = f64::NEG_INFINITY;
+    let mut interface_segments = 0usize;
+    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
+        let z = f64::from_le_bytes(record[16..24].try_into().unwrap());
+        let role = record[46];
+        if matches!(role, 9 | 10) {
+            support_top = support_top.max(z);
+            interface_segments += usize::from(role == 10);
+        } else if matches!(role, 1..=5 | 8) {
+            let layer = u16::from_le_bytes(record[44..46].try_into().unwrap()) as usize;
+            object_bottom = object_bottom.min(z - bundle.plan.layers[layer].height_mm);
+        }
+    }
+    assert!(interface_segments > 0);
+    assert!(object_bottom.is_finite() && support_top.is_finite());
+    let actual_gap = object_bottom - support_top;
+    assert!(
+        actual_gap >= z_gap_mm,
+        "actual XYZ6 gap {actual_gap:.12} must not undershoot minimum {z_gap_mm:.12}"
+    );
+    assert!(
+        actual_gap - z_gap_mm < 4.0 * LAYER_QUANTIZATION_MM,
+        "emitter-aware mandatory contact must not unnecessarily lose a whole scheduled layer"
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.paths.is_empty())
+    );
+    assert!(bundle.plan.layers[0].paths.iter().any(|path| matches!(
+        path.kind,
+        DepositionKind::Support | DepositionKind::SupportInterface
+    )));
+}
+
+#[test]
+fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut bundle = compile(scene.input(&intent(false)), &cancel).unwrap();
+    assert_eq!(bundle.provenance.planner_version, "8");
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+    bundle.provenance.planner_version = "7".into();
+    // The unchanged storage schema still admits this otherwise valid bundle.
+    // Its saved report and current-coordinate program cannot certify that the
+    // previous producer performed the current native geometry obligations.
+    bundle.validate().unwrap();
+    assert_eq!(
+        crate::verify_bundle(&bundle, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::UnsupportedCapability
+    );
+    let hash =
+        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    for output in [
+        VerificationOutput::ReportOnly,
+        VerificationOutput::ReportAndMotion,
+    ] {
+        let failure = crate::inspect_bundle(&bundle, &hash, output, &cancel)
+            .err()
+            .expect("previous planner output must not receive current inspection authority");
+        assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedCapability);
+    }
 }

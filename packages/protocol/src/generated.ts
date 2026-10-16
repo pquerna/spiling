@@ -169,7 +169,7 @@ export type ArtifactSummary = { "kind": "mesh", artifact_id: ArtifactId, definit
 
 export type ArtifactChunkMetadata = { "kind": "mesh", metadata: MeshChunkMetadata, } | { "kind": "section", metadata: SectionChunkMetadata, };
 
-export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "native_kernel_failure" | "native_conditioning_failure" | "native_analysis_indeterminate" | "native_singular_geometry" | "native_shape_error_exceeded" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
+export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "native_kernel_failure" | "native_conditioning_failure" | "native_analysis_indeterminate" | "native_singular_geometry" | "native_shape_error_exceeded" | "program_coordinate_conditioning_failure" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
 
 export type ManufacturingError = { code: ManufacturingErrorCode, message: string, };
 
@@ -242,6 +242,8 @@ export type NativeFeatureCoverageSummary = { disjoint_source_layer_count: number
 export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, achieved_shape_error_mm: number, height_analysis_count: number, 
 /**
  * Accepted original-occurrence/slab evidence captures, including endpoint ownership.
+ * One certified invariant slab may cover several scheduled layers. Every
+ * accepted slab captures every original occurrence, including inactive ones.
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 

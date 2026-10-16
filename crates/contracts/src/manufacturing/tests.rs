@@ -395,7 +395,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "7".into(),
+            planner_version: "8".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -1815,5 +1815,33 @@ fn resolution_validation_is_strict_and_advisory_attribution_cannot_drift() {
     assert_eq!(
         self::bundle().summary().surface_resolution,
         SurfaceResolutionTotals::empty()
+    );
+}
+
+#[test]
+fn xyz6_gap_refuses_unbounded_outward_result_despite_finite_head_and_compensation() {
+    // The exact difference is below -MAX, although rounded subtraction and
+    // every TwoDiff intermediate are finite. Outward evidence must refuse.
+    let above = -f64::MAX;
+    let below = 1.0;
+    assert!((above - below).is_finite());
+    let failure = program_coordinates::enclosed_vertical_gap_mm(above, below).unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+    );
+}
+
+#[test]
+fn xyz6_gap_rejects_nonfinite_compensation_despite_finite_subtraction_head() {
+    let below = f64::MAX;
+    let above = 1.5 * (f64::MAX - f64::MAX.next_down());
+    let head = above - below;
+    assert!(head.is_finite());
+    assert!(!(above - head).is_finite());
+    let failure = program_coordinates::enclosed_vertical_gap_mm(above, below).unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
     );
 }

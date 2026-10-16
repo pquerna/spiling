@@ -17,10 +17,10 @@ pub use replay::*;
 mod job;
 pub use job::*;
 mod process;
+pub mod program_coordinates;
 pub use process::*;
 mod resolution;
 pub use resolution::*;
-pub mod program_coordinates;
 
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 6;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
@@ -43,6 +43,7 @@ pub enum ManufacturingErrorCode {
     NativeAnalysisIndeterminate,
     NativeSingularGeometry,
     NativeShapeErrorExceeded,
+    ProgramCoordinateConditioningFailure,
     NoIntent,
     EmptyProject,
     StaleRevision,
