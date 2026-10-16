@@ -107,10 +107,16 @@ fn conic_phase_sin_cos(
         }
     };
     let mut lower = cut(1);
-    let (mut sine, mut cosine) = enclose(Interval { lo: span.lo, hi: lower })?;
+    let (mut sine, mut cosine) = enclose(Interval {
+        lo: span.lo,
+        hi: lower,
+    })?;
     for index in 1..pieces {
         let upper = cut(index + 1);
-        let bounds = enclose(Interval { lo: lower, hi: upper })?;
+        let bounds = enclose(Interval {
+            lo: lower,
+            hi: upper,
+        })?;
         sine = sine.hull(bounds.0);
         cosine = cosine.hull(bounds.1);
         lower = upper;
@@ -278,10 +284,7 @@ fn coefficients(
 fn projected(c: &Coefficients, x: [Interval; 3], y: [Interval; 3]) -> [[Interval; 2]; 3] {
     [c.c, c.u, c.v].map(|a| [dot(a, x), dot(a, y)])
 }
-fn squared_radius(
-    coeff: [[Interval; 2]; 3],
-    harmonics: &[(Interval, Interval); 2],
-) -> Interval {
+fn squared_radius(coeff: [[Interval; 2]; 3], harmonics: &[(Interval, Interval); 2]) -> Interval {
     let [c, u, v] = coeff;
     let [(sine, cosine), (double_sine, double_cosine)] = *harmonics;
     let dot2 = |a: [Interval; 2], b: [Interval; 2]| a[0].mul(b[0]).add(a[1].mul(b[1]));
@@ -824,7 +827,10 @@ pub(super) fn certify_in_place(
                         .add(p(s.entity().small_radius()))
                         .mul(p(radial_error).square())
                         .mul(p(0.5));
-                    let tube = sqrt_nonnegative(squared_radius(projected(&shifted, radial, z), &shifted.harmonics))?;
+                    let tube = sqrt_nonnegative(squared_radius(
+                        projected(&shifted, radial, z),
+                        &shifted.harmonics,
+                    ))?;
                     margin[1] = p(margin[1])
                         .add(
                             displacement

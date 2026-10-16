@@ -22,5 +22,7 @@ An undeclared source-associated sweep may propose an affine profile chart from c
 
 Charge completed work and owned capacities cumulatively, including failures and cancellation. Caller limits only narrow frozen caps. Count shared preparation once and account query/output coexistence. Native allocations and bounded stacks retain separate kernel/host limits; adapter accounting is not an RSS guarantee. Preserve specific unresolved, conditioning, singularity, resource and cancellation failures.
 
+Prepared section analyses borrow their already-certified original trim domains by immutable definition instance and original face identity. Domain reuse never reuses height-dependent classification, roots, continuation, critical incidence or slab certificates. Charge retained metadata once at the source owner and admit each native classification's current scratch separately; standalone consumers use the identical query algorithm with locally owned preparation.
+
 Canonical mathematics and scope: [native parity](../../docs/adr/004-native-geometry-parity.md). Exercise geometry tests and real corpus paths in [geometry evidence](../../docs/quality/geometry-evidence.md); metadata and same-producer roundtrips are not acceptance.
 

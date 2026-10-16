@@ -1029,82 +1029,6 @@ pub(super) fn sample_wire(
     Ok(boundary)
 }
 
-// Temporary bounded attribution for the actual saved-model sampling run.
-struct SamplingTrace {
-    id: usize,
-    started: Option<std::time::Instant>,
-    calls: [u64; 3],
-    work: [u64; 3],
-    elapsed: [std::time::Duration; 3],
-}
-impl SamplingTrace {
-    fn begin(range: (f64, f64), work: u64) -> Self {
-        static ENABLED: std::sync::LazyLock<bool> =
-            std::sync::LazyLock::new(|| std::env::var_os("SPILING_TRACE_NATIVE").is_some());
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let id = if *ENABLED {
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        } else {
-            usize::MAX
-        };
-        let started = (id < 128).then(std::time::Instant::now);
-        if started.is_some() {
-            eprintln!("SAMPLER curve={id} begin range={range:?} work={work}");
-        }
-        Self {
-            id,
-            started,
-            calls: [0; 3],
-            work: [0; 3],
-            elapsed: [std::time::Duration::ZERO; 3],
-        }
-    }
-
-    fn measure<T>(
-        &mut self,
-        stage: usize,
-        work: &mut GeometryWorkBudget,
-        operation: impl FnOnce(&mut GeometryWorkBudget) -> Result<T, GeometryError>,
-    ) -> Result<T, GeometryError> {
-        let Some(_) = self.started else {
-            return operation(work);
-        };
-        let before = work.consumed();
-        let start = std::time::Instant::now();
-        let result = operation(work);
-        self.calls[stage] += 1;
-        self.work[stage] += work.consumed() - before;
-        self.elapsed[stage] += start.elapsed();
-        result
-    }
-
-    fn span(&self, phase: &str, index: usize, range: (f64, f64), work: u64) {
-        if self.started.is_some() && index < 64 {
-            eprintln!(
-                "SAMPLER curve={} span={index} {phase} range={range:?} work={work} calls={:?} stage_work={:?} stage_us={:?}",
-                self.id,
-                self.calls,
-                self.work,
-                self.elapsed.map(|time| time.as_micros()),
-            );
-        }
-    }
-
-    fn finish(&self, work: u64, points: usize, result: &Result<[f64; 2], GeometryError>) {
-        if let Some(start) = self.started {
-            eprintln!(
-                "SAMPLER curve={} end us={} work={work} points={points} result={:?} calls={:?} stage_work={:?} stage_us={:?}",
-                self.id,
-                start.elapsed().as_micros(),
-                result.as_ref().map(|_| ()).map_err(|error| &error.code),
-                self.calls,
-                self.work,
-                self.elapsed.map(|time| time.as_micros()),
-            );
-        }
-    }
-}
-
 fn sample_curve(
     prepared: &PreparedCurveEnclosure<'_>,
     range: (f64, f64),
@@ -1175,19 +1099,17 @@ fn sample_curve(
         [Option<SamplingNode<'_, '_>>; MAX_SAMPLING_DEPTH as usize + 1],
     >() + std::mem::size_of::<SamplingNode<'_, '_>>()
         + std::mem::size_of::<CurveSamplingInterval<'_, '_>>()
-        + std::mem::size_of::<SamplingTrace>()
         + 3 * std::mem::size_of::<CurveSamplingEndpoint<'_, '_>>()
-        + std::mem::size_of::<crate::parametric::CurveEnclosure>()
+        + 3 * std::mem::size_of::<crate::parametric::CurveEnclosure>()
+        + std::mem::size_of::<[[crate::parametric::Interval; 3]; 2]>()
         + std::mem::size_of::<monstertruck_modeling::ValidatedCurveJet>();
     work.remaining_bytes = work.remaining_bytes.checked_sub(scratch).ok_or_else(|| {
         resource_error("native section sampling proof stack exceeds scratch capacity")
     })?;
-    let mut trace = SamplingTrace::begin(range, work.native.consumed());
     let result = (|| {
         let mut stack = [None; MAX_SAMPLING_DEPTH as usize + 1];
         let mut previous_end: Option<CurveSamplingEndpoint<'_, '_>> = None;
-        for (span_index, span) in prepared.parameter_intervals().enumerate() {
-            trace.span("begin", span_index, span, work.native.consumed());
+        for span in prepared.parameter_intervals() {
             check_cancel(cancel)?;
             if span.0 != covered_until || span.0 >= span.1 || span.1 > range.1 {
                 return Err(kernel_error(
@@ -1197,13 +1119,9 @@ fn sample_curve(
             covered_until = span.1;
             let start = match previous_end.filter(|endpoint| endpoint.parameter() == span.0) {
                 Some(endpoint) => endpoint,
-                None => trace.measure(0, work.native, |native| {
-                    prepared.sampling_endpoint(span.0, native, cancel)
-                })?,
+                None => prepared.sampling_endpoint(span.0, work.native, cancel)?,
             };
-            let end = trace.measure(0, work.native, |native| {
-                prepared.sampling_endpoint(span.1, native, cancel)
-            })?;
+            let end = prepared.sampling_endpoint(span.1, work.native, cancel)?;
             previous_end = Some(end);
             stack[0] = Some(([start, end], 0_u8));
             let mut pending = 1;
@@ -1214,9 +1132,8 @@ fn sample_curve(
                     stack[pending].take().expect("pending native sampling span");
                 let start = endpoints[0].parameter();
                 let end = endpoints[1].parameter();
-                let interval = trace.measure(1, work.native, |native| {
-                    prepared.sampling_interval(&endpoints, frame, native, cancel)
-                })?;
+                let interval =
+                    prepared.sampling_interval(&endpoints, frame, work.native, cancel)?;
                 let enclosure = interval.enclosure();
                 check_cancel(cancel)?;
                 if !enclosure.chord_error_mm.is_finite()
@@ -1270,28 +1187,17 @@ fn sample_curve(
                     .max(endpoint_plane_error)
                     .max(plane_residual_upper(output_start, frame)?)
                     .max(plane_residual_upper(output_end, frame)?);
-                if trace.started.is_some()
-                    && (trace.calls[1] <= 20 || trace.calls[1].is_power_of_two())
-                {
-                    eprintln!(
-                        "SAMPLER curve={} cell={} depth={depth} range={:?} chord={chord_error:e} plane={plane_error:e} raw_chord={:e} raw_plane={:e} shifts={:?} extension={:?} jet={:?}",
-                        trace.id,
-                        trace.calls[1],
-                        (start, end),
-                        enclosure.chord_error_mm,
-                        enclosure.plane_error_mm,
-                        [start_shift, end_shift],
-                        [front_extension, back_extension],
-                        interval.trace_jet(),
-                    );
-                }
                 if chord_error <= SECTION_SAMPLING_TOLERANCE_MM
                     && plane_error <= SECTION_PLANE_TOLERANCE_MM
                 {
                     budget.check_loop(points.len() + 1)?;
-                    let part_area = trace.measure(2, work.native, |native| {
-                        interval.signed_area(frame, reference_mm, native, cancel)
-                    })?;
+                    let part_area = interval.signed_area(
+                        &endpoints,
+                        frame,
+                        reference_mm,
+                        work.native,
+                        cancel,
+                    )?;
                     if part_area.iter().any(|value| !value.is_finite())
                         || part_area[0] > part_area[1]
                     {
@@ -1319,14 +1225,11 @@ fn sample_curve(
                         "native section curve cannot resolve the requested interval error",
                     ));
                 }
-                let midpoint = trace.measure(0, work.native, |native| {
-                    prepared.sampling_endpoint(middle, native, cancel)
-                })?;
+                let midpoint = prepared.sampling_endpoint(middle, work.native, cancel)?;
                 stack[pending] = Some(([midpoint, endpoints[1]], depth + 1));
                 stack[pending + 1] = Some(([endpoints[0], midpoint], depth + 1));
                 pending += 2;
             }
-            trace.span("end", span_index, span, work.native.consumed());
         }
         if covered_until != range.1 {
             return Err(kernel_error(
@@ -1335,7 +1238,6 @@ fn sample_curve(
         }
         Ok(area)
     })();
-    trace.finish(work.native.consumed(), points.len(), &result);
     work.remaining_bytes += scratch;
     result
 }

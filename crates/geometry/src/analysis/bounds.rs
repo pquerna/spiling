@@ -63,7 +63,7 @@ fn projected_bounds_with_total_limit(
             )
         })?;
     projected_bounds_with_scratch_limit(
-        definition,
+        crate::section::OriginalTrimSource::standalone(definition),
         direction,
         policy,
         remaining_bytes,
@@ -75,13 +75,14 @@ fn projected_bounds_with_total_limit(
 /// `remaining_bytes` is scratch capacity AFTER the enclosing caller reserves
 /// the definition's pinned query proof and all other coexisting buffers.
 pub(super) fn projected_bounds_with_scratch_limit(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     direction: [f64; 3],
     policy: BoundsPolicy,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
+    let definition = source.definition();
     work.charge(1, cancel)?;
     let tolerance = policy.maximum_endpoint_uncertainty_mm;
     if !tolerance.is_finite() || tolerance <= 0.0 {
@@ -133,16 +134,10 @@ pub(super) fn projected_bounds_with_scratch_limit(
             })?
         } else {
             let remaining_bytes = scratch.byte_limit - scratch.allocated_bytes;
-            let trim = crate::kernel::prepare_face_trim_domain_with_byte_limit(
-                definition,
-                face_index,
-                remaining_bytes,
-                work,
-                cancel,
-            )?;
+            let trim = source.face_domain(face_index, remaining_bytes, work, cancel)?;
             scratch.allocated_bytes = scratch
                 .allocated_bytes
-                .checked_add(trim.retained_bytes())
+                .checked_add(trim.owned_bytes())
                 .filter(|bytes| *bytes <= scratch.byte_limit)
                 .ok_or_else(|| {
                     error(

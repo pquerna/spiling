@@ -71,6 +71,65 @@ fn parity_definition(name: &str) -> Definition {
 }
 
 #[test]
+fn original_trim_queries_bind_the_immutable_definition_and_face() {
+    let definition = fixture("box-mm.step");
+    let other = fixture("box-mm.step");
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let originals = crate::parametric::prepare_section_originals(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap()
+    .expect("source-backed original trim domains");
+    let source = OriginalTrimSource {
+        definition: &definition,
+        originals: Some(&originals),
+    };
+    let wrong = OriginalTrimSource {
+        definition: &other,
+        originals: Some(&originals),
+    };
+    for (index, identity) in definition.face_boundaries.iter().enumerate() {
+        let domain = source
+            .face_domain(index, MAX_QUERY_SEED_BYTES, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(domain.native().face().id(), identity.face);
+        assert_eq!(domain.owned_bytes(), 0);
+        // Equal imported geometry is not authority to borrow another instance's proof.
+        assert!(
+            wrong
+                .face_domain(index, MAX_QUERY_SEED_BYTES, &mut work, &cancel)
+                .is_err()
+        );
+    }
+    assert!(
+        source
+            .face_domain(
+                definition.face_boundaries.len(),
+                MAX_QUERY_SEED_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+    );
+    assert!(
+        source
+            .face_domain(0, usize::MAX, &mut work, &cancel,)
+            .is_err(),
+        "metadata-inclusive scratch overflow must refuse"
+    );
+    assert!(
+        source
+            .face_domain(0, MAX_QUERY_SEED_BYTES, &mut work, &AtomicBool::new(true),)
+            .is_err(),
+        "borrowing still observes cancellation"
+    );
+}
+
+#[test]
 fn original_and_retained_implicit_box_sections_preserve_physical_material() {
     let cancel = AtomicBool::new(false);
     let implicit = crate::corpus_fixtures::implicit_intersections(

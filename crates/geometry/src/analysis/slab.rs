@@ -30,9 +30,7 @@ use super::{
     AnalysisPolicy, GeometryWorkBudget, HeightAnalysis, InvariantHeightDomain, SlabAnalysis,
     SlabRequest,
 };
-use crate::kernel::{
-    PreparedFaceTrimDomain, TrimClassification, prepare_face_trim_domain_with_byte_limit,
-};
+use crate::kernel::{PreparedFaceTrimDomain, TrimClassification};
 use crate::parametric::{
     Interval, PreparedCurveEnclosure, down, surface_crease_interfaces, surface_enclosure,
     surface_parameter_boxes, up,
@@ -776,7 +774,7 @@ fn analyze_height_domain_with_total_limit(
         definition.retained_query_proof_bytes(),
     )?;
     analyze_height_domain_with_scratch_limit(
-        definition,
+        crate::section::OriginalTrimSource::standalone(definition),
         frame,
         height_interval_mm,
         policy,
@@ -789,7 +787,7 @@ fn analyze_height_domain_with_total_limit(
 /// other coexisting buffers. It covers event arrays, trim/curve captures,
 /// source incidence tables and subdivision stacks; never debit pinned twice.
 pub(crate) fn analyze_height_domain_with_scratch_limit(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     frame: PlaneFrameMm,
     height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
@@ -798,7 +796,7 @@ pub(crate) fn analyze_height_domain_with_scratch_limit(
     cancel: &AtomicBool,
 ) -> Result<HeightAnalysis, GeometryError> {
     analyze_height_functional(
-        definition,
+        source,
         frame,
         HeightFunctional::from_frame(frame),
         height_interval_mm,
@@ -824,7 +822,7 @@ pub(crate) fn analyze_height_domain_enclosed(
         definition.retained_query_proof_bytes(),
     )?;
     analyze_height_domain_enclosed_with_scratch_limit(
-        definition,
+        crate::section::OriginalTrimSource::standalone(definition),
         frame,
         functional,
         height_interval_mm,
@@ -836,7 +834,7 @@ pub(crate) fn analyze_height_domain_enclosed(
 }
 /// Scratch-only boundary: the caller has already reserved the pinned proof.
 pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     frame: PlaneFrameMm,
     functional: HeightFunctional,
     height_interval_mm: [f64; 2],
@@ -853,7 +851,7 @@ pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
         && functional.offset.lo == nominal.offset.lo
         && functional.offset.hi == nominal.offset.hi;
     analyze_height_functional(
-        definition,
+        source,
         frame,
         functional,
         height_interval_mm,
@@ -865,7 +863,7 @@ pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
     )
 }
 fn analyze_height_functional(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     frame: PlaneFrameMm,
     functional: HeightFunctional,
     height_interval_mm: [f64; 2],
@@ -875,6 +873,7 @@ fn analyze_height_functional(
     cancel: &AtomicBool,
     nominal_fast_paths: bool,
 ) -> Result<HeightAnalysis, GeometryError> {
+    let definition = source.definition();
     work.charge(1, cancel)?;
     validate(
         frame,
@@ -912,7 +911,7 @@ fn analyze_height_functional(
         .and_then(|bytes| bytes.checked_sub(definition.id().allocated_bytes()));
     let invariance = if nominal_fast_paths && Some(scratch_limit) == full_scratch {
         narrow_invariance_with_scratch_limit(
-            definition,
+            source,
             frame,
             height_interval_mm,
             scratch_limit,
@@ -932,7 +931,7 @@ fn analyze_height_functional(
     let mut proved_events = Vec::new();
     if let Some(round) = if nominal_fast_paths {
         round_continuation(
-            definition,
+            source,
             frame,
             remaining_scratch_with_limit(scratch_limit, HEIGHT_EVENT_SCRATCH_BYTES)?,
             work,
@@ -975,14 +974,14 @@ fn analyze_height_functional(
     for (index, face) in definition.solid.face_iter().enumerate() {
         work.charge(1, cancel)?;
         let reserved = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(face)?);
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
-            index,
-            remaining_scratch_with_limit(scratch_limit, reserved)?,
-            work,
-            cancel,
-        )
-        .map_err(|error| height_face_context(error, index, "prepare original trim domain"))?;
+        let domain = source
+            .face_domain(
+                index,
+                remaining_scratch_with_limit(scratch_limit, reserved)?,
+                work,
+                cancel,
+            )
+            .map_err(|error| height_face_context(error, index, "prepare original trim domain"))?;
         let bounded_uv = trim_parameter_box(&domain)?;
         face.with_surface(|surface| -> Result<(), GeometryError> {
         let flat_height = if nominal_fast_paths { flat_native_surface_height(&surface, frame, work, cancel)? } else { constant_spline_height(&surface, functional, work, cancel)? };
@@ -1152,7 +1151,7 @@ fn analyze_height_functional(
                 }
                 if flat_height.is_none() {
                     edge.with_curve(|curve| -> Result<(), GeometryError> {
-                        let prepared = definition.prepare_boundary_curve(edge.id(), curve, curve.range_tuple(), remaining_scratch_with_limit(scratch_limit, reserved.saturating_add(domain.retained_bytes()))?, work, cancel)?;
+                        let prepared = definition.prepare_boundary_curve(edge.id(), curve, curve.range_tuple(), remaining_scratch_with_limit(scratch_limit, reserved.saturating_add(domain.owned_bytes()))?, work, cancel)?;
                         isolate_curve_events(&prepared, curve.range_tuple(), functional, height_interval_mm, policy.maximum_height_uncertainty_mm, &mut events, &mut proved_events, work, cancel)
                     }).map_err(|error| height_face_context(error, index, "isolate original coedge heights"))?;
                 }
@@ -1515,12 +1514,13 @@ pub(super) fn original_edge_uses(
 /// Classify complete original horizontal faces at exact endpoints. Incoming
 /// faces belong to the core closure; only outgoing faces become extra strata.
 fn decompose_endpoint_faces(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     request: SlabRequest,
     resident_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<EndpointDecomposition, GeometryError> {
+    let definition = source.definition();
     let mut result = EndpointDecomposition {
         faces: Vec::new(),
         strata: Vec::new(),
@@ -1554,8 +1554,7 @@ fn decompose_endpoint_faces(
         let incidence = incidence
             .as_ref()
             .ok_or_else(|| indeterminate("source endpoint incidence is unavailable"))?;
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
+        let domain = source.face_domain(
             face_index,
             remaining_scratch(
                 resident_bytes.saturating_add(2 * ENDPOINT_PROOF_BYTES + STACK_SCRATCH_BYTES),
@@ -1790,9 +1789,10 @@ fn narrow_invariance(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<InvariantHeightDomain>, GeometryError> {
+    let source = crate::section::OriginalTrimSource::standalone(definition);
     work.charge(1, cancel)?;
     narrow_invariance_with_scratch_limit(
-        definition,
+        source,
         frame,
         range,
         remaining_scratch_with_limit(
@@ -1804,7 +1804,7 @@ fn narrow_invariance(
     )
 }
 fn narrow_invariance_with_scratch_limit(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     remaining_bytes: usize,
@@ -1814,7 +1814,7 @@ fn narrow_invariance_with_scratch_limit(
     if frame.z_axis != [0.0, 0.0, 1.0] && frame.z_axis != [0.0, 0.0, -1.0] {
         return Ok(None);
     }
-    match native_vertical_boundary_flow(definition, frame, range, remaining_bytes, work, cancel) {
+    match native_vertical_boundary_flow(source, frame, range, remaining_bytes, work, cancel) {
         Err(e)
             if matches!(
                 e.code,
@@ -1842,13 +1842,14 @@ pub(super) struct FlowEdgeUses {
 }
 /// `remaining_bytes` excludes pinned proof and all caller-retained buffers.
 pub(super) fn native_vertical_boundary_flow(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<InvariantHeightDomain>, GeometryError> {
+    let definition = source.definition();
     const EDGE_BYTES: usize = 8 * 1024 * 1024;
     work.charge(1, cancel)?;
     let scratch_limit = remaining_bytes.min(MAX_SLAB_SCRATCH_BYTES);
@@ -1861,8 +1862,7 @@ pub(super) fn native_vertical_boundary_flow(
     let mut side_cells = 0u64;
     for (face_index, face) in definition.solid.face_iter().enumerate() {
         work.charge(1, cancel)?;
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
+        let domain = source.face_domain(
             face_index,
             remaining_scratch_with_limit(scratch_limit, EDGE_BYTES + STACK_SCRATCH_BYTES)?,
             work,
@@ -2099,6 +2099,7 @@ pub(super) fn native_closed_disk_product<'a>(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeClosedDiskProduct<'a>>, GeometryError> {
+    let source = crate::section::OriginalTrimSource::standalone(definition);
     work.charge(1, cancel)?;
     if definition.solid.boundaries().len() != 1 {
         return Ok(None);
@@ -2113,7 +2114,7 @@ pub(super) fn native_closed_disk_product<'a>(
     // cells. Its coefficient identities and opposed original coedge pairing
     // prove a product between the two exact cap levels.
     let Some(product) = narrow_invariance_with_scratch_limit(
-        definition,
+        source,
         frame,
         [-f64::MAX, f64::MAX],
         remaining_bytes,
@@ -2144,8 +2145,7 @@ pub(super) fn native_closed_disk_product<'a>(
         if caps[endpoint] || face.absolute_boundaries().len() != 1 {
             return Ok(None);
         }
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
+        let domain = source.face_domain(
             index,
             remaining_scratch_with_limit(remaining_bytes, STACK_SCRATCH_BYTES)?,
             work,
@@ -2301,12 +2301,13 @@ fn round_carrier(surface: &Surface) -> Option<(RoundCarrier, bool)> {
 /// complex is open and closed in the connected carrier: opposite edge uses
 /// continue across chart/face subdivisions rather than leaving physical trims.
 fn round_continuation<'a>(
-    definition: &'a Definition,
+    source: crate::section::OriginalTrimSource<'_, 'a>,
     frame: PlaneFrameMm,
     scratch_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<RoundContinuation<'a>>, GeometryError> {
+    let definition = source.definition();
     if definition.solid.boundaries().len() != 1 {
         return Ok(None);
     }
@@ -2336,8 +2337,7 @@ fn round_continuation<'a>(
         return Ok(None);
     };
     for index in 0..source_face_count {
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
+        let domain = source.face_domain(
             index,
             remaining_scratch_with_limit(scratch_limit, STACK_SCRATCH_BYTES)?,
             work,
@@ -2563,7 +2563,7 @@ pub(super) fn native_sample_height_band(
 /// vertical sweep of the actual native filled sample S. This does NOT assert
 /// a reverse distance from all CLOSED C to the current candidate prism.
 fn recover_critical_slab(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     request: SlabRequest,
     section: NativeSection,
     capture: super::SlabCapture,
@@ -2573,6 +2573,7 @@ fn recover_critical_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
+    let definition = source.definition();
     let sample_height = Interval {
         lo: capture.source_sample_height_band_mm[0],
         hi: capture.source_sample_height_band_mm[1],
@@ -2609,7 +2610,7 @@ fn recover_critical_slab(
             .saturating_add(STACK_SCRATCH_BYTES)
             .saturating_add(4096);
         if let Some(complex) = super::collar::certify_native_collar_complex(
-            definition,
+            source,
             &request,
             HeightFunctional::from_frame(request.frame),
             remaining_scratch(reserved)?,
@@ -2644,7 +2645,7 @@ fn recover_critical_slab(
     // proof. Work already consumed is never reset by trying this stronger path.
     drop(endpoints);
     let Some(mut critical) = super::critical::certify_critical_slab(
-        definition,
+        source,
         &request,
         &section,
         HeightFunctional::from_frame(request.frame),
@@ -2704,7 +2705,7 @@ fn recover_critical_slab(
 /// complex as an interior event band. A regular core certificate alone cannot
 /// authorize a directed adjacent source-M leaf to cover departing CLOSED C.
 fn certify_endpoint_transition_complex(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     request: &SlabRequest,
     endpoints: &EndpointDecomposition,
     resident_bytes: usize,
@@ -2719,7 +2720,7 @@ fn certify_endpoint_transition_complex(
         .saturating_add(STACK_SCRATCH_BYTES)
         .saturating_add(4096);
     let complex = super::collar::certify_native_collar_complex(
-        definition,
+        source,
         request,
         HeightFunctional::from_frame(request.frame),
         remaining_scratch(occupied)?,
@@ -2827,6 +2828,7 @@ pub(crate) fn analyze_slab(
     );
     let source_retained_bytes = crate::MAX_PREPARED_SECTION_BYTES - section_bytes;
     let section = source.section_with_byte_limit(plane, cancel, section_bytes as u32, work)?;
+    let source = source.trim_source();
     work.charge(
         section
             .loops
@@ -2850,10 +2852,10 @@ pub(crate) fn analyze_slab(
         .saturating_add(section.retained_bytes())
         .saturating_add(definition.id().allocated_bytes());
     remaining_scratch(resident_bytes.saturating_add(STACK_SCRATCH_BYTES))?;
-    let endpoints = decompose_endpoint_faces(definition, request, resident_bytes, work, cancel)?;
+    let endpoints = decompose_endpoint_faces(source, request, resident_bytes, work, cancel)?;
     let invariance = if endpoints.faces.is_empty() {
         narrow_invariance_with_scratch_limit(
-            definition,
+            source,
             request.frame,
             range,
             remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
@@ -2869,7 +2871,7 @@ pub(crate) fn analyze_slab(
     };
     let round = if invariance.is_none() && endpoints.faces.is_empty() {
         round_continuation(
-            definition,
+            source,
             request.frame,
             remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
             work,
@@ -2927,7 +2929,7 @@ pub(crate) fn analyze_slab(
         })
     } else if round.is_none() {
         let regular = regular_boundary_speed(
-            definition,
+            source,
             request.frame,
             range,
             &endpoints,
@@ -2939,7 +2941,7 @@ pub(crate) fn analyze_slab(
             Ok(regular) => Some(regular),
             Err(unresolved) if unresolved.code == GeometryErrorCode::AnalysisIndeterminate => {
                 return recover_critical_slab(
-                    definition,
+                    source,
                     request,
                     section,
                     capture,
@@ -3013,7 +3015,7 @@ pub(crate) fn analyze_slab(
             )?,
         );
         let collar_complex = certify_endpoint_transition_complex(
-            definition,
+            source,
             &request,
             &endpoints,
             resident_bytes
@@ -3091,7 +3093,7 @@ pub(crate) fn analyze_slab(
     }
     if bound > request.native_shape_error_mm {
         return recover_critical_slab(
-            definition,
+            source,
             request,
             section,
             capture,
@@ -3182,7 +3184,7 @@ pub(crate) fn analyze_slab(
         None
     };
     let collar_complex = certify_endpoint_transition_complex(
-        definition,
+        source,
         &request,
         &endpoints,
         resident_bytes
@@ -3237,7 +3239,7 @@ impl RegularContinuation<'_> {
     }
 }
 fn regular_boundary_speed<'a>(
-    definition: &'a Definition,
+    source: crate::section::OriginalTrimSource<'_, 'a>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     endpoints: &EndpointDecomposition,
@@ -3245,6 +3247,7 @@ fn regular_boundary_speed<'a>(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<RegularContinuation<'a>, GeometryError> {
+    let definition = source.definition();
     let mut speed = 0.0_f64;
     let mut covered_face_cells = 0u64;
     let mut covered_coedge_cells = 0u64;
@@ -3339,13 +3342,7 @@ fn regular_boundary_speed<'a>(
                 (cap_faces.capacity() + cap_edges.capacity() + cap_vertices.capacity())
                     .saturating_mul(64),
             );
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
-            index,
-            remaining_scratch(reserved)?,
-            work,
-            cancel,
-        )?;
+        let domain = source.face_domain(index, remaining_scratch(reserved)?, work, cancel)?;
         let bounded_uv = trim_parameter_box(&domain)?;
         face.with_surface(|surface| -> Result<(), GeometryError> {
             if !super::critical::critical_face_gluing(surface, bounded_uv, work, cancel)? {
@@ -3512,7 +3509,7 @@ fn regular_boundary_speed<'a>(
                             edge.id(),
                             curve,
                             curve.range_tuple(),
-                            remaining_scratch(reserved.saturating_add(domain.retained_bytes()))?,
+                            remaining_scratch(reserved.saturating_add(domain.owned_bytes()))?,
                             work,
                             cancel,
                         )?;
@@ -3917,7 +3914,7 @@ mod tests {
         )
         .unwrap();
         let nested = analyze_height_domain_with_scratch_limit(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [3.99, 4.01],
             policy,
@@ -4377,7 +4374,7 @@ mod tests {
         let mut work = GeometryWorkBudget::new(1000);
         let before = work.consumed();
         let error = native_vertical_boundary_flow(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [2.0, 6.0],
             0,
@@ -4388,7 +4385,7 @@ mod tests {
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         assert!(work.consumed() > before);
         let error = native_vertical_boundary_flow(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [2.0, 6.0],
             0,
@@ -4812,7 +4809,7 @@ mod tests {
         };
         let mut work = GeometryWorkBudget::new(20_000_000);
         let error = analyze_height_domain_with_scratch_limit(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [-2.1, 2.1],
             policy,
@@ -4823,7 +4820,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         let result = analyze_height_domain_with_scratch_limit(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [-2.1, 2.1],
             policy,
@@ -4842,7 +4839,7 @@ mod tests {
             );
         }
         let error = analyze_height_domain_with_scratch_limit(
-            &definition,
+            crate::section::OriginalTrimSource::standalone(&definition),
             frame(),
             [-2.1, 2.1],
             policy,

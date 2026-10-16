@@ -47,22 +47,6 @@ impl PreparedFaceTrimDomain<'_> {
         self.native.retained_bytes()
     }
 
-    /// Reserve other live caller storage before a native classification query.
-    pub(crate) fn restrict_retained_byte_limit(
-        &mut self,
-        remaining_bytes: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<(), GeometryError> {
-        check_cancel(cancel)?;
-        let mut native_work =
-            ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-        let result =
-            self.native
-                .restrict_retained_byte_limit(remaining_bytes, &mut native_work, cancel);
-        crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
-        result.map_err(trim_error)
-    }
     pub(crate) fn boundary_parameter_intervals(
         &self,
         coedge_index: usize,
@@ -110,12 +94,25 @@ impl PreparedFaceTrimDomain<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<TrimClassification, GeometryError> {
+        self.classify_with_byte_limit(uv, usize::MAX, work, cancel)
+    }
+
+    pub(crate) fn classify_with_byte_limit(
+        &self,
+        uv: [[f64; 2]; 2],
+        metadata_inclusive_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<TrimClassification, GeometryError> {
         check_cancel(cancel)?;
         let mut native_work =
             ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-        let result = self
-            .native
-            .classify_parameter_box(uv, &mut native_work, cancel);
+        let result = self.native.classify_parameter_box_with_byte_limit(
+            uv,
+            metadata_inclusive_bytes,
+            &mut native_work,
+            cancel,
+        );
         crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
         Ok(classification(result.map_err(trim_error)?))
     }

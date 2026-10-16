@@ -5784,10 +5784,6 @@ pub(super) fn filled_projection_distance(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
-    let trace = std::env::var_os("SPILING_TRACE_NATIVE").is_some();
-    if trace {
-        eprintln!("filled-distance begin work={}", work.consumed());
-    }
     if original.is_empty() || original.len() != candidate.len() {
         return Err(error(
             GeometryErrorCode::AnalysisIndeterminate,
@@ -5829,28 +5825,8 @@ pub(super) fn filled_projection_distance(
             }
         }
     }
-    if trace {
-        eprintln!(
-            "filled-distance rings work={} original-points={} candidate-points={}",
-            work.consumed(),
-            native.iter().map(|r| r.points.len()).sum::<usize>(),
-            output.iter().map(|r| r.points.len()).sum::<usize>()
-        );
-    }
     feature_clearance(&native, original_tube, work, cancel)?;
-    if trace {
-        eprintln!(
-            "filled-distance original-clearance work={}",
-            work.consumed()
-        );
-    }
     feature_clearance(&output, 0.0, work, cancel)?;
-    if trace {
-        eprintln!(
-            "filled-distance candidate-clearance work={}",
-            work.consumed()
-        );
-    }
     let mut used = Vec::new();
     scratch.reserve(&mut used, output.len(), work, cancel)?;
     used.resize(output.len(), false);
@@ -5883,9 +5859,6 @@ pub(super) fn filled_projection_distance(
         })?;
         used[index] = true;
         achieved = achieved.max(distance);
-    }
-    if trace {
-        eprintln!("filled-distance correspondence work={}", work.consumed());
     }
     Ok(achieved)
 }

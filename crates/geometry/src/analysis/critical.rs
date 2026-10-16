@@ -9,16 +9,19 @@
 //! an annular complex. Metric proximity and component/void/tunnel incidence are
 //! separate obligations; neither sampled roots nor a surface family grant them.
 
+mod source_chart;
+
 use super::slab::HeightFunctional;
 use super::{GeometryWorkBudget, SlabRequest};
-use crate::kernel::{
-    PreparedFaceTrimDomain, TrimClassification, prepare_face_trim_domain_with_byte_limit,
-};
+#[cfg(test)]
+use crate::kernel::prepare_face_trim_domain_with_byte_limit;
+use crate::kernel::{PreparedFaceTrimDomain, TrimClassification};
 use crate::parametric::{
     Interval, SurfaceEnclosure, down, same_surface_coefficients as coefficient_equal,
     surface_crease_interfaces, surface_enclosure, surface_parameter_boxes,
     surface_parameter_span_smooth, up,
 };
+use crate::section::OriginalTrimSource;
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, SectionLoopMm};
 use monstertruck_modeling::{BoundedCurve, Curve, Surface};
 use monstertruck_topology::EdgeId;
@@ -1692,11 +1695,15 @@ impl SamplePrism {
         &self,
         jet: &SurfaceEnclosure,
         n: [Interval; 3],
+        source_convex: Option<bool>,
     ) -> Result<(Interval, bool), GeometryError> {
         let relative =
             std::array::from_fn(|axis| jet.position[axis].sub(Interval::point(self.center[axis])));
         let Some(core_radius) = self.core_radius else {
-            return Ok((dot(n, relative), locally_convex(jet, n)));
+            return Ok((
+                dot(n, relative),
+                source_convex.unwrap_or_else(|| locally_convex(jet, n)),
+            ));
         };
         let p = project(jet.position, self.frame);
         let rho = length([p[0], p[1], Interval::point(0.0)])?;
@@ -1728,6 +1735,12 @@ impl SamplePrism {
             )
         });
         let radial_degree = dot(n, q);
+        if let Some(convex) = source_convex {
+            // A coefficient-proved convex source carrier is convex in every
+            // tangent direction. No inverse of collapsed covering coordinates
+            // is needed to restrict its form to this meridian plane.
+            return Ok((radial_degree, convex));
+        }
         let nr = dot(n, radial);
         let nz = dot(n, self.dual[2]);
         let tangent = std::array::from_fn(|axis| {
@@ -1912,6 +1925,8 @@ fn coedge_normal_enclosure(
     cancel: &AtomicBool,
 ) -> Result<[Interval; 3], GeometryError> {
     let face = domain.native().face();
+    let source_chart =
+        face.with_surface(|surface| source_chart::SphereChart::new(surface, domain, work, cancel))?;
     let target_diameter = length(position.map(|value| Interval::point(value.width())))?.hi;
     let scale = position
         .into_iter()
@@ -1943,7 +1958,10 @@ fn coedge_normal_enclosure(
                         {
                             continue;
                         }
-                        let n = normal(&jet, face.orientation());
+                        let n = match &source_chart {
+                            Some(chart) => chart.normal(jet.position)?,
+                            None => normal(&jet, face.orientation()),
+                        };
                         result = Some(match result {
                             Some((p, previous)) => (
                                 std::array::from_fn(|axis| p[axis].hull(jet.position[axis])),
@@ -2045,7 +2063,7 @@ fn add_neighborhood(
 /// Returns None only when the actual native sample is outside this sufficient
 /// one-component/no-void construction. No family label decides applicability.
 pub(super) fn certify_critical_slab(
-    definition: &Definition,
+    source: OriginalTrimSource<'_, '_>,
     request: &SlabRequest,
     section: &NativeSection,
     functional: HeightFunctional,
@@ -2054,6 +2072,7 @@ pub(super) fn certify_critical_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<CriticalSlabCertificate>, GeometryError> {
+    let definition = source.definition();
     work.charge(1, cancel)?;
     if section.definition_id() != definition.id() || !section.is_native_intersection() {
         return Err(failure(
@@ -2139,13 +2158,7 @@ pub(super) fn certify_critical_slab(
     let mut lower = [f64::INFINITY; 2];
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
-        let domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
-            face_index,
-            chart_bytes,
-            work,
-            cancel,
-        )?;
+        let domain = source.face_domain(face_index, chart_bytes, work, cancel)?;
         for (coedge_index, coedge) in domain.native().coedges().iter().enumerate() {
             work.charge(1, cancel)?;
             let use_ = CoedgeUse {
@@ -2195,6 +2208,7 @@ pub(super) fn certify_critical_slab(
             }
         }
         face.with_surface(|surface| -> Result<(), GeometryError> {
+            let source_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
             if !critical_face_gluing(surface, domain.uv_bounds(), work, cancel)? {
                 return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
                     "whole original face has no proved C1/projective-G1 internal source gluing", face_index, domain.uv_bounds()));
@@ -2215,8 +2229,13 @@ pub(super) fn certify_critical_slab(
                         "original source span has an unresolved nested/reflected C0 curvature interface", face_index, uv));
                 }
                 let jet = surface_enclosure(surface, uv, work, cancel)?;
-                let n = normal(&jet, face.orientation());
-                let (radial_degree, convex) = prism.patch_incidence(&jet, n)?;
+                let n = match &source_chart {
+                    Some(chart) => chart.normal(jet.position)?,
+                    None => normal(&jet, face.orientation()),
+                };
+                let (radial_degree, convex) = prism.patch_incidence(
+                    &jet, n, source_chart.as_ref().map(source_chart::SphereChart::convex),
+                )?;
                 let regular = length(n)?.lo > 0.0;
                 let height = functional.height(jet.position);
                 let active = overlaps(height, request.height_interval_mm);
@@ -2275,13 +2294,7 @@ pub(super) fn certify_critical_slab(
             )
         })?;
         if first.face == second.face {
-            let domain = prepare_face_trim_domain_with_byte_limit(
-                definition,
-                first.face,
-                chart_bytes,
-                work,
-                cancel,
-            )?;
+            let domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
             let smooth = domain
                 .native()
                 .face()
@@ -2300,17 +2313,10 @@ pub(super) fn certify_critical_slab(
                 continue;
             }
         }
-        let first_domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
-            first.face,
-            chart_bytes,
-            work,
-            cancel,
-        )?;
-        let second_domain = prepare_face_trim_domain_with_byte_limit(
-            definition,
+        let first_domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
+        let second_domain = source.face_domain(
             second.face,
-            chart_bytes.saturating_sub(first_domain.retained_bytes()),
+            chart_bytes.saturating_sub(first_domain.owned_bytes()),
             work,
             cancel,
         )?;
@@ -2348,7 +2354,7 @@ pub(super) fn certify_critical_slab(
             // complete bounded capacity, not just the capacity before capture.
             let occupied_scratch = fixed_scratch
                 + prism.vertices.capacity() * std::mem::size_of::<[Interval; 2]>()
-                + first_domain.retained_bytes() + second_domain.retained_bytes();
+                + first_domain.owned_bytes() + second_domain.owned_bytes();
             let remaining = scratch_limit.checked_sub(occupied_scratch).ok_or_else(|| failure(
                 GeometryErrorCode::ResourceLimit, "critical scratch capacity exhausted before native curve capture", first.face, range))?;
             let prepared = definition.prepare_boundary_curve(edge.id(), curve, range, remaining, work, cancel)?;

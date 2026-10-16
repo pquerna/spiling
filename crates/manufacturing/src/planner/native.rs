@@ -555,6 +555,7 @@ pub(super) fn collect_span(
                 certify_stage(
                     input,
                     occurrences,
+                    sources,
                     &mut current,
                     &candidate,
                     previous.positive_materials(),
@@ -567,6 +568,7 @@ pub(super) fn collect_span(
                 certify_stage(
                     input,
                     occurrences,
+                    sources,
                     &mut current,
                     &candidate,
                     state.previous_positive.iter(),
@@ -953,7 +955,6 @@ fn capture_base(
                             "native slab has no remaining shared source/query byte allowance",
                         )
                     })?;
-                super::trace_native_stage("slab_enter", admission.geometry_work.consumed(), index);
                 let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
                     occurrence.pose,
                     interval,
@@ -963,7 +964,6 @@ fn capture_base(
                     &mut admission.geometry_work,
                     cancel,
                 );
-                super::trace_native_stage("slab_exit", admission.geometry_work.consumed(), index);
                 let analysis = match analysis {
                     Ok(analysis) => analysis,
                     Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
@@ -2026,6 +2026,7 @@ pub(super) fn project_protected_voids(
 fn certify_stage<'a>(
     input: &CompilerInput<'_>,
     occurrences: &[&OccurrenceRecord],
+    prepared_sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'_>>,
     current: &mut DraftStage,
     candidate: &Vec<spiling_geometry::SectionLoopMm>,
     lower: impl Iterator<Item = &'a SourceMaterial> + Clone,
@@ -2089,9 +2090,7 @@ fn certify_stage<'a>(
                     "critical native collar has no retained-byte allowance",
                 )
             })?;
-        super::trace_native_stage("collar_metric_enter", work.consumed(), current.index);
-        let metric = spiling_geometry::certify_native_critical_collar(
-            &input.definitions[&occurrence.definition_id],
+        let metric = prepared_sources[&occurrence.definition_id].certify_native_critical_collar(
             analysis,
             targets,
             spiling_geometry::NativeCriticalCollarPolicy {
@@ -2102,7 +2101,6 @@ fn certify_stage<'a>(
             work,
             cancel,
         );
-        super::trace_native_stage("collar_metric_exit", work.consumed(), current.index);
         let metric = metric.map_err(|failure| {
             super::native_error(
                 failure,
@@ -2112,7 +2110,6 @@ fn certify_stage<'a>(
                 ),
             )
         })?;
-        super::trace_native_stage("collar_incidence_enter", work.consumed(), current.index);
         let incidence = spiling_geometry::certify_native_collar_incidence(
             analysis,
             &current_material.leaf,
@@ -2121,7 +2118,6 @@ fn certify_stage<'a>(
             work,
             cancel,
         );
-        super::trace_native_stage("collar_incidence_exit", work.consumed(), current.index);
         let incidence = incidence.map_err(|failure| {
             super::native_error(
                 failure,
@@ -2164,8 +2160,7 @@ fn certify_stage<'a>(
             evidence,
         });
     }
-    super::trace_native_stage("union_enter", work.consumed(), current.index);
-    let union = spiling_geometry::certify_native_union(
+    spiling_geometry::certify_native_union(
         &captures,
         candidate,
         spiling_geometry::NativeUnionPolicy {
@@ -2182,9 +2177,7 @@ fn certify_stage<'a>(
                 current.index
             ),
         )
-    });
-    super::trace_native_stage("union_exit", work.consumed(), current.index);
-    union
+    })
 }
 
 /// Final publication gate over actual emitted support capsules. Boolean masks

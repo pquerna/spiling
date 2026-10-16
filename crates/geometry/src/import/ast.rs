@@ -131,6 +131,7 @@ impl<'a> Entities<'a> {
                         | "CURVE"
                         | "TRIMMED_CURVE"
                         | "SURFACE_CURVE"
+                        | "INTERSECTION_CURVE"
                         | "SEAM_CURVE"
                         | "PCURVE"
                         | "DEFINITIONAL_REPRESENTATION"

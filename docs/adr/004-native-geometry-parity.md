@@ -254,6 +254,14 @@ inventory, candidate and output capacities coexist under the shared allowance.
 Native winding scratch receives the current query allowance even when its
 original trim domain was prepared earlier with more free capacity.
 
+An exactly known endpoint coordinate has zero physical span; it is not an
+unresolved positive-width extension. Prove its unique original-carrier point
+with a constant-plane constraint in the original uniqueness tube, retaining
+complete trim incidence and material orientation. Do not widen the guide,
+invent an extension arc or relax the endpoint budget to make a point
+nondegenerate. Refinement may reuse an identical already-certified domain
+instead of repeating the same deterministic inclusion solve.
+
 ### 5.2 Affine-plane reduction inside native continuation
 
 Repeated section queries must be affordable under the unchanged whole-job work
@@ -269,6 +277,16 @@ and the existing guide-coordinate plane `g(t)·x=d(t)`, the reduced equations ar
 unchanged native guide/projection jet and raw parameter. It is equivalent to
 the four-variable system's averaged-point equation on an actual common root;
 no native parameter gauge is replaced by arc length, angle or sampled leaders.
+
+For an original Native leader `L(t)`, retain its position and derivative jet
+inside the private coordinate authority. Evaluate `F=L'·(P-L)`,
+`partial_t F=L''·(P-L)-L'·L'` and
+`partial_tt F=L'''·(P-L)-3*L'·L''` with the shared displacement formed first.
+These are the same native coordinate law, not a recentered geometry or new
+parameter. Separately enclosing world-position dot products loses their
+common-origin dependency. Generic and reduced implicit jets must consume the
+same correlated partials; varying explicit endpoint planes retain their own
+combined-coefficient interpolation law.
 
 A distinct private proof authority must certify whole-span two-dimensional
 existence, uniqueness and transversality, then reconstruct the actual plane UV
@@ -297,6 +315,125 @@ independent jet/root oracles, reversed/posed gauges, invalid-transversality and
 resource/cancellation properties, followed by the unchanged full fitting and
 housing operator workflows. This planned specialization is not qualification
 of those workflows.
+
+### 5.3 Translation-stable native coefficient evaluation
+
+Native curve and tensor-surface Taylor enclosures must not manufacture derivative
+uncertainty from a large constant source origin. Where the existing native
+basis admission proves partition unity, evaluate the identical polynomial as
+`p0 + sum(Bi * (pi - p0))`, with `p0` an original active control coefficient.
+Use outward interval subtraction, not rounded replacement control points.
+Outside the proved partition retain the uncentered sum.
+
+Apply the same identity to ordinary and homogeneous coefficients. Original
+coefficient hulls, rational ratios, denominator separation, knot/continuity
+policy and all native ranges remain authoritative; a tighter enclosure cannot
+cancel an unproved pole or lower a representation. The shared accumulator owns
+this arithmetic for both curves and surfaces, including the original Native
+guide. Retain one charged visit per original active control, bounded stack
+data, cancellation and existing work/resource limits. Adoption requires posed
+whole-span independent jets, rational-pole and knot-policy properties, then
+the real operator workflows; changing budgets is not a substitute.
+
+### 5.4 Retained-bound-first sampling and certified Green quadrature
+
+Geometry may borrow the already certified whole-piece native jets as coarse
+enclosures on a contained query. Preserve the original binding, active range,
+units, parameter gauge and native C1 qualification; a piecewise Hessian alone
+does not establish smoothness. Charge bounded piece lookup/aggregation, retain
+no coordinate cache, and refine through the existing native jet API only when
+the coarse certificate cannot discharge the requested chord/plane obligation.
+Do not repeatedly reconstruct an implicit branch merely to rediscover a valid
+bound already retained by that same branch.
+
+For a C1 arc with bounded piecewise second derivative norm `M`, raw parameter
+width `h` and true endpoint-chord length bound `L`, its projected Green integral
+lies in the true endpoint-chord integral plus/minus
+`M*h^2*L/8 + M^2*h^4/32`. This follows from the zero-endpoint interpolation
+remainder and integration by parts, not from treating sampled polygon area as
+native truth. Project original endpoint error enclosures outwardly before the
+chord integral. The same whole-query curvature certificate owns both sampling
+and this analytic remainder. Non-C1 queries retain their existing independent
+image/integral path; no zero-curvature or sampled-area fallback is admitted.
+
+### 5.5 Scalar native obligations before unused spatial evaluation
+
+Trim-plane inventory needs the native scalar `n dot (S(U(t))-origin)`, not every
+spatial surface derivative. Pull that exact functional through native carrier,
+affine and rational coefficient evaluation before interval basis expansion,
+then compose with the original UV curve jet. Retain interval plane coefficients,
+world units, original chart/3D gauges, denominator and knot policies, complete
+root isolation, correspondence and endpoint/whole-face coverage. Unsupported
+scalar specialization may use the existing full certified evaluator, never a
+sample or fitted carrier. An original plane coefficient identity that makes
+the entire scalar constant can discharge that query before unused implicit
+spatial jets, after the same range, binding and cancellation admission.
+
+These changes retain existing work, storage, chord, plane, area and deadline
+limits. Qualification remains complete real-part compilation and independent
+replay, not a faster isolated query or a widened allowance.
+
+### 5.6 Borrow immutable original trim proofs across prepared queries
+
+`PreparedSectionSource` already owns the admitted original face-trim domains.
+Prepared section, directional-support, slab, endpoint and collar analyses must
+borrow those same domains through one geometry-owned source context rather than
+reconstruct their coefficient correspondence for every layer. Bind every lookup
+to the exact immutable definition and original face identity. Standalone queries
+use the same algorithms with a query-owned domain; do not introduce another
+planner, cloned domain cache or unsafe self-reference.
+
+Source retention is admitted once. A borrowed domain consumes no second retained
+allocation, but its current classification must use the current query's bounded
+scratch allowance. Where Native's limit includes domain metadata, add only that
+already-admitted metadata with checked arithmetic. Cancellation and lookup work
+remain charged. Query-dependent classifications, roots, heights, events, contact
+and material/slab certificates remain fresh; borrowing source authority does not
+authorize borrowing a different query's result.
+
+### 5.7 Reject disjoint candidate meshes before dense pair admission
+
+Native Boolean loop construction may cache finite coordinate bounds of its exact
+immutable polygon seed faces for that query. Strict separation on any coordinate
+axis proves that every seed-triangle pair would fail the existing mesh
+extractor's AABB test; omit that interference/reconstruction call before admitting
+its Cartesian triangle product. Touching, overlapping, empty, missing or
+nonfinite bounds cannot prove separation and retain the existing pair pipeline.
+
+Charge the source-position scan, pair checks and failed admissions; bound combined
+requested and actual cache capacity under the existing query scratch policy.
+Remeshing creates a new query-local cache. Every admitted pair keeps its original
+Cartesian work/triangle limits, native reconstruction and two-sided genealogy.
+This is candidate broadphase only: no mesh box establishes original native-face
+emptiness, completeness, material or topology. Root's independent original-root
+and whole-face coverage remain mandatory.
+
+### 5.8 Separate geometric regularity from a certified pole chart
+
+A collapsed covering coordinate does not by itself make the original surface
+singular. Critical material analysis may use a nonvanishing geometric normal
+derived from original carrier coefficients when its geometric regularity,
+orientation and convexity are proved independently of that coordinate rank.
+For a nonsingular affine image of an original analytic sphere, use the actual
+affine cofactor/inverse coefficients and source position enclosure; the positive
+definite implicit quadratic supplies the geometric curvature sign. Admit the
+actual face/processor/determinant orientation, not an assumed outward normal.
+
+Any polar-domain overrun must be covered in full by an original connector
+independently qualified by Native as `SphericalPole`, with the same shared vertex
+and complete oriented incoming/outgoing occurrences. An original
+`EndpointUncertainty` joint may propose a completion but grants no pole authority.
+Certify the entire completion/world tube under the existing source-chart error,
+including retained map margins; exactly one original connector must qualify.
+A nearby endpoint, longitude bound or rank failure alone is not a certificate.
+Require one chart sheet; aliases, interior folds, missing incidence and
+singular/projective maps do not acquire this proof.
+
+Retain all original source cells and their position, height, distance,
+radial-degree, stationary coverage, manifold and edge-link obligations. Use the
+same source geometric normal for face and coedge incidence. Do not snap UV,
+discard pole cells, replace the carrier or infer global material closure from
+the implicit equation alone.
 
 ## 6. Generic geometry substrate and necessary specializations
 

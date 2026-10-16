@@ -72,9 +72,38 @@ pub(crate) struct PreparedSectionOriginals<'a> {
     boundaries: Vec<OriginalBoundary<'a>>,
     retained_bytes: usize,
 }
-impl PreparedSectionOriginals<'_> {
+impl<'a> PreparedSectionOriginals<'a> {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    pub(crate) fn face_domain(
+        &self,
+        definition: &Definition,
+        face_index: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<&PreparedFaceTrimDomain<'a>, GeometryError> {
+        work.charge(1, cancel)?;
+        if !std::ptr::eq(self.definition, definition) {
+            return Err(unresolved(
+                "original trim owner belongs to another immutable definition",
+            ));
+        }
+        let face = self
+            .faces
+            .get(face_index)
+            .ok_or_else(|| unresolved("original trim owner lost its source face"))?;
+        let identity = definition
+            .face_boundaries
+            .get(face_index)
+            .ok_or_else(|| unresolved("original trim owner lacks source face correspondence"))?;
+        if face.domain.native().face().id() != identity.face {
+            return Err(unresolved(
+                "original trim owner disagrees with immutable face identity",
+            ));
+        }
+        Ok(&face.domain)
     }
 
     fn original_use(

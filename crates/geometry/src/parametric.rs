@@ -9,7 +9,9 @@
 
 use crate::{GeometryError, GeometryWorkBudget, PlaneFrameMm, check_cancel};
 use monstertruck_modeling::{Curve, ParametricCurve, Surface};
-use spiling_contracts::geometry::GeometryErrorCode;
+use spiling_contracts::geometry::{
+    GeometryErrorCode, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
+};
 use std::sync::atomic::AtomicBool;
 
 pub(crate) fn down(value: f64) -> f64 {
@@ -1192,7 +1194,7 @@ impl CurveSamplingEndpoint<'_, '_> {
     }
 }
 
-/// Chord and Green queries share the same freshly certified whole-span jet.
+/// Chord and Green queries share one certified whole-query curvature bound.
 pub(crate) struct CurveSamplingInterval<'a, 'source> {
     binding: &'a PreparedCurveEnclosure<'source>,
     range: (f64, f64),
@@ -1204,14 +1206,10 @@ impl CurveSamplingInterval<'_, '_> {
         &self.enclosure
     }
 
-    // Temporary bounded sampler attribution; no additional native queries.
-    pub(crate) fn trace_jet(&self) -> Option<&CurveEnclosure> {
-        self.jet.as_ref()
-    }
-
-    /// Integrates this exact interval; no nearby range or other binding can be substituted.
+    /// Integrates this exact interval from its original native endpoint receipts.
     pub(crate) fn signed_area(
         &self,
+        endpoints: &[CurveSamplingEndpoint<'_, '_>; 2],
         frame: &PlaneFrameMm,
         reference_mm: [f64; 3],
         work: &mut GeometryWorkBudget,
@@ -1219,14 +1217,36 @@ impl CurveSamplingInterval<'_, '_> {
     ) -> Result<[f64; 2], GeometryError> {
         work.charge(1, cancel)?;
         frame.validate()?;
-        let fresh;
-        let enclosure = match &self.jet {
-            Some(jet) => jet,
-            None => {
-                fresh = self.binding.jet(self.range, work, cancel)?;
-                &fresh
-            }
-        };
+        if !std::ptr::eq(endpoints[0].binding, self.binding)
+            || !std::ptr::eq(endpoints[1].binding, self.binding)
+            || (endpoints[0].parameter, endpoints[1].parameter) != self.range
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "native Green endpoints do not own this prepared interval",
+            ));
+        }
+        if self.range.0 == self.range.1 {
+            return Ok([0.0; 2]);
+        }
+        if let Some(jet) = &self.jet {
+            let endpoint_bounds = endpoints.each_ref().map(|endpoint| {
+                endpoint
+                    .point
+                    .error
+                    .map(|value| adapt(value).mul(Interval::point(self.binding.scale)))
+            });
+            return green::signed_area_from_curvature(
+                frame,
+                reference_mm,
+                &endpoint_bounds,
+                &jet.second_derivative,
+                self.range,
+                work,
+                cancel,
+            );
+        }
+        let enclosure = self.binding.jet(self.range, work, cancel)?;
         let projection = |axis: [f64; 3], derivative: bool| {
             (0..3).fold(Interval::point(0.0), |sum, index| {
                 let value = if derivative {
@@ -1517,18 +1537,32 @@ impl<'source> PreparedCurveEnclosure<'source> {
         let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
             usize::try_from(work.remaining()).unwrap_or(usize::MAX),
         );
-        // Evaluate in the original source frame, then apply the actual scalar
-        // unit map outwardly. This never reprojects a scaled implicit guide.
-        let native_origin = if self.scale == 1.0 { origin } else { [0.0; 3] };
-        let result = self.native.projected_jet(
-            [range.0, range.1],
-            native_origin,
-            direction,
-            &mut native_work,
-            cancel,
-        );
+        let result =
+            self.projected_with_native_budget(range, origin, direction, &mut native_work, cancel);
         debit_native_work(work, native_work.consumed(), cancel)?;
-        let jet = result.map_err(native_error)?;
+        result
+    }
+
+    fn projected_with_native_budget(
+        &self,
+        range: (f64, f64),
+        origin: [f64; 3],
+        direction: [f64; 3],
+        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Interval, GeometryError> {
+        // Evaluate in the original source frame before the actual unit map.
+        let native_origin = if self.scale == 1.0 { origin } else { [0.0; 3] };
+        let jet = self
+            .native
+            .projected_jet(
+                [range.0, range.1],
+                native_origin,
+                direction,
+                native_work,
+                cancel,
+            )
+            .map_err(native_error)?;
         if self.scale == 1.0 {
             Ok(adapt(jet.position))
         } else {
@@ -1549,17 +1583,108 @@ impl<'source> PreparedCurveEnclosure<'source> {
         let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
             usize::try_from(work.remaining()).unwrap_or(usize::MAX),
         );
-        let result = self
-            .native
-            .jet([range.0, range.1], &mut native_work, cancel);
+        let result = self.refined_with_native_budget(range, &mut native_work, cancel);
         debit_native_work(work, native_work.consumed(), cancel)?;
-        let jet = result.map_err(native_error)?;
+        result
+    }
+
+    fn refined_with_native_budget(
+        &self,
+        range: (f64, f64),
+        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<CurveEnclosure, GeometryError> {
+        let jet = self
+            .native
+            .jet([range.0, range.1], native_work, cancel)
+            .map_err(native_error)?;
         let scaled = |value| adapt(value).mul(Interval::point(self.scale));
         Ok(CurveEnclosure {
             position: jet.position.map(scaled),
             derivative: jet.first.map(scaled),
             second_derivative: jet.second.map(scaled),
         })
+    }
+
+    /// Borrow a finite whole-piece certificate on a contained smooth query.
+    /// The caller separately qualifies C1; a retained Hessian is not that proof.
+    fn retained_with_native_budget(
+        &self,
+        range: (f64, f64),
+        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<CurveEnclosure>, GeometryError> {
+        if range.0 == range.1 {
+            native_work.charge(1, cancel).map_err(native_error)?;
+            return Ok(None);
+        }
+        let pieces = self.native.pieces();
+        let (mut low, mut high) = (0, pieces.len());
+        while low < high {
+            native_work.charge(1, cancel).map_err(native_error)?;
+            let middle = low + (high - low) / 2;
+            if pieces[middle].parameter[1] <= range.0 {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let mut covered = range.0;
+        let mut result: Option<CurveEnclosure> = None;
+        let scaled = |value| adapt(value).mul(Interval::point(self.scale));
+        for piece in &pieces[low..] {
+            native_work.charge(1, cancel).map_err(native_error)?;
+            if piece.parameter[0] >= range.1 {
+                break;
+            }
+            let lower = piece.parameter[0].max(range.0);
+            let upper = piece.parameter[1].min(range.1);
+            if lower >= upper {
+                continue;
+            }
+            if lower > covered {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "retained native curve partition has an uncovered query interval",
+                ));
+            }
+            let jet = CurveEnclosure {
+                position: piece.jet.position.map(scaled),
+                derivative: piece.jet.first.map(scaled),
+                second_derivative: piece.jet.second.map(scaled),
+            };
+            if jet
+                .position
+                .into_iter()
+                .chain(jet.derivative)
+                .chain(jet.second_derivative)
+                .any(|bound| !bound.lo.is_finite() || !bound.hi.is_finite())
+            {
+                return Ok(None);
+            }
+            result = Some(match result {
+                None => jet,
+                Some(previous) => CurveEnclosure {
+                    position: std::array::from_fn(|axis| {
+                        previous.position[axis].hull(jet.position[axis])
+                    }),
+                    derivative: std::array::from_fn(|axis| {
+                        previous.derivative[axis].hull(jet.derivative[axis])
+                    }),
+                    second_derivative: std::array::from_fn(|axis| {
+                        previous.second_derivative[axis].hull(jet.second_derivative[axis])
+                    }),
+                },
+            });
+            covered = upper;
+            if covered == range.1 {
+                return Ok(result);
+            }
+        }
+        Err(GeometryError::new(
+            GeometryErrorCode::InvalidGeometry,
+            "retained native curve partition does not cover the requested range",
+        ))
     }
 
     /// Compose the actual retained native branch with a pole-free projective
@@ -1709,22 +1834,28 @@ impl<'source> PreparedCurveEnclosure<'source> {
                 endpoint_error(start_mm, start.error)?.max(endpoint_error(end_mm, end.error)?);
             let mut retained_jet = None;
             let (position, chord_error_mm) = if smooth {
-                let jet = self
-                    .native
-                    .jet([range.0, range.1], &mut native_work, cancel)
-                    .map_err(native_error)?;
-                let jet = CurveEnclosure {
-                    position: jet.position.map(scaled),
-                    derivative: jet.first.map(scaled),
-                    second_derivative: jet.second.map(scaled),
-                };
-                retained_jet = Some(jet);
                 let width = Interval::point(range.1).sub(Interval::point(range.0));
-                let remainder = Interval::point(norm_upper(jet.second_derivative)?)
-                    .mul(width.square())
-                    .mul(Interval::point(0.125))
-                    .hi;
-                (jet.position, up(remainder + reserve))
+                let chord_error = |jet: &CurveEnclosure| -> Result<f64, GeometryError> {
+                    let remainder = Interval::point(norm_upper(jet.second_derivative)?)
+                        .mul(width.square())
+                        .mul(Interval::point(0.125))
+                        .hi;
+                    Ok(up(remainder + reserve))
+                };
+                let coarse = self.retained_with_native_budget(range, &mut native_work, cancel)?;
+                let jet = match coarse {
+                    Some(jet) => {
+                        if chord_error(&jet)? <= SECTION_SAMPLING_TOLERANCE_MM {
+                            jet
+                        } else {
+                            self.refined_with_native_budget(range, &mut native_work, cancel)?
+                        }
+                    }
+                    None => self.refined_with_native_budget(range, &mut native_work, cancel)?,
+                };
+                let error = chord_error(&jet)?;
+                retained_jet = Some(jet);
+                (jet.position, error)
             } else {
                 // Curve -> chord uses its first actual chord endpoint. Chord
                 // -> curve uses the true native start point enclosed by E0;
@@ -1749,6 +1880,18 @@ impl<'source> PreparedCurveEnclosure<'source> {
                         .mul(Interval::point(frame.z_axis[axis])),
                 )
             });
+            let mut plane_error_mm = projection.abs_upper();
+            if smooth && plane_error_mm > SECTION_PLANE_TOLERANCE_MM {
+                plane_error_mm = self
+                    .projected_with_native_budget(
+                        range,
+                        frame.origin_mm,
+                        frame.z_axis,
+                        &mut native_work,
+                        cancel,
+                    )?
+                    .abs_upper();
+            }
             Ok(CurveSamplingInterval {
                 binding: self,
                 range,
@@ -1756,7 +1899,7 @@ impl<'source> PreparedCurveEnclosure<'source> {
                     start_mm,
                     end_mm,
                     chord_error_mm,
-                    plane_error_mm: projection.abs_upper(),
+                    plane_error_mm,
                 },
                 jet: retained_jet,
             })
@@ -1838,6 +1981,7 @@ pub(crate) fn prepare_section_curve_enclosure(
     })
 }
 
+mod green;
 mod section_coverage;
 pub(crate) use section_coverage::{
     PreparedSectionOriginals, PreparedSectionPlaneRoots, SectionPlaneCoverage,
@@ -2881,7 +3025,7 @@ mod tests {
             assert!(enclosure.chord_error_mm <= SECTION_SAMPLING_TOLERANCE_MM);
             assert!(enclosure.plane_error_mm <= SECTION_PLANE_TOLERANCE_MM);
             let part = interval
-                .signed_area(&frame, [0.0; 3], &mut work, &cancel)
+                .signed_area(&[start, end], &frame, [0.0; 3], &mut work, &cancel)
                 .unwrap();
             area = area.add(Interval {
                 lo: part[0],
@@ -2934,9 +3078,21 @@ mod tests {
         let interval = prepared
             .sampling_interval(&[start, end], &frame, &mut work, &cancel)
             .unwrap();
+        for endpoints in [[start, foreign], [end, start]] {
+            let failure = interval
+                .signed_area(&endpoints, &frame, [0.0; 3], &mut work, &cancel)
+                .unwrap_err();
+            assert_eq!(failure.code, GeometryErrorCode::InvalidGeometry);
+        }
         assert_eq!(
             interval
-                .signed_area(&frame, [0.0; 3], &mut GeometryWorkBudget::new(0), &cancel)
+                .signed_area(
+                    &[start, end],
+                    &frame,
+                    [0.0; 3],
+                    &mut GeometryWorkBudget::new(0),
+                    &cancel
+                )
                 .unwrap_err()
                 .code,
             GeometryErrorCode::ResourceLimit
@@ -2944,7 +3100,7 @@ mod tests {
         let cancelled = AtomicBool::new(true);
         assert_eq!(
             interval
-                .signed_area(&frame, [0.0; 3], &mut work, &cancelled)
+                .signed_area(&[start, end], &frame, [0.0; 3], &mut work, &cancelled)
                 .unwrap_err()
                 .code,
             GeometryErrorCode::Cancelled

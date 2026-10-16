@@ -256,7 +256,7 @@ pub fn placed_bounds(
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
     placed_bounds_inner(
-        definition,
+        crate::section::OriginalTrimSource::standalone(definition),
         pose,
         world_direction,
         policy,
@@ -269,7 +269,7 @@ pub fn placed_bounds(
 /// Scratch allowance excludes the pinned source proof and every caller-owned
 /// buffer that coexists with this complete native directional support query.
 pub(super) fn placed_bounds_with_scratch_limit(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
@@ -278,7 +278,7 @@ pub(super) fn placed_bounds_with_scratch_limit(
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
     placed_bounds_inner(
-        definition,
+        source,
         pose,
         world_direction,
         policy,
@@ -289,7 +289,7 @@ pub(super) fn placed_bounds_with_scratch_limit(
 }
 
 fn placed_bounds_inner(
-    definition: &Definition,
+    source_context: crate::section::OriginalTrimSource<'_, '_>,
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
@@ -297,6 +297,7 @@ fn placed_bounds_inner(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
+    let definition = source_context.definition();
     work.charge(1, cancel)?;
     let tolerance = policy.maximum_endpoint_uncertainty_mm;
     if !tolerance.is_finite() || tolerance <= 0.0 {
@@ -330,7 +331,7 @@ fn placed_bounds_inner(
     };
     let source = match remaining_bytes {
         Some(bytes) => super::bounds::projected_bounds_with_scratch_limit(
-            definition,
+            source_context,
             nominal,
             source_policy,
             bytes,
@@ -1110,7 +1111,7 @@ pub(crate) fn analyze_placed_slab(
             coexisting_bytes.saturating_add(result.retained_bytes()),
         )?;
         let actual = super::collar::place_native_collar_complex(
-            source.definition(),
+            source.trim_source(),
             seed,
             pose,
             world_height_interval_mm,
@@ -1284,7 +1285,7 @@ fn identical_functional(a: HeightFunctional, b: HeightFunctional) -> bool {
 }
 
 fn certify_plane_homotopy(
-    definition: &Definition,
+    trim_source: crate::section::OriginalTrimSource<'_, '_>,
     section: &NativeSection,
     target: HeightFunctional,
     query_byte_limit: usize,
@@ -1315,7 +1316,7 @@ fn certify_plane_homotopy(
             )
         })?;
     let analysis = super::slab::analyze_height_domain_enclosed_with_scratch_limit(
-        definition,
+        trim_source,
         PlaneFrameMm::from_plane(section.plane)?,
         family,
         [-tolerance, tolerance],
@@ -1374,7 +1375,7 @@ pub(crate) fn section_placed_with_work(
         offset: target.offset.hull(declared_functional.offset),
     };
     certify_plane_homotopy(
-        source.definition(),
+        source.trim_source(),
         &section,
         family,
         query_byte_limit as usize,

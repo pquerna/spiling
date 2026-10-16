@@ -36,19 +36,6 @@ pub const MAX_PREPARED_SECTION_SOURCE_BYTES: usize =
 const MAX_NATIVE_SEED_VERTICES: usize = 1_000_000;
 const MAX_NATIVE_SEED_TRIANGLES: usize = 1_000_000;
 
-fn trace_section_stage(stage: &str, work: u64) {
-    static START: std::sync::LazyLock<Option<std::time::Instant>> =
-        std::sync::LazyLock::new(|| {
-            std::env::var_os("SPILING_TRACE_NATIVE").map(|_| std::time::Instant::now())
-        });
-    if let Some(start) = *START {
-        eprintln!(
-            "{{\"event\":\"section_phase_probe\",\"stage\":\"{stage}\",\"elapsed_ms\":{},\"work\":{work}}}",
-            start.elapsed().as_millis()
-        );
-    }
-}
-
 /// Job-local search seeds and original trim proofs borrowing one immutable definition.
 ///
 /// Seeds accelerate native intersections; they never certify section geometry.
@@ -57,6 +44,121 @@ pub struct PreparedSectionSource<'a> {
     definition: &'a Definition,
     native: PreparedBooleanSource<'a, Curve, Surface>,
     originals: Option<crate::parametric::PreparedSectionOriginals<'a>>,
+}
+
+/// Immutable original authority plus query-local admission, never a geometric cache.
+#[derive(Clone, Copy)]
+pub(crate) struct OriginalTrimSource<'s, 'd> {
+    definition: &'d Definition,
+    originals: Option<&'s crate::parametric::PreparedSectionOriginals<'d>>,
+}
+
+impl<'s, 'd> OriginalTrimSource<'s, 'd> {
+    pub(crate) fn standalone(definition: &'d Definition) -> Self {
+        Self {
+            definition,
+            originals: None,
+        }
+    }
+
+    pub(crate) fn definition(self) -> &'d Definition {
+        self.definition
+    }
+
+    pub(crate) fn face_domain(
+        self,
+        index: usize,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<FaceTrimQuery<'s, 'd>, GeometryError> {
+        work.charge(1, cancel)?;
+        let domain = match self.originals {
+            Some(originals) => FaceTrimStorage::Borrowed(originals.face_domain(
+                self.definition,
+                index,
+                work,
+                cancel,
+            )?),
+            None => {
+                FaceTrimStorage::Owned(crate::kernel::prepare_face_trim_domain_with_byte_limit(
+                    self.definition,
+                    index,
+                    remaining_bytes,
+                    work,
+                    cancel,
+                )?)
+            }
+        };
+        let mut query = FaceTrimQuery {
+            domain,
+            byte_limit: usize::MAX,
+        };
+        query.restrict_retained_byte_limit(remaining_bytes, work, cancel)?;
+        Ok(query)
+    }
+}
+
+enum FaceTrimStorage<'s, 'd> {
+    Borrowed(&'s crate::kernel::PreparedFaceTrimDomain<'d>),
+    Owned(crate::kernel::PreparedFaceTrimDomain<'d>),
+}
+
+pub(crate) struct FaceTrimQuery<'s, 'd> {
+    domain: FaceTrimStorage<'s, 'd>,
+    byte_limit: usize,
+}
+
+impl<'d> std::ops::Deref for FaceTrimQuery<'_, 'd> {
+    type Target = crate::kernel::PreparedFaceTrimDomain<'d>;
+    fn deref(&self) -> &Self::Target {
+        match &self.domain {
+            FaceTrimStorage::Borrowed(domain) => domain,
+            FaceTrimStorage::Owned(domain) => domain,
+        }
+    }
+}
+
+impl FaceTrimQuery<'_, '_> {
+    /// Borrowed metadata is already included in the prepared source allowance.
+    pub(crate) fn owned_bytes(&self) -> usize {
+        match &self.domain {
+            FaceTrimStorage::Borrowed(_) => 0,
+            FaceTrimStorage::Owned(domain) => domain.retained_bytes(),
+        }
+    }
+
+    pub(crate) fn restrict_retained_byte_limit(
+        &mut self,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        let metadata_bytes = match &self.domain {
+            FaceTrimStorage::Borrowed(domain) => domain.retained_bytes(),
+            FaceTrimStorage::Owned(_) => 0,
+        };
+        let limit = remaining_bytes
+            .checked_add(metadata_bytes)
+            .ok_or_else(|| resource_error("original trim query capacity overflow"))?;
+        if limit < self.retained_bytes() {
+            return Err(resource_error(
+                "original trim query metadata exceeds capacity",
+            ));
+        }
+        self.byte_limit = self.byte_limit.min(limit);
+        Ok(())
+    }
+
+    pub(crate) fn classify(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::kernel::TrimClassification, GeometryError> {
+        self.classify_with_byte_limit(uv, self.byte_limit, work, cancel)
+    }
 }
 
 // Native and original retained_bytes already include their inline bindings.
@@ -74,6 +176,13 @@ fn source_header_bytes(has_originals: bool) -> usize {
 impl PreparedSectionSource<'_> {
     pub(crate) fn definition(&self) -> &Definition {
         self.definition
+    }
+
+    pub(crate) fn trim_source(&self) -> OriginalTrimSource<'_, '_> {
+        OriginalTrimSource {
+            definition: self.definition,
+            originals: self.originals.as_ref(),
+        }
     }
 
     /// Owned seeds, original preparations and the definition's pinned query proofs.
@@ -125,7 +234,6 @@ pub fn prepare_section_source<'a>(
     work: &mut GeometryWorkBudget,
 ) -> Result<PreparedSectionSource<'a>, GeometryError> {
     work.charge(1, cancel)?;
-    trace_section_stage("source_prepare_enter", work.consumed());
     let pinned_bytes = definition.retained_query_proof_bytes();
     let source_allowance = remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES);
     let original_allowance = source_allowance
@@ -180,11 +288,6 @@ pub fn prepare_section_source<'a>(
         limits,
         cancel,
         &native_work,
-    );
-    trace_section_stage(
-        "source_prepare_exit",
-        work.consumed()
-            .saturating_add(native_work.consumed() as u64),
     );
     crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
     let native = native.map_err(native_error)?;
@@ -258,11 +361,17 @@ fn section_using(
     let query_remaining = query_byte_limit
         .checked_sub(result.retained_bytes())
         .ok_or_else(|| resource_error("native section certificate exceeds query capacity"))?;
-    trace_section_stage("regularity_enter", work.consumed());
     // Scratch already excludes the pinned proof and result certificate.
-    let regularity =
-        crate::analysis::section_regularity(definition, &plane, query_remaining, work, cancel);
-    trace_section_stage("regularity_exit", work.consumed());
+    let regularity = crate::analysis::section_regularity(
+        prepared.map_or_else(
+            || OriginalTrimSource::standalone(definition),
+            |source| source.trim_source(),
+        ),
+        &plane,
+        query_remaining,
+        work,
+        cancel,
+    );
     if matches!(regularity?, crate::analysis::SectionRegularity::Empty) {
         return Ok(result);
     }
@@ -334,18 +443,12 @@ fn section_using(
     };
     let native_work =
         BooleanWorkBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-    trace_section_stage("boolean_enter", work.consumed());
     let cut = monstertruck_solid::and_prepared_with_provenance_counted_with_query_bytes(
         &source.native,
         &clip,
         cancel,
         &native_work,
         native_query_remaining,
-    );
-    trace_section_stage(
-        "boolean_exit",
-        work.consumed()
-            .saturating_add(native_work.consumed() as u64),
     );
     crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
     let cut = cut.map_err(native_error)?;
@@ -370,7 +473,6 @@ fn section_using(
     let capture_limit = scratch_limit
         .checked_sub(cap_bytes)
         .ok_or_else(|| resource_error("native cap index exceeds query capacity"))?;
-    trace_section_stage("capture_enter", work.consumed());
     let captures =
         loops::CapturedCurves::collect(definition, &cut, &cap_faces, capture_limit, work, cancel)
             .map_err(|mut error| {
@@ -404,10 +506,8 @@ fn section_using(
             error
         })?;
     let capture_bytes = capture_limit - remaining_bytes - root_bytes;
-    trace_section_stage("capture_exit", work.consumed());
     // Full original-root coverage precedes sampling: sealed endpoint extensions
     // must spend the same frozen chord/plane and signed-area allowances.
-    trace_section_stage("plane_coverage_enter", work.consumed());
     let coverage = crate::parametric::certify_section_plane_coverage(
         definition,
         &roots,
@@ -425,8 +525,6 @@ fn section_using(
         error
     })?;
     let coverage_bytes = coverage.retained_bytes();
-    trace_section_stage("plane_coverage_exit", work.consumed());
-    trace_section_stage("sampling_enter", work.consumed());
     // Inventories are query-local and can be released once every endpoint is sealed.
     drop(roots);
     let remaining_bytes = remaining_bytes

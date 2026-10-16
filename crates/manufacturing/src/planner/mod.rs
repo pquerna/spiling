@@ -35,26 +35,11 @@ pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
 const MAX_BOOLEAN_PAIRS: usize = 20_000_000;
 
-fn trace_native_stage(stage: &str, work: u64, index: u32) {
-    static START: std::sync::LazyLock<Option<std::time::Instant>> =
-        std::sync::LazyLock::new(|| {
-            std::env::var_os("SPILING_TRACE_NATIVE").map(|_| std::time::Instant::now())
-        });
-    if let Some(start) = *START {
-        eprintln!(
-            "{{\"event\":\"native_phase_probe\",\"stage\":\"{stage}\",\"elapsed_ms\":{},\"work\":{work},\"index\":{index}}}",
-            start.elapsed().as_millis()
-        );
-    }
-}
-
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    trace_native_stage("admit_enter", 0, 0);
     let mut admission = preflight::admit(input, cancel)?;
-    trace_native_stage("admit_exit", admission.geometry_work.consumed(), 0);
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
         disposition @ (PreflightDisposition::Refused | PreflightDisposition::Unresolved) => {
@@ -104,17 +89,12 @@ pub(crate) fn plan(
         }
     }
     let recipe = &input.intent.recipe;
-    trace_native_stage("events_enter", admission.geometry_work.consumed(), 0);
     preflight::resolve_native_events(input, &mut admission, cancel)?;
-    trace_native_stage("events_exit", admission.geometry_work.consumed(), 0);
-    trace_native_stage("prepare_enter", admission.geometry_work.consumed(), 0);
     let prepared_sources = prepare_sources(input, &mut admission.geometry_work, cancel)?;
-    trace_native_stage("prepare_exit", admission.geometry_work.consumed(), 0);
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
     let mut schedule = scheduled_layers(input, &admission, cancel)?;
-    trace_native_stage("schedule_exit", admission.geometry_work.consumed(), 0);
     let mut count = schedule.len() as u32;
     let mut occurrences = input.occurrences.iter().collect::<Vec<_>>();
     occurrences.sort_by_key(|o| o.occurrence_id);
@@ -460,13 +440,7 @@ pub(crate) fn plan(
         index = end;
     }
     drop(prepared_sources);
-    trace_native_stage(
-        "native_stream_exit",
-        admission.geometry_work.consumed(),
-        count,
-    );
     let mut native_coverage = native_stage.finalize(&mut admission.geometry_work, cancel)?;
-    trace_native_stage("ledger_exit", admission.geometry_work.consumed(), count);
     drop(native_finished);
     drop(native_required);
     drop(native_material);
@@ -490,9 +464,9 @@ pub(crate) fn plan(
         let sample = elevation.sample;
         let height = elevation.height;
         let current = span_at(&sections, index);
-        let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
+        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
+        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
         if sections[current].material.0.is_empty() {
             layers.push(PrintLayer {
@@ -738,7 +712,6 @@ pub(crate) fn plan(
     // Support reserves this derived-cache pool once; regeneration may evict and
     // rebuild within it, but cannot silently increase retained support staging.
     neighborhoods.freeze_retained_capacity();
-    trace_native_stage("paths_exit", admission.geometry_work.consumed(), count);
     support::realize(
         &mut layers,
         &sections,
@@ -761,14 +734,14 @@ pub(crate) fn plan(
             let elevation = &schedule[index];
             let current = span_at(&sections, index as u32);
             let below = physical_neighbor(
-                schedule,
+                &schedule,
                 index as u32,
                 recipe.bottom_skin_thickness_mm,
                 false,
             )
             .map(|i| span_at(&sections, i));
             let above =
-                physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true)
+                physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
                     .map(|i| span_at(&sections, i));
             let lower = neighborhoods.survival(current, below, live_retained_points, cancel)?;
             let upper = neighborhoods.survival(

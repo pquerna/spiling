@@ -428,7 +428,7 @@ pub(crate) enum SectionRegularity {
 
 /// Completeness is established independently of native Boolean search seeds.
 pub(crate) fn section_regularity(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     plane: &PlaneMm,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
@@ -437,7 +437,7 @@ pub(crate) fn section_regularity(
     check_cancel(cancel)?;
     let frame = PlaneFrameMm::from_plane(*plane)?;
     let support = bounds::projected_bounds_with_scratch_limit(
-        definition,
+        source,
         plane.normal,
         BoundsPolicy {
             maximum_endpoint_uncertainty_mm:
@@ -457,7 +457,7 @@ pub(crate) fn section_regularity(
         return Ok(SectionRegularity::Empty);
     }
     let height = slab::analyze_height_domain_with_scratch_limit(
-        definition,
+        source,
         frame,
         [-tolerance, tolerance],
         AnalysisPolicy {
