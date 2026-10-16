@@ -31,57 +31,34 @@ Do not expand the initial product into cloud services, collaboration, a general 
 
 ## 2. Canonical local documentation
 
-### Required files and placement
+### Add local guidance only when it earns its place
 
-Every crate, application, shared package, and substantial module or code area MUST have two files at its owning directory:
+This root guide supplies shared rules. A directory MAY have `AGENT-RULES.md`, `AGENT-VISION.md`, both, or neither. They are not a mandatory pair. A crate, package, module, or new directory does not automatically need either file.
 
-- `AGENT-RULES.md`: the **current binding rules** for working in that area.
-- `AGENT-VISION.md`: the **current intended purpose and direction** of that area.
+Add a local file only when it contributes useful, non-obvious guidance beyond its ancestors and canonical specifications. Keep it at the directory that owns those facts. Do not create directories, empty templates, or extra documentation layers just to satisfy a documentation convention.
 
-This root `AGENTS.md` is the shared entry point; it does not replace local pairs. Add the pair when an area is introduced, before or alongside its first implementation. Do not pre-create directories or pairs for hypothetical future areas.
+### Content: current facts, patterns, rules and direction
 
-A substantial area has a distinct responsibility, contract, invariants, or independent change surface. Crate roots always qualify; modules such as project persistence, artifact storage, job scheduling, kernel adapters, manufacturing verification, and major UI features qualify when introduced. A small private helper does not need a pair merely because it is in a separate file.
+- **`AGENT-RULES.md`**: what a contributor needs to change this area correctly—responsibility, ownership and dependency boundaries, important invariants, established patterns, non-obvious failure/resource behavior, and the relevant way to exercise it. Include only what matters locally; do not fill a checklist of categories.
+- **`AGENT-VISION.md`**: why this area exists, whom it serves, the durable direction and explicit non-goals. Distinguish current capability from intended capability; include open architectural decisions only while they still affect that direction.
 
-For a directory module, put the pair beside its implementation, usually under `src/<module>/`. Prefer an owning directory for a substantial single-file module rather than inventing ambiguous document names. Nested substantial areas get their own pairs even when the parent has one. Do not scatter a pair beside every source file.
+Neither file is a history, changelog, backlog, session transcript or implementation journal. No dated progress, completed-task lists, “previously we…” narratives, build results, fixture hashes or accounts of how a fix was discovered. State the resulting rule or direction, not the story.
 
-### Reading and authority
+Prefer a few short bullets or paragraphs. As a review signal, aim for roughly 300 words or fewer for rules and 150 for vision; these are ceilings to question, not quotas to fill. A shorter useful file wins. If more is needed, keep only essential local guidance and link the detailed specification rather than creating more agent files.
 
-Before editing an area:
+Do not repeat inherited rules, copy protocol/API specifications, enumerate every function/test, or narrate code that is easy to inspect. Link canonical documents for detail. An important safety or ownership invariant still belongs here when it would otherwise be easy to miss.
 
-1. Read root `AGENTS.md`.
-2. Read both local files along the directory ancestry, from broadest scope to the target area.
-3. Read the pairs for affected dependency or consumer areas when changing their contracts.
+### Read, maintain and prune
 
-Local rules refine repository-wide rules; they cannot silently override them. Vision explains intent, not permission to bypass rules or advertise unimplemented behavior. If documentation conflicts with another document or observed code, resolve the conflict explicitly rather than choosing the convenient version. An intentional architecture change updates the governing documents and affected consumers together.
+Before editing, read this guide and any existing local rules/vision along the target's directory ancestry, broadest first. Read affected dependency/consumer guidance when changing their contracts. Missing local files are normal; do not create them as a prerequisite to work.
 
-These filenames are mandatory even if an agent tool does not automatically discover them. Agents are responsible for reading them explicitly; do not rely on automatic `AGENTS.md` discovery to enforce the system. Avoid additional nested `AGENTS.md` files that duplicate the local pair.
+Local rules refine inherited rules; they cannot silently override them. Vision does not authorize unsupported behavior. Resolve conflicts with code or governing specifications explicitly, updating affected guidance and consumers together.
 
-### What each file contains
+When a change affects documented facts or direction, rewrite the relevant guidance in place. Do not append a paragraph for each feature or fix. Remove stale, redundant or resolved material; implementation-only changes need no documentation churn.
 
-Keep `AGENT-RULES.md` short and actionable:
+When touching an area, question whether its local files still earn their place. Remove an unnecessary file once any unique, still-relevant guidance has a suitable canonical owner; do not preserve boilerplate or a pair merely for symmetry. Do not discard safety or contract facts just to hit a word target.
 
-- Responsibility, scope, allowed dependencies, and prohibited coupling.
-- Public contracts, authority boundaries, invariants, and error behavior.
-- Relevant units, frames, tolerances, revisions, concurrency, safety, and resource ownership.
-- How to exercise the area and what evidence a meaningful change requires.
-- Links to canonical protocol specifications or decisions rather than copied specifications.
-
-Keep `AGENT-VISION.md` short and specific:
-
-- Purpose and the user or downstream consumer it serves.
-- Intended capabilities, architectural direction, and explicit non-goals.
-- Current support envelope and clearly labeled intended or experimental capabilities.
-- Acceptance conditions and unresolved decisions that still affect the direction.
-
-Neither file is a backlog, changelog, session transcript, implementation journal, or collection of superseded proposals. No dated progress entries, completed-task lists, or “previously we…” narratives. Current limitations and genuinely open decisions belong; their chronological story does not.
-
-### Maintenance is part of the change
-
-When responsibilities, contracts, invariants, support limits, or direction change, update the affected pair and any governing parent in the same change. Replace obsolete statements; remove resolved questions, stale guidance, and duplicate material. Do not append a contradictory new paragraph beneath an old rule.
-
-A change is incomplete if the documentation describes a different system. Read both files even when neither needs an edit; do not manufacture documentation churn for implementation-only changes.
-
-Keep historical rationale in `docs/adr/`, measured milestone evidence in `docs/quality/`, and chronological changes in version control or a project changelog when present. An ADR records a decision and evidence; the agent files state the resulting current rules and vision. Link history only when it helps explain a current constraint. Do not require the session paste or a private external conversation to understand binding rules.
+Keep historical rationale in `docs/adr/`, measured evidence in `docs/quality/`, and chronological changes in version control or an existing changelog. A reader must not need a session paste or private conversation to understand current binding rules. Avoid nested `AGENTS.md` files that duplicate this guidance.
 
 Private research, planning, ideas, Markdown, and agent knowledge live in the separate `/root/spiling-brain` checkout (`pquerna/spiling-brain`), not this repository's `docs/reserach/`. Read its own agent guide before changing it; every brain change must be committed and safely pushed to main, fetching/rebasing concurrent updates without force-pushing. Brain proposals do not override implementation contracts. Adopt accepted constraints into the relevant public canonical documents without exposing private material or requiring private-repository access to understand the code.
 
@@ -168,7 +145,7 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 
 ## 6. Working and acceptance discipline
 
-Before implementation, identify the owning area, read its pair, and state the boundary and acceptance behavior being changed. Reuse existing patterns. Do not introduce alternate protocols, planners, type definitions, or compatibility shims as shortcuts.
+Before implementation, identify the owning area, read its applicable existing guidance, and state the boundary and acceptance behavior being changed. Reuse existing patterns. Do not introduce alternate protocols, planners, type definitions, or compatibility shims as shortcuts.
 
 Verify the changed behavior through the real surface: native engine/CLI operations, packaged desktop integration, geometry corpus, or emitted-program replay as appropriate. Unit tests alone do not establish end-to-end behavior. For documentation-only changes, check scope, consistency, and document references; no application smoke run is implied.
 
