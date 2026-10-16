@@ -80,6 +80,35 @@ impl<'s, 'd> OriginalTrimSource<'s, 'd> {
         self.definition
     }
 
+    /// A standalone full query owns preparation once; prepared sources already
+    /// account for these immutable domains and must not prepare or debit again.
+    pub(crate) fn prepare_domains_if_missing(
+        self,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<crate::parametric::PreparedSectionOriginals<'d>>, GeometryError> {
+        if self.originals.is_some() {
+            return Ok(None);
+        }
+        let before = work.consumed();
+        crate::parametric::PreparedSectionOriginals::prepare_trim_domains(
+            self.definition, remaining_bytes, work, cancel,
+        ).map(Some).map_err(|error| work.annotate_error(
+            error, before, "standalone SourceOriginals preparation",
+        ))
+    }
+
+    pub(crate) fn borrowing_domains(
+        self,
+        originals: Option<&'s crate::parametric::PreparedSectionOriginals<'d>>,
+    ) -> Self {
+        Self {
+            definition: self.definition,
+            originals: self.originals.or(originals),
+        }
+    }
+
     pub(crate) fn face_domain(
         self,
         index: usize,

@@ -23,22 +23,23 @@ mod tests;
 pub use analysis::{
     AnalysisPolicy, BoundsPolicy, CompletedNativeUnionProofSet, CriticalEventNeighborhood,
     EndpointOwnershipRequest, GeometryWorkBudget, HeightAnalysis, InvariantHeightDomain,
-    NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
-    NativeCriticalCollarIncidence, NativeCriticalCollarMaterialTarget, NativeCriticalCollarPolicy,
-    NativeCriticalCollarTarget, NativeCriticalCollarTargetSide, NativeEndpointStratum,
-    NativeInterfaceAttachment, NativeOwnedEndpoint, NativeProjectedVoids,
+    MaterialProjectedBounds, NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar,
+    NativeCriticalCollarCell, NativeCriticalCollarIncidence, NativeCriticalCollarMaterialTarget,
+    NativeCriticalCollarPolicy, NativeCriticalCollarTarget, NativeCriticalCollarTargetSide,
+    NativeEndpointStratum, NativeInterfaceAttachment, NativeOwnedEndpoint, NativeProjectedVoids,
     NativeProtectedVoidEnvelope, NativeSourceLeafProofKind, NativeSourceLeafReceipt,
     NativeUnionBindingLedger, NativeUnionBoundaryEdge, NativeUnionBoundarySource,
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
-    PendingNativeUnionProof, PlacedSlabRequest, PlanarCapsuleClearance,
-    PlanarCapsuleClearancePolicy, PlanarCapsuleMm, ProjectedBounds, ProtectedVoidHeightScope,
-    ProtectedVoidPolicy, SlabAnalysis, SlabRequest, SourceLeafRequest, analyze_height_domain,
-    analyze_placed_height_domain, capture_projected_voids, certify_endpoint_ownership,
-    certify_endpoint_stratum_ownership, certify_native_collar_incidence,
-    certify_native_critical_collar, certify_native_one_sided_source_leaf,
-    certify_native_source_leaf, certify_native_union, certify_planar_capsule_clearance,
-    certify_planar_capsule_pair_clearance, placed_bounds, projected_bounds,
+    PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
+    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, ProjectedBounds,
+    ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest, SourceLeafRequest,
+    analyze_height_domain, analyze_placed_height_domain, capture_projected_voids,
+    certify_endpoint_ownership, certify_endpoint_stratum_ownership,
+    certify_native_collar_incidence, certify_native_critical_collar,
+    certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
+    certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
+    material_projected_bounds, placed_bounds, placed_material_bounds, projected_bounds,
     projected_protected_void_envelopes,
 };
 pub use kernel::Definition;
@@ -57,7 +58,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "b14bb0c20056cb4c8599ce6e43798fcb06acf9a5";
+pub const KERNEL_REVISION: &str = "e6ff94e05ee5130f06451883cc7bb2148a080b99";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
@@ -92,6 +93,9 @@ pub struct SectionLoopMm {
 }
 
 /// Owned native section; loop identities are local to this result, never source faces.
+/// This certifies a geometric intersection or conservative projection, not
+/// closure of toleranced source material. Material reuse and support require
+/// the separate descriptor-bound slab/leaf and completed-union authority.
 #[derive(Debug)]
 pub struct NativeSection {
     pub(crate) plane: PlaneMm,

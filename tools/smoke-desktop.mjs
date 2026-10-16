@@ -1043,6 +1043,28 @@ async function inspectManufacturing() {
   const bedOccurrence = beforeBedScene.occurrences[0].occurrence_id;
   const originalPose = beforeBedScene.occurrences[0].pose;
   await input('[data-testid="manufacturing-bed-occurrence"]', bedOccurrence);
+  const bedCancellationRequested = await evaluate(`(async () => {
+    document.querySelector('[data-testid="manufacturing-center-bed"]').click();
+    const deadline = performance.now() + 10000;
+    while (performance.now() < deadline) {
+      const button = document.querySelector('[data-testid="manufacturing-cancel"]');
+      if (button && !button.disabled) { button.click(); return true; }
+      await new Promise(requestAnimationFrame);
+    }
+    return false;
+  })()`);
+  assert.equal(bedCancellationRequested, true,
+    "Bed preparation exposes the actual cancellable native operation");
+  const afterBedCancellation = await until(async () => {
+    const current = await manufacturingState();
+    return !current.working && !(await geometryState()).active_job ? current : false;
+  }, "bed cancellation/ACK-winning terminal completion", 65000);
+  assert.equal(afterBedCancellation.project_revision, beforeBedProject.project_revision,
+    "Cancelling bed preparation cannot mutate the project");
+  assert.deepEqual((await geometryState()).scene, beforeBedScene.scene,
+    "Cancelling bed preparation cannot replace the scene");
+  assert.deepEqual((await geometryState()).occurrences, beforeBedScene.occurrences,
+    "Cancelling bed preparation cannot move an occurrence");
   await click("manufacturing-center-bed");
   const prepared = await until(async () => {
     const current = await manufacturingState();

@@ -45,6 +45,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 use step_p21::ast::Parameter;
+pub(crate) use trim_certificate::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
 
 pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
 
@@ -991,6 +992,32 @@ fn validate_parameter_bindings(
                         "retained parameter map lost original interval or native edge binding",
                     ));
                 }
+                if let Some(proof) = retained.correspondence.as_ref() {
+                    let binding = proof.binding().ok_or_else(|| {
+                        kernel("original coedge receipt lacks normalized ownership")
+                    })?;
+                    let native_range = conversion
+                        .as_ref()
+                        .map_or_else(
+                            || continuation.map(|branch| branch.source_range),
+                            |map| Some(map.native_range),
+                        )
+                        .ok_or_else(|| kernel("original coedge receipt lacks native range"))?;
+                    if binding.face != face.id()
+                        || binding.edge != edge.id()
+                        || binding.endpoints != [edge.front().id(), edge.back().id()]
+                        || binding.source != *source_use
+                        || binding.source_face != source.source_face
+                        || binding.source_face_use != source.source_face_use
+                        || proof.native_range() != [native_range.0, native_range.1]
+                        || retained.source_chart_parameter_range
+                            != Some((proof.uv_range()[0], proof.uv_range()[1]))
+                    {
+                        return Err(kernel(
+                            "original coedge receipt lost source/native range or ownership",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1391,6 +1418,27 @@ pub(crate) fn import_step(
             ));
         }
     }
+    // Charge complete fixed records at their source owner, including alignment
+    // and the inline receipt. A second record-sized reserve bounds temporary
+    // metadata coexistence; only the final source-owned records remain charged.
+    let correspondence_bytes = coedge_count
+        .checked_mul(std::mem::size_of::<BoundaryCoedgeRef>())
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "original coedge receipt capacity overflow",
+            )
+        })?;
+    if continuation_bytes
+        .checked_add(correspondence_bytes.saturating_mul(2))
+        .is_none_or(|bytes| bytes > query_proof_byte_limit)
+    {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "original coedge receipt owner capacity exhausted",
+        ));
+    }
+    continuation_bytes += correspondence_bytes;
     let mut trim_slots = Vec::with_capacity(shell.faces.len());
     for face in &shell.faces {
         check_cancel(cancel)?;
@@ -1569,6 +1617,7 @@ pub(crate) fn import_step(
                         parameter_range,
                         witness.certificate,
                         witness.declared_source,
+                        witness.correspondence,
                     ));
                     witness.curve
                 })
@@ -1784,16 +1833,80 @@ pub(crate) fn import_step(
                     &mut source_vertices,
                     &mut native_vertices,
                 )?;
+                let metadata = source_trim_metadata[face_index][wire_index][coedge_index];
+                // The final native coefficients have been normalized, and an
+                // implicit/periodic inverse may have widened the UV tube after
+                // its first forward proof. Reprove the FULL final tube against
+                // these actual operands; scaling an old residual is not proof.
+                let correspondence = if let Some(previous) = metadata.5 {
+                    let chart = trims[wire_index][coedge_index].as_ref().ok_or_else(|| {
+                        kernel("completed original correspondence lost its UV coefficients")
+                    })?;
+                    let mut proof = face.with_surface(|surface| edge.with_curve(|curve| {
+                        let continuation = boundary_continuations
+                            .get(slot.index).and_then(Option::as_ref);
+                        if previous.provenance() == OriginalCorrespondenceProvenance::ExactCoefficients
+                            && continuation.is_none()
+                            && metadata.0 == [0.0; 2]
+                            && source_trim::native_chart(
+                                curve, surface, Some(chart), parameter.native_uv_domain,
+                                &mut chart_work, cancel,
+                            )?.is_some()
+                        {
+                            return trim_certificate::OriginalCoedgeCorrespondence::exact_coefficients(
+                                curve, chart, &mut chart_work, cancel,
+                            ).map(Some);
+                        }
+                        let input = trim_certificate::Correspondence {
+                            curve, surface, chart,
+                            maximum_error_mm: 1.0e-7,
+                            margin_uv: metadata.0,
+                        };
+                        let proof = if let Some(branch) = continuation {
+                            trim_certificate::certify_retained_coedge_correspondence(
+                                input, (&original_continuations[branch.prepared], scale),
+                                &mut chart_work, cancel,
+                            )?
+                        } else {
+                            trim_certificate::certify_declared_coedge_correspondence(
+                                input, &mut chart_work, cancel, None,
+                            )?
+                        };
+                        Ok(proof)
+                    }))?;
+                    if previous.provenance() == OriginalCorrespondenceProvenance::CompletedPoleGraph
+                        && let Some(receipt) = proof.as_mut()
+                    {
+                        receipt.complete_pole_graph();
+                    }
+                    proof
+                } else {
+                    None
+                };
+                let source_chart_error_mm = correspondence.as_ref().map_or(metadata.1, |proof| {
+                    metadata.1.max(proof.position_error_mm())
+                });
+                let correspondence = correspondence.map(|proof| {
+                    proof.bind(crate::kernel::OriginalCoedgeBinding {
+                        face: face.id(),
+                        edge: edge.id(),
+                        endpoints: [edge.front().id(), edge.back().id()],
+                        owner: [face_index, wire_index, coedge_index],
+                        source_face: source_topology.faces[face_index].source_face,
+                        source_face_use: source_topology.faces[face_index].source_face_use,
+                        source: source_topology.faces[face_index].wires[wire_index].coedges
+                            [coedge_index],
+                    })
+                });
                 refs.push(BoundaryCoedgeRef {
                     witness: slot.index,
                     orientation: slot.orientation,
                     edge: edge.id(),
+                    correspondence,
                     source_chart_margin_uv: source_trim_metadata[face_index][wire_index]
                         [coedge_index]
                         .0,
-                    source_chart_error_mm: source_trim_metadata[face_index][wire_index]
-                        [coedge_index]
-                        .1,
+                    source_chart_error_mm,
                     source_chart_parameter_range: source_trim_metadata[face_index][wire_index]
                         [coedge_index]
                         .2,

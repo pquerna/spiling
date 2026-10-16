@@ -1551,17 +1551,31 @@ export function useWorkbench(
               throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
             if (snapshot.stale || !summary || !snapshot.project)
               throw new DomainError("stale_revision", "Resume the native scene before preparing the bed.");
-            const result = await exchange(
+            const occurrence = snapshot.occurrences.find(row => row.occurrence_id === occurrenceId);
+            if (!occurrence)
+              throw new DomainError("stale_revision", "Occurrence is absent from the captured scene.");
+            const accepted = await exchange(
               () => native.prepareManufacturingBed(summary.session_id, summary.revision, occurrenceId, center),
               token,
             );
+            const completed = await waitJob(accepted, token);
+            if (completed.kind !== "bed_pose_prepared")
+              throw new Error("Unexpected native bed preparation result.");
+            const result = completed.preparation;
             const current = stateRef.current;
-            if (current.hello?.session_id !== result.session_id ||
+            if (result.session_id !== summary.session_id ||
+                result.scene_revision !== summary.revision ||
+                result.project_revision !== snapshot.project.revision ||
+                current.hello?.session_id !== result.session_id ||
                 sceneRef.current?.revision !== result.scene_revision ||
                 current.project?.revision !== result.project_revision ||
                 current.project?.project_id !== snapshot.project.project_id ||
                 current.projectEpoch !== snapshot.projectEpoch ||
-                result.occurrence_id !== occurrenceId)
+                result.occurrence_id !== occurrenceId ||
+                result.definition_id !== occurrence.definition_id ||
+                result.center_xy !== center ||
+                !result.original_pose.translation_mm.every((value, axis) => value === occurrence.pose.translation_mm[axis]) ||
+                !result.original_pose.rotation_xyzw.every((value, axis) => value === occurrence.pose.rotation_xyzw[axis]))
               throw new DomainError("stale_revision", "Bed proposal superseded; prepare again.");
             preparation = result;
           } catch (error) {

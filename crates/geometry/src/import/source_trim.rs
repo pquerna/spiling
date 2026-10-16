@@ -69,13 +69,7 @@ impl<'a> TrimInput<'a> {
     }
 }
 
-/// Completed forward position AND relative-tangent proof for the exact chart
-/// returned by this retention call. Coefficient projections and inverse tubes
-/// deliberately cannot construct this receipt.
-struct ForwardCorrespondence {
-    error: f64,
-    margin_uv: [f64; 2],
-}
+use super::trim_certificate::OriginalCoedgeCorrespondence;
 
 pub(super) struct SourceTrim {
     pub curve: Option<Curve2D>,
@@ -86,25 +80,36 @@ pub(super) struct SourceTrim {
     /// Original source PCURVE (or literal source parameter curve), not a fitted
     /// inverse. Consumers still require native UV incidence/coverage.
     pub declared_source: bool,
-    forward: Option<ForwardCorrespondence>,
+    pub correspondence: Option<OriginalCoedgeCorrespondence>,
 }
 impl SourceTrim {
     pub(super) fn proves_forward(&self, tolerance: f64, margin_uv: [f64; 2]) -> bool {
-        self.forward.as_ref().is_some_and(|proof| {
-            proof.error <= tolerance && (0..2).all(|axis| margin_uv[axis] <= proof.margin_uv[axis])
+        self.correspondence.as_ref().is_some_and(|proof| {
+            proof.provenance() == super::trim_certificate::OriginalCorrespondenceProvenance::Forward
+                && proof.position_error_mm() <= tolerance
+                && (0..2).all(|axis| margin_uv[axis] <= proof.margin_uv()[axis])
         })
     }
 
-    fn exact(curve: Curve2D) -> Self {
-        Self {
+    fn exact(
+        source: &Curve,
+        curve: Curve2D,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let correspondence =
+            super::trim_certificate::OriginalCoedgeCorrespondence::exact_coefficients(
+                source, &curve, work, cancel,
+            )?;
+        Ok(Self {
             curve: Some(curve),
             margin_uv: [0.0; 2],
             error_mm: 0.0,
             certificate: SourceChartCertificate::InverseOrExact,
             pending_meridian: None,
             declared_source: false,
-            forward: None,
-        }
+            correspondence: Some(correspondence),
+        })
     }
     fn retained(curve: Option<Curve2D>) -> Self {
         Self {
@@ -114,7 +119,7 @@ impl SourceTrim {
             certificate: SourceChartCertificate::Unproved,
             pending_meridian: None,
             declared_source: false,
-            forward: None,
+            correspondence: None,
         }
     }
 }
@@ -614,7 +619,7 @@ fn prove_line_branch(
         && margin_uv == [0.0; 2]
         && native_chart(curve, surface, Some(&chart), domain, work, cancel)?.is_some()
     {
-        let mut witness = SourceTrim::exact(chart);
+        let mut witness = SourceTrim::exact(curve, chart, work, cancel)?;
         witness.declared_source = true;
         return Ok(Some(witness));
     }
@@ -636,14 +641,11 @@ fn prove_line_branch(
     Ok(Some(SourceTrim {
         curve: Some(chart),
         margin_uv,
-        error_mm: crate::parametric::up(bound * scale),
+        error_mm: crate::parametric::up(bound.position_error_mm() * scale),
         certificate: SourceChartCertificate::InverseOrExact,
         pending_meridian: None,
         declared_source: true,
-        forward: Some(ForwardCorrespondence {
-            error: bound,
-            margin_uv,
-        }),
+        correspondence: Some(bound),
     }))
 }
 
@@ -967,7 +969,7 @@ pub(super) fn retain_with_continuation(
             maximum_error_mm: 1.0e-7 / scale,
             margin_uv,
         },
-        prepared,
+        (prepared, 1.0),
         work,
         cancel,
     )?
@@ -983,7 +985,7 @@ pub(super) fn retain_with_continuation(
             prepared,
             surface: native_surface,
             chart: &chart,
-            physical_residual: bound,
+            physical_residual: bound.position_error_mm(),
             coefficient_margin: margin_uv,
         },
         work,
@@ -992,13 +994,13 @@ pub(super) fn retain_with_continuation(
     Ok(SourceTrim {
         curve: Some(chart),
         margin_uv,
-        error_mm: crate::parametric::up(bound * scale),
+        error_mm: crate::parametric::up(bound.position_error_mm() * scale),
         // The converter's stored chart is a candidate, not independent proof
         // that an implicit source declared a literal PCURVE expression.
         certificate: SourceChartCertificate::InverseOrExact,
         pending_meridian: None,
         declared_source: false,
-        forward: None,
+        correspondence: Some(bound),
     })
 }
 
@@ -1031,14 +1033,11 @@ fn derived_chart_witness(
     Ok(Some(SourceTrim {
         curve: Some(chart),
         margin_uv: [0.0; 2],
-        error_mm: crate::parametric::up(bound * scale),
+        error_mm: crate::parametric::up(bound.position_error_mm() * scale),
         certificate: SourceChartCertificate::InverseOrExact,
         pending_meridian: None,
         declared_source: false,
-        forward: Some(ForwardCorrespondence {
-            error: bound,
-            margin_uv: [0.0; 2],
-        }),
+        correspondence: Some(bound),
     }))
 }
 
@@ -1091,17 +1090,13 @@ fn pole_meridian_witness(
     Ok(Some(SourceTrim {
         curve: Some(proof.chart.curve),
         margin_uv: proof.chart.margin_uv,
-        error_mm: proof
-            .chart
-            .error_mm
-            .max(crate::parametric::up(bound * input.surface.scale)),
+        error_mm: proof.chart.error_mm.max(crate::parametric::up(
+            bound.position_error_mm() * input.surface.scale,
+        )),
         certificate: SourceChartCertificate::Unproved,
         pending_meridian: Some(proof.graph),
         declared_source: false,
-        forward: Some(ForwardCorrespondence {
-            error: bound,
-            margin_uv: proof.chart.margin_uv,
-        }),
+        correspondence: Some(bound),
     }))
 }
 
@@ -1298,10 +1293,10 @@ fn source_associated_planar_chart(
         jet.dv = axes[1];
     }
     let residual = witness
-        .forward
+        .correspondence
         .as_ref()
         .ok_or_else(|| invalid("derived affine chart lost its completed forward receipt"))?
-        .error;
+        .position_error_mm();
     let Some(margin) = super::implicit::inverse_margin(jet, residual)? else {
         return Ok(None);
     };
@@ -1549,14 +1544,11 @@ fn source_associated_extrusion_chart(
             return Ok(Some(SourceTrim {
                 curve: Some(chart),
                 margin_uv: [0.0; 2],
-                error_mm: crate::parametric::up(bound * scale),
+                error_mm: crate::parametric::up(bound.position_error_mm() * scale),
                 certificate: SourceChartCertificate::InverseOrExact,
                 pending_meridian: None,
                 declared_source: false,
-                forward: Some(ForwardCorrespondence {
-                    error: bound,
-                    margin_uv: [0.0; 2],
-                }),
+                correspondence: Some(bound),
             }));
         }
     }
@@ -1637,7 +1629,7 @@ pub(super) fn retain(
     )? {
         let original = declared.take();
         let declared_source = original.is_some() && matches!(map, SurfaceParameterMap::Identity);
-        let mut witness = SourceTrim::exact(original.unwrap_or(curve));
+        let mut witness = SourceTrim::exact(native_curve, original.unwrap_or(curve), work, cancel)?;
         witness.declared_source = declared_source;
         // Exact native coefficient projection supplies its own native chart;
         // it does not turn the separately retained raw STEP gauge into equality.
@@ -1699,14 +1691,11 @@ pub(super) fn retain(
             return Ok(SourceTrim {
                 curve: declared,
                 margin_uv,
-                error_mm: crate::parametric::up(bound * scale),
+                error_mm: crate::parametric::up(bound.position_error_mm() * scale),
                 certificate: SourceChartCertificate::InverseOrExact,
                 pending_meridian: None,
                 declared_source: true,
-                forward: Some(ForwardCorrespondence {
-                    error: bound,
-                    margin_uv,
-                }),
+                correspondence: Some(bound),
             });
         }
     }
@@ -1727,7 +1716,7 @@ pub(super) fn retain(
             .transpose()?
             .unwrap_or(true)
     {
-        let mut witness = SourceTrim::exact(curve);
+        let mut witness = SourceTrim::exact(native_curve, curve, work, cancel)?;
         witness.declared_source = true;
         return Ok(witness);
     }
@@ -1764,14 +1753,42 @@ pub(super) fn retain(
         {
             return Err(invalid("source chart proof returned invalid uncertainty"));
         }
+        // The coefficient-derived inverse tube is not a source/native C1
+        // correspondence. Independently prove the actual retained native edge
+        // against this whole mapped UV expression, including its full tube.
+        // A declined proof retains inverse authority only, never a receipt.
+        let margin_uv = std::array::from_fn(|axis| {
+            crate::parametric::Interval::point(proof.margin_uv[axis])
+                .add(crate::parametric::Interval::point(
+                    additional_margin_uv[axis],
+                ))
+                .hi
+        });
+        let correspondence = super::trim_certificate::certify_declared_coedge_correspondence(
+            super::trim_certificate::Correspondence {
+                curve: native_curve,
+                surface: native_surface,
+                chart: &proof.curve,
+                maximum_error_mm: 1.0e-7 / scale,
+                margin_uv,
+            },
+            work,
+            cancel,
+            None,
+        )?;
+        let error_mm = correspondence.as_ref().map_or(proof.error_mm, |bound| {
+            proof
+                .error_mm
+                .max(crate::parametric::up(bound.position_error_mm() * scale))
+        });
         return Ok(SourceTrim {
             curve: Some(proof.curve),
-            margin_uv: proof.margin_uv,
-            error_mm: proof.error_mm,
+            margin_uv,
+            error_mm,
             certificate: SourceChartCertificate::InverseOrExact,
             pending_meridian: None,
             declared_source: false,
-            forward: None,
+            correspondence,
         });
     }
     // A bounded positional correspondence is useful diagnostic evidence, not
@@ -2236,7 +2253,7 @@ fn prove_periodic_rebind(
                     maximum_error_mm: 1e-7 / scale,
                     margin_uv,
                 },
-                prepared,
+                (prepared, 1.0),
                 work,
                 cancel,
             )?
@@ -2265,7 +2282,7 @@ fn prove_periodic_rebind(
                     prepared,
                     surface: native_surface,
                     chart: &chart,
-                    physical_residual: bound,
+                    physical_residual: bound.position_error_mm(),
                     coefficient_margin: margin_uv,
                 },
                 work,
@@ -2277,11 +2294,12 @@ fn prove_periodic_rebind(
         Ok(Some(SourceTrim {
             curve: Some(chart),
             margin_uv,
-            error_mm: crate::parametric::up(bound * scale).max(coefficient_error),
+            error_mm: crate::parametric::up(bound.position_error_mm() * scale)
+                .max(coefficient_error),
             certificate: SourceChartCertificate::InverseOrExact,
             pending_meridian: None,
             declared_source,
-            forward: None,
+            correspondence: Some(bound),
         }))
     })();
     result.map_err(|cause| periodic_error(cause, stage, context, shift, started, work))
@@ -2971,6 +2989,9 @@ where
                 latitude_axis: graph.latitude_axis,
                 pole_endpoints: graph.pole_endpoints,
             };
+            if let Some(receipt) = witness.correspondence.as_mut() {
+                receipt.complete_pole_graph();
+            }
         }
     }
     Ok(())
@@ -2985,6 +3006,127 @@ mod tests {
     };
     use std::str::FromStr;
     use step_p21::{ast::DataSection, tables::EntityTable};
+
+    #[test]
+    fn analytic_inverse_tube_requires_independent_whole_native_correspondence() {
+        use monstertruck_io::step::load::step_geometry::{Conic3D, ElementarySurface};
+        use monstertruck_modeling::RevolutionSurface;
+        let cancel = AtomicBool::new(false);
+        let tau = std::f64::consts::TAU;
+        let original_surface =
+            StepSurface::ElementarySurface(ElementarySurface::CylindricalSurface(Processor::new(
+                RevolutionSurface::by_revolution(
+                    Line(Point3::new(13., 10., 0.), Point3::new(13., 10., 8.)),
+                    Point3::new(10., 10., 0.),
+                    Vector3::unit_z(),
+                ),
+            )));
+        let (surface, map) = original_surface.to_modeling_with_parameter_map().unwrap();
+        for reflected in [false, true] {
+            let mut ellipse = Processor::with_transform(
+                TrimmedCurve::new(
+                    UnitCircle::<Point3>::new(),
+                    (tau, 3. * std::f64::consts::PI),
+                ),
+                Matrix4::from_translation(Vector3::new(10., 10., 4.))
+                    * Matrix4::from_nonuniform_scale(3., 3., 1.),
+            );
+            if reflected {
+                ellipse.invert();
+            }
+            let source = Curve3D::Conic(Conic3D::Ellipse(ellipse));
+            let native = source.to_parameter_preserving_modeling().unwrap();
+            let input = TrimInput {
+                source_curve: &source,
+                native_curve: &native,
+                surface: SurfaceInput {
+                    source_surface: &original_surface,
+                    native_surface: &surface,
+                    map,
+                    scale: 1.,
+                },
+                declared: None,
+            };
+            let witness = retain(
+                input,
+                [0.; 2],
+                &mut GeometryWorkBudget::new(4_000_000),
+                &cancel,
+            )
+            .unwrap();
+            let proof = witness
+                .correspondence
+                .as_ref()
+                .expect("whole original analytic receipt");
+            assert_eq!(
+                proof.provenance(),
+                super::super::trim_certificate::OriginalCorrespondenceProvenance::Forward
+            );
+            assert_eq!(proof.native_range(), [tau, 3. * std::f64::consts::PI]);
+            assert_eq!(proof.margin_uv(), witness.margin_uv);
+            assert!(proof.position_error_mm() <= 1.0e-7);
+            assert!(proof.relative_derivative_error_bound() <= 0.25);
+            assert!(witness.certificate.is_certified() && !witness.declared_source);
+            assert!(witness.margin_uv.into_iter().any(|margin| margin > 0.));
+            let wrong = native.transformed(Matrix4::from_translation(Vector3::new(0.001, 0., 0.)));
+            let inverse_only = retain(
+                TrimInput {
+                    native_curve: &wrong,
+                    ..input
+                },
+                [0.; 2],
+                &mut GeometryWorkBudget::new(4_000_000),
+                &cancel,
+            )
+            .unwrap();
+            assert!(inverse_only.certificate.is_certified());
+            assert!(
+                inverse_only.correspondence.is_none(),
+                "source inverse coefficients cannot prove a different NativeEdge expression"
+            );
+        }
+    }
+
+    #[test]
+    fn blind_pocket_analytic_receipts_bind_final_original_coedges() {
+        let cancel = AtomicBool::new(false);
+        let source = crate::parity_fixtures::original(
+            "native-parity-blind-pocket.step",
+            crate::parity_fixtures::blind_pocket(),
+        );
+        let definition = crate::import_step(source.as_bytes(), &cancel).unwrap();
+        let mut analytic_forward = 0;
+        for (face_index, face) in definition.face_boundaries.iter().enumerate() {
+            for (wire_index, wire) in face.wires.iter().enumerate() {
+                for (coedge_index, coedge) in wire.iter().enumerate() {
+                    let proof = coedge.correspondence.as_ref().unwrap_or_else(|| panic!(
+                        "missing original correspondence at face {face_index}, wire {wire_index}, coedge {coedge_index}",
+                    ));
+                    let binding = proof.binding().expect("final normalized binding");
+                    assert_eq!(binding.face, face.face);
+                    assert_eq!(binding.edge, coedge.edge);
+                    assert_eq!(binding.owner, [face_index, wire_index, coedge_index]);
+                    assert_eq!(
+                        binding.source,
+                        definition.source_topology.faces[face_index].wires[wire_index].coedges
+                            [coedge_index]
+                    );
+                    assert_eq!(proof.margin_uv(), coedge.source_chart_margin_uv);
+                    assert!(proof.position_error_mm() <= 1.0e-7);
+                    assert!(proof.relative_derivative_error_bound() <= 0.25);
+                    if !coedge.source_chart_declared
+                        && proof.provenance() == super::super::trim_certificate::OriginalCorrespondenceProvenance::Forward
+                    {
+                        analytic_forward += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            analytic_forward > 0,
+            "actual derived analytic charts retain forward receipts"
+        );
+    }
 
     fn original_pole_meridian(radius: f64, longitude: f64, reflected: bool) -> Curve3D {
         use monstertruck_io::step::load::step_geometry::Conic3D;
@@ -4572,10 +4714,6 @@ mod tests {
         )
         .unwrap();
         assert!(proof.certificate.is_certified() && proof.declared_source);
-        assert!(
-            proof.forward.is_none(),
-            "a whole coefficient identity is not a numerical forward-error receipt",
-        );
         assert_eq!(proof.curve.unwrap().range_tuple(), (0., 4.));
         let wrong = StepCurve2D::Line(Line(Point2::new(0., 1.), Point2::new(1., 1.)));
         let refused = retain(

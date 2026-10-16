@@ -309,7 +309,7 @@ fn prove_retained(
             maximum_error_mm: 1.0e-7 / scale,
             margin_uv: margin,
         },
-        prepared,
+        (prepared, 1.0),
         work,
         cancel,
     )?
@@ -332,7 +332,7 @@ fn prove_retained(
                 maximum_error_mm: 1.0e-7 / scale,
                 margin_uv: margin,
             },
-            prepared,
+            (prepared, 1.0),
             work,
             cancel,
         )?

@@ -87,6 +87,7 @@ struct SlabOccurrence<'a> {
 struct NativeUnionSourceIdentity {
     occurrence_id: OccurrenceId,
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     pose: RigidPoseMm,
 }
 #[derive(Debug, Clone)]
@@ -95,6 +96,20 @@ pub struct NativeUnionSourceCapture {
     native_shape_error_policy_mm: f64,
 }
 impl NativeUnionSourceCapture {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.identity.material_realization
+    }
+    fn matches_original_material(&self, definition: &Definition) -> bool {
+        self.definition_id() == definition.id()
+            && self.identity.material_realization
+                == crate::kernel::MaterialRealizationIdentity::new(definition)
+    }
+    fn same_material_recipe(&self, other: &Self) -> bool {
+        self.definition_id() == other.definition_id()
+            && self.identity.material_realization == other.identity.material_realization
+    }
     pub fn occurrence_id(&self) -> OccurrenceId {
         self.identity.occurrence_id
     }
@@ -153,6 +168,14 @@ struct NativeLoopShape {
     kernel_box: Option<[[f64; 2]; 2]>,
 }
 impl NativeSourceLeafReceipt {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.source.material_realization_identity()
+    }
+    pub(crate) fn matches_original_material(&self, definition: &Definition) -> bool {
+        self.source.matches_original_material(definition)
+    }
     pub fn occurrence_id(&self) -> OccurrenceId {
         self.source.occurrence_id()
     }
@@ -327,6 +350,11 @@ pub struct NativeEndpointOwnership {
     stratum: Option<Arc<NativeStratumSourceCapture>>,
 }
 impl NativeEndpointOwnership {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.source.material_realization_identity()
+    }
     pub fn occurrence_id(&self) -> OccurrenceId {
         self.source.occurrence_id()
     }
@@ -756,6 +784,9 @@ pub fn certify_native_collar_incidence(
     })?;
     if current.native_sample_sha256() != &native_sample_hash(analysis, work, cancel)?
         || current.definition_id() != collar.definition_id()
+        || current.material_realization_identity() != collar.material_realization_identity()
+        || current.material_realization_identity() != analysis.material_realization_identity()
+        || current.material_realization_identity() != complex.material_realization_identity()
         || current.pose() != collar.placed_pose()
         || current.world_height_interval_mm() != collar.world_height_interval_mm()
         || current.sample_world_z_mm() != collar.sample_world_z_mm()
@@ -784,6 +815,7 @@ pub fn certify_native_collar_incidence(
         work.charge(1, cancel)?;
         if input.leaf.occurrence_id() != current.occurrence_id()
             || input.leaf.definition_id() != current.definition_id()
+            || input.leaf.material_realization_identity() != current.material_realization_identity()
             || input.leaf.pose() != current.pose()
             || !input.leaf.is_positive()
         {
@@ -1479,7 +1511,7 @@ fn source_retained_bytes(source: &NativeUnionSourceCapture) -> usize {
 
 fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
     a.occurrence_id() == b.occurrence_id()
-        && a.definition_id() == b.definition_id()
+        && a.source.same_material_recipe(&b.source)
         && a.pose() == b.pose()
         && a.world_height_interval_mm == b.world_height_interval_mm
         && a.sample_world_z_mm == b.sample_world_z_mm
@@ -1503,6 +1535,7 @@ fn hash_source(hash: &mut Sha256, source: &NativeUnionSourceCapture) {
     hash.update(source.occurrence_id().get().to_le_bytes());
     hash.update((source.definition_id().as_str().len() as u64).to_le_bytes());
     hash.update(source.definition_id().as_str().as_bytes());
+    hash.update(source.material_realization_identity().identity_bytes());
     for value in source
         .pose()
         .translation_mm
@@ -2108,7 +2141,7 @@ impl NativeUnionBindingLedger {
                     work.charge(1, cancel)?;
                     matches += usize::from(
                         source.occurrence_id() == actual.occurrence_id()
-                            && source.definition_id() == actual.definition_id()
+                            && source.same_material_recipe(actual)
                             && source.pose() == actual.pose(),
                     );
                 }
@@ -3028,6 +3061,7 @@ pub(super) fn native_sample_hash(
     work.charge(1, cancel)?;
     let mut hash = Sha256::new();
     hash.update(b"spiling-native-frozen-slab-sample-1\0");
+    hash.update(analysis.material_realization_identity().identity_bytes());
     hash.update((analysis.section.loops.len() as u64).to_le_bytes());
     let plane = analysis.source_sample_plane();
     for value in plane.origin_mm.into_iter().chain(plane.normal) {
@@ -3158,7 +3192,7 @@ fn certify_source_leaf(
             "source-M leaf requires a captured native policy",
         )
     })?;
-    if analysis.definition_id() != definition.id()
+    if !analysis.matches_original_material(definition)
         || analysis.section.definition_id() != definition.id()
         || !analysis.section.is_native_intersection()
         || analysis.placed_pose() != Some(pose)
@@ -3193,7 +3227,7 @@ fn certify_source_leaf(
     }
     if let Some(invariance) = &analysis.invariance {
         let range = invariance.height_interval_mm();
-        if invariance.definition_id() != definition.id()
+        if !invariance.matches_original_material(definition)
             || invariance.pose() != Some(pose)
             || range[0] > interval[0]
             || range[1] < interval[1]
@@ -3517,6 +3551,7 @@ fn certify_source_leaf(
             identity: Arc::new(NativeUnionSourceIdentity {
                 occurrence_id: *occurrence_id,
                 definition_id: definition.id().clone(),
+                material_realization: analysis.material_realization_identity(),
                 pose,
             }),
             native_shape_error_policy_mm: native_policy,
@@ -3591,7 +3626,7 @@ pub fn certify_endpoint_ownership(
         ));
     }
     if adjacent.occurrence_id() != *occurrence_id
-        || adjacent.definition_id() != definition.id()
+        || !adjacent.matches_original_material(definition)
         || adjacent.pose() != pose
     {
         return Err(error(
@@ -3730,7 +3765,10 @@ pub fn certify_endpoint_stratum_ownership(
     {
         return Err(unresolved());
     }
-    if adjacent.definition_id() != stratum.definition_id() || adjacent.pose() != pose {
+    if adjacent.definition_id() != stratum.definition_id()
+        || adjacent.material_realization_identity() != stratum.material_realization_identity()
+        || adjacent.pose() != pose
+    {
         return Err(error(
             GeometryErrorCode::InvalidGeometry,
             "native stratum and adjacent source-M core have different original source/pose",
@@ -3797,6 +3835,7 @@ fn owns_native_stratum(
     capture.face_id == *stratum.face_id()
         && capture.face_index == stratum.face_index()
         && ownership.definition_id() == stratum.definition_id()
+        && ownership.material_realization_identity() == stratum.material_realization_identity()
         && Some(ownership.pose()) == stratum.placed_pose()
         && Some(ownership.world_height_interval_mm) == stratum.world_height_interval_mm()
         && Some(ownership.sample_world_z_mm) == stratum.sample_world_z_mm()
@@ -3911,7 +3950,7 @@ pub fn certify_native_union(
                         "native union source has no placed policy capture",
                     )
                 })?;
-                if analysis.definition_id() != occurrence.definition.id()
+                if !analysis.matches_original_material(occurrence.definition)
                     || analysis.section.definition_id() != occurrence.definition.id()
                     || !analysis.section.is_native_intersection()
                     || analysis.placed_pose() != Some(occurrence.pose)
@@ -3964,7 +4003,7 @@ pub fn certify_native_union(
                 }
                 if let Some(invariance) = &analysis.invariance {
                     let range = invariance.height_interval_mm();
-                    if invariance.definition_id() != occurrence.definition.id()
+                    if !invariance.matches_original_material(occurrence.definition)
                         || invariance.pose() != Some(occurrence.pose)
                         || range[0] > interval[0]
                         || range[1] < interval[1]
@@ -3996,7 +4035,9 @@ pub fn certify_native_union(
                     cancel,
                 )?;
                 if leaf.occurrence_id() != occurrence.occurrence_id
-                    || leaf.definition_id() != occurrence.definition.id()
+                    || !leaf.matches_original_material(occurrence.definition)
+                    || leaf.material_realization_identity()
+                        != analysis.material_realization_identity()
                     || leaf.pose() != occurrence.pose
                     || leaf.world_height_interval_mm() != interval
                     || leaf.sample_world_z_mm() != z
@@ -4111,7 +4152,9 @@ pub fn certify_native_union(
                 leaf.source.clone()
             }
             NativeUnionOccurrenceEvidence::EndpointOwned(ownership) => {
-                if ownership.definition_id() != occurrence.definition.id()
+                if !ownership
+                    .source
+                    .matches_original_material(occurrence.definition)
                     || ownership.occurrence_id() != occurrence.occurrence_id
                     || ownership.pose() != occurrence.pose
                     || ownership.stratum.is_some()
@@ -7281,8 +7324,20 @@ mod tests {
             };
             let a = slab(&definition, RigidPoseMm::IDENTITY, 0, &mut work);
             let b = slab(&definition, pose, a.retained_bytes(), &mut work);
+            assert_eq!(
+                a.material_realization_identity(),
+                b.material_realization_identity()
+            );
             let leaf_a = source_leaf(&definition, 1, RigidPoseMm::IDENTITY, &a, &mut work);
             let leaf_b = source_leaf(&definition, 2, pose, &b, &mut work);
+            assert_eq!(
+                leaf_a.material_realization_identity(),
+                leaf_b.material_realization_identity()
+            );
+            assert_eq!(
+                leaf_a.material_realization_identity(),
+                crate::kernel::MaterialRealizationIdentity::new(&definition),
+            );
             let occurrences = [
                 NativeUnionOccurrence {
                     occurrence_id: OccurrenceId::new(1).unwrap(),
@@ -7547,6 +7602,54 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("actual immutable native slab and actual source-M polygon proof")
+    }
+
+    #[test]
+    fn same_definition_leaf_with_different_material_recipe_is_not_reusable() {
+        let definition = original("box-mm.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(50_000_000);
+        let pose = RigidPoseMm::IDENTITY;
+        let analysis = slab(&definition, pose, 0, &mut work);
+        let leaf = source_leaf(&definition, 1, pose, &analysis, &mut work);
+        let mut changed = leaf.clone();
+        let allowance = if definition.provenance().uncertainty_mm.is_some() {
+            None
+        } else {
+            Some(0.0)
+        };
+        changed.source.identity = Arc::new(NativeUnionSourceIdentity {
+            occurrence_id: leaf.occurrence_id(),
+            definition_id: leaf.definition_id().clone(),
+            pose,
+            material_realization: crate::kernel::MaterialRealizationIdentity::with_allowance(
+                allowance,
+            ),
+        });
+        assert!(!same_leaf(&leaf, &changed));
+        assert!(!changed.matches_original_material(&definition));
+        let mut original_hash = Sha256::new();
+        let mut changed_hash = Sha256::new();
+        hash_source(&mut original_hash, &leaf.source);
+        hash_source(&mut changed_hash, &changed.source);
+        assert_ne!(original_hash.finalize(), changed_hash.finalize());
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: leaf.occurrence_id(),
+            definition: &definition,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &analysis,
+                leaf: &changed,
+                endpoint_ownerships: &[],
+            },
+        }];
+        let loops = xy_candidate(&analysis, analysis.sample_world_z_mm().unwrap());
+        assert_eq!(
+            certify_native_union(&occurrences, &loops, policy(0.0), &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+        );
     }
 
     #[test]

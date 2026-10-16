@@ -16,7 +16,7 @@ use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, che
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::sync::atomic::AtomicBool;
 
-pub use bounds::projected_bounds;
+pub use bounds::{MaterialProjectedBounds, material_projected_bounds, projected_bounds};
 pub use collar::{
     NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
     NativeCriticalCollarMaterialTarget, NativeCriticalCollarPolicy, NativeCriticalCollarTarget,
@@ -34,7 +34,10 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub use placed::{analyze_placed_height_domain, placed_bounds};
+pub use placed::{
+    PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
+    placed_material_bounds,
+};
 pub(crate) use placed::{analyze_placed_slab, section_placed_with_work};
 pub use planar::{
     PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm,
@@ -67,6 +70,24 @@ impl GeometryWorkBudget {
     }
     pub(crate) fn remaining(&self) -> u64 {
         self.remaining
+    }
+    /// Add bounded, failure-only phase context without changing the error code or cause.
+    pub(crate) fn annotate_error(
+        &self,
+        error: GeometryError,
+        before: u64,
+        context: impl std::fmt::Display,
+    ) -> GeometryError {
+        GeometryError::new(
+            error.code,
+            format!(
+                "{context}: work_before={before} work_consumed={} work_delta={} work_remaining={}: {}",
+                self.consumed,
+                self.consumed.saturating_sub(before),
+                self.remaining,
+                error.message,
+            ),
+        )
     }
     pub(crate) fn charge(&mut self, amount: u64, cancel: &AtomicBool) -> Result<(), GeometryError> {
         if amount > self.remaining {
@@ -104,11 +125,22 @@ pub struct AnalysisPolicy {
 #[derive(Debug, Clone)]
 pub struct InvariantHeightDomain {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     frame: PlaneFrameMm,
     height_interval_mm: [f64; 2],
     pose: Option<spiling_contracts::geometry::RigidPoseMm>,
 }
 impl InvariantHeightDomain {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.material_realization
+    }
+    pub(crate) fn matches_original_material(&self, definition: &Definition) -> bool {
+        self.definition_id() == definition.id()
+            && self.material_realization
+                == crate::kernel::MaterialRealizationIdentity::new(definition)
+    }
     pub fn definition_id(&self) -> &DefinitionId {
         &self.definition_id
     }
@@ -131,17 +163,67 @@ pub struct HeightAnalysis {
     capture: HeightCapture,
 }
 
+/// Conservative support of possible source-relative transport, not an isolated
+/// critical height, an existence witness, or a physical layer boundary.
+type SourceTransportCover = critical::material_link::SourceTransportSupport;
+
 #[derive(Debug)]
 struct HeightCapture {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
+    transport_support: Vec<SourceTransportCover>,
+    transport_support_complete: bool,
     frame: PlaneFrameMm,
     height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
     pose: Option<spiling_contracts::geometry::RigidPoseMm>,
 }
 impl HeightAnalysis {
+    /// Ordinary event brackets describe literal native geometry. Overlapping
+    /// transport support requires a complete realized-material closed capture,
+    /// even when the ordinary native event list is empty.
+    pub fn requires_closed_material_capture(&self, range: [f64; 2]) -> bool {
+        !self.capture.transport_support_complete
+            || !range.into_iter().all(f64::is_finite)
+            || range[0] > range[1]
+            || range[0] < self.capture.height_interval_mm[0]
+            || range[1] > self.capture.height_interval_mm[1]
+            || self.capture.transport_support.iter().any(|cover| {
+                cover.base_interval[0].min(cover.corrected_interval[0]) <= range[1]
+                    && range[0] <= cover.base_interval[1].max(cover.corrected_interval[1])
+            })
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.capture.definition_id.allocated_bytes()
+            + (self.event_brackets_mm.capacity() + self.proved_event_brackets_mm.capacity())
+                * std::mem::size_of::<[f64; 2]>()
+            + self.capture.transport_support.capacity()
+                * std::mem::size_of::<SourceTransportCover>()
+            + self
+                .invariance
+                .as_ref()
+                .map_or(0, |proof| proof.definition_id.allocated_bytes())
+    }
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.capture.material_realization
+    }
+    /// Literal native critical candidates, not transport-support boundaries.
+    /// Material callers must also honor `requires_closed_material_capture`.
     pub fn event_brackets_mm(&self) -> &[[f64; 2]] {
         &self.event_brackets_mm
+    }
+    /// Mandatory material-plane candidates are unchanged literal events proved
+    /// outside the complete source-owned correction support. Covered native
+    /// events remain deferred closed-capture obligations, not extra sliver
+    /// planes. An empty iterator never proves an absence of material critical
+    /// strata; global material terminal brackets come from material bounds.
+    pub fn material_plane_event_brackets_mm(&self) -> impl Iterator<Item = [f64; 2]> + '_ {
+        self.event_brackets_mm
+            .iter()
+            .filter(|band| !self.requires_closed_material_capture(**band))
+            .copied()
     }
     pub fn invariance(&self) -> Option<&InvariantHeightDomain> {
         self.invariance.as_ref()
@@ -194,6 +276,7 @@ pub struct SlabAnalysis {
 #[derive(Debug)]
 struct SlabCapture {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     request: SlabRequest,
     source_sample_plane: PlaneMm,
     source_sample_height_band_mm: [f64; 2],
@@ -211,6 +294,7 @@ impl SlabCapture {
             slab::native_sample_height_band(definition, request.frame, section, work, cancel)?;
         Ok(Self {
             definition_id: definition.id().clone(),
+            material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
             request,
             source_sample_plane: section.plane,
             source_sample_height_band_mm: [height.lo, height.hi],
@@ -233,6 +317,7 @@ struct PlacedSlabCapture {
 #[derive(Debug)]
 pub struct NativeEndpointStratum {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     face_id: spiling_contracts::geometry::FaceId,
     face_index: usize,
     request: SlabRequest,
@@ -245,6 +330,11 @@ pub struct NativeEndpointStratum {
     patch_cover: Vec<[[f64; 2]; 2]>,
 }
 impl NativeEndpointStratum {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.material_realization
+    }
     pub fn definition_id(&self) -> &DefinitionId {
         &self.definition_id
     }
@@ -295,6 +385,16 @@ impl NativeEndpointStratum {
     }
 }
 impl SlabAnalysis {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.capture.material_realization
+    }
+    pub(crate) fn matches_original_material(&self, definition: &Definition) -> bool {
+        self.definition_id() == definition.id()
+            && self.capture.material_realization
+                == crate::kernel::MaterialRealizationIdentity::new(definition)
+    }
     pub fn section(&self) -> &NativeSection {
         &self.section
     }
@@ -334,6 +434,7 @@ impl SlabAnalysis {
             let a = proof.request();
             let b = self.capture.request;
             proof.definition_id() == &self.capture.definition_id
+                && proof.material_realization_identity() == self.capture.material_realization
                 && a.frame == b.frame
                 && a.height_interval_mm == b.height_interval_mm
                 && a.sample_height_mm.to_bits() == b.sample_height_mm.to_bits()
@@ -467,7 +568,7 @@ pub(crate) fn section_regularity(
     if support.minimum[0] > offset.hi + tolerance || support.maximum[1] < offset.lo - tolerance {
         return Ok(SectionRegularity::Empty);
     }
-    let height = slab::analyze_height_domain_with_scratch_limit(
+    let height = slab::analyze_literal_native_height_domain(
         source,
         frame,
         [-tolerance, tolerance],

@@ -11,8 +11,8 @@ use serde::Serialize;
 use spiling_contracts::{
     ArtifactView, NativeOperationView,
     geometry::{
-        BedPosePreparation, GeometryCommand, GeometryResponse, JobResult, JobStatus,
-        MAX_DISPLAY_LABEL_BYTES, OccurrenceId, ScenePageKind, SceneRevision, SessionId,
+        GeometryCommand, GeometryResponse, JobResult, JobStatus, MAX_DISPLAY_LABEL_BYTES,
+        OccurrenceId, SECTION_PLANE_TOLERANCE_MM, ScenePageKind, SceneRevision, SessionId,
         bounded_text,
     },
     manufacturing::{
@@ -221,7 +221,7 @@ pub async fn manufacturing_prepare_bed(
     base_revision: SceneRevision,
     occurrence_id: OccurrenceId,
     center: bool,
-) -> Result<BedPosePreparation, String> {
+) -> Result<GeometryResponse, String> {
     let mut supervisor = state.active().await?;
     supervisor.refresh().await;
     if supervisor
@@ -317,34 +317,19 @@ pub async fn manufacturing_prepare_bed(
     }
     let occurrence =
         occurrence.ok_or("Selected occurrence is absent from the current native scene")?;
-    let rpc = supervisor
-        .client
-        .as_ref()
-        .ok_or("engine is not running")?
-        .rpc();
-    // Native work must not hold lifecycle ownership: cancellation/close stay callable.
-    drop(supervisor);
-    let preparation = rpc
-        .prepare_bed_pose(
-            &summary,
-            info.revision,
-            &occurrence,
-            intent.printer.build_envelope,
-            center,
-        )
+    supervisor
+        .geometry(GeometryCommand::PrepareBedPose {
+            session_id,
+            base_revision,
+            project_revision: info.revision,
+            occurrence_id: occurrence.occurrence_id,
+            expected_definition_id: occurrence.definition_id,
+            expected_pose: occurrence.pose,
+            envelope_mm: intent.printer.build_envelope,
+            center_xy: center,
+            contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+        })
         .await
-        .map_err(|error| error.to_string())?;
-    let mut supervisor = state.active().await?;
-    supervisor.refresh().await;
-    if supervisor
-        .client
-        .as_ref()
-        .map(|client| &client.hello().session_id)
-        != Some(&preparation.session_id)
-    {
-        return Err("stale_revision: bed preparation belongs to a replaced session".into());
-    }
-    Ok(preparation)
 }
 
 pub(super) fn observe(supervisor: &mut Supervisor, operation: &NativeOperationView) {

@@ -257,6 +257,7 @@ pub struct NativeCriticalCollar {
 #[derive(Debug)]
 struct NativeCriticalCollarCapture {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     pose: RigidPoseMm,
     source_request: super::SlabRequest,
     source_sample_plane: crate::PlaneMm,
@@ -279,6 +280,11 @@ struct NativeCriticalCollarCapture {
     cells: Vec<NativeCriticalCollarCell>,
 }
 impl NativeCriticalCollar {
+    pub(crate) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.inner.material_realization
+    }
     pub fn definition_id(&self) -> &DefinitionId {
         &self.inner.definition_id
     }
@@ -976,7 +982,7 @@ fn certify_native_critical_collar_using(
     let native_policy = analysis
         .world_shape_error_policy_mm()
         .ok_or_else(|| unresolved("native collar lacks source policy"))?;
-    if analysis.definition_id() != definition.id()
+    if !analysis.matches_original_material(definition)
         || analysis.section().definition_id() != definition.id()
         || !analysis.section().is_native_intersection()
         || !(interval[0] < sample && sample < interval[1])
@@ -1002,7 +1008,9 @@ fn certify_native_critical_collar_using(
         .as_ref()
         .and_then(NativeCollarComplex::world_regular_boundary_xy_speed_mm_per_mm);
     let complex_sha256 = if let Some(complex) = analysis.collar_complex.as_ref() {
-        if complex.definition_id() != definition.id() {
+        if complex.definition_id() != definition.id()
+            || complex.material_realization_identity() != analysis.material_realization_identity()
+        {
             return Err(unresolved(
                 "native collar continuum complex has another original source",
             ));
@@ -1019,7 +1027,9 @@ fn certify_native_critical_collar_using(
     } else {
         let complex = analysis.critical.as_ref().ok_or_else(|| unresolved(
             "native collar metric enclosure cannot replace missing original critical/face/void incidence"))?;
-        if complex.definition_id() != definition.id() {
+        if complex.definition_id() != definition.id()
+            || complex.material_realization_identity() != analysis.material_realization_identity()
+        {
             return Err(unresolved(
                 "native collar critical complex has another original source",
             ));
@@ -1027,6 +1037,7 @@ fn certify_native_critical_collar_using(
         let mut hash = Sha256::new();
         hash.update(b"spiling-existing-native-critical-complex-1\0");
         hash.update(definition.id().as_str().as_bytes());
+        hash.update(analysis.material_realization_identity().identity_bytes());
         let request = complex.request();
         for value in request
             .height_interval_mm
@@ -1086,7 +1097,8 @@ fn certify_native_critical_collar_using(
     for input in inputs {
         work.charge(1, cancel)?;
         let leaf = input.leaf;
-        if leaf.definition_id() != definition.id()
+        if !leaf.matches_original_material(definition)
+            || leaf.material_realization_identity() != analysis.material_realization_identity()
             || leaf.pose() != pose
             || !leaf.is_positive()
             || leaf.occurrence_id() != inputs[0].leaf.occurrence_id()
@@ -1792,6 +1804,7 @@ fn certify_native_critical_collar_using(
     Ok(NativeCriticalCollar {
         inner: Arc::new(NativeCriticalCollarCapture {
             definition_id: definition.id().clone(),
+            material_realization: analysis.material_realization_identity(),
             pose,
             source_request: analysis.request(),
             interval,
@@ -2616,6 +2629,7 @@ fn choose_material_target(
 #[derive(Debug)]
 pub(super) struct NativeCollarComplex {
     definition_id: DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     request: super::SlabRequest,
     fingerprint: [u8; 32],
     world_capture: Option<NativeCollarWorldCapture>,
@@ -2676,6 +2690,11 @@ impl NativeCollarBoundaryCriticalBand {
     }
 }
 impl NativeCollarComplex {
+    pub(super) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.material_realization
+    }
     pub(super) fn definition_id(&self) -> &DefinitionId {
         &self.definition_id
     }
@@ -4305,7 +4324,10 @@ pub(super) fn place_native_collar_complex(
     } = query;
     let definition = source.definition();
     work.charge(1, cancel)?;
-    if seed.definition_id() != definition.id() {
+    if seed.definition_id() != definition.id()
+        || seed.material_realization_identity()
+            != crate::kernel::MaterialRealizationIdentity::new(definition)
+    {
         return Err(failure(
             GeometryErrorCode::InvalidGeometry,
             "placed collar event complex has another immutable original source",
@@ -4595,6 +4617,7 @@ fn certify_collar_complex(
     let mut hash = Sha256::new();
     hash.update(b"spiling-original-native-collar-complex-2\\0");
     hash.update(definition.id().as_str().as_bytes());
+    hash.update(crate::kernel::MaterialRealizationIdentity::new(definition).identity_bytes());
     for value in functional.direction.into_iter().chain([functional.offset]) {
         hash_interval(&mut hash, value);
     }
@@ -5048,6 +5071,7 @@ fn certify_collar_complex(
     }
     Ok(Some(NativeCollarComplex {
         definition_id: definition.id().clone(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         request: seed.map_or(*request, |seed| seed.request),
         world_capture,
         fingerprint: hash.finalize().into(),

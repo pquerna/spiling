@@ -19,7 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "8";
+/// Binds Native M to the original toleranced-material realization contract v1.
+pub const PLANNER_VERSION: &str = "9";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 

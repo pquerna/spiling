@@ -81,6 +81,36 @@ impl<'a> PreparedSectionOriginals<'a> {
         self.retained_bytes
     }
 
+    /// Material-height/support queries borrow domains but never request plane
+    /// roots. Retain the same original owner without preparing unused curves.
+    pub(crate) fn prepare_trim_domains(
+        definition: &'a Definition,
+        byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let mut remaining = byte_limit
+            .checked_sub(size_of::<Self>())
+            .ok_or_else(|| resource("native section original owner exceeds source capacity"))?;
+        let mut faces = Vec::new();
+        reserve(&mut faces, definition.faces.len(), &mut remaining, work, cancel)?;
+        for face_index in 0..definition.faces.len() {
+            let before = work.consumed();
+            let domain = prepare_original_face_domain(
+                definition, face_index, &mut remaining, work, cancel,
+            ).map_err(|error| work.annotate_error(
+                error, before, format_args!("standalone SourceOriginals source_face={face_index} trim-domain preparation"),
+            ))?;
+            faces.push(OriginalFace { domain, uses: Vec::new() });
+        }
+        Ok(Self {
+            definition,
+            faces,
+            boundaries: Vec::new(),
+            retained_bytes: byte_limit - remaining,
+        })
+    }
+
     pub(crate) fn face_domain(
         &self,
         definition: &Definition,
@@ -247,6 +277,28 @@ fn explicit_source(
     ))
 }
 
+fn prepare_original_face_domain<'a>(
+    definition: &'a Definition,
+    face_index: usize,
+    remaining: &mut usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PreparedFaceTrimDomain<'a>, GeometryError> {
+    work.charge(1, cancel)?;
+    let domain = crate::kernel::prepare_face_trim_domain_with_byte_limit(
+        definition, face_index, *remaining, work, cancel,
+    )?;
+    // The domain's inline binding already lives in the precharged face vector.
+    let domain_heap = domain
+        .retained_bytes()
+        .checked_sub(size_of::<PreparedFaceParameterDomain<'_>>())
+        .ok_or_else(|| unresolved("native section original domain omitted inline storage"))?;
+    *remaining = remaining
+        .checked_sub(domain_heap)
+        .ok_or_else(|| resource("native section original domains exceed source capacity"))?;
+    Ok(domain)
+}
+
 /// Freeze each original trim domain and distinct boundary preparation once.
 /// Profile-only operations retain their existing admission: missing whole-chart
 /// correspondence is refused only if a query actually requests native coverage.
@@ -293,18 +345,9 @@ pub(crate) fn prepare_section_originals<'a>(
     let registry_bytes =
         registry.capacity() * 2 * (size_of::<((EdgeId<Curve>, u64, u64), usize)>() + 32);
     for face_index in 0..definition.faces.len() {
-        work.charge(1, cancel)?;
-        let domain = crate::kernel::prepare_face_trim_domain_with_byte_limit(
-            definition, face_index, remaining, work, cancel,
+        let domain = prepare_original_face_domain(
+            definition, face_index, &mut remaining, work, cancel,
         )?;
-        // The domain's inline binding already lives in the precharged face vector.
-        let domain_heap = domain
-            .retained_bytes()
-            .checked_sub(size_of::<PreparedFaceParameterDomain<'_>>())
-            .ok_or_else(|| unresolved("native section original domain omitted inline storage"))?;
-        remaining = remaining
-            .checked_sub(domain_heap)
-            .ok_or_else(|| resource("native section original domains exceed source capacity"))?;
         let face = domain.native().face();
         let mut uses = Vec::new();
         reserve(

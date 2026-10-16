@@ -181,7 +181,7 @@ pub(super) fn admit(
         };
         for axis in 0..3 {
             let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
-            let extent = match spiling_geometry::placed_bounds(
+            let extent = match spiling_geometry::placed_material_bounds(
                 definition,
                 occurrence.pose,
                 direction,
@@ -191,14 +191,26 @@ pub(super) fn admit(
                 &mut result.geometry_work,
                 cancel,
             ) {
-                Ok(extent) => extent,
+                Ok(extent) => {
+                    if extent.definition_id() != &occurrence.definition_id
+                        || !extent.is_compatible_with_definition(definition)
+                        || extent.placed_pose() != occurrence.pose
+                        || extent.world_direction() != direction
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                            "material support lost its original source/recipe/pose/query binding",
+                        ));
+                    }
+                    extent.bounds()
+                }
                 Err(e)
                     if matches!(
                         e.code,
                         GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
                     ) =>
                 {
-                    return Err(super::native_error(e, "native projected bounds"));
+                    return Err(super::native_error(e, "material projected bounds"));
                 }
                 Err(e) => {
                     add(
@@ -212,6 +224,11 @@ pub(super) fn admit(
             };
             placed.min[axis] = extent.minimum[0];
             placed.max[axis] = extent.maximum[1];
+            if axis == 2 {
+                result
+                    .material_domains
+                    .insert(occurrence.occurrence_id, [extent.minimum, extent.maximum]);
+            }
         }
         result
             .native_bounds
@@ -421,7 +438,7 @@ pub(super) fn resolve_native_events(
     let mut completed_bounds: Option<AabbMm> = None;
     for occurrence in input.occurrences {
         check_cancel(cancel)?;
-        let mut bounds = admission.native_bounds[&occurrence.occurrence_id];
+        let bounds = admission.native_bounds[&occurrence.occurrence_id];
         let analysis = spiling_geometry::analyze_placed_height_domain(
             &input.definitions[&occurrence.definition_id],
             occurrence.pose,
@@ -434,7 +451,6 @@ pub(super) fn resolve_native_events(
         if analysis.definition_id() != &occurrence.definition_id
             || analysis.pose() != Some(occurrence.pose)
             || analysis.height_interval_mm() != [bounds.min[2], bounds.max[2]]
-            || analysis.event_brackets_mm().is_empty()
         {
             return Err(error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -444,22 +460,12 @@ pub(super) fn resolve_native_events(
                 ),
             ));
         }
-        let invariant = analysis.invariance().is_some();
-        let mut bands = analysis.event_brackets_mm().to_vec();
-        bands.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
-        bands.dedup_by(|a, b| *a == *b);
-        let domain = [
-            bands[0],
-            *bands
-                .iter()
-                .max_by(|a, b| a[1].total_cmp(&b[1]))
-                .expect("nonempty native event bands"),
-        ];
-        admission
-            .material_domains
-            .insert(occurrence.occurrence_id, domain);
-        admission.reuse_slabs &= invariant;
-        for bracket in bands {
+        // The realization's support receipt, not raw-source critical candidates,
+        // owns the material terminals. Covered raw candidates remain obligations
+        // of the geometry capture rather than extra mandatory slicing planes.
+        let domain = admission.material_domains[&occurrence.occurrence_id];
+        admission.reuse_slabs &= analysis.invariance().is_some();
+        for bracket in analysis.material_plane_event_brackets_mm().chain(domain) {
             if !bracket.iter().all(|z| z.is_finite())
                 || bracket[0] > bracket[1]
                 || bracket[1] - bracket[0] > policy.maximum_height_uncertainty_mm
@@ -487,41 +493,7 @@ pub(super) fn resolve_native_events(
                 }
                 admission.native_event_bands.insert(position, bracket);
             }
-            // Exact representable strata stay exact. An isolated numerical band
-            // uses its upper endpoint, never a fictitious exact midpoint. The
-            // bed can own a bounded contact neighborhood without a sliver; the
-            // complete band remains captured for actual closed-slab proof.
-            let z = if bracket[0] <= bed
-                && bracket[1] >= bed
-                && (bracket[0] - bed).abs().max((bracket[1] - bed).abs())
-                    <= policy.maximum_shape_error_mm
-            {
-                bed
-            } else {
-                bracket[1]
-            };
-            if let Err(position) = admission
-                .horizontal_events
-                .binary_search_by(|old| old.total_cmp(&z))
-            {
-                if admission.horizontal_events.len() >= MAX_PRINT_LAYERS as usize {
-                    return Err(error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "native material events exceed the layer schedule budget",
-                    ));
-                }
-                admission.horizontal_events.insert(position, z);
-            }
         }
-        // This complete query covered the original certified support domain.
-        // Native event candidates include every source extremum and no injected
-        // query endpoints. Intersect their full enclosure with initial bounds;
-        // do not append the old conservative support-pad as an empty top layer.
-        bounds.min[2] = bounds.min[2].max(domain[0][0]);
-        bounds.max[2] = bounds.max[2].min(domain[1][1]);
-        admission
-            .native_bounds
-            .insert(occurrence.occurrence_id, bounds);
         let placed = admission
             .surface_fields
             .get(&occurrence.occurrence_id)
@@ -540,14 +512,97 @@ pub(super) fn resolve_native_events(
             completed_bounds = Some(placed);
         }
     }
+    // Union overlapping scheduling covers only. Atomic source candidates and
+    // their existence/incidence obligations remain in the geometry capture.
+    // Neither root identity nor an increased uncertainty allowance is implied.
+    let maximum_cover_width = policy
+        .maximum_height_uncertainty_mm
+        .min(policy.maximum_shape_error_mm);
+    for bracket in scheduling_event_covers(&admission.native_event_bands, maximum_cover_width) {
+        let z = if bracket[0] <= bed
+            && bracket[1] >= bed
+            && (bracket[0] - bed).abs().max((bracket[1] - bed).abs())
+                <= policy.maximum_shape_error_mm
+        {
+            bed
+        } else {
+            bracket[1]
+        };
+        if let Err(position) = admission
+            .horizontal_events
+            .binary_search_by(|old| old.total_cmp(&z))
+        {
+            if admission.horizontal_events.len() >= MAX_PRINT_LAYERS as usize {
+                return Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native material events exceed the layer schedule budget",
+                ));
+            }
+            admission.horizontal_events.insert(position, z);
+        }
+    }
     admission.bounds = completed_bounds;
     Ok(())
+}
+
+/// Sorted, validated candidate bands become bounded scheduling-set covers.
+/// A disjoint gap, however small, never supplies shared event identity.
+fn scheduling_event_covers(
+    bands: &[[f64; 2]],
+    maximum_width: f64,
+) -> impl Iterator<Item = [f64; 2]> + '_ {
+    let mut bands = bands.iter().copied();
+    let mut pending = None;
+    std::iter::from_fn(move || {
+        let mut cover = pending.take().or_else(|| bands.next())?;
+        for candidate in bands.by_ref() {
+            let upper = cover[1].max(candidate[1]);
+            // Containment adds no uncertainty. An expanding union keeps a
+            // strict margin so rounded subtraction cannot admit an overwide set.
+            if candidate[0] <= cover[1] && (upper <= cover[1] || upper - cover[0] < maximum_width) {
+                cover[1] = upper;
+            } else {
+                pending = Some(candidate);
+                break;
+            }
+        }
+        Some(cover)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scheduling_event_covers;
+
+    #[test]
+    fn scheduling_covers_merge_overlap_without_erasing_a_disjoint_ulp_gap() {
+        let next = 1.0_f64.next_up();
+        let bands = [[0.0, 0.6], [0.2, 0.4], [0.4, 1.0], [next, 1.2]];
+        let covers: Vec<_> = scheduling_event_covers(&bands, 1.1).collect();
+        assert_eq!(covers, [[0.0, 1.0], [next, 1.2]]);
+    }
+
+    #[test]
+    fn scheduling_covers_keep_the_policy_ceiling_and_every_candidate() {
+        let bands = [[0.0, 0.75], [0.5, 1.25], [1.0, 1.375]];
+        let covers: Vec<_> = scheduling_event_covers(&bands, 1.0).collect();
+        assert_eq!(covers, [[0.0, 0.75], [0.5, 1.375]]);
+        for band in bands {
+            assert!(
+                covers
+                    .iter()
+                    .any(|cover| cover[0] <= band[0] && cover[1] >= band[1])
+            );
+        }
+        assert!(covers.iter().all(|cover| cover[1] - cover[0] <= 1.0));
+    }
 }
 
 fn native_check_code(code: GeometryErrorCode) -> &'static str {
     match code {
         GeometryErrorCode::ConditioningFailure => "native_conditioning_failure",
-        GeometryErrorCode::AnalysisIndeterminate => "native_analysis_indeterminate",
+        GeometryErrorCode::AnalysisIndeterminate
+        | GeometryErrorCode::ParameterCorrespondenceUnavailable => "native_analysis_indeterminate",
         GeometryErrorCode::UnsupportedGeometry => "native_unsupported_geometry",
         GeometryErrorCode::UnsupportedConversion => "native_unsupported_conversion",
         GeometryErrorCode::KernelFailure => "native_kernel_failure",

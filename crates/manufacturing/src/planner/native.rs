@@ -47,6 +47,7 @@ pub(super) struct ProtectedVoidDemand<'a> {
     pub native_bounds: &'a BTreeMap<OccurrenceId, spiling_contracts::geometry::AabbMm>,
     pub demand_bounds: &'a [[[f64; 2]; 2]],
     pub point_limit: usize,
+    pub retained_material_proof_bytes: usize,
 }
 
 pub(super) struct SupportClearanceGeometry<'a> {
@@ -84,6 +85,9 @@ pub(super) struct CompletedCoverage {
     pub achieved_shape_error_mm: f64,
     pub source_features: NativeFeatureCoverageSummary,
     pub protected_voids: Vec<CapturedProtectedVoid>,
+    /// Compact accepted source/recipe identities and stream binding remain
+    /// owned until all continuous-target support consumers have finished.
+    pub material_proof: spiling_geometry::CompletedNativeUnionProofSet,
 }
 
 pub(super) struct CapturedProtectedVoid {
@@ -332,6 +336,7 @@ impl NativeStageState {
                 owned_critical_slab_count: 0,
             },
             protected_voids: self.protected_voids,
+            material_proof: completed,
         };
         for metric in self.metrics {
             check_cancel(cancel)?;
@@ -353,7 +358,7 @@ impl NativeStageState {
             };
             *count = add_count(*count, metric.layers)?;
         }
-        if completed.owned_critical_slab_count()
+        if result.material_proof.owned_critical_slab_count()
             != result.source_features.owned_critical_slab_count as usize
         {
             return Err(error(
@@ -1896,7 +1901,10 @@ pub(super) fn project_protected_voids(
         native_bounds,
         demand_bounds,
         point_limit,
+        retained_material_proof_bytes,
     } = *demand;
+    // The accepted material proof coexists with every projection and converted
+    // mask. Keep it in the shared live total, including conversion-time checks.
     let mut retained_native = captures
         .capacity()
         .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>())
@@ -1905,7 +1913,8 @@ pub(super) fn project_protected_voids(
                 .iter()
                 .map(|value| value.capture.retained_bytes())
                 .sum::<usize>(),
-        );
+        )
+        .saturating_add(retained_material_proof_bytes);
     let mut regions = Vec::new();
     let mut scopes = Vec::new();
     let mut points = 0usize;
@@ -1993,6 +2002,7 @@ pub(super) fn project_protected_voids(
                 )
             })?;
             if projected.definition_id() != captured.capture.definition_id()
+                || !projected.is_compatible_with_definition(definition)
                 || projected.placed_pose() != captured.capture.placed_pose()
                 || projected.world_height_interval_mm()
                     != captured.capture.world_height_interval_mm()
@@ -2000,7 +2010,7 @@ pub(super) fn project_protected_voids(
             {
                 return Err(error(
                     ManufacturingErrorCode::NativeAnalysisIndeterminate,
-                    "native protected projection lost source/pose/query capture",
+                    "native protected projection lost source/recipe/pose/query capture",
                 ));
             }
             let required = regions

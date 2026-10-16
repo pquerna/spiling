@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Read-only, revision-captured native support queries. Core still owns Apply.
+//! Read-only, revision-captured material support queries. Core still owns Apply.
 use super::{check_cancel, error};
 use spiling_contracts::{geometry::*, project::ProjectRevision};
 use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget};
@@ -50,7 +50,7 @@ pub(super) fn prepare(
         check_cancel(cancel)?;
         let mut direction = [0.0; 3];
         direction[axis] = 1.0;
-        let bounds = spiling_geometry::placed_bounds(
+        let support = spiling_geometry::placed_material_bounds(
             definition,
             request.pose,
             direction,
@@ -60,6 +60,17 @@ pub(super) fn prepare(
             &mut work,
             cancel,
         )?;
+        if support.definition_id() != &request.definition_id
+            || !support.is_compatible_with_definition(definition)
+            || support.placed_pose() != request.pose
+            || support.world_direction() != direction
+        {
+            return Err(error(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "material support lost its original source/recipe/pose/query binding",
+            ));
+        }
+        let bounds = support.bounds();
         minimum_lower_mm[axis] = bounds.minimum[0];
         minimum_upper_mm[axis] = bounds.minimum[1];
         maximum_lower_mm[axis] = bounds.maximum[0];

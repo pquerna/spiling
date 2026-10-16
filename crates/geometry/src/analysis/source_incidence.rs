@@ -263,6 +263,9 @@ impl SourceEdgeIncidence {
         }
         Ok(())
     }
+    pub fn vertices(&self) -> Option<impl Iterator<Item = VertexId<Point3>> + '_> {
+        Some(self.vertices.as_ref()?.heads.keys().copied())
+    }
     pub fn vertex_edges(
         &self,
         vertex: VertexId<Point3>,

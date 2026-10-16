@@ -480,6 +480,7 @@ pub(super) struct UvMarginInput<'a> {
     pub prepared: &'a monstertruck_modeling::PreparedValidatedCurve<'static>,
     pub surface: &'a monstertruck_modeling::Surface,
     pub chart: &'a monstertruck_modeling::Curve2D,
+    /// Length in the unchanged original carrier's native units, not millimetres.
     pub physical_residual: f64,
     pub coefficient_margin: [f64; 2],
 }
@@ -574,7 +575,7 @@ pub(super) fn certify_uv_margin(
         let middle = cell[0] * 0.5 + cell[1] * 0.5;
         if depth == 48 || middle <= cell[0] || middle >= cell[1] {
             return Err(unavailable(&format!(
-                "original implicit source UV inverse chart, pole or periodic lift remains unresolved: source parameter={cell:?}, candidate={candidate:?}, retained original root={actual:?}, coefficient margin={coefficient_margin:?}, physical residual={physical_residual} mm",
+                "original implicit source UV inverse chart, pole or periodic lift remains unresolved: source parameter={cell:?}, candidate={candidate:?}, retained original root={actual:?}, coefficient margin={coefficient_margin:?}, physical residual={physical_residual} native length units",
             )));
         }
         stack[live] = ([middle, cell[1]], depth + 1);

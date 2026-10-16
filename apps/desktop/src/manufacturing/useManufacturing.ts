@@ -229,11 +229,15 @@ export function useManufacturing(host: ManufacturingHost) {
     if (!writable || !statusRef.current?.intent || changed || conflict) return;
     const id = ++bedRequest.current;
     const capturedAuthority = currentAuthority;
+    const capturedEnvelope = statusRef.current.intent.printer.build_envelope;
     setBedProposal(null);
     setWorking(true);
     try {
       const preparation = await hostRef.current.prepareBed(occurrenceId, center);
       if (!mounted.current || bedRequest.current !== id) return;
+      if (!preparation.envelope_mm.min.every((value, axis) => value === capturedEnvelope.min[axis]) ||
+          !preparation.envelope_mm.max.every((value, axis) => value === capturedEnvelope.max[axis]))
+        throw new Error("Bed proposal belongs to a different printer envelope; prepare again.");
       setBedProposal({ preparation, authority: capturedAuthority, invalidated: false });
       setMessage("Read-only native bed proposal ready. Review contact evidence and preserved orientation, then explicitly Apply; no project edit has occurred.");
     } catch (error) {

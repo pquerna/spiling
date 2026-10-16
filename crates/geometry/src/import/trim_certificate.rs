@@ -136,6 +136,203 @@ pub(super) struct Correspondence<'a> {
     pub margin_uv: [f64; 2],
 }
 
+/// Completed whole-expression proof. No inverse qualification can construct it.
+/// Span inventories refer to the unchanged expressions selected by the owning
+/// coedge; they do not copy adaptive proof cells.
+#[derive(Clone, Copy)]
+pub(crate) struct OriginalCoedgeCorrespondence {
+    map: AffineMap,
+    position_error: f64,
+    relative_derivative_error: f64,
+    margin_uv: [f64; 2],
+    provenance: OriginalCorrespondenceProvenance,
+    inventory: OriginalSpanInventory,
+    binding: Option<crate::kernel::OriginalCoedgeBinding>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OriginalCorrespondenceProvenance {
+    ExactCoefficients,
+    Forward,
+    CompletedPoleGraph,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OriginalSpanInventory {
+    pub(crate) source_knot_boundaries: usize,
+    pub(crate) uv_knot_boundaries: usize,
+    pub(crate) continuation_spans: usize,
+}
+
+impl OriginalCoedgeCorrespondence {
+    fn completed(
+        input: Correspondence<'_>,
+        map: AffineMap,
+        bound: f64,
+        retained: Option<&model::PreparedValidatedCurve<'static>>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let mut inventory = OriginalSpanInventory {
+            source_knot_boundaries: 0,
+            uv_knot_boundaries: 0,
+            continuation_spans: 0,
+        };
+        visit_curve_cuts(input.curve, &mut |_| {
+            work.charge(1, cancel)?;
+            inventory.source_knot_boundaries += 1;
+            Ok(())
+        })?;
+        visit_chart_cuts(input.chart, &mut |_| {
+            work.charge(1, cancel)?;
+            inventory.uv_knot_boundaries += 1;
+            Ok(())
+        })?;
+        if let Some(prepared) = retained {
+            for _ in prepared.pieces() {
+                work.charge(1, cancel)?;
+                inventory.continuation_spans += 1;
+            }
+        }
+        Ok(Self {
+            map,
+            position_error: bound,
+            // Both successful whole-source lanes prove the strict 1/4 bound.
+            // This retained conservative bound is not a measured sample ratio.
+            relative_derivative_error: 0.25,
+            margin_uv: input.margin_uv,
+            provenance: OriginalCorrespondenceProvenance::Forward,
+            inventory,
+            binding: None,
+        })
+    }
+
+    /// Only the caller's completed whole-coefficient theorem may use this
+    /// constructor. It is distinct from a zero residual numerical proof.
+    pub(super) fn exact_coefficients(
+        curve: &model::Curve,
+        chart: &model::Curve2D,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let (a, b) = curve.range_tuple();
+        let (c, d) = chart.range_tuple();
+        let map = AffineMap::new([a, b], [c, d])?;
+        // No carrier is needed: this path has already proved coefficient
+        // identity and only captures the two original expression inventories.
+        let mut source_knot_boundaries = 0;
+        let mut uv_knot_boundaries = 0;
+        visit_curve_cuts(curve, &mut |_| {
+            work.charge(1, cancel)?;
+            source_knot_boundaries += 1;
+            Ok(())
+        })?;
+        visit_chart_cuts(chart, &mut |_| {
+            work.charge(1, cancel)?;
+            uv_knot_boundaries += 1;
+            Ok(())
+        })?;
+        Ok(Self {
+            map,
+            position_error: 0.0,
+            relative_derivative_error: 0.0,
+            margin_uv: [0.0; 2],
+            provenance: OriginalCorrespondenceProvenance::ExactCoefficients,
+            inventory: OriginalSpanInventory {
+                source_knot_boundaries,
+                uv_knot_boundaries,
+                continuation_spans: 0,
+            },
+            binding: None,
+        })
+    }
+
+    pub(crate) fn native_range(&self) -> [f64; 2] {
+        self.map.source
+    }
+    /// Endpoint pairing retains orientation, not merely sorted UV bounds.
+    pub(crate) fn uv_range(&self) -> [f64; 2] {
+        self.map.target
+    }
+    pub(crate) fn uv_parameter_image(&self, range: [f64; 2]) -> Result<Interval, GeometryError> {
+        if range[0] < self.map.source[0] || range[1] > self.map.source[1] || range[0] > range[1] {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original coedge map query lies outside its complete certified range",
+            ));
+        }
+        self.map.image(range)
+    }
+    pub(crate) fn uv_parameter_derivative(&self) -> Interval {
+        self.map.slope
+    }
+    pub(crate) fn position_error_mm(&self) -> f64 {
+        self.position_error
+    }
+    pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
+        self.relative_derivative_error
+    }
+    pub(crate) fn margin_uv(&self) -> [f64; 2] {
+        self.margin_uv
+    }
+    pub(crate) fn provenance(&self) -> OriginalCorrespondenceProvenance {
+        self.provenance
+    }
+    pub(crate) fn span_inventory(&self) -> OriginalSpanInventory {
+        self.inventory
+    }
+    /// Borrow the complete original coefficient/continuation inventories.
+    /// Boundaries are emitted in native-edge coordinates as outward intervals;
+    /// repeated or overlapping knot boundaries are intentional, not gaps.
+    pub(crate) fn visit_span_boundaries(
+        &self,
+        curve: &model::Curve,
+        chart: &model::Curve2D,
+        continuation: Option<&model::PreparedValidatedCurve<'static>>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visit: &mut impl FnMut(Interval) -> Result<(), GeometryError>,
+    ) -> Result<(), GeometryError> {
+        check_cancel(cancel)?;
+        let mut emit = |boundary: Interval| {
+            work.charge(1, cancel)?;
+            let low = boundary.lo.max(self.map.source[0]);
+            let high = boundary.hi.min(self.map.source[1]);
+            if low <= high {
+                visit(Interval::new(low, high)?)?;
+            }
+            Ok(())
+        };
+        emit(Interval::point(self.map.source[0]))?;
+        emit(Interval::point(self.map.source[1]))?;
+        visit_curve_cuts(curve, &mut emit)?;
+        if let Some(prepared) = continuation {
+            for piece in prepared.pieces() {
+                emit(Interval::point(piece.parameter[0]))?;
+                emit(Interval::point(piece.parameter[1]))?;
+            }
+        }
+        visit_chart_cuts(chart, &mut |boundary| {
+            let low = boundary.lo.max(self.map.target[0].min(self.map.target[1]));
+            let high = boundary.hi.min(self.map.target[0].max(self.map.target[1]));
+            if low <= high {
+                emit(self.map.preimage(low)?.hull(self.map.preimage(high)?))?;
+            }
+            Ok(())
+        })
+    }
+    pub(crate) fn binding(&self) -> Option<&crate::kernel::OriginalCoedgeBinding> {
+        self.binding.as_ref()
+    }
+    pub(super) fn bind(mut self, binding: crate::kernel::OriginalCoedgeBinding) -> Self {
+        self.binding = Some(binding);
+        self
+    }
+    pub(super) fn complete_pole_graph(&mut self) {
+        self.provenance = OriginalCorrespondenceProvenance::CompletedPoleGraph;
+    }
+}
+
 /// Prove a whole-original-range physical residual under one captured monotone
 /// affine correspondence. The native curve range and the pcurve's *own* range
 /// are independent. Both endpoint-pairing orientations are proposals only;
@@ -156,7 +353,7 @@ pub(super) fn certify_curve_on_surface(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
-    certify_with_policy(
+    Ok(certify_with_policy(
         Correspondence {
             curve,
             surface,
@@ -168,7 +365,8 @@ pub(super) fn certify_curve_on_surface(
         work,
         cancel,
         None,
-    )
+    )?
+    .map(|proof| proof.position_error))
 }
 
 /// Verify a retained declared coedge's forward affine parameter proposal using
@@ -186,14 +384,15 @@ pub(super) fn certify_declared_coedge_correspondence(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: Option<&mut CorrespondenceDiagnostic>,
-) -> Result<Option<f64>, GeometryError> {
-    certify_with_policy(
+) -> Result<Option<OriginalCoedgeCorrespondence>, GeometryError> {
+    Ok(certify_with_policy(
         input,
         ProofPolicy::DeclaredCoedge(input.margin_uv),
         work,
         cancel,
         diagnostic,
-    )
+    )?
+    .and_then(|proof| proof.coedge))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -210,13 +409,42 @@ impl ProofPolicy {
     }
 }
 
+/// Position-only calls never construct a material correspondence or traverse
+/// its retained inventory. Only the whole-source tangent policy can do that.
+struct PolicyProof {
+    position_error: f64,
+    coedge: Option<OriginalCoedgeCorrespondence>,
+}
+impl PolicyProof {
+    fn completed(
+        input: Correspondence<'_>,
+        map: AffineMap,
+        bound: f64,
+        retained: Option<&model::PreparedValidatedCurve<'static>>,
+        policy: ProofPolicy,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        Ok(Self {
+            position_error: bound,
+            coedge: if matches!(policy, ProofPolicy::DeclaredCoedge(_)) {
+                Some(OriginalCoedgeCorrespondence::completed(
+                    input, map, bound, retained, work, cancel,
+                )?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
 fn certify_with_policy(
     input: Correspondence<'_>,
     policy: ProofPolicy,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: Option<&mut CorrespondenceDiagnostic>,
-) -> Result<Option<f64>, GeometryError> {
+) -> Result<Option<PolicyProof>, GeometryError> {
     let maximum_error_mm = input.maximum_error_mm;
     check_cancel(cancel)?;
     if !maximum_error_mm.is_finite() || maximum_error_mm <= 0.0 {
@@ -246,16 +474,22 @@ fn certify_with_policy(
 
 pub(super) fn certify_retained_coedge_correspondence(
     input: Correspondence<'_>,
-    prepared: &model::PreparedValidatedCurve<'static>,
+    prepared: (&model::PreparedValidatedCurve<'static>, f64),
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<f64>, GeometryError> {
+) -> Result<Option<OriginalCoedgeCorrespondence>, GeometryError> {
     let Correspondence {
         maximum_error_mm: maximum_error,
         margin_uv,
         ..
     } = input;
     check_cancel(cancel)?;
+    if !prepared.1.is_finite() || prepared.1 <= 0.0 {
+        return Err(GeometryError::new(
+            GeometryErrorCode::ConditioningFailure,
+            "retained original correspondence needs a finite positive frame scale",
+        ));
+    }
     if !maximum_error.is_finite()
         || maximum_error <= 0.0
         || margin_uv
@@ -278,7 +512,7 @@ pub(super) fn certify_retained_coedge_correspondence(
     );
     work.charge(local.consumed(), &AtomicBool::new(false))?;
     check_cancel(cancel)?;
-    resolution(result)
+    Ok(resolution(result)?.and_then(|proof| proof.coedge))
 }
 
 fn terminal(error: &GeometryError) -> bool {
@@ -287,7 +521,7 @@ fn terminal(error: &GeometryError) -> bool {
         GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
     )
 }
-fn resolution(result: Result<Option<f64>, GeometryError>) -> Result<Option<f64>, GeometryError> {
+fn resolution<T>(result: Result<Option<T>, GeometryError>) -> Result<Option<T>, GeometryError> {
     match result {
         Err(error) if !terminal(&error) => Ok(None),
         other => other,
@@ -421,11 +655,11 @@ const STACK_BYTES: usize = size_of::<[Span; MAX_DEPTH + 1]>();
 fn certify(
     input: Correspondence<'_>,
     policy: ProofPolicy,
-    retained: Option<&model::PreparedValidatedCurve<'static>>,
+    retained: Option<(&model::PreparedValidatedCurve<'static>, f64)>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     mut diagnostic: Option<&mut CorrespondenceDiagnostic>,
-) -> Result<Option<f64>, GeometryError> {
+) -> Result<Option<PolicyProof>, GeometryError> {
     let Correspondence {
         curve,
         surface,
@@ -440,7 +674,7 @@ fn certify(
     // A mapped original basis may have a larger natural domain than its retained
     // EDGE_CURVE restriction; conversely a periodic child is narrower than its
     // shared whole-original receipt. Both independent authorities must hold.
-    let (a, b) = retained.map_or((a, b), |prepared| {
+    let (a, b) = retained.map_or((a, b), |(prepared, _)| {
         let range = prepared.range();
         (a.max(range[0]), b.min(range[1]))
     });
@@ -468,10 +702,10 @@ fn certify(
     }
     let source = Source {
         original: curve,
-        implicit: if let Some(prepared) = retained {
+        implicit: if let Some((prepared, scale)) = retained {
             Some(PreparedCurveEnclosure::borrowed_restricted(
                 prepared,
-                1.0,
+                scale,
                 (a, b),
             ))
         } else if matches!(basis, model::Curve::IntersectionCurve(_)) {
@@ -486,6 +720,7 @@ fn certify(
             None
         },
     };
+    let original_retained = retained.map(|(prepared, _)| prepared);
     let retained = source
         .implicit
         .as_ref()
@@ -535,7 +770,9 @@ fn certify(
                 )
             }))?
         {
-            return Ok(Some(bound));
+            return Ok(Some(PolicyProof::completed(
+                input, map, bound, original_retained, policy, work, cancel,
+            )?));
         }
         let harmonic_work = work.consumed() - harmonic_started;
         let fallback_started = work.consumed();
@@ -626,7 +863,15 @@ fn certify(
             )
         });
         if let Some(bound) = resolution(result)? {
-            return Ok(Some(bound));
+            return Ok(Some(PolicyProof::completed(
+                input,
+                map,
+                bound,
+                original_retained,
+                policy,
+                work,
+                cancel,
+            )?));
         }
     }
     Ok(None)
@@ -1361,7 +1606,7 @@ mod tests {
             .unwrap()
         };
         let bound = certify(1.0e-9).unwrap();
-        assert!((1.0e-9..=1.0e-7).contains(&bound));
+        assert!((1.0e-9..=1.0e-7).contains(&bound.position_error_mm()));
         assert!(certify(1.0e-3).is_none());
     }
 
@@ -1501,6 +1746,7 @@ mod tests {
             None,
         )
         .unwrap()
+        .map(|proof| proof.position_error_mm())
     }
 
     #[test]
@@ -1663,8 +1909,8 @@ mod tests {
                 -5.0 + 5.0 * angle.cos(),
                 3.0 + 3.0 * angle.sin(),
             );
-            assert!((carrier.subs(0.0, angle) - expected).magnitude() <= error);
-            assert!((original.subs(angle) - expected).magnitude() <= error);
+            assert!((carrier.subs(0.0, angle) - expected).magnitude() <= error.position_error_mm());
+            assert!((original.subs(angle) - expected).magnitude() <= error.position_error_mm());
         }
     }
 
@@ -1773,7 +2019,7 @@ mod tests {
                     maximum_error_mm: 1.0e-7,
                     margin_uv: [0.0; 2],
                 },
-                &prepared,
+                (&prepared, 1.0),
                 &mut work,
                 &cancel
             )
@@ -1789,12 +2035,97 @@ mod tests {
                     maximum_error_mm: 1.0e-7,
                     margin_uv: [0.0; 2],
                 },
-                &prepared,
+                (&prepared, 1.0),
                 &mut work,
                 &cancel
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn retained_receipt_keeps_independent_endpoint_recipe_and_nonzero_bounds() {
+        let curve = model::Curve::BsplineCurve(model::BsplineCurve::new(
+            knots(10.0, 12.0, 1),
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+        ));
+        let chart = model::Curve2D::Line(model::Line(
+            Point2::new(0.0, 1.0e-9),
+            Point2::new(1.0, 1.0e-9),
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(MAX_WORK);
+        let proof = certify_declared_coedge_correspondence(
+            Correspondence {
+                curve: &curve,
+                surface: &plane(),
+                chart: &chart,
+                maximum_error_mm: 1.0e-7,
+                margin_uv: [0.0; 2],
+            },
+            &mut work,
+            &cancel,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            proof.provenance(),
+            OriginalCorrespondenceProvenance::Forward
+        );
+        assert_eq!(proof.native_range(), [10.0, 12.0]);
+        assert_eq!(proof.uv_range(), [0.0, 1.0]);
+        assert_eq!(proof.uv_parameter_image([10.0, 10.0]).unwrap().lo, 0.0);
+        assert_eq!(proof.uv_parameter_image([12.0, 12.0]).unwrap().hi, 1.0);
+        let slope = proof.uv_parameter_derivative();
+        assert!(slope.lo <= 0.5 && 0.5 <= slope.hi);
+        assert!(proof.position_error_mm() >= 1.0e-9);
+        assert_eq!(proof.relative_derivative_error_bound(), 0.25);
+        assert!(proof.span_inventory().source_knot_boundaries >= 4);
+        assert!(proof.binding().is_none());
+    }
+
+    #[test]
+    fn retained_exact_coefficients_and_completed_graph_have_distinct_provenance() {
+        let curve = model::Curve::Line(model::Line(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+        ));
+        let chart = model::Curve2D::Line(model::Line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(MAX_WORK);
+        let exact =
+            OriginalCoedgeCorrespondence::exact_coefficients(&curve, &chart, &mut work, &cancel)
+                .unwrap();
+        assert_eq!(
+            exact.provenance(),
+            OriginalCorrespondenceProvenance::ExactCoefficients
+        );
+        assert_eq!(exact.position_error_mm(), 0.0);
+        assert_eq!(exact.relative_derivative_error_bound(), 0.0);
+        let mut forward = certify_declared_coedge_correspondence(
+            Correspondence {
+                curve: &curve,
+                surface: &plane(),
+                chart: &chart,
+                maximum_error_mm: 1.0e-7,
+                margin_uv: [0.0; 2],
+            },
+            &mut work,
+            &cancel,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            forward.provenance(),
+            OriginalCorrespondenceProvenance::Forward
+        );
+        forward.complete_pole_graph();
+        assert_eq!(
+            forward.provenance(),
+            OriginalCorrespondenceProvenance::CompletedPoleGraph
         );
     }
 }

@@ -108,6 +108,18 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit `planner_version`, `emitter_version`, `verifier_version`. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making the bundle/provenance export self-contained. In-memory Arc capture shares canonical content without a raster copy. Inspection/status provenance contains metadata only. Captured persisted source labels/units/uncertainty remain authoritative; native reimport labels must not replace them. Definitions/occurrences obey shared identity/reference/pose/provenance caps and every definition is referenced.
 
+Planner `9` binds Native M to original-material realization contract `1`:
+immutable source topology and coefficients, an identity-bound seam/vertex
+realization inside the admitted source uncertainty, and the same versioned
+source-relative recipe across all slab queries. Geometry's compact completed
+source/union authority remains alive through continuous-occupancy consumers;
+realized D and deposited anchors retain separate dependencies. A small source-map
+residual does not establish exact seam coincidence or material closure. See the
+[native material contract](../adr/004-native-geometry-parity.md#514-certify-toleranced-source-material-not-fictitious-exact-seams).
+Producer/kernel versions are checked independently of the authoring input hash;
+changing realization semantics requires a producer cutover, not a compatibility
+interpretation of an older bundle.
+
 `input_fingerprint(project_id,definitions,occurrences,intent,surface_overlays)` validates these inputs, sorts definitions by definition ID and occurrences by occurrence ID, then SHA-256 hashes the UTF-8 compact JSON emitted by Rust serde_json in this field order:
 
 ```text
@@ -132,7 +144,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Planner producer8 is required for current inspection/reopen; planner7 and earlier bundles refuse before fresh report or motion publication, even when their storage schema is valid. The semantic input fingerprint does not bind planner implementation, and replay does not reconstruct transient support-demand/contact associations. Exact producer admission therefore prevents older plans from acquiring authority without the final emitted minimum-gap planner proof. Project5/manufacturing6/surface3, emitter/verifier4 and SPLR3 accompany the current cutover; no old-artifact compatibility path is provided.
+Planner producer9 is required for current inspection/reopen; producer8 and earlier bundles refuse before fresh report or motion publication, even when their storage schema is valid. The semantic input fingerprint does not bind planner implementation, and replay does not reconstruct source-material realization proofs or transient support-demand/contact associations. Exact producer admission prevents older plans from acquiring current authority without the source/recipe-bound Native M and final emitted minimum-gap obligations. Project5/manufacturing6/surface3, emitter/verifier4 and SPLR3 accompany the current cutover; no old-artifact compatibility path is provided.
 
 `inspect_bundle(&bundle,&bundle_hash,output,&cancel)` produces `ManufacturingInspection {report,provenance,replay}`. `VerificationOutput` is explicitly `report_only` or `report_and_motion`; `verify_bundle` retains its report-only API. The same independent command decoder streams validated actual XYZ, absolute E and F into an optional bounded SPLR byte sink. Layer/kind attribution comes from the validated expected-point iterator, never emitter comments. Report-only work allocates no display buffer, index or display/program hash. Failed decoding or cancellation drops the unpublished optional sink; no partial display result exists.
 

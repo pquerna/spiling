@@ -1095,10 +1095,134 @@ fn add_event(
     Ok(())
 }
 
-/// Complete conservative isolation of critical-height strata. Interval root
-/// exclusion, not a list of sampled roots, establishes completeness. A bracket
-/// may still contain an unresolved critical candidate; it never authorizes a
-/// regular slab or an invariant-domain certificate through that neighborhood.
+fn material_transport_height_padding(
+    definition: &Definition,
+    functional: HeightFunctional,
+) -> Result<f64, GeometryError> {
+    let allowance = definition.provenance().uncertainty_mm.ok_or_else(|| {
+        error(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "nonzero or unresolved material transport has no declared source allowance",
+        )
+    })?;
+    if !allowance.is_finite() || allowance < 0.0 {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "invalid original material source allowance",
+        ));
+    }
+    Ok(Interval::point(allowance)
+        .mul(norm(functional.direction)?)
+        .hi)
+}
+
+/// Retain actual source-owned collar, edge-end and joint-star supports.
+/// The provider evaluates the full unnormalized scalar covector; only the
+/// affine height offset is applied here. No whole-face blanket or fabricated
+/// root subdivisions replace these physical supports.
+fn material_transport_height_cover(
+    source: crate::section::OriginalTrimSource<'_, '_>,
+    functional: HeightFunctional,
+    height_interval_mm: [f64; 2],
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Vec<super::SourceTransportCover>, GeometryError> {
+    let mut covers = super::critical::material_link::source_transport_supports(
+        source,
+        functional.direction,
+        None,
+        remaining_bytes,
+        work,
+        cancel,
+    )?;
+    if covers.len() > MAX_EVENT_BRACKETS {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "material transport support count exceeds cap",
+        ));
+    }
+    remaining_scratch_with_limit(
+        remaining_bytes,
+        covers
+            .capacity()
+            .checked_mul(std::mem::size_of::<super::SourceTransportCover>())
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "material transport support capacity overflow",
+                )
+            })?,
+    )?;
+    for cover in &mut covers {
+        work.charge(1, cancel)?;
+        let base =
+            Interval::new(cover.base_interval[0], cover.base_interval[1])?.add(functional.offset);
+        let corrected = Interval::new(cover.corrected_interval[0], cover.corrected_interval[1])?
+            .add(functional.offset);
+        let base = Interval::new(base.lo, base.hi)?;
+        let corrected = Interval::new(corrected.lo, corrected.hi)?;
+        Interval::new(
+            cover.displacement_interval[0],
+            cover.displacement_interval[1],
+        )?;
+        if !cover.source_error_mm.is_finite() || cover.source_error_mm < 0.0 {
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "invalid material transport physical error",
+            ));
+        }
+        cover.base_interval = [base.lo, base.hi];
+        cover.corrected_interval = [corrected.lo, corrected.hi];
+    }
+    covers.retain(|cover| {
+        cover.base_interval[0].min(cover.corrected_interval[0]) <= height_interval_mm[1]
+            && height_interval_mm[0] <= cover.base_interval[1].max(cover.corrected_interval[1])
+    });
+    Ok(covers)
+}
+
+/// Source-owned proof that the complete correction support misses this exact
+/// CLOSED range. Scalar displacement zero alone cannot construct this receipt:
+/// an active XY correction can still change physical continuation speed.
+struct MaterialTransportExclusion<'d> {
+    definition_id: &'d spiling_contracts::geometry::DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
+    frame: PlaneFrameMm,
+    range: [f64; 2],
+}
+fn exclude_material_transport<'d>(
+    source: crate::section::OriginalTrimSource<'_, 'd>,
+    frame: PlaneFrameMm,
+    range: [f64; 2],
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<MaterialTransportExclusion<'d>>, GeometryError> {
+    let supports = material_transport_height_cover(
+        source,
+        HeightFunctional::from_frame(frame),
+        range,
+        remaining_bytes,
+        work,
+        cancel,
+    )?;
+    if !supports.is_empty() {
+        return Ok(None);
+    }
+    let definition = source.definition();
+    Ok(Some(MaterialTransportExclusion {
+        definition_id: definition.id(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
+        frame,
+        range,
+    }))
+}
+
+/// Complete conservative isolation of literal native critical-height strata.
+/// Source-material completeness additionally retains the entire possible
+/// transport support on HeightCapture. Such supports never become isolated
+/// root brackets or authorize a raw regular slab through their neighborhoods.
 pub fn analyze_height_domain(
     definition: &Definition,
     frame: PlaneFrameMm,
@@ -1173,6 +1297,35 @@ pub(crate) fn analyze_height_domain_with_scratch_limit(
         work,
         cancel,
         true,
+        HeightCensusScope::OriginalMaterial,
+    )
+}
+
+/// Literal native-section regularity needs geometric candidate heights, not a
+/// source-material realization. Its private capture explicitly lacks material
+/// support completeness and cannot authorize material reuse.
+pub(super) fn analyze_literal_native_height_domain(
+    source: crate::section::OriginalTrimSource<'_, '_>,
+    frame: PlaneFrameMm,
+    height_interval_mm: [f64; 2],
+    policy: AnalysisPolicy,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<HeightAnalysis, GeometryError> {
+    analyze_height_functional(
+        &HeightDomainQuery {
+            source,
+            frame,
+            functional: HeightFunctional::from_frame(frame),
+            height_interval_mm,
+            policy,
+        },
+        remaining_bytes,
+        work,
+        cancel,
+        true,
+        HeightCensusScope::LiteralNative,
     )
 }
 pub(crate) fn analyze_height_domain_enclosed(
@@ -1219,7 +1372,19 @@ pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
     }) && nominal.offset.lo == nominal.offset.hi
         && functional.offset.lo == nominal.offset.lo
         && functional.offset.hi == nominal.offset.hi;
-    analyze_height_functional(query, remaining_bytes, work, cancel, exact_nominal)
+    analyze_height_functional(
+        query,
+        remaining_bytes,
+        work,
+        cancel,
+        exact_nominal,
+        HeightCensusScope::OriginalMaterial,
+    )
+}
+#[derive(Clone, Copy)]
+enum HeightCensusScope {
+    LiteralNative,
+    OriginalMaterial,
 }
 fn analyze_height_functional(
     query: &HeightDomainQuery<'_, '_>,
@@ -1227,6 +1392,7 @@ fn analyze_height_functional(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     nominal_fast_paths: bool,
+    scope: HeightCensusScope,
 ) -> Result<HeightAnalysis, GeometryError> {
     let HeightDomainQuery {
         source,
@@ -1271,18 +1437,42 @@ fn analyze_height_functional(
     let full_scratch = MAX_SLAB_SCRATCH_BYTES
         .checked_sub(definition.retained_query_proof_bytes())
         .and_then(|bytes| bytes.checked_sub(definition.id().allocated_bytes()));
-    let invariance = if nominal_fast_paths && Some(scratch_limit) == full_scratch {
-        narrow_invariance_with_scratch_limit(
-            source,
-            frame,
-            height_interval_mm,
-            scratch_limit,
+    let material_scope = matches!(scope, HeightCensusScope::OriginalMaterial);
+    let material_transport_zero =
+        material_scope && definition.material_transport_is_proved_zero(work, cancel)?;
+    // Keep source-only preparation alive across support, all corner attempts
+    // and the native face census. Existing prepared sources lend their owner;
+    // query-dependent roots and frame proofs are still evaluated below.
+    let originals = if material_scope && !material_transport_zero {
+        source.prepare_domains_if_missing(
+            remaining_scratch_with_limit(
+                scratch_limit,
+                HEIGHT_EVENT_SCRATCH_BYTES + STACK_SCRATCH_BYTES,
+            )?,
             work,
             cancel,
         )?
     } else {
         None
     };
+    let source = source.borrowing_domains(originals.as_ref());
+    let scratch_limit = remaining_scratch_with_limit(
+        scratch_limit,
+        originals.as_ref().map_or(0, |owner| owner.retained_bytes()),
+    )?;
+    let invariance =
+        if material_transport_zero && nominal_fast_paths && Some(scratch_limit) == full_scratch {
+            narrow_invariance_with_scratch_limit(
+                source,
+                frame,
+                height_interval_mm,
+                scratch_limit,
+                work,
+                cancel,
+            )?
+        } else {
+            None
+        };
     let scratch_limit = remaining_scratch_with_limit(
         scratch_limit,
         invariance
@@ -1291,14 +1481,39 @@ fn analyze_height_functional(
     )?;
     let mut events = Vec::new();
     let mut proved_events = Vec::new();
+    let transport_before = work.consumed();
+    let transport_support = if !material_scope || material_transport_zero {
+        Vec::new()
+    } else {
+        material_transport_height_cover(
+            source,
+            functional,
+            height_interval_mm,
+            remaining_scratch_with_limit(
+                scratch_limit,
+                HEIGHT_EVENT_SCRATCH_BYTES + STACK_SCRATCH_BYTES,
+            )?,
+            work,
+            cancel,
+        ).map_err(|error| work.annotate_error(
+            error, transport_before, "material height transport support",
+        ))?
+    };
+    let scratch_limit = remaining_scratch_with_limit(
+        scratch_limit,
+        transport_support.capacity() * std::mem::size_of::<super::SourceTransportCover>(),
+    )?;
+    let raw_before = work.consumed();
     if let Some(round) = if nominal_fast_paths {
-        round_continuation(
+        raw_round_continuation(
             source,
             frame,
             remaining_scratch_with_limit(scratch_limit, HEIGHT_EVENT_SCRATCH_BYTES)?,
             work,
             cancel,
-        )?
+        ).map_err(|error| work.annotate_error(
+            error, raw_before, "raw height census round continuation after material transport",
+        ))?
     } else {
         None
     } {
@@ -1326,16 +1541,22 @@ fn analyze_height_functional(
             invariance: None,
             capture: super::HeightCapture {
                 definition_id: definition.id().clone(),
+                material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
                 frame,
                 height_interval_mm,
                 policy,
                 pose: None,
+                transport_support,
+                transport_support_complete: material_scope,
             },
         });
     }
     let mut source_links: Option<HeightSourceLinks> = None;
     for (index, face) in definition.solid.face_iter().enumerate() {
-        work.charge(1, cancel)?;
+        let face_before = work.consumed();
+        work.charge(1, cancel).map_err(|error| work.annotate_error(
+            error, face_before, format_args!("raw height census source_face={index} begin face"),
+        ))?;
         let face_reserved = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(face)?);
         let reserved = face_reserved.saturating_add(
             source_links
@@ -1349,8 +1570,13 @@ fn analyze_height_functional(
                 work,
                 cancel,
             )
-            .map_err(|error| height_face_context(error, index, "prepare original trim domain"))?;
+            .map_err(|error| work.annotate_error(error, face_before, format_args!("raw height census source_face={index} prepare original trim domain")))?;
         let bounded_uv = trim_parameter_box(&domain)?;
+        let mut stage = "source face qualification";
+        let mut curve_owner: Option<(usize, usize)> = None;
+        let mut curve_window: Option<(f64, f64)> = None;
+        let mut surface_window = bounded_uv;
+        let mut vertex_point: Option<[f64; 3]> = None;
         super::critical::with_original_source_face(&domain, bounded_uv, |original_face| -> Result<(), GeometryError> {
         let surface = original_face.surface();
         let flat_height = if nominal_fast_paths { flat_native_surface_height(surface, frame, work, cancel)? } else { constant_spline_height(surface, functional, work, cancel)? };
@@ -1372,6 +1598,8 @@ fn analyze_height_functional(
         let mut spans = surface_parameter_boxes(surface, bounded_uv, work, cancel)?;
         let mut stack = Vec::new();
         while let Some((uv, depth)) = stack.pop().or_else(|| if flat_height.is_none() { spans.next().map(|uv| (uv, 0u8)) } else { None }) {
+            stage = "source face interior";
+            surface_window = uv;
             work.charge(1, cancel)?;
             // Carrier height/gradient exclusion is independent of trim
             // membership. Do not refine winding near a source boundary for a
@@ -1478,6 +1706,8 @@ fn analyze_height_functional(
         // Potential C0 interfaces are lower-dimensional strata. Multiplicity
         // alone does not prove an actual geometric crease or event.
         for crease in surface_crease_interfaces(surface, bounded_uv, work, cancel)? {
+            stage = "source face crease";
+            surface_window = crease;
             if crease.iter().all(|axis| axis[0] != axis[1]) {
                 return Err(indeterminate("source reflected knot band has no proved fixed chart coordinate"));
             }
@@ -1526,15 +1756,24 @@ fn analyze_height_functional(
         let wires = face.absolute_boundaries();
         let mut constant_heights = HashMap::new();
         let references = definition.face_boundaries.get(index).ok_or_else(|| indeterminate("native trim correspondence is incomplete"))?;
-        for reference in references.wires.iter().flatten() {
+        for (wire_index, coedge_index, reference) in references.wires.iter().enumerate().flat_map(|(wire_index, wire)| {
+            wire.iter().enumerate().map(move |(coedge_index, reference)| (wire_index, coedge_index, reference))
+        }) {
+            stage = "source boundary witness";
+            curve_owner = Some((wire_index, coedge_index));
+            curve_window = None;
             work.charge(1, cancel)?;
             let witness = definition.boundary_curves.get(reference.witness).ok_or_else(|| indeterminate("native boundary witness is unavailable"))?;
             if nominal_fast_paths
                 && let Some(h) = constant_boundary_height(witness, frame) { constant_heights.insert(reference.edge, h); }
             prove_circle_stationary_heights(witness, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, work, cancel)?;
         }
-        for wire in wires {
-            for edge in wire {
+        for (wire_index, wire) in wires.iter().enumerate() {
+            for (coedge_index, edge) in wire.iter().enumerate() {
+                stage = "source coedge census";
+                curve_owner = Some((wire_index, coedge_index));
+                curve_window = Some(edge.with_curve(|curve| curve.range_tuple()));
+                vertex_point = None;
                 work.charge(1, cancel)?;
                 let constant = match constant_heights.get(&edge.id()).copied() {
                     Some(h) => Some(h),
@@ -1565,6 +1804,8 @@ fn analyze_height_functional(
                     continue;
                 }
                 for vertex in [edge.front(), edge.back()] {
+                    stage = "source vertex census";
+                    vertex_point = Some(vertex.point().into());
                     let height = functional.vertex(vertex.point().into());
                     if flat_height.is_none() && overlaps(height, height_interval_mm) {
                         let allowance = remaining_scratch_with_limit(scratch_limit,
@@ -1578,6 +1819,8 @@ fn analyze_height_functional(
                     add_event(&mut events, height, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
                 }
                 if flat_height.is_none() {
+                    stage = "source coedge height isolation";
+                    vertex_point = None;
                     edge.with_curve(|curve| -> Result<(), GeometryError> {
                         let occupied = face_reserved.saturating_add(domain.owned_bytes())
                             .saturating_add(source_links.as_ref().map_or(0, HeightSourceLinks::owned_bytes));
@@ -1591,7 +1834,9 @@ fn analyze_height_functional(
             return Err(indeterminate("analytic critical-height value lacks a feasible native trim witness"));
         }
         Ok(())
-        }).map_err(|error| height_face_context(error, index, "complete original strata"))?;
+        }).map_err(|error| work.annotate_error(error, face_before, format_args!(
+            "raw height census stage={stage} source_face={index} wire_coedge={curve_owner:?} native_curve_window={curve_window:?} uv_window={surface_window:?} vertex_mm={vertex_point:?} transport_work_before={transport_before}"
+        )))?;
     }
     events.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
     // Only identical enclosures are deduplicated. Proximity is not proof that
@@ -1605,10 +1850,13 @@ fn analyze_height_functional(
         invariance,
         capture: super::HeightCapture {
             definition_id: definition.id().clone(),
+            material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
             frame,
             height_interval_mm,
             policy,
             pose: None,
+            transport_support,
+            transport_support_complete: material_scope,
         },
     })
 }
@@ -1974,8 +2222,12 @@ fn isolate_smooth_curve_span_events(
         heights,
         uncertainty,
     } = *query;
+    let before = work.consumed();
+    let mut window = span;
+    let result = (|| {
     let mut stack = vec![(span, 0u8)];
     while let Some(((lo, hi), depth)) = stack.pop() {
+        window = (lo, hi);
         work.charge(1, cancel)?;
         let jet = curve.jet((lo, hi), work, cancel)?;
         let h = functional.height(jet.position);
@@ -2047,6 +2299,10 @@ fn isolate_smooth_curve_span_events(
         stack.push(((lo, mid), depth + 1));
     }
     Ok(())
+    })();
+    result.map_err(|error| work.annotate_error(
+        error, before, format_args!("raw height census smooth original coedge native_parameter_bounds={span:?} curve_window={window:?}"),
+    ))
 }
 
 const ENDPOINT_PROOF_BYTES: usize = 8 * 1024 * 1024;
@@ -2382,6 +2638,7 @@ fn decompose_endpoint_faces(
             })?;
             let stratum = super::NativeEndpointStratum {
                 definition_id: definition.id().clone(),
+                material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
                 face_id: info.face_id.clone(),
                 face_index,
                 request,
@@ -2500,6 +2757,9 @@ pub(super) fn native_vertical_boundary_flow(
     work.charge(1, cancel)?;
     let scratch_limit = remaining_bytes.min(MAX_SLAB_SCRATCH_BYTES);
     remaining_scratch_with_limit(scratch_limit, EDGE_BYTES + STACK_SCRATCH_BYTES)?;
+    if !definition.material_transport_is_proved_zero(work, cancel)? {
+        return Ok(None);
+    }
     use monstertruck_modeling::Curve;
     use monstertruck_topology::EdgeId;
     let mut edges: HashMap<EdgeId<Curve>, FlowEdgeUses> = HashMap::new();
@@ -2726,6 +2986,7 @@ pub(super) fn native_vertical_boundary_flow(
     }
     Ok(Some(InvariantHeightDomain {
         definition_id: definition.id().clone(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         frame,
         height_interval_mm: interval,
         pose: None,
@@ -2737,6 +2998,7 @@ pub(super) fn native_vertical_boundary_flow(
 /// even when the requested sample is outside the source's closed support.
 pub(super) struct NativeClosedDiskProduct<'a> {
     _definition_id: &'a spiling_contracts::geometry::DefinitionId,
+    _material_realization: crate::kernel::MaterialRealizationIdentity,
 }
 
 pub(super) fn native_closed_disk_product<'a>(
@@ -2847,6 +3109,7 @@ pub(super) fn native_closed_disk_product<'a>(
         .all(|cap| cap)
         .then_some(NativeClosedDiskProduct {
             _definition_id: definition.id(),
+            _material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         }))
 }
 
@@ -2860,6 +3123,7 @@ struct RoundCarrier {
 }
 struct RoundContinuation<'a> {
     definition_id: &'a spiling_contracts::geometry::DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     source_face_count: usize,
     carrier: RoundCarrier,
     offset: Interval,
@@ -2869,11 +3133,17 @@ struct RoundContinuation<'a> {
 }
 pub(super) struct RoundIncidenceProof<'a> {
     definition_id: &'a spiling_contracts::geometry::DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     source_face_count: usize,
     tunnel_cycles: usize,
     native_convex_source: bool,
 }
 impl RoundIncidenceProof<'_> {
+    pub(super) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.material_realization
+    }
     pub(super) fn definition_id(&self) -> &spiling_contracts::geometry::DefinitionId {
         self.definition_id
     }
@@ -2897,6 +3167,7 @@ impl<'a> RoundContinuation<'a> {
     fn incidence_proof(&self) -> RoundIncidenceProof<'a> {
         RoundIncidenceProof {
             definition_id: self.definition_id,
+            material_realization: self.material_realization,
             source_face_count: self.source_face_count,
             tunnel_cycles: usize::from(self.carrier.major_radius.is_some()),
             // The complete positively bounded affine sphere was proved from
@@ -2946,7 +3217,7 @@ fn round_carrier(surface: &Surface) -> Option<(RoundCarrier, bool)> {
 /// not permission from a family label. A regular closed same-carrier patch
 /// complex is open and closed in the connected carrier: opposite edge uses
 /// continue across chart/face subdivisions rather than leaving physical trims.
-fn round_continuation<'a>(
+fn raw_round_continuation<'a>(
     source: crate::section::OriginalTrimSource<'_, 'a>,
     frame: PlaneFrameMm,
     scratch_limit: usize,
@@ -3080,6 +3351,7 @@ fn round_continuation<'a>(
     let other = [(axis + 1) % 3, (axis + 2) % 3];
     Ok(Some(RoundContinuation {
         definition_id: definition.id(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         source_face_count,
         carrier,
         offset,
@@ -3439,6 +3711,7 @@ fn certified_empty_slab(
     // A regular empty sample or endpoint-only contact is not this witness.
     let invariance = Some(InvariantHeightDomain {
         definition_id: definition.id().clone(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         frame: request.frame,
         height_interval_mm: request.height_interval_mm,
         pose: None,
@@ -3477,6 +3750,12 @@ pub(crate) fn analyze_slab(
         ));
     }
     let definition = source.definition();
+    let material_transport_zero = definition.material_transport_is_proved_zero(work, cancel)?;
+    let transport_height_padding = if material_transport_zero {
+        0.0
+    } else {
+        material_transport_height_padding(definition, HeightFunctional::from_frame(request.frame))?
+    };
     let n = request.frame.z_axis;
     let norm_squared = dot(n.map(Interval::point), n);
     let factor = Interval::point(request.sample_height_mm).div(norm_squared)?;
@@ -3544,7 +3823,10 @@ pub(crate) fn analyze_slab(
             .sum(),
         cancel,
     )?;
-    let broad = broad_height(definition, request.frame);
+    let broad = broad_height(definition, request.frame).add(Interval {
+        lo: -transport_height_padding,
+        hi: transport_height_padding,
+    });
     if range[1] < broad.lo || range[0] > broad.hi {
         return certified_empty_slab(
             section,
@@ -3559,8 +3841,35 @@ pub(crate) fn analyze_slab(
         .saturating_add(section.retained_bytes())
         .saturating_add(definition.id().allocated_bytes());
     remaining_scratch(resident_bytes.saturating_add(STACK_SCRATCH_BYTES))?;
-    let endpoints = decompose_endpoint_faces(source, request, resident_bytes, work, cancel)?;
-    let invariance = if endpoints.faces.is_empty() {
+    let transport_exclusion = if material_transport_zero {
+        Some(MaterialTransportExclusion {
+            definition_id: definition.id(),
+            material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
+            frame: request.frame,
+            range,
+        })
+    } else {
+        exclude_material_transport(
+            source,
+            request.frame,
+            range,
+            remaining_scratch(resident_bytes.saturating_add(STACK_SCRATCH_BYTES))?,
+            work,
+            cancel,
+        )?
+    };
+    let endpoints = if transport_exclusion.is_some() {
+        decompose_endpoint_faces(source, request, resident_bytes, work, cancel)?
+    } else {
+        // Raw horizontal caps are not caps of a potentially transported face.
+        // The complete closed-source recovery must establish their ownership.
+        EndpointDecomposition {
+            faces: Vec::new(),
+            strata: Vec::new(),
+            stratum_buffer_bytes: 0,
+        }
+    };
+    let invariance = if material_transport_zero && endpoints.faces.is_empty() {
         narrow_invariance_with_scratch_limit(
             source,
             request.frame,
@@ -3576,8 +3885,8 @@ pub(crate) fn analyze_slab(
     } else {
         None
     };
-    let round = if invariance.is_none() && endpoints.faces.is_empty() {
-        round_continuation(
+    let round = if material_transport_zero && invariance.is_none() && endpoints.faces.is_empty() {
+        raw_round_continuation(
             source,
             request.frame,
             remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
@@ -3617,7 +3926,7 @@ pub(crate) fn analyze_slab(
     }
     let regular = if let Some(product) = &invariance {
         work.charge(1, cancel)?;
-        if product.definition_id() != definition.id()
+        if !product.matches_original_material(definition)
             || product.frame() != request.frame
             || product.pose().is_some()
             || product.height_interval_mm()[0] > range[0]
@@ -3634,6 +3943,7 @@ pub(crate) fn analyze_slab(
         // not claim that an unvisited source cell is a finite root cover.
         Some(RegularContinuation {
             definition_id: definition.id(),
+            material_realization: product.material_realization_identity(),
             frame: request.frame,
             range,
             speed: 0.0,
@@ -3643,8 +3953,7 @@ pub(crate) fn analyze_slab(
     } else if round.is_none() {
         let regular = regular_boundary_speed(
             source,
-            request.frame,
-            range,
+            transport_exclusion.as_ref(),
             &endpoints,
             resident_bytes,
             work,
@@ -3938,6 +4247,7 @@ pub(crate) fn analyze_slab(
 /// Face normals alone never replace original edge/vertex continuation.
 pub(super) struct RegularContinuation<'a> {
     definition_id: &'a spiling_contracts::geometry::DefinitionId,
+    material_realization: crate::kernel::MaterialRealizationIdentity,
     frame: PlaneFrameMm,
     range: [f64; 2],
     speed: f64,
@@ -3945,6 +4255,11 @@ pub(super) struct RegularContinuation<'a> {
     covered_coedge_cells: u64,
 }
 impl RegularContinuation<'_> {
+    pub(super) fn material_realization_identity(
+        &self,
+    ) -> crate::kernel::MaterialRealizationIdentity {
+        self.material_realization
+    }
     pub(super) fn definition_id(&self) -> &spiling_contracts::geometry::DefinitionId {
         self.definition_id
     }
@@ -3963,14 +4278,29 @@ impl RegularContinuation<'_> {
 }
 fn regular_boundary_speed<'a>(
     source: crate::section::OriginalTrimSource<'_, 'a>,
-    frame: PlaneFrameMm,
-    range: [f64; 2],
+    transport_exclusion: Option<&MaterialTransportExclusion<'_>>,
     endpoints: &EndpointDecomposition,
     resident_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<RegularContinuation<'a>, GeometryError> {
     let definition = source.definition();
+    let Some(exclusion) = transport_exclusion else {
+        return Err(indeterminate(
+            "active material transport requires corrected geometric continuation, not a raw speed",
+        ));
+    };
+    if exclusion.definition_id != definition.id()
+        || exclusion.material_realization
+            != crate::kernel::MaterialRealizationIdentity::new(definition)
+    {
+        return Err(error(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "regular continuation changed its source-owned transport exclusion",
+        ));
+    }
+    let frame = exclusion.frame;
+    let range = exclusion.range;
     let mut speed = 0.0_f64;
     let mut covered_face_cells = 0u64;
     let mut covered_coedge_cells = 0u64;
@@ -4309,6 +4639,7 @@ fn regular_boundary_speed<'a>(
     }
     Ok(RegularContinuation {
         definition_id: definition.id(),
+        material_realization: crate::kernel::MaterialRealizationIdentity::new(definition),
         frame,
         range,
         speed,
@@ -4596,6 +4927,65 @@ mod tests {
         crate::import_step(source.as_bytes(), &AtomicBool::new(false))
             .expect("native source-backed definition")
     }
+    #[test]
+    fn standalone_material_domains_borrow_one_definition_bound_owner() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let other = crate::import_step(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let standalone = crate::section::OriginalTrimSource::standalone(&definition);
+        let mut preparation = GeometryWorkBudget::new(20_000_000);
+        let originals = standalone
+            .prepare_domains_if_missing(MAX_SLAB_SCRATCH_BYTES, &mut preparation, &cancel)
+            .unwrap()
+            .expect("standalone query owns its original domains");
+        assert!(originals.retained_bytes() > 0);
+        let source = standalone.borrowing_domains(Some(&originals));
+        // Reborrowing consumes only binding work, not domain preparation or
+        // another retained allocation, even with no additional metadata space.
+        let mut work = GeometryWorkBudget::new(64);
+        assert!(
+            source
+                .prepare_domains_if_missing(0, &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        let first = source.face_domain(0, 0, &mut work, &cancel).unwrap();
+        assert_eq!(first.owned_bytes(), 0);
+        for _ in 0..10 {
+            let again = source.face_domain(0, 0, &mut work, &cancel).unwrap();
+            assert!(std::ptr::eq(&*first, &*again));
+            assert_eq!(again.owned_bytes(), 0);
+        }
+        let foreign = crate::section::OriginalTrimSource::standalone(&other)
+            .borrowing_domains(Some(&originals));
+        let error = foreign.face_domain(0, 0, &mut work, &cancel).err().unwrap();
+        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+        let error = standalone
+            .prepare_domains_if_missing(0, &mut work, &cancel)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+        assert!(error.message.contains("standalone SourceOriginals preparation"));
+        assert!(error.message.contains("work_before="));
+        assert!(error.message.contains("work_delta=0"));
+        assert!(error.message.contains("work_remaining="));
+        let error = standalone
+            .prepare_domains_if_missing(MAX_SLAB_SCRATCH_BYTES, &mut work, &AtomicBool::new(true))
+            .err()
+            .unwrap();
+        assert_eq!(error.code, GeometryErrorCode::Cancelled);
+        assert!(error.message.contains("standalone SourceOriginals"));
+        assert!(error.message.contains("work_consumed="));
+    }
+
     #[test]
     fn affine_spline_census_keeps_all_original_corner_levels() {
         let cancel = AtomicBool::new(false);
@@ -5187,6 +5577,52 @@ mod tests {
     }
 
     #[test]
+    fn transport_supports_are_owned_metadata_not_isolated_events() {
+        let cancel = AtomicBool::new(false);
+        let definition = parity_definition("native-parity-blind-pocket.step");
+        let mut work = GeometryWorkBudget::new(5_000_000);
+        let source = crate::section::OriginalTrimSource::standalone(&definition);
+        let policy = AnalysisPolicy {
+            maximum_height_uncertainty_mm: 1.0e-7,
+            maximum_shape_error_mm: 0.1,
+        };
+        let covers = material_transport_height_cover(
+            source,
+            HeightFunctional::from_frame(frame()),
+            [-1.0, 9.0],
+            MAX_SLAB_SCRATCH_BYTES - definition.retained_query_proof_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(covers.len() <= MAX_EVENT_BRACKETS);
+        assert!(
+            covers.iter().any(|cover| {
+                cover.base_interval[1].max(cover.corrected_interval[1])
+                    - cover.base_interval[0].min(cover.corrected_interval[0])
+                    > policy.maximum_height_uncertainty_mm
+            }),
+            "a full transport support must never be tiled into fabricated critical heights"
+        );
+        let retained =
+            covers.capacity() * std::mem::size_of::<super::super::SourceTransportCover>();
+        let literal = analyze_literal_native_height_domain(
+            source,
+            frame(),
+            [5.9, 6.1],
+            policy,
+            MAX_SLAB_SCRATCH_BYTES - definition.retained_query_proof_bytes() - retained,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(literal.event_brackets_mm.is_empty());
+        assert!(literal.capture.transport_support.is_empty());
+        assert!(!literal.capture.transport_support_complete);
+        assert!(literal.requires_closed_material_capture([5.9, 6.1]));
+    }
+
+    #[test]
     fn actual_original_torus_height_zero_has_no_seam_or_vertex_critical_alias() {
         let definition = parity_definition("native-parity-nurbs-torus.step");
         let cancel = AtomicBool::new(false);
@@ -5209,6 +5645,13 @@ mod tests {
             census.event_brackets_mm,
             census.proved_event_brackets_mm,
             work.consumed(),
+        );
+        assert_eq!(
+            census.requires_closed_material_capture([-0.01, 0.01]),
+            !definition
+                .material_transport_is_proved_zero(&mut work, &cancel)
+                .unwrap(),
+            "an empty literal event list alone never certifies a transported material band",
         );
     }
 
@@ -5444,6 +5887,51 @@ mod tests {
         }
     }
     #[test]
+    fn actual_bore_interior_uses_realized_regular_flow_under_unchanged_shape_policy() {
+        let definition = parity_definition("native-parity-blind-pocket.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(70_000_000);
+        let source = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        let slab = analyze_slab(
+            &source,
+            SlabRequest {
+                frame: frame(),
+                height_interval_mm: [5.9, 6.1],
+                sample_height_mm: 6.0,
+                native_shape_error_mm: 0.05,
+            },
+            crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .expect("actual interior transport must use its realized flow, not a full vertical return");
+        assert!(
+            slab.closed_shape_error_mm()
+                .is_some_and(|bound| bound <= 0.05)
+        );
+        assert!(slab.critical.as_ref().is_some_and(|proof| {
+            proof
+                .regular_flow_speed_mm_per_height()
+                .is_some_and(|speed| speed.is_finite())
+        }));
+        if !definition
+            .material_transport_is_proved_zero(&mut work, &cancel)
+            .unwrap()
+        {
+            assert!(
+                slab.invariance.is_none(),
+                "a G-aware regular flow is not exact material invariance"
+            );
+        }
+    }
+
+    #[test]
     fn source_vertical_flow_covers_bores_generic_extrusions_and_exact_tensor_columns() {
         let cancel = AtomicBool::new(false);
         for name in [
@@ -5454,15 +5942,25 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(30_000_000);
-            let certificate =
-                narrow_invariance(&definition, frame(), [-1.0, 9.0], &mut work, &cancel)
-                    .unwrap()
-                    .expect("actual source boundary has exact vertical flow");
-            assert_eq!(certificate.height_interval_mm, [0.0, 8.0], "{name}");
-            let inner = narrow_invariance(&definition, frame(), [2.0, 6.0], &mut work, &cancel)
-                .unwrap()
+            let zero = definition
+                .material_transport_is_proved_zero(&mut work, &cancel)
                 .unwrap();
-            assert_eq!(inner.height_interval_mm, [2.0, 6.0], "{name}");
+            let certificate =
+                narrow_invariance(&definition, frame(), [-1.0, 9.0], &mut work, &cancel).unwrap();
+            assert_eq!(
+                certificate.is_some(),
+                zero,
+                "{name}: raw flow requires a zero-transport theorem"
+            );
+            if let Some(certificate) = certificate {
+                assert_eq!(certificate.height_interval_mm, [0.0, 8.0], "{name}");
+            }
+            let inner =
+                narrow_invariance(&definition, frame(), [2.0, 6.0], &mut work, &cancel).unwrap();
+            assert_eq!(inner.is_some(), zero, "{name}");
+            if let Some(inner) = inner {
+                assert_eq!(inner.height_interval_mm, [2.0, 6.0], "{name}");
+            }
         }
     }
     #[test]
@@ -5490,12 +5988,17 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        assert!(slab.invariance.is_some());
+        let zero = definition
+            .material_transport_is_proved_zero(&mut work, &cancel)
+            .unwrap();
+        assert_eq!(slab.invariance.is_some(), zero);
         let proof = slab
             .critical
             .as_ref()
             .expect("the exact original product is a real continuation");
-        assert_eq!(proof.regular_flow_speed_mm_per_height(), Some(0.0));
+        if zero {
+            assert_eq!(proof.regular_flow_speed_mm_per_height(), Some(0.0));
+        }
         assert_eq!(proof.material_component_count(), 1);
         assert_eq!(proof.tunnel_cycle_count(), 0);
         assert!(
@@ -5571,7 +6074,14 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(result.invariance.unwrap().height_interval_mm, [0.0, 8.0]);
+        let zero = definition
+            .material_transport_is_proved_zero(&mut work, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(result.invariance.is_some(), zero);
+        assert_eq!(result.requires_closed_material_capture([2.0, 6.0]), !zero);
+        if let Some(invariance) = result.invariance.as_ref() {
+            assert_eq!(invariance.height_interval_mm, [0.0, 8.0]);
+        }
         assert!(
             result
                 .proved_event_brackets_mm

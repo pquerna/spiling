@@ -29,8 +29,193 @@ pub(crate) struct PreparedFaceTrimDomain<'a> {
     native: PreparedFaceParameterDomain<'a>,
     source_chart_error_mm: f64,
     certified_uv_domain: Option<[[f64; 2]; 2]>,
+    definition: &'a Definition,
+    face_index: usize,
 }
 impl PreparedFaceTrimDomain<'_> {
+    /// Resolve against immutable original metadata, never a cached address.
+    pub(crate) fn original_coedge(
+        &self,
+        coedge_index: usize,
+    ) -> Result<&super::BoundaryCoedgeRef, GeometryError> {
+        self.definition.face_boundaries[self.face_index]
+            .wires
+            .iter()
+            .flatten()
+            .nth(coedge_index)
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original coedge index is outside its captured face",
+                )
+            })
+    }
+
+    pub(crate) fn original_coedge_correspondence(
+        &self,
+        coedge_index: usize,
+    ) -> Result<&super::OriginalCoedgeCorrespondence, GeometryError> {
+        let coedge = self.original_coedge(coedge_index)?;
+        let proof = coedge.correspondence.as_ref().ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original coedge has no completed coefficient/forward correspondence",
+            )
+        })?;
+        let binding = proof.binding().ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original coedge correspondence lacks normalized ownership",
+            )
+        })?;
+        if binding.face != self.definition.face_boundaries[self.face_index].face
+            || binding.edge != coedge.edge
+            || binding.owner[0] != self.face_index
+            || binding.source.native_orientation != coedge.orientation
+            || coedge.source_chart_parameter_range
+                != Some((proof.uv_range()[0], proof.uv_range()[1]))
+            || !coedge.source_chart_certificate.is_certified()
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "retained original coedge correspondence ownership changed",
+            ));
+        }
+        Ok(proof)
+    }
+
+    /// Reevaluate unchanged native spatial and UV coefficient jets using the
+    /// retained endpoint recipe. Both returned derivatives use native edge t.
+    /// UV uncertainty remains separately available on the receipt.
+    pub(crate) fn original_coedge_jets(
+        &self,
+        coedge_index: usize,
+        range: [f64; 2],
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<
+        (
+            crate::parametric::CurveEnclosure,
+            crate::parametric::ChartCurveEnclosure,
+        ),
+        GeometryError,
+    > {
+        check_cancel(cancel)?;
+        let proof = self.original_coedge_correspondence(coedge_index)?;
+        let binding = proof.binding().expect("validated original ownership");
+        let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
+        let edge = &face.face().absolute_boundaries()[binding.owner[1]][binding.owner[2]];
+        if edge.id() != binding.edge || [edge.front().id(), edge.back().id()] != binding.endpoints {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original native coedge operands changed",
+            ));
+        }
+        proof.uv_parameter_image(range)?;
+        let native_range = proof.native_range();
+        let spatial = edge.with_curve(|curve| {
+            self.definition
+                .prepare_boundary_curve(
+                    edge.id(),
+                    curve,
+                    (native_range[0], native_range[1]),
+                    remaining_bytes,
+                    work,
+                    cancel,
+                )?
+                .jet((range[0], range[1]), work, cancel)
+        })?;
+        Ok((
+            spatial,
+            self.original_coedge_uv_jet(coedge_index, range, work, cancel)?,
+        ))
+    }
+
+    /// Reevaluate only the unchanged UV coefficients. Spatial consumers can
+    /// reuse an already prepared original edge instead of recapturing per cell.
+    pub(crate) fn original_coedge_uv_jet(
+        &self,
+        coedge_index: usize,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::parametric::ChartCurveEnclosure, GeometryError> {
+        check_cancel(cancel)?;
+        let proof = self.original_coedge_correspondence(coedge_index)?;
+        let binding = proof.binding().expect("validated original ownership");
+        let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
+        let uv_range = proof.uv_parameter_image(range)?;
+        let chart = face.trims()[binding.owner[1]][binding.owner[2]]
+            .as_ref()
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original coedge UV coefficients are unavailable",
+                )
+            })?;
+        let mut native_work =
+            ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
+        let result = monstertruck_modeling::validated_curve2d_jet(
+            chart,
+            [uv_range.lo, uv_range.hi],
+            &mut native_work,
+            cancel,
+        );
+        crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
+        let jet = result.map_err(crate::parametric::native_error)?;
+        let adapt = |v: monstertruck_modeling::ValidatedInterval| crate::parametric::Interval {
+            lo: v.lower,
+            hi: v.upper,
+        };
+        let slope = proof.uv_parameter_derivative();
+        Ok(crate::parametric::ChartCurveEnclosure {
+            position: jet.position.map(adapt),
+            derivative: jet.first.map(|v| adapt(v).mul(slope)),
+            second_derivative: jet.second.map(|v| adapt(v).mul(slope.square())),
+        })
+    }
+
+    pub(crate) fn material_realization(&self) -> super::OriginalMaterialRealization<'_> {
+        super::OriginalMaterialRealization::new(self.definition)
+    }
+
+    /// Visit every original spatial/UV knot and retained continuation boundary
+    /// in native-edge coordinates without a per-cell retained vector. The
+    /// callback runs under the original edge's coefficient borrow; collect
+    /// boundary data only and do not recursively evaluate that edge.
+    pub(crate) fn visit_original_coedge_span_boundaries(
+        &self,
+        coedge_index: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visit: &mut impl FnMut(crate::parametric::Interval) -> Result<(), GeometryError>,
+    ) -> Result<(), GeometryError> {
+        let proof = self.original_coedge_correspondence(coedge_index)?;
+        let coedge = self.original_coedge(coedge_index)?;
+        let binding = proof.binding().expect("validated original ownership");
+        let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
+        let edges = face.face().absolute_boundaries();
+        let edge = &edges[binding.owner[1]][binding.owner[2]];
+        let chart = face.trims()[binding.owner[1]][binding.owner[2]]
+            .as_ref()
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original coedge UV inventory is unavailable",
+                )
+            })?;
+        let continuation = self
+            .definition
+            .boundary_continuations
+            .get(coedge.witness)
+            .and_then(Option::as_ref)
+            .map(|branch| &self.definition.original_continuations[branch.prepared]);
+        edge.with_curve(|curve| {
+            proof.visit_span_boundaries(curve, chart, continuation, work, cancel, visit)
+        })
+    }
+
     pub(crate) fn uv_bounds(&self) -> [[f64; 2]; 2] {
         self.native.closed_parameter_box()
     }
@@ -436,5 +621,136 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
         native: result.map_err(trim_error)?,
         source_chart_error_mm,
         certified_uv_domain: identity.parameter.native_uv_domain,
+        definition,
+        face_index,
     })
+}
+
+#[cfg(test)]
+mod retained_receipt_tests {
+    use super::*;
+
+    fn original_box(name: &str) -> Definition {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry")
+            .join(name);
+        crate::import_step(&std::fs::read(path).unwrap(), &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn retained_receipt_survives_normalization_and_resolves_original_jets() {
+        let cancel = AtomicBool::new(false);
+        for name in ["box-mm.step", "box-inch.step"] {
+            let definition = original_box(name);
+            let mut work = GeometryWorkBudget::new(10_000_000);
+            for face_index in 0..definition.faces.len() {
+                let domain = prepare_face_trim_domain_with_byte_limit(
+                    &definition,
+                    face_index,
+                    32 * 1024 * 1024,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                let refs = &definition.face_boundaries[face_index];
+                for (index, coedge) in refs.wires.iter().flatten().enumerate() {
+                    let proof = domain.original_coedge_correspondence(index).unwrap();
+                    let binding = proof.binding().unwrap();
+                    assert_eq!(binding.face, refs.face);
+                    assert_eq!(binding.edge, coedge.edge);
+                    assert_eq!(binding.owner[0], face_index);
+                    assert_eq!(binding.source.native_edge_index, coedge.witness);
+                    assert_eq!(binding.source.native_orientation, coedge.orientation);
+                    assert_eq!(
+                        binding.source,
+                        definition.source_topology.faces[face_index].wires[binding.owner[1]]
+                            .coedges[binding.owner[2]],
+                    );
+                    assert!(binding.source.source_edge.is_some());
+                    assert!(proof.position_error_mm() <= 1.0e-7);
+                    assert!(proof.relative_derivative_error_bound() <= 0.25);
+                    assert_eq!(proof.margin_uv(), coedge.source_chart_margin_uv);
+                    let [a, b] = proof.native_range();
+                    let (spatial, chart) = domain
+                        .original_coedge_jets(index, [a, a], 32 * 1024 * 1024, &mut work, &cancel)
+                        .unwrap();
+                    let uv = domain
+                        .original_coedge_uv_jet(index, [a, a], &mut work, &cancel)
+                        .unwrap();
+                    assert_eq!(
+                        chart.position.map(|v| [v.lo, v.hi]),
+                        uv.position.map(|v| [v.lo, v.hi])
+                    );
+                    assert!(
+                        spatial
+                            .position
+                            .iter()
+                            .all(|v| v.lo.is_finite() && v.hi.is_finite())
+                    );
+                    let end = proof.uv_parameter_image([b, b]).unwrap();
+                    assert!(end.lo <= proof.uv_range()[1] && proof.uv_range()[1] <= end.hi);
+                    assert!(proof.uv_parameter_image([a - (b - a), b]).is_err());
+                    let mut saw_front = false;
+                    let mut saw_back = false;
+                    domain
+                        .visit_original_coedge_span_boundaries(
+                            index,
+                            &mut work,
+                            &cancel,
+                            &mut |boundary| {
+                                saw_front |= boundary.lo <= a && a <= boundary.hi;
+                                saw_back |= boundary.lo <= b && b <= boundary.hi;
+                                assert!(a <= boundary.lo && boundary.hi <= b);
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                    assert!(saw_front && saw_back);
+                }
+                let recipe = domain.material_realization();
+                assert_eq!(recipe.collar_parameter_fraction(), 1.0 / 1024.0);
+                assert_eq!(recipe.endpoint_support_fraction(), 1.0 / 1024.0);
+            }
+            let receipts = definition
+                .face_boundaries
+                .iter()
+                .flat_map(|face| &face.wires)
+                .map(Vec::capacity)
+                .sum::<usize>();
+            assert!(
+                definition.retained_query_proof_bytes()
+                    >= receipts * std::mem::size_of::<super::super::BoundaryCoedgeRef>()
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_qualification_without_retained_receipt_refuses_material_authority() {
+        let mut definition = original_box("box-mm.step");
+        let coedge = &mut definition.face_boundaries[0].wires[0][0];
+        coedge.correspondence = None;
+        assert!(coedge.source_chart_certificate.is_certified());
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let domain = prepare_face_trim_domain_with_byte_limit(
+            &definition,
+            0,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            domain.original_coedge_correspondence(0).err().unwrap().code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        );
+        assert_eq!(
+            domain
+                .original_coedge_uv_jet(0, [0.0, 0.0], &mut work, &cancel)
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        );
+    }
 }

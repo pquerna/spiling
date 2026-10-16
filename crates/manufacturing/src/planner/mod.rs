@@ -446,6 +446,20 @@ pub(crate) fn plan(
     }
     drop(prepared_sources);
     let mut native_coverage = native_stage.finalize(&mut admission.geometry_work, cancel)?;
+    let accepted_native_proof_bytes = native_coverage.material_proof.retained_bytes();
+    // Preserve the compact material authority without retaining native proof
+    // geometry. Reserve its actual bytes in coordinate-sized admission units
+    // throughout classification and support, alongside the immutable operands.
+    let proof_units = accepted_native_proof_bytes.div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+    retained_points = retained_points
+        .checked_add(proof_units)
+        .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "accepted native material proof retention exceeds planner admission",
+            )
+        })?;
     drop(native_finished);
     drop(native_required);
     drop(native_material);
@@ -806,6 +820,7 @@ pub(crate) fn plan(
                     native_bounds: &admission.native_bounds,
                     demand_bounds,
                     point_limit,
+                    retained_material_proof_bytes: accepted_native_proof_bytes,
                 },
                 support_work,
                 native_work,
@@ -816,6 +831,7 @@ pub(crate) fn plan(
     // No-support/no-demand paths never project or retain unused negative-space
     // captures beyond support admission.
     drop(native_coverage.protected_voids);
+    drop(native_coverage.material_proof);
     let result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         native_geometry: NativeGeometryCoverageSummary {

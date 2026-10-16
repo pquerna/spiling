@@ -288,6 +288,96 @@ pub(super) fn placed_bounds_with_scratch_limit(
     )
 }
 
+struct PlacedBoundsFrame {
+    matrix: Matrix,
+    coefficients: [Interval; 3],
+    nominal: [f64; 3],
+    norm: Interval,
+    offset: Interval,
+    policy: BoundsPolicy,
+    source_policy: BoundsPolicy,
+}
+impl PlacedBoundsFrame {
+    fn new(
+        pose: RigidPoseMm,
+        world_direction: [f64; 3],
+        policy: BoundsPolicy,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        work.charge(1, cancel)?;
+        let tolerance = policy.maximum_endpoint_uncertainty_mm;
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "placed bounds require positive finite endpoint uncertainty",
+            ));
+        }
+        let matrix = rotation(pose)?;
+        let world = normalized(world_direction)?;
+        let coefficients =
+            std::array::from_fn(|i| dot(std::array::from_fn(|j| matrix[j][i]), world));
+        let nominal = coefficients.map(Interval::mid);
+        let norm = length(nominal.map(Interval::point))?;
+        if norm.lo <= 0.0 {
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "posed support functional has no resolved positive norm",
+            ));
+        }
+        let offset = dot(world, pose.translation_mm.map(Interval::point));
+        let source_tolerance = div(Interval::point(tolerance * 0.25), norm)?.lo;
+        if !source_tolerance.is_finite() || source_tolerance <= 0.0 {
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "placed endpoint policy has no representable source uncertainty",
+            ));
+        }
+        Ok(Self {
+            matrix,
+            coefficients,
+            nominal,
+            norm,
+            offset,
+            policy,
+            source_policy: BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: source_tolerance,
+            },
+        })
+    }
+
+    fn finish(
+        &self,
+        source: ProjectedBounds,
+        extent: [f64; 3],
+    ) -> Result<ProjectedBounds, GeometryError> {
+        let residual = coefficient_error(self.coefficients, self.nominal, extent)?;
+        let transform = |bracket: [f64; 2]| -> Result<Interval, GeometryError> {
+            finite(add(
+                add(
+                    mul(self.norm, Interval::new(bracket[0], bracket[1])?),
+                    self.offset,
+                ),
+                symmetric(residual),
+            ))
+        };
+        let minimum = transform(source.minimum)?;
+        let maximum = transform(source.maximum)?;
+        let achieved = width(minimum).max(width(maximum));
+        if achieved > self.policy.maximum_endpoint_uncertainty_mm {
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "placed endpoint arithmetic exceeds the requested uncertainty",
+            ));
+        }
+        Ok(ProjectedBounds {
+            minimum: [minimum.lo, minimum.hi],
+            maximum: [maximum.lo, maximum.hi],
+            achieved_uncertainty_mm: achieved,
+        })
+    }
+}
+
 fn placed_bounds_inner(
     source_context: crate::section::OriginalTrimSource<'_, '_>,
     pose: RigidPoseMm,
@@ -298,76 +388,129 @@ fn placed_bounds_inner(
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
     let definition = source_context.definition();
-    work.charge(1, cancel)?;
-    let tolerance = policy.maximum_endpoint_uncertainty_mm;
-    if !tolerance.is_finite() || tolerance <= 0.0 {
-        return Err(error(
-            GeometryErrorCode::InvalidGeometry,
-            "placed bounds require positive finite endpoint uncertainty",
-        ));
-    }
-    let matrix = rotation(pose)?;
-    let world = normalized(world_direction)?;
-    let coefficients = std::array::from_fn(|i| dot(std::array::from_fn(|j| matrix[j][i]), world));
-    let nominal = coefficients.map(Interval::mid);
-    let norm = length(nominal.map(Interval::point))?;
-    if norm.lo <= 0.0 {
-        return Err(error(
-            GeometryErrorCode::ConditioningFailure,
-            "posed support functional has no resolved positive norm",
-        ));
-    }
-    let residual = coefficient_error(coefficients, nominal, source_extent(definition))?;
-    let offset = dot(world, pose.translation_mm.map(Interval::point));
-    let source_tolerance = div(Interval::point(tolerance * 0.25), norm)?.lo;
-    if !source_tolerance.is_finite() || source_tolerance <= 0.0 {
-        return Err(error(
-            GeometryErrorCode::ConditioningFailure,
-            "placed endpoint policy has no representable source uncertainty",
-        ));
-    }
-    let source_policy = BoundsPolicy {
-        maximum_endpoint_uncertainty_mm: source_tolerance,
-    };
+    let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
     let source = match remaining_bytes {
         Some(bytes) => super::bounds::projected_bounds_with_scratch_limit(
             source_context,
-            nominal,
-            source_policy,
+            frame.nominal,
+            frame.source_policy,
             bytes,
             work,
             cancel,
         ),
-        None => projected_bounds(definition, nominal, source_policy, work, cancel),
+        None => projected_bounds(definition, frame.nominal, frame.source_policy, work, cancel),
     }?;
-    let transform = |bracket: [f64; 2]| -> Result<Interval, GeometryError> {
-        finite(add(
-            add(
-                mul(
-                    norm,
-                    Interval {
-                        lo: bracket[0],
-                        hi: bracket[1],
-                    },
-                ),
-                offset,
-            ),
-            symmetric(residual),
-        ))
-    };
-    let minimum = transform(source.minimum)?;
-    let maximum = transform(source.maximum)?;
-    let achieved = width(minimum).max(width(maximum));
-    if achieved > tolerance {
+    frame.finish(source, source_extent(definition))
+}
+
+/// Opaque complete material support bound for one exact source, recipe, pose
+/// and directional query. Its terminal brackets are global material extrema,
+/// not isolated critical events or permission to merge nearby source heights.
+#[derive(Debug)]
+pub struct PlacedMaterialProjectedBounds {
+    source: super::bounds::MaterialProjectedBounds,
+    pose: RigidPoseMm,
+    world_direction: [f64; 3],
+    policy: BoundsPolicy,
+    bounds: ProjectedBounds,
+    source_realization_error_mm: f64,
+    scalar_transport_is_identically_zero: bool,
+}
+impl PlacedMaterialProjectedBounds {
+    pub fn bounds(&self) -> ProjectedBounds {
+        self.bounds
+    }
+    pub fn definition_id(&self) -> &spiling_contracts::geometry::DefinitionId {
+        self.source.definition_id()
+    }
+    pub fn placed_pose(&self) -> RigidPoseMm {
+        self.pose
+    }
+    pub fn world_direction(&self) -> [f64; 3] {
+        self.world_direction
+    }
+    pub fn policy(&self) -> BoundsPolicy {
+        self.policy
+    }
+    pub fn source_realization_error_mm(&self) -> f64 {
+        self.source_realization_error_mm
+    }
+    /// True only for a whole-source scalar identity at the actual posed
+    /// covector. An uncertain coefficient box cannot inherit nominal equality.
+    pub fn scalar_transport_is_identically_zero(&self) -> bool {
+        self.scalar_transport_is_identically_zero
+    }
+    /// Match the immutable original definition and its exact material recipe.
+    /// Pose, direction and policy remain independently bound query fields.
+    pub fn is_compatible_with_definition(&self, definition: &Definition) -> bool {
+        self.source.definition_id() == definition.id()
+            && self.source.material_realization_identity()
+                == crate::kernel::MaterialRealizationIdentity::new(definition)
+    }
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .source
+                .retained_bytes()
+                .saturating_sub(std::mem::size_of::<super::bounds::MaterialProjectedBounds>())
+    }
+}
+
+pub fn placed_material_bounds(
+    definition: &Definition,
+    pose: RigidPoseMm,
+    world_direction: [f64; 3],
+    policy: BoundsPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PlacedMaterialProjectedBounds, GeometryError> {
+    let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
+    let source = super::bounds::material_projected_bounds(
+        definition,
+        frame.nominal,
+        frame.source_policy,
+        work,
+        cancel,
+    )?;
+    if source.definition_id() != definition.id()
+        || source.material_realization_identity()
+            != crate::kernel::MaterialRealizationIdentity::new(definition)
+    {
         return Err(error(
-            GeometryErrorCode::ConditioningFailure,
-            "placed endpoint arithmetic exceeds the requested uncertainty",
+            GeometryErrorCode::InvalidGeometry,
+            "placed material support changed its source recipe",
         ));
     }
-    Ok(ProjectedBounds {
-        minimum: [minimum.lo, minimum.hi],
-        maximum: [maximum.lo, maximum.hi],
-        achieved_uncertainty_mm: achieved,
+    let source_error = source.source_realization_error_mm();
+    if !source_error.is_finite() || source_error < 0.0 {
+        return Err(error(
+            GeometryErrorCode::ConditioningFailure,
+            "invalid source material realization error",
+        ));
+    }
+    // Quaternion/coefficient residuals must cover actual G, not just the raw
+    // source AABB. The physical source error enlarges each coordinate extent.
+    let extent = source_extent(definition)
+        .map(|extent| add(Interval::point(extent), Interval::point(source_error)).hi);
+    let bounds = frame.finish(source.bounds(), extent)?;
+    let source_realization_error_mm = finite(mul(
+        Interval::point(source_error),
+        Interval::point(spectral_bound(frame.matrix)?),
+    ))?
+    .hi;
+    let scalar_transport_is_identically_zero = source.scalar_transport_is_identically_zero()
+        && (0..3).all(|axis| {
+            frame.coefficients[axis].lo == frame.nominal[axis]
+                && frame.coefficients[axis].hi == frame.nominal[axis]
+        });
+    Ok(PlacedMaterialProjectedBounds {
+        source,
+        pose,
+        world_direction,
+        policy,
+        bounds,
+        source_realization_error_mm,
+        scalar_transport_is_identically_zero,
     })
 }
 
@@ -485,6 +628,7 @@ fn placed_invariance(
     {
         return Some(InvariantHeightDomain {
             definition_id: certificate.definition_id,
+            material_realization: certificate.material_realization,
             frame: world_frame(),
             height_interval_mm: range,
             pose: Some(pose),
@@ -518,6 +662,7 @@ fn placed_invariance(
     .min(range[1]);
     (lower.is_finite() && upper.is_finite() && lower < upper).then_some(InvariantHeightDomain {
         definition_id: certificate.definition_id,
+        material_realization: certificate.material_realization,
         frame: world_frame(),
         height_interval_mm: [lower, upper],
         pose: Some(pose),
@@ -590,6 +735,19 @@ pub fn analyze_placed_height_domain(
                 ));
             }
         }
+        for support in &mut source.capture.transport_support {
+            work.charge(1, cancel)?;
+            support.base_interval = map.world_value(pose, support.base_interval)?;
+            support.corrected_interval = map.world_value(pose, support.corrected_interval)?;
+            let displacement = finite(mul(
+                Interval::point(map.scale),
+                Interval::new(
+                    support.displacement_interval[0],
+                    support.displacement_interval[1],
+                )?,
+            ))?;
+            support.displacement_interval = [displacement.lo, displacement.hi];
+        }
         source.invariance = placed_invariance(
             source.invariance,
             &map,
@@ -615,8 +773,20 @@ pub fn analyze_placed_height_domain(
         enclosed.invariance = None;
         enclosed
     };
+    let material_realization = result.material_realization_identity();
+    if result.definition_id() != definition.id()
+        || material_realization != crate::kernel::MaterialRealizationIdentity::new(definition)
+    {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "placed height capture changed its original material realization",
+        ));
+    }
     result.capture = HeightCapture {
         definition_id: definition.id().clone(),
+        material_realization,
+        transport_support: std::mem::take(&mut result.capture.transport_support),
+        transport_support_complete: result.capture.transport_support_complete,
         frame: world_frame(),
         height_interval_mm: world_height_interval_mm,
         policy,
@@ -1097,6 +1267,16 @@ pub(crate) fn analyze_placed_slab(
         work,
         cancel,
     )?;
+    if !result.matches_original_material(source.definition())
+        || result.endpoint_strata.iter().any(|stratum| {
+            stratum.material_realization_identity() != result.material_realization_identity()
+        })
+    {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "placed slab cannot change its original material realization",
+        ));
+    }
     let placed = PlacedSlabCapture {
         pose: request.pose,
         world_height_interval_mm: request.world_height_interval_mm,
@@ -1430,6 +1610,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn placed_material_bounds_retain_source_recipe_pose_and_terminal_brackets() {
+        let cancel = AtomicBool::new(false);
+        let mut definition = crate::import_step(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [2.0, -3.0, 4.0],
+            ..RigidPoseMm::IDENTITY
+        };
+        let direction = [0.0, 0.0, 3.0];
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 1.0e-7,
+        };
+        let mut work = GeometryWorkBudget::new(5_000_000);
+        let material =
+            placed_material_bounds(&definition, pose, direction, policy, &mut work, &cancel)
+                .unwrap();
+        let literal =
+            placed_bounds(&definition, pose, direction, policy, &mut work, &cancel).unwrap();
+        assert_eq!(material.definition_id(), definition.id());
+        assert_eq!(material.placed_pose(), pose);
+        assert_eq!(material.world_direction(), direction);
+        assert_eq!(
+            material.policy().maximum_endpoint_uncertainty_mm,
+            policy.maximum_endpoint_uncertainty_mm
+        );
+        assert!(material.is_compatible_with_definition(&definition));
+        assert!(material.scalar_transport_is_identically_zero());
+        assert_eq!(material.source_realization_error_mm(), 0.0);
+        let bounds = material.bounds();
+        assert!(bounds.minimum[0] <= literal.minimum[1] && literal.minimum[0] <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= literal.maximum[1] && literal.maximum[0] <= bounds.maximum[1]);
+        assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
+        assert!(material.retained_bytes() >= std::mem::size_of::<PlacedMaterialProjectedBounds>());
+        assert_eq!(
+            placed_material_bounds(
+                &definition,
+                pose,
+                direction,
+                policy,
+                &mut GeometryWorkBudget::new(0),
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            placed_material_bounds(
+                &definition,
+                pose,
+                direction,
+                policy,
+                &mut work,
+                &AtomicBool::new(true),
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled,
+        );
+        definition.provenance.uncertainty_mm = if definition.provenance.uncertainty_mm.is_some() {
+            None
+        } else {
+            Some(0.0)
+        };
+        assert!(!material.is_compatible_with_definition(&definition));
+    }
+
+    #[test]
     fn exact_operations_preserve_only_actual_singletons() {
         assert_eq!(add(Interval::point(4.0), Interval::point(8.0)).lo, 12.0);
         assert_eq!(add(Interval::point(4.0), Interval::point(8.0)).hi, 12.0);
@@ -1707,6 +1958,7 @@ mod tests {
         };
         let certificate = InvariantHeightDomain {
             definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(&[0; 32]),
+            material_realization: crate::kernel::MaterialRealizationIdentity::with_allowance(None),
             frame: world_frame(),
             height_interval_mm: [0.0, 2.0],
             pose: None,

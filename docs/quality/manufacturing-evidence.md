@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Software-only manufacturing evidence
 
-Current source producer is planner7 with project4/surface3/manufacturing5, unchanged emitter/verifier4 and SPLR3. Inspection/reopen requires the exact planner generation for the XYZ6 minimum emitted-gap proof. Historical gate identities and measured artifacts below retain the producers actually exercised; they are not requalified by this source change.
+The current source cutover is planner9 with project5/surface3/manufacturing6, unchanged emitter/verifier4 and SPLR3. Its original-material realization contract is not qualified by historical runs: complete fitting/housing Compile and matching workbench acceptance remain open. Inspection/reopen requires the exact producer/kernel generation. Historical gate identities and measured artifacts below retain the producers actually exercised.
 
 ## Physical qualification gate — not yet exercised
 
@@ -44,6 +44,53 @@ Component metadata and nominal bead coverage do not establish collision freedom
 or swept-bead physics. Physical qualification remains open until the frozen
 configuration passes supervised measurements; the workbench has no execution
 connector and must not infer permission from a verified report.
+
+## Native geometry checkpoint: literal-box workflow — planner 8
+
+This is a baseline regression, **not** planner9, toleranced-material or full
+geometry-parity qualification. Runtime source was `2e06412` with the exact
+Monstertruck pin/reporting constant changed to
+`ba4efb1907d6fe96ea48d18332a8f56191423efc` and diagnostic unit wording corrected.
+The exported provenance reports planner8, emitter/verifier4 and that exact
+kernel revision. Source project5/manufacturing6/surface3 and SPLR3 were used.
+
+Unchanged public inputs:
+
+| Input | SHA-256 |
+| --- | --- |
+| `fixtures/geometry/box-mm.step` | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
+| `fixtures/manufacturing/complete-sparse.intent.json` | `1259af868eb3ee612e5c973f9184e6e46db6123c0f5915408a604f9bc06161ce` |
+
+The actual CLI created a new project from identical retained input copies,
+centered occurrence1 on the declared bed, ran Preflight/Compile/Verify, exported
+the bundle and saved. A fresh engine then opened the saved project read-only,
+performed fresh independent replay, exported a separate bundle and wrote packed
+replay output. Both commands exited zero. No external-source deletion was
+exercised in this checkpoint.
+
+| Observed property | Result |
+| --- | --- |
+| Layers / deposition segments | 41 / 898 |
+| Accepted slabs / geometry work | 5 / 1,775,272 |
+| Requested / achieved native shape bound | 0.1 / 0.000010000000032862606 mm |
+| Fresh independent verification | `verified: true` |
+| Create/compile/save elapsed; `time -v` max RSS | 2.77 s; 30,784 KiB |
+| Fresh reopen/replay/export elapsed; `time -v` max RSS | 1.21 s; 29,300 KiB |
+| Observed swap use | 0 |
+
+Initial and reopened `program.gcode` both hash to
+`dd2edddb214c66deb877ebd14912e14d57341cccc5c85b352dad47f2ab8c1ffd`;
+both `plan.json` files hash to
+`33309dbd9b75b458e3f549ec4df1a199e75b33661d00b194d8dbe9614335b720`.
+Linux x64 runtime scopes used 1 GiB memory, 64 MiB swap and 64 tasks; the
+matched engine/CLI build used one Cargo job, no incremental compilation,
+3 GiB memory and 128 MiB swap. Max RSS is the timed command's reported value,
+not an aggregate host-memory measurement.
+
+At the same runtime checkpoint, the unchanged fitting failed the cumulative
+20M geometry-work limit at layer26. The rounded housing advanced past its
+incoming layer but refused the layer1 physical source-link proof. Those failures
+are retained blockers, not successful slicing or permission to weaken a gate.
 
 ## XYZ6 command coordinates and emitted support gaps — planner 7
 
