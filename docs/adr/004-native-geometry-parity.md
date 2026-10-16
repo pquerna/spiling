@@ -689,6 +689,52 @@ Rank collapse is permitted only by the already proved original vertex/pole
 quotient. A pole graph cannot be passed to the ordinary regular-collar lane.
 An uncertain pcurve connector does not acquire analytic-pole authority.
 
+**Range-scoped UV authority.** Separate immutable collar geometry from its
+embedding receipt. Bind the receipt to the original definition, NativeUse/edge,
+complete parameter-map operands, original normalization range, actually used
+native/across intervals, width, side and bubble law. A source-owned central
+range comes from the agreed native vertex exits, not the current slab.
+A whole-edge Cartesian monotonicity flag is neither necessary nor sufficient
+for those distinct range-scoped obligations.
+
+For a normalized across-coordinate, a normal ribbon may have the unchanged law
+`U(t,w) = gamma(t) + k beta(t) w R gamma'(t)`, where `R` is the oriented
+quarter-turn. On a proved `beta > 0` central range, `r = beta(t) w` is a
+coordinate homeomorphism. A P-matrix certificate for
+`U(t,r) = gamma(t) + k r R gamma'(t)` on a rectangular proof superset may
+establish injectivity on its curved subdomain. Account for the full coordinate
+Jacobian/shear; this does not authorize deleting `beta'` from the original G
+derivatives. Local charts alone do not prove global injectivity: unresolved
+nonlocal parameter pairs require complete image separation or a common
+injective chart. Retain original smooth-span qualifications and explicit
+endpoint quotients rather than inventing strict rank at collapsed endpoints.
+
+**Uncertain UV joints.** Two retained germs at the same original NativeV need
+not evaluate to identical UV endpoints. A comparison completion may use an
+exact source expression such as `j* = (j_a + j_b)/2` only after proving it lies
+inside **both** admitted original UV fibers and retaining both whole forward
+correspondences. For normalized endpoint traces,
+`gamma_i~(s) = gamma_i(s) + (1-s)(j* - j_i)` preserves each actual exit.
+Its derivative corrections are explicit; it inherits no unchanged tangent
+certificate. This is a comparison chart, not snapped source data or a new
+physical G boundary.
+
+Prove the comparison star's factored Jacobian, complete boundary winding,
+same-NativeV endpoint ownership and separation from every nonowning trim and
+collar. A strict interior calibration cannot replace those whole-boundary
+obligations. Joining cutovers use the same original outer-trace operands and
+range-scoped ribbon authority, including intended shared endpoints; an
+affine-rim shortcut cannot authorize a nonlinear rim.
+
+The comparison must not change actual G, its outer trace, selected widths,
+exits or vertex recipe. Bound G against the completed carrier comparison,
+include the bidirectional physical completion-homotopy cost, and independently
+bound the original 3D curve-to-chord and NativeV residual. Their complete face,
+edge and vertex maxima must fit the **same** source allowance and propagate to
+every material-derived consumer. A UV margin or forward residual cannot be
+silently omitted, counted twice as separate authority, or spent as a larger
+manufacturing error budget.
+
 Include the entire corrected physical envelope when deciding whether a cell
 meets either **closed** cut. Charge source-realization uncertainty in both
 source-to-prism and reverse bounds, and preserve it through endpoint/cap
