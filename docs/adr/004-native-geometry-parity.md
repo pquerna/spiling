@@ -394,6 +394,8 @@ reconstruct their coefficient correspondence for every layer. Bind every lookup
 to the exact immutable definition and original face identity. Standalone queries
 use the same algorithms with a query-owned domain; do not introduce another
 planner, cloned domain cache or unsafe self-reference.
+Nested graph and radial-link proofs must forward that prepared source context;
+replacing it with a standalone context discards the job's admitted originals.
 
 Source retention is admitted once. A borrowed domain consumes no second retained
 allocation, but its current classification must use the current query's bounded
@@ -402,6 +404,11 @@ already-admitted metadata with checked arithmetic. Cancellation and lookup work
 remain charged. Query-dependent classifications, roots, heights, events, contact
 and material/slab certificates remain fresh; borrowing source authority does not
 authorize borrowing a different query's result.
+
+Native `with_surface` and `with_curve` callbacks hold their owner's
+non-reentrant mutex. Finish the callback before calling another helper that
+acquires that same owner; borrowed source authority does not make nested
+locking safe.
 
 ### 5.7 Reject disjoint candidate meshes before dense pair admission
 
@@ -728,6 +735,19 @@ normalized endpoint traces,
 Its derivative corrections are explicit; it inherits no unchanged tangent
 certificate. This is a comparison chart, not snapped source data or a new
 physical G boundary.
+
+A comparison may instead use the cubic Hermite correction
+`gamma_i~ = gamma_i + (1-3s^2+2s^3) delta_j_i
+                       + (s-2s^2+s^3) delta_d_i`
+to preserve both the actual exit position and derivative. Any proposed common
+comparison-apex direction and positive relative speed need fresh whole-germ
+transport bounds; their constructed opposition is not an original G1 claim.
+For a proved zero-offset, zero-bulge middle piece, original C2 integral
+remainders may expose an additional radial factor in the comparison Jacobian.
+Prove the remaining coefficient and nonzero radial vector for every `s > 0`,
+retaining the existing same-NativeV quotient at `s = 0`. Never discard a small
+apex neighborhood, clamp an uncertain sign, or infer an exact cancellation
+from interval overlap.
 
 Prove the comparison star's factored Jacobian, complete boundary winding,
 same-NativeV endpoint ownership and separation from every nonowning trim and
