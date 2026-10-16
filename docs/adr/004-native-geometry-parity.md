@@ -599,6 +599,158 @@ domain. A generic whole-curve point query also consumes adjacent closed pieces
 and is a different obligation. Neither contract may guess a shared root from
 nearby positions or erase original interval/branch identity.
 
+The same rule applies to immutable prepared-root partitions. A charged binary
+slice lookup may omit only pieces proved disjoint from the closed query.
+Retain every incident piece at an exact joint, in original order; mapped and
+reflected sources keep their existing coordinate-joint and one-sided rules.
+This changes traversal cost, not branch, smoothness or endpoint authority.
+
+### 5.14 Certify toleranced source material, not fictitious exact seams
+
+**Material interpretation: accepted; implementation and qualification pending.**
+Native M denotes the oriented original BREP with its admitted, bounded
+source-chart uncertainty. It is not the literal union of independently evaluated
+carrier patches that disagree inside that uncertainty. Stored STEP, BREP,
+coefficients, parameter gauges, topology and persistent source identity remain
+unchanged. A proof-only boundary realization must remain inside the unchanged
+source allowance; it is not a repaired import, an alternate kernel, an exact-G1
+claim or permission to join nearby, independently identified geometry.
+
+Position residual and relative-tangent correspondence alone do not establish
+physical closure. Neither a shared source ID nor a small dihedral interval
+supplies the missing two-sided embedding or endpoint fan. This distinction also
+applies to an otherwise strict convex-dihedral proof with nonzero source-map
+uncertainty. Do not clamp an unresolved sign or infer equality from CAD intent.
+
+Retain an opaque **original coedge correspondence** through import and immutable
+native metadata, instead of discarding the completed forward proof. Bind it to
+the actual face/edge/oriented use, complete original and UV parameter ranges,
+certified parameter map, original span inventory, source displacement and
+derivative bounds, UV uncertainty, and endpoint ownership. Exact coefficient
+correspondence and completed pole graphs are distinct constructors; a regular
+inverse or bare qualification boolean cannot manufacture either authority.
+Resolve operands against the same immutable definition, not cached addresses.
+
+A **paired material-link** request consumes both complete correspondences and
+the original incidence inventory. Require exactly two opposed uses of the same
+actual native edge. Source IDs determine incidence; spatial bounds only reject
+nonincident contacts. The certificate proves local material degree one, not
+convexity, C1 continuity or a new source parameterization.
+
+Select the realization lane from immutable original coefficients and topology,
+not the success of a placement/slab query. Prefer a proved **carrier-preserving
+source law** when available: a unique common boundary `C*(t)` and vertex
+completion on the actual original carriers, inside both admitted source charts
+and the original `C(t)`/vertex uncertainty. Bind its complete parameter
+correspondence, orientation, endpoint fan and component to those same native
+IDs. `C*` is an explicit toleranced realization, never relabeled as an exact
+conversion of the stored `C`. Tangent carriers require their actual
+coefficient-level uniqueness law; ordinary transverse-intersection rank cannot
+be invented. Unchanged carriers establish convexity, height or invariance only
+after their complete realized trim/link obligations also pass.
+
+The source-only recipe records the selector version and its deterministic
+lane decision. A structural nonmatch may use the general transport below.
+Exhaustion, cancellation or an unresolved matched law must refuse, not switch
+realizations according to the current query. No replacement BREP is stored.
+
+In the general transport lane, for a regular original edge restriction `C(t)`,
+prove actual inward carrier collars `F_i(t,w)`, `0 <= w <= rho_i`. A possible
+proof-only transport is:
+
+```text
+d_i(t) = C(t) - F_i(t,0)
+G_i(t,w) = F_i(t,w) + (1 - w/rho_i) d_i(t)
+G_it = F_it + (1 - w/rho_i) d_i'
+G_iw = F_iw - d_i/rho_i
+```
+
+At the common seam both sides use the same original edge; outside each collar
+the original carrier is unchanged. Prove all of the following over complete
+parameter cells and the entire transport homotopy, not sampled normals:
+
+- Actual inward collar coverage, regularity and injectivity in a validated
+  projection chart. Bound every derivative correction, including `d_i/rho_i`;
+  the existing relative-tangent threshold alone is insufficient.
+- Strict positive projected Jacobian for the complete swept collar. A positive
+  Jacobian plus a simple boundary of winding one establishes injectivity;
+  positive pointwise rank alone does not.
+- Opposite projected material sides at the shared edge, complete closed-range
+  coverage, and separation of all swept tubes from every nonincident trim,
+  face, collar and protected hole.
+- Consistent same-original-vertex completion and a complete projected endpoint
+  fan of winding exactly one, including all incident uses and source joints.
+  A topological cycle inventory is necessary but not a winding proof.
+- Total face, edge-end and vertex transport error inside the existing source
+  allowance. An original curve endpoint need not equal the stored vertex
+  exactly; any completion needs its own bound and retained directed speed.
+
+Rank collapse is permitted only by the already proved original vertex/pole
+quotient. A pole graph cannot be passed to the ordinary regular-collar lane.
+An uncertain pcurve connector does not acquire analytic-pole authority.
+
+Include the entire corrected physical envelope when deciding whether a cell
+meets either **closed** cut. Charge source-realization uncertainty in both
+source-to-prism and reverse bounds, and preserve it through endpoint/cap
+coverage. Never enlarge a source allowance, manufacturing shape budget, work
+limit or deadline to admit a realization. Failed and unresolved attempts retain
+typed refusals and cumulative resource accounting.
+
+For a disk-core capture, complete patch/collar positive radial degree, shared
+edge links, vertex winding and actual halfspace-cap closure can establish a
+proper radial boundary map to the sphere. Toroidal captures need the analogous
+proved local map to the torus in the actual source frame. In either case an
+exhaustive **total regular-fiber count of one** establishes covering degree one;
+for a torus this also discharges the fundamental-cycle index obligation.
+Sample loop count alone is not a fiber census. These are closed-material/star
+theorems, not global convexity; retain stronger convexity authority separately.
+
+The covering argument requires the entire **closed** realization, complete
+component inventory and cap interfaces. The total fiber census establishes a
+single component; whole-shell connectivity before clipping cannot substitute
+for it. Per-face radial signs alone supply neither closure nor calibration.
+A final global injectivity proof may
+discharge nonincident embedding obligations instead of quadratic pair checks;
+it must cover every included stratum. Raw intermediate carrier patches need
+not glue during a local transport homotopy, so their positive Jacobians do not
+define a global quotient covering at intermediate homotopy values.
+
+Bind the realization itself across queries. Retain an immutable source-relative
+recipe/descriptor for coedge collars and edge-end/vertex completion, with its
+actual error bound and contract identity. Closed-slab and placement queries
+prove facts about that **same** Native M; they cannot choose incompatible
+collar widths or vertex transports for successive slabs and then reuse only a
+source ID. A source-uncertainty-family alternative would need a proved common
+realization for every combined query, not separate existential certificates.
+Include the descriptor/contract identity in Native M reuse and producer input
+identity. Source-relative preparation and pose-specific proof remain distinct.
+
+All material-derived height, support, event-completeness, normal and invariance
+queries must describe that realization, not merely attach its identity to a
+raw-carrier proof. Nonzero transport may introduce extrema or destroy exact
+convexity/Z invariance. Retain broad whole-support height covers separately
+from isolated critical events; such a cover does not manufacture an event
+plane or require sliver-layer tiling. Raw event-list emptiness grants no material
+regularity. Material scheduling, endpoint ownership, expected stream coverage
+and continuous occupied-height clipping require directed bounds on the actual
+realization, including every edge-end/corner correction. Literal native section
+and authoring geometry queries remain distinct geometric candidates.
+
+Planner producer `9` and its exact shared engine/client build identity bind
+material-realization contract `1`. The authoring input fingerprint remains
+independent of algorithm identity. Retain compact accepted source/recipe/union
+authority through support consumers without retaining raw proof geometry;
+charge its actual metadata bytes in combined admissions. A later recipe-semantic
+change requires a producer cutover, not acceptance of an older bundle.
+
+Opaque native-owned coedge, paired-link and vertex-fan receipts belong in the
+geometry service, not Core, the planner or the renderer. Slab/collar queries
+consume them against the exact immutable source, radial map and closed height
+range. Their quantified source uncertainty belongs to Native M's certificate
+and reuse identity; final realized D and support dependencies remain separate.
+No support or qualification claim follows from this design alone.
+
+
 ## 6. Generic geometry substrate and necessary specializations
 
 ### 6.1 Bounded domains and rational conditioning
