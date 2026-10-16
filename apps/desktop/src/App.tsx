@@ -5,7 +5,12 @@
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import licenseDocument from "../../../LICENSE.md?raw";
-import { IMPORT_PROFILE, type OccurrenceRecord, type RigidPoseMm } from "@spiling/protocol";
+import {
+  IMPORT_PROFILE,
+  type DefinitionRecord,
+  type OccurrenceRecord,
+  type RigidPoseMm,
+} from "@spiling/protocol";
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
 import { ManufacturingPanel } from "./manufacturing/ManufacturingPanel.tsx";
 import { SurfaceFinishPanel } from "./surface/SurfaceFinishPanel.tsx";
@@ -21,6 +26,11 @@ const phaseDescriptions: Record<Phase, string> = {
   unsupported: "WebGPU unavailable",
   error: "Session could not start",
 };
+function definitionDisplayLabel(display: DefinitionRecord["display"]): string {
+  return display.kind === "unavailable"
+    ? `Geometry only — ${display.error.code}: ${display.error.message}. No certified display mesh or GPU picking; inspect native faces from the list.`
+    : "Approximate mesh display · source-face picking";
+}
 function LicenseDialog({ onClose }: { onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -217,7 +227,9 @@ function Workbench() {
   const selected = state.occurrences.find((row) => row.occurrence_id === selectedId) ?? null;
   const definition = state.definitions.find((row) => row.definition_id === selected?.definition_id);
   const greeting = state.hello,
-    noObjects = !state.occurrences.length;
+    noObjects = !state.occurrences.length,
+    unavailableDefinitions = state.definitions.filter((row) => row.display.kind === "unavailable"),
+    noDisplayMeshes = !noObjects && unavailableDefinitions.length === state.definitions.length;
   useEffect(() => {
     if (state.inspection) setSelectedId(state.inspection.reference.occurrence_id);
   }, [state.inspection]);
@@ -463,6 +475,7 @@ function Workbench() {
                 <small>
                   {part.face_count} native faces · {part.provenance.source_unit}
                 </small>
+                <small data-testid="definition-display">{definitionDisplayLabel(part.display)}</small>
                 <ul>
                   {state.occurrences
                     .filter((row) => row.definition_id === part.definition_id)
@@ -520,8 +533,9 @@ function Workbench() {
           <span className="eyebrow">SUPPORTED INPUT PROFILE</span>
           <strong>{IMPORT_PROFILE}</strong>
           <p>
-            Native BREP is authoritative. Mesh surface deviation ≤0.05 mm relative to admitted
-            carriers. Durable source-backed projects, bounded session undo and software-only
+            Native BREP is authoritative. Available certified meshes have surface deviation ≤0.05 mm
+            relative to admitted carriers; geometry-only definitions have no display mesh or GPU
+            picking. Durable source-backed projects, bounded session undo and software-only
             manufacturing review; no general STEP assemblies or machine execution.
           </p>
         </div>
@@ -534,6 +548,13 @@ function Workbench() {
           </div>
           <span className={`gpu-tag ${state.gpu ? "ready" : ""}`}>WEBGPU ONLY</span>
         </div>
+        {unavailableDefinitions.length > 0 && (
+          <p role="status" data-testid="geometry-only-status">
+            {unavailableDefinitions.length} geometry-only definition(s): no certified display mesh
+            or GPU picking for their instances. Native bounds still govern Fit scene; select an
+            instance and use the native face list for inspection.
+          </p>
+        )}
         <div className="view-actions">
           <button
             disabled={!running}
@@ -559,7 +580,10 @@ function Workbench() {
           >
             Isometric
           </button>
-          <small>Drag to orbit · pan/zoom · click a face to inspect</small>
+          <small>
+            Drag to orbit · pan/zoom ·{" "}
+            {noDisplayMeshes ? "inspect faces from the native list" : "click displayed faces to inspect"}
+          </small>
         </div>
         <div className={`canvas-stage ${!running ? "inactive" : ""}`}>
           <canvas
@@ -587,20 +611,24 @@ function Workbench() {
           />
           {(!running ||
             state.diagnosticSession ||
-            (noObjects && !state.stale && !state.replayDisplayed)) && (
+            ((noObjects || noDisplayMeshes) && !state.stale && !state.replayDisplayed)) && (
             <div className="viewport-empty" role="status">
               <h2>
                 {state.diagnosticSession
                   ? "Native diagnostic — no GPU display"
                   : running
-                    ? "Empty native scene"
+                    ? noDisplayMeshes
+                      ? "Geometry-only native scene"
+                      : "Empty native scene"
                     : phaseDescriptions[state.phase]}
               </h2>
               <p>
                 {state.diagnosticSession
                   ? "Production native manufacturing bridge only. No picking, rendering acceptance or hardware claim."
                   : running
-                    ? "Import parts or open a saved project. First save chooses a new project directory."
+                    ? noDisplayMeshes
+                      ? "Native definitions and bounds are retained without certified display meshes. No GPU geometry or picking is available; inspect source faces from the instance list."
+                      : "Import parts or open a saved project. First save chooses a new project directory."
                     : state.phase === "desktop-required"
                       ? "Open the Tauri / CEF desktop; browsers cannot launch the engine."
                       : state.phase === "unsupported"
@@ -625,7 +653,9 @@ function Workbench() {
             </div>
           )}
           <div className="artifact-caption">
-            APPROXIMATE DISPLAY · SOURCE FACE IDENTITY · NATIVE MM
+            {noDisplayMeshes
+              ? "NATIVE GEOMETRY ONLY · NO DISPLAY MESH OR GPU PICKING · NATIVE MM"
+              : "APPROXIMATE DISPLAY · SOURCE FACE IDENTITY · NATIVE MM"}
           </div>
         </div>
         <div className="transfer-strip" data-testid="transfer-metrics">
@@ -730,6 +760,11 @@ function Workbench() {
         <div className="geometry-controls">
           <h3>Face inspector</h3>
           {definition && (
+            <p data-testid="inspection-definition-display">
+              {definitionDisplayLabel(definition.display)}
+            </p>
+          )}
+          {definition && (
             <select
               aria-label="Native face"
               disabled={!interactive}
@@ -745,7 +780,11 @@ function Workbench() {
                 });
               }}
             >
-              <option value="">Select or click a source face</option>
+              <option value="">
+                {definition.display.kind === "unavailable"
+                  ? "Select a native source face (no GPU picking)"
+                  : "Select or click a source face"}
+              </option>
               {definition.faces.map((face) => (
                 <option key={face.face_id} value={face.face_id}>
                   {face.face_id}
@@ -760,14 +799,16 @@ function Workbench() {
                 {state.inspection.face.face_id}
               </strong>
               <p>
-                {state.inspection.face.source_entity_kind} · surface entity{" "}
-                {state.inspection.face.surface_face_entity}
+                Source face {state.inspection.face.source_entity_kind} · surface{" "}
+                {state.inspection.face.source_surface_entity_kind} #{" "}
+                {state.inspection.face.surface_face_entity} · native family{" "}
+                {state.inspection.face.geometry.family}
               </p>
               <p>
-                Orientation: {state.inspection.face.orientation ? "forward" : "reversed"},
-                independent of carrier
+                Material-side orientation: {state.inspection.face.orientation ? "forward" : "reversed"}{" "}
+                relative to the regular native frame; singular normals require limiting charts.
               </p>
-              <pre>{JSON.stringify(state.inspection.face.carrier, null, 2)}</pre>
+              <pre>{JSON.stringify(state.inspection.face.geometry, null, 2)}</pre>
               <p>
                 Source unit: {state.inspection.provenance.source_unit}. Declared uncertainty:{" "}
                 {state.inspection.provenance.uncertainty_mm ?? "not provided"} mm.
@@ -776,11 +817,16 @@ function Workbench() {
                 Source SHA-256: {state.inspection.provenance.source_hash}
               </p>
               <p>
-                Carrier parameters are native definition-frame mm, not an exact GPU hit measurement.
+                Geometry descriptions use native definition-frame mm. They are not operation
+                certificates or exact GPU hit measurements.
               </p>
             </div>
           ) : (
-            <p>Select an instance, then pick or select a native source face.</p>
+            <p>
+              {definition?.display.kind === "unavailable"
+                ? "Select an instance, then select a native source face from the list. No display mesh or GPU picking is available."
+                : "Select an instance, then pick or select a native source face."}
+            </p>
           )}
           <SurfaceFinishPanel
             state={state}

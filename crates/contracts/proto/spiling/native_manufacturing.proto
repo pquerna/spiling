@@ -59,16 +59,32 @@ enum PreflightSeverity {
   PREFLIGHT_WARNING = 2;
   PREFLIGHT_INFO = 3;
 }
+enum PreflightDisposition {
+  PREFLIGHT_DISPOSITION_UNSPECIFIED = 0;
+  PREFLIGHT_ADMITTED = 1;
+  PREFLIGHT_REFUSED = 2;
+  PREFLIGHT_UNRESOLVED = 3;
+}
+enum PreflightEvidence {
+  PREFLIGHT_EVIDENCE_UNSPECIFIED = 0;
+  PREFLIGHT_NOT_EVALUATED = 1;
+  PREFLIGHT_CERTIFIED = 2;
+  PREFLIGHT_UNSUPPORTED = 3;
+  PREFLIGHT_INDETERMINATE = 4;
+  PREFLIGHT_FAILED = 5;
+}
 message PreflightCheck {
   string code = 1;
   PreflightSeverity severity = 2;
   string message = 3;
   optional uint32 occurrence_id = 4;
   optional string face_id = 5;
+  PreflightEvidence evidence = 6;
+  optional bool required = 7;
 }
 message PreflightReport {
   uint32 input_revision = 1;
-  bool eligible = 2;
+  PreflightDisposition disposition = 2;
   bool software_only = 3;
   repeated PreflightCheck checks = 4;
 }
@@ -248,6 +264,7 @@ message PlanarPrintRecipe {
   double bottom_skin_thickness_mm = 14;
   ProcessPolicy process = 15;
   SupportPolicy supports = 16;
+  double native_shape_error_mm = 17;
 }
 message RetractionDisabled {}
 message RetractionEnabled {
@@ -292,6 +309,35 @@ message ManufacturingArtifactRecord {
   uint32 byte_count = 3;
   ManufacturingSummary summary = 4;
 }
+enum SkinCoverageScope {
+  SKIN_COVERAGE_SCOPE_UNSPECIFIED = 0;
+  SCHEDULED_MATERIAL_DISTANCE = 1;
+}
+enum SupportClearanceScope {
+  SUPPORT_CLEARANCE_SCOPE_UNSPECIFIED = 0;
+  CONTINUOUS_TARGET_OUTER_OCCUPANCY = 1;
+}
+// Accepted scheduled-layer partition and explicit original-occurrence endpoint ownership.
+message NativeFeatureCoverageSummary {
+  optional uint32 disjoint_source_layer_count = 1;
+  optional uint32 invariant_source_union_layer_count = 2;
+  optional uint32 native_interface_complex_layer_count = 3;
+  optional uint32 owned_critical_slab_count = 4;
+}
+// Complete actual occurrence query/slab coverage, not emitted physical union-boundary proof.
+message NativeGeometryCoverageSummary {
+  double requested_shape_error_mm = 1;
+  double achieved_shape_error_mm = 2;
+  uint32 height_analysis_count = 3;
+  uint32 slab_count = 4;
+  uint32 event_count = 5;
+  uint64 geometry_work = 6;
+  PreflightEvidence evidence = 7;
+  SkinCoverageScope skin_coverage = 8;
+  SupportClearanceScope support_clearance = 9;
+  uint32 certified_layer_count = 10;
+  NativeFeatureCoverageSummary source_feature_coverage = 11;
+}
 message ManufacturingSummary {
   uint32 layers = 1;
   uint32 paths = 2;
@@ -303,6 +349,7 @@ message ManufacturingSummary {
   double support_deposited_volume_mm3 = 8;
   double support_filament_length_mm = 9;
   SurfaceResolutionTotals surface_resolution = 10;
+  NativeGeometryCoverageSummary native_geometry = 11;
 }
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }

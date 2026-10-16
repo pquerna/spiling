@@ -3,9 +3,12 @@
 // Licensed under the Open Software License version 3.0
 
 use super::Definition;
-use crate::{GeometryError, VerticalWallFace, check_cancel, section::projected_extent};
+use crate::{GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel};
+use monstertruck_modeling::base::ParametricCurve;
 use monstertruck_modeling::{Curve, Surface};
-use spiling_contracts::geometry::{FaceCarrier, FaceId, GeometryErrorCode};
+use spiling_contracts::geometry::{
+    AnalyticSurfaceDescription, FaceId, GeometryErrorCode, SurfaceFamily,
+};
 use std::sync::atomic::AtomicBool;
 
 // Admission/carrier residual tolerance, not a manufacturing approximation budget.
@@ -37,6 +40,70 @@ fn unit(a: [f64; 3]) -> Result<[f64; 3], GeometryError> {
     Ok(scaled.map(|v| v / norm))
 }
 
+fn native_line_matches(
+    curve: &Curve,
+    orientation: bool,
+    front: [f64; 3],
+    back: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let mut basis = curve;
+    let mut line = false;
+    for depth in 0..=32 {
+        work.charge(1, cancel)?;
+        match basis {
+            Curve::Line(_) => {
+                line = true;
+                break;
+            }
+            Curve::TrimmedCurve(wrapped) if depth < 32 => {
+                let m = wrapped.transform();
+                if !(0..4).all(|i| (0..4).all(|j| m[i][j].is_finite()))
+                    || m.x.w != 0.0
+                    || m.y.w != 0.0
+                    || m.z.w != 0.0
+                    || m.w.w != 1.0
+                {
+                    return Ok(false);
+                }
+                basis = wrapped.entity().curve().as_ref();
+            }
+            _ => break,
+        }
+    }
+    if !line {
+        return Ok(false);
+    }
+    let Some((a, b)) = curve.try_range_tuple() else {
+        return Ok(false);
+    };
+    if !a.is_finite() || !b.is_finite() || a >= b {
+        return Ok(false);
+    }
+    let parameters = if orientation { [a, b] } else { [b, a] };
+    for (parameter, vertex) in parameters.into_iter().zip([front, back]) {
+        let jet = crate::parametric::curve_enclosure(curve, (parameter, parameter), work, cancel)?;
+        let squared = (0..3).fold(crate::parametric::Interval::point(0.0), |sum, axis| {
+            sum.add(
+                jet.position[axis]
+                    .sub(crate::parametric::Interval::point(vertex[axis]))
+                    .square(),
+            )
+        });
+        let error = crate::parametric::Interval {
+            lo: squared.lo.max(0.0),
+            hi: squared.hi,
+        }
+        .sqrt()?
+        .hi;
+        if error > RESIDUAL_MM {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl Definition {
     /// Certify an exact source-local, full-height rectangular exterior wall.
     /// Face identity is the admitted positional native face use, never a mesh
@@ -52,10 +119,19 @@ impl Definition {
         face_id: &FaceId,
         cancel: &AtomicBool,
     ) -> Result<VerticalWallFace, GeometryError> {
+        self.vertical_wall_face_with_work(face_id, &mut GeometryWorkBudget::new(50_000_000), cancel)
+    }
+
+    pub(crate) fn vertical_wall_face_with_work(
+        &self,
+        face_id: &FaceId,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<VerticalWallFace, GeometryError> {
         check_cancel(cancel)?;
         let mut selected = None;
         for (index, info) in self.faces.iter().enumerate() {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             if &info.face_id == face_id {
                 selected = Some((index, info));
                 break;
@@ -67,13 +143,18 @@ impl Definition {
                 "source face is not in native definition",
             )
         })?;
-        let FaceCarrier::Plane {
+        if info.geometry.family != SurfaceFamily::Plane {
+            return Err(unsupported(
+                "surface finish requires an analytic planar source face",
+            ));
+        }
+        let Some(AnalyticSurfaceDescription::Plane {
             origin_mm: source_origin,
             normal: source_normal,
-        } = &info.carrier
+        }) = &info.geometry.analytic
         else {
             return Err(unsupported(
-                "surface finish requires a vertical planar native face, not a cylinder",
+                "surface finish requires a vertical planar native face",
             ));
         };
         let shells = self.solid.boundaries();
@@ -129,7 +210,7 @@ impl Definition {
         let wire = &wires[0];
         let mut points = [[0.0; 3]; 4];
         for i in 0..4 {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             let edge = &wire[i];
             if edge.back().id() != wire[(i + 1) % 4].front().id()
                 || (0..i)
@@ -142,18 +223,8 @@ impl Definition {
             points[i] = edge.front().point().into();
             let back: [f64; 3] = edge.back().point().into();
             let line_matches = edge.with_curve(|curve| {
-                let Curve::Line(line) = curve else {
-                    return false;
-                };
-                let (a, b): ([f64; 3], [f64; 3]) = if edge.orientation() {
-                    (line.0.into(), line.1.into())
-                } else {
-                    (line.1.into(), line.0.into())
-                };
-                a.iter().chain(&b).all(|v| v.is_finite())
-                    && length(sub(a, points[i])) <= RESIDUAL_MM
-                    && length(sub(b, back)) <= RESIDUAL_MM
-            });
+                native_line_matches(curve, edge.orientation(), points[i], back, work, cancel)
+            })?;
             if !line_matches {
                 return Err(unsupported(
                     "native wall trim must consist of four exact bounded line edges",
@@ -254,13 +325,13 @@ impl Definition {
                 "native rectangular trim is not the oriented outer material boundary",
             ));
         }
-        let z_span = projected_extent(self, [0.0, 0.0, 1.0], cancel)?;
+        let z_span = super::finish_support_extent(self, [0.0, 0.0, 1.0], work, cancel)?;
         if (min_z - z_span[0]).abs() > RESIDUAL_MM || (max_z - z_span[1]).abs() > RESIDUAL_MM {
             return Err(unsupported(
                 "surface finish requires a native wall spanning the complete local source height",
             ));
         }
-        let support_span = projected_extent(self, outward, cancel)?;
+        let support_span = super::finish_support_extent(self, outward, work, cancel)?;
         let support = dot(points[origin_index], outward);
         if !support.is_finite() || (support_span[1] - support).abs() > RESIDUAL_MM {
             return Err(unsupported(
@@ -268,11 +339,13 @@ impl Definition {
             ));
         }
         for (other_index, other) in self.faces.iter().enumerate() {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             if other_index == index {
                 continue;
             }
-            if let FaceCarrier::Plane { origin_mm, normal } = &other.carrier {
+            if let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) =
+                &other.geometry.analytic
+            {
                 let other_normal = unit(*normal)?;
                 let residual = dot(sub(*origin_mm, points[origin_index]), outward);
                 if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
@@ -298,5 +371,52 @@ impl Definition {
             min_z_mm: z_span[0],
             max_z_mm: z_span[1],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monstertruck_modeling::{
+        Invertible, Line, Matrix4, Point3, Processor, TrimmedCurve, Vector3,
+    };
+    #[test]
+    fn native_wrapped_line_uses_actual_bounded_range_pose_and_sense() {
+        let mut wrapped = Processor::with_transform(
+            TrimmedCurve::new(
+                Box::new(Curve::Line(Line(
+                    Point3::new(0.0, 0.0, 0.0),
+                    Point3::new(1.0, 0.0, 0.0),
+                ))),
+                (4.0, 6.0),
+            ),
+            Matrix4::from_translation(Vector3::new(2.0, 0.0, 0.0)),
+        );
+        wrapped.invert();
+        let curve = Curve::TrimmedCurve(wrapped);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let cancel = AtomicBool::new(false);
+        assert!(
+            native_line_matches(
+                &curve,
+                true,
+                [8.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !native_line_matches(
+                &curve,
+                true,
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
     }
 }

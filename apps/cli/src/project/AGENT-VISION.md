@@ -10,6 +10,6 @@ Provide a reproducible operator surface for source-backed native authoring throu
 
 Ordered actual-program motion export uses explicit fresh inspection and the same checked ByteStream client and shared exclusive filesystem transaction as the native shell. Its immutable descriptor and inspection provenance accompany operator reports without changing persistent Core state.
 
-Full inert intent preserves printer identity and capabilities. Ordered axis-aligned certified-bound bed placement and centering use normal authoritative pose transactions; explicit actionable preflight is safe in read-only reopen and never confers native slicing success or physical qualification. Operator JSON retains revision-bound checks and historical export identity.
+Full inert intent preserves printer identity and capabilities. Revision-bound native bed preparation handles placed parts through the same geometry service as the workbench; an explicit normal pose transaction applies the result. Read-only actionable preflight never confers native slicing success or physical qualification. Operator JSON retains revision-bound checks and historical export identity.
 
 Explicit source-face flags add, remove and enable definition/occurrence-scoped Smooth, VerticalRibs, CylindricalRibs and ImageRelief through the same project authority. Schema3 overlays retain canonical immutable image identities; ordered native image import and fresh read-only PGM export accompany self-contained provenance and motion without source-path dependence. Assignment does not remesh or claim compile eligibility.

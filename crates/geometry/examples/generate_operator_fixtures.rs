@@ -25,7 +25,7 @@ fn prism(points_xz: &[(f64, f64)], depth: f64) -> Solid<Point3, Curve3D, Surface
             |c| Some(c.clone()),
             |surface| {
                 if let Surface::SweepSurface(SweepSurface::ExtrusionSurface(extrusion)) = surface {
-                    let Curve3D::Line(line) = extrusion.entity_curve() else {
+                    let Curve3D::Line(line) = extrusion.entity_curve().as_ref() else {
                         return None;
                     };
                     Some(Surface::ElementarySurface(ElementarySurface::Plane(

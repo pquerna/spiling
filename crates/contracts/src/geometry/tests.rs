@@ -13,7 +13,7 @@ fn identities_are_canonical_and_content_scoped() {
     );
     assert_eq!(
         DefinitionId::from_source_sha256(&digest).as_str(),
-        "b30b34eba89b65be95070ca70366465f6dadd3fee7a7c51b2f28e72d146e6133"
+        "e5d3ff9e934a73b255aaecf9aac9aebc6f46a3b73b5aa85b5c19ad550db3a1d3"
     );
     assert_ne!(
         DefinitionId::from_source_sha256(&digest).as_str(),
@@ -173,7 +173,9 @@ fn face_refs_reject_every_stale_or_cross_identity() {
         },
         face_count: 1,
         bounds_mm: bounds,
-        mesh_artifact_id: ArtifactId::new(1).unwrap(),
+        display: DefinitionDisplay::Mesh {
+            artifact_id: ArtifactId::new(1).unwrap(),
+        },
     };
     let occurrence = OccurrenceRecord {
         occurrence_id: OccurrenceId::new(1).unwrap(),
@@ -266,4 +268,202 @@ fn native_paths_preserve_non_utf8_and_reject_oversized_or_wrong_host() {
         .validate()
         .is_ok()
     );
+}
+
+#[test]
+fn face_inspection_separates_native_family_from_source_encoding() {
+    let geometry = FaceGeometryInfo::new(
+        SurfaceFamily::Nurbs,
+        Some(AnalyticSurfaceDescription::Plane {
+            origin_mm: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        }),
+        FaceDomainSummary::new(2, 1, false, false, false).unwrap(),
+    )
+    .unwrap();
+    let face = FaceInfo {
+        face_id: FaceId::from_step_entity(9_007_199_254_740_993).unwrap(),
+        surface_face_entity: "9007199254740994".into(),
+        source_entity_kind: "ADVANCED_FACE".into(),
+        source_surface_entity_kind: "B_SPLINE_SURFACE_WITH_KNOTS".into(),
+        orientation: false,
+        geometry,
+    };
+    let json = serde_json::to_value(&face).unwrap();
+    assert_eq!(
+        serde_json::from_value::<FaceInfo>(json.clone()).unwrap(),
+        face
+    );
+    let mut invalid = json;
+    invalid["geometry"]["family"] = serde_json::json!("sphere");
+    assert!(serde_json::from_value::<FaceInfo>(invalid).is_err());
+    let mut invalid = face.clone();
+    invalid.source_surface_entity_kind = "PLANE\0".into();
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn analytic_metadata_rejects_invalid_frames_conventions_and_trim_counts() {
+    let frame = PlaneFrameMm::from_plane(PlaneMm {
+        origin_mm: [0.0; 3],
+        normal: [0.0, 0.0, 1.0],
+    })
+    .unwrap();
+    let cone = AnalyticSurfaceDescription::Cone {
+        frame,
+        reference_radius_mm: 2.0,
+        semi_angle_radians: -0.25,
+    };
+    assert!(cone.validate().is_ok());
+    let mut json = serde_json::to_value(&cone).unwrap();
+    json["semi_angle_radians"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<AnalyticSurfaceDescription>(json).is_err());
+    let mut reflected = frame;
+    reflected.y_axis = reflected.y_axis.map(|v| -v);
+    assert!(
+        AnalyticSurfaceDescription::Sphere {
+            frame: reflected,
+            radius_mm: 2.0
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        AnalyticSurfaceDescription::Torus {
+            frame,
+            major_radius_mm: 2.0,
+            minor_radius_mm: 3.0,
+            torus_kind: TorusKind::RegularRing,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        AnalyticSurfaceDescription::Torus {
+            frame,
+            major_radius_mm: 2.0,
+            minor_radius_mm: 2.0,
+            torus_kind: TorusKind::Horn,
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(FaceDomainSummary::new(2, 2, false, false, false).is_err());
+    assert!(FaceDomainSummary::new(2 * MAX_STEP_ENTITIES + 1, 0, false, false, false).is_err());
+    assert!(
+        serde_json::from_value::<FaceDomainSummary>(serde_json::json!({
+            "trim_loop_count": 1, "inner_loop_count": 1, "periodic_u": false,
+            "periodic_v": false, "has_singular_boundary": false,
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn geometry_only_scene_retains_bounded_definition_and_native_face_identity() {
+    let summary = SceneSummary {
+        session_id: SessionId::new(),
+        revision: SceneRevision(1),
+        definition_count: 1,
+        occurrence_count: 1,
+        bounds_mm: Some(AabbMm::new([0.0; 3], [1.0; 3]).unwrap()),
+        unique_mesh_bytes: 0,
+    };
+    assert!(summary.validate().is_ok());
+    assert_eq!(
+        serde_json::from_value::<SceneSummary>(serde_json::to_value(&summary).unwrap()).unwrap(),
+        summary
+    );
+    let display = DefinitionDisplay::Unavailable {
+        error: GeometryError::new(
+            GeometryErrorCode::UnsupportedOperation,
+            "display chart correspondence unavailable",
+        ),
+    };
+    let definition = DefinitionRecord {
+        definition_id: DefinitionId::from_source_sha256(&[1; 32]),
+        provenance: SourceProvenance {
+            source_hash: SourceHash::from_bytes(b"part"),
+            source_name: "part.step".into(),
+            source_unit: SourceUnit::Millimetre,
+            uncertainty_mm: None,
+        },
+        face_count: 1,
+        bounds_mm: summary.bounds_mm.unwrap(),
+        display,
+    };
+    assert!(definition.validate().is_ok());
+    assert_eq!(
+        serde_json::from_value::<DefinitionRecord>(serde_json::to_value(&definition).unwrap())
+            .unwrap(),
+        definition
+    );
+    let occurrence = OccurrenceRecord {
+        occurrence_id: OccurrenceId::new(1).unwrap(),
+        definition_id: definition.definition_id.clone(),
+        pose: RigidPoseMm::IDENTITY,
+    };
+    let face_id = FaceId::from_step_entity(9_007_199_254_740_993).unwrap();
+    let reference = FaceRef {
+        session_id: summary.session_id.clone(),
+        scene_revision: summary.revision,
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: definition.definition_id.clone(),
+        face_id: face_id.clone(),
+    };
+    assert!(
+        reference
+            .validate_current(
+                &summary,
+                &occurrence,
+                &definition,
+                &[FaceIndexRow {
+                    ordinal: 0,
+                    face_id
+                }]
+            )
+            .is_ok()
+    );
+    let mut absent = serde_json::to_value(&definition).unwrap();
+    absent.as_object_mut().unwrap().remove("display");
+    assert!(serde_json::from_value::<DefinitionRecord>(absent).is_err());
+    assert!(
+        serde_json::from_value::<DefinitionDisplay>(serde_json::json!({
+            "kind":"mesh","artifact_id":0,
+        }))
+        .is_err()
+    );
+    let invalid = DefinitionDisplay::Unavailable {
+        error: GeometryError {
+            code: GeometryErrorCode::UnsupportedOperation,
+            message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1),
+        },
+    };
+    assert!(invalid.validate().is_err());
+    let empty = SceneSummary {
+        definition_count: 0,
+        occurrence_count: 0,
+        bounds_mm: None,
+        unique_mesh_bytes: 152,
+        ..summary
+    };
+    assert!(empty.validate().is_err());
+    assert!(serde_json::from_value::<SceneSummary>(serde_json::to_value(empty).unwrap()).is_err());
+}
+
+#[test]
+fn display_unavailability_cannot_turn_cancellation_or_staleness_into_success() {
+    for code in [
+        GeometryErrorCode::Cancelled,
+        GeometryErrorCode::StaleRevision,
+    ] {
+        let display = DefinitionDisplay::Unavailable {
+            error: GeometryError::new(code, "operation did not commit"),
+        };
+        assert!(display.validate().is_err());
+        assert!(
+            serde_json::from_value::<DefinitionDisplay>(serde_json::to_value(display).unwrap())
+                .is_err()
+        );
+    }
 }

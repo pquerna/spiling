@@ -3,7 +3,7 @@
 
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
-use geo::{Area, BooleanOps, MultiPolygon, Polygon};
+use geo::{Area, BooleanOps, BoundingRect, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
@@ -21,6 +21,11 @@ pub(super) struct RasterCandidate {
     pub(super) whole_rows: Vec<DepositionPath>,
 }
 
+pub(super) struct ProtectedVoidSet {
+    pub regions: MultiPolygon<f64>,
+    pub scopes: Vec<spiling_geometry::ProtectedVoidHeightScope>,
+}
+
 /// Admission inputs shared by whole-row ownership and deposited-anchor proof.
 struct BridgeRowContext<'a> {
     axis: region::HatchAxis,
@@ -35,26 +40,6 @@ struct SharedUnion {
     result: Arc<MultiPolygon<f64>>,
 }
 
-fn merge(
-    into: &mut MultiPolygon<f64>,
-    other: &MultiPolygon<f64>,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    check_cancel(cancel)?;
-    if other.0.is_empty() {
-        return Ok(());
-    }
-    if into.0.is_empty() {
-        *into = other.clone();
-    } else {
-        boolean_budget(into, other, cancel)?;
-        *into = into.union(other);
-    }
-    check_cancel(cancel)?;
-    region::check_size(into)?;
-    region::canonicalize(into);
-    Ok(())
-}
 // Identical fixed-XY columns share immutable contours between layers. Reuse a
 // union for identical incoming owners; a weak key retains no old point arrays.
 // Each cache is scoped to one fixed immutable `other` column below.
@@ -93,22 +78,30 @@ fn merge_shared(
     Ok(())
 }
 
-// SectionSpan.material is the same admitted D (native M union finish A) used
-// by walls/classification and the raster callback. Never query native-only
-// sections here: actual-stroke anchors and all lower corridor clearance use final D.
+// Anchors come only from actual deposited capsules. Corridor exclusion consumes
+// every lower slab's continuous-target outer occupancy, separately from the
+// sampled/scheduled D used by walls and physical-distance skin classification.
 pub(super) fn realize(
     layers: &mut [PrintLayer],
     sections: &[SectionSpan],
+    schedule: &[super::LayerElevation],
     native_points: usize,
     recipe: &PlanarPrintRecipe,
     segments: &mut usize,
     cancel: &AtomicBool,
+    native_work: &mut spiling_geometry::GeometryWorkBudget,
     mut raster: impl FnMut(
         usize,
         region::HatchAxis,
         &mut usize,
         usize,
     ) -> Result<RasterCandidate, ManufacturingError>,
+    mut project_voids: impl FnMut(
+        &[[[f64; 2]; 2]],
+        usize,
+        &mut usize,
+        &mut spiling_geometry::GeometryWorkBudget,
+    ) -> Result<ProtectedVoidSet, ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
     let width = recipe.bead_width_mm;
     let mut demands: Vec<Demand> = Vec::new();
@@ -212,21 +205,40 @@ pub(super) fn realize(
     else {
         unreachable!("disabled support demand refused above")
     };
-    // Protect every source hole in projection, not merely a layer's material.
-    // This conservative policy never fills a through-hole with breakaway support.
-    let mut protected = MultiPolygon(Vec::new());
-    for section in sections {
-        for polygon in &section.material.0 {
-            for hole in polygon.interiors() {
-                let hole = MultiPolygon(vec![Polygon::new(hole.clone(), vec![])]);
-                remaining_geometry_budget(retained, &[], &[], &[&protected, &hole])?;
-                charge_boolean(&protected, &hole, &mut work, cancel)?;
-                merge(&mut protected, &hole, cancel)?;
-                remaining_geometry_budget(retained, &[], &[], &[&protected])?;
-            }
-        }
+    // Native all-Z void branches are projected only after actual strokes prove
+    // demand. Scheduled hole samples cannot certify a protected projection.
+    let mut demand_bounds = Vec::with_capacity(demands.len());
+    for demand in &demands {
+        check_cancel(cancel)?;
+        let candidate = &sections[span_at(sections, demand.target as u32)].material;
+        let bounds = candidate.bounding_rect().ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                "actual support demand has no material footprint bounds",
+            )
+        })?;
+        demand_bounds.push([
+            [bounds.min().x, bounds.max().x],
+            [bounds.min().y, bounds.max().y],
+        ]);
     }
-    let protected = region::offset(&protected, xy_clearance_mm, cancel)?;
+    let projected = project_voids(
+        &demand_bounds,
+        remaining_geometry_budget(retained, &[], &[], &[])?,
+        &mut work,
+        native_work,
+    )?;
+    let ProtectedVoidSet {
+        regions: protected,
+        scopes,
+    } = projected;
+    if protected.0.len() != scopes.len() {
+        return Err(error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "native protected void scopes do not match their outer masks",
+        ));
+    }
+    region::check_size(&protected)?;
     let empty = Arc::new(MultiPolygon(Vec::new()));
     let mut support_regions = vec![Arc::clone(&empty); layers.len()];
     let mut interfaces = vec![empty; layers.len()];
@@ -235,11 +247,23 @@ pub(super) fn realize(
     remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     for demand in &demands {
         check_cancel(cancel)?;
-        let floor = layers[demand.target].z_mm - layers[demand.target].height_mm;
-        let Some(top) = (0..demand.target)
-            .rev()
-            .find(|&i| layers[i].z_mm <= floor - z_gap_mm + 1e-6)
-        else {
+        let floor = super::native::emitted_bead_height(
+            &[[0.0, 0.0, layers[demand.target].z_mm]; 2],
+            layers[demand.target].height_mm,
+        )?[0];
+        let mut contact_top = None;
+        for i in (0..demand.target).rev() {
+            super::native::charge_support_clearance(&mut work, cancel)?;
+            let upper = super::native::emitted_bead_height(
+                &[[0.0, 0.0, layers[i].z_mm]; 2],
+                layers[i].height_mm,
+            )?[1];
+            if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
+                contact_top = Some(i);
+                break;
+            }
+        }
+        let Some(top) = contact_top else {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
@@ -264,9 +288,82 @@ pub(super) fn realize(
         // Certify a fixed-XY corridor all the way to the bed before publishing.
         // Top-down publication before lower clipping leaves floating components.
         for section in &sections[..=span_at(sections, top as u32)] {
+            if column.0.is_empty() {
+                break;
+            }
+            for (occupied, height) in section.occupied_pieces() {
+                check_cancel(cancel)?;
+                if column.0.is_empty() {
+                    break;
+                }
+                work = work
+                    .checked_add(1)
+                    .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "cumulative continuous occupied scope work exceeded",
+                        )
+                    })?;
+                if let Some([lower, upper]) = height {
+                    let bed = layers[0].z_mm - layers[0].height_mm;
+                    if lower > layers[top].z_mm || upper < bed {
+                        continue;
+                    }
+                }
+                // Independent certified outer operands may overlap. A single
+                // even-odd normalization would erase their overlap; subtract
+                // each expanded operand instead, borrowing its original rings.
+                super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
+                let distance = candidate_clearance_distance(occupied, &column, xy_clearance_mm)?;
+                let clearance = region::offset_polygon(occupied, distance, cancel)?;
+                remaining_geometry_budget(
+                    retained,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column, &clearance],
+                )?;
+                charge_boolean(&column, &clearance, &mut work, cancel)?;
+                column = column.difference(&clearance);
+                region::check_size(&column)?;
+                remaining_geometry_budget(
+                    retained,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column, &clearance],
+                )?;
+            }
+        }
+        for (mask, scope) in protected.0.iter().zip(&scopes) {
+            if column.0.is_empty() {
+                break;
+            }
             check_cancel(cancel)?;
-            charge_boolean(&section.material, &section.material, &mut work, cancel)?;
-            let clearance = region::offset(&section.material, xy_clearance_mm, cancel)?;
+            work = work
+                .checked_add(1)
+                .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "cumulative protected-void scope work budget exceeded",
+                    )
+                })?;
+            let corridor_lower = layers[0].z_mm - layers[0].height_mm;
+            let corridor_upper = layers[top].z_mm;
+            let relevant = match scope {
+                spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
+                    *lower_mm <= corridor_upper && *upper_mm >= corridor_lower
+                }
+                spiling_geometry::ProtectedVoidHeightScope::OpenBelow { upper_mm } => {
+                    *upper_mm >= corridor_lower
+                }
+            };
+            if !relevant {
+                continue;
+            }
+            super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
+            let distance = candidate_clearance_distance(mask, &column, xy_clearance_mm)?;
+            let clearance = region::offset_polygon(mask, distance, cancel)?;
             remaining_geometry_budget(
                 retained,
                 &support_regions,
@@ -283,8 +380,6 @@ pub(super) fn realize(
                 &[&protected, &column, &clearance],
             )?;
         }
-        charge_boolean(&column, &protected, &mut work, cancel)?;
-        column = column.difference(&protected);
         region::check_size(&column)?;
         if column.0.is_empty() {
             let layer = &layers[demand.target];
@@ -296,9 +391,9 @@ pub(super) fn realize(
             let nearest_a = nearest_stroke([a[0], a[1]], previous.paths.iter(), &mut work, cancel)?;
             let nearest_b = nearest_stroke([b[0], b[1]], previous.paths.iter(), &mut work, cancel)?;
             return Err(error(
-                ManufacturingErrorCode::UnsupportedGeometry,
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
                 format!(
-                    "layer {} Z {:.9}: object/protected geometry blocks every bed-anchored support corridor; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; previous layer {} Z {:.9}, nearest start {:?}, nearest end {:?}; nominal bead width {:.9} mm, XY clearance {:.9} mm, Z gap {:.9} mm, bridge limit {:.9} mm",
+                    "layer {} Z {:.9}: unresolved continuous outer occupancy/protected geometry cannot certify any bed-anchored support corridor; conservative exclusion is not proof of actual collision; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; previous layer {} Z {:.9}, nearest start {:?}, nearest end {:?}; nominal bead width {:.9} mm, XY clearance {:.9} mm, Z gap {:.9} mm, bridge limit {:.9} mm",
                     demand.target,
                     layer.z_mm,
                     path.kind,
@@ -585,6 +680,61 @@ pub(super) fn realize(
             layer.paths[begin + path].kind = DepositionKind::Bridge;
         }
     }
+    // Contact selection is only a proposal until actual final paths exist.
+    // Check the same closed, physical-decimal bead enclosure used by the XY
+    // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
+    for (target, top) in contact_tops.iter().enumerate() {
+        let Some(top) = *top else {
+            continue;
+        };
+        let mut object_bottom = f64::INFINITY;
+        let mut support_top = f64::NEG_INFINITY;
+        for path in &layers[target].paths {
+            if support_role(path.kind) {
+                continue;
+            }
+            for edge in path.points_mm.windows(2) {
+                super::native::charge_support_clearance(&mut work, cancel)?;
+                object_bottom = object_bottom
+                    .min(super::native::emitted_bead_height(edge, layers[target].height_mm)?[0]);
+            }
+        }
+        for path in &layers[top].paths {
+            if !support_role(path.kind) {
+                continue;
+            }
+            for edge in path.points_mm.windows(2) {
+                super::native::charge_support_clearance(&mut work, cancel)?;
+                support_top = support_top
+                    .max(super::native::emitted_bead_height(edge, layers[top].height_mm)?[1]);
+            }
+        }
+        if !object_bottom.is_finite()
+            || !support_top.is_finite()
+            || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)? < z_gap_mm
+        {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                format!(
+                    "layer {target}: actual emitted contact does not prove the minimum Z gap {z_gap_mm} mm"
+                ),
+            ));
+        }
+    }
+    // Offset/overlay corridor masks only propose candidates. Certify every
+    // final actual emitted support capsule against the unchanged raw all-Z C
+    // and scoped positive void masks, after both raster/anchor alternatives.
+    super::native::certify_support_clearance(
+        layers,
+        sections,
+        schedule,
+        &protected,
+        &scopes,
+        recipe,
+        native_work,
+        &mut work,
+        cancel,
+    )?;
     object_volumes(layers, recipe);
     Ok(())
 }
@@ -1017,4 +1167,44 @@ mod tests {
                 .all(|path| path.kind == DepositionKind::SparseFill)
         );
     }
+}
+
+fn candidate_clearance_distance(
+    occupied: &Polygon<f64>,
+    column: &MultiPolygon<f64>,
+    requested: f64,
+) -> Result<f64, ManufacturingError> {
+    let a = occupied.bounding_rect().ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "native outer operand has no finite bounds",
+        )
+    })?;
+    let Some(b) = column.bounding_rect() else {
+        return Ok(requested);
+    };
+    // Offset allowance and Boolean padding only propose a candidate work
+    // frame. They do not prove raw-C containment after overlay. Final actual
+    // XYZ6 support capsules have a separate shared geometry proof.
+    let reserve = super::OFFSET_TOLERANCE_MM + 2.0f64.sqrt() * (super::LAYER_QUANTIZATION_MM * 0.5);
+    let base = (requested + reserve).next_up();
+    let min = [a.min().x.min(b.min().x), a.min().y.min(b.min().y)];
+    let max = [a.max().x.max(b.max().x), a.max().y.max(b.max().y)];
+    let padding = super::boolean::overlay_padding(
+        min.map(|v| (v - base - super::OFFSET_TOLERANCE_MM).next_down()),
+        max.map(|v| (v + base + super::OFFSET_TOLERANCE_MM).next_up()),
+    )?;
+    let guard = (2.0 * 2.0f64.sqrt() * padding).next_up();
+    let distance = (base + guard).next_up();
+    let actual_padding = super::boolean::overlay_padding(
+        min.map(|v| (v - distance - super::OFFSET_TOLERANCE_MM).next_down()),
+        max.map(|v| (v + distance + super::OFFSET_TOLERANCE_MM).next_up()),
+    )?;
+    if !distance.is_finite() || (2.0f64.sqrt() * actual_padding).next_up() > guard {
+        return Err(error(
+            ManufacturingErrorCode::NativeConditioningFailure,
+            "support exclusion candidate cannot admit its offset/overlay/XYZ6 work frame",
+        ));
+    }
+    Ok(distance)
 }

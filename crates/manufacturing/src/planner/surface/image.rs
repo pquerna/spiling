@@ -185,7 +185,14 @@ impl PreparedFinish {
         &self,
         start: f64,
         end: f64,
+        sample: f64,
     ) -> Result<f64, ManufacturingError> {
+        if !sample.is_finite() {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "nonfinite shared native/image sample height",
+            ));
+        }
         let Some(i) = self.image() else {
             return Ok(0.0);
         };
@@ -206,9 +213,9 @@ impl PreparedFinish {
             * (1.0 + start.abs() + end.abs() + i.translation_z.abs())
             * (1.0 + b.dz)
             * i.parameters.depth_mm;
-        let bound = ((b.maximum - b.minimum).min(b.dz * (end - start).abs() / 2.0))
-            * i.parameters.depth_mm
-            + reserve;
+        let sample_distance = (sample - start).abs().max((end - sample).abs());
+        let bound =
+            ((b.maximum - b.minimum).min(b.dz * sample_distance)) * i.parameters.depth_mm + reserve;
         if !bound.is_finite() {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,

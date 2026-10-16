@@ -6,6 +6,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   GeometryCommand,
+  BedPosePreparation,
   GeometryResponse,
   Hello,
   ProjectCommand,
@@ -153,7 +154,7 @@ export const native = {
   manufacturingLayers: (record: ManufacturingArtifactRecord) =>
     invoke<ManufacturingLayer[]>("manufacturing_layers", { record }),
   prepareManufacturingBed: (sessionId: SessionId, baseRevision: SceneRevision, occurrenceId: number, center: boolean) =>
-    invoke<GeometryResponse>("manufacturing_prepare_bed", { sessionId, baseRevision, occurrenceId, center }),
+    invoke<BedPosePreparation>("manufacturing_prepare_bed", { sessionId, baseRevision, occurrenceId, center }),
   replay: (descriptor: ReplayDisplayDescriptor, record: ManufacturingArtifactRecord) =>
     invoke<ArrayBuffer>("manufacturing_replay", { descriptor, record }),
   selectManufacturingExport: () =>

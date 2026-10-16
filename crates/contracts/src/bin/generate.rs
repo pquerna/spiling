@@ -41,13 +41,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SourceProvenance::decl(&config),
         DisplayProfile::decl(&config),
         FaceRef::decl(&config),
-        FaceCarrier::decl(&config),
+        SurfaceFamily::decl(&config),
+        TorusKind::decl(&config),
+        AnalyticSurfaceDescription::decl(&config),
+        FaceDomainSummary::decl(&config),
+        FaceGeometryInfo::decl(&config),
         FaceInfo::decl(&config),
         FaceInspection::decl(&config),
         FaceIndexRow::decl(&config),
         SceneSummary::decl(&config),
+        DefinitionDisplay::decl(&config),
         DefinitionRecord::decl(&config),
         OccurrenceRecord::decl(&config),
+        BedPosePreparation::decl(&config),
         NativePath::decl(&config),
         MeshChunkMetadata::decl(&config),
         SectionChunkMetadata::decl(&config),
@@ -105,6 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RetractionPolicy::decl(&config),
         SupportPolicy::decl(&config),
         PreflightSeverity::decl(&config),
+        PreflightDisposition::decl(&config),
+        PreflightEvidence::decl(&config),
         PreflightCheck::decl(&config),
         PreflightReport::decl(&config),
         ManufacturingIntent::decl(&config),
@@ -112,6 +120,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DepositionPath::decl(&config),
         PlanarRegionCoverage::decl(&config),
         PrintLayer::decl(&config),
+        SkinCoverageScope::decl(&config),
+        SupportClearanceScope::decl(&config),
+        NativeFeatureCoverageSummary::decl(&config),
+        NativeGeometryCoverageSummary::decl(&config),
         NormalizedPrintPlan::decl(&config),
         ManufacturingProvenance::decl(&config),
         VerificationReport::decl(&config),
@@ -344,12 +356,14 @@ fn geometry_fixtures() -> Result<Vec<(&'static str, serde_json::Value)>, Box<dyn
 {
     let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")?;
     let definition = DefinitionId::from_source_sha256(&[7; 32]);
-    let mut mesh = MeshChunkBuilder::new(definition.clone(), 2, DisplayProfile::MeshMm005V1)?;
+    let mut mesh =
+        MeshChunkBuilder::new(definition.clone(), 2, DisplayProfile::MeshTrimmedMm005V2)?;
     mesh.push_face(
         0,
         &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
         &[[0.0, 0.0, 1.0]; 3],
         &[[0, 1, 2]],
+        0.0,
         0.0,
     )?;
     mesh.push_face(
@@ -357,6 +371,7 @@ fn geometry_fixtures() -> Result<Vec<(&'static str, serde_json::Value)>, Box<dyn
         &[[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
         &[[0.0, 0.0, -1.0]; 3],
         &[[0, 2, 1]],
+        0.0,
         0.0,
     )?;
     let mesh = mesh.finish()?;

@@ -325,7 +325,18 @@ impl TryFrom<rpc::PreflightReport> for PreflightReport {
         valid(
             Self {
                 input_revision: ProjectRevision(value.input_revision),
-                eligible: value.eligible,
+                disposition: match rpc::PreflightDisposition::try_from(value.disposition) {
+                    Ok(rpc::PreflightDisposition::PreflightAdmitted) => {
+                        PreflightDisposition::Admitted
+                    }
+                    Ok(rpc::PreflightDisposition::PreflightRefused) => {
+                        PreflightDisposition::Refused
+                    }
+                    Ok(rpc::PreflightDisposition::PreflightUnresolved) => {
+                        PreflightDisposition::Unresolved
+                    }
+                    _ => return Err("unknown preflight disposition".into()),
+                },
                 software_only: value.software_only,
                 checks: value
                     .checks
@@ -334,6 +345,25 @@ impl TryFrom<rpc::PreflightReport> for PreflightReport {
                         Ok(PreflightCheck {
                             code: check.code,
                             message: check.message,
+                            evidence: match rpc::PreflightEvidence::try_from(check.evidence) {
+                                Ok(rpc::PreflightEvidence::PreflightNotEvaluated) => {
+                                    PreflightEvidence::NotEvaluated
+                                }
+                                Ok(rpc::PreflightEvidence::PreflightCertified) => {
+                                    PreflightEvidence::Certified
+                                }
+                                Ok(rpc::PreflightEvidence::PreflightUnsupported) => {
+                                    PreflightEvidence::Unsupported
+                                }
+                                Ok(rpc::PreflightEvidence::PreflightIndeterminate) => {
+                                    PreflightEvidence::Indeterminate
+                                }
+                                Ok(rpc::PreflightEvidence::PreflightFailed) => {
+                                    PreflightEvidence::Failed
+                                }
+                                _ => return Err("unknown preflight evidence".into()),
+                            },
+                            required: required(check.required, "preflight check required policy")?,
                             occurrence_id: check
                                 .occurrence_id
                                 .map(crate::geometry::OccurrenceId::new)
@@ -370,7 +400,11 @@ impl TryFrom<PreflightReport> for rpc::PreflightReport {
         value.validate().map_err(|e| e.to_string())?;
         Ok(Self {
             input_revision: value.input_revision.get(),
-            eligible: value.eligible,
+            disposition: match value.disposition {
+                PreflightDisposition::Admitted => rpc::PreflightDisposition::PreflightAdmitted,
+                PreflightDisposition::Refused => rpc::PreflightDisposition::PreflightRefused,
+                PreflightDisposition::Unresolved => rpc::PreflightDisposition::PreflightUnresolved,
+            } as i32,
             software_only: value.software_only,
             checks: value
                 .checks
@@ -378,6 +412,20 @@ impl TryFrom<PreflightReport> for rpc::PreflightReport {
                 .map(|check| rpc::PreflightCheck {
                     code: check.code,
                     message: check.message,
+                    evidence: match check.evidence {
+                        PreflightEvidence::NotEvaluated => {
+                            rpc::PreflightEvidence::PreflightNotEvaluated
+                        }
+                        PreflightEvidence::Certified => rpc::PreflightEvidence::PreflightCertified,
+                        PreflightEvidence::Unsupported => {
+                            rpc::PreflightEvidence::PreflightUnsupported
+                        }
+                        PreflightEvidence::Indeterminate => {
+                            rpc::PreflightEvidence::PreflightIndeterminate
+                        }
+                        PreflightEvidence::Failed => rpc::PreflightEvidence::PreflightFailed,
+                    } as i32,
+                    required: Some(check.required),
                     occurrence_id: check.occurrence_id.map(|id| id.get()),
                     face_id: check.face_id.map(|id| id.as_str().to_owned()),
                     severity: match check.severity {
@@ -734,6 +782,7 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 material_revision: value.material_revision,
                 filament_diameter_mm: value.filament_diameter_mm,
                 layer_height_mm: value.layer_height_mm,
+                native_shape_error_mm: value.native_shape_error_mm,
                 bead_width_mm: value.bead_width_mm,
                 perimeter_count: value.perimeter_count,
                 infill_fraction: value.infill_fraction,
@@ -760,6 +809,7 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             material_revision: value.material_revision,
             filament_diameter_mm: value.filament_diameter_mm,
             layer_height_mm: value.layer_height_mm,
+            native_shape_error_mm: value.native_shape_error_mm,
             bead_width_mm: value.bead_width_mm,
             perimeter_count: value.perimeter_count,
             infill_fraction: value.infill_fraction,
@@ -795,6 +845,111 @@ impl TryFrom<ManufacturingIntent> for rpc::ManufacturingIntent {
         })
     }
 }
+impl TryFrom<rpc::NativeFeatureCoverageSummary> for NativeFeatureCoverageSummary {
+    type Error = String;
+    fn try_from(value: rpc::NativeFeatureCoverageSummary) -> Result<Self, String> {
+        valid(
+            Self {
+                disjoint_source_layer_count: required(
+                    value.disjoint_source_layer_count,
+                    "disjoint source layer count",
+                )?,
+                invariant_source_union_layer_count: required(
+                    value.invariant_source_union_layer_count,
+                    "invariant source union layer count",
+                )?,
+                native_interface_complex_layer_count: required(
+                    value.native_interface_complex_layer_count,
+                    "native interface complex layer count",
+                )?,
+                owned_critical_slab_count: required(
+                    value.owned_critical_slab_count,
+                    "owned critical slab count",
+                )?,
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<NativeFeatureCoverageSummary> for rpc::NativeFeatureCoverageSummary {
+    type Error = String;
+    fn try_from(value: NativeFeatureCoverageSummary) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            disjoint_source_layer_count: Some(value.disjoint_source_layer_count),
+            invariant_source_union_layer_count: Some(value.invariant_source_union_layer_count),
+            native_interface_complex_layer_count: Some(value.native_interface_complex_layer_count),
+            owned_critical_slab_count: Some(value.owned_critical_slab_count),
+        })
+    }
+}
+impl TryFrom<rpc::NativeGeometryCoverageSummary> for NativeGeometryCoverageSummary {
+    type Error = String;
+    fn try_from(value: rpc::NativeGeometryCoverageSummary) -> Result<Self, String> {
+        valid(
+            Self {
+                requested_shape_error_mm: value.requested_shape_error_mm,
+                achieved_shape_error_mm: value.achieved_shape_error_mm,
+                height_analysis_count: value.height_analysis_count,
+                slab_count: value.slab_count,
+                certified_layer_count: value.certified_layer_count,
+                event_count: value.event_count,
+                geometry_work: value.geometry_work,
+                evidence: match rpc::PreflightEvidence::try_from(value.evidence) {
+                    Ok(rpc::PreflightEvidence::PreflightCertified) => PreflightEvidence::Certified,
+                    _ => return Err("native geometry coverage must be certified".into()),
+                },
+                source_feature_coverage: required(
+                    value.source_feature_coverage,
+                    "native source feature coverage",
+                )?
+                .try_into()?,
+                skin_coverage: match rpc::SkinCoverageScope::try_from(value.skin_coverage) {
+                    Ok(rpc::SkinCoverageScope::ScheduledMaterialDistance) => {
+                        SkinCoverageScope::ScheduledMaterialDistance
+                    }
+                    _ => return Err("unknown native skin coverage scope".into()),
+                },
+                support_clearance: match rpc::SupportClearanceScope::try_from(
+                    value.support_clearance,
+                ) {
+                    Ok(rpc::SupportClearanceScope::ContinuousTargetOuterOccupancy) => {
+                        SupportClearanceScope::ContinuousTargetOuterOccupancy
+                    }
+                    _ => return Err("unknown native support clearance scope".into()),
+                },
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<NativeGeometryCoverageSummary> for rpc::NativeGeometryCoverageSummary {
+    type Error = String;
+    fn try_from(value: NativeGeometryCoverageSummary) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            requested_shape_error_mm: value.requested_shape_error_mm,
+            achieved_shape_error_mm: value.achieved_shape_error_mm,
+            height_analysis_count: value.height_analysis_count,
+            slab_count: value.slab_count,
+            certified_layer_count: value.certified_layer_count,
+            event_count: value.event_count,
+            geometry_work: value.geometry_work,
+            evidence: rpc::PreflightEvidence::PreflightCertified as i32,
+            source_feature_coverage: Some(value.source_feature_coverage.try_into()?),
+            skin_coverage: match value.skin_coverage {
+                SkinCoverageScope::ScheduledMaterialDistance => {
+                    rpc::SkinCoverageScope::ScheduledMaterialDistance
+                }
+            } as i32,
+            support_clearance: match value.support_clearance {
+                SupportClearanceScope::ContinuousTargetOuterOccupancy => {
+                    rpc::SupportClearanceScope::ContinuousTargetOuterOccupancy
+                }
+            } as i32,
+        })
+    }
+}
 impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
     type Error = String;
     fn try_from(value: rpc::ManufacturingSummary) -> Result<Self, String> {
@@ -814,6 +969,8 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
                     "surface resolution totals",
                 )?
                 .try_into()?,
+                native_geometry: required(value.native_geometry, "native geometry coverage")?
+                    .try_into()?,
             },
             Self::validate,
         )
@@ -834,6 +991,7 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
             support_deposited_volume_mm3: value.support_deposited_volume_mm3,
             support_filament_length_mm: value.support_filament_length_mm,
             surface_resolution: Some(value.surface_resolution.try_into()?),
+            native_geometry: Some(value.native_geometry.try_into()?),
         })
     }
 }
@@ -1030,9 +1188,10 @@ mod tests {
         invalid.request_id = "not-a-uuid".into();
         assert!(ManufacturingCommand::try_from(invalid).is_err());
         let report = PreflightReport {
-            input_revision: ProjectRevision(7), eligible: true, software_only: true,
+            input_revision: ProjectRevision(7), disposition: PreflightDisposition::Admitted, software_only: true,
             checks: vec![PreflightCheck {
                 code: "compile_analysis_required".into(), severity: PreflightSeverity::Info,
+                evidence: PreflightEvidence::NotEvaluated, required: false,
                 message: "Native layer/support/bridge/offset analysis occurs during Compile; physical qualification absent".into(),
                 occurrence_id: Some(crate::geometry::OccurrenceId::new(1).unwrap()),
                 face_id: Some(crate::geometry::FaceId::from_step_entity(9007199254740993).unwrap()),
@@ -1053,6 +1212,47 @@ mod tests {
             invalid.checks[0].severity = severity;
             assert!(PreflightReport::try_from(invalid).is_err());
         }
+        for invalid_value in [0, -1, i32::MAX] {
+            let mut invalid = wire.clone();
+            invalid.disposition = invalid_value;
+            assert!(PreflightReport::try_from(invalid).is_err());
+            let mut invalid = wire.clone();
+            invalid.checks[0].evidence = invalid_value;
+            assert!(PreflightReport::try_from(invalid).is_err());
+        }
+        let mut missing = wire.clone();
+        missing.checks[0].required = None;
+        assert!(PreflightReport::try_from(missing).is_err());
+        let mut unresolved = wire.clone();
+        unresolved.checks[0].required = Some(true);
+        assert!(PreflightReport::try_from(unresolved.clone()).is_err());
+        unresolved.disposition = rpc::PreflightDisposition::PreflightUnresolved as i32;
+        let mut domain = PreflightReport::try_from(unresolved.clone()).unwrap();
+        domain.disposition = PreflightDisposition::Admitted;
+        assert!(rpc::PreflightReport::try_from(domain).is_err());
+        for evidence in [
+            rpc::PreflightEvidence::PreflightNotEvaluated,
+            rpc::PreflightEvidence::PreflightIndeterminate,
+            rpc::PreflightEvidence::PreflightCertified,
+            rpc::PreflightEvidence::PreflightUnsupported,
+            rpc::PreflightEvidence::PreflightFailed,
+        ] {
+            let disposition = match evidence {
+                rpc::PreflightEvidence::PreflightCertified => {
+                    rpc::PreflightDisposition::PreflightAdmitted
+                }
+                rpc::PreflightEvidence::PreflightUnsupported
+                | rpc::PreflightEvidence::PreflightFailed => {
+                    rpc::PreflightDisposition::PreflightRefused
+                }
+                _ => rpc::PreflightDisposition::PreflightUnresolved,
+            };
+            let mut checked = unresolved.clone();
+            checked.disposition = disposition as i32;
+            checked.checks[0].evidence = evidence as i32;
+            let domain = PreflightReport::try_from(checked.clone()).unwrap();
+            assert_eq!(rpc::PreflightReport::try_from(domain).unwrap(), checked);
+        }
         let mut invalid = wire.clone();
         invalid.checks[0].occurrence_id = Some(0);
         assert!(PreflightReport::try_from(invalid).is_err());
@@ -1069,6 +1269,14 @@ mod tests {
         let domain = intent();
         let wire = rpc::ManufacturingIntent::try_from(domain.clone()).unwrap();
         assert_eq!(ManufacturingIntent::try_from(wire.clone()).unwrap(), domain);
+        for value in [0.0, -0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().native_shape_error_mm = value;
+            assert!(ManufacturingIntent::try_from(invalid).is_err());
+            let mut invalid = domain.clone();
+            invalid.recipe.native_shape_error_mm = value;
+            assert!(rpc::ManufacturingIntent::try_from(invalid).is_err());
+        }
         let mut missing = wire.clone();
         missing.recipe.as_mut().unwrap().process = None;
         assert!(ManufacturingIntent::try_from(missing).is_err());
@@ -1169,6 +1377,24 @@ mod tests {
                 support_deposited_volume_mm3: 0.0,
                 support_filament_length_mm: 0.0,
                 surface_resolution: SurfaceResolutionTotals::empty(),
+                native_geometry: NativeGeometryCoverageSummary {
+                    requested_shape_error_mm: 0.02,
+                    achieved_shape_error_mm: 0.001,
+                    height_analysis_count: 1,
+                    slab_count: 1,
+                    certified_layer_count: 1,
+                    event_count: 0,
+                    geometry_work: 1,
+                    evidence: PreflightEvidence::Certified,
+                    source_feature_coverage: NativeFeatureCoverageSummary {
+                        disjoint_source_layer_count: 1,
+                        invariant_source_union_layer_count: 0,
+                        native_interface_complex_layer_count: 0,
+                        owned_critical_slab_count: 0,
+                    },
+                    skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                    support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                },
             },
         };
         let wire = rpc::ManufacturingArtifactRecord::try_from(record.clone()).unwrap();
@@ -1179,6 +1405,105 @@ mod tests {
         let mut invalid = wire.clone();
         invalid.hash = "not-sha256".into();
         assert!(ManufacturingArtifactRecord::try_from(invalid).is_err());
+        let mut missing = wire.clone();
+        missing.summary.as_mut().unwrap().native_geometry = None;
+        assert!(ManufacturingArtifactRecord::try_from(missing).is_err());
+        let coverage = wire
+            .summary
+            .as_ref()
+            .unwrap()
+            .native_geometry
+            .as_ref()
+            .unwrap()
+            .clone();
+        for (disjoint, invariant, interface) in [(3, 0, 0), (0, 3, 0), (0, 0, 3), (1, 1, 1)] {
+            let mut expected = record.summary.native_geometry.clone();
+            expected.certified_layer_count = 3;
+            expected.slab_count = 3;
+            expected.source_feature_coverage = NativeFeatureCoverageSummary {
+                disjoint_source_layer_count: disjoint,
+                invariant_source_union_layer_count: invariant,
+                native_interface_complex_layer_count: interface,
+                owned_critical_slab_count: 1,
+            };
+            let encoded = rpc::NativeGeometryCoverageSummary::try_from(expected.clone()).unwrap();
+            assert_eq!(
+                NativeGeometryCoverageSummary::try_from(encoded).unwrap(),
+                expected
+            );
+        }
+        let mut missing = coverage.clone();
+        missing.source_feature_coverage = None;
+        assert!(NativeGeometryCoverageSummary::try_from(missing).is_err());
+        for field in 0..4 {
+            let mut missing = coverage.clone();
+            let feature = missing.source_feature_coverage.as_mut().unwrap();
+            match field {
+                0 => feature.disjoint_source_layer_count = None,
+                1 => feature.invariant_source_union_layer_count = None,
+                2 => feature.native_interface_complex_layer_count = None,
+                _ => feature.owned_critical_slab_count = None,
+            }
+            assert!(NativeGeometryCoverageSummary::try_from(missing).is_err());
+        }
+        for (disjoint, invariant, interface, endpoints) in [
+            (0, 0, 0, 0),
+            (1, 1, 0, 0),
+            (1, 0, 1, 0),
+            (1, 0, 0, 2),
+            (u32::MAX, 0, 1, 0),
+        ] {
+            let mut invalid = coverage.clone();
+            invalid.source_feature_coverage = Some(rpc::NativeFeatureCoverageSummary {
+                disjoint_source_layer_count: Some(disjoint),
+                invariant_source_union_layer_count: Some(invariant),
+                native_interface_complex_layer_count: Some(interface),
+                owned_critical_slab_count: Some(endpoints),
+            });
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+            let mut invalid = record.summary.native_geometry.clone();
+            invalid.source_feature_coverage = NativeFeatureCoverageSummary {
+                disjoint_source_layer_count: disjoint,
+                invariant_source_union_layer_count: invariant,
+                native_interface_complex_layer_count: interface,
+                owned_critical_slab_count: endpoints,
+            };
+            assert!(rpc::NativeGeometryCoverageSummary::try_from(invalid).is_err());
+        }
+        let mut omitted_capture = coverage.clone();
+        omitted_capture.certified_layer_count = 2;
+        omitted_capture
+            .source_feature_coverage
+            .as_mut()
+            .unwrap()
+            .disjoint_source_layer_count = Some(2);
+        assert!(NativeGeometryCoverageSummary::try_from(omitted_capture).is_err());
+        for value in [0, -1, i32::MAX] {
+            let mut invalid = coverage.clone();
+            invalid.evidence = value;
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+            let mut invalid = coverage.clone();
+            invalid.skin_coverage = value;
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+            let mut invalid = coverage.clone();
+            invalid.support_clearance = value;
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+        }
+        for evidence in [
+            rpc::PreflightEvidence::PreflightNotEvaluated,
+            rpc::PreflightEvidence::PreflightUnsupported,
+            rpc::PreflightEvidence::PreflightIndeterminate,
+            rpc::PreflightEvidence::PreflightFailed,
+        ] {
+            let mut invalid = coverage.clone();
+            invalid.evidence = evidence as i32;
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+        }
+        for achieved in [-0.001, 0.021, f64::NAN, f64::INFINITY] {
+            let mut invalid = coverage.clone();
+            invalid.achieved_shape_error_mm = achieved;
+            assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
+        }
         let mut invalid = wire;
         invalid.summary.as_mut().unwrap().software_only = false;
         assert!(ManufacturingArtifactRecord::try_from(invalid).is_err());

@@ -56,6 +56,45 @@ fn native_snapshots_validate_identity_state_timestamps_and_terminal_details() {
     assert!(native_operation_view(&op).is_err());
 }
 #[test]
+fn geometry_only_native_scene_succeeds_without_fabricated_display_outputs() {
+    let mut op = operation();
+    let mut meta = native_metadata(&op).unwrap();
+    meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
+    meta.completed_units = meta.total_units;
+    meta.end_time = meta.update_time;
+    let summary = SceneSummary {
+        session_id: SessionId::parse(meta.session_id.clone()).unwrap(),
+        revision: SceneRevision(1),
+        definition_count: 1,
+        occurrence_count: 1,
+        bounds_mm: Some(AabbMm::new([0.0; 3], [1.0; 3]).unwrap()),
+        unique_mesh_bytes: 0,
+    };
+    let result = rpc::NativeOperationResult::try_from(JobResult::Scene {
+        summary: summary.clone(),
+    })
+    .unwrap();
+    op.done = true;
+    op.result = Some(google::longrunning::operation::Result::Response(
+        prost_types::Any {
+            type_url: NATIVE_RESULT_TYPE.into(),
+            value: result.encode_to_vec(),
+        },
+    ));
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    let view = native_operation_view(&op).unwrap();
+    assert!(view.outputs.is_empty());
+    assert!(matches!(view.result, Some(JobResult::Scene { summary: actual }) if actual == summary));
+    meta.outputs.push(rpc::Artifact {
+        name: format!("artifacts/{}", "a".repeat(64)),
+        sha256: "a".repeat(64),
+        size_bytes: 152,
+        media_type: "application/x-spiling-mesh".into(),
+    });
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    assert!(native_operation_view(&op).is_err());
+}
+#[test]
 fn domain_status_keeps_codes_and_rejects_cross_domain_or_unknown_details() {
     let e = JobError::Geometry {
         error: GeometryError::new(GeometryErrorCode::InvalidPose, "invalid quaternion"),

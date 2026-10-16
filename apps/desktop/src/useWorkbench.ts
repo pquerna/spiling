@@ -18,6 +18,7 @@ import {
   MAX_SCENE_MESH_BYTES,
   MAX_SECTION_BYTES,
   type ArtifactId,
+  type BedPosePreparation,
   type DefinitionRecord,
   type FaceIndexRow,
   type FaceInspection,
@@ -118,7 +119,8 @@ export interface ManufacturingHost {
   token(): number;
   snapshot(): WorkbenchState;
   refreshProject(token: number): Promise<ProjectInfo>;
-  prepareBed(occurrenceId: number, center: boolean): Promise<void>;
+  prepareBed(occurrenceId: number, center: boolean): Promise<BedPosePreparation>;
+  applyBed(preparation: BedPosePreparation): Promise<void>;
   showReplay(descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay): Promise<void>;
   clearReplay(): Promise<void>;
   setReplayView(options: {
@@ -506,18 +508,20 @@ export function useWorkbench(
         checkDisplay(token);
         const faceRows = await faces(definition, summary.session_id, token);
         definitions.push({ ...definition, faces: faceRows });
-        if (view.hasDefinition(definition.definition_id, definition.mesh_artifact_id)) continue;
+        if (definition.display.kind === "unavailable") continue;
+        const artifact = definition.display.artifact_id;
+        if (view.hasDefinition(definition.definition_id, artifact)) continue;
         try {
           const page = await artifactPages(
             summary.session_id,
-            definition.mesh_artifact_id,
+            artifact,
             "chunks",
             token,
           );
           if (
             page.summary.kind !== "mesh" ||
             page.summary.definition_id !== definition.definition_id ||
-            page.summary.artifact_id !== definition.mesh_artifact_id
+            page.summary.artifact_id !== artifact
           )
             throw new Error("invalid definition artifact");
           const descriptors: MeshChunkMetadata[] = page.chunks.map((row) => {
@@ -526,7 +530,7 @@ export function useWorkbench(
           });
           validateMeshManifest(descriptors, {
             session_id: summary.session_id,
-            artifact_id: definition.mesh_artifact_id,
+            artifact_id: artifact,
             definition_id: definition.definition_id,
           });
           if (
@@ -550,7 +554,7 @@ export function useWorkbench(
             checkDisplay(token);
             const mesh = await decodeMesh(bytes, metadata, {
               session_id: summary.session_id,
-              artifact_id: definition.mesh_artifact_id,
+              artifact_id: artifact,
               definition_id: definition.definition_id,
               chunk_index: metadata.chunk_index,
             });
@@ -570,7 +574,7 @@ export function useWorkbench(
             await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
           }
         } finally {
-          await release(summary.session_id, definition.mesh_artifact_id, token);
+          await release(summary.session_id, artifact, token);
         }
       }
       checkDisplay(token);
@@ -703,6 +707,7 @@ export function useWorkbench(
               await getProject(token);
               return result;
             case "section":
+            case "bed_pose_prepared":
             case "project_saved":
             case "surface_image_prepared":
               return result;
@@ -879,6 +884,8 @@ export function useWorkbench(
         case "scene":
           await syncScene(result.summary, token);
           break;
+        case "bed_pose_prepared":
+          throw new Error("bed preparation is not a project replacement or save");
         case "section":
           throw new Error("unexpected section result for a project job");
         case "surface_image_prepared":
@@ -1168,13 +1175,22 @@ export function useWorkbench(
       if (stateRef.current.stale)
         throw new DomainError("stale_revision", "Resume display before editing instances.");
       const summary = sceneRef.current!;
+      const project = stateRef.current.project;
+      if (!project)
+        throw new DomainError("stale_revision", "Refresh project state before editing instances.");
       const shared = { session_id: summary.session_id, base_revision: summary.revision };
       const request: GeometryCommand =
         command === "add"
           ? { op: "add_instance", ...shared, definition_id: occurrence.definition_id, pose }
           : command === "remove"
             ? { op: "remove_instance", ...shared, occurrence_id: occurrence.occurrence_id }
-            : { op: "set_instance_pose", ...shared, occurrence_id: occurrence.occurrence_id, pose };
+            : {
+                op: "set_instance_pose",
+                ...shared,
+                project_revision: project.revision,
+                occurrence_id: occurrence.occurrence_id,
+                pose,
+              };
       const response = await control(request, token);
       if (response.type !== "scene_changed")
         throw new Error("unexpected instance mutation response");
@@ -1525,33 +1541,66 @@ export function useWorkbench(
       snapshot: () => stateRef.current,
       refreshProject: getProject,
       prepareBed: async (occurrenceId: number, center: boolean) => {
+        let preparation: BedPosePreparation | undefined;
+        let failureCause: unknown;
+        await run(async (token) => {
+          try {
+            const snapshot = stateRef.current;
+            const summary = sceneRef.current;
+            if (snapshot.project?.read_only)
+              throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
+            if (snapshot.stale || !summary || !snapshot.project)
+              throw new DomainError("stale_revision", "Resume the native scene before preparing the bed.");
+            const result = await exchange(
+              () => native.prepareManufacturingBed(summary.session_id, summary.revision, occurrenceId, center),
+              token,
+            );
+            const current = stateRef.current;
+            if (current.hello?.session_id !== result.session_id ||
+                sceneRef.current?.revision !== result.scene_revision ||
+                current.project?.revision !== result.project_revision ||
+                current.project?.project_id !== snapshot.project.project_id ||
+                current.projectEpoch !== snapshot.projectEpoch ||
+                result.occurrence_id !== occurrenceId)
+              throw new DomainError("stale_revision", "Bed proposal superseded; prepare again.");
+            preparation = result;
+          } catch (error) {
+            failureCause = error;
+            throw error;
+          }
+        });
+        if (failureCause) throw failureCause;
+        if (!preparation) throw new Error("Bed preparation was not admitted.");
+        return preparation;
+      },
+      applyBed: async (preparation: BedPosePreparation) => {
         let applied = false;
         let failureCause: unknown;
         await run(async (token) => {
           try {
             const snapshot = stateRef.current;
+            const occurrence = snapshot.occurrences.find(row => row.occurrence_id === preparation.occurrence_id);
             if (snapshot.project?.read_only)
-              throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
-            if (snapshot.stale || !sceneRef.current)
-              throw new DomainError(
-                "stale_revision",
-                "Resume the native scene before preparing the bed.",
-              );
-            const summary = sceneRef.current;
-            const response = await exchange(
-              () =>
-                native.prepareManufacturingBed(
-                  summary.session_id,
-                  summary.revision,
-                  occurrenceId,
-                  center,
-                ),
-              token,
-            );
+              throw new DomainError("read_only", "Read-only projects cannot apply bed proposals.");
+            if (snapshot.stale || snapshot.hello?.session_id !== preparation.session_id ||
+                sceneRef.current?.revision !== preparation.scene_revision ||
+                snapshot.project?.revision !== preparation.project_revision ||
+                occurrence?.definition_id !== preparation.definition_id ||
+                !occurrence.pose.translation_mm.every((value, axis) => value === preparation.original_pose.translation_mm[axis]) ||
+                !occurrence.pose.rotation_xyzw.every((value, axis) => value === preparation.original_pose.rotation_xyzw[axis]))
+              throw new DomainError("stale_revision", "Bed proposal no longer owns this occurrence; prepare again.");
+            const response = await exchange(() => native.geometry({
+              op: "set_instance_pose",
+              session_id: preparation.session_id,
+              base_revision: preparation.scene_revision,
+              project_revision: preparation.project_revision,
+              occurrence_id: preparation.occurrence_id,
+              pose: preparation.pose,
+            }), token);
             if (response.type === "error" || response.type === "project_error")
               throw new DomainError(response.error.code, response.error.message);
             if (response.type !== "scene_changed")
-              throw new Error("Unexpected native bed preparation response.");
+              throw new Error("Unexpected native bed Apply response.");
             await getProject(token);
             await syncScene(response.summary, token);
             applied = true;
@@ -1561,7 +1610,7 @@ export function useWorkbench(
           }
         });
         if (failureCause) throw failureCause;
-        if (!applied) throw new Error("Bed preparation was not admitted.");
+        if (!applied) throw new Error("Bed proposal was not applied.");
       },
       showReplay: async (descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay) => {
         const view = viewport.current;

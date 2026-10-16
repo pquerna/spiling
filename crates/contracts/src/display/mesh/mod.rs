@@ -20,6 +20,7 @@ pub struct MeshChunkDescriptor {
     pub face_count: u32,
     pub bounds_mm: AabbMm,
     pub carrier_deviation_mm: f64,
+    pub trim_deviation_mm: f64,
     pub quantization_error_mm: f64,
 }
 impl MeshChunkDescriptor {
@@ -41,6 +42,7 @@ impl MeshChunkDescriptor {
             face_count: self.face_count,
             bounds_mm: self.bounds_mm,
             carrier_deviation_mm: self.carrier_deviation_mm,
+            trim_deviation_mm: self.trim_deviation_mm,
             quantization_error_mm: self.quantization_error_mm,
         }
     }
@@ -106,6 +108,7 @@ pub struct MeshChunkBuilder {
     origin: [f64; 3],
     bounds: Option<AabbMm>,
     carrier: f64,
+    trim: f64,
     quantization: f64,
     vertex_count: u32,
     triangle_count: u32,
@@ -180,6 +183,7 @@ impl MeshChunkBuilder {
             origin: [0.0; 3],
             bounds: None,
             carrier: 0.0,
+            trim: 0.0,
             quantization: 0.0,
             vertex_count: 0,
             triangle_count: 0,
@@ -193,6 +197,53 @@ impl MeshChunkBuilder {
             bytes: self.budget.bytes - self.total_bytes,
         }
     }
+    /// Owned heap capacities, excluding borrowed inputs and allocator bookkeeping.
+    /// The standard HashMap does not expose its bucket allocation; reserve a
+    /// conservative two-slot-per-capacity bound plus control/alignment overhead.
+    pub fn retained_bytes(&self) -> usize {
+        let vector_bytes = self
+            .chunks
+            .capacity()
+            .saturating_mul(std::mem::size_of::<EncodedMeshChunk>())
+            .saturating_add(
+                self.positions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[f32; 3]>()),
+            )
+            .saturating_add(
+                self.normals
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[f32; 3]>()),
+            )
+            .saturating_add(
+                self.indices
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                self.faces
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(self.definition.allocated_bytes());
+        let map_capacity = self.remap.capacity();
+        let map_bytes = if map_capacity == 0 {
+            0
+        } else {
+            map_capacity
+                .saturating_mul(2)
+                .saturating_mul(std::mem::size_of::<(u32, u32)>() + 1)
+                .saturating_add(64)
+        };
+        self.chunks
+            .iter()
+            .fold(vector_bytes.saturating_add(map_bytes), |bytes, chunk| {
+                bytes
+                    .saturating_add(chunk.bytes.capacity())
+                    .saturating_add(chunk.descriptor.definition_id.allocated_bytes())
+                    .saturating_add(chunk.descriptor.sha256.allocated_bytes())
+            })
+    }
     pub fn push_face(
         &mut self,
         ordinal: u32,
@@ -200,12 +251,19 @@ impl MeshChunkBuilder {
         normals: &[[f64; 3]],
         triangles: &[[u32; 3]],
         carrier_deviation_mm: f64,
+        trim_deviation_mm: f64,
     ) -> Result<(), GeometryError> {
         if self.failed {
             return Err(invalid("mesh builder was invalidated"));
         }
-        let result =
-            self.push_face_inner(ordinal, positions, normals, triangles, carrier_deviation_mm);
+        let result = self.push_face_inner(
+            ordinal,
+            positions,
+            normals,
+            triangles,
+            carrier_deviation_mm,
+            trim_deviation_mm,
+        );
         if result.is_err() {
             self.failed = true;
         }
@@ -218,6 +276,7 @@ impl MeshChunkBuilder {
         normals: &[[f64; 3]],
         triangles: &[[u32; 3]],
         carrier: f64,
+        trim: f64,
     ) -> Result<(), GeometryError> {
         if ordinal != self.next_face || ordinal >= self.face_count {
             return Err(invalid(
@@ -232,8 +291,15 @@ impl MeshChunkBuilder {
         {
             return Err(resource("per-face mesh count exceeds limit"));
         }
-        if !carrier.is_finite() || !(0.0..=MESH_CARRIER_TOLERANCE_MM).contains(&carrier) {
-            return Err(invalid("carrier deviation exceeds profile"));
+        if !carrier.is_finite()
+            || !trim.is_finite()
+            || carrier < 0.0
+            || trim < 0.0
+            || carrier + trim > MESH_CARRIER_TOLERANCE_MM
+        {
+            return Err(invalid(
+                "native interpolation plus trim deviation exceeds profile",
+            ));
         }
         for (&point, &normal) in positions.iter().zip(normals) {
             if !finite3(point)
@@ -250,6 +316,11 @@ impl MeshChunkBuilder {
             {
                 return Err(invalid("native mesh index out of range"));
             }
+        }
+        // Separate achieved maxima must remain conservative when faces share a chunk.
+        // Split rather than reject when maxima from distinct faces would exceed the budget.
+        if self.carrier.max(carrier) + self.trim.max(trim) > MESH_CARRIER_TOLERANCE_MM {
+            self.flush()?;
         }
         self.remap.clear();
         for triangle in triangles {
@@ -290,7 +361,7 @@ impl MeshChunkBuilder {
                         || !finite3(reconstructed)
                         || !error.is_finite()
                         || error > MESH_QUANTIZATION_TOLERANCE_MM
-                        || carrier + error > MESH_SURFACE_TOLERANCE_MM
+                        || carrier + trim + error > MESH_SURFACE_TOLERANCE_MM
                     {
                         return Err(invalid("mesh quantization exceeds profile"));
                     }
@@ -318,7 +389,10 @@ impl MeshChunkBuilder {
                 return Err(resource("unique mesh triangle budget exceeded"));
             }
             self.carrier = self.carrier.max(carrier);
-            if self.carrier + self.quantization > MESH_SURFACE_TOLERANCE_MM {
+            self.trim = self.trim.max(trim);
+            if self.carrier + self.trim > MESH_CARRIER_TOLERANCE_MM
+                || self.carrier + self.trim + self.quantization > MESH_SURFACE_TOLERANCE_MM
+            {
                 return Err(invalid("combined chunk error exceeds profile"));
             }
             self.indices.extend_from_slice(&mapped);
@@ -376,6 +450,7 @@ impl MeshChunkBuilder {
             face_count: self.face_count,
             bounds_mm: self.bounds.take().expect("nonempty chunk"),
             carrier_deviation_mm: self.carrier,
+            trim_deviation_mm: self.trim,
             quantization_error_mm: self.quantization,
         };
         self.total_bytes += length as u32;
@@ -386,6 +461,7 @@ impl MeshChunkBuilder {
         self.faces.clear();
         self.remap.clear();
         self.carrier = 0.0;
+        self.trim = 0.0;
         self.quantization = 0.0;
         Ok(())
     }
@@ -435,25 +511,8 @@ pub fn validate_mesh_chunk<'a>(
             "mesh descriptor identity mismatch",
         ));
     }
-    if metadata.schema_version != MESH_SCHEMA_VERSION
-        || metadata.chunk_count == 0
-        || chunk_index >= metadata.chunk_count
-        || metadata.face_count == 0
-        || metadata.face_count > MAX_NATIVE_FACES
-    {
-        return Err(invalid("invalid mesh descriptor counts or version"));
-    }
-    metadata.bounds_mm.validate()?;
-    let carrier = metadata.carrier_deviation_mm;
+    metadata.validate()?;
     let quantization = metadata.quantization_error_mm;
-    if !carrier.is_finite()
-        || !quantization.is_finite()
-        || !(0.0..=MESH_CARRIER_TOLERANCE_MM).contains(&carrier)
-        || !(0.0..=MESH_QUANTIZATION_TOLERANCE_MM).contains(&quantization)
-        || carrier + quantization > MESH_SURFACE_TOLERANCE_MM
-    {
-        return Err(invalid("invalid mesh error budget"));
-    }
     if bytes.len() < MESH_HEADER_BYTES
         || bytes.len() > MAX_GEOMETRY_CHUNK_BYTES as usize
         || bytes.len() != metadata.byte_count as usize
@@ -537,6 +596,7 @@ pub fn validate_mesh_manifest(metadata: &[MeshChunkMetadata]) -> Result<(), Geom
         .ok_or_else(|| invalid("mesh has no chunks"))?;
     let mut bytes = 0_u32;
     for (index, chunk) in metadata.iter().enumerate() {
+        chunk.validate()?;
         if chunk.chunk_index as usize != index
             || chunk.chunk_count as usize != metadata.len()
             || chunk.session_id != first.session_id

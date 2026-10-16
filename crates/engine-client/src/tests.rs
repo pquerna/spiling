@@ -16,6 +16,24 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
         byte_count: bytes.len() as u32,
         summary: spiling_contracts::manufacturing::ManufacturingSummary {
             layers: 1,
+            native_geometry: NativeGeometryCoverageSummary {
+                requested_shape_error_mm: 0.1,
+                achieved_shape_error_mm: 0.0,
+                height_analysis_count: 1,
+                slab_count: 1,
+                certified_layer_count: 1,
+                event_count: 2,
+                geometry_work: 1,
+                evidence: PreflightEvidence::Certified,
+                skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+                support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                source_feature_coverage: NativeFeatureCoverageSummary {
+                    disjoint_source_layer_count: 1,
+                    invariant_source_union_layer_count: 0,
+                    native_interface_complex_layer_count: 0,
+                    owned_critical_slab_count: 0,
+                },
+            },
             paths: 1,
             deposition_segments: 1,
             deposited_volume_mm3: 1.0,
@@ -24,6 +42,7 @@ fn manufacturing_record(bytes: &[u8]) -> ManufacturingArtifactRecord {
             support_deposited_volume_mm3: 0.0,
             support_filament_length_mm: 0.0,
             software_only: true,
+            surface_resolution: SurfaceResolutionTotals::empty(),
         },
     }
 }
@@ -190,7 +209,7 @@ fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info()
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         kernel: "monstertruck".into(),
         geometry_capabilities: vec!["source_backed_geometry".into()],
-        project_capabilities: vec!["recoverable_projects_v4".into()],
+        project_capabilities: vec!["recoverable_projects_v5".into()],
         manufacturing_capabilities: vec!["planar_software_compile_v1".into()],
         max_message_bytes: MAX_CONTROL_BYTES,
         max_artifact_bytes: MAX_ARTIFACT_BYTES,
@@ -199,36 +218,6 @@ fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info()
         ..Default::default()
     };
     assert!(Hello::try_from(info).is_err());
-}
-
-#[test]
-fn bed_preparation_rejects_extent_amplified_near_axis_rotation_without_snapping() {
-    let bounds = AabbMm::new([0.0; 3], [1e12, 20.0, 10.0]).unwrap();
-    let envelope = AabbMm::new([-2e12, -2e12, 0.0], [2e12, 2e12, 100.0]).unwrap();
-    let near_axis = RigidPoseMm {
-        translation_mm: [0.0; 3],
-        rotation_xyzw: [0.0, 5e-16, 0.0, 1.0],
-    };
-    assert!(matches!(
-        super::prepare_bed_pose(bounds, near_axis, envelope, true),
-        Err(ClientError::InvalidRequest(_))
-    ));
-    let quarter_turn = RigidPoseMm {
-        translation_mm: [40.0, 40.0, 30.0],
-        rotation_xyzw: [
-            0.0,
-            0.0,
-            std::f64::consts::FRAC_1_SQRT_2,
-            std::f64::consts::FRAC_1_SQRT_2,
-        ],
-    };
-    let small = AabbMm::new([0.0; 3], [20.0, 20.0, 10.0]).unwrap();
-    let machine = AabbMm::new([0.0; 3], [200.0; 3]).unwrap();
-    let placed = super::prepare_bed_pose(small, quarter_turn, machine, true).unwrap();
-    assert_eq!(placed.rotation_xyzw, quarter_turn.rotation_xyzw);
-    assert!(placed.translation_mm[2].abs() < 1e-12);
-    assert!((placed.translation_mm[0] - 110.0).abs() < 1e-10);
-    assert!((placed.translation_mm[1] - 90.0).abs() < 1e-10);
 }
 
 mod real;
@@ -311,16 +300,19 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         kernel: "monstertruck".into(),
         geometry_capabilities: vec![
+            "step_native_trimmed_v2".into(),
+            "native_geometry_queries_v2".into(),
+            "native_bed_contact_v1".into(),
             "native_vertical_rectangular_wall_v1".into(),
             "native_vertical_cylinder_face_v1".into(),
         ],
         project_capabilities: vec![
-            "recoverable_projects_v4".into(),
+            "recoverable_projects_v5".into(),
             "source_face_surface_finish_v3".into(),
             "surface_image_assets_v1".into(),
         ],
         manufacturing_capabilities: vec![
-            "manufacturing_schema5".into(),
+            "manufacturing_schema6".into(),
             "mapped_image_relief_v1".into(),
             "varying_z_material_domains_v1".into(),
             "bounded_vertical_rib_construction_v1".into(),
@@ -343,7 +335,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     hello.engine_build = spiling_contracts::ENGINE_BUILD_ID.into();
     hello.project_capabilities[0] = "recoverable_projects_v2".into();
     assert!(super::validate_engine_cutover(&hello).is_err());
-    hello.project_capabilities[0] = "recoverable_projects_v4".into();
+    hello.project_capabilities[0] = "recoverable_projects_v5".into();
     hello.project_capabilities[1] = "source_face_surface_finish_v1".into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[1] = "source_face_surface_finish_v3".into();

@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   decodeReplayDisplay,
+  type BedPosePreparation,
   type DecodedReplayDisplay,
   type JobResult,
   type ManufacturingResponse,
@@ -56,6 +57,12 @@ export function useManufacturing(host: ManufacturingHost) {
   const [message, setMessage] = useState("");
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [working, setWorking] = useState(false);
+  const [bedProposal, setBedProposal] = useState<{
+    preparation: BedPosePreparation;
+    authority: string;
+    invalidated: boolean;
+  } | null>(null);
+  const bedRequest = useRef(0);
   const [admittingReplay, setAdmittingReplay] = useState(false);
   const [layer, setLayer] = useState<number | null>(null);
   const [eventCount, setEventCount] = useState(0);
@@ -92,6 +99,17 @@ export function useManufacturing(host: ManufacturingHost) {
   const conflict = !!draft && !!status && draft.base !== intentIdentity(status.intent);
   const available = host.state.phase === "running" && !host.state.busy && !working;
   const writable = available && !host.state.project?.read_only;
+  const bedProposalStale = !!bedProposal && (
+    bedProposal.invalidated || bedProposal.authority !== currentAuthority ||
+    bedProposal.preparation.session_id !== session ||
+    bedProposal.preparation.scene_revision !== host.state.scene?.revision ||
+    bedProposal.preparation.project_revision !== revision ||
+    host.state.stale || changed || conflict
+  );
+  useEffect(() => {
+    if (bedProposalStale)
+      setBedProposal(previous => previous && !previous.invalidated ? { ...previous, invalidated: true } : previous);
+  }, [bedProposalStale]);
 
   function ensureRequest(token: number, id: number) {
     hostRef.current.ensure(token);
@@ -133,6 +151,7 @@ export function useManufacturing(host: ManufacturingHost) {
       mounted.current = false;
       ++request.current;
       ++refreshSequence.current;
+      ++bedRequest.current;
     };
   }, []);
   useEffect(() => {
@@ -140,6 +159,7 @@ export function useManufacturing(host: ManufacturingHost) {
       authority.current = currentAuthority;
       ++request.current;
       ++refreshSequence.current;
+      ++bedRequest.current;
       statusRef.current = null;
       setStatus(null);
       draftRef.current = null;
@@ -200,12 +220,53 @@ export function useManufacturing(host: ManufacturingHost) {
     });
     if (mounted.current) setWorking(false);
   }
+  function clearBedProposal() {
+    ++bedRequest.current;
+    setBedProposal(null);
+    setMessage("Bed proposal cleared; no project edit was submitted.");
+  }
   async function prepareBed(occurrenceId: number, center: boolean) {
-    if (!writable || !statusRef.current?.intent || changed) return;
+    if (!writable || !statusRef.current?.intent || changed || conflict) return;
+    const id = ++bedRequest.current;
+    const capturedAuthority = currentAuthority;
+    setBedProposal(null);
+    setWorking(true);
     try {
-      await hostRef.current.prepareBed(occurrenceId, center);
-      setMessage("Bed placement submitted through authoritative SetInstancePose; Core revision/history owns the edit.");
-    } catch (error) { setMessage(String(error)); }
+      const preparation = await hostRef.current.prepareBed(occurrenceId, center);
+      if (!mounted.current || bedRequest.current !== id) return;
+      setBedProposal({ preparation, authority: capturedAuthority, invalidated: false });
+      setMessage("Read-only native bed proposal ready. Review contact evidence and preserved orientation, then explicitly Apply; no project edit has occurred.");
+    } catch (error) {
+      if (mounted.current && bedRequest.current === id) setMessage(String(error));
+    } finally {
+      if (mounted.current && bedRequest.current === id) setWorking(false);
+    }
+  }
+  async function applyBed() {
+    if (!writable || !bedProposal || bedProposalStale) return;
+    const snapshot = hostRef.current.snapshot();
+    const liveAuthority = `${snapshot.phase === "running" ? snapshot.hello?.session_id ?? "" : ""}:${snapshot.project?.project_id ?? ""}:${snapshot.projectEpoch}`;
+    if (bedProposal.authority !== liveAuthority) {
+      setBedProposal(previous => previous ? { ...previous, invalidated: true } : previous);
+      setMessage("Bed proposal belongs to a replaced project/session; prepare again.");
+      return;
+    }
+    const captured = bedProposal;
+    const id = ++bedRequest.current;
+    setWorking(true);
+    try {
+      await hostRef.current.applyBed(captured.preparation);
+      if (!mounted.current || bedRequest.current !== id) return;
+      setBedProposal(null);
+      setMessage("Reviewed bed pose applied in one authoritative SetInstancePose transaction; Core owns revision and Undo/Redo.");
+    } catch (error) {
+      if (mounted.current && bedRequest.current === id) {
+        setBedProposal(previous => previous ? { ...previous, invalidated: true } : previous);
+        setMessage(`${String(error)} Proposal invalidated; prepare again before applying.`);
+      }
+    } finally {
+      if (mounted.current && bedRequest.current === id) setWorking(false);
+    }
   }
   function selectSoftwareIntent() {
     const next = makeDraft(softwareIntent, statusRef.current?.intent ?? null);
@@ -299,7 +360,7 @@ export function useManufacturing(host: ManufacturingHost) {
           if (hostRef.current.snapshot().project?.revision !== result.report.input_revision)
             throw new Error("Preflight revision changed; run it again.");
           setPreflight(result.report);
-          setMessage("Inexpensive input eligibility only: native slicing analysis pending; software-only and physically unqualified.");
+          setMessage(`Preflight ${result.report.disposition}: captured required evidence is reported separately from pending Compile-only analysis; software-only and physically unqualified.`);
           return;
         }
         if (inspectionRef.current) {
@@ -509,6 +570,10 @@ export function useManufacturing(host: ManufacturingHost) {
     preflight,
     selectIntent,
     prepareBed,
+    bedProposal: bedProposal?.preparation ?? null,
+    bedProposalStale,
+    applyBed,
+    clearBedProposal,
     fresh,
     message,
     working,

@@ -3,6 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 use crate::{check_cancel, error};
+use spiling_contracts::manufacturing::program_coordinates::{
+    project_xyz6_coordinate_mm, project_xyz6_point_mm,
+};
 use spiling_contracts::manufacturing::*;
 use std::fmt::{self, Write};
 use std::sync::atomic::AtomicBool;
@@ -42,8 +45,8 @@ pub fn emit(
             job.bed_temperature_c, job.nozzle_temperature_c
         )
         .map_err(limit)?;
-        let start = job.prime_start_mm.map(round_xyz);
-        let end = job.prime_end_mm.map(round_xyz);
+        let start = project_xyz6_point_mm(job.prime_start_mm)?;
+        let end = project_xyz6_point_mm(job.prime_end_mm)?;
         writable_position(start, intent)?;
         writable_position(end, intent)?;
         if start == end {
@@ -110,7 +113,7 @@ pub fn emit(
                     emitted_extrusion = rounded;
                 }
                 Event::Travel(target, speed) | Event::Deposit(target, _, speed) => {
-                    let to = target.map(round_xyz);
+                    let to = project_xyz6_point_mm(target)?;
                     writable_position(to, intent)?;
                     let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
                     if !feed.is_finite()
@@ -177,11 +180,11 @@ pub fn emit(
     )?;
     if let JobWorkflow::CompleteMarlin { job } = &intent.printer.workflow {
         let last = last.unwrap();
-        let lift = [last[0], last[1], job.park_position_mm[2]].map(round_xyz);
-        let park = job.park_position_mm.map(round_xyz);
+        let lift = project_xyz6_point_mm([last[0], last[1], job.park_position_mm[2]])?;
+        let park = project_xyz6_point_mm(job.park_position_mm)?;
         writable_position(lift, intent)?;
         writable_position(park, intent)?;
-        if lift[2] <= round_xyz(last[2]) {
+        if lift[2] <= project_xyz6_coordinate_mm(last[2])? {
             return Err(error(
                 ManufacturingErrorCode::InvalidSpecification,
                 "park clearance collapses at coordinate precision",
@@ -206,10 +209,6 @@ pub fn emit(
     }
     check_cancel(cancel)?;
     Ok(program.0)
-}
-fn round_xyz(v: f64) -> f64 {
-    let v = (v * 1_000_000.0).round() / 1_000_000.0;
-    if v == 0.0 { 0.0 } else { v }
 }
 fn writable_position(
     point: [f64; 3],

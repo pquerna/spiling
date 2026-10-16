@@ -5,6 +5,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use spiling_contracts::manufacturing::program_coordinates::{
+    project_xyz6_coordinate_mm, project_xyz6_point_mm,
+};
 use spiling_contracts::manufacturing::*;
 
 mod expected;
@@ -269,8 +272,9 @@ fn inspect_lifecycle(
             ];
             let feed = decoded.fields[4].unwrap();
             let envelope = intent.printer.build_envelope;
+            let projected = project_xyz6_point_mm(target)?;
             if (0..3).any(|a| {
-                (position[a] - target[a]).abs() > XYZ_HALF_STEP + arithmetic_slack(target[a])
+                position[a] != projected[a]
                     || position[a] < envelope.min[a]
                     || position[a] > envelope.max[a]
             }) || feed <= 0.0
@@ -391,10 +395,7 @@ pub(crate) fn verify_actual(
     }
 
     let initial_position = match &printer.workflow {
-        JobWorkflow::CompleteMarlin { job } => Some(
-            job.prime_end_mm
-                .map(|v| (v * 1_000_000.0).round() / 1_000_000.0),
-        ),
+        JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::DiagnosticBodyOnly => None,
     };
     let mut expected = expected::Expected::new(plan, recipe, initial_position).peekable();
@@ -681,9 +682,14 @@ pub(crate) fn verify_actual(
             decoded.fields[2].ok_or_else(|| failed("missing Z"))?,
         ];
         for axis in 0..3 {
-            let error = (position[axis] - target[axis]).abs();
-            if error > XYZ_HALF_STEP + arithmetic_slack(target[axis]) {
-                return Err(failed("command position differs from normalized path"));
+            // Independent parsing admits at most six decimal places. Compare
+            // that decoded number with this output contract's projection,
+            // not raw-plan ±half-step (which admits the wrong tie neighbor).
+            // Both conversions are correctly rounded f64 values; physical
+            // decimal enclosure remains the shared proof operand, not extra
+            // permission to choose another encoded coordinate.
+            if position[axis] != project_xyz6_coordinate_mm(target[axis])? {
+                return Err(failed("command position differs from projected XYZ6 path"));
             }
             if position[axis] < printer.build_envelope.min[axis]
                 || position[axis] > printer.build_envelope.max[axis]

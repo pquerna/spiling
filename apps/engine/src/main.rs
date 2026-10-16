@@ -314,6 +314,28 @@ impl geometry_server::Geometry for Service {
             self.jobs.start_native(self.native.clone(), input).await?,
         ))
     }
+    async fn prepare_bed_pose(
+        &self,
+        req: Request<PrepareBedPoseRequest>,
+    ) -> Result<Response<Operation>, Status> {
+        let mut req = req.into_inner();
+        let id = std::mem::take(&mut req.request_id);
+        let parent = req.parent.clone();
+        let digest = native_digest("Geometry.PrepareBedPose", &req);
+        let command = req.try_into().map_err(|e: String| {
+            request_error(spiling_contracts::native::geometry_request_status(&e))
+        })?;
+        let input = jobs::NativeAdmission {
+            parent,
+            request_id: id,
+            digest,
+            command: Control::Geometry(command),
+            reservation: 0,
+        };
+        Ok(Response::new(
+            self.jobs.start_native(self.native.clone(), input).await?,
+        ))
+    }
 }
 #[tonic::async_trait]
 impl projects_server::Projects for Service {
@@ -596,7 +618,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         pid: std::process::id(),
         kernel: "monstertruck".into(),
         geometry_capabilities: [
-            "step_planar_cylindrical_v1",
+            "step_native_trimmed_v2",
+            "native_geometry_queries_v2",
+            "native_bed_contact_v1",
             "multi_instance_scene_v1",
             "mesh_chunks_v1",
             "native_plane_section_v1",
@@ -610,8 +634,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         kernel_identity: Some(
             spiling_contracts::geometry::KernelIdentity {
                 name: "monstertruck".into(),
-                version: "0.4.1".into(),
-                revision: "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e".into(),
+                version: spiling_geometry::KERNEL_VERSION.into(),
+                revision: spiling_geometry::KERNEL_REVISION.into(),
             }
             .try_into()
             .map_err(jobs::internal)?,
@@ -622,7 +646,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(jobs::internal)?,
         ),
         project_capabilities: [
-            "recoverable_projects_v4",
+            "recoverable_projects_v5",
             "project_transactions_v1",
             "project_read_only_v1",
             "source_face_surface_finish_v3",
@@ -635,7 +659,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "planar_software_compile_v1",
             "independent_program_replay_v1",
             "immutable_bundle_bytestream_v1",
-            "manufacturing_schema5",
+            "manufacturing_schema6",
             "mapped_image_relief_v1",
             "varying_z_material_domains_v1",
             "bounded_vertical_rib_construction_v1",

@@ -204,10 +204,14 @@ async fn bounded_mesh_transfer_stable_ids_eviction_and_fresh_restart_session() {
     let (definition, occurrence) = records(&mut client).await;
     let faces = face_rows(&mut client, &definition).await;
     assert_eq!(faces.len(), 6);
+    let DefinitionDisplay::Mesh { artifact_id } = &definition.display else {
+        panic!("box fixture must publish a certified display mesh");
+    };
+    let artifact_id = *artifact_id;
     let (rows, resources, artifact_summary) = match client
         .geometry(GeometryCommand::GetArtifactPage {
             session_id: session.clone(),
-            artifact_id: definition.mesh_artifact_id,
+            artifact_id,
             kind: ArtifactPageKind::Chunks,
             offset: 0,
         })
@@ -251,7 +255,7 @@ async fn bounded_mesh_transfer_stable_ids_eviction_and_fresh_restart_session() {
             &payload,
             row,
             &session,
-            definition.mesh_artifact_id,
+            artifact_id,
             &definition.definition_id,
             row.chunk_index,
         )
@@ -334,6 +338,7 @@ async fn preflight_rejections_leave_transport_unwritten_and_live() {
         .geometry(GeometryCommand::SetInstancePose {
             session_id: client.hello().session_id.clone(),
             base_revision: SceneRevision::ZERO,
+            project_revision: spiling_contracts::project::ProjectRevision(0),
             occurrence_id: OccurrenceId::new(1).unwrap(),
             pose: RigidPoseMm {
                 translation_mm: [0.0; 3],
@@ -439,7 +444,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
             .hello()
             .project_capabilities
             .iter()
-            .any(|value| value == "recoverable_projects_v4")
+            .any(|value| value == "recoverable_projects_v5")
     );
     assert_eq!(
         import(&mut writer, &fixture("box-mm.step")).await.status,
@@ -469,6 +474,15 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
     open_project(&mut reader, &path, true).await.unwrap();
     let readonly = scene(&mut reader).await;
     let (definition, occurrence) = records(&mut reader).await;
+    let ProjectResponse::Status { info } = reader
+        .project(ProjectCommand::Get {
+            session_id: readonly.session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("read-only project status");
+    };
     for command in [
         GeometryCommand::AddInstance {
             session_id: readonly.session_id.clone(),
@@ -479,6 +493,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
         GeometryCommand::SetInstancePose {
             session_id: readonly.session_id.clone(),
             base_revision: readonly.revision,
+            project_revision: info.revision,
             occurrence_id: occurrence.occurrence_id,
             pose: RigidPoseMm::IDENTITY,
         },

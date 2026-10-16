@@ -5,9 +5,12 @@
 use super::*;
 use classification::{ClassifiedRegions, WallLayout};
 use geo::{Coord, LineString, Polygon};
+use spiling_contracts::geometry::PlaneMm;
+use std::collections::BTreeSet;
 
 pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
     PlanarPrintRecipe {
+        native_shape_error_mm: 0.1,
         id: "region-test".into(),
         revision: "1".into(),
         material_id: "nominal".into(),
@@ -289,12 +292,14 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
             start: 0,
             end: 6,
             material: rectangle(20.0, 10.0),
+            occupied: None,
             source_area_mm2: 200.0,
         },
         SectionSpan {
             start: 6,
             end: 12,
             material: rectangle(10.0, 10.0),
+            occupied: None,
             source_area_mm2: 100.0,
         },
     ];
@@ -466,7 +471,7 @@ fn native_section_consumer_preserves_hole_ownership_in_sparse_and_skin_paths() {
         4 * 1024 * 1024,
     )
     .unwrap();
-    let section = region::from_native(native, &RigidPoseMm::IDENTITY, 0.2, &cancel).unwrap();
+    let section = region::from_native(&native, &RigidPoseMm::IDENTITY, 0.2, &cancel).unwrap();
     assert_eq!(section.0.len(), 1);
     assert_eq!(section.0[0].interiors().len(), 1);
     let void = empty();
@@ -672,6 +677,10 @@ fn integral_decimal_ratios_use_roundoff_safe_layer_budget_admission() {
                 4.0 * f64::EPSILON * bed.abs().max(top.abs()).max((top - bed).abs()).max(1.0);
             let mut previous = bed;
             for layer in schedule {
+                assert_eq!(
+                    layer.lower_z, previous,
+                    "native slab closures must meet without a normalized-height gap"
+                );
                 assert!(layer.height > 0.0 && layer.height <= 0.2);
                 assert!((layer.z - previous - layer.height).abs() <= construction_roundoff);
                 assert_eq!(layer.sample, previous + (layer.z - previous) * 0.5);
@@ -943,6 +952,7 @@ fn decimal_nominal_bead_height_keeps_strict_limit_and_exact_event_endpoints() {
         let schedule = layer_schedule(bed, bed + 8.0, 0.6, &events).unwrap();
         let mut previous = bed;
         for layer in &schedule {
+            assert_eq!(layer.lower_z, previous);
             assert!(
                 layer.height <= 0.6,
                 "subdivision roundoff must not exceed the strict bead cap"
@@ -1117,13 +1127,16 @@ fn mixed_face_required_coverage_keeps_ribs_hard_on_the_image_owned_island() {
         [0.0, 0.0],
     ]);
     let id = spiling_contracts::geometry::OccurrenceId::new(1).unwrap();
-    let original = Arc::new(MultiPolygon(vec![unrelated.clone(), native.0[0].clone()]));
+    let mut original = MultiPolygon(vec![unrelated.clone(), native.0[0].clone()]);
+    let native_bytes = native::material_bytes(&mut original);
+    let original = Arc::new(original);
     let mut span = NativeSurfaceSpan {
         start: 0,
         end: 1,
         occurrences: vec![(id, Arc::clone(&original))],
         image_islands: vec![(id, 1)],
         required: BTreeMap::from([(id, Arc::clone(&original))]),
+        native_bytes,
     };
     let mut work = 0;
     let image_requested = MultiPolygon(vec![fine_image, unrelated.clone()]);
@@ -1169,6 +1182,7 @@ fn skin_horizon_intersects_varying_local_boundaries_under_cumulative_work_cap() 
                 vec![ring(-1.0, -1.0, 2.0, 2.0)],
             )]);
             SectionSpan {
+                occupied: None,
                 start: index,
                 end: index + 1,
                 source_area_mm2: material.unsigned_area(),
@@ -1229,6 +1243,7 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
         .map(|index| {
             let material = annulus(radius(index));
             SectionSpan {
+                occupied: None,
                 start: index as u32,
                 end: index as u32 + 1,
                 source_area_mm2: material.unsigned_area(),
@@ -1504,6 +1519,7 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
     let section = rectangle(20.0, 10.0);
     let sections: Vec<_> = (0..2)
         .map(|index| SectionSpan {
+            occupied: None,
             start: index,
             end: index + 1,
             material: section.clone(),

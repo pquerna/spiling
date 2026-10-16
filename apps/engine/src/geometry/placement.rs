@@ -4,7 +4,7 @@
 
 use spiling_contracts::geometry::*;
 
-pub fn rotate(pose: RigidPoseMm, v: [f64; 3]) -> [f64; 3] {
+fn rotate(pose: RigidPoseMm, v: [f64; 3]) -> [f64; 3] {
     let [x, y, z, w] = pose.rotation_xyzw;
     let cross = |a: [f64; 3], b: [f64; 3]| {
         [
@@ -18,26 +18,12 @@ pub fn rotate(pose: RigidPoseMm, v: [f64; 3]) -> [f64; 3] {
     let u = cross(q, t);
     std::array::from_fn(|i| v[i] + w * t[i] + u[i])
 }
-pub fn point(pose: RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
+fn point(pose: RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     let p = rotate(pose, p);
     std::array::from_fn(|i| p[i] + pose.translation_mm[i])
 }
-pub fn inverse_plane(pose: RigidPoseMm, plane: PlaneMm) -> Result<PlaneMm, GeometryError> {
-    let [x, y, z, w] = pose.rotation_xyzw;
-    let inverse = RigidPoseMm {
-        translation_mm: [0.0; 3],
-        rotation_xyzw: [-x, -y, -z, w],
-    };
-    PlaneMm {
-        origin_mm: rotate(
-            inverse,
-            std::array::from_fn(|i| plane.origin_mm[i] - pose.translation_mm[i]),
-        ),
-        normal: rotate(inverse, plane.normal),
-    }
-    .normalized()
-}
-pub fn placed_bounds(pose: RigidPoseMm, bounds: AabbMm) -> Result<AabbMm, GeometryError> {
+/// Scene framing and finite-coordinate admission only, not certified native contact.
+pub fn scene_bounds(pose: RigidPoseMm, bounds: AabbMm) -> Result<AabbMm, GeometryError> {
     let first = point(pose, bounds.min);
     let mut result = AabbMm::new(first, first)?;
     for bits in 1..8 {
@@ -53,29 +39,4 @@ pub fn placed_bounds(pose: RigidPoseMm, bounds: AabbMm) -> Result<AabbMm, Geomet
         ))?;
     }
     Ok(result)
-}
-
-/// Equal normalized oriented plane equations share native work within this job only.
-/// Canonicalizing the origin removes in-plane offsets, but never merges approximate planes.
-pub fn canonical_plane(plane: PlaneMm) -> Result<(PlaneMm, [u64; 4]), GeometryError> {
-    let plane = plane.normalized()?;
-    let distance = plane
-        .origin_mm
-        .iter()
-        .zip(plane.normal)
-        .map(|(a, b)| a * b)
-        .sum::<f64>();
-    let zero = |v: f64| if v == 0.0 { 0.0 } else { v };
-    let key = [
-        zero(plane.normal[0]).to_bits(),
-        zero(plane.normal[1]).to_bits(),
-        zero(plane.normal[2]).to_bits(),
-        zero(distance).to_bits(),
-    ];
-    let canonical = PlaneMm {
-        origin_mm: plane.normal.map(|v| zero(v * distance)),
-        normal: plane.normal,
-    };
-    canonical.validate()?;
-    Ok((canonical, key))
 }

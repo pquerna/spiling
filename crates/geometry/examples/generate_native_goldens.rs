@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cancel = AtomicBool::new(false);
     let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")?;
     let box_definition = import_step(&std::fs::read(root.join("geometry/box-mm.step"))?, &cancel)?;
-    let mesh = tessellate(&box_definition, DisplayProfile::MeshMm005V1, &cancel)?;
+    let mesh = tessellate(&box_definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
     store(
         &protocol,
         "native-mesh.json",
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         normal: [0.0, 0.0, 1.0],
     };
     let native = section(&definition, plane, &cancel)?;
-    if native.loops.len() != 2 || native.loops[0].is_hole || !native.loops[1].is_hole {
+    if native.loops().len() != 2 || native.loops()[0].is_hole || !native.loops()[1].is_hole {
         return Err("native through-hole topology changed".into());
     }
     for (name, artifact, cap) in [
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             plane,
             cap,
         )?;
-        for boundary in &native.loops {
+        for boundary in native.loops() {
             builder.push_loop(
                 OccurrenceId::new(1)?,
                 definition.id().clone(),

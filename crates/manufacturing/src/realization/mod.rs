@@ -3,6 +3,9 @@
 
 //! Pure normalized-path canonicalization and streamed process realization.
 use crate::{check_cancel, error};
+use spiling_contracts::manufacturing::program_coordinates::{
+    project_xyz6_coordinate_mm, project_xyz6_point_mm,
+};
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -38,10 +41,7 @@ pub(crate) fn canonicalize(
     plan.validate(intent)?;
     let mut position = match &intent.printer.workflow {
         JobWorkflow::DiagnosticBodyOnly => None,
-        JobWorkflow::CompleteMarlin { job } => Some(
-            job.prime_end_mm
-                .map(|v| (v * 1_000_000.0).round() / 1_000_000.0),
-        ),
+        JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
     };
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
@@ -159,7 +159,8 @@ pub(crate) fn stream(
                 let hop_z = base_z + z_hop_mm;
                 if z_hop_mm > 0.0
                     && (!hop_z.is_finite()
-                        || (hop_z * 1_000_000.0).round() <= (base_z * 1_000_000.0).round())
+                        || project_xyz6_coordinate_mm(hop_z)?
+                            <= project_xyz6_coordinate_mm(base_z)?)
                 {
                     return Err(error(
                         ManufacturingErrorCode::InvalidSpecification,

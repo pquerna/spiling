@@ -6,11 +6,14 @@ use super::{forward, region, rotate};
 use crate::{CompilerInput, check_cancel, error};
 use geo::{Coord, MultiPolygon};
 use spiling_contracts::geometry::{
-    AabbMm, FaceCarrier, FaceId, GeometryErrorCode, OccurrenceRecord,
+    AabbMm, AnalyticSurfaceDescription, FaceId, GeometryErrorCode, OccurrenceRecord, SurfaceFamily,
 };
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::surface::{SurfaceFinish, SurfaceScope};
-use std::{collections::BTreeSet, sync::atomic::AtomicBool};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 pub(super) const SURFACE_TOLERANCE_MM: f64 = 0.001;
 const SURFACE_ROUNDING_MM: f64 = 0.00001;
@@ -64,6 +67,68 @@ impl PreparedFinish {
             PreparedShape::Planar(_) => "rectangular supporting-face",
             PreparedShape::Cylindrical(_) => "full-turn exterior cylindrical-face",
         }
+    }
+    /// Conservative continuous-target outer occupancy from the certified finish
+    /// construction box. A box is not contact, deposited material or inner coverage.
+    pub(super) fn include_occupied_envelope(
+        &self,
+        occupied: &mut Arc<super::ContinuousOccupied>,
+        lower_z: f64,
+        upper_z: f64,
+        native_height: [f64; 2],
+        retained_points: usize,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        check_cancel(cancel)?;
+        let bounds = self.bounds();
+        if upper_z < native_height[0] || lower_z > native_height[1] {
+            return Ok(());
+        }
+        let cloned_points = if Arc::strong_count(occupied) > 1 {
+            occupied.point_count
+        } else {
+            0
+        };
+        retained_points
+            .checked_add(cloned_points)
+            .and_then(|n| n.checked_add(5))
+            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "continuous finish occupied-envelope staging budget exceeded",
+                )
+            })?;
+        *work = work
+            .checked_add(5)
+            .filter(|n| *n <= super::MAX_BOOLEAN_PAIRS)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "continuous finish envelope work budget exceeded",
+                )
+            })?;
+        let mut envelope = geo::Polygon::new(
+            geo::LineString::from(vec![
+                (bounds.min[0], bounds.min[1]),
+                (bounds.max[0], bounds.min[1]),
+                (bounds.max[0], bounds.max[1]),
+                (bounds.min[0], bounds.max[1]),
+                (bounds.min[0], bounds.min[1]),
+            ]),
+            vec![],
+        );
+        // Whole-native eligibility proves exact zero actual world-Z from
+        // every local horizontal/normal displacement, using the actual matrix.
+        // The captured placed-native outer bracket therefore encloses the
+        // finish's Z as well; nominal rounded frame endpoints do not.
+        super::region::canonicalize_polygon(&mut envelope);
+        Arc::make_mut(occupied).push(
+            envelope,
+            [lower_z.max(native_height[0]), upper_z.min(native_height[1])],
+        )?;
+        Ok(())
     }
 }
 
@@ -146,6 +211,18 @@ fn admit_extrusion(
             "vertical ribs require source local Z to map to positive or negative build Z without tilt",
         ));
     }
+    if [
+        rotate(&occurrence.pose, [1.0, 0.0, 0.0]),
+        rotate(&occurrence.pose, [0.0, 1.0, 0.0]),
+    ]
+    .iter()
+    .any(|axis| axis[2] != 0.0)
+    {
+        return Err(unsupported(
+            face_id,
+            "native extrusion finish requires exactly zero actual build-Z from horizontal or normal displacement",
+        ));
+    }
     if (source_bounds.min[2] - input.intent.printer.build_envelope.min[2]).abs()
         > super::LAYER_QUANTIZATION_MM
     {
@@ -156,17 +233,22 @@ fn admit_extrusion(
     }
     for carrier in input.definitions[&occurrence.definition_id].faces() {
         check_cancel(cancel)?;
-        let invariant = match &carrier.carrier {
-            FaceCarrier::Plane { origin_mm, normal } => {
+        let invariant = match (&carrier.geometry.family, &carrier.geometry.analytic) {
+            (
+                SurfaceFamily::Plane,
+                Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }),
+            ) => {
                 normal[2] == 0.0
                     || (normal[0] == 0.0
                         && normal[1] == 0.0
                         && ((origin_mm[2] - min_z).abs() <= super::LAYER_QUANTIZATION_MM
                             || (origin_mm[2] - max_z).abs() <= super::LAYER_QUANTIZATION_MM))
             }
-            FaceCarrier::Cylinder { axis_direction, .. } => {
-                axis_direction[0] == 0.0 && axis_direction[1] == 0.0
-            }
+            (
+                SurfaceFamily::Cylinder,
+                Some(AnalyticSurfaceDescription::Cylinder { axis_direction, .. }),
+            ) => axis_direction[0] == 0.0 && axis_direction[1] == 0.0,
+            _ => false,
         };
         if !invariant {
             return Err(unsupported(
@@ -224,12 +306,37 @@ pub(super) fn metadata(
             &face.face_id,
         );
         let finish = layer.map(|layer| &layer.finish);
+        // Native family is a dispatch restriction, never a finish certificate.
+        // An optional analytic description on another family must not broaden
+        // the existing exact planar/full-turn-cylinder finish lanes.
+        let supported_family = match finish {
+            None | Some(SurfaceFinish::Smooth) => true,
+            Some(SurfaceFinish::VerticalRibs { .. }) => {
+                face.geometry.family == SurfaceFamily::Plane
+            }
+            Some(SurfaceFinish::CylindricalRibs { .. }) => {
+                face.geometry.family == SurfaceFamily::Cylinder
+            }
+            Some(SurfaceFinish::ImageRelief { .. }) => matches!(
+                face.geometry.family,
+                SurfaceFamily::Plane | SurfaceFamily::Cylinder
+            ),
+        };
+        if !supported_family {
+            return Err(unsupported(
+                &face.face_id,
+                "effective finish has no realization for this native source family; generic material admission does not authorize a planar or cylindrical finish",
+            ));
+        }
         if let Some(SurfaceFinish::ImageRelief {
             image_hash,
             parameters,
         }) = finish
         {
-            if matches!(face.carrier, FaceCarrier::Cylinder { .. }) {
+            if matches!(
+                face.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            ) {
                 let field = cylindrical::metadata(
                     input,
                     occurrence,
@@ -251,6 +358,15 @@ pub(super) fn metadata(
                     shape: PreparedShape::Cylindrical(field),
                 });
                 continue;
+            }
+            if !matches!(
+                face.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Plane { .. })
+            ) {
+                return Err(unsupported(
+                    &face.face_id,
+                    "image relief requires an exact certified planar or cylindrical supporting face; this source family has no finish realization",
+                ));
             }
         }
         if let Some(SurfaceFinish::CylindricalRibs {

@@ -17,6 +17,9 @@ service Geometry {
   rpc StartSection(StartSectionRequest) returns (google.longrunning.Operation) {
     option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
   }
+  rpc PrepareBedPose(PrepareBedPoseRequest) returns (google.longrunning.Operation) {
+    option (google.longrunning.operation_info) = { response_type: "NativeOperationResult" metadata_type: "NativeOperationMetadata" };
+  }
 }
 message ImportPartRequest {
   string parent = 1;
@@ -30,6 +33,35 @@ message StartSectionRequest {
   string request_id = 2;
   uint32 base_revision = 3;
   PlaneMm plane = 4;
+}
+message PrepareBedPoseRequest {
+  string parent = 1;
+  string request_id = 2;
+  uint32 base_revision = 3;
+  uint32 project_revision = 4;
+  uint32 occurrence_id = 5;
+  string expected_definition_id = 6;
+  RigidPoseMm expected_pose = 7;
+  AabbMm envelope_mm = 8;
+  bool center_xy = 9;
+  double contact_tolerance_mm = 10;
+}
+message BedPosePreparation {
+  string session_id = 1;
+  uint32 scene_revision = 2;
+  uint32 project_revision = 3;
+  uint32 occurrence_id = 4;
+  string definition_id = 5;
+  RigidPoseMm original_pose = 6;
+  RigidPoseMm pose = 7;
+  AabbMm envelope_mm = 8;
+  Vec3 minimum_lower_mm = 9;
+  Vec3 minimum_upper_mm = 10;
+  Vec3 maximum_lower_mm = 11;
+  Vec3 maximum_upper_mm = 12;
+  bool center_xy = 13;
+  double contact_tolerance_mm = 14;
+  double maximum_contact_gap_mm = 15;
 }
 message GeometryRequest {
   oneof command {
@@ -45,7 +77,7 @@ message GeometryRequest {
   }
 }
 message AddInstanceRequest { string session_id = 1; uint32 base_revision = 2; string definition_id = 3; RigidPoseMm pose = 4; }
-message SetInstancePoseRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; RigidPoseMm pose = 4; }
+message SetInstancePoseRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; RigidPoseMm pose = 4; uint32 project_revision = 5; }
 message RemoveInstanceRequest { string session_id = 1; uint32 base_revision = 2; uint32 occurrence_id = 3; }
 message GetSceneRequest { string session_id = 1; }
 message GetScenePageRequest { string session_id = 1; uint32 revision = 2; ScenePageKind kind = 3; uint32 offset = 4; }
@@ -77,17 +109,50 @@ message ArtifactPage {
   repeated Artifact resources = 5;
 }
 enum SourceUnit { SOURCE_UNIT_UNSPECIFIED = 0; MILLIMETRE = 1; METRE = 2; INCH = 3; }
-enum DisplayProfile { DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_MM_005_V1 = 1; }
+enum DisplayProfile { reserved 1; DISPLAY_PROFILE_UNSPECIFIED = 0; MESH_TRIMMED_MM_005_V2 = 2; }
 message SourceProvenance { string source_hash = 1; string source_name = 2; SourceUnit source_unit = 3; optional double uncertainty_mm = 4; }
-message DefinitionRecord { string definition_id = 1; SourceProvenance provenance = 2; uint32 face_count = 3; AabbMm bounds_mm = 4; uint32 mesh_artifact_id = 5; }
+message DefinitionDisplay {
+  oneof kind { uint32 mesh_artifact_id = 1; DomainError unavailable = 2; }
+}
+message DefinitionRecord {
+  reserved 5;
+  string definition_id = 1; SourceProvenance provenance = 2; uint32 face_count = 3;
+  AabbMm bounds_mm = 4; DefinitionDisplay display = 6;
+}
 message OccurrenceRecord { uint32 occurrence_id = 1; string definition_id = 2; RigidPoseMm pose = 3; }
 message FaceRef { string session_id = 1; uint32 scene_revision = 2; uint32 occurrence_id = 3; string definition_id = 4; string face_id = 5; }
-message FaceCarrier {
-  oneof kind { PlaneFaceCarrier plane = 1; CylinderFaceCarrier cylinder = 2; }
+// Native family is descriptive and independent of the source STEP encoding.
+enum SurfaceFamily {
+  SURFACE_FAMILY_UNSPECIFIED = 0;
+  PLANE = 1; CYLINDER = 2; CONE = 3; SPHERE = 4; TORUS = 5;
+  B_SPLINE = 6; NURBS = 7; LINEAR_EXTRUSION = 8; REVOLUTION = 9; T_SPLINE = 10;
 }
-message PlaneFaceCarrier { Vec3 origin_mm = 1; Vec3 normal = 2; }
-message CylinderFaceCarrier { Vec3 axis_origin_mm = 1; Vec3 axis_direction = 2; double radius_mm = 3; }
-message FaceInfo { string face_id = 1; string surface_face_entity = 2; string source_entity_kind = 3; bool orientation = 4; FaceCarrier carrier = 5; }
+enum TorusKind { TORUS_KIND_UNSPECIFIED = 0; REGULAR_RING = 1; HORN = 2; SPINDLE = 3; }
+message AnalyticSurfaceDescription {
+  oneof kind {
+    PlaneSurfaceDescription plane = 1;
+    CylinderSurfaceDescription cylinder = 2;
+    ConeSurfaceDescription cone = 3;
+    SphereSurfaceDescription sphere = 4;
+    TorusSurfaceDescription torus = 5;
+  }
+}
+message PlaneSurfaceDescription { Vec3 origin_mm = 1; Vec3 normal = 2; }
+message CylinderSurfaceDescription { Vec3 axis_origin_mm = 1; Vec3 axis_direction = 2; double radius_mm = 3; }
+// radius(z) = reference_radius_mm + z * tan(semi_angle_radians), z along frame.z_axis.
+message ConeSurfaceDescription { PlaneFrameMm frame = 1; double reference_radius_mm = 2; double semi_angle_radians = 3; }
+message SphereSurfaceDescription { PlaneFrameMm frame = 1; double radius_mm = 2; }
+message TorusSurfaceDescription { PlaneFrameMm frame = 1; double major_radius_mm = 2; double minor_radius_mm = 3; TorusKind kind = 4; }
+message FaceDomainSummary {
+  uint32 trim_loop_count = 1; uint32 inner_loop_count = 2;
+  bool periodic_u = 3; bool periodic_v = 4; bool has_singular_boundary = 5;
+}
+message FaceGeometryInfo { SurfaceFamily family = 1; AnalyticSurfaceDescription analytic = 2; FaceDomainSummary domain = 3; }
+// orientation is material-side direction relative to a regular frame; singular normals require limiting charts.
+message FaceInfo {
+  string face_id = 1; string surface_face_entity = 2; string source_entity_kind = 3; bool orientation = 4;
+  FaceGeometryInfo geometry = 5; string source_surface_entity_kind = 6;
+}
 message FaceInspection { FaceRef reference = 1; FaceInfo face = 2; RigidPoseMm pose = 3; SourceProvenance provenance = 4; }
 message FaceIndexRow { uint32 ordinal = 1; string face_id = 2; }
 message PlaneFrameMm { Vec3 origin_mm = 1; Vec3 x_axis = 2; Vec3 y_axis = 3; Vec3 z_axis = 4; }
@@ -97,6 +162,7 @@ message MeshChunkMetadata {
   uint32 chunk_index = 6; uint32 chunk_count = 7; uint32 byte_count = 8;
   string sha256 = 9; uint32 face_count = 10; AabbMm bounds_mm = 11;
   double carrier_deviation_mm = 12; double quantization_error_mm = 13;
+  optional double trim_deviation_mm = 14;
 }
 message SectionChunkMetadata {
   string session_id = 1; uint32 artifact_id = 2; uint32 schema_version = 3;

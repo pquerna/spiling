@@ -39,6 +39,95 @@ pub fn add(exchange: &mut Exchange, id: u64, source: &str) {
         .entities
         .push(EntityInstance::Simple { id, record });
 }
+
+/// Original implicit-source variant of a controlled explicit-carrier recipe.
+/// Geometry, source entity IDs and carrier incidence stay unchanged; only the
+/// declared curve subtype changes. Its independent oracle remains the recipe's
+/// analytic solid, not an import/export or sampled-curve comparison.
+pub fn implicit_intersections(source: &str, filename: &str) -> String {
+    let mut exchange = step_p21::parser::parse(source).expect("controlled original STEP source");
+    parameters(
+        exchange
+            .header
+            .iter_mut()
+            .find(|record| record.name == "FILE_NAME")
+            .expect("controlled original STEP filename"),
+    )[0] = Parameter::String(filename.into());
+    let mut changed = 0;
+    for record in records_mut(&mut exchange) {
+        if record.name == "SURFACE_CURVE" {
+            record.name = "INTERSECTION_CURVE".into();
+            changed += 1;
+        }
+    }
+    assert!(
+        changed > 0,
+        "implicit source recipe needs explicit carrier intersections"
+    );
+    serialize(&exchange)
+}
+
+/// Controlled OCCT fitting adversary: its alternate top-face association stays
+/// valid, but the preferred PCURVE is moved to the distinct bottom plane.
+pub fn wrong_selected_master(source: &str, filename: &str) -> String {
+    let mut exchange = step_p21::parser::parse(source).expect("controlled OCCT fitting source");
+    parameters(
+        exchange
+            .header
+            .iter_mut()
+            .find(|record| record.name == "FILE_NAME")
+            .unwrap(),
+    )[0] = Parameter::String(filename.into());
+    let selected = {
+        let declaration = first(&mut exchange, "SURFACE_CURVE");
+        let fields = parameters(declaration);
+        assert!(matches!(&fields[3],Parameter::Enumeration(choice) if choice=="PCURVE_S1"));
+        let Parameter::List(associations) = &fields[2] else {
+            panic!("controlled associated geometry");
+        };
+        let Parameter::Ref(Name::Entity(selected)) = associations[0] else {
+            panic!("controlled preferred PCURVE");
+        };
+        selected
+    };
+    let bottom_plane = exchange.data[0]
+        .entities
+        .iter()
+        .filter_map(|entity| match entity {
+            EntityInstance::Simple { id, record } if record.name == "PLANE" => Some(*id),
+            _ => None,
+        })
+        .nth(1)
+        .expect("controlled fitting has distinct top and bottom planes");
+    let selected = exchange.data[0]
+        .entities
+        .iter_mut()
+        .find_map(|entity| match entity {
+            EntityInstance::Simple { id, record } if *id == selected => Some(record),
+            _ => None,
+        })
+        .expect("controlled preferred PCURVE entity");
+    assert_eq!(selected.name, "PCURVE");
+    parameters(selected)[1] = Parameter::Ref(Name::Entity(bottom_plane));
+    serialize(&exchange)
+}
+
+/// Invalid source LINE carrier while its original BREP vertices stay unchanged.
+/// A converter must not silently replace this declaration by the vertex chord.
+pub fn wrong_spatial_line(source: &str, filename: &str) -> String {
+    let mut exchange = step_p21::parser::parse(source).expect("controlled original box source");
+    parameters(
+        exchange
+            .header
+            .iter_mut()
+            .find(|record| record.name == "FILE_NAME")
+            .unwrap(),
+    )[0] = Parameter::String(filename.into());
+    let point = next_id(&exchange);
+    add(&mut exchange, point, "CARTESIAN_POINT('',(0.,0.,123.))");
+    parameters(first(&mut exchange, "LINE"))[1] = Parameter::Ref(Name::Entity(point));
+    serialize(&exchange)
+}
 fn emit_parameter(out: &mut String, p: &Parameter) {
     match p {
         Parameter::Typed { keyword, parameter } => {

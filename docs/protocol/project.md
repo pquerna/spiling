@@ -4,7 +4,7 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Durable source-backed project format4
+# Durable source-backed project format5
 
 The executable storage schema is `spiling-contracts::project`; state and storage authority is `spiling-core`. Engine caches are disposable. CLI, desktop and engine-client do not implement this format themselves. Generated protobuf Projects services operate on captured immutable snapshots rather than frontend recipes or external source paths. Long opens/saves are standard Google Operations scoped to the native session; RPC and operation metadata are not persisted project manifest schemas.
 
@@ -27,7 +27,7 @@ The initial successful save has no previous checkpoint. Root/assets must be regu
 
 `manifest.json` is strict UTF-8 JSON, at most 1,048,576 bytes. Duplicate object fields, unknown fields, trailing JSON, invalid checked IDs, invalid poses and unsupported versions are errors. Its exact fields are:
 
-- `format_version`: `4` (strict cutover; no compatibility reader).
+- `format_version`: `5` (strict cutover; no compatibility reader).
 - `project_id`: canonical lowercase, nonnil UUID string.
 - `revision`: persistent nonnegative `u32` authoring revision.
 - `units`: `"mm"`; `frame`: `"right_handed"`.
@@ -47,11 +47,11 @@ Each surface layer has checked nonzero `layer_id`, explicit `enabled`, a canonic
 
 Import accepts bounded PNG or canonical PGM source bytes, at most1MiB. PNG decoding is engine-owned: palette/transparency expand,16-bit channels use their high byte, RGB luminance is `(299R+587G+114B+500)/1000`, then alpha is applied with `(luma*alpha+127)/255`; no gamma/ICC correction. APNG and oversized/unsupported images fail explicitly. Neither the renderer nor Core normalizes images. Original PNG files are not project dependencies after admission; `images/<image_hash>.pgm` is authoritative.
 
-An asset contains 1..16 MiB of exact original imported bytes, not normalized or regenerated STEP. Its filename is the SHA-256 of those bytes. `definition_id` is SHA-256 of the byte sequence `spiling:definition:step-planar-cylindrical-v1\0` followed by the 32 raw source-hash bytes. Hash/identity/reference/provenance mismatches fail before publication. Source bytes enter one `Arc<Vec<u8>>` without copying the captured Vec allocation; every snapshot/history entry shares the same canonical source asset. Reimporting identical bytes from another basename keeps the first retained source label; differing source units/uncertainty are conflicting native provenance, not a new definition.
+An asset contains 1..16 MiB of exact original imported bytes, not normalized or regenerated STEP. Its filename is the SHA-256 of those bytes. `definition_id` is SHA-256 of the byte sequence `spiling:definition:step-native-trimmed-v2\0` followed by the 32 raw source-hash bytes. Hash/identity/reference/provenance mismatches fail before publication. Source bytes enter one `Arc<Vec<u8>>` without copying the captured Vec allocation; every snapshot/history entry shares the same canonical source asset. Reimporting identical bytes from another basename keeps the first retained source label; differing source units/uncertainty are conflicting native provenance, not a new definition.
 
 Each immutable asset directory is limited to128 files and256MiB, including complete unreferenced assets left by earlier saves; image files additionally remain at most65,551 bytes each. There is **no asset garbage collection**: a concurrent reader may still hold a manifest referring to an old immutable asset. Exhaustion is an explicit resource error, not permission to delete old assets. Scratch permits at most eight entries, with aggregate bytes capped at16MiB for source/manufacturing directories and65,551 bytes for the image directory. Root entries are limited to32 and each temporary manifest to1MiB. A save refuses to exceed scratch capacity, including crash leftovers. These are storage bounds, not certification of arbitrary externally modified directories. First-save crash staging directories live beside the destination and are not published projects.
 
-Manufacturing records require intent and a semantic input hash matching the current project ID, sorted definitions/provenance, sorted rigid occurrences, explicit intent and the full ordered surface document (including disabled layers). Manufacturing schema5 captures the same document plus one bounded canonical content entry per image in bundle provenance. Bundles are capped at16MiB serialized bytes and allocated Vec capacity; the separate64MiB retained/staged/history budget charges allocated capacity, not just length, and deduplicates shared assets. Disk/wire record byte counts remain exact serialized lengths. Load hashes exact bytes, validates bounded strict bundle schema and provenance/reference/summary/document/content agreement; engine independently replays the stored program before reporting verified. Persisted `verified` is not trusted. See [manufacturing.md](manufacturing.md).
+Manufacturing records require intent and a semantic input hash matching the current project ID, sorted definitions/provenance, sorted rigid occurrences, explicit intent and the full ordered surface document (including disabled layers). Manufacturing schema6 captures the same document, native shape-policy/certification provenance and one bounded canonical content entry per image in bundle provenance. Bundles are capped at16MiB serialized bytes and allocated Vec capacity; the separate64MiB retained/staged/history budget charges allocated capacity, not just length, and deduplicates shared assets. Disk/wire record byte counts remain exact serialized lengths. Load hashes exact bytes, validates bounded strict bundle schema and provenance/reference/summary/document/content agreement; engine independently replays the stored program before reporting verified. Persisted `verified` is not trusted. See [manufacturing.md](manufacturing.md).
 
 ## Identity, transactions and saved state
 

@@ -3,9 +3,11 @@
 // Licensed under the Open Software License version 3.0
 
 use super::{BoundaryCurveMm, Definition};
-use crate::{GeometryError, VerticalCylinderFace, check_cancel, section::projected_extent};
+use crate::{GeometryError, GeometryWorkBudget, VerticalCylinderFace, check_cancel};
 use monstertruck_modeling::{Curve, Surface, base::*};
-use spiling_contracts::geometry::{FaceCarrier, FaceId, GeometryErrorCode};
+use spiling_contracts::geometry::{
+    AnalyticSurfaceDescription, FaceId, GeometryErrorCode, SurfaceFamily,
+};
 use std::{collections::HashMap, f64::consts::TAU, sync::atomic::AtomicBool};
 
 const RESIDUAL_MM: f64 = 1e-7;
@@ -69,10 +71,23 @@ impl Definition {
         face_id: &FaceId,
         cancel: &AtomicBool,
     ) -> Result<VerticalCylinderFace, GeometryError> {
+        self.vertical_cylinder_face_with_work(
+            face_id,
+            &mut GeometryWorkBudget::new(50_000_000),
+            cancel,
+        )
+    }
+
+    pub(crate) fn vertical_cylinder_face_with_work(
+        &self,
+        face_id: &FaceId,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<VerticalCylinderFace, GeometryError> {
         check_cancel(cancel)?;
         let mut selected = None;
         for (index, info) in self.faces.iter().enumerate() {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             if &info.face_id == face_id {
                 selected = Some((index, info));
                 break;
@@ -84,11 +99,16 @@ impl Definition {
                 "source face is not in native definition",
             )
         })?;
-        let FaceCarrier::Cylinder {
+        if info.geometry.family != SurfaceFamily::Cylinder {
+            return Err(unsupported(
+                "cylindrical finish requires an analytic cylindrical source face",
+            ));
+        }
+        let Some(AnalyticSurfaceDescription::Cylinder {
             axis_origin_mm,
             axis_direction,
             radius_mm,
-        } = &info.carrier
+        }) = &info.geometry.analytic
         else {
             return Err(unsupported(
                 "cylindrical finish requires a native cylindrical source face",
@@ -180,7 +200,7 @@ impl Definition {
             Ok(())
         })?;
         let center = [axis_origin_mm[0], axis_origin_mm[1]];
-        let z = projected_extent(self, [0.0, 0.0, 1.0], cancel)?;
+        let z = super::finish_support_extent(self, [0.0, 0.0, 1.0], work, cancel)?;
         if !z.iter().all(|v| v.is_finite()) || z[1] - z[0] <= 2.0 * RESIDUAL_MM {
             return Err(unsupported("cylinder has no finite full source height"));
         }
@@ -197,7 +217,7 @@ impl Definition {
         let mut rims = [HashMap::new(), HashMap::new()];
         let mut seams = HashMap::new();
         for (wire, refs) in wires.iter().zip(&refs.wires) {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             if wire.len() != refs.len() {
                 return Err(malformed(
                     "native cylinder positional coedge mapping changed",
@@ -207,7 +227,7 @@ impl Definition {
                 return Err(unsupported("cylinder trim wire is empty or open"));
             }
             for (i, (edge, reference)) in wire.iter().zip(refs).enumerate() {
-                check_cancel(cancel)?;
+                work.charge(1, cancel)?;
                 if edge.id() != reference.edge || edge.orientation() != reference.orientation {
                     return Err(malformed(
                         "native cylinder coedge identity or orientation changed",
@@ -341,11 +361,16 @@ impl Definition {
                         }
                         pair.2 += 1;
                     }
+                    BoundaryCurveMm::Native { .. } => {
+                        return Err(unsupported(
+                            "cylindrical finish requires exact line/circle trims",
+                        ));
+                    }
                 }
             }
         }
         for (_, _, count) in seams.values() {
-            check_cancel(cancel)?;
+            work.charge(1, cancel)?;
             if *count != 2 {
                 return Err(unsupported(
                     "cylinder has an unpaired axial trim, not a full periodic face",
@@ -367,6 +392,7 @@ impl Definition {
             let mut previous = first_point;
             let mut join_error = [0.0; 2];
             for step in 0..count {
+                work.charge(1, cancel)?;
                 check_cancel(cancel)?;
                 let (back, a, b) = cycle.remove(&next).ok_or_else(|| {
                     unsupported("cylinder rim is disconnected or has repeated incidence")
@@ -403,11 +429,11 @@ impl Definition {
             if other_index == index {
                 continue;
             }
-            if let FaceCarrier::Cylinder {
+            if let Some(AnalyticSurfaceDescription::Cylinder {
                 axis_origin_mm: origin,
                 axis_direction: axis,
                 radius_mm: radius,
-            } = &other.carrier
+            }) = &other.geometry.analytic
             {
                 let axis = unit(vector(*axis))?;
                 let separation = (vector(*origin) - vector(*axis_origin_mm))

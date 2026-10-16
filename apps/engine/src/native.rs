@@ -320,7 +320,11 @@ fn publish_terminal(
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
     }
-    if matches!(&private, geometry::JobResult::ManufacturingPreflight { .. }) {
+    if matches!(
+        &private,
+        geometry::JobResult::ManufacturingPreflight { .. }
+            | geometry::JobResult::BedPosePrepared { .. }
+    ) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
@@ -511,6 +515,9 @@ fn public_result(
     Ok(match result {
         geometry::JobResult::Scene { summary } => Public::Scene { summary },
         geometry::JobResult::Section { artifact_id } => Public::Section { artifact_id },
+        geometry::JobResult::BedPosePrepared { preparation } => {
+            Public::BedPosePrepared { preparation }
+        }
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
         geometry::JobResult::SurfaceImageImported {
             info,

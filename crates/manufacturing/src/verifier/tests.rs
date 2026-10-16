@@ -47,6 +47,11 @@ fn coverage() -> PlanarRegionCoverage {
     }
 }
 fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
+    plan.native_geometry.certified_layer_count = plan.layers.len() as u32;
+    plan.native_geometry.slab_count = plan.layers.len() as u32;
+    plan.native_geometry
+        .source_feature_coverage
+        .disjoint_source_layer_count = plan.layers.len() as u32;
     let r = &intent.recipe;
     for layer in &mut plan.layers {
         let height = layer.height_mm;
@@ -112,6 +117,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
+            native_shape_error_mm: 0.1,
             id: "recipe".into(),
             revision: "1".into(),
             material_id: "nominal-only".into(),
@@ -142,6 +148,24 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     };
     let mut plan = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        native_geometry: NativeGeometryCoverageSummary {
+            requested_shape_error_mm: intent.recipe.native_shape_error_mm,
+            achieved_shape_error_mm: 0.0,
+            height_analysis_count: 1,
+            slab_count: 1,
+            certified_layer_count: 2,
+            event_count: 2,
+            geometry_work: 1,
+            evidence: PreflightEvidence::Certified,
+            skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+            support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+            source_feature_coverage: NativeFeatureCoverageSummary {
+                disjoint_source_layer_count: 2,
+                invariant_source_union_layer_count: 0,
+                native_interface_complex_layer_count: 0,
+                owned_critical_slab_count: 0,
+            },
+        },
         surface_resolution: Vec::new(),
         sampling_tolerance_mm: 0.005,
         offset_tolerance_mm: 0.001,
@@ -236,6 +260,7 @@ fn replay_rejects_omitted_intermediate_and_final_fixed_height_layers() {
                 }
             }
         }
+        refresh_volumes(&intent, &mut omitted);
         // The remaining deposited paths are realized exactly by the numeric
         // golden; absence of moves for an empty layer cannot imply coverage.
         let program = if empty_index == 1 {
@@ -288,6 +313,60 @@ fn actual_backend_program_is_independently_replayed() {
     assert_eq!(
         serde_json::to_value(&report).unwrap(),
         serde_json::to_value(verify(&second_program, &plan, &intent, &cancel).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn actual_half_step_xyz_cannot_choose_the_other_lattice_neighbor() {
+    let cancel = AtomicBool::new(false);
+    for offset in [0.0000005, -0.0000005] {
+        let (mut intent, mut plan) = fixture();
+        intent.printer.build_envelope.min[0] = -10.0;
+        for layer in &mut plan.layers {
+            for path in &mut layer.paths {
+                for point in &mut path.points_mm {
+                    point[0] = (point[0] - 1.0) + offset;
+                }
+            }
+        }
+        refresh_volumes(&intent, &mut plan);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+        let actual = if offset > 0.0 {
+            "G0 X0.000001 "
+        } else {
+            "G0 X-0.000001 "
+        };
+        let alternate = program.replacen(actual, "G0 X0.000000 ", 1);
+        assert_ne!(alternate, program);
+        assert_eq!(
+            verify(&alternate, &plan, &intent, &cancel)
+                .unwrap_err()
+                .code,
+            ManufacturingErrorCode::VerificationFailed,
+            "the alternate physical endpoint is raw-half-step-close but not the encoded coordinate"
+        );
+    }
+}
+
+#[test]
+fn actual_output_refuses_coordinates_without_unique_xyz6_numeric_correspondence() {
+    let (mut intent, mut plan) = fixture();
+    let shift = program_coordinates::MAX_XYZ6_COORDINATE_MM + 32.0;
+    intent.printer.build_envelope.max[0] = shift + 100.0;
+    for layer in &mut plan.layers {
+        for path in &mut layer.paths {
+            for point in &mut path.points_mm {
+                point[0] += shift;
+            }
+        }
+    }
+    refresh_volumes(&intent, &mut plan);
+    assert_eq!(
+        crate::backend::emit(&plan, &intent, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::NativeConditioningFailure
     );
 }
 
@@ -510,10 +589,12 @@ fn decoded_coordinates_must_fit_even_when_quantization_matches_expected_point() 
 fn zero_length_after_serialization_is_not_positive_deposition() {
     let (intent, mut plan) = fixture();
     plan.layers.truncate(1);
+    plan.native_geometry.certified_layer_count = 1;
     plan.layers[0].paths = vec![DepositionPath {
         kind: DepositionKind::SolidFill,
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
     }];
+    refresh_volumes(&intent, &mut plan);
     let program =
         "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2 Y2 Z1 E0.00000003 F600\n";
     assert_eq!(
@@ -1040,6 +1121,7 @@ fn unretraction_restores_actual_endpoint_without_decimal_tolerance() {
     let (mut intent, mut plan) = process_fixture();
     intent.recipe.filament_diameter_mm = 0.002;
     plan.layers.truncate(1);
+    refresh_volumes(&intent, &mut plan);
     let program = "\
 G21
 G90
@@ -1161,7 +1243,7 @@ fn support_only_layers_are_real_and_not_object_accounting() {
 }
 
 #[test]
-fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
+fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_missing_interface() {
     let (mut intent, mut plan) = process_fixture();
     intent.recipe.process.retraction = RetractionPolicy::Disabled;
     plan.layers[0].paths.retain(|p| {
@@ -1202,6 +1284,18 @@ fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
     assert_eq!(report.deposition_segments, 1);
     if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut intent.recipe.supports {
         *z_gap_mm = 0.1;
+    }
+    assert!(verify(&program, &plan, &intent, &cancel).is_ok());
+    let mut detached = plan.clone();
+    for path in &mut detached.layers[0].paths {
+        if path.kind == DepositionKind::SupportInterface {
+            path.kind = DepositionKind::Support;
+        }
+    }
+    refresh_volumes(&intent, &mut detached);
+    assert!(detached.validate(&intent).is_err());
+    if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut intent.recipe.supports {
+        *z_gap_mm = 0.3;
     }
     assert!(verify(&program, &plan, &intent, &cancel).is_err());
 }

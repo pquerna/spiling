@@ -6,9 +6,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { decodeMesh, validateMeshManifest } from "../packages/protocol/src/index.ts";
+import { decodeMesh, validateMeshManifest, SECTION_PLANE_TOLERANCE_MM } from "../packages/protocol/src/index.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { crc32, deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -119,16 +119,24 @@ const executable = option("--executable");
 const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
 const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
+const customManufacturingSource = option("--manufacturing-source");
+if (args.includes("--manufacturing-source") &&
+    (!customManufacturingSource || customManufacturingSource.startsWith("--")))
+  throw new Error("--manufacturing-source requires a relative STEP source path");
+if (customManufacturingSource && (scenario !== "manufacturing" ||
+    isAbsolute(customManufacturingSource) || !/\.(step|stp)$/i.test(customManufacturingSource)))
+  throw new Error("--manufacturing-source accepts a relative STEP path only with --scenario manufacturing");
 const imageReliefScenario = scenario === "image-relief" || scenario === "image-relief-planar";
 const cylindricalFinishScenario = scenario === "cylindrical-finish" || scenario === "image-relief";
 const surfaceFinishScenario = scenario === "surface-finish" || cylindricalFinishScenario || imageReliefScenario;
-const manufacturingSource = cylindricalFinishScenario
-  ? "independent-exporters/occt-cylinder-mm.step"
-  : "box-mm.step";
+const manufacturingSource = customManufacturingSource ? basename(customManufacturingSource)
+  : cylindricalFinishScenario
+    ? "independent-exporters/occt-cylinder-mm.step"
+    : "box-mm.step";
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -158,7 +166,10 @@ if (scenario === "project-bridge" || manufacturingScenario) {
     scenario === "project-bridge" ? ["box-mm.step", "cylinder.step"] : [manufacturingSource];
   for (const name of sources) {
     await mkdir(dirname(resolve(fixtureRoot, name)), { recursive: true });
-    await copyFile(resolve(sourceFixtureRoot, name), resolve(fixtureRoot, name));
+    await copyFile(
+      customManufacturingSource ? resolve(customManufacturingSource) : resolve(sourceFixtureRoot, name),
+      resolve(fixtureRoot, name),
+    );
   }
 }
 if (manufacturingScenario) {
@@ -617,6 +628,7 @@ async function inspectProjectBridge() {
       op: "set_instance_pose",
       session_id: hello.session_id,
       base_revision: scene.revision,
+      project_revision: saved.info.revision,
       occurrence_id: box.occurrence_id,
       pose: { ...identity, translation_mm: [10, 20, 0] },
     },
@@ -684,11 +696,12 @@ async function inspectProjectBridge() {
   assert.equal(definitions.type, "scene_page");
   let decodedBytes = 0;
   for (const definition of definitions.definitions) {
+    assert.equal(definition.display.kind, "mesh", "rendered fixture display");
     const page = await invoke("geometry_control", {
       command: {
         op: "get_artifact_page",
         session_id: hello.session_id,
-        artifact_id: definition.mesh_artifact_id,
+        artifact_id: definition.display.artifact_id,
         kind: "chunks",
         offset: 0,
       },
@@ -698,7 +711,7 @@ async function inspectProjectBridge() {
     const metadata = page.chunks.map((chunk) => chunk.metadata);
     const expected = {
       session_id: hello.session_id,
-      artifact_id: definition.mesh_artifact_id,
+      artifact_id: definition.display.artifact_id,
       definition_id: definition.definition_id,
     };
     validateMeshManifest(metadata, expected);
@@ -741,6 +754,7 @@ async function inspectProjectBridge() {
       op: "set_instance_pose",
       session_id: hello.session_id,
       base_revision: scene.revision,
+      project_revision: readonly.revision,
       occurrence_id: box.occurrence_id,
       pose: identity,
     },
@@ -959,13 +973,16 @@ async function inspectManufacturing() {
   assert.equal(state.diagnostic_no_gpu, manufacturingDiagnostic);
   assert.equal(state.selected_intent, null, "There is no implicitly selected printer intent");
   assert.equal(state.selected_artifact, null);
-  if (manufacturingDiagnostic)
+  if (manufacturingDiagnostic && customManufacturingSource) {
+    await input('[data-testid="manufacturing-diagnostic-source"]', manufacturingSource);
+    await click("manufacturing-diagnostic-source-import");
+  } else if (manufacturingDiagnostic) {
     await click(
       cylindricalFinishScenario
         ? "manufacturing-diagnostic-cylinder-import"
         : "manufacturing-diagnostic-import",
     );
-  else {
+  } else {
     await input('[data-testid="geometry-debug-paths"]', JSON.stringify([manufacturingSource]));
     await click("geometry-debug-import");
   }
@@ -1021,19 +1038,87 @@ async function inspectManufacturing() {
     true,
     "Unchanged intent is not submitted",
   );
-  const bedOccurrence = (await geometryState()).occurrences[0].occurrence_id;
+  const beforeBedScene = await geometryState();
+  const beforeBedProject = await manufacturingState();
+  const bedOccurrence = beforeBedScene.occurrences[0].occurrence_id;
+  const originalPose = beforeBedScene.occurrences[0].pose;
   await input('[data-testid="manufacturing-bed-occurrence"]', bedOccurrence);
   await click("manufacturing-center-bed");
+  const prepared = await until(async () => {
+    const current = await manufacturingState();
+    return current.bed_proposal && !current.working ? current : false;
+  }, "read-only native center-and-bed proposal", 65000);
+  const proposal = prepared.bed_proposal;
+  assert.equal(prepared.bed_proposal_stale, false);
+  assert.equal(prepared.project_revision, beforeBedProject.project_revision, "Prepare cannot mutate the project");
+  assert.deepEqual((await geometryState()).scene, beforeBedScene.scene, "Prepare cannot change the native scene");
+  assert.deepEqual((await geometryState()).occurrences, beforeBedScene.occurrences, "Prepare cannot move an occurrence");
+  assert.deepEqual(proposal.original_pose, originalPose);
+  assert.deepEqual(proposal.pose.rotation_xyzw, originalPose.rotation_xyzw, "Arbitrary rigid orientation is preserved");
+  assert.ok(proposal.contact_tolerance_mm > 0 && proposal.contact_tolerance_mm <= SECTION_PLANE_TOLERANCE_MM);
+  assert.ok(proposal.maximum_contact_gap_mm >= 0 &&
+    proposal.maximum_contact_gap_mm <= proposal.contact_tolerance_mm);
+  const tolerance = proposal.contact_tolerance_mm + 1e-8;
+  for (let axis = 0; axis < 3; axis++) {
+    const delta = proposal.pose.translation_mm[axis] - originalPose.translation_mm[axis];
+    const lower = proposal.minimum_lower_mm[axis] + delta;
+    const upper = proposal.maximum_upper_mm[axis] + delta;
+    assert.ok(lower >= proposal.envelope_mm.min[axis] - 1e-8, "Native candidate must not penetrate the declared envelope");
+    assert.ok(upper <= proposal.envelope_mm.max[axis] + 1e-8, "Native candidate must fit the declared envelope");
+    if (axis === 2) {
+      assert.ok(Math.abs(lower - proposal.envelope_mm.min[axis]) <= tolerance, "Certified source contacts the bed within native tolerance");
+      assert.ok(proposal.minimum_upper_mm[axis] + delta - proposal.envelope_mm.min[axis] <= tolerance);
+    } else {
+      const center = (proposal.envelope_mm.min[axis] + proposal.envelope_mm.max[axis]) / 2;
+      const centerLower = (proposal.minimum_lower_mm[axis] + proposal.maximum_lower_mm[axis]) / 2 + delta;
+      const centerUpper = (proposal.minimum_upper_mm[axis] + proposal.maximum_upper_mm[axis]) / 2 + delta;
+      assert.ok(centerLower <= center + tolerance && centerUpper >= center - tolerance,
+        "Native original-source support brackets certify XY centering");
+    }
+  }
+  if (!customManufacturingSource) {
+    const expected = cylindricalFinishScenario ? [110, 110, 0] : [100, 105, 0];
+    proposal.pose.translation_mm.forEach((value, axis) =>
+      assert.ok(Math.abs(value - expected[axis]) <= tolerance, "Known physical fixture placement within contact tolerance"));
+  }
+  await evaluate("document.querySelector('[data-testid=\"manufacturing-bed-review\"]').scrollIntoView({block:'start'})");
+  await screenshot(`${scenario}-native-bed-proposal`);
+  await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
+  await until(async () => (await manufacturingState()).bed_proposal_stale,
+    "changed manufacturing draft visibly invalidates the captured proposal");
+  assert.equal(
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-bed-apply\"]').disabled"),
+    true, "A stale proposal cannot be applied",
+  );
+  await click("manufacturing-reset-draft");
+  await until(async () => !(await manufacturingState()).draft_changed, "restore authoritative intent draft");
+  assert.equal((await manufacturingState()).bed_proposal_stale, true, "Reset must not revive an invalidated proposal");
+  await click("manufacturing-bed-clear");
+  await until(async () => !(await manufacturingState()).bed_proposal, "explicitly cleared proposal");
+  assert.equal((await manufacturingState()).project_revision, beforeBedProject.project_revision);
+  assert.deepEqual((await geometryState()).occurrences, beforeBedScene.occurrences);
+  await click("manufacturing-center-bed");
   await until(async () => {
-    const row = (await geometryState()).occurrences.find(
-      (row) => row.occurrence_id === bedOccurrence,
-    );
-    return (
-      row &&
-      JSON.stringify(row.pose.translation_mm) ===
-        JSON.stringify(cylindricalFinishScenario ? [110, 110, 0] : [100, 105, 0])
-    );
-  }, "shared native center-and-bed transaction");
+    const current = await manufacturingState();
+    return current.bed_proposal && !current.bed_proposal_stale && !current.working;
+  }, "fresh read-only proposal after explicit Clear", 65000);
+  await click("manufacturing-bed-apply");
+  const appliedBed = await until(async () => {
+    const current = await geometryState();
+    const manufacturing = await manufacturingState();
+    const row = current.occurrences.find(row => row.occurrence_id === bedOccurrence);
+    return !manufacturing.working && manufacturing.project_revision > beforeBedProject.project_revision &&
+      current.scene.revision > beforeBedScene.scene.revision && row &&
+      row.pose.translation_mm.every((value, axis) =>
+        Math.abs(value - proposal.pose.translation_mm[axis]) <= tolerance) ? current : false;
+  }, "explicit revision-owned center-and-bed Apply");
+  assert.deepEqual(appliedBed.occurrences[0].pose.rotation_xyzw, originalPose.rotation_xyzw);
+  await click("project-undo");
+  await until(async () => JSON.stringify((await geometryState()).occurrences[0].pose) === JSON.stringify(originalPose),
+    "one Core Undo restores the complete original bed pose");
+  await click("project-redo");
+  await until(async () => JSON.stringify((await geometryState()).occurrences[0].pose) === JSON.stringify(appliedBed.occurrences[0].pose),
+    "one Core Redo restores the reviewed bed pose");
   const beforePreflight = await manufacturingState();
   await click("manufacturing-preflight");
   state = await until(async () => {
@@ -1043,7 +1128,7 @@ async function inspectManufacturing() {
       ? current
       : false;
   }, "revision-captured read-only native Preflight");
-  assert.equal(state.preflight.eligible, true);
+  assert.equal(state.preflight.disposition, "admitted");
   assert.equal(state.preflight.software_only, true);
   assert.equal(state.project_revision, beforePreflight.project_revision);
   assert.deepEqual(state.selected_artifact, beforePreflight.selected_artifact);

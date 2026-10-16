@@ -121,6 +121,7 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
                     ) && info.save_uncertain))
         }
         Some(JobResult::Section { .. })
+        | Some(JobResult::BedPosePrepared { .. })
         | Some(JobResult::ManufacturingCompiled { .. })
         | Some(JobResult::ManufacturingVerified { .. })
         | Some(JobResult::ManufacturingPreflight { .. })

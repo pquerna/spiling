@@ -3,6 +3,27 @@
 // Licensed under the Open Software License version 3.0
 use crate::{DOMAIN_ERROR_TYPE, geometry::*, google, manufacturing::*, project::*, rpc};
 use prost::Message;
+impl TryFrom<rpc::DomainError> for GeometryError {
+    type Error = String;
+    fn try_from(value: rpc::DomainError) -> Result<Self, String> {
+        let error = Self {
+            code: geometry_parse(&value.code)?,
+            message: value.message,
+        };
+        error.validate().map_err(|error| error.to_string())?;
+        Ok(error)
+    }
+}
+impl TryFrom<GeometryError> for rpc::DomainError {
+    type Error = String;
+    fn try_from(value: GeometryError) -> Result<Self, String> {
+        value.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            code: geometry_code(value.code).into(),
+            message: value.message,
+        })
+    }
+}
 fn geometry_code(code: GeometryErrorCode) -> &'static str {
     match code {
         GeometryErrorCode::InvalidGeometry => "invalid_geometry",
@@ -18,6 +39,16 @@ fn geometry_code(code: GeometryErrorCode) -> &'static str {
         GeometryErrorCode::Cancelled => "cancelled",
         GeometryErrorCode::DegenerateSection => "degenerate_section",
         GeometryErrorCode::KernelFailure => "kernel_failure",
+        GeometryErrorCode::ConditioningFailure => "conditioning_failure",
+        GeometryErrorCode::AnalysisIndeterminate => "analysis_indeterminate",
+        GeometryErrorCode::SingularGeometry => "singular_geometry",
+        GeometryErrorCode::UnsupportedConversion => "unsupported_conversion",
+        GeometryErrorCode::UnsupportedOperation => "unsupported_operation",
+        GeometryErrorCode::NativeIntersectionFailure => "native_intersection_failure",
+        GeometryErrorCode::ParameterCorrespondenceUnavailable => {
+            "parameter_correspondence_unavailable"
+        }
+        GeometryErrorCode::ShapeErrorExceeded => "shape_error_exceeded",
     }
 }
 fn geometry_parse(code: &str) -> Result<GeometryErrorCode, String> {
@@ -35,6 +66,16 @@ fn geometry_parse(code: &str) -> Result<GeometryErrorCode, String> {
         "cancelled" => GeometryErrorCode::Cancelled,
         "degenerate_section" => GeometryErrorCode::DegenerateSection,
         "kernel_failure" => GeometryErrorCode::KernelFailure,
+        "conditioning_failure" => GeometryErrorCode::ConditioningFailure,
+        "analysis_indeterminate" => GeometryErrorCode::AnalysisIndeterminate,
+        "singular_geometry" => GeometryErrorCode::SingularGeometry,
+        "unsupported_conversion" => GeometryErrorCode::UnsupportedConversion,
+        "unsupported_operation" => GeometryErrorCode::UnsupportedOperation,
+        "native_intersection_failure" => GeometryErrorCode::NativeIntersectionFailure,
+        "parameter_correspondence_unavailable" => {
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        }
+        "shape_error_exceeded" => GeometryErrorCode::ShapeErrorExceeded,
         _ => return Err("unknown domain error code".into()),
     })
 }
@@ -92,6 +133,11 @@ fn manufacturing_code(code: ManufacturingErrorCode) -> &'static str {
         ManufacturingErrorCode::CorruptArtifact => "corrupt_artifact",
         ManufacturingErrorCode::ReadOnly => "read_only",
         ManufacturingErrorCode::Busy => "busy",
+        ManufacturingErrorCode::NativeKernelFailure => "native_kernel_failure",
+        ManufacturingErrorCode::NativeConditioningFailure => "native_conditioning_failure",
+        ManufacturingErrorCode::NativeAnalysisIndeterminate => "native_analysis_indeterminate",
+        ManufacturingErrorCode::NativeSingularGeometry => "native_singular_geometry",
+        ManufacturingErrorCode::NativeShapeErrorExceeded => "native_shape_error_exceeded",
     }
 }
 fn manufacturing_parse(code: &str) -> Result<ManufacturingErrorCode, String> {
@@ -109,6 +155,11 @@ fn manufacturing_parse(code: &str) -> Result<ManufacturingErrorCode, String> {
         "corrupt_artifact" => ManufacturingErrorCode::CorruptArtifact,
         "read_only" => ManufacturingErrorCode::ReadOnly,
         "busy" => ManufacturingErrorCode::Busy,
+        "native_kernel_failure" => ManufacturingErrorCode::NativeKernelFailure,
+        "native_conditioning_failure" => ManufacturingErrorCode::NativeConditioningFailure,
+        "native_analysis_indeterminate" => ManufacturingErrorCode::NativeAnalysisIndeterminate,
+        "native_singular_geometry" => ManufacturingErrorCode::NativeSingularGeometry,
+        "native_shape_error_exceeded" => ManufacturingErrorCode::NativeShapeErrorExceeded,
         _ => return Err("unknown domain error code".into()),
     })
 }
@@ -146,7 +197,11 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
         "busy" | "project_locked" => 9,
         "stale_revision" => 10,
         "unknown_handle" | "missing_asset" | "no_saved_path" => 5,
-        "source_io" | "io" | "kernel_failure" => 13,
+        "source_io"
+        | "io"
+        | "kernel_failure"
+        | "native_intersection_failure"
+        | "native_kernel_failure" => 13,
         "read_only" => 7,
         "no_intent"
         | "empty_project"
@@ -157,7 +212,18 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
         | "unsupported_geometry"
         | "unsupported_units"
         | "unsupported_format"
-        | "verification_failed" => 9,
+        | "verification_failed"
+        | "conditioning_failure"
+        | "analysis_indeterminate"
+        | "singular_geometry"
+        | "unsupported_conversion"
+        | "unsupported_operation"
+        | "parameter_correspondence_unavailable"
+        | "shape_error_exceeded"
+        | "native_conditioning_failure"
+        | "native_analysis_indeterminate"
+        | "native_singular_geometry"
+        | "native_shape_error_exceeded" => 9,
         _ => 3,
     };
     google::rpc::Status {
@@ -300,6 +366,16 @@ pub fn geometry_request_status(message: &str) -> google::rpc::Status {
         "Cancelled" => GeometryErrorCode::Cancelled,
         "DegenerateSection" => GeometryErrorCode::DegenerateSection,
         "KernelFailure" => GeometryErrorCode::KernelFailure,
+        "ConditioningFailure" => GeometryErrorCode::ConditioningFailure,
+        "AnalysisIndeterminate" => GeometryErrorCode::AnalysisIndeterminate,
+        "SingularGeometry" => GeometryErrorCode::SingularGeometry,
+        "UnsupportedConversion" => GeometryErrorCode::UnsupportedConversion,
+        "UnsupportedOperation" => GeometryErrorCode::UnsupportedOperation,
+        "NativeIntersectionFailure" => GeometryErrorCode::NativeIntersectionFailure,
+        "ParameterCorrespondenceUnavailable" => {
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        }
+        "ShapeErrorExceeded" => GeometryErrorCode::ShapeErrorExceeded,
         _ => GeometryErrorCode::InvalidGeometry,
     };
     domain_status(&JobError::Geometry {
@@ -346,9 +422,82 @@ pub fn manufacturing_request_status(message: &str) -> google::rpc::Status {
         "CorruptArtifact" => ManufacturingErrorCode::CorruptArtifact,
         "ReadOnly" => ManufacturingErrorCode::ReadOnly,
         "Busy" => ManufacturingErrorCode::Busy,
+        "NativeKernelFailure" => ManufacturingErrorCode::NativeKernelFailure,
+        "NativeConditioningFailure" => ManufacturingErrorCode::NativeConditioningFailure,
+        "NativeAnalysisIndeterminate" => ManufacturingErrorCode::NativeAnalysisIndeterminate,
+        "NativeSingularGeometry" => ManufacturingErrorCode::NativeSingularGeometry,
+        "NativeShapeErrorExceeded" => ManufacturingErrorCode::NativeShapeErrorExceeded,
         _ => ManufacturingErrorCode::InvalidSpecification,
     };
     domain_status(&JobError::Manufacturing {
         error: ManufacturingError::new(code, text),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numerical_refusals_preserve_typed_codes_through_status() {
+        for code in [
+            GeometryErrorCode::ConditioningFailure,
+            GeometryErrorCode::AnalysisIndeterminate,
+            GeometryErrorCode::SingularGeometry,
+            GeometryErrorCode::UnsupportedConversion,
+            GeometryErrorCode::UnsupportedOperation,
+            GeometryErrorCode::NativeIntersectionFailure,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            GeometryErrorCode::ShapeErrorExceeded,
+        ] {
+            let name = geometry_code(code);
+            assert_eq!(geometry_parse(name).unwrap(), code);
+            let status =
+                geometry_request_status(&format!("{code:?}: numerical obligation refused"));
+            assert_eq!(
+                status.code,
+                if code == GeometryErrorCode::NativeIntersectionFailure {
+                    13
+                } else {
+                    9
+                }
+            );
+            let detail =
+                rpc::DomainErrorDetail::decode(status.details[0].value.as_slice()).unwrap();
+            let Some(rpc::domain_error_detail::Error::Geometry(error)) = detail.error else {
+                panic!("geometry status detail");
+            };
+            assert_eq!(geometry_parse(&error.code).unwrap(), code);
+            assert_eq!(error.message, "numerical obligation refused");
+        }
+    }
+
+    #[test]
+    fn manufacturing_preserves_native_failure_distinctions_through_status() {
+        for code in [
+            ManufacturingErrorCode::NativeKernelFailure,
+            ManufacturingErrorCode::NativeConditioningFailure,
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            ManufacturingErrorCode::NativeSingularGeometry,
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+        ] {
+            assert_eq!(manufacturing_parse(manufacturing_code(code)).unwrap(), code);
+            let status = manufacturing_request_status(&format!("{code:?}: native slab refused"));
+            assert_eq!(
+                status.code,
+                if code == ManufacturingErrorCode::NativeKernelFailure {
+                    13
+                } else {
+                    9
+                }
+            );
+            let detail =
+                rpc::DomainErrorDetail::decode(status.details[0].value.as_slice()).unwrap();
+            let Some(rpc::domain_error_detail::Error::Manufacturing(error)) = detail.error else {
+                panic!("manufacturing status detail");
+            };
+            assert_eq!(manufacturing_parse(&error.code).unwrap(), code);
+            assert_eq!(error.message, "native slab refused");
+        }
+    }
 }

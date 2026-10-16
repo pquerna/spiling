@@ -112,7 +112,8 @@ fn two_parts_transfer_is_verified_even_without_output_and_sections_are_per_occur
         );
     }
     for row in persisted["definitions"].as_array().unwrap() {
-        let artifact = row["record"]["mesh_artifact_id"].as_u64().unwrap();
+        assert_eq!(row["record"]["display"]["kind"], "mesh");
+        let artifact = row["record"]["display"]["artifact_id"].as_u64().unwrap();
         for chunk in row["chunks"].as_array().unwrap() {
             let index = chunk["chunk_index"].as_u64().unwrap();
             let bytes =

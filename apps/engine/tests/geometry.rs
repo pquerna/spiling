@@ -6,6 +6,7 @@ use spiling_contracts::{
     NativeOperationView,
     display::{validate_mesh_chunk, validate_section_chunk},
     geometry::*,
+    project::{ProjectCommand, ProjectResponse, ProjectRevision},
 };
 use spiling_engine_client::EngineClient;
 use std::{
@@ -41,6 +42,18 @@ async fn scene(client: &mut EngineClient) -> SceneSummary {
     };
     summary.validate().unwrap();
     summary
+}
+async fn project_revision(client: &EngineClient) -> ProjectRevision {
+    let ProjectResponse::Status { info } = client
+        .project(ProjectCommand::Get {
+            session_id: client.hello().session_id.clone(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("project status");
+    };
+    info.revision
 }
 async fn wait_job(client: &mut EngineClient, job_id: String) -> NativeOperationView {
     let start = Instant::now();
@@ -165,9 +178,17 @@ async fn faces(client: &mut EngineClient, definition: &DefinitionRecord) -> Vec<
     assert!(next_offset.is_none());
     faces
 }
+fn mesh_artifact(definition: &DefinitionRecord) -> ArtifactId {
+    match &definition.display {
+        DefinitionDisplay::Mesh { artifact_id } => *artifact_id,
+        DefinitionDisplay::Unavailable { error } => {
+            panic!("expected certified native display: {error:?}")
+        }
+    }
+}
 async fn mesh(client: &mut EngineClient, definition: &DefinitionRecord) -> Vec<SourceHash> {
     let session_id = client.hello().session_id.clone();
-    let artifact_id = definition.mesh_artifact_id;
+    let artifact_id = mesh_artifact(definition);
     let mut offset = 0;
     let mut hashes = vec![];
     let mut total = 0;
@@ -439,7 +460,7 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
         &mut client,
         GeometryCommand::GetArtifactPage {
             session_id: first.session_id.clone(),
-            artifact_id: definition.mesh_artifact_id,
+            artifact_id: mesh_artifact(&definition),
             kind: ArtifactPageKind::Chunks,
             offset: 0,
         },
@@ -471,8 +492,8 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
     assert_eq!(summary.occurrence_count, 2);
     assert_eq!(summary.unique_mesh_bytes, first.unique_mesh_bytes);
     assert_eq!(
-        definitions(&mut client, &summary).await[0].mesh_artifact_id,
-        definition.mesh_artifact_id
+        mesh_artifact(&definitions(&mut client, &summary).await[0]),
+        mesh_artifact(&definition)
     );
     for index in 2..128 {
         let pose = RigidPoseMm {
@@ -557,7 +578,7 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
             &mut client,
             GeometryCommand::ReleaseArtifact {
                 session_id: session.clone(),
-                artifact_id: definition.mesh_artifact_id
+                artifact_id: mesh_artifact(&definition)
             }
         )
         .await,
@@ -579,7 +600,7 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
             &mut client,
             GeometryCommand::GetArtifactPage {
                 session_id: session.clone(),
-                artifact_id: definition.mesh_artifact_id,
+                artifact_id: mesh_artifact(&definition),
                 kind: ArtifactPageKind::Chunks,
                 offset: 0,
             },
@@ -605,7 +626,7 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
             &mut client,
             GeometryCommand::ReleaseArtifact {
                 session_id: session.clone(),
-                artifact_id: definition.mesh_artifact_id
+                artifact_id: mesh_artifact(&definition)
             }
         )
         .await,
@@ -631,7 +652,7 @@ async fn real_scene_reuse_pages_faces_and_final_removal() {
     let reimported = import(&mut client, "box-mm.step", RigidPoseMm::IDENTITY).await;
     let current = definitions(&mut client, &reimported).await.remove(0);
     assert_eq!(current.definition_id, definition.definition_id);
-    assert_ne!(current.mesh_artifact_id, definition.mesh_artifact_id);
+    assert_ne!(mesh_artifact(&current), mesh_artifact(&definition));
     assert_eq!(faces(&mut client, &current).await, face_table);
     assert_eq!(mesh(&mut client, &current).await, hashes);
     assert_eq!(client.pid(), pid);
@@ -846,12 +867,14 @@ async fn multi_part_world_sections_and_large_origin_preserve_unique_meshes() {
         let current = scene(&mut client).await;
         let mut pose = record.pose;
         pose.translation_mm = pose.translation_mm.map(|v| v + 1e9);
+        let project_revision = project_revision(&client).await;
         assert!(matches!(
             command(
                 &mut client,
                 GeometryCommand::SetInstancePose {
                     session_id: current.session_id,
                     base_revision: current.revision,
+                    project_revision,
                     occurrence_id: record.occurrence_id,
                     pose
                 }
@@ -936,11 +959,13 @@ async fn cancellation_queue_and_stale_publication_leave_committed_scene() {
     assert_ne!(queued_section.name, job_id);
     let occurrence = occurrences(&mut client, &before).await.remove(0);
     let started = Instant::now();
+    let project_revision = project_revision(&client).await;
     let GeometryResponse::SceneChanged { summary: moved } = command(
         &mut client,
         GeometryCommand::SetInstancePose {
             session_id: before.session_id.clone(),
             base_revision: before.revision,
+            project_revision,
             occurrence_id: occurrence.occurrence_id,
             pose: RigidPoseMm {
                 translation_mm: [10.0, 0.0, 0.0],
@@ -1164,5 +1189,159 @@ async fn terminal_execution_eviction_preserves_operations_without_retaining_sess
     assert!(oldest.error.is_none());
     assert!(matches!(oldest.result, Some(JobResult::Section { .. })));
     client.ping().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
+    use spiling_contracts::manufacturing::{
+        ManufacturingCommand, ManufacturingResponse, decode_intent,
+    };
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let angle = std::f64::consts::PI / 6.0;
+    let pose = RigidPoseMm {
+        translation_mm: [30.0, 40.0, 50.0],
+        rotation_xyzw: [0.0, (angle * 0.5).sin(), 0.0, (angle * 0.5).cos()],
+    };
+    let captured = import(&mut client, "cylinder.step", pose).await;
+    let occurrence = occurrences(&mut client, &captured).await.remove(0);
+    let revision = project_revision(&client).await;
+    let envelope = AabbMm::new([0.0; 3], [200.0; 3]).unwrap();
+    let prepared = client
+        .prepare_bed_pose(&captured, revision, &occurrence, envelope, true)
+        .await
+        .unwrap();
+    assert_eq!(prepared.pose.rotation_xyzw, pose.rotation_xyzw);
+    // Independent analytic support: radius 5, source axial height [0,8].
+    let true_minimum_z = prepared.pose.translation_mm[2] - 5.0 * angle.sin();
+    assert!(
+        true_minimum_z >= 0.0,
+        "native contact penetrates by {}",
+        -true_minimum_z
+    );
+    assert!(true_minimum_z <= prepared.maximum_contact_gap_mm);
+    assert!(prepared.maximum_contact_gap_mm <= SECTION_PLANE_TOLERANCE_MM);
+    assert!(
+        (prepared.pose.translation_mm[0] + 4.0 * angle.sin() - 100.0).abs()
+            <= SECTION_PLANE_TOLERANCE_MM
+    );
+    assert!((prepared.pose.translation_mm[1] - 100.0).abs() <= SECTION_PLANE_TOLERANCE_MM);
+    assert_eq!(scene(&mut client).await, captured, "query must not Apply");
+    assert_eq!(project_revision(&client).await, revision);
+
+    // A project-only change cannot authorize an old preparation at the same scene.
+    let intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/solid-fill.intent.json"
+    ))
+    .unwrap();
+    assert!(matches!(
+        client
+            .manufacturing(ManufacturingCommand::SetIntent {
+                session_id: captured.session_id.clone(),
+                base_revision: revision,
+                intent: intent.into(),
+            })
+            .await
+            .unwrap(),
+        ManufacturingResponse::Status { .. }
+    ));
+    assert_eq!(scene(&mut client).await, captured);
+    let stale = client
+        .geometry(GeometryCommand::SetInstancePose {
+            session_id: captured.session_id.clone(),
+            base_revision: prepared.scene_revision,
+            project_revision: prepared.project_revision,
+            occurrence_id: occurrence.occurrence_id,
+            pose: prepared.pose,
+        })
+        .await;
+    assert!(matches!(
+        stale,
+        Err(spiling_engine_client::ClientError::Geometry(
+            GeometryError {
+                code: GeometryErrorCode::StaleRevision,
+                ..
+            }
+        ))
+    ));
+    let current_revision = project_revision(&client).await;
+    let fresh = client
+        .prepare_bed_pose(&captured, current_revision, &occurrence, envelope, true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        client
+            .geometry(GeometryCommand::SetInstancePose {
+                session_id: captured.session_id.clone(),
+                base_revision: fresh.scene_revision,
+                project_revision: fresh.project_revision,
+                occurrence_id: occurrence.occurrence_id,
+                pose: fresh.pose,
+            })
+            .await
+            .unwrap(),
+        GeometryResponse::SceneChanged { .. }
+    ));
+    let moved = scene(&mut client).await;
+    let placed = occurrences(&mut client, &moved).await.remove(0);
+    let too_small = AabbMm::new([0.0; 3], [1.0; 3]).unwrap();
+    assert!(matches!(
+        client
+            .prepare_bed_pose(
+                &moved,
+                project_revision(&client).await,
+                &placed,
+                too_small,
+                true,
+            )
+            .await,
+        Err(spiling_engine_client::ClientError::Geometry(_))
+    ));
+    assert_eq!(scene(&mut client).await, moved, "failed fit must not Apply");
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn equivalent_world_planes_preserve_sections_for_accepted_near_unit_poses() {
+    let mut client = EngineClient::spawn(ENGINE).await.unwrap();
+    let pose = RigidPoseMm {
+        translation_mm: [0.0; 3],
+        rotation_xyzw: [0.3, 0.4, 0.5, 0.5_f64.sqrt()].map(|value| value * (1.0 + 5e-11)),
+    };
+    pose.validate().unwrap();
+    let captured = import(&mut client, "box-mm.step", pose).await;
+    let mut reference: Option<Vec<[f64; 3]>> = None;
+    for origin_mm in [[0.0, 0.0, 4.0], [1e9, -1e9, 4.0]] {
+        let operation = section(
+            &mut client,
+            PlaneMm {
+                origin_mm,
+                normal: [0.0, 0.0, 1.0],
+            },
+        )
+        .await;
+        assert_eq!(operation.status, JobStatus::Completed, "{operation:?}");
+        let Some(JobResult::Section { artifact_id }) = operation.result else {
+            panic!("expected a native world section");
+        };
+        let (_, loops) = section_loops(&mut client, artifact_id).await;
+        assert_eq!(loops.len(), 1);
+        assert!(!loops[0].0.is_hole);
+        let points = &loops[0].1;
+        if let Some(expected) = &reference {
+            assert_eq!(points.len(), expected.len());
+            for (actual, expected) in points.iter().zip(expected) {
+                for axis in 0..3 {
+                    assert!(
+                        (actual[axis] - expected[axis]).abs() <= 2e-5,
+                        "an in-plane origin shift changed the cut: {actual:?} != {expected:?}"
+                    );
+                }
+            }
+        } else {
+            reference = Some(points.clone());
+        }
+        assert_eq!(scene(&mut client).await, captured);
+    }
     client.shutdown().await.unwrap();
 }

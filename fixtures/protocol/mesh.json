@@ -20,13 +20,14 @@
         "carrier_deviation_mm": 0.0,
         "chunk_count": 1,
         "chunk_index": 0,
-        "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+        "definition_id": "011b000cb8c71c15bef0a62bd16a5f90fba35205d66156d9ca3fae07ea571a40",
         "face_count": 2,
-        "mesh_profile": "mesh-mm-0.05-v1",
+        "mesh_profile": "mesh-trimmed-mm-0.05-v2",
         "quantization_error_mm": 0.0,
         "schema_version": 1,
         "session_id": "550e8400-e29b-41d4-a716-446655440000",
-        "sha256": "3dd7618be8f481e8346e909802784b77b07a333ba1d0e611bbc485b236928a9e"
+        "sha256": "3dd7618be8f481e8346e909802784b77b07a333ba1d0e611bbc485b236928a9e",
+        "trim_deviation_mm": 0.0
       }
     }
   ],

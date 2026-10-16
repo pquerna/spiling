@@ -14,7 +14,7 @@ export type NativeOperationView = { name: string, session_id: SessionId, capture
 
 export type Hello = { instance_id: string, engine_build: string, kernel: string, geometry_capabilities: Array<string>, max_control_bytes: number, max_binary_bytes: number, pid: number, session_id: SessionId, kernel_identity: KernelIdentity, geometry_limits: GeometryLimits, manufacturing_capabilities: Array<string>, project_capabilities: Array<string>, };
 
-export type GeometryErrorCode = "invalid_geometry" | "unsupported_geometry" | "unsupported_units" | "source_io" | "source_changed" | "invalid_pose" | "stale_revision" | "unknown_handle" | "busy" | "resource_limit" | "cancelled" | "degenerate_section" | "kernel_failure";
+export type GeometryErrorCode = "invalid_geometry" | "unsupported_geometry" | "unsupported_units" | "source_io" | "source_changed" | "invalid_pose" | "stale_revision" | "unknown_handle" | "busy" | "resource_limit" | "cancelled" | "degenerate_section" | "kernel_failure" | "conditioning_failure" | "analysis_indeterminate" | "singular_geometry" | "unsupported_conversion" | "unsupported_operation" | "native_intersection_failure" | "parameter_correspondence_unavailable" | "shape_error_exceeded";
 
 export type GeometryError = { code: GeometryErrorCode, message: string, };
 
@@ -48,17 +48,30 @@ export type SourceProvenance = { source_hash: SourceHash, source_name: string, s
  */
 uncertainty_mm: number | null, };
 
-export type DisplayProfile = "mesh-mm-0.05-v1";
+export type DisplayProfile = "mesh-trimmed-mm-0.05-v2";
 
 export type FaceRef = { session_id: SessionId, scene_revision: SceneRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, face_id: FaceId, };
 
-export type FaceCarrier = { "kind": "plane", origin_mm: [number, number, number], normal: [number, number, number], } | { "kind": "cylinder", axis_origin_mm: [number, number, number], axis_direction: [number, number, number], radius_mm: number, };
+export type SurfaceFamily = "plane" | "cylinder" | "cone" | "sphere" | "torus" | "b_spline" | "nurbs" | "linear_extrusion" | "revolution" | "t_spline";
+
+export type TorusKind = "regular_ring" | "horn" | "spindle";
+
+export type AnalyticSurfaceDescription = { "kind": "plane", origin_mm: [number, number, number], normal: [number, number, number], } | { "kind": "cylinder", axis_origin_mm: [number, number, number], axis_direction: [number, number, number], radius_mm: number, } | { "kind": "cone", frame: PlaneFrameMm, reference_radius_mm: number, semi_angle_radians: number, } | { "kind": "sphere", frame: PlaneFrameMm, radius_mm: number, } | { "kind": "torus", frame: PlaneFrameMm, major_radius_mm: number, minor_radius_mm: number, torus_kind: TorusKind, };
+
+export type FaceDomainSummary = { trim_loop_count: number, inner_loop_count: number, periodic_u: boolean, periodic_v: boolean, has_singular_boundary: boolean, };
+
+export type FaceGeometryInfo = { family: SurfaceFamily, analytic: AnalyticSurfaceDescription | null, domain: FaceDomainSummary, };
 
 export type FaceInfo = { face_id: FaceId, 
 /**
  * Decimal string preserves STEP entity IDs above JavaScript's exact integer range.
  */
-surface_face_entity: string, source_entity_kind: string, orientation: boolean, carrier: FaceCarrier, };
+surface_face_entity: string, source_entity_kind: string, source_surface_entity_kind: string, 
+/**
+ * Material-side direction relative to the regular analytic/native frame.
+ * At singular points, operations require an oriented limiting chart/fan.
+ */
+orientation: boolean, geometry: FaceGeometryInfo, };
 
 export type FaceInspection = { reference: FaceRef, face: FaceInfo, pose: RigidPoseMm, provenance: SourceProvenance, };
 
@@ -66,13 +79,21 @@ export type FaceIndexRow = { ordinal: number, face_id: FaceId, };
 
 export type SceneSummary = { session_id: SessionId, revision: SceneRevision, definition_count: number, occurrence_count: number, bounds_mm: AabbMm | null, unique_mesh_bytes: number, };
 
-export type DefinitionRecord = { definition_id: DefinitionId, provenance: SourceProvenance, face_count: number, bounds_mm: AabbMm, mesh_artifact_id: ArtifactId, };
+export type DefinitionDisplay = { "kind": "mesh", artifact_id: ArtifactId, } | { "kind": "unavailable", error: GeometryError, };
+
+export type DefinitionRecord = { definition_id: DefinitionId, provenance: SourceProvenance, face_count: number, bounds_mm: AabbMm, display: DefinitionDisplay, };
 
 export type OccurrenceRecord = { occurrence_id: OccurrenceId, definition_id: DefinitionId, pose: RigidPoseMm, };
 
+export type BedPosePreparation = { session_id: SessionId, scene_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, definition_id: DefinitionId, original_pose: RigidPoseMm, pose: RigidPoseMm, envelope_mm: AabbMm, minimum_lower_mm: [number, number, number], minimum_upper_mm: [number, number, number], maximum_lower_mm: [number, number, number], maximum_upper_mm: [number, number, number], center_xy: boolean, contact_tolerance_mm: number, maximum_contact_gap_mm: number, };
+
 export type NativePath = { "kind": "unix_bytes", hex: string, } | { "kind": "windows_wide", units: Array<number>, };
 
-export type MeshChunkMetadata = { session_id: SessionId, artifact_id: ArtifactId, definition_id: DefinitionId, schema_version: number, mesh_profile: DisplayProfile, chunk_index: number, chunk_count: number, byte_count: number, sha256: SourceHash, face_count: number, bounds_mm: AabbMm, carrier_deviation_mm: number, quantization_error_mm: number, };
+export type MeshChunkMetadata = { session_id: SessionId, artifact_id: ArtifactId, definition_id: DefinitionId, schema_version: number, mesh_profile: DisplayProfile, chunk_index: number, chunk_count: number, byte_count: number, sha256: SourceHash, face_count: number, bounds_mm: AabbMm, carrier_deviation_mm: number, 
+/**
+ * Whole trimmed-domain triangle-chain approximation, independent of interpolation.
+ */
+trim_deviation_mm: number, quantization_error_mm: number, };
 
 export type SectionChunkMetadata = { session_id: SessionId, artifact_id: ArtifactId, schema_version: number, chunk_index: number, chunk_count: number, byte_count: number, sha256: SourceHash, first_loop_ordinal: number, loop_count: number, };
 
@@ -86,7 +107,7 @@ export type KernelIdentity = { name: string, version: string, revision: string, 
 
 export type SelectedSource = { token: string, session_id: SessionId, label: string, };
 
-export type GeometryCommand = { "op": "import_part", session_id: SessionId, base_revision: SceneRevision, source: NativePath, initial_pose: RigidPoseMm, } | { "op": "add_instance", session_id: SessionId, base_revision: SceneRevision, definition_id: DefinitionId, pose: RigidPoseMm, } | { "op": "set_instance_pose", session_id: SessionId, base_revision: SceneRevision, occurrence_id: OccurrenceId, pose: RigidPoseMm, } | { "op": "remove_instance", session_id: SessionId, base_revision: SceneRevision, occurrence_id: OccurrenceId, } | { "op": "get_scene", session_id: SessionId, } | { "op": "get_scene_page", session_id: SessionId, revision: SceneRevision, kind: ScenePageKind, offset: number, } | { "op": "get_face_index_page", session_id: SessionId, definition_id: DefinitionId, offset: number, } | { "op": "inspect_face", reference: FaceRef, } | { "op": "start_section", session_id: SessionId, base_revision: SceneRevision, plane: PlaneMm, } | { "op": "get_artifact_page", session_id: SessionId, artifact_id: ArtifactId, kind: ArtifactPageKind, offset: number, } | { "op": "release_artifact", session_id: SessionId, artifact_id: ArtifactId, };
+export type GeometryCommand = { "op": "import_part", session_id: SessionId, base_revision: SceneRevision, source: NativePath, initial_pose: RigidPoseMm, } | { "op": "add_instance", session_id: SessionId, base_revision: SceneRevision, definition_id: DefinitionId, pose: RigidPoseMm, } | { "op": "set_instance_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, pose: RigidPoseMm, } | { "op": "remove_instance", session_id: SessionId, base_revision: SceneRevision, occurrence_id: OccurrenceId, } | { "op": "get_scene", session_id: SessionId, } | { "op": "get_scene_page", session_id: SessionId, revision: SceneRevision, kind: ScenePageKind, offset: number, } | { "op": "get_face_index_page", session_id: SessionId, definition_id: DefinitionId, offset: number, } | { "op": "inspect_face", reference: FaceRef, } | { "op": "start_section", session_id: SessionId, base_revision: SceneRevision, plane: PlaneMm, } | { "op": "prepare_bed_pose", session_id: SessionId, base_revision: SceneRevision, project_revision: ProjectRevision, occurrence_id: OccurrenceId, expected_definition_id: DefinitionId, expected_pose: RigidPoseMm, envelope_mm: AabbMm, center_xy: boolean, contact_tolerance_mm: number, } | { "op": "get_artifact_page", session_id: SessionId, artifact_id: ArtifactId, kind: ArtifactPageKind, offset: number, } | { "op": "release_artifact", session_id: SessionId, artifact_id: ArtifactId, };
 
 export type GeometryResponse = { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "scene_changed", summary: SceneSummary, } | { "type": "scene", summary: SceneSummary, } | { "type": "scene_page", definitions: Array<DefinitionRecord>, occurrences: Array<OccurrenceRecord>, next_offset: number | null, } | { "type": "face_index_page", faces: Array<FaceIndexRow>, next_offset: number | null, } | { "type": "face_inspection", inspection: FaceInspection, } | { "type": "artifact_page", summary: ArtifactSummary, chunks: Array<ArtifactChunkMetadata>, loops: Array<SectionLoopMetadata>, resources: Array<ArtifactView>, next_offset: number | null, } | { "type": "released", } | { "type": "error", error: GeometryError, } | { "type": "project_error", error: ProjectError, };
 
@@ -96,7 +117,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
+export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
 
@@ -148,7 +169,7 @@ export type ArtifactSummary = { "kind": "mesh", artifact_id: ArtifactId, definit
 
 export type ArtifactChunkMetadata = { "kind": "mesh", metadata: MeshChunkMetadata, } | { "kind": "section", metadata: SectionChunkMetadata, };
 
-export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
+export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "native_kernel_failure" | "native_conditioning_failure" | "native_analysis_indeterminate" | "native_singular_geometry" | "native_shape_error_exceeded" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
 
 export type ManufacturingError = { code: ManufacturingErrorCode, message: string, };
 
@@ -184,7 +205,7 @@ export type MachineComponent = { id: string, role: MachineComponentRole, pose: R
 
 export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, };
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, };
 
 export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
 
@@ -194,9 +215,13 @@ export type SupportPolicy = { "kind": "disabled" } | { "kind": "breakaway", dens
 
 export type PreflightSeverity = "error" | "warning" | "info";
 
-export type PreflightCheck = { code: string, severity: PreflightSeverity, message: string, occurrence_id: OccurrenceId | null, face_id: FaceId | null, };
+export type PreflightDisposition = "admitted" | "refused" | "unresolved";
 
-export type PreflightReport = { input_revision: ProjectRevision, eligible: boolean, software_only: boolean, checks: Array<PreflightCheck>, };
+export type PreflightEvidence = "not_evaluated" | "certified" | "unsupported" | "indeterminate" | "failed";
+
+export type PreflightCheck = { code: string, severity: PreflightSeverity, evidence: PreflightEvidence, required: boolean, message: string, occurrence_id: OccurrenceId | null, face_id: FaceId | null, };
+
+export type PreflightReport = { input_revision: ProjectRevision, disposition: PreflightDisposition, software_only: boolean, checks: Array<PreflightCheck>, };
 
 export type ManufacturingIntent = { printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
@@ -208,7 +233,19 @@ export type PlanarRegionCoverage = { section_area_mm2: number, source_section_ar
 
 export type PrintLayer = { index: number, z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
-export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, };
+export type SkinCoverageScope = "scheduled_material_distance";
+
+export type SupportClearanceScope = "continuous_target_outer_occupancy";
+
+export type NativeFeatureCoverageSummary = { disjoint_source_layer_count: number, invariant_source_union_layer_count: number, native_interface_complex_layer_count: number, owned_critical_slab_count: number, };
+
+export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, achieved_shape_error_mm: number, height_analysis_count: number, 
+/**
+ * Accepted original-occurrence/slab evidence captures, including endpoint ownership.
+ */
+slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
+
+export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -230,7 +267,7 @@ export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_i
 
 export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
 
-export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, };
+export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 
@@ -281,7 +318,7 @@ export const JOB_CANCEL_AFTER_MS = 60000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 4 as const;
+export const PROJECT_FORMAT_VERSION = 5 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
@@ -298,7 +335,7 @@ export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 5 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 6 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;
@@ -315,6 +352,6 @@ export const SECTION_BOOLEAN_TOLERANCE_MM = 0.00001 as const;
 export const SECTION_PLANE_TOLERANCE_MM = 0.0001 as const;
 export const POSE_NORM_TOLERANCE = 0.0000000001 as const;
 export const NORMAL_NORM_TOLERANCE = 0.0001 as const;
-export const IMPORT_PROFILE = "step-planar-cylindrical-v1" as const;
-export const MESH_PROFILE = "mesh-mm-0.05-v1" as const;
+export const IMPORT_PROFILE = "step-native-trimmed-v2" as const;
+export const MESH_PROFILE = "mesh-trimmed-mm-0.05-v2" as const;
 export const SURFACE_IMAGE_MEDIA_TYPE = "image/x-portable-graymap" as const;

@@ -9,11 +9,12 @@ const intent = {
   printer,
   recipe: {
     id: "software-solid-fill",
-    revision: "3",
+    revision: "4",
     material_id: "nominal-software-filament",
     material_revision: "1",
     filament_diameter_mm: 1.75,
     layer_height_mm: 0.2,
+    native_shape_error_mm: 0.1,
     bead_width_mm: 0.45,
     perimeter_count: 2,
     infill_fraction: 1,

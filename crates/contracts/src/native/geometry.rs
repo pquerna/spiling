@@ -167,6 +167,37 @@ impl TryFrom<SceneSummary> for rpc::SceneSummary {
     }
 }
 
+impl TryFrom<rpc::DefinitionDisplay> for DefinitionDisplay {
+    type Error = String;
+    fn try_from(value: rpc::DefinitionDisplay) -> Result<Self, String> {
+        let value = match required(value.kind, "definition display kind")? {
+            rpc::definition_display::Kind::MeshArtifactId(id) => Self::Mesh {
+                artifact_id: checked(ArtifactId::new(id))?,
+            },
+            rpc::definition_display::Kind::Unavailable(error) => Self::Unavailable {
+                error: error.try_into()?,
+            },
+        };
+        checked(value.validate())?;
+        Ok(value)
+    }
+}
+impl TryFrom<DefinitionDisplay> for rpc::DefinitionDisplay {
+    type Error = String;
+    fn try_from(value: DefinitionDisplay) -> Result<Self, String> {
+        checked(value.validate())?;
+        let kind = match value {
+            DefinitionDisplay::Mesh { artifact_id } => {
+                rpc::definition_display::Kind::MeshArtifactId(artifact_id.get())
+            }
+            DefinitionDisplay::Unavailable { error } => {
+                rpc::definition_display::Kind::Unavailable(error.try_into()?)
+            }
+        };
+        Ok(Self { kind: Some(kind) })
+    }
+}
+
 impl TryFrom<rpc::DefinitionRecord> for DefinitionRecord {
     type Error = String;
     fn try_from(value: rpc::DefinitionRecord) -> Result<Self, String> {
@@ -175,7 +206,7 @@ impl TryFrom<rpc::DefinitionRecord> for DefinitionRecord {
             provenance: required(value.provenance, "provenance")?.try_into()?,
             face_count: value.face_count,
             bounds_mm: required(value.bounds_mm, "bounds_mm")?.try_into()?,
-            mesh_artifact_id: checked(ArtifactId::new(value.mesh_artifact_id))?,
+            display: required(value.display, "definition display")?.try_into()?,
         };
         checked(value.validate())?;
         Ok(value)
@@ -191,7 +222,7 @@ impl TryFrom<DefinitionRecord> for rpc::DefinitionRecord {
             provenance: Some(value.provenance.try_into()?),
             face_count: value.face_count,
             bounds_mm: Some(value.bounds_mm.try_into()?),
-            mesh_artifact_id: value.mesh_artifact_id.get(),
+            display: Some(value.display.try_into()?),
         };
         Ok(value)
     }
@@ -258,8 +289,9 @@ impl TryFrom<rpc::FaceInfo> for FaceInfo {
             face_id: checked(FaceId::parse(value.face_id))?,
             surface_face_entity: value.surface_face_entity,
             source_entity_kind: value.source_entity_kind,
+            source_surface_entity_kind: value.source_surface_entity_kind,
             orientation: value.orientation,
-            carrier: required(value.carrier, "carrier")?.try_into()?,
+            geometry: required(value.geometry, "geometry")?.try_into()?,
         };
         checked(value.validate())?;
         Ok(value)
@@ -274,8 +306,9 @@ impl TryFrom<FaceInfo> for rpc::FaceInfo {
             face_id: value.face_id.into(),
             surface_face_entity: value.surface_face_entity,
             source_entity_kind: value.source_entity_kind,
+            source_surface_entity_kind: value.source_surface_entity_kind,
             orientation: value.orientation,
-            carrier: Some(value.carrier.try_into()?),
+            geometry: Some(value.geometry.try_into()?),
         };
         Ok(value)
     }
@@ -381,6 +414,7 @@ impl TryFrom<rpc::MeshChunkMetadata> for MeshChunkMetadata {
             face_count: value.face_count,
             bounds_mm: required(value.bounds_mm, "bounds_mm")?.try_into()?,
             carrier_deviation_mm: value.carrier_deviation_mm,
+            trim_deviation_mm: required(value.trim_deviation_mm, "trim_deviation_mm")?,
             quantization_error_mm: value.quantization_error_mm,
         };
         validate_mesh_metadata(&value)?;
@@ -405,6 +439,7 @@ impl TryFrom<MeshChunkMetadata> for rpc::MeshChunkMetadata {
             face_count: value.face_count,
             bounds_mm: Some(value.bounds_mm.try_into()?),
             carrier_deviation_mm: value.carrier_deviation_mm,
+            trim_deviation_mm: Some(value.trim_deviation_mm),
             quantization_error_mm: value.quantization_error_mm,
         };
         Ok(value)
@@ -549,7 +584,7 @@ impl TryFrom<i32> for DisplayProfile {
         match rpc::DisplayProfile::try_from(value)
             .map_err(|_| "unknown DisplayProfile".to_string())?
         {
-            rpc::DisplayProfile::MeshMm005V1 => Ok(Self::MeshMm005V1),
+            rpc::DisplayProfile::MeshTrimmedMm005V2 => Ok(Self::MeshTrimmedMm005V2),
             _ => Err("unspecified DisplayProfile".into()),
         }
     }
@@ -558,7 +593,7 @@ impl TryFrom<DisplayProfile> for rpc::DisplayProfile {
     type Error = String;
     fn try_from(value: DisplayProfile) -> Result<Self, String> {
         Ok(match value {
-            DisplayProfile::MeshMm005V1 => Self::MeshMm005V1,
+            DisplayProfile::MeshTrimmedMm005V2 => Self::MeshTrimmedMm005V2,
         })
     }
 }
@@ -649,27 +684,7 @@ fn validate_frame(value: &PlaneFrameMm) -> Result<(), String> {
     Ok(())
 }
 fn validate_mesh_metadata(value: &MeshChunkMetadata) -> Result<(), String> {
-    checked(value.bounds_mm.validate())?;
-    if value.schema_version != crate::display::MESH_SCHEMA_VERSION
-        || value.chunk_count == 0
-        || value.chunk_count > MAX_SCENE_MESH_BYTES / crate::display::MESH_HEADER_BYTES as u32
-        || value.chunk_index >= value.chunk_count
-        || value.face_count == 0
-        || value.face_count > MAX_NATIVE_FACES
-        || value.byte_count < crate::display::MESH_HEADER_BYTES as u32
-        || value.byte_count > MAX_GEOMETRY_CHUNK_BYTES
-    {
-        return Err("invalid mesh descriptor counts, bytes or schema".into());
-    }
-    if !value.carrier_deviation_mm.is_finite()
-        || !value.quantization_error_mm.is_finite()
-        || !(0.0..=MESH_CARRIER_TOLERANCE_MM).contains(&value.carrier_deviation_mm)
-        || !(0.0..=MESH_QUANTIZATION_TOLERANCE_MM).contains(&value.quantization_error_mm)
-        || value.carrier_deviation_mm + value.quantization_error_mm > MESH_SURFACE_TOLERANCE_MM
-    {
-        return Err("invalid mesh error budget".into());
-    }
-    Ok(())
+    checked(value.validate())
 }
 fn validate_section_metadata(value: &SectionChunkMetadata) -> Result<(), String> {
     if value.schema_version != crate::display::SECTION_SCHEMA_VERSION
@@ -696,43 +711,170 @@ fn validate_loop(value: &SectionLoopMetadata) -> Result<(), String> {
     }
     Ok(())
 }
-impl TryFrom<rpc::FaceCarrier> for FaceCarrier {
+impl TryFrom<rpc::FaceDomainSummary> for FaceDomainSummary {
     type Error = String;
-    fn try_from(value: rpc::FaceCarrier) -> Result<Self, String> {
-        let value = match required(value.kind, "face carrier kind")? {
-            rpc::face_carrier::Kind::Plane(v) => Self::Plane {
+    fn try_from(value: rpc::FaceDomainSummary) -> Result<Self, String> {
+        checked(Self::new(
+            value.trim_loop_count,
+            value.inner_loop_count,
+            value.periodic_u,
+            value.periodic_v,
+            value.has_singular_boundary,
+        ))
+    }
+}
+impl TryFrom<FaceDomainSummary> for rpc::FaceDomainSummary {
+    type Error = String;
+    fn try_from(value: FaceDomainSummary) -> Result<Self, String> {
+        checked(value.validate())?;
+        Ok(Self {
+            trim_loop_count: value.trim_loop_count,
+            inner_loop_count: value.inner_loop_count,
+            periodic_u: value.periodic_u,
+            periodic_v: value.periodic_v,
+            has_singular_boundary: value.has_singular_boundary,
+        })
+    }
+}
+impl TryFrom<rpc::FaceGeometryInfo> for FaceGeometryInfo {
+    type Error = String;
+    fn try_from(value: rpc::FaceGeometryInfo) -> Result<Self, String> {
+        let family = match rpc::SurfaceFamily::try_from(value.family)
+            .map_err(|_| "unknown surface family")?
+        {
+            rpc::SurfaceFamily::Plane => SurfaceFamily::Plane,
+            rpc::SurfaceFamily::Cylinder => SurfaceFamily::Cylinder,
+            rpc::SurfaceFamily::Cone => SurfaceFamily::Cone,
+            rpc::SurfaceFamily::Sphere => SurfaceFamily::Sphere,
+            rpc::SurfaceFamily::Torus => SurfaceFamily::Torus,
+            rpc::SurfaceFamily::BSpline => SurfaceFamily::BSpline,
+            rpc::SurfaceFamily::Nurbs => SurfaceFamily::Nurbs,
+            rpc::SurfaceFamily::LinearExtrusion => SurfaceFamily::LinearExtrusion,
+            rpc::SurfaceFamily::Revolution => SurfaceFamily::Revolution,
+            rpc::SurfaceFamily::TSpline => SurfaceFamily::TSpline,
+            rpc::SurfaceFamily::Unspecified => return Err("unspecified surface family".into()),
+        };
+        checked(Self::new(
+            family,
+            value.analytic.map(TryInto::try_into).transpose()?,
+            required(value.domain, "face domain")?.try_into()?,
+        ))
+    }
+}
+impl TryFrom<FaceGeometryInfo> for rpc::FaceGeometryInfo {
+    type Error = String;
+    fn try_from(value: FaceGeometryInfo) -> Result<Self, String> {
+        checked(value.validate())?;
+        let family = match value.family {
+            SurfaceFamily::Plane => rpc::SurfaceFamily::Plane,
+            SurfaceFamily::Cylinder => rpc::SurfaceFamily::Cylinder,
+            SurfaceFamily::Cone => rpc::SurfaceFamily::Cone,
+            SurfaceFamily::Sphere => rpc::SurfaceFamily::Sphere,
+            SurfaceFamily::Torus => rpc::SurfaceFamily::Torus,
+            SurfaceFamily::BSpline => rpc::SurfaceFamily::BSpline,
+            SurfaceFamily::Nurbs => rpc::SurfaceFamily::Nurbs,
+            SurfaceFamily::LinearExtrusion => rpc::SurfaceFamily::LinearExtrusion,
+            SurfaceFamily::Revolution => rpc::SurfaceFamily::Revolution,
+            SurfaceFamily::TSpline => rpc::SurfaceFamily::TSpline,
+        };
+        Ok(Self {
+            family: family as i32,
+            analytic: value.analytic.map(TryInto::try_into).transpose()?,
+            domain: Some(value.domain.try_into()?),
+        })
+    }
+}
+impl TryFrom<rpc::AnalyticSurfaceDescription> for AnalyticSurfaceDescription {
+    type Error = String;
+    fn try_from(value: rpc::AnalyticSurfaceDescription) -> Result<Self, String> {
+        use rpc::analytic_surface_description::Kind;
+        let value = match required(value.kind, "analytic surface kind")? {
+            Kind::Plane(v) => Self::Plane {
                 origin_mm: required(v.origin_mm, "origin_mm")?.try_into()?,
                 normal: required(v.normal, "normal")?.try_into()?,
             },
-            rpc::face_carrier::Kind::Cylinder(v) => Self::Cylinder {
+            Kind::Cylinder(v) => Self::Cylinder {
                 axis_origin_mm: required(v.axis_origin_mm, "axis_origin_mm")?.try_into()?,
                 axis_direction: required(v.axis_direction, "axis_direction")?.try_into()?,
                 radius_mm: v.radius_mm,
+            },
+            Kind::Cone(v) => Self::Cone {
+                frame: required(v.frame, "cone frame")?.try_into()?,
+                reference_radius_mm: v.reference_radius_mm,
+                semi_angle_radians: v.semi_angle_radians,
+            },
+            Kind::Sphere(v) => Self::Sphere {
+                frame: required(v.frame, "sphere frame")?.try_into()?,
+                radius_mm: v.radius_mm,
+            },
+            Kind::Torus(v) => Self::Torus {
+                frame: required(v.frame, "torus frame")?.try_into()?,
+                major_radius_mm: v.major_radius_mm,
+                minor_radius_mm: v.minor_radius_mm,
+                torus_kind: match rpc::TorusKind::try_from(v.kind)
+                    .map_err(|_| "unknown torus kind")?
+                {
+                    rpc::TorusKind::RegularRing => TorusKind::RegularRing,
+                    rpc::TorusKind::Horn => TorusKind::Horn,
+                    rpc::TorusKind::Spindle => TorusKind::Spindle,
+                    rpc::TorusKind::Unspecified => return Err("unspecified torus kind".into()),
+                },
             },
         };
         checked(value.validate())?;
         Ok(value)
     }
 }
-impl TryFrom<FaceCarrier> for rpc::FaceCarrier {
+impl TryFrom<AnalyticSurfaceDescription> for rpc::AnalyticSurfaceDescription {
     type Error = String;
-    fn try_from(value: FaceCarrier) -> Result<Self, String> {
+    fn try_from(value: AnalyticSurfaceDescription) -> Result<Self, String> {
         checked(value.validate())?;
+        use rpc::analytic_surface_description::Kind;
         let kind = match value {
-            FaceCarrier::Plane { origin_mm, normal } => {
-                rpc::face_carrier::Kind::Plane(rpc::PlaneFaceCarrier {
+            AnalyticSurfaceDescription::Plane { origin_mm, normal } => {
+                Kind::Plane(rpc::PlaneSurfaceDescription {
                     origin_mm: Some(origin_mm.try_into()?),
                     normal: Some(normal.try_into()?),
                 })
             }
-            FaceCarrier::Cylinder {
+            AnalyticSurfaceDescription::Cylinder {
                 axis_origin_mm,
                 axis_direction,
                 radius_mm,
-            } => rpc::face_carrier::Kind::Cylinder(rpc::CylinderFaceCarrier {
+            } => Kind::Cylinder(rpc::CylinderSurfaceDescription {
                 axis_origin_mm: Some(axis_origin_mm.try_into()?),
                 axis_direction: Some(axis_direction.try_into()?),
                 radius_mm,
+            }),
+            AnalyticSurfaceDescription::Cone {
+                frame,
+                reference_radius_mm,
+                semi_angle_radians,
+            } => Kind::Cone(rpc::ConeSurfaceDescription {
+                frame: Some(frame.try_into()?),
+                reference_radius_mm,
+                semi_angle_radians,
+            }),
+            AnalyticSurfaceDescription::Sphere { frame, radius_mm } => {
+                Kind::Sphere(rpc::SphereSurfaceDescription {
+                    frame: Some(frame.try_into()?),
+                    radius_mm,
+                })
+            }
+            AnalyticSurfaceDescription::Torus {
+                frame,
+                major_radius_mm,
+                minor_radius_mm,
+                torus_kind,
+            } => Kind::Torus(rpc::TorusSurfaceDescription {
+                frame: Some(frame.try_into()?),
+                major_radius_mm,
+                minor_radius_mm,
+                kind: match torus_kind {
+                    TorusKind::RegularRing => rpc::TorusKind::RegularRing,
+                    TorusKind::Horn => rpc::TorusKind::Horn,
+                    TorusKind::Spindle => rpc::TorusKind::Spindle,
+                } as i32,
             }),
         };
         Ok(Self { kind: Some(kind) })
@@ -834,6 +976,7 @@ pub enum GeometryCall {
     Execute(rpc::GeometryRequest),
     ImportPart(rpc::ImportPartRequest),
     StartSection(rpc::StartSectionRequest),
+    PrepareBedPose(rpc::PrepareBedPoseRequest),
 }
 impl TryFrom<rpc::AddInstanceRequest> for GeometryCommand {
     type Error = String;
@@ -852,6 +995,7 @@ impl TryFrom<rpc::SetInstancePoseRequest> for GeometryCommand {
         Ok(Self::SetInstancePose {
             session_id: checked(SessionId::parse(value.session_id))?,
             base_revision: SceneRevision(value.base_revision),
+            project_revision: crate::project::ProjectRevision(value.project_revision),
             occurrence_id: checked(OccurrenceId::new(value.occurrence_id))?,
             pose: required(value.pose, "pose")?.try_into()?,
         })
@@ -992,6 +1136,31 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
                 plane: Some(plane.try_into()?),
             }));
         }
+        GeometryCommand::PrepareBedPose {
+            session_id,
+            base_revision,
+            project_revision,
+            occurrence_id,
+            expected_definition_id,
+            expected_pose,
+            envelope_mm,
+            center_xy,
+            contact_tolerance_mm,
+        } => {
+            super::bed_pose::validate_request(expected_pose, envelope_mm, contact_tolerance_mm)?;
+            return Ok(GeometryCall::PrepareBedPose(rpc::PrepareBedPoseRequest {
+                parent: format!("sessions/{}", session_id.as_str()),
+                request_id: id.into(),
+                base_revision: base_revision.get(),
+                project_revision: project_revision.0,
+                occurrence_id: occurrence_id.get(),
+                expected_definition_id: expected_definition_id.into(),
+                expected_pose: Some(expected_pose.try_into()?),
+                envelope_mm: Some(envelope_mm.try_into()?),
+                center_xy,
+                contact_tolerance_mm,
+            }));
+        }
         GeometryCommand::AddInstance {
             session_id,
             base_revision,
@@ -1006,11 +1175,13 @@ pub fn geometry_call(command: GeometryCommand, id: &str) -> Result<GeometryCall,
         GeometryCommand::SetInstancePose {
             session_id,
             base_revision,
+            project_revision,
             occurrence_id,
             pose,
         } => rpc::geometry_request::Command::SetInstancePose(rpc::SetInstancePoseRequest {
             session_id: session_id.into(),
             base_revision: base_revision.get(),
+            project_revision: project_revision.0,
             occurrence_id: occurrence_id.get(),
             pose: Some(pose.try_into()?),
         }),
@@ -1517,6 +1688,7 @@ mod tests {
             GeometryCommand::SetInstancePose {
                 session_id: session.clone(),
                 base_revision: revision,
+                project_revision: crate::project::ProjectRevision(7),
                 occurrence_id: occurrence,
                 pose: RigidPoseMm::IDENTITY,
             },
@@ -1580,6 +1752,10 @@ mod tests {
                     assert_eq!(request.request_id, id.as_str());
                     GeometryCommand::try_from(request).unwrap()
                 }
+                GeometryCall::PrepareBedPose(request) => {
+                    assert_eq!(request.request_id, id.as_str());
+                    GeometryCommand::try_from(request).unwrap()
+                }
             };
             assert_eq!(decoded, command);
         }
@@ -1591,6 +1767,155 @@ mod tests {
                 "invalid"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn definition_display_roundtrip_requires_explicit_mesh_or_bounded_refusal() {
+        for display in [
+            DefinitionDisplay::Mesh {
+                artifact_id: ArtifactId::new(1).unwrap(),
+            },
+            DefinitionDisplay::Unavailable {
+                error: GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "source chart unavailable for display",
+                ),
+            },
+        ] {
+            let wire = rpc::DefinitionDisplay::try_from(display.clone()).unwrap();
+            assert_eq!(DefinitionDisplay::try_from(wire).unwrap(), display);
+        }
+        assert!(DefinitionDisplay::try_from(rpc::DefinitionDisplay { kind: None }).is_err());
+        assert!(
+            DefinitionDisplay::try_from(rpc::DefinitionDisplay {
+                kind: Some(rpc::definition_display::Kind::MeshArtifactId(0)),
+            })
+            .is_err()
+        );
+        assert!(
+            DefinitionDisplay::try_from(rpc::DefinitionDisplay {
+                kind: Some(rpc::definition_display::Kind::Unavailable(
+                    rpc::DomainError {
+                        code: "unknown".into(),
+                        message: "refusal".into(),
+                    }
+                )),
+            })
+            .is_err()
+        );
+        assert!(
+            DefinitionDisplay::try_from(rpc::DefinitionDisplay {
+                kind: Some(rpc::definition_display::Kind::Unavailable(
+                    rpc::DomainError {
+                        code: "unsupported_operation".into(),
+                        message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1),
+                    }
+                )),
+            })
+            .is_err()
+        );
+        assert!(
+            rpc::DefinitionDisplay::try_from(DefinitionDisplay::Unavailable {
+                error: GeometryError {
+                    code: GeometryErrorCode::UnsupportedOperation,
+                    message: "x".repeat(MAX_ERROR_MESSAGE_BYTES as usize + 1)
+                },
+            })
+            .is_err()
+        );
+        assert!(
+            DefinitionRecord::try_from(rpc::DefinitionRecord {
+                definition_id: "a".repeat(64),
+                provenance: Some(rpc::SourceProvenance {
+                    source_hash: "b".repeat(64),
+                    source_name: "part".into(),
+                    source_unit: rpc::SourceUnit::Millimetre as i32,
+                    uncertainty_mm: None,
+                }),
+                face_count: 1,
+                bounds_mm: Some(AabbMm::new([0.0; 3], [1.0; 3]).unwrap().try_into().unwrap()),
+                display: None,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn face_geometry_roundtrip_preserves_encoding_family_domains_and_singularities() {
+        let frame = PlaneFrameMm::from_plane(PlaneMm {
+            origin_mm: [1.0, 2.0, 3.0],
+            normal: [0.0, 0.0, 1.0],
+        })
+        .unwrap();
+        let descriptions = [
+            AnalyticSurfaceDescription::Plane {
+                origin_mm: frame.origin_mm,
+                normal: frame.z_axis,
+            },
+            AnalyticSurfaceDescription::Cylinder {
+                axis_origin_mm: frame.origin_mm,
+                axis_direction: frame.z_axis,
+                radius_mm: 2.0,
+            },
+            AnalyticSurfaceDescription::Cone {
+                frame,
+                reference_radius_mm: 2.0,
+                semi_angle_radians: -0.2,
+            },
+            AnalyticSurfaceDescription::Sphere {
+                frame,
+                radius_mm: 3.0,
+            },
+            AnalyticSurfaceDescription::Torus {
+                frame,
+                major_radius_mm: 3.0,
+                minor_radius_mm: 3.0,
+                torus_kind: TorusKind::Horn,
+            },
+        ];
+        for description in descriptions {
+            let face = FaceInfo {
+                face_id: FaceId::from_step_entity(9_007_199_254_740_993).unwrap(),
+                surface_face_entity: "9007199254740994".into(),
+                source_entity_kind: "ADVANCED_FACE".into(),
+                source_surface_entity_kind: "B_SPLINE_SURFACE_WITH_KNOTS".into(),
+                orientation: false,
+                geometry: FaceGeometryInfo::new(
+                    SurfaceFamily::Nurbs,
+                    Some(description),
+                    FaceDomainSummary::new(2, 1, true, false, true).unwrap(),
+                )
+                .unwrap(),
+            };
+            let wire = rpc::FaceInfo::try_from(face.clone()).unwrap();
+            assert_eq!(FaceInfo::try_from(wire.clone()).unwrap(), face);
+            let mut malformed = wire;
+            malformed.geometry.as_mut().unwrap().family = i32::MAX;
+            assert!(FaceInfo::try_from(malformed).is_err());
+        }
+        assert!(
+            FaceGeometryInfo::try_from(rpc::FaceGeometryInfo {
+                family: rpc::SurfaceFamily::Plane as i32,
+                analytic: None,
+                domain: None,
+            })
+            .is_err()
+        );
+        assert!(
+            rpc::FaceGeometryInfo::try_from(FaceGeometryInfo {
+                family: SurfaceFamily::Sphere,
+                analytic: Some(AnalyticSurfaceDescription::Plane {
+                    origin_mm: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0]
+                }),
+                domain: FaceDomainSummary::new(1, 0, false, false, false).unwrap(),
+            })
+            .is_err()
+        );
+        assert!(
+            AnalyticSurfaceDescription::try_from(rpc::AnalyticSurfaceDescription { kind: None })
+                .is_err()
         );
     }
 
@@ -1625,19 +1950,21 @@ mod tests {
             .is_err()
         );
         assert!(
-            FaceCarrier::try_from(rpc::FaceCarrier {
-                kind: Some(rpc::face_carrier::Kind::Plane(rpc::PlaneFaceCarrier {
-                    origin_mm: Some(rpc::Vec3 {
-                        x: f64::NAN,
-                        y: 0.0,
-                        z: 0.0
-                    }),
-                    normal: Some(rpc::Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 1.0
-                    })
-                }))
+            AnalyticSurfaceDescription::try_from(rpc::AnalyticSurfaceDescription {
+                kind: Some(rpc::analytic_surface_description::Kind::Plane(
+                    rpc::PlaneSurfaceDescription {
+                        origin_mm: Some(rpc::Vec3 {
+                            x: f64::NAN,
+                            y: 0.0,
+                            z: 0.0
+                        }),
+                        normal: Some(rpc::Vec3 {
+                            x: 0.0,
+                            y: 0.0,
+                            z: 1.0
+                        })
+                    }
+                ))
             })
             .is_err()
         );
@@ -1663,7 +1990,7 @@ mod tests {
             artifact_id: artifact,
             definition_id: definition.clone(),
             schema_version: crate::display::MESH_SCHEMA_VERSION,
-            mesh_profile: DisplayProfile::MeshMm005V1,
+            mesh_profile: DisplayProfile::MeshTrimmedMm005V2,
             chunk_index: 0,
             chunk_count: 1,
             byte_count: 256,
@@ -1671,8 +1998,36 @@ mod tests {
             face_count: 1,
             bounds_mm: AabbMm::new([0.0; 3], [1.0; 3]).unwrap(),
             carrier_deviation_mm: 0.0,
+            trim_deviation_mm: 0.0,
             quantization_error_mm: 0.0,
         };
+        let mut achieved = metadata.clone();
+        achieved.carrier_deviation_mm = 0.01;
+        achieved.trim_deviation_mm = 0.005;
+        achieved.quantization_error_mm = 0.02;
+        let wire = rpc::MeshChunkMetadata::try_from(achieved.clone()).unwrap();
+        assert_eq!(MeshChunkMetadata::try_from(wire.clone()).unwrap(), achieved);
+        assert_eq!(
+            serde_json::from_value::<MeshChunkMetadata>(serde_json::to_value(&achieved).unwrap())
+                .unwrap(),
+            achieved
+        );
+        let mut absent_trim = wire.clone();
+        absent_trim.trim_deviation_mm = None;
+        assert!(MeshChunkMetadata::try_from(absent_trim).is_err());
+        let mut old_profile = wire.clone();
+        old_profile.mesh_profile = 1;
+        assert!(MeshChunkMetadata::try_from(old_profile).is_err());
+        let mut over_budget = achieved.clone();
+        over_budget.trim_deviation_mm = 0.02;
+        assert!(rpc::MeshChunkMetadata::try_from(over_budget.clone()).is_err());
+        assert!(
+            serde_json::from_value::<MeshChunkMetadata>(serde_json::to_value(over_budget).unwrap())
+                .is_err()
+        );
+        let mut missing = serde_json::to_value(achieved).unwrap();
+        missing.as_object_mut().unwrap().remove("trim_deviation_mm");
+        assert!(serde_json::from_value::<MeshChunkMetadata>(missing).is_err());
         let response = GeometryResponse::ArtifactPage {
             summary: ArtifactSummary::Mesh {
                 artifact_id: artifact,

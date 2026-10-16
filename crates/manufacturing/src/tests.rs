@@ -27,6 +27,7 @@ fn intent() -> ManufacturingIntent {
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
+            native_shape_error_mm: 0.1,
             id: "solid".into(),
             revision: "1".into(),
             material_id: "nominal".into(),
@@ -245,6 +246,22 @@ fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates(
         .compile(&data)
         .unwrap();
     assert_eq!(
+        overlap
+            .plan
+            .native_geometry
+            .source_feature_coverage
+            .disjoint_source_layer_count,
+        0
+    );
+    assert_eq!(
+        overlap
+            .plan
+            .native_geometry
+            .source_feature_coverage
+            .invariant_source_union_layer_count,
+        overlap.plan.native_geometry.certified_layer_count,
+    );
+    assert_eq!(
         overlap.plan.layers[0]
             .paths
             .iter()
@@ -396,7 +413,7 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
         )
         .unwrap();
         let boundary = native
-            .loops
+            .into_loops()
             .into_iter()
             .find(|boundary| !boundary.is_hole)
             .unwrap();

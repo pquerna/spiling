@@ -24,9 +24,7 @@ export function ManufacturingPanel({
 }: {
   host: ManufacturingHost;
   cancel: () => void;
-  diagnosticImport: (
-    source: "box-mm.step" | "independent-exporters/occt-cylinder-mm.step",
-  ) => Promise<void>;
+  diagnosticImport: (source: string) => Promise<void>;
 }) {
   const manufacturing = useManufacturing(host);
   const [exportPath, setExportPath] = useState("manufacturing-export");
@@ -34,6 +32,7 @@ export function ManufacturingPanel({
     "fixtures/manufacturing/complete-sparse.intent.json",
   );
   const [bedOccurrence, setBedOccurrence] = useState("");
+  const [diagnosticSource, setDiagnosticSource] = useState("");
   const { status, draft, inspection, fresh, available, writable } = manufacturing;
   const result = inspection?.result,
     replay = inspection?.replay;
@@ -94,6 +93,22 @@ export function ManufacturingPanel({
             }}
           >
             Admit full-face OCCT cylinder fixture through native tokens
+          </button>
+          <label>
+            Diagnostic STEP source relative to the native fixture root
+            <input
+              data-testid="manufacturing-diagnostic-source"
+              value={diagnosticSource}
+              disabled={!writable || !!host.state.occurrences.length}
+              onChange={(event) => setDiagnosticSource(event.target.value)}
+            />
+          </label>
+          <button
+            data-testid="manufacturing-diagnostic-source-import"
+            disabled={!writable || !!host.state.occurrences.length || !diagnosticSource}
+            onClick={() => { void diagnosticImport(diagnosticSource); }}
+          >
+            Diagnostic native token import — no viewport or hardware claim
           </button>
         </div>
       )}
@@ -262,7 +277,10 @@ export function ManufacturingPanel({
         <select
           data-testid="manufacturing-bed-occurrence"
           value={bedOccurrence}
-          onChange={(event) => setBedOccurrence(event.target.value)}
+          onChange={(event) => {
+            setBedOccurrence(event.target.value);
+            manufacturing.clearBedProposal();
+          }}
         >
           <option value="">Select occurrence explicitly</option>
           {host.state.occurrences.map((row) => (
@@ -278,7 +296,7 @@ export function ManufacturingPanel({
             void manufacturing.prepareBed(Number(bedOccurrence), false);
           }}
         >
-          Place on bed
+          Prepare place-on-bed proposal
         </button>
         <button
           data-testid="manufacturing-center-bed"
@@ -287,14 +305,63 @@ export function ManufacturingPanel({
             void manufacturing.prepareBed(Number(bedOccurrence), true);
           }}
         >
-          Center and place on bed
+          Prepare center-and-place proposal
         </button>
         <p>
-          Uses certified native definition bounds and current axis-aligned pose, never mesh bounds.
-          Preserves orientation; one SetInstancePose transaction uses current revision and Core
-          undo. Oblique orientations require native contact analysis and are rejected explicitly.
+          Read-only native contact analysis supports the current arbitrary rigid orientation,
+          preserves its quaternion and uses original-source native bounds, never display meshes.
+          Review first; only explicit Apply commits one revision-bound Core pose transaction.
+          Software contact evidence is not physical printability or machine qualification.
         </p>
       </fieldset>
+      {manufacturing.bedProposal && (
+        <section aria-label="Review native bed proposal" data-testid="manufacturing-bed-review">
+          <h3>Review native bed pose — not yet applied</h3>
+          {manufacturing.bedProposalStale && (
+            <p role="alert" data-testid="manufacturing-bed-stale">
+              Proposal invalidated by changed scene, project, intent or session. Clear or prepare
+              again; this captured pose cannot be applied.
+            </p>
+          )}
+          <p>
+            Occurrence {manufacturing.bedProposal.occurrence_id}; captured project revision{" "}
+            {manufacturing.bedProposal.project_revision}, scene revision{" "}
+            {manufacturing.bedProposal.scene_revision}.
+          </p>
+          <dl>
+            <dt>Original translation (mm)</dt>
+            <dd>{manufacturing.bedProposal.original_pose.translation_mm.join(", ")}</dd>
+            <dt>Proposed translation (mm)</dt>
+            <dd>{manufacturing.bedProposal.pose.translation_mm.join(", ")}</dd>
+            <dt>Original orientation quaternion (X, Y, Z, W)</dt>
+            <dd>{manufacturing.bedProposal.original_pose.rotation_xyzw.join(", ")}</dd>
+            <dt>Proposed orientation quaternion (X, Y, Z, W), preserved</dt>
+            <dd>{manufacturing.bedProposal.pose.rotation_xyzw.join(", ")}</dd>
+            <dt>Native contact tolerance / maximum certified gap (mm)</dt>
+            <dd>{manufacturing.bedProposal.contact_tolerance_mm} / {manufacturing.bedProposal.maximum_contact_gap_mm}</dd>
+            <dt>Declared bed envelope (mm, minimum → maximum)</dt>
+            <dd>{manufacturing.bedProposal.envelope_mm.min.join(", ")} → {manufacturing.bedProposal.envelope_mm.max.join(", ")}</dd>
+            <dt>Original native minimum support bracket (mm)</dt>
+            <dd>{manufacturing.bedProposal.minimum_lower_mm.join(", ")} → {manufacturing.bedProposal.minimum_upper_mm.join(", ")}</dd>
+            <dt>Original native maximum support bracket (mm)</dt>
+            <dd>{manufacturing.bedProposal.maximum_lower_mm.join(", ")} → {manufacturing.bedProposal.maximum_upper_mm.join(", ")}</dd>
+          </dl>
+          <button
+            data-testid="manufacturing-bed-apply"
+            disabled={!writable || host.state.stale || manufacturing.bedProposalStale}
+            onClick={() => { void manufacturing.applyBed(); }}
+          >
+            Apply reviewed bed pose once
+          </button>
+          <button
+            data-testid="manufacturing-bed-clear"
+            disabled={!available}
+            onClick={manufacturing.clearBedProposal}
+          >
+            Clear bed proposal without editing project
+          </button>
+        </section>
+      )}
       <div className="geometry-buttons">
         <button
           data-testid="manufacturing-preflight"
@@ -335,15 +402,18 @@ export function ManufacturingPanel({
       </div>
       {manufacturing.preflight && (
         <section data-testid="manufacturing-preflight-report">
-          <h3>Preflight — input eligibility only</h3>
+          <h3>Preflight — captured input admission</h3>
           <p>
             Revision {manufacturing.preflight.input_revision};
             {manufacturing.preflight.input_revision === host.state.project?.revision
               ? " current"
               : " stale — rerun"}
-            . Eligible: {String(manufacturing.preflight.eligible)}. Software only:{" "}
-            {String(manufacturing.preflight.software_only)}. Native layer/support/bridge/offset
-            analysis remains pending until Compile. Physical qualification is absent.
+            . Disposition: {manufacturing.preflight.disposition}. Software only:{" "}
+            {String(manufacturing.preflight.software_only)}. Required unevaluated or indeterminate
+            checks remain unresolved, not passed. Compile-only checks are optional admission
+            evidence: pending, partial, unsupported or failed native analysis does not itself
+            refuse admitted input. Admission does not authorize Compile or certify its outcome.
+            Physical qualification is absent.
           </p>
           <ul>
             {manufacturing.preflight.checks.map((check, index) => (
@@ -351,7 +421,8 @@ export function ManufacturingPanel({
                 <strong>
                   {check.severity}: {check.code}
                 </strong>{" "}
-                — {check.message}
+                — {check.message}; evidence: {check.evidence}; required: {String(check.required)}
+                ; scope: {check.required ? "required input admission" : "Compile-only analysis"}
                 {check.occurrence_id !== null && <>; occurrence {check.occurrence_id}</>}
                 {check.face_id !== null && <>; face {check.face_id}</>}
               </li>
@@ -396,6 +467,48 @@ export function ManufacturingPanel({
             {status.artifact.byte_count} B; {status.artifact.summary.layers} layers;
             {status.artifact.summary.paths} paths; {status.artifact.summary.deposition_segments}{" "}
             deposition segments.
+          </p>
+          <dl data-testid="manufacturing-native-geometry-coverage">
+            <dt>Actual occurrence-query / slab coverage evidence</dt>
+            <dd>{status.artifact.summary.native_geometry.evidence}</dd>
+            <dt>Accepted disjoint / invariant-union / native-interface-complex layers</dt>
+            <dd>
+              {status.artifact.summary.native_geometry.source_feature_coverage.disjoint_source_layer_count} /{" "}
+              {status.artifact.summary.native_geometry.source_feature_coverage.invariant_source_union_layer_count} /{" "}
+              {status.artifact.summary.native_geometry.source_feature_coverage.native_interface_complex_layer_count}
+            </dd>
+            <dt>Owned critical source slabs</dt>
+            <dd>
+              {status.artifact.summary.native_geometry.source_feature_coverage.owned_critical_slab_count}
+            </dd>
+            <dt>Required / achieved native shape error (mm)</dt>
+            <dd>
+              {status.artifact.summary.native_geometry.requested_shape_error_mm} /{" "}
+              {status.artifact.summary.native_geometry.achieved_shape_error_mm}
+            </dd>
+            <dt>Height analyses / slabs / events / geometry work</dt>
+            <dd>
+              {status.artifact.summary.native_geometry.height_analysis_count} /{" "}
+              {status.artifact.summary.native_geometry.slab_count} /{" "}
+              {status.artifact.summary.native_geometry.event_count} /{" "}
+              {status.artifact.summary.native_geometry.geometry_work}
+            </dd>
+            <dt>Skin coverage scope</dt>
+            <dd>{status.artifact.summary.native_geometry.skin_coverage}</dd>
+            <dt>Support clearance scope</dt>
+            <dd>{status.artifact.summary.native_geometry.support_clearance}</dd>
+          </dl>
+          <p>
+            Native evidence covers the actual occurrence queries and slabs used by this schedule,
+            not every possible query. Source feature composition counts accepted disjoint-source,
+            invariant-union and native-interface-complex layers separately; a proof for one
+            interval does not make the entire plan invariant. Endpoint-owned contributions
+            bind certified adjacent closed strata, not an empty-to-contact distance certificate.
+            Per-occurrence certificates alone do not certify a global composed union boundary.
+            Requested and achieved bounds are separate from sampled image resolution below.
+            Skin coverage measures distance in scheduled realized material D. Support clearance
+            uses continuous target outer occupancy, not deposition anchors or proof of physical
+            collision freedom. Actual deposited strokes alone establish anchors.
           </p>
           <small>
             Compiled summary is not a fresh actual-program report. Revision bookkeeping is not
@@ -681,6 +794,8 @@ export function ManufacturingPanel({
               working: manufacturing.working,
               draft_changed: manufacturing.changed,
               preflight: manufacturing.preflight ?? null,
+              bed_proposal: manufacturing.bedProposal,
+              bed_proposal_stale: manufacturing.bedProposalStale,
               replay: replay
                 ? {
                     event_count: replay.eventCount,
