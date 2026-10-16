@@ -711,9 +711,19 @@ endpoint quotients rather than inventing strict rank at collapsed endpoints.
 
 **Uncertain UV joints.** Two retained germs at the same original NativeV need
 not evaluate to identical UV endpoints. A comparison completion may use an
-exact source expression such as `j* = (j_a + j_b)/2` only after proving it lies
-inside **both** admitted original UV fibers and retaining both whole forward
-correspondences. For normalized endpoint traces,
+exact source expression such as `j* = (j_a + j_b)/2` only inside the original
+validated joint envelope bound to that NativeV and **both material-oriented
+NativeUses**, with both whole forward correspondences retained. This joint
+completion authority is distinct from the selected parameter map's numerical
+UV margin, which may be exactly zero. Never enlarge or relabel that original
+map margin. A nonsingular endpoint envelope does not authorize a spherical
+pole, unstored period lift or different chart association.
+
+The native joint envelope authorizes local endpoint completions only.
+A separate comparison-transport receipt must qualify any whole-germ
+deformation: physical position and relative-derivative bounds, complete
+homotopy and nonincident separation under the same source allowance. For
+normalized endpoint traces,
 `gamma_i~(s) = gamma_i(s) + (1-s)(j* - j_i)` preserves each actual exit.
 Its derivative corrections are explicit; it inherits no unchanged tangent
 certificate. This is a comparison chart, not snapped source data or a new
