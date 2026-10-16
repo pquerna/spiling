@@ -28,6 +28,38 @@ This is source-resolution/native API smoke, not the admitted-profile import/cyli
 
 At the source-availability step, `cargo test --locked -p spiling-contracts -p spiling-engine-client` passed 24 tests and `pnpm contracts --check` passed. That historical check did not add an application geometry capability or protocol cutover; the later v2 evidence is recorded separately below.
 
+### Published source-owned Boolean checkpoint
+
+The later native checkpoint is public at
+[`e6ff94e05ee5130f06451883cc7bb2148a080b99`](https://github.com/pquerna/monstertruck/tree/e6ff94e05ee5130f06451883cc7bb2148a080b99),
+on `spiling-dev`. It preserves complete source-owned curved intersection branches,
+original endpoint genealogy and paired source-chart seams. Historical edge-ID
+maps retain allocation-only identity leases; dropping the last strong edge
+still releases its curve buffers. Directed face adjacency uses immutable
+identity/orientation keys instead of mutable face keys.
+
+Observed checks used Rust 1.99.0, one Cargo job, no incremental compilation,
+zero debug information and a 3 GiB memory / 128 MiB swap scope:
+
+| Native check | Observed result |
+| --- | --- |
+| Solid library | 95 passed |
+| Topology library | 50 passed |
+| Selected periodic-cylinder, inward-hole, terminal-seam and spherical-section consumers | 5 passed |
+| Public directed-adjacency doctests | 2 passed |
+| Geometry/modeling/topology/meshing/solid all-target Clippy, `-D warnings` | Passed |
+
+The spherical consumer retains all four original upper face uses and eight
+original boundary/meridian edges, with a closed cap and unchanged source.
+The six-case rational-torus matrix remains intact as six independently named
+cases. A combined run completed its first four case assertions before the
+unchanged 300-second command deadline; the two quarter-turn cases then passed
+separately. The timed-out combined command is **not** a full-suite pass.
+
+This is a bounded native-kernel checkpoint, not full STEP, Spiling fitting/housing
+Compile, workbench, physical printing or packaged geometry qualification. The
+older frozen corpus below retains its actual producer and support envelope.
+
 ### Original upstream source failure
 
 Candidate kernel: Monstertruck 0.4.1, Git revision `1fbc7a52555df6ccfe66aee7c877097ab1852146`. Its public repository clones without recursively fetching submodules. Its `.gitmodules` includes:
