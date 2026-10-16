@@ -155,6 +155,18 @@ Exported face `same_sense` composes the native face use with the UV map's determ
 
 Writer/reader agreement alone is insufficient interoperability evidence. Independently cross-check directed trim behavior against [OCCT's STEP conversion](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_0/src/StepToGeom/StepToGeom.cxx#L2247-L2395) and [periodic trim selection](https://github.com/Open-Cascade-SAS/OCCT/blob/V7_9_0/src/Geom/Geom_TrimmedCurve.cxx#L91-L141), with independent physical positions, derivatives and normals. Representation-changing rationalization or fitted surface export requires its own non-affine map/error proof; otherwise refuse it rather than advertising an affine chart correspondence.
 
+Finite tensor support is part of the original carrier contract, not merely a
+hint for finding a UV proposal. An affine/conic correspondence must retain its
+coefficient-derived UV curve and prove both nominal support and the complete
+inverse uncertainty tube within the original knot domain. Inward rounding,
+clamping or replacing the curve cannot repair a source boundary outside that
+domain. Diagnostic authoring may instead construct a sufficient finite carrier
+on the same exact physical plane from certified bounds of every complete
+original boundary interval, preserving all original spatial curves, parameter
+phases, topology and material orientation. That is a correction to an authored
+representation, not an import fallback or retroactive qualification of an
+invalid fixture.
+
 ## 5. Geometry facade API changes
 
 Names below specify responsibility and data semantics. They are proposed Rust-level interfaces, not compatibility shims or a request to expose each method over gRPC.
@@ -435,6 +447,102 @@ same source geometric normal for face and coedge incidence. Do not snap UV,
 discard pole cells, replace the carrier or infer global material closure from
 the implicit equation alone.
 
+### 5.9 Bound planar proof pairs and reuse exact oriented geometry
+
+Material clearance must examine every potentially close nonincident segment
+pair, not the complete Cartesian inventory twice. A geometry-owned, balanced
+boundary-order AABB hierarchy may reject a subtree only when a downward-rounded
+axis gap is strictly greater than the unchanged clearance margin. Touching,
+uncertain or overlapping boxes retain the existing narrowphase. Enumerate
+unordered pairs once; retain edge-degeneracy and adjacency rules. The hierarchy
+is only a rejection index, never material or topology authority.
+
+Charge construction, visits, narrowphase pairs and actual vector capacities.
+Bound recursion and scratch; reclaim temporary index storage on every exit
+without refunding work. Overlapping/pathological inputs still encounter the
+existing resource gates; do not promise universally subquadratic work.
+
+A complete exact oriented-cycle bijection may replace tolerance-based
+correspondence search. Compare all finite coordinates, orientation and hole
+roles, permitting only cyclic rotation and inventory order. Repeated/ambiguous
+anchors retain the general proof path. Exact floating-boundary identity proves
+zero relative coordinate displacement, not zero native/source approximation.
+Keep native tube/pose/chord/plane contributions in achieved bounds and preserve
+the original clearance obligation: correspondence displacement for separated
+cycles, or the full original projection tube for filled projection. The proved
+native clearance then applies to an exactly identical candidate; caller
+provenance or a matching hash alone is insufficient.
+
+### 5.10 Contract affine-plane systems from paired source functionals
+
+For source surface `S`, query plane `(n,O)` and unchanged Native leader `L`,
+the reduced equations remain `n dot (S-O)` and `L' dot (S-L)`. Evaluate both
+source functionals together before unused spatial Taylor coordinates, sharing
+the original basis and rational denominator. Interval-centered coefficients
+retain `P-L` directly, including homogeneous `P-wL`; do not distribute a large
+independent world-origin offset. Generic revolution pulls actual rotation,
+processor pose and inversion through original profile coefficients. Unsupported
+profiles retain one shared certified spatial evaluation, not a surrogate.
+
+Strict inclusion still covers the entire original parameter span and uniqueness
+domain. Full spatial reconstruction, residuals, time partials and first/second
+derivatives remain mandatory. Transversality may be established on the
+all-root-containing whole-span image; this is not permission to shrink the
+parameter query. Mean-value reconstruction outside that image requires jets on
+the complete convex connecting domain. Preserve the existing piecewise source
+admission policy without inventing whole-C1 or Hessian authority. Failed
+attempts and all actual evaluator work retain the existing gates.
+
+Native's `max_retained_bytes` bounds owned source/proof storage, not evaluator
+stack memory. Fixed-capacity tensor/basis workspaces must be included in both
+full and reduced formulation cost comparisons using their actual layouts;
+these comparisons are not a scratch-byte admission API. Shared capacity
+accounting and external process memory limits remain distinct. Do not claim
+that a retained-byte limit establishes a hard stack or RSS bound.
+
+### 5.11 Distinguish closed-slab topology from whole-source convexity
+
+A blind pocket outside a closed manufacturing band cannot establish global
+convexity, but need not prevent a proof of the actual slab-clipped source.
+Exhaustively cover original face/edge cells: certify whole-cell height exclusion
+outside the closed band; retain all regularity, positive degree, curvature,
+distance, pole and source-link obligations for cells meeting it. Unknown-height
+cells remain active. Close both cuts with actual original-source material
+halfspace caps, never candidate polygons. Prove the calibrated source witness
+strictly between both endpoint planes; cap radial signs and source/cap links
+must follow from those coefficient-level halfspace constraints.
+
+Scope this authority to the exact immutable source, frame and closed interval.
+Only a separately completed whole-source proof may populate the existing global
+convexity authority. Adjacent local proofs cannot be ORed into a cross-height
+claim: joint acceptance still needs a proof covering the combined height range
+or actual nonempty original interface/coface incidence. Keep existing collar,
+material correspondence and interface dependencies mandatory; local exclusion
+is not a shortcut past closure or component/void calibration.
+
+### 5.12 Preserve tensor identities before independent interval products
+
+On an original knot span where both active bases have proved partition unity,
+evaluate the homogeneous control net as its corner, two first-row/column
+differences and mixed control differences. This retains exact additive
+separability before multiplying independent basis intervals; it is not analytic
+recognition or replacement of a spline. Outside that partition premise, retain
+the original basis sum.
+
+The two-axis form can be looser on genuinely mixed nets. Retain the independent
+one-origin enclosure in the same original-control pass and intersect Taylor
+coefficients over the identical complete source/span before span hulling or
+rational division. Empty intersections refuse. Original weight/pole admission,
+coefficient hulls and piecewise continuity obligations remain mandatory, even
+for zero projected functionals.
+
+Share original bases, controls and products; use bounded fixed-capacity
+workspace, charge the additional arithmetic and account its actual layout.
+Sharper enclosures do not guarantee monotone numerical root proposals or
+preconditioners. Qualify actual implicit-curve consumers as well as independent
+surface-jet oracles before changing the published kernel pin.
+
+
 ## 6. Generic geometry substrate and necessary specializations
 
 ### 6.1 Bounded domains and rational conditioning
@@ -620,6 +728,18 @@ the work budget merely because its parameter interval is wider than the
 varying profile interval. Retain the same depth, cumulative work, scratch and
 cancellation limits; degenerate or nonfinite priorities use the existing
 bounded widest-axis split. No surface family or fixture dispatch is needed.
+
+Before asking Native to classify an interior-event search cell, enclose its
+whole carrier height and projected gradient. A height-disjoint cell or a
+strictly nonzero gradient component excludes interior stationarity independently
+of trim membership; this is not an inside/outside certificate. Every surviving
+cell still uses Native winding classification, and existence still requires
+its feasible original-trim witness. If early carrier evaluation cannot produce
+a bound for an arithmetic/domain reason, fall back to classification first:
+only Native `Outside` may discard that cell; otherwise retain the enclosure
+failure. Cancellation and exhausted resources propagate immediately, including
+all attempted work. Keep the original coedge, crease and vertex census intact;
+regular interior exclusion does not discard boundary height events.
 
 On a qualified whole-source C1 patch, scalar interval Newton may contract a
 necessary cover of stationary roots using either height-gradient equation.

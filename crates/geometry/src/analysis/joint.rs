@@ -26,6 +26,9 @@ use spiling_contracts::geometry::{
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+mod planar;
+use planar::{exact_cycle_mapping, feature_clearance};
+
 const MAX_SCRATCH: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -5568,59 +5571,6 @@ fn segment_gap(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
     }
     gap.max(0.0)
 }
-fn feature_clearance(
-    rings: &[Ring],
-    radius: f64,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    let margin = up(4.0 * radius);
-    for (ri, r) in rings.iter().enumerate() {
-        for i in 0..r.points.len() {
-            let a = r.points[i];
-            let b = r.points[(i + 1) % r.points.len()];
-            if delta(a, b).iter().all(|v| {
-                let lower = if v.lo > 0.0 {
-                    v.lo
-                } else if v.hi < 0.0 {
-                    -v.hi
-                } else {
-                    0.0
-                };
-                lower <= margin
-            }) {
-                return Err(error(
-                    GeometryErrorCode::AnalysisIndeterminate,
-                    format!(
-                        "native union boundary cycle {ri} edge cannot be separated from its endpoint/rounding tube"
-                    ),
-                ));
-            }
-            for (rj, s) in rings.iter().enumerate().skip(ri) {
-                for j in 0..s.points.len() {
-                    work.charge(1, cancel)?;
-                    if ri == rj
-                        && (i == j
-                            || (i + 1) % r.points.len() == j
-                            || (j + 1) % r.points.len() == i)
-                    {
-                        continue;
-                    }
-                    if segment_gap(a, b, s.points[j], s.points[(j + 1) % s.points.len()]) <= margin
-                    {
-                        return Err(error(
-                            GeometryErrorCode::AnalysisIndeterminate,
-                            format!(
-                                "native union boundary cycle pair {ri}/{rj} has nonincident features meeting native/rounding tubes"
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
 /// An allocation-free view of ACTUAL global output loops. Selected indices are
 /// internal partition proposals; the complete graph verifier remains authority.
 #[derive(Clone, Copy)]
@@ -5710,14 +5660,38 @@ fn certify_separated_candidate_impl(
             scratch.push(&mut budgets, (tube, remaining), work, cancel)?;
         }
     }
+    let mut candidate_rings = Vec::new();
+    for loop_ in candidate.iter() {
+        let r = ring(loop_, scratch, work, cancel)?;
+        scratch.push(&mut candidate_rings, r, work, cancel)?;
+    }
+    if let Some(exact) = exact_cycle_mapping(&native, &candidate_rings, scratch, work, cancel)? {
+        let mut achieved = 0.0_f64;
+        for &index in &exact {
+            work.charge(1, cancel)?;
+            if let Some(mapping) = mapping.as_mut() {
+                scratch.push(*mapping, index, work, cancel)?;
+            }
+            achieved = achieved.max(
+                Interval::point(budgets[index].0)
+                    .add(Interval::point(0.0))
+                    .hi,
+            );
+        }
+        scratch.bytes -= exact.capacity() * std::mem::size_of::<usize>();
+        drop(exact);
+        // Complete oriented polygon identity makes the correspondence exactly
+        // zero, not the native/source error. The same native clearance at the
+        // actual maximum rounding (zero here) also proves candidate clearance.
+        feature_clearance(&native, 0.0, scratch, work, cancel)?;
+        return Ok(achieved);
+    }
     let mut used = Vec::new();
     scratch.reserve(&mut used, count, work, cancel)?;
     used.resize(count, false);
-    let mut candidate_rings = Vec::new();
     let mut achieved = 0.0_f64;
     let mut max_rounding = 0.0_f64;
-    for loop_ in candidate.iter() {
-        let r = ring(loop_, scratch, work, cancel)?;
+    for r in &candidate_rings {
         let mut matched = None;
         for (index, s) in native.iter().enumerate() {
             if used[index] || r.hole != s.hole || r.points.len() != s.points.len() {
@@ -5760,12 +5734,11 @@ fn certify_separated_candidate_impl(
                 .hi,
         );
         max_rounding = max_rounding.max(bound);
-        scratch.push(&mut candidate_rings, r, work, cancel)?;
     }
     // This is a graph embedding check in addition to metric matching. Close
     // Hausdorff boundaries alone could erase a tiny hole or bridge.
-    feature_clearance(&native, max_rounding, work, cancel)?;
-    feature_clearance(&candidate_rings, 0.0, work, cancel)?;
+    feature_clearance(&native, max_rounding, scratch, work, cancel)?;
+    feature_clearance(&candidate_rings, 0.0, scratch, work, cancel)?;
     Ok(achieved)
 }
 
@@ -5825,8 +5798,16 @@ pub(super) fn filled_projection_distance(
             }
         }
     }
-    feature_clearance(&native, original_tube, work, cancel)?;
-    feature_clearance(&output, 0.0, work, cancel)?;
+    feature_clearance(&native, original_tube, &mut scratch, work, cancel)?;
+    if maximum_distance >= 0.0 {
+        if let Some(exact) = exact_cycle_mapping(&native, &output, &mut scratch, work, cancel)? {
+            drop(exact);
+            // Native clearance retained its full source tube. Exact oriented
+            // filled-set identity reuses that stronger proof for output.
+            return Ok(0.0);
+        }
+    }
+    feature_clearance(&output, 0.0, &mut scratch, work, cancel)?;
     let mut used = Vec::new();
     scratch.reserve(&mut used, output.len(), work, cancel)?;
     used.resize(output.len(), false);
@@ -6987,8 +6968,8 @@ fn rectangular_arrangement(
             "native union candidate rounding exceeds native shape policy",
         ));
     }
-    feature_clearance(&snapped_rings, achieved, work, cancel)?;
-    feature_clearance(&actual_rings, 0.0, work, cancel)?;
+    feature_clearance(&snapped_rings, achieved, scratch, work, cancel)?;
+    feature_clearance(&actual_rings, 0.0, scratch, work, cancel)?;
     Ok((achieved, expected, attribution))
 }
 
@@ -7533,6 +7514,68 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("actual immutable native slab and actual source-M polygon proof")
+    }
+
+    #[test]
+    fn exact_native_cycle_rotation_preserves_source_error_and_request_capture() {
+        let definition = original("cylinder.step");
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let pose = RigidPoseMm::IDENTITY;
+        let analysis = slab(&definition, pose, 0, &mut work);
+        let baseline = source_leaf(&definition, 1, pose, &analysis, &mut work);
+        let z = analysis.sample_world_z_mm().unwrap();
+        let mut rotated = xy_candidate(&analysis, z);
+        for cycle in &mut rotated {
+            cycle.points_mm.pop();
+            cycle.points_mm.rotate_left(1);
+            cycle.points_mm.push(cycle.points_mm[0]);
+        }
+        rotated.reverse();
+        let receipt = certify_native_source_leaf(
+            &definition,
+            &OccurrenceId::new(1).unwrap(),
+            pose,
+            &analysis,
+            &rotated,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            receipt.achieved_shape_error_mm,
+            baseline.achieved_shape_error_mm
+        );
+        assert!(receipt.achieved_shape_error_mm > 0.0);
+        assert_eq!(
+            receipt.sample_region_error_mm,
+            baseline.sample_region_error_mm
+        );
+        assert_eq!(
+            receipt.sample_coordinate_error_mm,
+            baseline.sample_coordinate_error_mm
+        );
+        assert_eq!(receipt.native_sample_sha256, baseline.native_sample_sha256);
+        let stale_pose = RigidPoseMm {
+            translation_mm: [1.0, 0.0, 0.0],
+            ..pose
+        };
+        assert_eq!(
+            certify_native_source_leaf(
+                &definition,
+                &OccurrenceId::new(1).unwrap(),
+                stale_pose,
+                &analysis,
+                &rotated,
+                policy(0.0),
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::InvalidGeometry
+        );
     }
 
     #[test]
