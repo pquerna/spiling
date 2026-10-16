@@ -186,6 +186,74 @@ fn plane_harmonic(plane: &model::Plane, mut uv: Harmonic<2>, margin: [f64; 2]) -
     }
 }
 
+/// Compose a harmonic chart with the ORIGINAL coefficient-proved finite tensor.
+/// This does not replace the native surface by a plane. Whole actual stored UV
+/// coefficients must lie in source support before any physical receipt is made.
+fn tensor_harmonic(
+    frame: &super::chart_proof::AffineTensorFrame,
+    chart: &model::Curve2D,
+    mut uv: Harmonic<2>,
+    margin: [f64; 2],
+) -> Result<Option<Harmonic<3>>, GeometryError> {
+    let bounds = if let model::Curve2D::Conic(model::Conic2D::Ellipse(conic)) = chart {
+        super::chart_proof::conic_support(conic.transform())?
+    } else {
+        let mut bounds = [p(0.0); 2];
+        for axis in 0..2 {
+            let square = uv.cosine[axis].square().add(uv.sine[axis].square());
+            let radius = Interval {
+                lo: square.lo.max(0.0),
+                hi: square.hi,
+            }
+            .sqrt()?
+            .hi;
+            bounds[axis] = uv.center[axis].add(Interval {
+                lo: -radius,
+                hi: radius,
+            });
+        }
+        bounds
+    };
+    for axis in 0..2 {
+        let bounds = bounds[axis].add(Interval {
+            lo: -margin[axis],
+            hi: margin[axis],
+        });
+        if bounds.lo < frame.domain[axis][0] || bounds.hi > frame.domain[axis][1] {
+            return Ok(None);
+        }
+        uv.center[axis] = uv.center[axis].add(Interval {
+            lo: -margin[axis],
+            hi: margin[axis],
+        });
+    }
+    let map = |value: Vector<2>| -> Vector<3> {
+        std::array::from_fn(|axis| {
+            frame.axes[0][axis]
+                .mul(value[0])
+                .add(frame.axes[1][axis].mul(value[1]))
+        })
+    };
+    let center = map(uv.center);
+    let linear = (0..3)
+        .map(|axis| {
+            p(frame.axes[0][axis].abs_upper())
+                .add(p(frame.axes[1][axis].abs_upper()))
+                .hi
+        })
+        .fold(0.0_f64, f64::max);
+    Ok(Some(Harmonic {
+        center: std::array::from_fn(|axis| frame.origin[axis].add(center[axis])),
+        cosine: map(uv.cosine),
+        sine: map(uv.sine),
+        offset: uv.offset,
+        sense: uv.sense,
+        arithmetic_scale: p(uv.arithmetic_scale.hi.max(f64::MIN_POSITIVE))
+            .mul(p(linear))
+            .add(p(frame.arithmetic_scale.max(f64::MIN_POSITIVE))),
+    }))
+}
+
 /// Majorize the original Rodrigues evaluation, not its cancelled harmonic
 /// coefficients. Native evaluation is o + R(axis,phi)*(profile(u)-o).
 /// Its literal matrix entries are (1-c)*ai*ai+c on the diagonal and
@@ -563,6 +631,23 @@ pub(super) fn certify(
             let front = uv.offset.add(p(uv.sense).mul(p(target[0])));
             let slope = p(uv.sense).mul(map_slope);
             (plane_harmonic(plane, uv, margin), front, slope, 0.0)
+        }
+        model::Surface::BsplineSurface(_) | model::Surface::NurbsSurface(_) => {
+            diagnostic.stage = "affine-tensor-chart-coefficients";
+            let Some(frame) = super::chart_proof::affine_tensor_frame(surface, work, cancel)?
+            else {
+                return Ok(None);
+            };
+            let Some(uv) = uv_harmonic(chart, 0, work, cancel)? else {
+                return Ok(None);
+            };
+            let front = uv.offset.add(p(uv.sense).mul(p(target[0])));
+            let slope = p(uv.sense).mul(map_slope);
+            let Some(native) = tensor_harmonic(&frame, chart, uv, margin)? else {
+                diagnostic.stage = "affine-tensor-finite-source-support";
+                return Ok(None);
+            };
+            (native, front, slope, 0.0)
         }
         model::Surface::RevolutionSurface(processor) => {
             diagnostic.stage = "revolution-chart-coefficients";

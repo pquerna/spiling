@@ -211,6 +211,209 @@ fn linear_matrix(mut matrix: Matrix4) -> Matrix4 {
     matrix
 }
 
+/// Coefficient-proved affine tensor, still the ORIGINAL finite native carrier.
+/// The outward frame is not a rounded inverse and supplies no trim authority.
+pub(super) struct AffineTensorFrame {
+    pub origin: [Interval; 3],
+    pub axes: [[Interval; 3]; 2],
+    pub domain: [[f64; 2]; 2],
+    pub arithmetic_scale: f64,
+}
+
+/// TwoSum is an error-free sum of finite binary64 operands, including gradual
+/// underflow. Nonfinite intermediates refuse rather than assert an identity.
+fn exact_pair_sum(a: f64, b: f64) -> Option<(f64, f64)> {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    let a_virtual = sum - b_virtual;
+    let b_error = b - b_virtual;
+    let a_error = a - a_virtual;
+    let error = a_error + b_error;
+    [sum, b_virtual, a_virtual, b_error, a_error, error]
+        .into_iter()
+        .all(f64::is_finite)
+        .then_some((sum, error))
+}
+
+/// Exact equality of two binary64 products, without evaluating either rounded
+/// product. Two 53-bit significands fit in u128 even when their real product
+/// overflows/underflows binary64. Signed zeros denote the same exact zero.
+pub(super) fn exact_products_equal(a: f64, b: f64, c: f64, d: f64) -> bool {
+    fn factor(value: f64) -> Option<(bool, u64, i32)> {
+        if !value.is_finite() {
+            return None;
+        }
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let mantissa = bits & ((1_u64 << 52) - 1);
+        Some((
+            bits >> 63 != 0,
+            if exponent == 0 {
+                mantissa
+            } else {
+                mantissa | (1_u64 << 52)
+            },
+            if exponent == 0 {
+                -1074
+            } else {
+                exponent - 1023 - 52
+            },
+        ))
+    }
+    fn product(a: f64, b: f64) -> Option<(bool, u128, i32)> {
+        let (negative_a, a, exponent_a) = factor(a)?;
+        let (negative_b, b, exponent_b) = factor(b)?;
+        let product = u128::from(a) * u128::from(b);
+        if product == 0 {
+            return Some((false, 0, 0));
+        }
+        let zeros = product.trailing_zeros();
+        Some((
+            negative_a != negative_b,
+            product >> zeros,
+            exponent_a + exponent_b + zeros as i32,
+        ))
+    }
+    match (product(a, b), product(c, d)) {
+        (Some(first), Some(second)) => first == second,
+        _ => false,
+    }
+}
+
+/// A single clamped bilinear patch is affine exactly when all homogeneous
+/// weights are the same nonzero value and every coordinate parallelogram
+/// identity holds. All four original controls and both knot vectors participate.
+/// Higher-degree/nonconstant-weight carriers retain their existing proof lanes.
+pub(super) fn affine_tensor_frame(
+    surface: &monstertruck_modeling::Surface,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<AffineTensorFrame>, GeometryError> {
+    work.charge(128, cancel)?;
+    let (knots, controls) = match surface {
+        monstertruck_modeling::Surface::BsplineSurface(surface) => {
+            let controls = surface.control_points();
+            if controls.len() != 2 || controls.iter().any(|row| row.len() != 2) {
+                return Ok(None);
+            }
+            let points = std::array::from_fn::<_, 2, _>(|i| {
+                std::array::from_fn::<_, 2, _>(|j| {
+                    let point = controls[i][j];
+                    [point.x, point.y, point.z, 1.0]
+                })
+            });
+            (surface.knot_vectors(), points)
+        }
+        monstertruck_modeling::Surface::NurbsSurface(surface) => {
+            let controls = surface.control_points();
+            if controls.len() != 2 || controls.iter().any(|row| row.len() != 2) {
+                return Ok(None);
+            }
+            let points = std::array::from_fn::<_, 2, _>(|i| {
+                std::array::from_fn::<_, 2, _>(|j| {
+                    let point = controls[i][j];
+                    [point.x, point.y, point.z, point.w]
+                })
+            });
+            (surface.knot_vectors(), points)
+        }
+        _ => return Ok(None),
+    };
+    let mut domain = [[0.0; 2]; 2];
+    for (axis, knots) in [&knots.0, &knots.1].into_iter().enumerate() {
+        if knots.len() != 4
+            || !knots.iter().all(|value| value.is_finite())
+            || knots[0] != knots[1]
+            || knots[2] != knots[3]
+            || knots[0] >= knots[3]
+        {
+            return Ok(None);
+        }
+        domain[axis] = [knots[0], knots[3]];
+    }
+    let weight = controls[0][0][3];
+    if !weight.is_finite()
+        || weight == 0.0
+        || controls.iter().flatten().any(|point| {
+            point[3] != weight || !point.iter().all(|coordinate| coordinate.is_finite())
+        })
+    {
+        return Ok(None);
+    }
+    for axis in 0..3 {
+        let Some(first) = exact_pair_sum(controls[0][0][axis], controls[1][1][axis]) else {
+            return Ok(None);
+        };
+        if Some(first) != exact_pair_sum(controls[1][0][axis], controls[0][1][axis]) {
+            return Ok(None);
+        }
+    }
+    let corner: [Interval; 3] = std::array::from_fn(|axis| p(controls[0][0][axis]));
+    let corner = [
+        corner[0].div(p(weight))?,
+        corner[1].div(p(weight))?,
+        corner[2].div(p(weight))?,
+    ];
+    let mut axes = [[p(0.0); 3]; 2];
+    let mut condition = p(1.0);
+    for axis in 0..2 {
+        let span = p(domain[axis][1]).sub(p(domain[axis][0]));
+        let last = if axis == 0 {
+            controls[1][0]
+        } else {
+            controls[0][1]
+        };
+        for coordinate in 0..3 {
+            axes[axis][coordinate] = p(last[coordinate])
+                .sub(p(controls[0][0][coordinate]))
+                .div(p(weight))?
+                .div(span)?;
+        }
+        condition = condition.mul(
+            p(1.0)
+                .add(p(domain[axis][0].abs()))
+                .add(p(domain[axis][1].abs()))
+                .div(span)?,
+        );
+    }
+    let origin = std::array::from_fn(|coordinate| {
+        corner[coordinate]
+            .sub(axes[0][coordinate].mul(p(domain[0][0])))
+            .sub(axes[1][coordinate].mul(p(domain[1][0])))
+    });
+    let maximum = controls
+        .iter()
+        .flatten()
+        .flat_map(|point| point[..3].iter())
+        .map(|coordinate| coordinate.abs())
+        .fold(0.0_f64, f64::max);
+    let arithmetic_scale = p(maximum).div(p(weight.abs()))?.mul(condition).hi;
+    if !arithmetic_scale.is_finite() {
+        return Ok(None);
+    }
+    Ok(Some(AffineTensorFrame {
+        origin,
+        axes,
+        domain,
+        arithmetic_scale,
+    }))
+}
+
+/// Full-ellipse support from the ACTUAL stored affine conic coefficients, not
+/// angular samples. The source parameter interval and every phase stay intact.
+pub(super) fn conic_support(matrix: &Matrix3) -> Result<[Interval; 2], GeometryError> {
+    let mut bounds = [p(0.0); 2];
+    for axis in 0..2 {
+        let radius =
+            sqrt_nonnegative(p(matrix[0][axis]).square().add(p(matrix[1][axis]).square()))?;
+        bounds[axis] = p(matrix[2][axis]).add(Interval {
+            lo: -radius.hi,
+            hi: radius.hi,
+        });
+    }
+    Ok(bounds)
+}
+
 struct Coefficients {
     c: [Interval; 3],
     u: [Interval; 3],
@@ -633,9 +836,11 @@ struct AffineChart {
     error: [f64; 2],
 }
 
-/// A retained line basis stays structurally affine on its actual own range.
-/// Native endpoint boxes and the whole-interval second derivative enclose its
-/// entire UV chord residual, including nested pose and sense arithmetic.
+/// A retained LINE or single clamped degree-one polynomial span is affine on
+/// its actual own range. Multiple degree-one spans need not be collinear or
+/// equally parameterized and deliberately remain on the general proof path.
+/// Native jets check complete support through every original pose/reflection.
+/// Endpoint boxes and the whole-interval second derivative enclose the chord.
 fn affine_chart(
     chart: &Curve2D,
     budget: &mut ValidatedGeometryBudget,
@@ -645,7 +850,17 @@ fn affine_chart(
     for depth in 0..=32 {
         budget.charge(1, cancel).map_err(native_error)?;
         match basis {
-            Curve2D::TrimmedCurve(source) if depth < 32 => basis = source.entity().curve().as_ref(),
+            Curve2D::TrimmedCurve(source) if depth < 32 => {
+                let matrix = source.transform();
+                if (0..3).any(|col| (0..3).any(|row| !matrix[col][row].is_finite()))
+                    || matrix.x.z != 0.0
+                    || matrix.y.z != 0.0
+                    || matrix.z.z != 1.0
+                {
+                    return Ok(None);
+                }
+                basis = source.entity().curve().as_ref();
+            }
             Curve2D::TrimmedCurve(_) => {
                 return Err(error(
                     GeometryErrorCode::ResourceLimit,
@@ -653,6 +868,15 @@ fn affine_chart(
                 ));
             }
             Curve2D::Line(_) => break,
+            Curve2D::BsplineCurve(source)
+                if source.control_points().len() == 2
+                    && source.knot_vector().len() == 4
+                    && source.knot_vector()[0] == source.knot_vector()[1]
+                    && source.knot_vector()[2] == source.knot_vector()[3]
+                    && source.knot_vector()[1] < source.knot_vector()[2] =>
+            {
+                break;
+            }
             _ => return Ok(None),
         }
     }
@@ -701,6 +925,32 @@ fn affine_chart(
         end,
         error: reserve,
     }))
+}
+
+/// Endpoint proposals of a structurally affine original declaration. These
+/// rounded values are not identities: callers must prove each endpoint
+/// coefficient exactly before using them to bind an independently gauged row.
+pub(super) fn affine_endpoint_proposals(
+    chart: &Curve2D,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Point2; 2]>, GeometryError> {
+    let mut budget =
+        ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
+    let result = affine_chart(chart, &mut budget, cancel)
+        .map(|proposal| proposal.map(|chart| [chart.start, chart.end]));
+    crate::parametric::debit_native_work(work, budget.consumed(), cancel)?;
+    match result {
+        Err(cause)
+            if !matches!(
+                cause.code,
+                GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+            ) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
 }
 
 /// Certifies a structural candidate, rather than granting it authority merely
@@ -954,6 +1204,81 @@ mod tests {
     use super::*;
     use monstertruck_io::step::load::step_geometry::Conic3D;
     use monstertruck_modeling::{Processor, RevolutionSurface, TrimmedCurve, UnitCircle};
+
+    #[test]
+    fn affine_tensor_frame_proves_all_original_coefficients_and_denominator() {
+        use monstertruck_modeling::{
+            BsplineSurface, KnotVector, NurbsSurface, Surface as NativeSurface,
+        };
+        let surface = |controls| {
+            let knots = KnotVector::from(vec![0., 0., 1., 1.]);
+            NativeSurface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+                (knots.clone(), knots),
+                controls,
+            )))
+        };
+        let controls = vec![
+            vec![
+                Vector4::new(12., 12., 8., 2.),
+                Vector4::new(12., 28., 8., 2.),
+            ],
+            vec![
+                Vector4::new(28., 12., 8., 2.),
+                Vector4::new(28., 28., 8., 2.),
+            ],
+        ];
+        let valid = surface(controls.clone());
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let frame = affine_tensor_frame(&valid, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(frame.origin[0].lo <= 6. && frame.origin[0].hi >= 6.);
+        assert!(frame.axes[0][0].lo <= 8. && frame.axes[0][0].hi >= 8.);
+        for weight in [0., 1.] {
+            let mut changed = controls.clone();
+            changed[1][1].w = weight;
+            assert!(
+                affine_tensor_frame(&surface(changed), &mut work, &cancel)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut all_zero = controls.clone();
+        for point in all_zero.iter_mut().flatten() {
+            point.w = 0.;
+        }
+        assert!(
+            affine_tensor_frame(&surface(all_zero), &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        let mut rounded_identity = controls;
+        rounded_identity[0][0].x = 1e16;
+        rounded_identity[1][1].x = 1.;
+        rounded_identity[1][0].x = 1e16;
+        rounded_identity[0][1].x = 0.;
+        assert!(
+            affine_tensor_frame(&surface(rounded_identity), &mut work, &cancel)
+                .unwrap()
+                .is_none(),
+            "equal rounded sums are not a homogeneous parallelogram identity",
+        );
+        assert_eq!(
+            affine_tensor_frame(&valid, &mut GeometryWorkBudget::new(0), &cancel)
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            affine_tensor_frame(&valid, &mut work, &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
 
     fn ring(radius: f64, height: f64) -> Curve3D {
         let matrix = Matrix4::from_translation(Vector3::new(0., 0., height))

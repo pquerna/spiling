@@ -442,36 +442,129 @@ pub fn blind_pocket() -> StepSolid {
     Solid::new(vec![shell])
 }
 
+/// Author a finite rational carrier only after bounding every original finite
+/// boundary interval. Coordinate-plane coefficients keep the physical plane
+/// exact; outward integer support is derived from certified whole-curve bounds,
+/// never nominal circle radii, samples or an epsilon expansion.
+fn bounded_coordinate_plane(face: &Face<Point3, Curve3D, Surface>) -> Option<Surface> {
+    use monstertruck_modeling::{ValidatedGeometryBudget, validated_curve_jet};
+    use std::sync::atomic::AtomicBool;
+    let Surface::ElementarySurface(ElementarySurface::Plane(plane)) = face.surface() else {
+        return None;
+    };
+    let axes = [plane.axis_u(), plane.axis_v()];
+    if !(0..3).all(|coordinate| plane.origin()[coordinate].is_finite())
+        || !axes
+            .iter()
+            .all(|axis| (0..3).all(|coordinate| axis[coordinate].is_finite()))
+    {
+        return None;
+    }
+    let fixed = (0..3).find(|&axis| axes[0][axis] == 0. && axes[1][axis] == 0.)?;
+    let normal = axes[0].cross(axes[1]);
+    if !normal[fixed].is_finite() || normal[fixed] == 0. {
+        return None;
+    }
+    let varying = match fixed {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    };
+    let cancel = AtomicBool::new(false);
+    let mut work = ValidatedGeometryBudget::new(1_000_000);
+    let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+    let mut count = 0usize;
+    for wire in face.absolute_boundaries() {
+        for edge in wire {
+            let curve = edge.with_curve(|original| {
+                let mut basis = original;
+                let mut bounded = false;
+                for _ in 0..32 {
+                    match basis {
+                        Curve3D::SurfaceCurve(source) => basis = source.leader(),
+                        Curve3D::TrimmedCurve(_)
+                        | Curve3D::Conic(_)
+                        | Curve3D::BsplineCurve(_)
+                        | Curve3D::NurbsCurve(_)
+                        | Curve3D::Polyline(_) => {
+                            bounded = true;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                bounded
+                    .then(|| original.to_parameter_preserving_modeling().ok())
+                    .flatten()
+            })?;
+            let (a, b) = curve.try_range_tuple()?;
+            if !a.is_finite() || !b.is_finite() || a >= b {
+                return None;
+            }
+            let jet = validated_curve_jet(&curve, [a, b], &mut work, &cancel).ok()?;
+            for (axis, &coordinate) in varying.iter().enumerate() {
+                bounds[axis][0] = bounds[axis][0].min(jet.position[coordinate].lower);
+                bounds[axis][1] = bounds[axis][1].max(jet.position[coordinate].upper);
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    for bound in &mut bounds {
+        bound[0] = bound[0].floor();
+        bound[1] = bound[1].ceil();
+        if !bound.iter().all(|coordinate| coordinate.is_finite()) || bound[0] >= bound[1] {
+            return None;
+        }
+    }
+    let point = |i: usize, j: usize| {
+        let mut point = plane.origin().to_vec();
+        point[varying[0]] = bounds[0][i];
+        point[varying[1]] = bounds[1][j];
+        Vector4::new(point.x, point.y, point.z, 1.)
+    };
+    let knots = KnotVector::from(vec![0., 0., 1., 1.]);
+    let mut replacement = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+        (knots.clone(), knots),
+        vec![
+            vec![point(0, 0), point(0, 1)],
+            vec![point(1, 0), point(1, 1)],
+        ],
+    )));
+    let canonical_normal = if fixed == 1 { -1. } else { 1. };
+    if normal[fixed].signum() != canonical_normal {
+        replacement.invert();
+    }
+    Some(replacement)
+}
+
 /// Same exact pocket, with a genuinely bounded rational tensor floor instead
-/// of an elementary plane. Integer homogeneous controls cover the complete disk.
+/// of an elementary plane. Its finite homogeneous support is derived from the
+/// actual original boundary coefficients, including rounded source frames.
 pub fn blind_pocket_nurbs_floor() -> StepSolid {
-    blind_pocket()
+    let solid = blind_pocket();
+    let floor = solid
+        .face_iter()
+        .find(|face| {
+            matches!(face.surface(), Surface::ElementarySurface(ElementarySurface::Plane(plane))
+            if plane.origin().z == 4.)
+        })
+        .expect("original pocket floor");
+    let original = floor.surface();
+    let replacement = bounded_coordinate_plane(floor)
+        .expect("original coordinate-plane floor has supported complete finite boundary bounds");
+    solid
         .try_mapped(
             |point| Some(*point),
             |curve| Some(curve.clone()),
             |surface| {
-                let Surface::ElementarySurface(ElementarySurface::Plane(plane)) = surface else {
-                    return Some(surface.clone());
-                };
-                if plane.origin().z != 4. {
-                    return Some(surface.clone());
-                }
-                let knots = KnotVector::from(vec![0., 0., 1., 1.]);
-                let spline = BsplineSurface::new(
-                    (knots.clone(), knots),
-                    vec![
-                        vec![Vector4::new(7., 7., 4., 1.), Vector4::new(7., 13., 4., 1.)],
-                        vec![
-                            Vector4::new(13., 7., 4., 1.),
-                            Vector4::new(13., 13., 4., 1.),
-                        ],
-                    ],
-                );
-                let mut replacement = Surface::NurbsSurface(NurbsSurface::new(spline));
-                if plane.normal().z < 0. {
-                    replacement.invert();
-                }
-                Some(replacement)
+                Some(if surface == &original {
+                    replacement.clone()
+                } else {
+                    surface.clone()
+                })
             },
         )
         .expect("exact original bounded rational pocket floor")
@@ -699,6 +792,103 @@ pub fn aliasing_source() -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn rational_plane_authoring_bounds_original_coefficients_and_preserves_normal() {
+        let solid = blind_pocket();
+        let floor = solid
+            .face_iter()
+            .find(|face| {
+                matches!(face.surface(), Surface::ElementarySurface(ElementarySurface::Plane(plane))
+                if plane.origin().z == 4.)
+            })
+            .unwrap();
+        for inverted in [false, true] {
+            let mut source = floor.surface();
+            if inverted {
+                source.invert();
+            }
+            let Surface::ElementarySurface(ElementarySurface::Plane(plane)) = &source else {
+                unreachable!();
+            };
+            let face = Face::new(floor.absolute_boundaries().clone(), source.clone());
+            let replacement = bounded_coordinate_plane(&face).unwrap();
+            let Surface::NurbsSurface(tensor) = replacement else {
+                unreachable!()
+            };
+            let controls = tensor.control_points();
+            let xyz = |point: Vector4| {
+                Point3::new(point.x / point.w, point.y / point.w, point.z / point.w)
+            };
+            let origin = xyz(controls[0][0]);
+            let u = xyz(controls[1][0]) - origin;
+            let v = xyz(controls[0][1]) - origin;
+            assert!(u.cross(v).dot(plane.axis_u().cross(plane.axis_v())) > 0.);
+            assert!(
+                controls
+                    .iter()
+                    .flatten()
+                    .all(|point| point.z == 4. && point.w == 1.)
+            );
+            assert!(
+                controls
+                    .iter()
+                    .flatten()
+                    .map(|point| point.x)
+                    .fold(f64::INFINITY, f64::min)
+                    < 7.
+            );
+            assert!(
+                controls
+                    .iter()
+                    .flatten()
+                    .map(|point| point.x)
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    > 13.
+            );
+            assert!(
+                controls
+                    .iter()
+                    .flatten()
+                    .map(|point| point.y)
+                    .fold(f64::INFINITY, f64::min)
+                    < 7.
+            );
+            assert!(
+                controls
+                    .iter()
+                    .flatten()
+                    .map(|point| point.y)
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    > 13.
+            );
+            for (original, retained) in floor
+                .absolute_boundaries()
+                .iter()
+                .flatten()
+                .zip(face.absolute_boundaries().iter().flatten())
+            {
+                assert_eq!(
+                    original.id(),
+                    retained.id(),
+                    "original spatial edges/phase remain untouched"
+                );
+                assert_eq!(original.orientation(), retained.orientation());
+            }
+        }
+        let unbounded = Face::new(
+            vec![rectangle(2., 3.)],
+            Surface::ElementarySurface(ElementarySurface::Plane(Plane::new(
+                Point3::origin(),
+                Point3::new(1., 0., 0.),
+                Point3::new(0., 1., 0.),
+            ))),
+        );
+        assert!(
+            bounded_coordinate_plane(&unbounded).is_none(),
+            "bare LINE convenience intervals do not author original finite support",
+        );
+    }
 
     #[test]
     fn parity_originals_are_closed_manifolds() {

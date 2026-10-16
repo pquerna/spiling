@@ -1050,12 +1050,42 @@ fn source_sphere_chart_is_not_assumed_equal_to_native_uv() {
     }
 }
 
+/// Failure-only coefficient context stays bounded even if a source has a large
+/// tensor net or deeply nested original wrappers.
+fn bounded_chart_debug(value: &impl std::fmt::Debug) -> String {
+    use std::fmt::Write;
+    struct Context(String);
+    impl std::fmt::Write for Context {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let available = 2048_usize.saturating_sub(self.0.len());
+            if text.len() <= available {
+                self.0.push_str(text);
+                return Ok(());
+            }
+            let mut end = available;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.0.push_str(&text[..end]);
+            Err(std::fmt::Error)
+        }
+    }
+    let mut context = Context(String::new());
+    if write!(&mut context, "{value:?}").is_err() {
+        context.0.push_str("...");
+    }
+    context.0
+}
+
 #[test]
-fn original_frustum_and_pocket_coedges_retain_whole_native_chart_authority() {
+fn original_tensor_frustum_and_pocket_coedges_retain_whole_native_chart_authority() {
     for name in [
         "native-parity-cone-frustum.step",
         "native-parity-blind-pocket.step",
         "native-parity-blind-pocket-nurbs-floor.step",
+        "native-parity-nurbs-cylinder.step",
+        "native-parity-nurbs-torus.step",
+        "native-parity-nurbs-torus-independent-parameters.step",
     ] {
         let (_, solid, _) = crate::parity_fixtures::recipes()
             .into_iter()
@@ -1066,9 +1096,23 @@ fn original_frustum_and_pocket_coedges_retain_whole_native_chart_authority() {
         for (face_index, face) in definition.face_boundaries.iter().enumerate() {
             for (wire_index, wire) in face.wires.iter().enumerate() {
                 for (coedge_index, coedge) in wire.iter().enumerate() {
+                    let native_face = &definition.trimmed_solid.boundaries()[0].faces()[face_index];
+                    let native_edge =
+                        &native_face.face().absolute_boundaries()[wire_index][coedge_index];
                     assert!(
                         coedge.source_chart_certified,
-                        "{name}: face {face_index}, wire {wire_index}, coedge {coedge_index}",
+                        "{name}: face {face_index}, wire {wire_index}, coedge {coedge_index}; \
+                         source_kind={} carrier={:?} map={:?} native_range={:?} \
+                         chart_range={:?} chart={:?}; original_native_curve={:?}; \
+                         carrier_coefficients={:?}",
+                        definition.faces[face_index].source_surface_entity_kind,
+                        definition.faces[face_index].geometry.family,
+                        face.parameter.conversion,
+                        native_edge.with_curve(|curve| curve.try_range_tuple()),
+                        coedge.source_chart_parameter_range,
+                        bounded_chart_debug(&native_face.trims()[wire_index][coedge_index]),
+                        native_edge.with_curve(bounded_chart_debug),
+                        native_face.face().with_surface(bounded_chart_debug),
                     );
                     let (a, b) = coedge
                         .source_chart_parameter_range

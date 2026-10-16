@@ -116,6 +116,31 @@ pub(super) fn intrinsic_domain(
         .then_some(result)
 }
 
+/// One global nonzero homogeneous scale preserves the WHOLE rational function,
+/// including its denominator zeros, every C0 knot and all one-sided tangents.
+/// Independent per-control scales do not preserve a rational spline.
+fn same_projective_controls(
+    a: &[Vector3],
+    b: &[Vector3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(
+        (a.len() as u64).saturating_mul(24).saturating_add(1),
+        cancel,
+    )?;
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    let Some((first, second)) = a.iter().zip(b).find(|(a, b)| a.z != 0. && b.z != 0.) else {
+        return Ok(false);
+    };
+    let (a_weight, b_weight) = (first.z, second.z);
+    Ok(a.iter().zip(b).all(|(a, b)| {
+        (0..3).all(|axis| chart_proof::exact_products_equal(a[axis], b_weight, b[axis], a_weight))
+    }))
+}
+
 fn same_coefficients(
     a: &Curve2D,
     b: &Curve2D,
@@ -152,7 +177,8 @@ fn same_coefficients_at(
             a.knot_vector() == b.knot_vector() && a.control_points() == b.control_points()
         }
         (Curve2D::NurbsCurve(a), Curve2D::NurbsCurve(b)) => {
-            a.knot_vector() == b.knot_vector() && a.control_points() == b.control_points()
+            a.knot_vector() == b.knot_vector()
+                && same_projective_controls(a.control_points(), b.control_points(), work, cancel)?
         }
         (Curve2D::TrimmedCurve(a), Curve2D::TrimmedCurve(b)) => {
             if depth == 32 {
@@ -239,6 +265,52 @@ fn acceptable(
         _ => Some(candidate),
     })
 }
+
+/// Structural affinity plus exact homogeneous endpoint identities proves the
+/// whole declaration under the normalized affine map of its OWN finite domain.
+/// Rounded endpoint proposals alone never select a tensor seam branch.
+fn exact_affine_endpoints(
+    chart: &Curve2D,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Point2; 2]>, GeometryError> {
+    let Some(points) = chart_proof::affine_endpoint_proposals(chart, work, cancel)? else {
+        return Ok(None);
+    };
+    let range = chart.range_tuple();
+    if exact_endpoint_coordinates(chart, [range.0, range.1], points, work, cancel)? {
+        Ok(Some(points))
+    } else {
+        Ok(None)
+    }
+}
+
+fn exact_endpoint_coordinates(
+    chart: &Curve2D,
+    parameters: [f64; 2],
+    points: [Point2; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    Ok(native_attempt(work, cancel, |budget| {
+        for (parameter, point) in parameters.into_iter().zip(points) {
+            for axis in 0..2 {
+                if !monstertruck_modeling::certified_curve2d_endpoint_coordinate(
+                    chart,
+                    parameter,
+                    axis,
+                    point[axis],
+                    budget,
+                    cancel,
+                )? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    })?
+    .unwrap_or(false))
+}
 pub(super) fn native_chart(
     curve: &Curve,
     surface: &Surface,
@@ -267,9 +339,14 @@ pub(super) fn native_chart(
     }
     // The original source use selects a seam branch. Never choose the first
     // geometrically coincident boundary of a periodic carrier.
-    if let (Some(Curve2D::Line(line)), Some(domain)) = (declared, domain) {
-        let a = [line.0.x, line.0.y];
-        let b = [line.1.x, line.1.y];
+    let boundary_endpoints = match (declared, domain) {
+        (Some(original), Some(domain)) => {
+            exact_affine_endpoints(original, work, cancel)?.map(|points| (points, domain))
+        }
+        _ => None,
+    };
+    if let Some((points, domain)) = boundary_endpoints {
+        let [a, b] = points.map(|point| [point.x, point.y]);
         let choices = [
             (0, domain[0][0], NativeSurfaceBoundary::UFront),
             (0, domain[0][1], NativeSurfaceBoundary::UBack),
@@ -290,8 +367,22 @@ pub(super) fn native_chart(
                     curve, surface, boundary, variable, budget, cancel,
                 )
             })? {
-                if let Some(candidate) =
-                    acceptable(candidate, Some(&Curve2D::Line(*line)), work, cancel)?
+                // Native proves every homogeneous row coefficient and knot
+                // under its exact affine map, retaining each spatial wrapper's
+                // actual inverse anchor. The declaration has its independent
+                // own range: equality of structurally affine endpoint
+                // coefficients proves the complete composition, not just two
+                // sampled positions. A reversed row/map is accepted only when
+                // its actual oriented endpoints agree with this original use.
+                let range = candidate.range_tuple();
+                if exact_affine_endpoints(&candidate, work, cancel)?.is_some()
+                    && exact_endpoint_coordinates(
+                        &candidate,
+                        [range.0, range.1],
+                        points,
+                        work,
+                        cancel,
+                    )?
                 {
                     return Ok(Some(candidate));
                 }
@@ -920,11 +1011,10 @@ fn same_original_affine_expression(
 }
 
 /// Propose the affine projection of the complete original LINE or ellipse onto
-/// its own original plane, only after symbolic source/native expression identity.
-/// Captured coefficient midpoints and phase arithmetic select search coordinates
-/// only. Whole native position AND relative-tangent correspondence then proves
-/// the same original expression, not an independent approximate conversion.
-/// The globally injective plane chart separately bounds its source projection.
+/// its own original plane or coefficient-proved affine tensor, only after
+/// symbolic source/native expression AND carrier identity. Rounded frame/inverse
+/// arithmetic selects coordinates only. Whole native position and relative
+/// tangents prove the proposal; the ORIGINAL carrier jet bounds its true inverse.
 fn source_associated_planar_chart(
     source_curve: &Curve3D,
     source_surface: &StepSurface,
@@ -935,12 +1025,48 @@ fn source_associated_planar_chart(
     cancel: &AtomicBool,
 ) -> Result<Option<SourceTrim>, GeometryError> {
     use monstertruck_io::step::load::step_geometry::ElementarySurface;
-    let (StepSurface::ElementarySurface(ElementarySurface::Plane(original)), Surface::Plane(plane)) =
-        (source_surface, surface)
-    else {
-        return Ok(None);
+    let (carrier_origin, u, v, jet_domain, support, tensor_axes) = match (source_surface, surface) {
+        (
+            StepSurface::ElementarySurface(ElementarySurface::Plane(original)),
+            Surface::Plane(plane),
+        ) if original == plane => (
+            plane.origin(),
+            plane.axis_u(),
+            plane.axis_v(),
+            [[0.0, 0.0]; 2],
+            None,
+            None,
+        ),
+        _ => {
+            let Some(frame) = chart_proof::affine_tensor_frame(surface, work, cancel)? else {
+                return Ok(None);
+            };
+            let same_carrier = match (source_surface, surface) {
+                (StepSurface::BsplineSurface(original), Surface::BsplineSurface(native)) => {
+                    original == native
+                }
+                (StepSurface::NurbsSurface(original), Surface::NurbsSurface(native)) => {
+                    original == native
+                }
+                _ => false,
+            };
+            if !same_carrier {
+                return Ok(None);
+            }
+            let point = |value: [crate::parametric::Interval; 3]| {
+                Vector3::new(value[0].mid(), value[1].mid(), value[2].mid())
+            };
+            (
+                Point3::from_vec(point(frame.origin)),
+                point(frame.axes[0]),
+                point(frame.axes[1]),
+                frame.domain,
+                Some(frame.domain),
+                Some(frame.axes),
+            )
+        }
     };
-    if original != plane || !same_original_affine_expression(source_curve, curve, work, cancel)? {
+    if !same_original_affine_expression(source_curve, curve, work, cancel)? {
         return Ok(None);
     }
     let mut budget =
@@ -951,15 +1077,14 @@ fn source_associated_planar_chart(
         return Ok(None);
     };
     work.charge(64, cancel)?;
-    let u = plane.axis_u();
-    let v = plane.axis_v();
+    // This rounded inverse is a proposal, not the true inverse used below.
     let Some(inverse) = Matrix3::from_cols(u, v, u.cross(v)).invert() else {
         return Ok(None);
     };
     let midpoint = |value: [crate::parametric::Interval; 3]| {
         Vector3::new(value[0].mid(), value[1].mid(), value[2].mid())
     };
-    let origin = inverse * (midpoint(source.c) - plane.origin().to_vec());
+    let origin = inverse * (midpoint(source.c) - carrier_origin.to_vec());
     let direction = inverse * midpoint(source.u);
     let chart = if source.circle {
         let transverse = inverse * midpoint(source.v);
@@ -976,6 +1101,14 @@ fn source_associated_planar_chart(
             Vector3::new(transverse.x, transverse.y, 0.0),
             Vector3::new(origin.x, origin.y, 1.0),
         ) * Matrix3::from_angle_z(Rad(phase));
+        if let Some(domain) = support {
+            let bounds = chart_proof::conic_support(&transform)?;
+            if (0..2)
+                .any(|axis| bounds[axis].lo < domain[axis][0] || bounds[axis].hi > domain[axis][1])
+            {
+                return Ok(None);
+            }
+        }
         let mut ellipse = Processor::with_transform(
             TrimmedCurve::new(UnitCircle::<Point2>::new(), source.range),
             transform,
@@ -995,19 +1128,43 @@ fn source_associated_planar_chart(
     else {
         return Ok(None);
     };
-    // For affine S(q)=O+Jq, the validated left inverse P=(AJ)^-1 A
-    // exists globally when |I-AJ|<1. Hence P(C-O)-U=P(C-S(U)) on the
-    // complete original range. This binds the coefficient-defined source
-    // projection, not an arbitrary nearby point or a periodic inverse branch.
-    let jet = crate::parametric::surface_enclosure(surface, [[0.0, 0.0]; 2], work, cancel)?;
+    // Let J be the ORIGINAL coefficient-defined affine derivative, A only a
+    // rounded preconditioner and P=(AJ)^-1 A the true left inverse. The whole
+    // carrier jet proves |I-AJ|<1 and bounds P; no rounded A*J=I is assumed.
+    // Thus P(C-O)-U=P(C-S(U)) for the true P, on the complete original range.
+    // The physical source mismatch stays in error_mm; finite support is not
+    // extrapolated and the native original-domain/trim binder remains required.
+    let mut jet = crate::parametric::surface_enclosure(surface, jet_domain, work, cancel)?;
+    if let Some(axes) = tensor_axes {
+        // These are outward ORIGINAL homogeneous coefficient derivatives, valid
+        // on the entire proved affine patch, not derivatives of the proposed
+        // rounded frame. Keep the native whole-domain denominator/support query.
+        jet.du = axes[0];
+        jet.dv = axes[1];
+    }
     let residual = witness
         .forward
         .as_ref()
-        .ok_or_else(|| invalid("derived plane chart lost its completed forward receipt"))?
+        .ok_or_else(|| invalid("derived affine chart lost its completed forward receipt"))?
         .error;
     let Some(margin) = super::implicit::inverse_margin(jet, residual)? else {
         return Ok(None);
     };
+    if let Some(domain) = support {
+        let Some(Curve2D::Conic(Conic2D::Ellipse(chart))) = witness.curve.as_ref() else {
+            return Ok(None);
+        };
+        let bounds = chart_proof::conic_support(chart.transform())?;
+        for axis in 0..2 {
+            let tube = bounds[axis].add(crate::parametric::Interval {
+                lo: -margin,
+                hi: margin,
+            });
+            if tube.lo < domain[axis][0] || tube.hi > domain[axis][1] {
+                return Ok(None);
+            }
+        }
+    }
     witness.margin_uv = [margin; 2];
     // Keep the forward receipt's original zero uncertainty. It cannot be
     // borrowed as a proof about every curve in this separately bounded tube.
@@ -2418,6 +2575,214 @@ mod tests {
     use step_p21::{ast::DataSection, tables::EntityTable};
 
     #[test]
+    fn rational_declared_chart_identity_keeps_global_scale_and_internal_c0_knots() {
+        use monstertruck_modeling::{BsplineCurve, KnotVector, NurbsCurve};
+        let knots = KnotVector::from(vec![0., 0., 0., 1., 1., 2., 2., 2.]);
+        let controls = vec![
+            Vector3::new(5., 0., 1.),
+            Vector3::new(5., 5., 1.),
+            Vector3::new(0., 10., 2.),
+            Vector3::new(-10., 10., 2.),
+            Vector3::new(-20., 0., 4.),
+        ];
+        let chart = |controls, knots| {
+            Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(knots, controls)))
+        };
+        let original = chart(controls.clone(), knots.clone());
+        let scaled = chart(
+            controls.iter().map(|point| *point / 32.).collect(),
+            knots.clone(),
+        );
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        assert!(same_coefficients(&original, &scaled, &mut work, &cancel).unwrap());
+        let mut independent_scales = controls.clone();
+        independent_scales[1] *= 2.;
+        assert!(
+            !same_coefficients(
+                &original,
+                &chart(independent_scales, knots.clone()),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let moved = KnotVector::from(vec![0., 0., 0., 1.5, 1.5, 2., 2., 2.]);
+        assert!(
+            !same_coefficients(
+                &original,
+                &chart(controls.clone(), moved),
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        let mut zero_weight = controls;
+        zero_weight[1].z = 0.;
+        let zero_original = chart(zero_weight.clone(), knots.clone());
+        let zero_scaled = chart(
+            zero_weight.iter().map(|point| *point * -2.).collect(),
+            knots,
+        );
+        assert!(
+            same_coefficients(&zero_original, &zero_scaled, &mut work, &cancel).unwrap(),
+            "coefficient equivalence does not discard zero control weights or admit a denominator"
+        );
+        assert!(chart_proof::exact_products_equal(
+            f64::MAX,
+            2.,
+            f64::MAX / 2.,
+            4.
+        ));
+        assert!(chart_proof::exact_products_equal(
+            f64::from_bits(1),
+            0.5,
+            f64::from_bits(1),
+            0.5
+        ));
+        assert!(!chart_proof::exact_products_equal(
+            f64::from_bits(1),
+            0.5,
+            0.,
+            1.
+        ));
+        assert!(!chart_proof::exact_products_equal(
+            f64::INFINITY,
+            0.,
+            0.,
+            1.
+        ));
+    }
+
+    #[test]
+    fn exact_tensor_row_keeps_independent_original_gauge_and_reflected_orientation() {
+        use monstertruck_modeling::{
+            BsplineCurve, BsplineSurface, KnotVector, NurbsCurve, NurbsSurface,
+        };
+        let knots = KnotVector::from(vec![0., 0., 0., 1., 1., 1.]);
+        let row = [
+            Vector4::new(0., 0., 0., 1.),
+            Vector4::new(1., 2., 0., 2.),
+            Vector4::new(2., 0., 0., 1.),
+        ];
+        let tensor = NurbsSurface::new(BsplineSurface::new(
+            (knots, KnotVector::from(vec![0., 0., 1., 1.])),
+            row.iter()
+                .map(|point| vec![*point, *point + Vector4::new(0., 0., point.w, 0.)])
+                .collect(),
+        ));
+        let source_surface = StepSurface::NurbsSurface(tensor.clone());
+        let surface = Surface::NurbsSurface(tensor);
+        let leader = NurbsCurve::new(BsplineCurve::new(
+            KnotVector::from(vec![10., 10., 10., 12., 12., 12.]),
+            row.to_vec(),
+        ));
+        let cancel = AtomicBool::new(false);
+        for reflected in [false, true] {
+            let mut spatial = Processor::<_, Matrix4>::new(TrimmedCurve::new(
+                Box::new(Curve::NurbsCurve(leader.clone())),
+                (10., 12.),
+            ));
+            let mut uv = Processor::<_, Matrix3>::new(TrimmedCurve::new(
+                Box::new(Curve2D::BsplineCurve(BsplineCurve::new(
+                    KnotVector::from(vec![7., 7., 19., 19.]),
+                    vec![Point2::new(0., 0.), Point2::new(1., 0.)],
+                ))),
+                (7., 19.),
+            ));
+            if reflected {
+                spatial.invert();
+                uv.invert();
+            }
+            let curve = Curve::TrimmedCurve(spatial);
+            let original = Curve2D::TrimmedCurve(uv);
+            let mut work = GeometryWorkBudget::new(100_000);
+            let candidate = native_chart(
+                &curve,
+                &surface,
+                Some(&original),
+                intrinsic_domain(&source_surface, &surface, SurfaceParameterMap::Identity),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .expect("all projective coefficients and independently scaled knots agree");
+            assert_eq!(candidate.range_tuple(), (10., 12.));
+            assert_eq!(original.range_tuple(), (7., 19.));
+            assert_eq!(
+                exact_affine_endpoints(&candidate, &mut work, &cancel).unwrap(),
+                exact_affine_endpoints(&original, &mut work, &cancel).unwrap(),
+            );
+            let wrong = mapped_declaration(
+                original,
+                (7., 19.),
+                Matrix3::from_translation(Vector2::new(0., 0.25)),
+                true,
+            );
+            assert!(
+                native_chart(
+                    &curve,
+                    &surface,
+                    Some(&wrong),
+                    intrinsic_domain(&source_surface, &surface, SurfaceParameterMap::Identity),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "nearby original chart cannot borrow a tensor-row identity",
+            );
+        }
+    }
+
+    #[test]
+    fn affine_endpoint_identity_refuses_bent_multispans_and_preserves_nested_anchors() {
+        use monstertruck_modeling::{BsplineCurve, KnotVector};
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let bent = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0., 0., 1., 2., 2.]),
+            vec![
+                Point2::new(0., 0.),
+                Point2::new(1., 1.),
+                Point2::new(2., 0.),
+            ],
+        ));
+        assert!(
+            exact_affine_endpoints(&bent, &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        let inner = mapped_declaration(
+            Curve2D::BsplineCurve(BsplineCurve::new(
+                KnotVector::from(vec![2., 2., 6., 6.]),
+                vec![Point2::new(0., 0.), Point2::new(1., 0.)],
+            )),
+            (2., 6.),
+            Matrix3::identity(),
+            false,
+        );
+        let outer = mapped_declaration(inner, (3., 4.), Matrix3::identity(), false);
+        assert_eq!(
+            exact_affine_endpoints(&outer, &mut work, &cancel).unwrap(),
+            Some([Point2::new(0.5, 0.), Point2::new(0.75, 0.)]),
+            "both original reflection anchors survive the narrower outer restriction",
+        );
+        assert_eq!(
+            exact_affine_endpoints(&outer, &mut GeometryWorkBudget::new(0), &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            exact_affine_endpoints(&outer, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
+
+    #[test]
     fn original_planar_line_keeps_full_posed_restriction_and_refuses_wrong_interior() {
         use monstertruck_io::step::load::step_geometry::{ElementarySurface, SourceTrimmedCurve};
         let plane = Plane::from_origin_vectors(
@@ -2490,6 +2855,155 @@ mod tests {
             .is_none(),
             "matching original endpoints cannot replace whole interior proof",
         );
+    }
+
+    #[test]
+    fn original_affine_tensor_conic_keeps_coefficients_gauges_and_true_inverse_tube() {
+        use monstertruck_io::step::load::step_geometry::{Conic3D, SourceTrimmedCurve};
+        use monstertruck_modeling::{BsplineSurface, KnotVector, NurbsSurface};
+        let tensor = |lower: f64, upper: f64, defect: f64| {
+            let knots = KnotVector::from(vec![0., 0., 1., 1.]);
+            Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+                (knots.clone(), knots),
+                vec![
+                    vec![
+                        Vector4::new(lower, lower, 4., 1.),
+                        Vector4::new(lower, upper, 4., 1.),
+                    ],
+                    vec![
+                        Vector4::new(upper, lower, 4., 1.),
+                        Vector4::new(upper, upper, 4. + defect, 1.),
+                    ],
+                ],
+            )))
+        };
+        let original = |surface: &Surface| {
+            let Surface::NurbsSurface(surface) = surface else {
+                unreachable!()
+            };
+            StepSurface::NurbsSurface(surface.clone())
+        };
+        let surface = tensor(6., 14., 0.);
+        let source_surface = original(&surface);
+        let cancel = AtomicBool::new(false);
+        let tau = std::f64::consts::TAU;
+        for reflected in [false, true] {
+            let mut conic = Processor::with_transform(
+                TrimmedCurve::new(
+                    UnitCircle::<Point3>::new(),
+                    (tau, 3. * std::f64::consts::PI),
+                ),
+                Matrix4::from_cols(
+                    Vector4::new(-3.0000000000000018, 1.776356839410001e-15, 0., 0.),
+                    Vector4::new(-1.776356839410001e-15, -3.0000000000000018, 0., 0.),
+                    Vector4::unit_z(),
+                    Vector4::new(10., 10., 4., 1.),
+                ),
+            );
+            if reflected {
+                conic.invert();
+            }
+            let source = Curve3D::TrimmedCurve(SourceTrimmedCurve::internal(
+                Processor::<_, Matrix4>::new(TrimmedCurve::new(
+                    Box::new(Curve3D::Conic(Conic3D::Ellipse(conic))),
+                    (tau + 0.25, 3. * std::f64::consts::PI - 0.25),
+                )),
+            ));
+            let native = source.to_parameter_preserving_modeling().unwrap();
+            let mut work = GeometryWorkBudget::new(2_000_000);
+            let witness = source_associated_planar_chart(
+                &source,
+                &source_surface,
+                &native,
+                &surface,
+                1.,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .expect("true original affine frame and whole conic correspondence");
+            assert!(witness.certified && !witness.declared_source);
+            assert!(witness.error_mm > 0. && witness.error_mm < 1e-7);
+            assert!(
+                witness
+                    .margin_uv
+                    .into_iter()
+                    .all(|margin| margin > 0. && margin.is_finite())
+            );
+            let chart = witness.curve.unwrap();
+            assert_eq!(chart.range_tuple(), source.range_tuple());
+            let wrong_carrier = tensor(6., 15., 0.);
+            assert!(
+                source_associated_planar_chart(
+                    &source,
+                    &source_surface,
+                    &native,
+                    &wrong_carrier,
+                    1.,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "physical coplanarity does not replace original carrier coefficient identity",
+            );
+            let nonaffine = tensor(6., 14., 0.125);
+            assert!(
+                source_associated_planar_chart(
+                    &source,
+                    &original(&nonaffine),
+                    &native,
+                    &nonaffine,
+                    1.,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "one altered original coefficient is not an affine frame",
+            );
+            let unsupported = tensor(7., 13., 0.);
+            assert!(
+                source_associated_planar_chart(
+                    &source,
+                    &original(&unsupported),
+                    &native,
+                    &unsupported,
+                    1.,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "a true inverse outside finite original support cannot be inward-rounded into success",
+            );
+            let mut wrong_phase = Processor::<_, Matrix4>::new(TrimmedCurve::new(
+                Box::new(native.clone()),
+                source.range_tuple(),
+            ));
+            wrong_phase.invert();
+            let wrong_phase = Curve::TrimmedCurve(wrong_phase);
+            assert!(
+                source_associated_planar_chart(
+                    &source,
+                    &source_surface,
+                    &wrong_phase,
+                    &surface,
+                    1.,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "the original spatial expression and actual reflection anchors are mandatory",
+            );
+            assert!(
+                derived_chart_witness(&wrong_phase, &surface, chart, 1., &mut work, &cancel)
+                    .unwrap()
+                    .is_none(),
+                "independent whole relative-tangent proof rejects the wrong phase/orientation",
+            );
+        }
     }
 
     #[test]
