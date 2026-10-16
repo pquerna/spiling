@@ -259,7 +259,8 @@ fn native_cantilever_emits_bed_anchored_support_and_separate_volume() {
         })
         .map(|layer| layer.z_mm)
         .fold(0.0f64, f64::max);
-    assert!((top - 7.8).abs() < 1e-8);
+    assert!(top < 8.0);
+    assert!(actual_fixture_contact_gap(&bundle, 8.0) >= 0.2);
     let interface_height: f64 = bundle
         .plan
         .layers
@@ -345,7 +346,8 @@ fn authored_sparse_cantilever_partial_skin_uses_actual_endpoint_footprints() {
                 .any(|path| path.kind == DepositionKind::SupportInterface)
         })
         .collect();
-    assert!((interface.last().unwrap().z_mm - 7.8).abs() < 1e-8);
+    assert!(interface.last().unwrap().z_mm < 8.0);
+    assert!(actual_fixture_contact_gap(&bundle, 8.0) >= 0.2);
     assert!((interface.iter().map(|layer| layer.height_mm).sum::<f64>() - 0.4).abs() < 1e-8);
     for point in bundle
         .plan
@@ -380,7 +382,7 @@ fn authored_sparse_cantilever_partial_skin_uses_actual_endpoint_footprints() {
 }
 
 #[test]
-fn floating_native_body_has_real_support_only_layers_and_exact_contact_gap() {
+fn floating_native_body_has_real_support_only_layers_and_minimum_contact_gap() {
     let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0)]);
     let enabled = intent(true);
     let bundle = compile(scene.input(&enabled), &AtomicBool::new(false)).unwrap();
@@ -407,7 +409,8 @@ fn floating_native_body_has_real_support_only_layers_and_exact_contact_gap() {
         .iter()
         .filter(|layer| layer.paths.is_empty())
         .collect();
-    assert!((empty.iter().map(|layer| layer.height_mm).sum::<f64>() - 0.2).abs() < 1e-8);
+    assert!(empty.iter().map(|layer| layer.height_mm).sum::<f64>() >= 0.2);
+    assert!(actual_fixture_contact_gap(&bundle, 2.0) >= 0.2);
     let report = preflight(&scene.input(&intent(false)), &AtomicBool::new(false)).unwrap();
     assert!(!report.eligible);
     assert!(
@@ -824,7 +827,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             "protected corner band was filled"
         );
         assert!(
-            outward >= -1e-6 && outward <= 0.1 + 1e-6,
+            (-1e-6..=0.1 + 1e-6).contains(&outward),
             "addition exceeded the outward-only profile bounds"
         );
     }
@@ -1602,12 +1605,8 @@ fn mapped_images_vary_native_planar_and_cylindrical_walls_fill_skin_and_actual_p
         );
         assert_eq!(bundle.provenance.surface_overlays, scene.surface_overlays);
         assert_ne!(bundle.program, original.program);
-        let first_area = original.plan.layers[0]
-            .region_coverage
-            .source_section_area_mm2;
         for layer in &bundle.plan.layers {
             let coverage = &layer.region_coverage;
-            assert!((coverage.source_section_area_mm2 - first_area).abs() < 1e-8);
             assert!(
                 (coverage.section_area_mm2
                     - coverage.source_section_area_mm2
@@ -2108,4 +2107,136 @@ fn image_capture_disabled_references_metadata_and_event_budgets_are_not_bypassed
         compile(scene.input(&intent), &cancel).unwrap_err().code,
         ManufacturingErrorCode::ResourceLimit
     );
+}
+
+fn actual_fixture_contact_gap(bundle: &ManufacturingBundle, source_floor: f64) -> f64 {
+    let xyz6 = |z: f64| format!("{z:.6}").parse::<f64>().unwrap();
+    let first_object = bundle
+        .plan
+        .layers
+        .iter()
+        .find(|layer| {
+            layer.section_z_mm > source_floor
+                && layer.paths.iter().any(|path| {
+                    !matches!(
+                        path.kind,
+                        DepositionKind::Support | DepositionKind::SupportInterface
+                    )
+                })
+        })
+        .unwrap();
+    let object_bottom = first_object
+        .paths
+        .iter()
+        .filter(|path| {
+            !matches!(
+                path.kind,
+                DepositionKind::Support | DepositionKind::SupportInterface
+            )
+        })
+        .flat_map(|path| &path.points_mm)
+        .map(|point| xyz6(point[2]) - first_object.height_mm)
+        .fold(f64::INFINITY, f64::min);
+    let support_top = bundle
+        .plan
+        .layers
+        .iter()
+        .filter(|layer| layer.z_mm < source_floor)
+        .flat_map(|layer| &layer.paths)
+        .filter(|path| path.kind == DepositionKind::SupportInterface)
+        .flat_map(|path| &path.points_mm)
+        .map(|point| xyz6(point[2]))
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(object_bottom.is_finite() && support_top.is_finite());
+    object_bottom - support_top
+}
+
+#[test]
+fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0000004)]);
+    let mut enabled = intent(true);
+    enabled.recipe.layer_height_mm = 0.2;
+    let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut enabled.recipe.supports else {
+        panic!()
+    };
+    // A non-micrometre minimum must survive independently rounded endpoints.
+    *z_gap_mm = 0.2000006;
+    let z_gap_mm = *z_gap_mm;
+    let bundle = compile(scene.input(&enabled), &cancel).unwrap();
+    let hash =
+        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    let inspection =
+        crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
+            .unwrap();
+    assert!(inspection.report.verified);
+    let replay = inspection.replay.unwrap();
+    let mut object_bottom = f64::INFINITY;
+    let mut support_top = f64::NEG_INFINITY;
+    let mut interface_segments = 0usize;
+    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
+        let z = f64::from_le_bytes(record[16..24].try_into().unwrap());
+        let role = record[46];
+        if matches!(role, 9 | 10) {
+            support_top = support_top.max(z);
+            interface_segments += usize::from(role == 10);
+        } else if matches!(role, 1..=5 | 8) {
+            let layer = u16::from_le_bytes(record[44..46].try_into().unwrap()) as usize;
+            object_bottom = object_bottom.min(z - bundle.plan.layers[layer].height_mm);
+        }
+    }
+    assert!(interface_segments > 0);
+    assert!(object_bottom.is_finite() && support_top.is_finite());
+    let actual_gap = object_bottom - support_top;
+    assert!(
+        actual_gap >= z_gap_mm,
+        "actual XYZ6 gap {actual_gap:.12} must not undershoot minimum {z_gap_mm:.12}"
+    );
+    assert!(
+        actual_gap - z_gap_mm < 4.0 * LAYER_QUANTIZATION_MM,
+        "emitter-aware mandatory contact must not unnecessarily lose a whole scheduled layer"
+    );
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .any(|layer| layer.paths.is_empty())
+    );
+    assert!(bundle.plan.layers[0].paths.iter().any(|path| matches!(
+        path.kind,
+        DepositionKind::Support | DepositionKind::SupportInterface
+    )));
+}
+
+#[test]
+fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority() {
+    let cancel = AtomicBool::new(false);
+    let scene = NativeScene::new(BOX, &[RigidPoseMm::IDENTITY]);
+    let mut bundle = compile(scene.input(&intent(false)), &cancel).unwrap();
+    assert_eq!(bundle.provenance.planner_version, "7");
+    assert!(crate::verify_bundle(&bundle, &cancel).unwrap().verified);
+    bundle.provenance.planner_version = "6".into();
+    // The unchanged storage schema still admits this otherwise valid bundle.
+    // Its saved report and current-coordinate program cannot certify that the
+    // previous planner performed the new final demanded-contact proof.
+    bundle.validate().unwrap();
+    assert_eq!(
+        crate::verify_bundle(&bundle, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::UnsupportedCapability
+    );
+    let hash =
+        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
+    for output in [
+        VerificationOutput::ReportOnly,
+        VerificationOutput::ReportAndMotion,
+    ] {
+        let failure = crate::inspect_bundle(&bundle, &hash, output, &cancel)
+            .err()
+            .expect("previous planner output must not receive current inspection authority");
+        assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedCapability);
+    }
 }

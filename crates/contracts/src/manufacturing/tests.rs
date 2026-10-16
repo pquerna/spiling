@@ -172,7 +172,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "6".into(),
+            planner_version: "7".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -937,23 +937,32 @@ fn preflight_admission_is_bounded_and_eligibility_is_not_physical_authority() {
 }
 
 #[test]
-fn durable_contact_gap_admission_requires_whole_plan_support_context() {
+fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     let mut data = intent();
     data.printer.capabilities.generated_supports = true;
+    data.recipe.layer_height_mm = 0.25;
     data.recipe.supports = SupportPolicy::Breakaway {
         density: 0.5,
         xy_clearance_mm: 0.3,
-        z_gap_mm: 0.2,
+        z_gap_mm: 0.25,
         interface_thickness_mm: 0.2,
     };
     let mut scheduled = plan();
+    scheduled.layers[0].z_mm = 5.25;
+    scheduled.layers[0].height_mm = 0.25;
+    scheduled.layers[0].section_z_mm = 5.125;
+    for path in &mut scheduled.layers[0].paths {
+        for point in &mut path.points_mm {
+            point[2] = 5.25;
+        }
+    }
     let mut object = scheduled.layers[0].clone();
     object.index = 2;
-    object.z_mm = 5.6;
-    object.section_z_mm = 5.5;
+    object.z_mm = 5.75;
+    object.section_z_mm = 5.625;
     for path in &mut object.paths {
         for point in &mut path.points_mm {
-            point[2] = 5.6;
+            point[2] = 5.75;
         }
     }
     let mut zero = coverage();
@@ -971,9 +980,9 @@ fn durable_contact_gap_admission_requires_whole_plan_support_context() {
     }
     scheduled.layers.push(PrintLayer {
         index: 1,
-        z_mm: 5.4,
-        height_mm: 0.2,
-        section_z_mm: 5.3,
+        z_mm: 5.5,
+        height_mm: 0.25,
+        section_z_mm: 5.375,
         region_coverage: zero,
         paths: Vec::new(),
     });
@@ -981,14 +990,23 @@ fn durable_contact_gap_admission_requires_whole_plan_support_context() {
     let bytes = serde_json::to_vec(&scheduled).unwrap();
     let admitted: NormalizedPrintPlan = serde_json::from_slice(&bytes).unwrap();
     admitted.validate(&data).unwrap();
+    let mut without_interface = admitted.clone();
+    for path in &mut without_interface.layers[0].paths {
+        path.kind = DepositionKind::Support;
+    }
+    assert!(without_interface.validate(&data).is_err());
     data.recipe.supports = SupportPolicy::Disabled;
     assert!(admitted.validate(&data).is_err());
     data.recipe.supports = SupportPolicy::Breakaway {
         density: 0.5,
         xy_clearance_mm: 0.3,
-        z_gap_mm: 0.19,
+        z_gap_mm: 0.2,
         interface_thickness_mm: 0.2,
     };
+    admitted.validate(&data).unwrap();
+    if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut data.recipe.supports {
+        *z_gap_mm = 0.3;
+    }
     assert!(admitted.validate(&data).is_err());
 }
 
@@ -1374,5 +1392,33 @@ fn resolution_validation_is_strict_and_advisory_attribution_cannot_drift() {
     assert_eq!(
         self::bundle().summary().surface_resolution,
         SurfaceResolutionTotals::empty()
+    );
+}
+
+#[test]
+fn xyz6_gap_refuses_unbounded_outward_result_despite_finite_head_and_compensation() {
+    // The exact difference is below -MAX, although rounded subtraction and
+    // every TwoDiff intermediate are finite. Outward evidence must refuse.
+    let above = -f64::MAX;
+    let below = 1.0;
+    assert!((above - below).is_finite());
+    let failure = program_coordinates::enclosed_vertical_gap_mm(above, below).unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+    );
+}
+
+#[test]
+fn xyz6_gap_rejects_nonfinite_compensation_despite_finite_subtraction_head() {
+    let below = f64::MAX;
+    let above = 1.5 * (f64::MAX - f64::MAX.next_down());
+    let head = above - below;
+    assert!(head.is_finite());
+    assert!(!(above - head).is_finite());
+    let failure = program_coordinates::enclosed_vertical_gap_mm(above, below).unwrap_err();
+    assert_eq!(
+        failure.code,
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
     );
 }

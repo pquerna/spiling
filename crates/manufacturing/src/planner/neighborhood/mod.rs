@@ -185,12 +185,12 @@ impl<'a> SkinNeighborhoods<'a> {
         for (index, slot) in self.nodes.iter().enumerate() {
             check_cancel(cancel)?;
             charge(&mut self.work, 1)?;
-            if let Cached::Geometry(material, _, used) = slot {
-                if Arc::strong_count(material) == 1 {
-                    let candidate = (*used, index);
-                    if oldest.is_none_or(|previous| candidate < previous) {
-                        oldest = Some(candidate);
-                    }
+            if let Cached::Geometry(material, _, used) = slot
+                && Arc::strong_count(material) == 1
+            {
+                let candidate = (*used, index);
+                if oldest.is_none_or(|previous| candidate < previous) {
+                    oldest = Some(candidate);
                 }
             }
         }

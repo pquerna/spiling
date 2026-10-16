@@ -287,7 +287,17 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     let realized = realize(native.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap();
     let first = region::offset(&realized, -0.2, &cancel).unwrap();
     let good = collect_resolution(
-        &first, &realized, &native, &fields, 2.0, 0, 0.4, &mut 0, &cancel,
+        ResolutionGeometry {
+            firstwall: &first,
+            material: &realized,
+            native: &native,
+        },
+        &fields,
+        2.0,
+        0,
+        0.4,
+        &mut 0,
+        &cancel,
     )
     .unwrap();
     good[0].validate().unwrap();
@@ -311,9 +321,11 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     assert!((peak(&realized) - peak(&shifted_material)).abs() < SURFACE_TOLERANCE_MM);
     let wrong_wall = region::offset(&shifted_material, -0.2, &cancel).unwrap();
     let bad = collect_resolution(
-        &wrong_wall,
-        &realized,
-        &native,
+        ResolutionGeometry {
+            firstwall: &wrong_wall,
+            material: &realized,
+            native: &native,
+        },
         &fields,
         2.0,
         0,
@@ -329,9 +341,11 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     );
     let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
     let incomplete = collect_resolution(
-        &first,
-        &realized,
-        &native,
+        ResolutionGeometry {
+            firstwall: &first,
+            material: &realized,
+            native: &native,
+        },
         &fields,
         2.0,
         0,

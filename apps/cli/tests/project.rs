@@ -857,7 +857,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
     let provenance: Value =
         serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
     assert_eq!(provenance["surface_overlays"], overlays);
-    assert_eq!(provenance["planner_version"], "6");
+    assert_eq!(provenance["planner_version"], "7");
     let baseline_provenance: Value =
         serde_json::from_slice(&std::fs::read(baseline_export.join("provenance.json")).unwrap())
             .unwrap();

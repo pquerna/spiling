@@ -17,6 +17,7 @@ pub use replay::*;
 mod job;
 pub use job::*;
 mod process;
+pub mod program_coordinates;
 pub use process::*;
 mod resolution;
 pub use resolution::*;
@@ -37,6 +38,7 @@ pub enum ManufacturingErrorCode {
     InvalidSpecification,
     UnsupportedCapability,
     UnsupportedGeometry,
+    ProgramCoordinateConditioningFailure,
     NoIntent,
     EmptyProject,
     StaleRevision,
@@ -914,13 +916,19 @@ impl NormalizedPrintPlan {
         if self.layers.len() > MAX_PRINT_LAYERS as usize {
             return Err(resource("print layer limit exceeded"));
         }
+        // Both current output identities use the reviewed Cartesian XYZ6
+        // contract. A future dialect must choose its representation explicitly.
+        match intent.printer.capabilities.output_dialect {
+            OutputDialect::CartesianAbsoluteGcodeV1
+            | OutputDialect::Marlin2SingleExtruderGcodeV1 => {}
+        }
         let envelope = &intent.printer.build_envelope;
         let mut lower_z = envelope.min[2];
         let mut segments = 0usize;
         let mut object_segments = 0usize;
         let complete = matches!(intent.printer.workflow, JobWorkflow::CompleteMarlin { .. });
         let mut object_xy = [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]];
-        let mut gap_height = 0.0;
+        let mut gap_start = None;
         for (index, layer) in self.layers.iter().enumerate() {
             layer.region_coverage.validate(&intent.recipe)?;
             let height = layer.height_mm;
@@ -943,7 +951,7 @@ impl NormalizedPrintPlan {
             }
             lower_z = layer.z_mm;
             if layer.paths.is_empty() {
-                let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
+                let SupportPolicy::Breakaway { .. } = intent.recipe.supports else {
                     return Err(invalid(
                         "empty schedule layers require explicit breakaway support policy",
                     ));
@@ -956,7 +964,7 @@ impl NormalizedPrintPlan {
                             DepositionKind::Support | DepositionKind::SupportInterface
                         )
                     })
-                    || (gap_height == 0.0
+                    || (gap_start.is_none()
                         && !self.layers[index - 1]
                             .paths
                             .iter()
@@ -966,11 +974,16 @@ impl NormalizedPrintPlan {
                         "contact gap requires bed-anchored support and preceding support interface",
                     ));
                 }
-                gap_height += layer.height_mm;
-                if gap_height > z_gap_mm + self.layer_quantization_mm {
-                    return Err(invalid("empty contact gap exceeds declared physical Z gap"));
+                if gap_start.is_none() {
+                    let preceding = &self.layers[index - 1];
+                    gap_start = Some(
+                        program_coordinates::project_xyz6_bead_height_mm(
+                            preceding.z_mm,
+                            preceding.height_mm,
+                        )?[1],
+                    );
                 }
-            } else if gap_height > 0.0 {
+            } else if let Some(support_top) = gap_start {
                 if !layer.paths.iter().any(|p| {
                     !matches!(
                         p.kind,
@@ -979,7 +992,20 @@ impl NormalizedPrintPlan {
                 }) {
                     return Err(invalid("contact gap must end at actual object deposition"));
                 }
-                gap_height = 0.0;
+                let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
+                    return Err(invalid("contact gap requires breakaway support policy"));
+                };
+                let object_bottom =
+                    program_coordinates::project_xyz6_bead_height_mm(layer.z_mm, layer.height_mm)?
+                        [0];
+                if program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)?
+                    < z_gap_mm
+                {
+                    return Err(invalid(
+                        "actual XYZ6 contact gap is below the declared physical minimum",
+                    ));
+                }
+                gap_start = None;
             }
             let has_object = layer.paths.iter().any(|p| {
                 !matches!(
@@ -1085,12 +1111,8 @@ impl NormalizedPrintPlan {
                     return Err(invalid("prime exclusion envelope exceeds numeric range"));
                 }
             }
-            let rounded_start = job
-                .prime_start_mm
-                .map(|value| (value * 1_000_000.0).round() / 1_000_000.0);
-            let rounded_end = job
-                .prime_end_mm
-                .map(|value| (value * 1_000_000.0).round() / 1_000_000.0);
+            let rounded_start = program_coordinates::project_xyz6_point_mm(job.prime_start_mm)?;
+            let rounded_end = program_coordinates::project_xyz6_point_mm(job.prime_end_mm)?;
             if rounded_start
                 .iter()
                 .chain(&rounded_end)

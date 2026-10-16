@@ -21,7 +21,7 @@ mod proof;
 mod resolution;
 mod splice;
 use image::ImageMapping;
-pub(super) use resolution::collect_resolution;
+pub(super) use resolution::{ResolutionGeometry, collect_resolution};
 #[cfg(test)]
 mod tests;
 use profile::PeriodicProfile;
@@ -224,52 +224,31 @@ pub(super) fn metadata(
             &face.face_id,
         );
         let finish = layer.map(|layer| &layer.finish);
-        if let Some(SurfaceFinish::ImageRelief {
-            image_hash,
-            parameters,
-        }) = finish
-        {
-            if matches!(face.carrier, FaceCarrier::Cylinder { .. }) {
-                let field = cylindrical::metadata(
-                    input,
-                    occurrence,
-                    source_bounds,
-                    &face.face_id,
-                    parameters.depth_mm,
-                    parameters.u_repeats,
-                    parameters.u_phase_fraction,
-                    sample_limit.saturating_sub(samples),
-                    cancel,
-                    Some((
-                        image_hash,
-                        parameters,
-                        layer.expect("effective layer").layer_id,
-                    )),
-                )?;
-                samples += field.samples;
-                result.push(PreparedFinish {
-                    shape: PreparedShape::Cylindrical(field),
-                });
-                continue;
-            }
-        }
-        if let Some(SurfaceFinish::CylindricalRibs {
-            depth_mm,
-            rib_count,
-            phase_fraction,
-        }) = finish
+        if let Some(SurfaceFinish::ImageRelief { .. }) = finish
+            && matches!(face.carrier, FaceCarrier::Cylinder { .. })
         {
             let field = cylindrical::metadata(
                 input,
                 occurrence,
                 source_bounds,
-                &face.face_id,
-                *depth_mm,
-                *rib_count,
-                *phase_fraction,
+                layer.expect("effective layer"),
                 sample_limit.saturating_sub(samples),
                 cancel,
-                None,
+            )?;
+            samples += field.samples;
+            result.push(PreparedFinish {
+                shape: PreparedShape::Cylindrical(field),
+            });
+            continue;
+        }
+        if let Some(SurfaceFinish::CylindricalRibs { .. }) = finish {
+            let field = cylindrical::metadata(
+                input,
+                occurrence,
+                source_bounds,
+                layer.expect("effective layer"),
+                sample_limit.saturating_sub(samples),
+                cancel,
             )?;
             samples += field.samples;
             result.push(PreparedFinish {
@@ -771,9 +750,9 @@ pub(super) fn component_bounds(component: &MachineComponent) -> AabbMm {
                 }
             }),
         );
-        for a in 0..3 {
-            result.min[a] = result.min[a].min(p[a]);
-            result.max[a] = result.max[a].max(p[a]);
+        for (a, coordinate) in p.into_iter().enumerate() {
+            result.min[a] = result.min[a].min(coordinate);
+            result.max[a] = result.max[a].max(coordinate);
         }
     }
     result

@@ -6,6 +6,8 @@ Licensed under the Open Software License version 3.0
 
 # Software-only manufacturing evidence
 
+Current source producer is planner7 with project4/surface3/manufacturing5, unchanged emitter/verifier4 and SPLR3. Inspection/reopen requires the exact planner generation for the XYZ6 minimum emitted-gap proof. Historical gate identities and measured artifacts below retain the producers actually exercised; they are not requalified by this source change.
+
 ## Physical qualification gate — not yet exercised
 
 Successful compilation, preflight, independent replay and export establish software
@@ -16,13 +18,13 @@ declared bytes; they do not certify the contents or a machine.
 
 Before a physical evaluation, freeze and retain:
 
-| Input | Required record |
-| --- | --- |
-| Machine and firmware | Exact machine/extruder/nozzle identity, firmware build and complete configuration; coordinate/homing/endstop conventions, usable envelope, extrusion mode, leveling state and temperature limits |
-| Process configuration | Ordinary print-cooling fan mapping with laser synchronization disabled; permitted externally commanded retraction, E-feed limits, prime/park clearance and permitted Z-hop |
-| Material calibration | Material/batch, filament diameter, extrusion calibration, temperatures, measured flow ceiling, first-layer settings, cooling, retraction and bridge-span settings with procedures and raw measurements |
-| Software and geometry | Spiling commit/kernel pin, exact inert intent, source hashes, normalized plan, actual program, fresh independent report and immutable export/provenance hashes |
-| Evaluation criteria | Operator-approved dimensional/first-layer/bridge/support-removal criteria and tolerances fixed before printing; fixture identities, repetitions, instruments and measurement procedure |
+| Input                 | Required record                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Machine and firmware  | Exact machine/extruder/nozzle identity, firmware build and complete configuration; coordinate/homing/endstop conventions, usable envelope, extrusion mode, leveling state and temperature limits       |
+| Process configuration | Ordinary print-cooling fan mapping with laser synchronization disabled; permitted externally commanded retraction, E-feed limits, prime/park clearance and permitted Z-hop                             |
+| Material calibration  | Material/batch, filament diameter, extrusion calibration, temperatures, measured flow ceiling, first-layer settings, cooling, retraction and bridge-span settings with procedures and raw measurements |
+| Software and geometry | Spiling commit/kernel pin, exact inert intent, source hashes, normalized plan, actual program, fresh independent report and immutable export/provenance hashes                                         |
+| Evaluation criteria   | Operator-approved dimensional/first-layer/bridge/support-removal criteria and tolerances fixed before printing; fixture identities, repetitions, instruments and measurement procedure                 |
 
 The supervised sequence is machine/configuration inspection, first-layer and
 extrusion calibration, dimensional box and protected-hole coupons, sparse-roof
@@ -43,6 +45,61 @@ or swept-bead physics. Physical qualification remains open until the frozen
 configuration passes supervised measurements; the workbench has no execution
 connector and must not infer permission from a verified report.
 
+## XYZ6 command coordinates and emitted support gaps — planner 7
+
+The source revision is the commit containing this section, based on main
+`71e6935`. This gate retains Monstertruck
+`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`, project4/manufacturing5/surface3,
+emitter/verifier4 and SPLR3. Environment: Linux 7.0.14-23-pve x64 and
+Rust 1.99.0. Builds used one Cargo job, no incremental compilation, zero debug
+information, a 3 GiB memory limit and 128 MiB swap limit. Runtime jobs used
+1 GiB / 64 MiB and 64 tasks; observed swap use was zero.
+
+The public CLI imported the unchanged `box-mm.step`, assigned the unchanged
+`complete-sparse.intent.json` and placed the occurrence at
+`[20,20,2.0000004]` with identity rotation. Their byte hashes are recorded in
+the spatial-image gate's frozen inputs below. The complete Marlin workflow
+included native compilation, independent byte replay, priming/retraction/
+park/shutdown, save, removal of the **owned external copy** of the STEP file,
+and fresh read-only engine reopen/replay/export. No fixture was removed.
+
+```sh
+WORK="$(mktemp -d)"
+cp fixtures/geometry/box-mm.step "$WORK/owned-input.step"
+CLI=target/debug/spiling-cli
+ENGINE="$PWD/target/debug/spiling-engine"
+"$CLI" project create "$WORK/project" --import "$WORK/owned-input.step" \
+  --intent fixtures/manufacturing/complete-sparse.intent.json \
+  --pose 1 '{"translation_mm":[20,20,2.0000004],"rotation_xyzw":[0,0,0,1]}' \
+  --preflight --compile --verify --manufacturing-out "$WORK/initial-export" \
+  --replay-out "$WORK/initial.splr" --save --engine "$ENGINE"
+rm "$WORK/owned-input.step"
+"$CLI" project inspect "$WORK/project" --preflight --verify \
+  --manufacturing-out "$WORK/reopen-export" --replay-out "$WORK/reopen.splr" \
+  --engine "$ENGINE"
+cmp "$WORK/initial.splr" "$WORK/reopen.splr"
+```
+
+| Observed property                            | Result                                                                                                    |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Captured planner / saved revision            | 7 / 4                                                                                                     |
+| Fresh reopen                                 | Different engine session; read-only, clean, revision 4                                                    |
+| Actual replay                                | 52 scheduled layers, 2559 events, 122928 bytes                                                            |
+| Actual support-interface deposition segments | 81                                                                                                        |
+| Decoded nominal full-bead contact gap        | 0.2000010378378383 mm, above configured 0.2 mm minimum                                                    |
+| Regenerated replay SHA-256                   | `f1233fd40b6a18dcd0e894845233a96a148622b11817b9916d524d4d0c9dd9cd`, identical before/after source removal |
+| Create/Compile/replay/export/save            | 1.553 s, 11.3 MiB peak                                                                                    |
+| Fresh read-only reopen/replay/export         | 1.159 s, 10.1 MiB peak                                                                                    |
+
+Gap measurement decodes actual SPLR Z/roles and subtracts the captured actual
+layer thickness for object beads; it does not substitute nominal layer-grid
+positions. Focused regressions also exercised a non-micrometre minimum gap
+`0.2000006`, rejection of an alternate half-step endpoint, coordinate-range
+refusal, nonfinite compensated arithmetic, genuine interface context, and
+planner6 rejection through fresh report-only and motion inspection.
+Generated TypeScript/fixture consistency passed. This gate adds no GPU,
+packaged-platform, swept-tool or physical printability qualification.
+
 ## Spatial image relief — project 4 / surface 3 / planner 6
 
 **Software workflow gate passed:** genuine PNG import and source-local U/Z
@@ -59,19 +116,19 @@ is the commit containing this section. The accepted
 iterated against independent review and actual failures. Environment:
 Linux7.0.14-23-pve x64, Rust1.99.0 (`b940084d7`,2026-09-28), Node24.15.0,
 pnpm10.32.1. Monstertruck remains
-`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Current identities are project4,
+`5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Recorded producer identities for this gate are project4,
 surface3, manufacturing5, planner6, emitter/verifier4 and SPLR3. Old formats
 have no compatibility reader.
 
 ### Frozen inputs and procedure
 
-| Input | SHA-256 |
-|---|---|
-| `fixtures/geometry/box-mm.step` | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
+| Input                                                           | SHA-256                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `fixtures/geometry/box-mm.step`                                 | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
 | `fixtures/geometry/independent-exporters/occt-cylinder-mm.step` | `21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a` |
-| `fixtures/manufacturing/image-relief.pattern.json` | `a2bc3a7ece26cdcb15f9819148d78de1df9ca75014b418ec8d857ad279eace0b` |
-| `fixtures/manufacturing/solid-fill.intent.json` | `f0638ecdadb8b50e85af8af4c8c8da26aaa61d9e6972ceee67de14f853448d4f` |
-| `fixtures/manufacturing/complete-sparse.intent.json` | `b91e7054907216e4ea6ecaf472cadeea950fb20e642586d4be15815893918c77` |
+| `fixtures/manufacturing/image-relief.pattern.json`              | `a2bc3a7ece26cdcb15f9819148d78de1df9ca75014b418ec8d857ad279eace0b` |
+| `fixtures/manufacturing/solid-fill.intent.json`                 | `f0638ecdadb8b50e85af8af4c8c8da26aaa61d9e6972ceee67de14f853448d4f` |
+| `fixtures/manufacturing/complete-sparse.intent.json`            | `b91e7054907216e4ea6ecaf472cadeea950fb20e642586d4be15815893918c77` |
 
 The CEF runner encodes the checked-in8×8 pattern as a genuine PNG. Canonical
 Gray8 PGM is75 bytes, SHA-256
@@ -106,16 +163,16 @@ packaging.
 
 ### Observed final cylindrical CEF output
 
-| Property | Observed value |
-|---|---|
-| Immutable bundle SHA-256 | `7f8a2e88de239f465512f48d56f8f5ac6700173e32e415e46c067de0c781723f` |
-| Bundle bytes | 2223740 |
-| Layers / paths / object deposition segments | 44 /425 /17600 |
-| Nominal object volume | 343.65968622023036mm³ |
-| Filament | 142.87709467mm |
-| Replay events / packed bytes | 18813 /903120 |
-| Maximum decoded position / extrusion error | 7.011189039420439e-7mm /9.966481183745768e-9mm |
-| Nominal surface witnesses | 10850 ambiguous;0 resolved/below-resolution/unavailable; coverage complete |
+| Property                                    | Observed value                                                             |
+| ------------------------------------------- | -------------------------------------------------------------------------- |
+| Immutable bundle SHA-256                    | `7f8a2e88de239f465512f48d56f8f5ac6700173e32e415e46c067de0c781723f`         |
+| Bundle bytes                                | 2223740                                                                    |
+| Layers / paths / object deposition segments | 44 /425 /17600                                                             |
+| Nominal object volume                       | 343.65968622023036mm³                                                      |
+| Filament                                    | 142.87709467mm                                                             |
+| Replay events / packed bytes                | 18813 /903120                                                              |
+| Maximum decoded position / extrusion error  | 7.011189039420439e-7mm /9.966481183745768e-9mm                             |
+| Nominal surface witnesses                   | 10850 ambiguous;0 resolved/below-resolution/unavailable; coverage complete |
 
 These are one captured artifact's values, not universal deterministic hashes
 across new project IDs or native sampling choices. Ambiguous surface witnesses
@@ -223,12 +280,12 @@ refuse; no helical/crossed knurling, arbitrary painting or physical grip claim.
 
 Frozen inputs, unchanged during evaluation:
 
-| Input | SHA-256 |
-| --- | --- |
+| Input                                                                       | SHA-256                                                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `geometry/independent-exporters/occt-cylinder-mm.step` — admitted full face | `21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a` |
-| `geometry/cylinder.step` — two native half-faces, explicit refusal | `95df1da444dc9c49529054f1825c9013c135301df677e30269c3a789ee2b464b` |
-| `manufacturing/solid-fill.intent.json` — actual CLI | `99a5033a65020d206b673b70a572c41bcd60850610426e0215187ec52d2ddb29` |
-| `manufacturing/complete-sparse.intent.json` — actual CEF | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
+| `geometry/cylinder.step` — two native half-faces, explicit refusal          | `95df1da444dc9c49529054f1825c9013c135301df677e30269c3a789ee2b464b` |
+| `manufacturing/solid-fill.intent.json` — actual CLI                         | `99a5033a65020d206b673b70a572c41bcd60850610426e0215187ec52d2ddb29` |
+| `manufacturing/complete-sparse.intent.json` — actual CEF                    | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
 
 Focused properties passed: five contract, six Core, two client and eleven
 selected geometry cases; eleven native manufacturing cases; two new Boolean
@@ -285,15 +342,15 @@ no release/package/full-workspace sweep. Native gates used 3 GiB RAM / 128 MiB
 swap / 64 tasks; frontend 2 GiB / 128 MiB / 64 tasks; CEF separately 1536 MiB /
 128 MiB / 256 tasks. No builds ran concurrently.
 
-| Observed stage | Wall time | Unit memory peak | Unit swap |
-| --- | ---: | ---: | ---: |
-| Geometry retry + eleven native manufacturing properties | 232.014 s | 440.1 MiB | 0 |
-| Two causal/adversarial Boolean properties | 4.386 s | 434.9 MiB | 0 |
-| Corrected engine build + both actual CLI workflows | 69.346 s | 505.3 MiB | 0 |
-| TypeScript + production Vite build | 1.523 s | 356.1 MiB | 0 |
-| Matching native CEF debug build | 16.617 s | 1.2 GiB, systemd-rounded | 0 |
-| Actual CEF cylindrical workflow | 54.454 s | 860 MiB | 0 |
-| Smoke syntax + `pnpm contracts --check` (no generated drift) | 1.329 s | 141.7 MiB | 0 |
+| Observed stage                                               | Wall time |         Unit memory peak | Unit swap |
+| ------------------------------------------------------------ | --------: | -----------------------: | --------: |
+| Geometry retry + eleven native manufacturing properties      | 232.014 s |                440.1 MiB |         0 |
+| Two causal/adversarial Boolean properties                    |   4.386 s |                434.9 MiB |         0 |
+| Corrected engine build + both actual CLI workflows           |  69.346 s |                505.3 MiB |         0 |
+| TypeScript + production Vite build                           |   1.523 s |                356.1 MiB |         0 |
+| Matching native CEF debug build                              |  16.617 s | 1.2 GiB, systemd-rounded |         0 |
+| Actual CEF cylindrical workflow                              |  54.454 s |                  860 MiB |         0 |
+| Smoke syntax + `pnpm contracts --check` (no generated drift) |   1.329 s |                141.7 MiB |         0 |
 
 Observed target usage rose from 10430356 to 10551188 KiB, below the 11 GiB
 ceiling at each stage check; filesystem headroom finished at 2.0 GiB.
@@ -302,7 +359,6 @@ The CEF run was explicitly unsandboxed software-GPU/no-WebGPU diagnostic
 under Xvfb; GPU process failures and absent desktop D-Bus services were visible.
 No hardware rendering/picking, real OS dialogs, packaging/platform durability,
 machine execution, measured texture/grip or physical printability was established.
-
 
 ## Planar source-face finish checkpoint — surface 1 / planner 4 (historical)
 
@@ -342,17 +398,17 @@ measured grip. Expanded exclusions are conservative nominal metadata checks.
 
 ### Focused observed checks
 
-| Exercised surface | Result |
-| --- | --- |
-| Surface/manifest/fingerprint, required area/bound and typed protobuf contracts | 6 PASS |
-| Core transaction, cascade, allocator/capacity, persistence/recovery and artifact history | 6 PASS |
-| Native face identity, outward side, trim/height/recess/co-carrier refusal, corruption/cancellation | 4 PASS |
-| Shared client typed edits and mixed-build readiness rejection | 2 PASS |
-| Native ribs, phase/chord bound, protected holes, poses, multi-face/occurrence, scope/limits, actual-anchor/support and verifier gap ownership | 8 PASS |
-| Actual engine metadata revision/scene/invalidation and reused/rebuilt native-open targets | 2 PASS |
-| Actual CLI create→native face inspection→definition finish→Preflight/Compile/Verify→save/export→delete owned source→fresh read-only replay/export→Smooth/disable/remove | PASS; observed each engine reaped |
-| Generated TypeScript consumed by production frontend build | PASS |
-| Actual compiled CEF `surface-finish --diagnostic-no-gpu` scenario | PASS; observed native window and engine exit |
+| Exercised surface                                                                                                                                                       | Result                                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Surface/manifest/fingerprint, required area/bound and typed protobuf contracts                                                                                          | 6 PASS                                       |
+| Core transaction, cascade, allocator/capacity, persistence/recovery and artifact history                                                                                | 6 PASS                                       |
+| Native face identity, outward side, trim/height/recess/co-carrier refusal, corruption/cancellation                                                                      | 4 PASS                                       |
+| Shared client typed edits and mixed-build readiness rejection                                                                                                           | 2 PASS                                       |
+| Native ribs, phase/chord bound, protected holes, poses, multi-face/occurrence, scope/limits, actual-anchor/support and verifier gap ownership                           | 8 PASS                                       |
+| Actual engine metadata revision/scene/invalidation and reused/rebuilt native-open targets                                                                               | 2 PASS                                       |
+| Actual CLI create→native face inspection→definition finish→Preflight/Compile/Verify→save/export→delete owned source→fresh read-only replay/export→Smooth/disable/remove | PASS; observed each engine reaped            |
+| Generated TypeScript consumed by production frontend build                                                                                                              | PASS                                         |
+| Actual compiled CEF `surface-finish --diagnostic-no-gpu` scenario                                                                                                       | PASS; observed native window and engine exit |
 
 Reproduction uses the selective `surface`, `wall`, `native_surface`,
 `certified_native_ribs`, `multiple_certified_finishes`, `finished_native_cantilever`,
@@ -365,12 +421,12 @@ production controls/services as the actual CEF runner.
 
 ### Frozen inputs and real workbench observation
 
-| Input | SHA-256 |
-| --- | --- |
-| Original native `box-mm.step` | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
-| Original protected-hole source | `eb2112f9ef4be523615f237b86b69569026cef8e1cafbc20e2fdca7e3459cb29` |
+| Input                            | SHA-256                                                            |
+| -------------------------------- | ------------------------------------------------------------------ |
+| Original native `box-mm.step`    | `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98` |
+| Original protected-hole source   | `eb2112f9ef4be523615f237b86b69569026cef8e1cafbc20e2fdca7e3459cb29` |
 | Schema-4 diagnostic solid intent | `99a5033a65020d206b673b70a572c41bcd60850610426e0215187ec52d2ddb29` |
-| Schema-4 complete sparse intent | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
+| Schema-4 complete sparse intent  | `ef2f2cb07d36f9a92917c5a3125b8103145c69b02efb8615e3eaee3cef38f176` |
 
 The actual CEF controls selected occurrence 1 / native face `step:25`, applied an
 occurrence layer with depth 0.1 mm, pitch 2 mm, protected margin 1 mm and phase
@@ -382,17 +438,17 @@ the native 200 mm² source footprint, positive bounded addition ≤2 mm² and ex
 source-plus-addition accounting. Screenshots visually showed the real selected
 native controls and disabled read-only controls; no GPU/picking proof is claimed.
 
-| Recorded complete-job observation | Value |
-| --- | --- |
-| Layers / paths | 40 / 749 |
-| Object deposition / travel segments | 14,429 / 977 |
-| Object volume / filament | 805.1545255017074 mm³ / 334.74435314 mm |
-| Support deposition | 0 |
-| Separate prime filament | 1.5 mm |
-| Retractions / retracted filament | 114 / 91.20000000000014 mm |
-| Actual replay events / packed bytes | 15,638 / 750,720 |
-| Bundle bytes / SHA-256 | 1,790,168 / `c1d1bbfc1a9f111cb217aac8c7950d76839448b1d3c52895c893e79947c57499` |
-| Input hash at project revision 10 | `5d59c779fd52acf8e3b78105c09e5d2b181c265af0459a22efca42effe176ce6` |
+| Recorded complete-job observation   | Value                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------ |
+| Layers / paths                      | 40 / 749                                                                       |
+| Object deposition / travel segments | 14,429 / 977                                                                   |
+| Object volume / filament            | 805.1545255017074 mm³ / 334.74435314 mm                                        |
+| Support deposition                  | 0                                                                              |
+| Separate prime filament             | 1.5 mm                                                                         |
+| Retractions / retracted filament    | 114 / 91.20000000000014 mm                                                     |
+| Actual replay events / packed bytes | 15,638 / 750,720                                                               |
+| Bundle bytes / SHA-256              | 1,790,168 / `c1d1bbfc1a9f111cb217aac8c7950d76839448b1d3c52895c893e79947c57499` |
+| Input hash at project revision 10   | `5d59c779fd52acf8e3b78105c09e5d2b181c265af0459a22efca42effe176ce6`             |
 
 Recorded hashes bind this run's project identity; separately created projects do
 not promise identical hashes. Fresh reopen compares immutable outputs within the
@@ -412,7 +468,7 @@ The actual CLI then exposed an incompatible 0.8 mm margin for its 0.45 mm bead;
 the explicit operator preset was corrected to 1 mm without relaxing process
 limits. Uniform worst-taper sampling also exhausted the unchanged 20-million
 Boolean-pair limit in boundary-capsule construction. Region-local curvature
-sampling and exact monotone collinear *construction-primitive* coalescing removed
+sampling and exact monotone collinear _construction-primitive_ coalescing removed
 redundant work; original material arrays, 0.001/0.005 mm bounds, point limits and
 the Boolean-pair cap were not weakened. The failing CLI passed afterward; native
 retention, phase/chord and support regressions also passed.
@@ -429,8 +485,6 @@ completed in 11.40 s after compilation.
 Authorized workspace-only cache cleanup recovered 2.3 GiB before work. The final
 warm target measured 10 GiB, below the 11 GiB goal, with 2.1 GiB free disk. No
 installer, release/benchmark duplicate or additional native distribution was built.
-
-
 
 ## Schema-3 operator workflow software evidence
 
@@ -471,16 +525,16 @@ copies, never frozen originals.
 
 ### Frozen focused checks
 
-| Exercised surface | Observed result |
-| --- | --- |
-| Contracts | 52 PASS |
-| Protocol, viewport and desktop TypeScript consumers | All three checks PASS |
-| Desktop manufacturing state | 4 PASS |
-| Core manufacturing | 12 PASS |
-| Independent verifier | 29 PASS |
-| Packed TypeScript consumers after actual native SPLR3 golden | 174 PASS |
-| Planner/support, excluding already-tested slow tilt | 32 PASS |
-| Actual-engine durable Preflight | 2 PASS |
+| Exercised surface                                            | Observed result       |
+| ------------------------------------------------------------ | --------------------- |
+| Contracts                                                    | 52 PASS               |
+| Protocol, viewport and desktop TypeScript consumers          | All three checks PASS |
+| Desktop manufacturing state                                  | 4 PASS                |
+| Core manufacturing                                           | 12 PASS               |
+| Independent verifier                                         | 29 PASS               |
+| Packed TypeScript consumers after actual native SPLR3 golden | 174 PASS              |
+| Planner/support, excluding already-tested slow tilt          | 32 PASS               |
+| Actual-engine durable Preflight                              | 2 PASS                |
 
 The verifier proof includes the actual exact-E endpoint large-E counterexample:
 it failed before correction and passed afterward. The actual-engine Preflight
@@ -490,11 +544,11 @@ claim. Native prisms initially had reversed winding in the original generator;
 construction was corrected rather than changing numerical tolerances. Section
 sampling remains 0.005 mm, boolean tolerance 1e-5 and plane tolerance 1e-4.
 
-| Corrected native source | SHA-256 |
-| --- | --- |
-| Nonintegral prism | `322c486eece35cdd306e530b089e99eb060f92948cf48b29d27775ef3575d263` |
-| Shelf prism | `dc8bdd90518575bdaf3c51f49935201617d177b38033180ce92a884e593655ff` |
-| Ramp prism | `d8aa2bcb2baa178dfaf886f8cfcd1af2d4aa61741b105606da222ceaac8048e9` |
+| Corrected native source | SHA-256                                                            |
+| ----------------------- | ------------------------------------------------------------------ |
+| Nonintegral prism       | `322c486eece35cdd306e530b089e99eb060f92948cf48b29d27775ef3575d263` |
+| Shelf prism             | `dc8bdd90518575bdaf3c51f49935201617d177b38033180ce92a884e593655ff` |
+| Ramp prism              | `d8aa2bcb2baa178dfaf886f8cfcd1af2d4aa61741b105606da222ceaac8048e9` |
 
 ### Actual CLI observations
 
@@ -510,16 +564,16 @@ calibration hash was
 `322df893a20557507671a732334464bebf7164d9c547e6ef09eea356e99b3a8b`,
 with `physical_measurements=[]`.
 
-| Observation | Complete box | Nonintegral source |
-| --- | ---: | ---: |
-| Scheduled layers | 40 | 42 |
-| Object deposition segments | 3,432 | 3,329 |
-| Object deposited volume, mm³ | 882.4183774865178 | 863.2515508721464 |
-| Object filament, mm | 366.86693003 | 358.89828951 |
-| Prime filament, mm (separate) | 1.5 | 1.5 |
-| Retractions / retracted filament, mm | 119 / 95.2 | 122 / 97.6 |
-| Replay events | 4,544 | 4,546 |
-| Elapsed / peak memory | 1.931 s / 13.1 MiB | 1.929 s / 13.3 MiB |
+| Observation                          |       Complete box | Nonintegral source |
+| ------------------------------------ | -----------------: | -----------------: |
+| Scheduled layers                     |                 40 |                 42 |
+| Object deposition segments           |              3,432 |              3,329 |
+| Object deposited volume, mm³         |  882.4183774865178 |  863.2515508721464 |
+| Object filament, mm                  |       366.86693003 |       358.89828951 |
+| Prime filament, mm (separate)        |                1.5 |                1.5 |
+| Retractions / retracted filament, mm |         119 / 95.2 |         122 / 97.6 |
+| Replay events                        |              4,544 |              4,546 |
+| Elapsed / peak memory                | 1.931 s / 13.1 MiB | 1.929 s / 13.3 MiB |
 
 The box run had 238 process events and used zero swap. The nonintegral source was 7.85 mm high with explicit
 first-layer flow 1.05 and bridge flow 0.95. Its first layer was 0.2 mm; its last
@@ -531,13 +585,13 @@ files and SPLR. All three reported engine PIDs returned `ESRCH` to `kill(pid,0)`
 after reaping; transient manifests/session/timing metadata are not identity
 comparands.
 
-| Nonintegral immutable output | SHA-256 |
-| --- | --- |
-| `plan.json` | `3c0e53eaf5c2b8e347d92e9529b1c5123a6ef7add5851c5016a7458a101f5df2` |
-| `program.gcode` | `db673300bf75f78ae4018bce04a00a54c8a59d3b3a2f3bb9130f3aad8d3ce6d5` |
-| `verification.json` | `568922de6adf38cc65e248f4f1fb1fc5ec435d8196b61873199365e5f866a876` |
-| `provenance.json` | `8c05ad6dc7ead871e6e8843dd8833b8159b307fa8056c831ba36a3cc1d363619` |
-| Replay SPLR | `b3925f71bc7b235934b24c65e3294c50da6f141c5187504dadf55e7624f5a18c` |
+| Nonintegral immutable output | SHA-256                                                            |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `plan.json`                  | `3c0e53eaf5c2b8e347d92e9529b1c5123a6ef7add5851c5016a7458a101f5df2` |
+| `program.gcode`              | `db673300bf75f78ae4018bce04a00a54c8a59d3b3a2f3bb9130f3aad8d3ce6d5` |
+| `verification.json`          | `568922de6adf38cc65e248f4f1fb1fc5ec435d8196b61873199365e5f866a876` |
+| `provenance.json`            | `8c05ad6dc7ead871e6e8843dd8833b8159b307fa8056c831ba36a3cc1d363619` |
+| Replay SPLR                  | `b3925f71bc7b235934b24c65e3294c50da6f141c5187504dadf55e7624f5a18c` |
 
 ### Sparse cantilever and actual packed replay
 
@@ -547,15 +601,15 @@ saved and exported successfully. No density, skin, width, endpoint tolerance or
 bridge-span relaxation was used to make this operator case pass. Runtime was
 2.629 s, peak memory 21.8 MiB, zero swap; the child process was observed reaped.
 
-| Property | Observed value |
-|---|---|
-| Schedule layers / paths | 80 / 1,590 |
-| Object segments / volume / filament | 6,826 / 1,677.0133951476005 mm³ / 697.2211499600002 mm |
-| Support segments / volume / filament | 481 / 367.7842359157383 mm³ / 152.9069169299998 mm |
-| Separate prime / retractions | 1.5 mm / 422 |
-| Actual replay events / stationary feeder events | 10,589 / 844 |
-| Program SHA-256 | `e57731f431ce87dcd625d81aef096207afb935b60fd321c13ddc86a7083f003a` |
-| Bundle SHA-256 | `2ac5ef3104585ed3d12c053e9a86fe48749871824e6e00e74ed0d1138a820d8c` |
+| Property                                        | Observed value                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------ |
+| Schedule layers / paths                         | 80 / 1,590                                                         |
+| Object segments / volume / filament             | 6,826 / 1,677.0133951476005 mm³ / 697.2211499600002 mm             |
+| Support segments / volume / filament            | 481 / 367.7842359157383 mm³ / 152.9069169299998 mm                 |
+| Separate prime / retractions                    | 1.5 mm / 422                                                       |
+| Actual replay events / stationary feeder events | 10,589 / 844                                                       |
+| Program SHA-256                                 | `e57731f431ce87dcd625d81aef096207afb935b60fd321c13ddc86a7083f003a` |
+| Bundle SHA-256                                  | `2ac5ef3104585ed3d12c053e9a86fe48749871824e6e00e74ed0d1138a820d8c` |
 
 The actual box, nonintegral and cantilever SPLR bytes passed the production
 TypeScript decoder and packed viewport constructor. Cantilever transport retained
@@ -582,14 +636,14 @@ used the same full complete-sparse intent, shared bed preparation where requeste
 read-only Preflight, native Compile, independently decoded program verification,
 save and exclusive export. All runs used zero swap and remained software-only.
 
-| Actual CLI property | Floating box | Non-grid shelf | Inward ramp |
-| --- | ---: | ---: | ---: |
-| Scheduled layers / paths | 50 / 807 | 45 / 738 | 42 / 665 |
-| Object deposition segments | 3,432 | 2,331 | 3,658 |
-| Object deposited volume, mm³ | 882.4183774865178 | 728.6029779488283 | 790.769379820963 |
-| Support segments / volume, mm³ | 202 / 230.33379795276542 | 0 / 0 | 0 / 0 |
-| Retractions | 145 | 133 | 115 |
-| Runtime / peak memory | 1.793 s / 13.7 MiB | 1.415 s / 11.2 MiB | 1.848 s / 13.7 MiB |
+| Actual CLI property            |             Floating box |     Non-grid shelf |        Inward ramp |
+| ------------------------------ | -----------------------: | -----------------: | -----------------: |
+| Scheduled layers / paths       |                 50 / 807 |           45 / 738 |           42 / 665 |
+| Object deposition segments     |                    3,432 |              2,331 |              3,658 |
+| Object deposited volume, mm³   |        882.4183774865178 |  728.6029779488283 |   790.769379820963 |
+| Support segments / volume, mm³ | 202 / 230.33379795276542 |              0 / 0 |              0 / 0 |
+| Retractions                    |                      145 |                133 |                115 |
+| Runtime / peak memory          |       1.793 s / 13.7 MiB | 1.415 s / 11.2 MiB | 1.848 s / 13.7 MiB |
 
 The floating plan has support interface at Z=1.8 mm, an empty contact-gap layer
 at Z=2.0 mm and first object deposition at Z=2.2 mm. The whole-plan validator,
@@ -619,7 +673,6 @@ owned test/profiling executables, while preserving current engine/CLI binaries,
 dependency caches and CEF, reduced it to 9.97 GiB with 2.52 GiB free disk. No
 blanket clean, release build, packaging or dependency/runtime download was used
 to obtain these CLI proofs.
-
 
 ### Current native-performance and workbench software gate
 
@@ -658,14 +711,14 @@ clearance within the declared offset bound. Complementary skin intersections
 use original operands rather than re-quantizing rounded masks; the strict
 `1e-7` area-partition invariant remains unchanged, including growing floors.
 
-| Published-pin CLI observation | Tilted cylinder | Floating support/contact gap |
-| --- | ---: | ---: |
-| Scheduled layers / paths | 21 / 394 | 50 / 807 |
-| Object deposition segments | 3,009 | 872 |
-| Object deposited volume, mm³ | 613.4708430886585 | 882.4183778713631 |
-| Support segments / volume, mm³ | 0 / 0 | 202 / 230.33379795276542 |
-| Actual replay events | 3,407 | 2,465 |
-| Runtime / peak memory | 58.469 s / 15.1 MiB | 1.653 s / 10.5 MiB |
+| Published-pin CLI observation  |     Tilted cylinder | Floating support/contact gap |
+| ------------------------------ | ------------------: | ---------------------------: |
+| Scheduled layers / paths       |            21 / 394 |                     50 / 807 |
+| Object deposition segments     |               3,009 |                          872 |
+| Object deposited volume, mm³   |   613.4708430886585 |            882.4183778713631 |
+| Support segments / volume, mm³ |               0 / 0 |     202 / 230.33379795276542 |
+| Actual replay events           |               3,407 |                        2,465 |
+| Runtime / peak memory          | 58.469 s / 15.1 MiB |           1.653 s / 10.5 MiB |
 
 Both runs used zero swap. Tilted program SHA-256 is
 `cc07c44d8f22f7ca5150ed60060c8c34b846fd7f052cba3e86feb81e9e5b7fbf`;

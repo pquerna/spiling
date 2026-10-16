@@ -217,8 +217,7 @@ impl ImageField<'_> {
         cancel: &AtomicBool,
     ) -> Result<(), ProjectError> {
         self.events(
-            start,
-            end,
+            [start, end],
             self.image.record.width as f64 * self.repeats as f64,
             self.phase * self.image.record.width as f64,
             out,
@@ -241,8 +240,7 @@ impl ImageField<'_> {
         let scale = self.image.record.height as f64 / self.period;
         let offset = out.len();
         self.events(
-            start,
-            end,
+            [start, end],
             scale,
             (self.z_phase - self.min_z) * scale,
             out,
@@ -274,8 +272,7 @@ impl ImageField<'_> {
     }
     fn events(
         &self,
-        start: f64,
-        end: f64,
+        [start, end]: [f64; 2],
         scale: f64,
         phase: f64,
         out: &mut Vec<f64>,

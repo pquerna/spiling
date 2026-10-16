@@ -235,11 +235,23 @@ pub(super) fn realize(
     remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     for demand in &demands {
         check_cancel(cancel)?;
-        let floor = layers[demand.target].z_mm - layers[demand.target].height_mm;
-        let Some(top) = (0..demand.target)
-            .rev()
-            .find(|&i| layers[i].z_mm <= floor - z_gap_mm + 1e-6)
-        else {
+        let floor = program_coordinates::project_xyz6_bead_height_mm(
+            layers[demand.target].z_mm,
+            layers[demand.target].height_mm,
+        )?[0];
+        let mut contact_top = None;
+        for i in (0..demand.target).rev() {
+            charge_contact_work(&mut work, cancel)?;
+            let upper = program_coordinates::project_xyz6_bead_height_mm(
+                layers[i].z_mm,
+                layers[i].height_mm,
+            )?[1];
+            if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
+                contact_top = Some(i);
+                break;
+            }
+        }
+        let Some(top) = contact_top else {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
@@ -585,6 +597,57 @@ pub(super) fn realize(
             layer.paths[begin + path].kind = DepositionKind::Bridge;
         }
     }
+    // Contact selection is only a proposal until actual final paths exist.
+    // Check the same closed, physical-decimal bead enclosure used by the XY
+    // exclusion gates; no schedule epsilon can authorize a smaller Z gap.
+    for (target, top) in contact_tops.iter().enumerate() {
+        let Some(top) = *top else {
+            continue;
+        };
+        let mut object_bottom = f64::INFINITY;
+        let mut support_top = f64::NEG_INFINITY;
+        for path in &layers[target].paths {
+            if support_role(path.kind) {
+                continue;
+            }
+            for edge in path.points_mm.windows(2) {
+                charge_contact_work(&mut work, cancel)?;
+                object_bottom = object_bottom.min(
+                    program_coordinates::project_xyz6_segment_bead_height_mm(
+                        edge[0][2],
+                        edge[1][2],
+                        layers[target].height_mm,
+                    )?[0],
+                );
+            }
+        }
+        for path in &layers[top].paths {
+            if !support_role(path.kind) {
+                continue;
+            }
+            for edge in path.points_mm.windows(2) {
+                charge_contact_work(&mut work, cancel)?;
+                support_top = support_top.max(
+                    program_coordinates::project_xyz6_segment_bead_height_mm(
+                        edge[0][2],
+                        edge[1][2],
+                        layers[top].height_mm,
+                    )?[1],
+                );
+            }
+        }
+        if !object_bottom.is_finite()
+            || !support_top.is_finite()
+            || program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)? < z_gap_mm
+        {
+            return Err(error(
+                ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+                format!(
+                    "layer {target}: actual emitted contact does not prove the minimum Z gap {z_gap_mm} mm"
+                ),
+            ));
+        }
+    }
     object_volumes(layers, recipe);
     Ok(())
 }
@@ -864,6 +927,20 @@ fn bead_area(layer: &PrintLayer, recipe: &PlanarPrintRecipe) -> f64 {
         } else {
             1.0
         }
+}
+
+fn charge_contact_work(work: &mut usize, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    *work = work
+        .checked_add(1)
+        .filter(|n| *n <= 20_000_000)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "cumulative support contact projection work budget exceeded",
+            )
+        })?;
+    Ok(())
 }
 
 fn charge_boolean(

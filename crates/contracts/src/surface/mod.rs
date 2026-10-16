@@ -93,36 +93,32 @@ impl SurfaceFinish {
             edge_margin_mm,
             phase_mm,
         } = self
-        {
-            if [*depth_mm, *pitch_mm, *edge_margin_mm]
+            && ([*depth_mm, *pitch_mm, *edge_margin_mm]
                 .iter()
                 .any(|v| !v.is_finite() || *v <= 0.0)
                 || !phase_mm.is_finite()
                 || *phase_mm < 0.0
-                || *phase_mm >= *pitch_mm
-            {
-                return Err(invalid(
-                    "vertical ribs require finite positive depth, pitch and edge margin, and phase in [0,pitch)",
-                ));
-            }
+                || *phase_mm >= *pitch_mm)
+        {
+            return Err(invalid(
+                "vertical ribs require finite positive depth, pitch and edge margin, and phase in [0,pitch)",
+            ));
         }
         if let Self::CylindricalRibs {
             depth_mm,
             rib_count,
             phase_fraction,
         } = self
-        {
-            if !depth_mm.is_finite()
+            && (!depth_mm.is_finite()
                 || *depth_mm <= 0.0
                 || !(2..=256).contains(rib_count)
                 || !phase_fraction.is_finite()
                 || *phase_fraction < 0.0
-                || *phase_fraction >= 1.0
-            {
-                return Err(invalid(
-                    "cylindrical ribs require finite positive depth, count in 2..=256, and phase fraction in [0,1)",
-                ));
-            }
+                || *phase_fraction >= 1.0)
+        {
+            return Err(invalid(
+                "cylindrical ribs require finite positive depth, count in 2..=256, and phase fraction in [0,1)",
+            ));
         }
         Ok(())
     }

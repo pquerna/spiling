@@ -76,6 +76,29 @@ fn domain_status_keeps_codes_and_rejects_cross_domain_or_unknown_details() {
     ));
 }
 #[test]
+fn program_coordinate_conditioning_keeps_native_request_and_operation_error_identity() {
+    use spiling_contracts::manufacturing::{ManufacturingError, ManufacturingErrorCode};
+    let expected = JobError::Manufacturing {
+        error: ManufacturingError::new(
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+            "Cartesian XYZ6 gap compensation is not finite",
+        ),
+    };
+    let request = native::manufacturing_request_status(
+        "ProgramCoordinateConditioningFailure: Cartesian XYZ6 gap compensation is not finite",
+    );
+    assert_eq!(request.code, 9);
+    assert_eq!(domain_error(&request).unwrap(), expected);
+    let operation = domain_status(&expected);
+    assert_eq!(operation.code, 9);
+    assert_eq!(domain_error(&operation).unwrap(), expected);
+    let detail = rpc::DomainErrorDetail::decode(operation.details[0].value.as_slice()).unwrap();
+    let Some(rpc::domain_error_detail::Error::Manufacturing(detail)) = detail.error else {
+        panic!("conditioning error must retain its manufacturing domain");
+    };
+    assert_eq!(detail.code, "program_coordinate_conditioning_failure");
+}
+#[test]
 fn artifact_limits_are_class_specific_and_sizes_are_canonical() {
     let hash = "a".repeat(64);
     let mut a = ArtifactView {

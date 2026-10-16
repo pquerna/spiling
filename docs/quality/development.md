@@ -139,7 +139,7 @@ For a native complete exterior cylindrical face, choose **Cylindrical vertical r
 
 Cylinder phase is measured from source-local +X about +Z as a fraction of one rib cycle, independent of the native seam/UV and instance pose. Integer count closes the circumference; manufacturing derives pitch from the certified source radius. A split pair of half-cylinder source faces is not one full-face target. Source BREP, history and scopes are independent of the carrier-specific numeric controls.
 
-Layer IDs come from authoritative project status. Native source material and protected holes remain separate from bounded outward finish additions. Selected trim, pose, process parameters, numerical conditioning, work and nominal exclusions can refuse explicitly; no untextured fallback exists. The changed domain feeds ordinary walls, skins, infill and actual-anchor/support analysis before emission/replay. Project4/surface3/manufacturing5/planner6 is the current clean cutover; emitter/verifier4 and SPLR3 remain unchanged. Old projects/bundles have no compatibility reader. The [rib mini-RFC](../adr/002-cylindrical-grip-ribs.md) and [spatial image mini-RFC](../adr/003-spatial-image-relief.md) separate shared scalar/material foundations from carrier-specific admission.
+Layer IDs come from authoritative project status. Native source material and protected holes remain separate from bounded outward finish additions. Selected trim, pose, process parameters, numerical conditioning, work and nominal exclusions can refuse explicitly; no untextured fallback exists. The changed domain feeds ordinary walls, skins, infill and actual-anchor/support analysis before emission/replay. Project4/surface3/manufacturing5/planner7 is the current clean cutover; emitter/verifier4 and SPLR3 remain unchanged. Old projects/bundles have no compatibility reader. The [rib mini-RFC](../adr/002-cylindrical-grip-ribs.md) and [spatial image mini-RFC](../adr/003-spatial-image-relief.md) separate shared scalar/material foundations from carrier-specific admission.
 
 Run the real production authoring→compile→fresh replay→save→source-deletion→read-only reopen/export scenario against the freshly built native shell and matching engine:
 
@@ -170,7 +170,6 @@ The full modified D is upstream of supports: object contact/demand and every rel
 Use `--scenario image-relief` or `--scenario image-relief-planar` with the CEF command above. The leading images vary in U/Z, include blank rows and non-grid vertical events, and compare native source/realized areas against an independent image integral. The workflow includes stored-image remapping after PNG deletion, history, actual G-code/replay, save, STEP deletion and fresh read-only canonical Canvas preview. These remain explicit no-GPU diagnostic controls, not hardware/picking/physical-print evidence.
 
 On Linux, the CEF runner gives each run an owned temporary `XDG_DATA_HOME`. Restart inside a scenario retains that run's durable operations, but repeated smoke runs neither consume nor clear the operator's retained ledger. Completed runs remove their own app data after desktop/engine closure; uncertain live-writer failures preserve it with a reported path. The ordinary 128-retained-operation admission cap remains unchanged.
-
 
 ## Resource-controlled local verification
 

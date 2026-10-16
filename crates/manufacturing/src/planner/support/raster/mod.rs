@@ -116,8 +116,10 @@ impl Domains {
             // Preserve the complete exterior/hole wall, including every original
             // vertex. Only process-role crossings split it; no seam is offset.
             walls(
-                &self.centers,
-                interface,
+                WallContours {
+                    centers: &self.centers,
+                    interface,
+                },
                 layer.z,
                 &mut paths,
                 &mut segments,
@@ -210,9 +212,18 @@ fn charge_hatch(
     Ok(())
 }
 
+struct WallContours<'a> {
+    centers: &'a MultiPolygon<f64>,
+    interface: &'a MultiPolygon<f64>,
+}
+
+struct WallRing {
+    z: f64,
+    first_path: usize,
+}
+
 fn walls(
-    centers: &MultiPolygon<f64>,
-    interface: &MultiPolygon<f64>,
+    contours: WallContours<'_>,
     z: f64,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
@@ -220,11 +231,15 @@ fn walls(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let WallContours { centers, interface } = contours;
     let mut cuts = Vec::new();
     let mut path_points = 0usize;
     for polygon in &centers.0 {
         for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            let first_path = paths.len();
+            let wall_ring = WallRing {
+                z,
+                first_path: paths.len(),
+            };
             for edge in ring.0.windows(2) {
                 check_cancel(cancel)?;
                 cuts.clear();
@@ -292,8 +307,7 @@ fn walls(
                         wall_piece(
                             [owned_start, start],
                             previous_kind,
-                            z,
-                            first_path,
+                            &wall_ring,
                             paths,
                             segments,
                             &mut path_points,
@@ -309,8 +323,7 @@ fn walls(
                 wall_piece(
                     [owned_start, b],
                     owned_kind.unwrap(),
-                    z,
-                    first_path,
+                    &wall_ring,
                     paths,
                     segments,
                     &mut path_points,
@@ -325,13 +338,13 @@ fn walls(
 fn wall_piece(
     edge: [Coord<f64>; 2],
     kind: DepositionKind,
-    z: f64,
-    first_path: usize,
+    ring: &WallRing,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     path_points: &mut usize,
     point_budget: usize,
 ) -> Result<(), ManufacturingError> {
+    let WallRing { z, first_path } = *ring;
     let [start, end] = edge;
     let length = (end.x - start.x).hypot(end.y - start.y);
     if !length.is_finite() || length <= 0.000002 {
@@ -547,8 +560,10 @@ mod tests {
         let mut paths = Vec::new();
         let mut segments = 0;
         walls(
-            &centers,
-            &interface,
+            WallContours {
+                centers: &centers,
+                interface: &interface,
+            },
             0.6,
             &mut paths,
             &mut segments,

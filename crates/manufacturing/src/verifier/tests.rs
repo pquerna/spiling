@@ -1161,7 +1161,7 @@ fn support_only_layers_are_real_and_not_object_accounting() {
 }
 
 #[test]
-fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
+fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_missing_interface() {
     let (mut intent, mut plan) = process_fixture();
     intent.recipe.process.retraction = RetractionPolicy::Disabled;
     plan.layers[0].paths.retain(|p| {
@@ -1202,6 +1202,18 @@ fn contact_gap_layer_has_no_fake_motion_and_is_physically_bounded_in_plan() {
     assert_eq!(report.deposition_segments, 1);
     if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut intent.recipe.supports {
         *z_gap_mm = 0.1;
+    }
+    assert!(verify(&program, &plan, &intent, &cancel).is_ok());
+    let mut detached = plan.clone();
+    for path in &mut detached.layers[0].paths {
+        if path.kind == DepositionKind::SupportInterface {
+            path.kind = DepositionKind::Support;
+        }
+    }
+    refresh_volumes(&intent, &mut detached);
+    assert!(detached.validate(&intent).is_err());
+    if let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut intent.recipe.supports {
+        *z_gap_mm = 0.3;
     }
     assert!(verify(&program, &plan, &intent, &cancel).is_err());
 }
@@ -1274,4 +1286,58 @@ fn complete_prime_to_first_body_can_retract_at_known_stationary_position() {
         &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
     )
     .unwrap();
+}
+
+#[test]
+fn actual_half_step_xyz_cannot_choose_the_other_lattice_neighbor() {
+    let cancel = AtomicBool::new(false);
+    for offset in [0.0000005, -0.0000005] {
+        let (mut intent, mut plan) = fixture();
+        intent.printer.build_envelope.min[0] = -10.0;
+        for layer in &mut plan.layers {
+            for path in &mut layer.paths {
+                for point in &mut path.points_mm {
+                    point[0] = (point[0] - 1.0) + offset;
+                }
+            }
+        }
+        refresh_volumes(&intent, &mut plan);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+        let actual = if offset > 0.0 {
+            "G0 X0.000001 "
+        } else {
+            "G0 X-0.000001 "
+        };
+        let alternate = program.replacen(actual, "G0 X0.000000 ", 1);
+        assert_ne!(alternate, program);
+        assert_eq!(
+            verify(&alternate, &plan, &intent, &cancel)
+                .unwrap_err()
+                .code,
+            ManufacturingErrorCode::VerificationFailed,
+            "the alternate physical endpoint is raw-half-step-close but not the encoded coordinate"
+        );
+    }
+}
+
+#[test]
+fn actual_output_refuses_coordinates_without_unique_xyz6_numeric_correspondence() {
+    let (mut intent, mut plan) = fixture();
+    let shift = program_coordinates::MAX_XYZ6_COORDINATE_MM + 32.0;
+    intent.printer.build_envelope.max[0] = shift + 100.0;
+    for layer in &mut plan.layers {
+        for path in &mut layer.paths {
+            for point in &mut path.points_mm {
+                point[0] += shift;
+            }
+        }
+    }
+    refresh_volumes(&intent, &mut plan);
+    assert_eq!(
+        crate::backend::emit(&plan, &intent, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+    );
 }

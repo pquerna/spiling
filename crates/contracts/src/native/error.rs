@@ -82,6 +82,9 @@ fn manufacturing_code(code: ManufacturingErrorCode) -> &'static str {
         ManufacturingErrorCode::InvalidSpecification => "invalid_specification",
         ManufacturingErrorCode::UnsupportedCapability => "unsupported_capability",
         ManufacturingErrorCode::UnsupportedGeometry => "unsupported_geometry",
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure => {
+            "program_coordinate_conditioning_failure"
+        }
         ManufacturingErrorCode::NoIntent => "no_intent",
         ManufacturingErrorCode::EmptyProject => "empty_project",
         ManufacturingErrorCode::StaleRevision => "stale_revision",
@@ -99,6 +102,9 @@ fn manufacturing_parse(code: &str) -> Result<ManufacturingErrorCode, String> {
         "invalid_specification" => ManufacturingErrorCode::InvalidSpecification,
         "unsupported_capability" => ManufacturingErrorCode::UnsupportedCapability,
         "unsupported_geometry" => ManufacturingErrorCode::UnsupportedGeometry,
+        "program_coordinate_conditioning_failure" => {
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+        }
         "no_intent" => ManufacturingErrorCode::NoIntent,
         "empty_project" => ManufacturingErrorCode::EmptyProject,
         "stale_revision" => ManufacturingErrorCode::StaleRevision,
@@ -157,7 +163,8 @@ pub fn domain_status(error: &JobError) -> google::rpc::Status {
         | "unsupported_geometry"
         | "unsupported_units"
         | "unsupported_format"
-        | "verification_failed" => 9,
+        | "verification_failed"
+        | "program_coordinate_conditioning_failure" => 9,
         _ => 3,
     };
     google::rpc::Status {
@@ -336,6 +343,9 @@ pub fn manufacturing_request_status(message: &str) -> google::rpc::Status {
         "InvalidSpecification" => ManufacturingErrorCode::InvalidSpecification,
         "UnsupportedCapability" => ManufacturingErrorCode::UnsupportedCapability,
         "UnsupportedGeometry" => ManufacturingErrorCode::UnsupportedGeometry,
+        "ProgramCoordinateConditioningFailure" => {
+            ManufacturingErrorCode::ProgramCoordinateConditioningFailure
+        }
         "NoIntent" => ManufacturingErrorCode::NoIntent,
         "EmptyProject" => ManufacturingErrorCode::EmptyProject,
         "StaleRevision" => ManufacturingErrorCode::StaleRevision,

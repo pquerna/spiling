@@ -21,6 +21,9 @@ use geo::{Area, BooleanOps, Intersects, MultiPolygon, Point};
 use spiling_contracts::geometry::{
     GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
+use spiling_contracts::manufacturing::program_coordinates::{
+    project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
+};
 use spiling_contracts::manufacturing::*;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
@@ -421,9 +424,9 @@ pub(crate) fn plan(
         let sample = elevation.sample;
         let height = elevation.height;
         let current = span_at(&sections, index);
-        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
+        let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
+        let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
         if sections[current].material.0.is_empty() {
             layers.push(PrintLayer {
@@ -528,12 +531,14 @@ pub(crate) fn plan(
                     continue;
                 };
                 let records = surface::collect_resolution(
-                    wall_layout
-                        .as_ref()
-                        .expect("current wall layout initialized")
-                        .first_wall(),
-                    &sections[current].material,
-                    native,
+                    surface::ResolutionGeometry {
+                        firstwall: wall_layout
+                            .as_ref()
+                            .expect("current wall layout initialized")
+                            .first_wall(),
+                        material: &sections[current].material,
+                        native,
+                    },
                     fields,
                     sample,
                     index,
@@ -687,14 +692,14 @@ pub(crate) fn plan(
             let elevation = &schedule[index];
             let current = span_at(&sections, index as u32);
             let below = physical_neighbor(
-                &schedule,
+                schedule,
                 index as u32,
                 recipe.bottom_skin_thickness_mm,
                 false,
             )
             .map(|i| span_at(&sections, i));
             let above =
-                physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
+                physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true)
                     .map(|i| span_at(&sections, i));
             let lower = neighborhoods.survival(current, below, live_retained_points, cancel)?;
             let upper = neighborhoods.survival(
@@ -780,26 +785,6 @@ fn scheduled_layers(
     let top = admission.bounds.expect("schedule has native bounds").max[2];
     let recipe = &input.intent.recipe;
     let mut events = admission.horizontal_events.clone();
-    if let SupportPolicy::Breakaway {
-        z_gap_mm,
-        interface_thickness_mm,
-        ..
-    } = recipe.supports
-    {
-        for event in &admission.horizontal_events {
-            for stop in [event - z_gap_mm, event - z_gap_mm - interface_thickness_mm] {
-                if stop > bed && stop < top {
-                    if events.len() >= 3 * MAX_PRINT_LAYERS as usize {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "support schedule event budget exceeded",
-                        ));
-                    }
-                    events.push(stop);
-                }
-            }
-        }
-    }
     events.sort_by(f64::total_cmp);
     events.dedup_by(|a, b| *a == *b);
     let mut row_events = Vec::new();
@@ -821,6 +806,81 @@ fn scheduled_layers(
                     events.insert(position, event);
                 }
             }
+        }
+    }
+    if let SupportPolicy::Breakaway {
+        z_gap_mm,
+        interface_thickness_mm,
+        ..
+    } = recipe.supports
+    {
+        // A nominal floor-gap event can round UP past the physical minimum.
+        // Reserve the emitter projection and height-construction arithmetic,
+        // then put the support stop on the actual XYZ6 lattice. This is an
+        // output-representation enclosure, not an extra geometry tolerance.
+        row_events.clear();
+        for &event in &events {
+            check_cancel(cancel)?;
+            let scale = event
+                .abs()
+                .max(recipe.layer_height_mm)
+                .max(z_gap_mm)
+                .max(1.0);
+            let arithmetic = (8.0 * f64::EPSILON * scale).next_up();
+            let half_quantum = (0.5 / 1_000_000.0f64).next_up();
+            let upper = (((event - half_quantum).next_down() - arithmetic).next_down() - z_gap_mm)
+                .next_down();
+            if upper <= bed {
+                continue;
+            }
+            let mut stop = project_xyz6_coordinate_mm(upper - half_quantum)?;
+            if project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
+                stop = project_xyz6_coordinate_mm(stop - 1.0 / 1_000_000.0)?;
+            }
+            if !stop.is_finite() || project_xyz6_bead_height_mm(stop, 0.0)?[1] > upper {
+                return Err(error(
+                    ManufacturingErrorCode::ProgramCoordinateConditioningFailure,
+                    "support stop cannot enclose the emitter's coordinate representation",
+                ));
+            }
+            for boundary in [stop, stop - interface_thickness_mm] {
+                if boundary > bed && boundary < top {
+                    if row_events.len() + events.len() >= 3 * MAX_PRINT_LAYERS as usize {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "combined native/field/support event budget exceeded",
+                        ));
+                    }
+                    row_events.push(boundary);
+                }
+            }
+        }
+        row_events.sort_by(f64::total_cmp);
+        row_events.dedup_by(|a, b| *a == *b);
+        for stop in row_events.drain(..) {
+            check_cancel(cancel)?;
+            let Err(position) = events.binary_search_by(|old| old.total_cmp(&stop)) else {
+                continue;
+            };
+            let below = if position == 0 {
+                bed
+            } else {
+                events[position - 1]
+            };
+            let above = if position == events.len() {
+                top
+            } else {
+                events[position]
+            };
+            let minimum = 2.0 * spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM;
+            // Never move a true native/field event or manufacture a sub-process
+            // layer to obtain a closer support contact. Retain the existing
+            // partition and select its latest provably safe top instead; the
+            // declared Z gap is a minimum, so the actual gap can be larger.
+            if stop - below <= minimum || above - stop <= minimum {
+                continue;
+            }
+            events.insert(position, stop);
         }
     }
     refine_surface_schedule(

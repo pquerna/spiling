@@ -18,7 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "6";
+pub const PLANNER_VERSION: &str = "7";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 const KERNEL_REVISION: &str = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e";

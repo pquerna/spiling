@@ -15,6 +15,7 @@ use spiling_contracts::geometry::{
 use spiling_contracts::manufacturing::{
     MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
 };
+use spiling_contracts::surface::{SurfaceFinish, SurfaceLayer};
 use std::{
     f64::consts::{PI, TAU},
     sync::atomic::AtomicBool,
@@ -55,19 +56,12 @@ pub(super) fn metadata(
     input: &CompilerInput<'_>,
     occurrence: &OccurrenceRecord,
     source_bounds: AabbMm,
-    face_id: &FaceId,
-    depth: f64,
-    count: u32,
-    phase: f64,
+    layer: &SurfaceLayer,
     sample_limit: usize,
     cancel: &AtomicBool,
-    image: Option<(
-        &spiling_contracts::geometry::SourceHash,
-        &spiling_contracts::surface::ImageReliefParameters,
-        spiling_contracts::surface::SurfaceLayerId,
-    )>,
 ) -> Result<CylinderField, ManufacturingError> {
     check_cancel(cancel)?;
+    let face_id = &layer.face_id;
     let native = &input.definitions[&occurrence.definition_id];
     let cert = native
         .vertical_cylinder_face_with_cancel(face_id, cancel)
@@ -81,6 +75,23 @@ pub(super) fn metadata(
                 format!("surface face {}: {e}", face_id.as_str()),
             )
         })?;
+    let (depth, count, phase, image) = match &layer.finish {
+        SurfaceFinish::CylindricalRibs {
+            depth_mm,
+            rib_count,
+            phase_fraction,
+        } => (*depth_mm, *rib_count, *phase_fraction, None),
+        SurfaceFinish::ImageRelief {
+            image_hash,
+            parameters,
+        } => (
+            parameters.depth_mm,
+            parameters.u_repeats,
+            parameters.u_phase_fraction,
+            Some((image_hash, parameters, layer.layer_id)),
+        ),
+        _ => unreachable!("cylindrical metadata requires cylindrical ribs or image relief"),
+    };
     let image = image
         .map(|(hash, parameters, layer_id)| {
             super::ImageMapping::new(
@@ -99,8 +110,7 @@ pub(super) fn metadata(
         .as_ref()
         .is_some_and(|image| image.parameters.edge_margin_mm != 0.0)
         || (image.is_none()
-            && (count < 2
-                || count > 256
+            && (!(2..=256).contains(&count)
                 || !depth.is_finite()
                 || !phase.is_finite()
                 || !(0.0..1.0).contains(&phase)

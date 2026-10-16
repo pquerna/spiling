@@ -148,7 +148,7 @@ export type ArtifactSummary = { "kind": "mesh", artifact_id: ArtifactId, definit
 
 export type ArtifactChunkMetadata = { "kind": "mesh", metadata: MeshChunkMetadata, } | { "kind": "section", metadata: SectionChunkMetadata, };
 
-export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
+export type ManufacturingErrorCode = "invalid_specification" | "unsupported_capability" | "unsupported_geometry" | "program_coordinate_conditioning_failure" | "no_intent" | "empty_project" | "stale_revision" | "verification_failed" | "resource_limit" | "cancelled" | "io" | "corrupt_artifact" | "read_only" | "busy";
 
 export type ManufacturingError = { code: ManufacturingErrorCode, message: string, };
 
