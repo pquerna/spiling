@@ -9,8 +9,8 @@
 use super::{
     AnalysisPolicy, BoundsPolicy, GeometryWorkBudget, HeightAnalysis, HeightCapture,
     HeightFunctional, InvariantHeightDomain, NativeEndpointStratum, NativeOwnedEndpoint,
-    PlacedSlabCapture, ProjectedBounds, SlabAnalysis, SlabRequest, analyze_height_domain,
-    analyze_height_domain_enclosed, analyze_slab, projected_bounds,
+    PlacedSlabCapture, PlacedSlabRequest, ProjectedBounds, SlabAnalysis, SlabRequest,
+    analyze_height_domain, analyze_height_domain_enclosed, analyze_slab, projected_bounds,
 };
 use crate::{
     Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, PreparedSectionSource,
@@ -754,17 +754,28 @@ fn record_world_accuracy(
     section.certificate.maximum_plane_error_mm = plane_error;
     Ok(())
 }
-fn transform_sample(
-    section: &mut NativeSection,
-    map: &HeightMap,
+struct SamplePlacement<'a> {
+    map: &'a HeightMap,
     pose: RigidPoseMm,
     sample: f64,
     sigma: f64,
     extent: [f64; 3],
+}
+
+fn transform_sample(
+    section: &mut NativeSection,
+    placement: &SamplePlacement<'_>,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
+    let SamplePlacement {
+        map,
+        pose,
+        sample,
+        sigma,
+        extent,
+    } = *placement;
     let plane_error = world_plane_error(
         section,
         HeightFunctional {
@@ -921,7 +932,7 @@ fn place_endpoint_stratum(
     stratum: &mut NativeEndpointStratum,
     definition: &Definition,
     map: &HeightMap,
-    capture: PlacedSlabCapture,
+    capture: &PlacedSlabCapture,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
@@ -949,8 +960,8 @@ fn place_endpoint_stratum(
     if world[2].lo == world[2].hi {
         constant = Some(world[2]);
     }
-    if constant.is_none_or(|height| height.lo != height.hi) {
-        if let Some(height) = super::slab::constant_source_face_height(
+    if constant.is_none_or(|height| height.lo != height.hi)
+        && let Some(height) = super::slab::constant_source_face_height(
             definition,
             stratum.face_index,
             HeightFunctional {
@@ -959,9 +970,9 @@ fn place_endpoint_stratum(
             },
             work,
             cancel,
-        )? {
-            constant = Some(height);
-        }
+        )?
+    {
+        constant = Some(height);
     }
     let endpoint = range[match stratum.endpoint {
         NativeOwnedEndpoint::Lower => 0,
@@ -985,7 +996,7 @@ fn place_endpoint_stratum(
     // definition owns the original coedge lineage checked by the constructor.
     // Only this actual-functional proof may add the separate posed capture.
     stratum.world_xy_bounds_mm = Some([[world[0].lo, world[0].hi], [world[1].lo, world[1].hi]]);
-    stratum.placed = Some(capture);
+    stratum.placed = Some(*capture);
     Ok(true)
 }
 
@@ -993,7 +1004,7 @@ fn place_endpoint_strata(
     strata: &mut Vec<NativeEndpointStratum>,
     definition: &Definition,
     map: &HeightMap,
-    capture: PlacedSlabCapture,
+    capture: &PlacedSlabCapture,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
@@ -1018,10 +1029,7 @@ fn place_endpoint_strata(
 
 pub(crate) fn analyze_placed_slab(
     source: &PreparedSectionSource<'_>,
-    pose: RigidPoseMm,
-    world_height_interval_mm: [f64; 2],
-    sample_world_z_mm: f64,
-    native_shape_error_mm: f64,
+    request: &PlacedSlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -1038,31 +1046,31 @@ pub(crate) fn analyze_placed_slab(
             })?,
     );
     let coexisting_bytes = crate::MAX_PREPARED_SECTION_BYTES - query_byte_limit;
-    validate_range(world_height_interval_mm)?;
-    if !sample_world_z_mm.is_finite()
-        || sample_world_z_mm <= world_height_interval_mm[0]
-        || sample_world_z_mm >= world_height_interval_mm[1]
-        || !native_shape_error_mm.is_finite()
-        || native_shape_error_mm <= 0.0
+    validate_range(request.world_height_interval_mm)?;
+    if !request.sample_world_z_mm.is_finite()
+        || request.sample_world_z_mm <= request.world_height_interval_mm[0]
+        || request.sample_world_z_mm >= request.world_height_interval_mm[1]
+        || !request.native_shape_error_mm.is_finite()
+        || request.native_shape_error_mm <= 0.0
     {
         return Err(error(
             GeometryErrorCode::InvalidGeometry,
             "placed slab requires an interior finite sample and positive finite shape error",
         ));
     }
-    let map = HeightMap::new(source.definition(), pose)?;
-    let range = map.source_range(pose, world_height_interval_mm)?;
+    let map = HeightMap::new(source.definition(), request.pose)?;
+    let range = map.source_range(request.pose, request.world_height_interval_mm)?;
     let sample = div(
         sub(
-            Interval::point(sample_world_z_mm),
-            Interval::point(pose.translation_mm[2]),
+            Interval::point(request.sample_world_z_mm),
+            Interval::point(request.pose.translation_mm[2]),
         ),
         Interval::point(map.scale),
     )?
     .mid();
     let sigma = spectral_bound(map.matrix)?;
     let source_policy = div(
-        Interval::point(native_shape_error_mm),
+        Interval::point(request.native_shape_error_mm),
         Interval::point(sigma),
     )?
     .lo;
@@ -1090,16 +1098,16 @@ pub(crate) fn analyze_placed_slab(
         cancel,
     )?;
     let placed = PlacedSlabCapture {
-        pose,
-        world_height_interval_mm,
-        sample_world_z_mm,
-        native_shape_error_mm,
+        pose: request.pose,
+        world_height_interval_mm: request.world_height_interval_mm,
+        sample_world_z_mm: request.sample_world_z_mm,
+        native_shape_error_mm: request.native_shape_error_mm,
     };
     place_endpoint_strata(
         &mut result.endpoint_strata,
         source.definition(),
         &map,
-        placed,
+        &placed,
         work,
         cancel,
     )?;
@@ -1112,10 +1120,12 @@ pub(crate) fn analyze_placed_slab(
         )?;
         let actual = super::collar::place_native_collar_complex(
             source.trim_source(),
-            seed,
-            pose,
-            world_height_interval_mm,
-            sample_world_z_mm,
+            super::collar::PlacedCollarComplexQuery {
+                seed,
+                pose: request.pose,
+                interval: request.world_height_interval_mm,
+                sample: request.sample_world_z_mm,
+            },
             remaining,
             work,
             cancel,
@@ -1138,11 +1148,13 @@ pub(crate) fn analyze_placed_slab(
         })?;
     let arithmetic = transform_sample(
         &mut result.section,
-        &map,
-        pose,
-        sample_world_z_mm,
-        sigma,
-        extent,
+        &SamplePlacement {
+            map: &map,
+            pose: request.pose,
+            sample: request.sample_world_z_mm,
+            sigma,
+            extent,
+        },
         section_byte_limit,
         work,
         cancel,
@@ -1158,14 +1170,22 @@ pub(crate) fn analyze_placed_slab(
         Interval::point(arithmetic),
     ))?
     .hi;
-    if bound > native_shape_error_mm {
+    if bound > request.native_shape_error_mm {
         return Err(error(
             GeometryErrorCode::ShapeErrorExceeded,
             "placed slab shape bound exceeds the requested world policy",
         ));
     }
     if let Some(occupied) = &mut result.occupied {
-        transform_occupied(occupied, &map, pose, sample_world_z_mm, drift, work, cancel)?;
+        transform_occupied(
+            occupied,
+            &map,
+            request.pose,
+            request.sample_world_z_mm,
+            drift,
+            work,
+            cancel,
+        )?;
     } else {
         return Err(error(
             GeometryErrorCode::AnalysisIndeterminate,
@@ -1175,9 +1195,9 @@ pub(crate) fn analyze_placed_slab(
     result.invariance = placed_invariance(
         result.invariance,
         &map,
-        pose,
+        request.pose,
         range,
-        world_height_interval_mm,
+        request.world_height_interval_mm,
     );
     result.boundary_motion_bound_mm = bound;
     result.capture.placed = Some(placed);
@@ -1316,13 +1336,15 @@ fn certify_plane_homotopy(
             )
         })?;
     let analysis = super::slab::analyze_height_domain_enclosed_with_scratch_limit(
-        trim_source,
-        PlaneFrameMm::from_plane(section.plane)?,
-        family,
-        [-tolerance, tolerance],
-        AnalysisPolicy {
-            maximum_height_uncertainty_mm: tolerance,
-            maximum_shape_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
+        &super::slab::HeightDomainQuery {
+            source: trim_source,
+            frame: PlaneFrameMm::from_plane(section.plane)?,
+            functional: family,
+            height_interval_mm: [-tolerance, tolerance],
+            policy: AnalysisPolicy {
+                maximum_height_uncertainty_mm: tolerance,
+                maximum_shape_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
+            },
         },
         remaining,
         work,
@@ -1590,11 +1612,13 @@ mod tests {
         let mut work = GeometryWorkBudget::new(1_000);
         transform_sample(
             &mut section,
-            &map,
-            pose,
-            declared,
-            1.0,
-            [2.0; 3],
+            &SamplePlacement {
+                map: &map,
+                pose,
+                sample: declared,
+                sigma: 1.0,
+                extent: [2.0; 3],
+            },
             spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
             &mut work,
             &AtomicBool::new(false),
@@ -1718,11 +1742,13 @@ mod tests {
         let mut work = GeometryWorkBudget::new(1_000);
         let failure = transform_sample(
             &mut section,
-            &map,
-            RigidPoseMm::IDENTITY,
-            2.0 + 2.0 * SECTION_PLANE_TOLERANCE_MM,
-            1.0,
-            [2.0; 3],
+            &SamplePlacement {
+                map: &map,
+                pose: RigidPoseMm::IDENTITY,
+                sample: 2.0 + 2.0 * SECTION_PLANE_TOLERANCE_MM,
+                sigma: 1.0,
+                extent: [2.0; 3],
+            },
             spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
             &mut work,
             &AtomicBool::new(false),

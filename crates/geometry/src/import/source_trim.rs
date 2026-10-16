@@ -15,7 +15,7 @@
 //! transport the original finite edge span into analytic chart proposals. Only
 //! a whole-source forward proof can activate the separately retained UV LINE.
 use super::{chart_proof, charts, error, invalid};
-use crate::{GeometryWorkBudget, check_cancel};
+use crate::{GeometryWorkBudget, check_cancel, kernel::SourceChartCertificate};
 use monstertruck_io::step::load::step_geometry::{
     Curve2D as StepCurve2D, Curve3D, Surface as StepSurface, SurfaceParameterMap,
 };
@@ -26,6 +26,48 @@ use monstertruck_modeling::{
 };
 use spiling_contracts::geometry::{GeometryError, GeometryErrorCode};
 use std::sync::atomic::AtomicBool;
+
+/// The unchanged decoded source carrier and its native conversion operator.
+#[derive(Clone, Copy)]
+pub(super) struct SurfaceInput<'a> {
+    pub source_surface: &'a StepSurface,
+    pub native_surface: &'a Surface,
+    pub map: SurfaceParameterMap,
+    pub scale: f64,
+}
+
+/// One original spatial association and its native restriction, not a guide.
+#[derive(Clone, Copy)]
+pub(super) struct TrimInput<'a> {
+    pub source_curve: &'a Curve3D,
+    pub native_curve: &'a Curve,
+    pub surface: SurfaceInput<'a>,
+    pub declared: Option<&'a StepCurve2D>,
+}
+
+/// Native spatial curve and carrier in their shared source-unit frame.
+#[derive(Clone, Copy)]
+struct NativeTrimGeometry<'a> {
+    curve: &'a Curve,
+    surface: &'a Surface,
+    scale: f64,
+    domain: Option<[[f64; 2]; 2]>,
+}
+
+impl<'a> TrimInput<'a> {
+    fn native_geometry(self) -> NativeTrimGeometry<'a> {
+        NativeTrimGeometry {
+            curve: self.native_curve,
+            surface: self.surface.native_surface,
+            scale: self.surface.scale,
+            domain: intrinsic_domain(
+                self.surface.source_surface,
+                self.surface.native_surface,
+                self.surface.map,
+            ),
+        }
+    }
+}
 
 /// Completed forward position AND relative-tangent proof for the exact chart
 /// returned by this retention call. Coefficient projections and inverse tubes
@@ -39,7 +81,8 @@ pub(super) struct SourceTrim {
     pub curve: Option<Curve2D>,
     pub margin_uv: [f64; 2],
     pub error_mm: f64,
-    pub certified: bool,
+    pub certificate: SourceChartCertificate,
+    pending_meridian: Option<chart_proof::MeridianGraph>,
     /// Original source PCURVE (or literal source parameter curve), not a fitted
     /// inverse. Consumers still require native UV incidence/coverage.
     pub declared_source: bool,
@@ -57,7 +100,8 @@ impl SourceTrim {
             curve: Some(curve),
             margin_uv: [0.0; 2],
             error_mm: 0.0,
-            certified: true,
+            certificate: SourceChartCertificate::InverseOrExact,
+            pending_meridian: None,
             declared_source: false,
             forward: None,
         }
@@ -67,7 +111,8 @@ impl SourceTrim {
             curve,
             margin_uv: [0.0; 2],
             error_mm: 0.0,
-            certified: false,
+            certificate: SourceChartCertificate::Unproved,
+            pending_meridian: None,
             declared_source: false,
             forward: None,
         }
@@ -319,23 +364,21 @@ pub(super) fn native_chart(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Curve2D>, GeometryError> {
-    if let Surface::Plane(plane) = surface {
-        if let Some(candidate) = native_attempt(work, cancel, |budget| {
+    if let Surface::Plane(plane) = surface
+        && let Some(candidate) = native_attempt(work, cancel, |budget| {
             monstertruck_modeling::certified_planar_parameter_curve(curve, plane, budget, cancel)
-        })? {
-            if let Some(candidate) = acceptable(candidate, declared, work, cancel)? {
-                return Ok(Some(candidate));
-            }
-        }
+        })?
+        && let Some(candidate) = acceptable(candidate, declared, work, cancel)?
+    {
+        return Ok(Some(candidate));
     }
     if let Some(candidate) = native_attempt(work, cancel, |budget| {
         monstertruck_modeling::certified_affine_surface_parameter_curve(
             curve, surface, budget, cancel,
         )
-    })? {
-        if let Some(candidate) = acceptable(candidate, declared, work, cancel)? {
-            return Ok(Some(candidate));
-        }
+    })? && let Some(candidate) = acceptable(candidate, declared, work, cancel)?
+    {
+        return Ok(Some(candidate));
     }
     // The original source use selects a seam branch. Never choose the first
     // geometrically coincident boundary of a periodic carrier.
@@ -389,28 +432,27 @@ pub(super) fn native_chart(
             }
         }
     }
-    if matches!(surface, Surface::ExtrusionSurface(_)) {
-        if let Some(Curve2D::Line(line)) = declared {
-            let choice = if line.0.y == line.1.y {
-                Some(ExtrusionChartCurve::ProfileAt { offset: line.0.y })
-            } else if line.0.x == line.1.x {
-                Some(ExtrusionChartCurve::GeneratorAt {
-                    profile_parameter: line.0.x,
-                })
-            } else {
-                None
-            };
-            if let Some(choice) = choice {
-                if let Some(candidate) = native_attempt(work, cancel, |budget| {
-                    monstertruck_modeling::certified_extrusion_parameter_curve(
-                        curve, surface, choice, budget, cancel,
-                    )
-                })? {
-                    if let Some(candidate) = acceptable(candidate, declared, work, cancel)? {
-                        return Ok(Some(candidate));
-                    }
-                }
-            }
+    if matches!(surface, Surface::ExtrusionSurface(_))
+        && let Some(Curve2D::Line(line)) = declared
+    {
+        let choice = if line.0.y == line.1.y {
+            Some(ExtrusionChartCurve::ProfileAt { offset: line.0.y })
+        } else if line.0.x == line.1.x {
+            Some(ExtrusionChartCurve::GeneratorAt {
+                profile_parameter: line.0.x,
+            })
+        } else {
+            None
+        };
+        if let Some(choice) = choice
+            && let Some(candidate) = native_attempt(work, cancel, |budget| {
+                monstertruck_modeling::certified_extrusion_parameter_curve(
+                    curve, surface, choice, budget, cancel,
+                )
+            })?
+            && let Some(candidate) = acceptable(candidate, declared, work, cancel)?
+        {
+            return Ok(Some(candidate));
         }
     }
     Ok(None)
@@ -549,23 +591,41 @@ fn prove_line_branch(
     raw: Line<Point2>,
     transform: Matrix3,
     candidate: &Curve2D,
-    curve: &Curve,
-    surface: &Surface,
+    input: NativeTrimGeometry<'_>,
     margin_uv: [f64; 2],
-    scale: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SourceTrim>, GeometryError> {
+    let NativeTrimGeometry {
+        curve,
+        surface,
+        scale,
+        domain,
+    } = input;
     work.charge(8, cancel)?;
     let Some(chart) = line_branch_proposal(raw, transform, candidate) else {
         return Ok(None);
     };
+    // A natural tensor row need not be globally C1 in its own knot gauge.
+    // Reuse the whole original row/knot theorem, binding the original LINE's
+    // complete affine declaration by exact endpoint coefficients. This is not
+    // a forward-error receipt and cannot erase a nonzero source/chart margin.
+    if domain.is_some()
+        && margin_uv == [0.0; 2]
+        && native_chart(curve, surface, Some(&chart), domain, work, cancel)?.is_some()
+    {
+        let mut witness = SourceTrim::exact(chart);
+        witness.declared_source = true;
+        return Ok(Some(witness));
+    }
     let Some(bound) = super::trim_certificate::certify_declared_coedge_correspondence(
-        curve,
-        surface,
-        &chart,
-        1e-7 / scale,
-        margin_uv,
+        super::trim_certificate::Correspondence {
+            curve,
+            surface,
+            chart: &chart,
+            maximum_error_mm: 1e-7 / scale,
+            margin_uv,
+        },
         work,
         cancel,
         None,
@@ -577,7 +637,8 @@ fn prove_line_branch(
         curve: Some(chart),
         margin_uv,
         error_mm: crate::parametric::up(bound * scale),
-        certified: true,
+        certificate: SourceChartCertificate::InverseOrExact,
+        pending_meridian: None,
         declared_source: true,
         forward: Some(ForwardCorrespondence {
             error: bound,
@@ -652,29 +713,42 @@ fn active_spatial_line_chart(
 /// declarations and may not enter this branch-selection path.
 fn active_line_branch(
     raw: Line<Point2>,
-    source_curve: &Curve3D,
-    source_surface: &StepSurface,
-    curve: &Curve,
-    surface: &Surface,
-    map: SurfaceParameterMap,
+    input: TrimInput<'_>,
     domain: Option<[[f64; 2]; 2]>,
     margin_uv: [f64; 2],
-    scale: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SourceTrim>, GeometryError> {
+    let TrimInput {
+        source_curve,
+        native_curve: curve,
+        surface:
+            SurfaceInput {
+                source_surface,
+                native_surface: surface,
+                map,
+                ..
+            },
+        ..
+    } = input;
     let transform = map.affine_transform().ok_or_else(|| {
         error(
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
             "original source LINE needs a nonlinear chart composition",
         )
     })?;
-    if let Some(candidate) = native_chart(curve, surface, None, domain, work, cancel)? {
-        if let Some(proof) = prove_line_branch(
-            raw, transform, &candidate, curve, surface, margin_uv, scale, work, cancel,
-        )? {
-            return Ok(Some(proof));
-        }
+    if let Some(candidate) = native_chart(curve, surface, None, domain, work, cancel)?
+        && let Some(proof) = prove_line_branch(
+            raw,
+            transform,
+            &candidate,
+            input.native_geometry(),
+            margin_uv,
+            work,
+            cancel,
+        )?
+    {
+        return Ok(Some(proof));
     }
     if let Some(domain) = domain {
         let a = transform.transform_point(raw.0);
@@ -693,37 +767,52 @@ fn active_line_branch(
                 monstertruck_modeling::certified_surface_isocurve_parameter_curve(
                     curve, surface, boundary, budget, cancel,
                 )
-            })? {
-                if let Some(proof) = prove_line_branch(
-                    raw, transform, &candidate, curve, surface, margin_uv, scale, work, cancel,
-                )? {
-                    return Ok(Some(proof));
-                }
+            })? && let Some(proof) = prove_line_branch(
+                raw,
+                transform,
+                &candidate,
+                input.native_geometry(),
+                margin_uv,
+                work,
+                cancel,
+            )? {
+                return Ok(Some(proof));
             }
         }
     }
     if let Some(mut candidate) =
         active_spatial_line_chart(source_curve, curve, source_surface, work, cancel)?
+        && let Some(decoded) = decoded_seed_map(map).affine_transform()
     {
-        if let Some(decoded) = decoded_seed_map(map).affine_transform() {
-            candidate.transform_by(decoded);
-            if let Some(proof) = prove_line_branch(
-                raw, transform, &candidate, curve, surface, margin_uv, scale, work, cancel,
-            )? {
-                return Ok(Some(proof));
-            }
+        candidate.transform_by(decoded);
+        if let Some(proof) = prove_line_branch(
+            raw,
+            transform,
+            &candidate,
+            input.native_geometry(),
+            margin_uv,
+            work,
+            cancel,
+        )? {
+            return Ok(Some(proof));
         }
     }
-    if let Some(mut candidate) = charts::source_chart(source_curve, source_surface)? {
-        if let Some(decoded) = decoded_seed_map(map).affine_transform() {
-            // Candidate only: actual original-LINE coefficients plus the FULL
-            // raw chart operator above must pass the independent forward proof.
-            candidate.transform_by(decoded);
-            if let Some(proof) = prove_line_branch(
-                raw, transform, &candidate, curve, surface, margin_uv, scale, work, cancel,
-            )? {
-                return Ok(Some(proof));
-            }
+    if let Some(mut candidate) = charts::source_chart(source_curve, source_surface)?
+        && let Some(decoded) = decoded_seed_map(map).affine_transform()
+    {
+        // Candidate only: actual original-LINE coefficients plus the FULL
+        // raw chart operator above must pass the independent forward proof.
+        candidate.transform_by(decoded);
+        if let Some(proof) = prove_line_branch(
+            raw,
+            transform,
+            &candidate,
+            input.native_geometry(),
+            margin_uv,
+            work,
+            cancel,
+        )? {
+            return Ok(Some(proof));
         }
     }
     Ok(None)
@@ -814,30 +903,25 @@ pub(super) fn implicit_guide_chart(
 }
 
 pub(super) fn retain_with_continuation(
-    source_curve: &Curve3D,
-    native_curve: &Curve,
-    source_surface: &StepSurface,
-    native_surface: &Surface,
-    map: SurfaceParameterMap,
-    declared: Option<&StepCurve2D>,
-    scale: f64,
+    input: TrimInput<'_>,
     retained: Option<&monstertruck_modeling::PreparedValidatedCurve<'static>>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceTrim, GeometryError> {
+    let TrimInput {
+        source_curve,
+        native_curve,
+        surface:
+            SurfaceInput {
+                source_surface,
+                native_surface,
+                map,
+                scale,
+            },
+        declared,
+    } = input;
     let Some(prepared) = retained else {
-        return retain(
-            source_curve,
-            native_curve,
-            source_surface,
-            native_surface,
-            map,
-            declared,
-            scale,
-            [0.0; 2],
-            work,
-            cancel,
-        );
+        return retain(input, [0.0; 2], work, cancel);
     };
     work.charge(1, cancel)?;
     let margin_uv = map_margin(map)?;
@@ -876,12 +960,14 @@ pub(super) fn retain_with_continuation(
         })?
     };
     let bound = super::trim_certificate::certify_retained_coedge_correspondence(
-        native_curve,
+        super::trim_certificate::Correspondence {
+            curve: native_curve,
+            surface: native_surface,
+            chart: &chart,
+            maximum_error_mm: 1.0e-7 / scale,
+            margin_uv,
+        },
         prepared,
-        native_surface,
-        &chart,
-        1.0e-7 / scale,
-        margin_uv,
         work,
         cancel,
     )?
@@ -892,12 +978,14 @@ pub(super) fn retain_with_continuation(
         )
     })?;
     let margin_uv = super::implicit::certify_uv_margin(
-        native_curve,
-        prepared,
-        native_surface,
-        &chart,
-        bound,
-        margin_uv,
+        super::implicit::UvMarginInput {
+            curve: native_curve,
+            prepared,
+            surface: native_surface,
+            chart: &chart,
+            physical_residual: bound,
+            coefficient_margin: margin_uv,
+        },
         work,
         cancel,
     )?;
@@ -907,7 +995,8 @@ pub(super) fn retain_with_continuation(
         error_mm: crate::parametric::up(bound * scale),
         // The converter's stored chart is a candidate, not independent proof
         // that an implicit source declared a literal PCURVE expression.
-        certified: true,
+        certificate: SourceChartCertificate::InverseOrExact,
+        pending_meridian: None,
         declared_source: false,
         forward: None,
     })
@@ -925,11 +1014,13 @@ fn derived_chart_witness(
     cancel: &AtomicBool,
 ) -> Result<Option<SourceTrim>, GeometryError> {
     let result = super::trim_certificate::certify_declared_coedge_correspondence(
-        curve,
-        surface,
-        &chart,
-        1.0e-7 / scale,
-        [0.0; 2],
+        super::trim_certificate::Correspondence {
+            curve,
+            surface,
+            chart: &chart,
+            maximum_error_mm: 1.0e-7 / scale,
+            margin_uv: [0.0; 2],
+        },
         work,
         cancel,
         None,
@@ -941,11 +1032,75 @@ fn derived_chart_witness(
         curve: Some(chart),
         margin_uv: [0.0; 2],
         error_mm: crate::parametric::up(bound * scale),
-        certified: true,
+        certificate: SourceChartCertificate::InverseOrExact,
+        pending_meridian: None,
         declared_source: false,
         forward: Some(ForwardCorrespondence {
             error: bound,
             margin_uv: [0.0; 2],
+        }),
+    }))
+}
+
+/// A latitude graph plus world tube is not a regular longitude inverse.
+/// Keep it unqualified until both original source-vertex joints have received
+/// their complete Native image certificates in the wire binder.
+fn pole_meridian_witness(
+    input: TrimInput<'_>,
+    candidate: &Curve2D,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<SourceTrim>, GeometryError> {
+    if input.declared.is_some()
+        || !matches!(
+            input.surface.source_surface,
+            StepSurface::ElementarySurface(
+                monstertruck_io::step::load::step_geometry::ElementarySurface::Sphere(_)
+            )
+        )
+    {
+        return Ok(None);
+    }
+    let Some(proof) = chart_proof::certify_pole_meridian(
+        input.source_curve,
+        input.surface.source_surface,
+        candidate.clone(),
+        decoded_seed_map(input.surface.map),
+        input.surface.scale,
+        work,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(bound) = super::trim_certificate::certify_declared_coedge_correspondence(
+        super::trim_certificate::Correspondence {
+            curve: input.native_curve,
+            surface: input.surface.native_surface,
+            chart: &proof.chart.curve,
+            maximum_error_mm: 1e-7 / input.surface.scale,
+            margin_uv: proof.chart.margin_uv,
+        },
+        work,
+        cancel,
+        None,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SourceTrim {
+        curve: Some(proof.chart.curve),
+        margin_uv: proof.chart.margin_uv,
+        error_mm: proof
+            .chart
+            .error_mm
+            .max(crate::parametric::up(bound * input.surface.scale)),
+        certificate: SourceChartCertificate::Unproved,
+        pending_meridian: Some(proof.graph),
+        declared_source: false,
+        forward: Some(ForwardCorrespondence {
+            error: bound,
+            margin_uv: proof.chart.margin_uv,
         }),
     }))
 }
@@ -1374,11 +1529,13 @@ fn source_associated_extrusion_chart(
                 None => continue,
             };
             let bound = super::trim_certificate::certify_declared_coedge_correspondence(
-                curve,
-                surface,
-                &chart,
-                1.0e-7 / scale,
-                [0.0; 2],
+                super::trim_certificate::Correspondence {
+                    curve,
+                    surface,
+                    chart: &chart,
+                    maximum_error_mm: 1.0e-7 / scale,
+                    margin_uv: [0.0; 2],
+                },
                 work,
                 cancel,
                 None,
@@ -1393,7 +1550,8 @@ fn source_associated_extrusion_chart(
                 curve: Some(chart),
                 margin_uv: [0.0; 2],
                 error_mm: crate::parametric::up(bound * scale),
-                certified: true,
+                certificate: SourceChartCertificate::InverseOrExact,
+                pending_meridian: None,
                 declared_source: false,
                 forward: Some(ForwardCorrespondence {
                     error: bound,
@@ -1406,17 +1564,23 @@ fn source_associated_extrusion_chart(
 }
 
 pub(super) fn retain(
-    source_curve: &Curve3D,
-    native_curve: &Curve,
-    source_surface: &StepSurface,
-    native_surface: &Surface,
-    map: SurfaceParameterMap,
-    declared: Option<&StepCurve2D>,
-    scale: f64,
+    input: TrimInput<'_>,
     additional_margin_uv: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceTrim, GeometryError> {
+    let TrimInput {
+        source_curve,
+        native_curve,
+        surface:
+            SurfaceInput {
+                source_surface,
+                native_surface,
+                map,
+                scale,
+            },
+        declared,
+    } = input;
     work.charge(1, cancel)?;
     let domain = intrinsic_domain(source_surface, native_surface, map);
     let conversion_margin = map_margin(map)?;
@@ -1435,22 +1599,10 @@ pub(super) fn retain(
             ))
             .hi
     });
-    if let Some(StepCurve2D::Line(raw)) = declared {
-        if let Some(proof) = active_line_branch(
-            *raw,
-            source_curve,
-            source_surface,
-            native_curve,
-            native_surface,
-            map,
-            domain,
-            margin_uv,
-            scale,
-            work,
-            cancel,
-        )? {
-            return Ok(proof);
-        }
+    if let Some(StepCurve2D::Line(raw)) = declared
+        && let Some(proof) = active_line_branch(*raw, input, domain, margin_uv, work, cancel)?
+    {
+        return Ok(proof);
     }
     let mut declared = declared
         .map(|curve| {
@@ -1513,20 +1665,18 @@ pub(super) fn retain(
         )? {
             return Ok(witness);
         }
-        if let Some(original_domain) = extrusion_profile_domain(map) {
-            if let Some(chart) = super::harmonic::extrusion_profile_chart_proposal(
+        if let Some(original_domain) = extrusion_profile_domain(map)
+            && let Some(chart) = super::harmonic::extrusion_profile_chart_proposal(
                 native_curve,
                 native_surface,
                 original_domain,
                 work,
                 cancel,
-            )? {
-                if let Some(witness) =
-                    derived_chart_witness(native_curve, native_surface, chart, scale, work, cancel)?
-                {
-                    return Ok(witness);
-                }
-            }
+            )?
+            && let Some(witness) =
+                derived_chart_witness(native_curve, native_surface, chart, scale, work, cancel)?
+        {
+            return Ok(witness);
         }
     }
     if let Some(chart) = declared.as_ref() {
@@ -1535,11 +1685,13 @@ pub(super) fn retain(
         // position AND relative tangent correspondence pass. Native preparation
         // must subsequently prove neighbor incidence, winding and trim coverage.
         if let Some(bound) = super::trim_certificate::certify_declared_coedge_correspondence(
-            native_curve,
-            native_surface,
-            chart,
-            1.0e-7 / scale,
-            margin_uv,
+            super::trim_certificate::Correspondence {
+                curve: native_curve,
+                surface: native_surface,
+                chart,
+                maximum_error_mm: 1.0e-7 / scale,
+                margin_uv,
+            },
             work,
             cancel,
             None,
@@ -1548,7 +1700,8 @@ pub(super) fn retain(
                 curve: declared,
                 margin_uv,
                 error_mm: crate::parametric::up(bound * scale),
-                certified: true,
+                certificate: SourceChartCertificate::InverseOrExact,
+                pending_meridian: None,
                 declared_source: true,
                 forward: Some(ForwardCorrespondence {
                     error: bound,
@@ -1566,19 +1719,17 @@ pub(super) fn retain(
     while let Curve3D::SurfaceCurve(curve) = leader {
         leader = curve.leader();
     }
-    if let Curve3D::ParameterCurve(pcurve) = leader {
-        if let Some(curve) = literal_chart(pcurve, source_surface, map)? {
-            if declared
-                .as_ref()
-                .map(|original| same_coefficients(&curve, original, work, cancel))
-                .transpose()?
-                .unwrap_or(true)
-            {
-                let mut witness = SourceTrim::exact(curve);
-                witness.declared_source = true;
-                return Ok(witness);
-            }
-        }
+    if let Curve3D::ParameterCurve(pcurve) = leader
+        && let Some(curve) = literal_chart(pcurve, source_surface, map)?
+        && declared
+            .as_ref()
+            .map(|original| same_coefficients(&curve, original, work, cancel))
+            .transpose()?
+            .unwrap_or(true)
+    {
+        let mut witness = SourceTrim::exact(curve);
+        witness.declared_source = true;
+        return Ok(witness);
     }
     // Derived analytic charts are considered only without an original PCURVE.
     // Reapplying a source/native map to an already mapped declared chart would
@@ -1588,8 +1739,13 @@ pub(super) fn retain(
     } else {
         None
     };
-    if let Some(candidate) = candidate {
-        if let Some(proof) = chart_proof::certify(
+    if let Some(candidate) = candidate.as_ref()
+        && let Some(proof) = pole_meridian_witness(input, candidate, work, cancel)?
+    {
+        return Ok(proof);
+    }
+    if let Some(candidate) = candidate
+        && let Some(proof) = chart_proof::certify(
             source_curve,
             source_surface,
             candidate,
@@ -1597,41 +1753,42 @@ pub(super) fn retain(
             scale,
             work,
             cancel,
-        )? {
-            if !proof.error_mm.is_finite()
-                || proof.error_mm < 0.0
-                || proof
-                    .margin_uv
-                    .into_iter()
-                    .any(|x| !x.is_finite() || x < 0.0)
-            {
-                return Err(invalid("source chart proof returned invalid uncertainty"));
-            }
-            return Ok(SourceTrim {
-                curve: Some(proof.curve),
-                margin_uv: proof.margin_uv,
-                error_mm: proof.error_mm,
-                certified: true,
-                declared_source: false,
-                forward: None,
-            });
+        )?
+    {
+        if !proof.error_mm.is_finite()
+            || proof.error_mm < 0.0
+            || proof
+                .margin_uv
+                .into_iter()
+                .any(|x| !x.is_finite() || x < 0.0)
+        {
+            return Err(invalid("source chart proof returned invalid uncertainty"));
         }
+        return Ok(SourceTrim {
+            curve: Some(proof.curve),
+            margin_uv: proof.margin_uv,
+            error_mm: proof.error_mm,
+            certificate: SourceChartCertificate::InverseOrExact,
+            pending_meridian: None,
+            declared_source: false,
+            forward: None,
+        });
     }
     // A bounded positional correspondence is useful diagnostic evidence, not
     // a topology/UV-inverse certificate. Retain the original use but refuse
     // operations that require an admitted native trim domain.
     let mut result = SourceTrim::retained(declared);
-    if let Some(chart) = &result.curve {
-        if let Some(bound) = super::trim_certificate::certify_curve_on_surface(
+    if let Some(chart) = &result.curve
+        && let Some(bound) = super::trim_certificate::certify_curve_on_surface(
             native_curve,
             native_surface,
             chart,
             1.0e-7 / scale,
             work,
             cancel,
-        )? {
-            result.error_mm = crate::parametric::up(bound * scale);
-        }
+        )?
+    {
+        result.error_mm = crate::parametric::up(bound * scale);
     }
     Ok(result)
 }
@@ -1788,6 +1945,30 @@ fn original_unbounded_line(
     Ok(None)
 }
 
+/// Propose a covering-coordinate operator around the already admitted source
+/// expression. Literal bounded declarations cannot move, and no original
+/// coefficient, raw chart map, active interval or reflection anchor changes.
+fn periodic_lift_proposal(
+    declared: Option<&StepCurve2D>,
+    chart: &Curve2D,
+    translation: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Curve2D>, GeometryError> {
+    work.charge(1, cancel)?;
+    if let Some(declared) = declared
+        && original_unbounded_line(declared, work, cancel)?.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(mapped_declaration(
+        chart.clone(),
+        chart.range_tuple(),
+        Matrix3::from_translation(Vector2::from(translation)),
+        true,
+    )))
+}
+
 fn uv_endpoint(
     witness: &SourceTrim,
     orientation: bool,
@@ -1836,8 +2017,29 @@ fn parameter_joint_incident(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
+    Ok(parameter_joint_status(incoming, outgoing, surface, vertex, scale, work, cancel)?.incident)
+}
+
+/// Fixed-size result of the SAME Native call, retained only for failure context.
+struct ParameterJointStatus {
+    incident: bool,
+    native_error: Option<TrimDomainError>,
+}
+
+fn parameter_joint_status(
+    incoming: [crate::parametric::Interval; 2],
+    outgoing: [crate::parametric::Interval; 2],
+    surface: &Surface,
+    vertex: Point3,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<ParameterJointStatus, GeometryError> {
     if incident(incoming, outgoing) {
-        return Ok(true);
+        return Ok(ParameterJointStatus {
+            incident: true,
+            native_error: None,
+        });
     }
     let endpoints = [incoming, outgoing].map(|point| {
         point.map(|axis| monstertruck_modeling::ValidatedInterval {
@@ -1859,9 +2061,28 @@ fn parameter_joint_incident(
     );
     crate::parametric::debit_native_work(work, budget.consumed(), cancel)?;
     match result {
-        Ok(proof) => Ok(proof.is_some()),
-        Err(cause) => recoverable(cause).map(|_| false),
+        Ok(proof) => Ok(ParameterJointStatus {
+            incident: proof.is_some(),
+            native_error: None,
+        }),
+        Err(cause) => {
+            recoverable(cause)?;
+            Ok(ParameterJointStatus {
+                incident: false,
+                native_error: Some(cause),
+            })
+        }
     }
+}
+
+fn decoded_chart_proposal(chart: Curve2D, map: SurfaceParameterMap) -> Option<Curve2D> {
+    let decoded = decoded_seed_map(map);
+    if matches!(decoded, SurfaceParameterMap::Identity) {
+        return Some(chart);
+    }
+    let inverse = decoded.affine_transform()?.invert()?;
+    let range = chart.range_tuple();
+    Some(mapped_declaration(chart, range, inverse, true))
 }
 
 /// Enclose the original branch's UV inverse as well as physical residual.
@@ -1877,17 +2098,8 @@ fn periodic_tube(
     cancel: &AtomicBool,
 ) -> Result<Option<chart_proof::ChartWitness>, GeometryError> {
     let decoded = decoded_seed_map(map);
-    let proposal = if matches!(decoded, SurfaceParameterMap::Identity) {
-        chart
-    } else {
-        let Some(inverse) = decoded
-            .affine_transform()
-            .and_then(|matrix| matrix.invert())
-        else {
-            return Ok(None);
-        };
-        let range = chart.range_tuple();
-        mapped_declaration(chart, range, inverse, true)
+    let Some(proposal) = decoded_chart_proposal(chart, map) else {
+        return Ok(None);
     };
     chart_proof::certify(source, surface, proposal, decoded, scale, work, cancel)
 }
@@ -1925,8 +2137,8 @@ fn widen_periodic_tube(
         .map(|tube| tube.margin_uv)
     };
     if let Some(margin) = margin {
-        for axis in 0..2 {
-            witness.margin_uv[axis] = witness.margin_uv[axis].max(margin[axis]);
+        for (maximum, margin) in witness.margin_uv.iter_mut().zip(margin) {
+            *maximum = maximum.max(margin);
         }
     }
     Ok(())
@@ -1936,22 +2148,53 @@ fn isolated_periodic_branch(witness: &SourceTrim, periods: [Option<f64>; 2]) -> 
     (0..2).all(|axis| periods[axis].is_none_or(|period| witness.margin_uv[axis] < period * 0.25))
 }
 
-fn prove_periodic_rebind(
-    context: &PeriodicUse<'_>,
-    source_surface: &StepSurface,
-    native_surface: &Surface,
-    map: SurfaceParameterMap,
+struct PeriodicBranch {
     chart: Curve2D,
     shift: [f64; 2],
-    scale: f64,
     declared_source: bool,
+}
+
+fn prove_periodic_rebind(
+    context: &PeriodicUse<'_>,
+    surface: SurfaceInput<'_>,
+    branch: PeriodicBranch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: &mut super::trim_certificate::CorrespondenceDiagnostic,
 ) -> Result<Option<SourceTrim>, GeometryError> {
+    let SurfaceInput {
+        source_surface,
+        native_surface,
+        map,
+        scale,
+    } = surface;
+    let PeriodicBranch {
+        chart,
+        shift,
+        declared_source,
+    } = branch;
     let started = work.consumed();
     let mut stage = "periodic-inverse-tube";
     let result = (|| {
+        if context.declared.is_none()
+            && matches!(native_surface, Surface::SphericalSurface(_))
+            && let Some(proposal) = decoded_chart_proposal(chart.clone(), map)
+            && let Some(proof) = pole_meridian_witness(
+                TrimInput {
+                    source_curve: context.source,
+                    native_curve: context.native,
+                    surface,
+                    declared: None,
+                },
+                &proposal,
+                work,
+                cancel,
+            )?
+        {
+            // This remains pending; neither an isolated lift nor one endpoint
+            // can publish graph authority. The final wire pass proves BOTH.
+            return Ok(Some(proof));
+        }
         let (chart, margin_uv, coefficient_error) = if context.retained.is_some() {
             (chart, map_margin(map)?, 0.)
         } else {
@@ -1986,22 +2229,26 @@ fn prove_periodic_rebind(
         });
         let bound = if let Some(prepared) = context.retained {
             super::trim_certificate::certify_retained_coedge_correspondence(
-                context.native,
+                super::trim_certificate::Correspondence {
+                    curve: context.native,
+                    surface: native_surface,
+                    chart: &chart,
+                    maximum_error_mm: 1e-7 / scale,
+                    margin_uv,
+                },
                 prepared,
-                native_surface,
-                &chart,
-                1e-7 / scale,
-                margin_uv,
                 work,
                 cancel,
             )?
         } else {
             super::trim_certificate::certify_declared_coedge_correspondence(
-                context.native,
-                native_surface,
-                &chart,
-                1e-7 / scale,
-                margin_uv,
+                super::trim_certificate::Correspondence {
+                    curve: context.native,
+                    surface: native_surface,
+                    chart: &chart,
+                    maximum_error_mm: 1e-7 / scale,
+                    margin_uv,
+                },
                 work,
                 cancel,
                 Some(diagnostic),
@@ -2013,12 +2260,14 @@ fn prove_periodic_rebind(
         let margin_uv = if let Some(prepared) = context.retained {
             stage = "periodic-retained-UV-margin";
             super::implicit::certify_uv_margin(
-                context.native,
-                prepared,
-                native_surface,
-                &chart,
-                bound,
-                margin_uv,
+                super::implicit::UvMarginInput {
+                    curve: context.native,
+                    prepared,
+                    surface: native_surface,
+                    chart: &chart,
+                    physical_residual: bound,
+                    coefficient_margin: margin_uv,
+                },
                 work,
                 cancel,
             )?
@@ -2029,7 +2278,8 @@ fn prove_periodic_rebind(
             curve: Some(chart),
             margin_uv,
             error_mm: crate::parametric::up(bound * scale).max(coefficient_error),
-            certified: true,
+            certificate: SourceChartCertificate::InverseOrExact,
+            pending_meridian: None,
             declared_source,
             forward: None,
         }))
@@ -2111,7 +2361,7 @@ where
     };
     for index in 0..count {
         work.charge(1, cancel)?;
-        if witnesses[index].certified {
+        if witnesses[index].certificate.is_certified() {
             continue;
         }
         let current = context(index);
@@ -2126,7 +2376,7 @@ where
         ] {
             work.charge(1, cancel)?;
             let neighbor = context(neighbor_index);
-            if !witnesses[neighbor_index].certified
+            if !witnesses[neighbor_index].certificate.is_certified()
                 || vertex(&current, current_back) != vertex(&neighbor, neighbor_back)
             {
                 continue;
@@ -2170,10 +2420,10 @@ where
             if parameter < native_range.0 || parameter > native_range.1 {
                 continue;
             }
-            if let super::harmonic::ProfileParameterDomain::Bounded(range) = original_domain {
-                if parameter < range[0] || parameter > range[1] {
-                    continue;
-                }
+            if let super::harmonic::ProfileParameterDomain::Bounded(range) = original_domain
+                && (parameter < range[0] || parameter > range[1])
+            {
+                continue;
             }
             let Some(chart) =
                 generator_chart_proposal(current.native, native_surface, parameter, work, cancel)?
@@ -2205,10 +2455,7 @@ where
 pub(super) fn bind_periodic_wire<'a, F>(
     witnesses: &mut [SourceTrim],
     context: F,
-    source_surface: &StepSurface,
-    native_surface: &Surface,
-    map: SurfaceParameterMap,
-    scale: f64,
+    surface: SurfaceInput<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: &mut super::trim_certificate::CorrespondenceDiagnostic,
@@ -2216,6 +2463,12 @@ pub(super) fn bind_periodic_wire<'a, F>(
 where
     F: Fn(usize) -> PeriodicUse<'a>,
 {
+    let SurfaceInput {
+        source_surface,
+        native_surface,
+        map,
+        scale,
+    } = surface;
     repair_source_associated_generators(
         witnesses,
         &context,
@@ -2228,9 +2481,10 @@ where
     let periods = [native_surface.period_u(), native_surface.period_v()];
     if periods.iter().all(Option::is_none)
         || witnesses.is_empty()
-        || witnesses
-            .iter()
-            .any(|witness| !witness.certified || witness.curve.is_none())
+        || witnesses.iter().any(|witness| {
+            (!witness.certificate.is_certified() && witness.pending_meridian.is_none())
+                || witness.curve.is_none()
+        })
     {
         return Ok(());
     }
@@ -2245,6 +2499,7 @@ where
         ));
     }
     let mut anchor = 0;
+    let mut literal_constant_anchor = false;
     for index in 0..witnesses.len() {
         let current = context(index);
         let started = work.consumed();
@@ -2308,6 +2563,26 @@ where
             let b = curve.subs(b);
             if (0..2).all(|axis| periods[axis].is_none() || a[axis] == b[axis]) {
                 anchor = index;
+                literal_constant_anchor = true;
+            }
+        }
+    }
+    if !literal_constant_anchor {
+        // Cut the search at an ORIGINAL singular endpoint, not inside the
+        // ordinary chain. Otherwise an early valid pole connector can leave
+        // two equivalent equator endpoints on different covering sheets.
+        // The graph's complete forward/tangent receipt binds these flags to
+        // its actual native curve/UV endpoint ranges, including every inner
+        // source/native reflection; the use sense only selects that proved end.
+        // This is search data, never pole authority or a nearest-angle choice.
+        for (index, witness) in witnesses.iter().enumerate() {
+            work.charge(1, cancel)?;
+            if let Some(graph) = witness.pending_meridian
+                && witness.proves_forward(1e-7 / scale, witness.margin_uv)
+                && graph.pole_endpoints[usize::from(!context(index).orientation)]
+            {
+                anchor = index;
+                break;
             }
         }
     }
@@ -2366,18 +2641,17 @@ where
             )? {
                 stage = "periodic-alternate-seam-chart";
                 let mut candidate = retain_with_continuation(
-                    current.source,
-                    current.native,
-                    source_surface,
-                    native_surface,
-                    map,
-                    Some(other),
-                    scale,
+                    TrimInput {
+                        source_curve: current.source,
+                        native_curve: current.native,
+                        surface,
+                        declared: Some(other),
+                    },
                     current.retained,
                     work,
                     cancel,
                 )?;
-                if candidate.certified {
+                if candidate.certificate.is_certified() {
                     if current.retained.is_none() && candidate.declared_source {
                         stage = "periodic-alternate-seam-inverse-tube";
                         widen_periodic_tube(
@@ -2427,42 +2701,19 @@ where
                 ));
             }
             let curve = witnesses[index].curve.as_ref().unwrap();
-            let range = curve.range_tuple();
-            let delta = Vector2::new(translation[0], translation[1]);
             stage = "periodic-original-line-branch";
-            let proposal = if let Some(declared) = current.declared {
-                if let Some(raw) = original_unbounded_line(declared, work, cancel)? {
-                    // Endpoint arithmetic constructs a seed only. The admitted
-                    // expression below keeps the original LINE and its chart
-                    // operator, then proves the complete independently mapped range.
-                    let shifted = Curve2D::Line(Line(
-                        curve.subs(range.0) + delta,
-                        curve.subs(range.1) + delta,
-                    ));
-                    map.affine_transform()
-                        .and_then(|transform| line_branch_proposal(raw, transform, &shifted))
-                } else {
-                    None
-                }
-            } else {
-                Some(mapped_declaration(
-                    curve.clone(),
-                    range,
-                    Matrix3::from_translation(delta),
-                    true,
-                ))
-            };
+            let proposal =
+                periodic_lift_proposal(current.declared, curve, translation, work, cancel)?;
             if let Some(proposal) = proposal {
                 stage = "periodic-translated-rebind";
                 if let Some(candidate) = prove_periodic_rebind(
                     &current,
-                    source_surface,
-                    native_surface,
-                    map,
-                    proposal,
-                    translation,
-                    scale,
-                    witnesses[index].declared_source,
+                    surface,
+                    PeriodicBranch {
+                        chart: proposal,
+                        shift: translation,
+                        declared_source: witnesses[index].declared_source,
+                    },
                     work,
                     cancel,
                     diagnostic,
@@ -2522,32 +2773,73 @@ where
     let last = (anchor + witnesses.len() - 1) % witnesses.len();
     let started = work.consumed();
     let result = (|| {
-        if !parameter_joint_incident(
-            uv_endpoint(
-                &witnesses[last],
-                context(last).orientation,
-                true,
-                work,
-                cancel,
-            )?
-            .unwrap(),
-            uv_endpoint(
-                &witnesses[anchor],
-                context(anchor).orientation,
-                false,
-                work,
-                cancel,
-            )?
-            .unwrap(),
+        let incoming = uv_endpoint(
+            &witnesses[last],
+            context(last).orientation,
+            true,
+            work,
+            cancel,
+        )?
+        .unwrap();
+        let outgoing = uv_endpoint(
+            &witnesses[anchor],
+            context(anchor).orientation,
+            false,
+            work,
+            cancel,
+        )?
+        .unwrap();
+        let current = context(anchor);
+        let before = context(last);
+        let status = parameter_joint_status(
+            incoming,
+            outgoing,
             native_surface,
-            context(anchor).front_vertex,
+            current.front_vertex,
             scale,
             work,
             cancel,
-        )? {
+        )?;
+        if !status.incident {
             return Err(error(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original periodic coedge branches do not close in one bounded UV chart",
+                &format!(
+                    "original periodic coedge branches do not close in one bounded UV chart; \
+                     native_joint={:?}; incoming c={last}/src={:?}/edge={}/orientation={} \
+                     source_vertices={:?} spatial_range={:?} uv_range={:?} uv={:?} margin={:?} graph={:?}; \
+                     outgoing c={anchor}/src={:?}/edge={}/orientation={} source_vertices={:?} \
+                     spatial_range={:?} uv_range={:?} uv={:?} margin={:?} graph={:?}; \
+                     shared_source_vertex={} position={:?} periods={periods:?}",
+                    status.native_error,
+                    before.source_edge,
+                    before.native_edge,
+                    before.orientation,
+                    before.vertices,
+                    before.native.try_range_tuple(),
+                    witnesses[last].curve.as_ref().map(Curve2D::range_tuple),
+                    incoming.map(|axis| [axis.lo, axis.hi]),
+                    witnesses[last].margin_uv,
+                    witnesses[last]
+                        .pending_meridian
+                        .map(|graph| (graph.latitude_axis, graph.pole_endpoints)),
+                    current.source_edge,
+                    current.native_edge,
+                    current.orientation,
+                    current.vertices,
+                    current.native.try_range_tuple(),
+                    witnesses[anchor].curve.as_ref().map(Curve2D::range_tuple),
+                    outgoing.map(|axis| [axis.lo, axis.hi]),
+                    witnesses[anchor].margin_uv,
+                    witnesses[anchor]
+                        .pending_meridian
+                        .map(|graph| (graph.latitude_axis, graph.pole_endpoints)),
+                    if current.orientation {
+                        current.vertices.0
+                    } else {
+                        current.vertices.1
+                    },
+                    current.front_vertex,
+                ),
             ));
         }
         Ok(())
@@ -2561,7 +2853,127 @@ where
             started,
             work,
         )
-    })
+    })?;
+    qualify_meridian_graphs(witnesses, &context, native_surface, scale, work, cancel)
+}
+
+/// Qualify all pending graphs atomically after ordinary wire binding. Source
+/// vertex identity and whole connector image are mandatory even for coincident
+/// UV endpoints; a pole endpoint must receive the actual Native pole theorem.
+fn qualify_meridian_graphs<'a, F>(
+    witnesses: &mut [SourceTrim],
+    context: &F,
+    surface: &Surface,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError>
+where
+    F: Fn(usize) -> PeriodicUse<'a>,
+{
+    if witnesses.is_empty() {
+        return Ok(());
+    }
+    for index in 0..witnesses.len() {
+        let previous = (index + witnesses.len() - 1) % witnesses.len();
+        let incoming_graph = witnesses[previous].pending_meridian;
+        let outgoing_graph = witnesses[index].pending_meridian;
+        if incoming_graph.is_none() && outgoing_graph.is_none() {
+            continue;
+        }
+        work.charge(1, cancel)?;
+        let before = context(previous);
+        let current = context(index);
+        let back = if before.orientation {
+            before.vertices.1
+        } else {
+            before.vertices.0
+        };
+        let front = if current.orientation {
+            current.vertices.0
+        } else {
+            current.vertices.1
+        };
+        if back != front {
+            return Err(invalid(
+                "meridian graph joint loses original source vertex identity",
+            ));
+        }
+        let pole = incoming_graph
+            .is_some_and(|graph| graph.pole_endpoints[usize::from(before.orientation)])
+            || outgoing_graph
+                .is_some_and(|graph| graph.pole_endpoints[usize::from(!current.orientation)]);
+        let endpoints = [
+            uv_endpoint(&witnesses[previous], before.orientation, true, work, cancel)?
+                .ok_or_else(|| invalid("meridian incoming chart is unavailable"))?,
+            uv_endpoint(&witnesses[index], current.orientation, false, work, cancel)?
+                .ok_or_else(|| invalid("meridian outgoing chart is unavailable"))?,
+        ]
+        .map(|point| {
+            point.map(|axis| monstertruck_modeling::ValidatedInterval {
+                lower: axis.lo,
+                upper: axis.hi,
+            })
+        });
+        // The physical graph tube is NOT a UV inverse. Reserve its complete
+        // error before asking Native to certify the connector's world image,
+        // so their sum remains inside the unchanged original physical budget.
+        let physical = witnesses[previous].error_mm.max(witnesses[index].error_mm);
+        let allowance = crate::parametric::Interval::point(1e-7)
+            .sub(crate::parametric::Interval::point(physical))
+            .div(crate::parametric::Interval::point(scale))?
+            .lo;
+        if !allowance.is_finite() || allowance <= 0. {
+            return Err(error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "meridian graph consumes the original source-vertex error allowance",
+            ));
+        }
+        let mut budget =
+            ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
+        let result = monstertruck_modeling::certified_surface_parameter_joint(
+            surface,
+            current.front_vertex,
+            endpoints,
+            [0.; 2],
+            allowance,
+            &mut budget,
+            cancel,
+        );
+        crate::parametric::debit_native_work(work, budget.consumed(), cancel)?;
+        let qualified = match result {
+            Ok(Some(kind)) => {
+                !pole
+                    || matches!(
+                        kind,
+                        monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+                    )
+            }
+            Ok(None) => false,
+            Err(cause) => {
+                recoverable(cause)?;
+                false
+            }
+        };
+        if !qualified {
+            return Err(error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                &format!(
+                    "original meridian graph joint {index} has no complete {}source-vertex image certificate",
+                    if pole { "spherical-pole " } else { "" }
+                ),
+            ));
+        }
+    }
+    for witness in witnesses {
+        if let Some(graph) = witness.pending_meridian.take() {
+            witness.certificate = SourceChartCertificate::PoleMeridianGraph {
+                latitude_axis: graph.latitude_axis,
+                pole_endpoints: graph.pole_endpoints,
+            };
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2573,6 +2985,287 @@ mod tests {
     };
     use std::str::FromStr;
     use step_p21::{ast::DataSection, tables::EntityTable};
+
+    fn original_pole_meridian(radius: f64, longitude: f64, reflected: bool) -> Curve3D {
+        use monstertruck_io::step::load::step_geometry::Conic3D;
+        let (sine, cosine) = longitude.sin_cos();
+        let frame = Matrix4::from_cols(
+            Vector4::new(radius * cosine, radius * sine, 0., 0.),
+            Vector4::new(0., 0., radius, 0.),
+            Vector4::new(sine, -cosine, 0., 0.),
+            Vector4::new(0., 0., 0., 1.),
+        );
+        let mut original = Processor::with_transform(
+            TrimmedCurve::new(
+                UnitCircle::<Point3>::new(),
+                (0., std::f64::consts::FRAC_PI_2),
+            ),
+            frame,
+        );
+        if reflected {
+            original.invert();
+        }
+        Curve3D::Conic(Conic3D::Ellipse(original))
+    }
+
+    #[test]
+    fn pole_meridian_graph_requires_whole_source_phase_plane_and_tangent() {
+        use monstertruck_io::step::load::step_geometry::ElementarySurface;
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        let cancel = AtomicBool::new(false);
+        for radius in [2., 1e-12] {
+            let original = StepSurface::ElementarySurface(ElementarySurface::Sphere(
+                Processor::new(monstertruck_io::step::load::step_geometry::Sphere(
+                    monstertruck_modeling::Sphere::new(Point3::origin(), radius),
+                )),
+            ));
+            // This property targets graph/tangent authority, not the STEP bridge's
+            // independent analytic-family size eligibility. Keep the microscopic
+            // original input and construct exactly the same Native coefficients.
+            let native_surface = Surface::SphericalSurface(Processor::new(
+                monstertruck_modeling::Sphere::new(Point3::origin(), radius),
+            ));
+            let map = SurfaceParameterMap::Affine(Matrix3::from_cols(
+                Vector3::new(0., 1., 0.),
+                Vector3::new(-1., 0., 0.),
+                Vector3::new(half_pi, 0., 1.),
+            ));
+            let source = original_pole_meridian(radius, 0., false);
+            let native = source.to_parameter_preserving_modeling().unwrap();
+            let input = TrimInput {
+                source_curve: &source,
+                native_curve: &native,
+                surface: SurfaceInput {
+                    source_surface: &original,
+                    native_surface: &native_surface,
+                    map,
+                    scale: 1.,
+                },
+                declared: None,
+            };
+            let mut work = GeometryWorkBudget::new(4_000_000);
+            let valid = Curve2D::Line(Line(Point2::origin(), Point2::new(0., half_pi)));
+            let pending = pole_meridian_witness(input, &valid, &mut work, &cancel)
+                .unwrap()
+                .expect("complete original meridian graph");
+            assert!(!pending.certificate.is_certified());
+            assert!(pending.pending_meridian.is_some());
+            assert!(pending.error_mm > 0. && pending.error_mm < 1e-7);
+            let declared = StepCurve2D::Line(Line(Point2::origin(), Point2::new(0., half_pi)));
+            assert!(
+                pole_meridian_witness(
+                    TrimInput {
+                        declared: Some(&declared),
+                        ..input
+                    },
+                    &valid,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+                "a retained original UV declaration is never replaced by a graph",
+            );
+            for wrong in [
+                Curve2D::Line(Line(
+                    Point2::new(half_pi, 0.),
+                    Point2::new(half_pi, half_pi),
+                )),
+                Curve2D::Line(Line(Point2::new(0., half_pi), Point2::origin())),
+                Curve2D::Line(Line(Point2::new(0., -half_pi), Point2::new(0., half_pi))),
+            ] {
+                assert!(
+                    pole_meridian_witness(input, &wrong, &mut work, &cancel)
+                        .unwrap()
+                        .is_none(),
+                    "wrong original plane, phase or winding cannot borrow pole authority",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pole_meridian_graph_encloses_original_affine_frame_and_both_reflection_senses() {
+        use monstertruck_io::step::load::step_geometry::{ElementarySurface, SourceTrimmedCurve};
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        let pose = Matrix4::from_cols(
+            Vector4::new(-1.2, 0., 0.1, 0.),
+            Vector4::new(0.3, 1.1, 0., 0.),
+            Vector4::new(0.1, 0.2, 0.9, 0.),
+            Vector4::new(3., -2., 1., 1.),
+        );
+        let original =
+            StepSurface::ElementarySurface(ElementarySurface::Sphere(Processor::with_transform(
+                monstertruck_io::step::load::step_geometry::Sphere(
+                    monstertruck_modeling::Sphere::new(Point3::origin(), 2.),
+                ),
+                pose,
+            )));
+        let (surface, map) = original.to_modeling_with_parameter_map().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(4_000_000);
+        for reflected in [false, true] {
+            let mut wrapper = Processor::with_transform(
+                TrimmedCurve::new(
+                    Box::new(original_pole_meridian(2., 0., false)),
+                    (0., half_pi),
+                ),
+                pose,
+            );
+            if reflected {
+                wrapper.invert();
+            }
+            let source = Curve3D::TrimmedCurve(SourceTrimmedCurve::internal(wrapper));
+            let native = source.to_parameter_preserving_modeling().unwrap();
+            let (first, last) = if reflected {
+                (half_pi, 0.)
+            } else {
+                (0., half_pi)
+            };
+            let chart = Curve2D::Line(Line(Point2::new(0., first), Point2::new(0., last)));
+            let proof = pole_meridian_witness(
+                TrimInput {
+                    source_curve: &source,
+                    native_curve: &native,
+                    surface: SurfaceInput {
+                        source_surface: &original,
+                        native_surface: &surface,
+                        map,
+                        scale: 1.,
+                    },
+                    declared: None,
+                },
+                &chart,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .expect("whole original inverse-frame and relative-tangent proof");
+            assert!(proof.pending_meridian.is_some());
+            assert!(!proof.certificate.is_certified());
+            assert!(proof.error_mm > 0. && proof.error_mm < 1e-7);
+        }
+    }
+
+    #[test]
+    fn pole_meridian_graph_publishes_only_after_both_original_vertex_joint_images() {
+        use monstertruck_io::step::load::step_geometry::{Conic3D, ElementarySurface};
+        let radius = 2.;
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        let original = StepSurface::ElementarySurface(ElementarySurface::Sphere(Processor::new(
+            monstertruck_io::step::load::step_geometry::Sphere(monstertruck_modeling::Sphere::new(
+                Point3::origin(),
+                radius,
+            )),
+        )));
+        let (surface, map) = original.to_modeling_with_parameter_map().unwrap();
+        let sources = [
+            original_pole_meridian(radius, 0., true),
+            Curve3D::Conic(Conic3D::Ellipse(Processor::with_transform(
+                TrimmedCurve::new(UnitCircle::<Point3>::new(), (0., half_pi)),
+                Matrix4::from_scale(radius),
+            ))),
+            original_pole_meridian(radius, half_pi, false),
+        ];
+        let native: [Curve; 3] =
+            std::array::from_fn(|index| sources[index].to_parameter_preserving_modeling().unwrap());
+        let points = [
+            Point3::new(0., 0., radius),
+            Point3::new(radius, 0., 0.),
+            Point3::new(0., radius, 0.),
+        ];
+        let vertices = [(0, 1), (1, 2), (2, 0)];
+        let cancel = AtomicBool::new(false);
+        for fault in 0..4 {
+            let mut work = GeometryWorkBudget::new(4_000_000);
+            let mut witnesses = (0..3)
+                .map(|index| {
+                    retain(
+                        TrimInput {
+                            source_curve: &sources[index],
+                            native_curve: &native[index],
+                            surface: SurfaceInput {
+                                source_surface: &original,
+                                native_surface: &surface,
+                                map,
+                                scale: 1.,
+                            },
+                            declared: None,
+                        },
+                        [0.; 2],
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert!(!witnesses[0].certificate.is_certified());
+            assert!(!witnesses[2].certificate.is_certified());
+            if fault == 3 {
+                let axis = witnesses[0].pending_meridian.unwrap().latitude_axis;
+                witnesses[0].margin_uv[axis] = 1e-3;
+            }
+            let context = |index: usize| PeriodicUse {
+                face: 0,
+                wire: 0,
+                coedge: index,
+                source_edge: Some(index as u64),
+                native_edge: index,
+                source: &sources[index],
+                native: &native[index],
+                declared: None,
+                retained: None,
+                orientation: true,
+                vertices: if fault == 2 && index == 0 {
+                    (99, 1)
+                } else {
+                    vertices[index]
+                },
+                front_vertex: if fault == 1 && index == 0 {
+                    points[0] + Vector3::new(0., 0., 1e-3)
+                } else {
+                    points[vertices[index].0]
+                },
+            };
+            let result = if fault == 3 {
+                // Exercise the final receipt with a genuinely unsupported
+                // whole connector tube, without proposing another chart.
+                qualify_meridian_graphs(&mut witnesses, &context, &surface, 1., &mut work, &cancel)
+            } else {
+                bind_periodic_wire(
+                    &mut witnesses,
+                    context,
+                    SurfaceInput {
+                        source_surface: &original,
+                        native_surface: &surface,
+                        map,
+                        scale: 1.,
+                    },
+                    &mut work,
+                    &cancel,
+                    &mut super::super::trim_certificate::CorrespondenceDiagnostic::default(),
+                )
+            };
+            if fault == 0 {
+                result.expect("complete original meridian wire and both Native joint images");
+                for index in [0, 2] {
+                    assert!(matches!(
+                        witnesses[index].certificate,
+                        SourceChartCertificate::PoleMeridianGraph { .. }
+                    ));
+                    assert!(!witnesses[index].certificate.has_regular_inverse());
+                    assert!(!witnesses[index].declared_source);
+                }
+            } else {
+                assert!(
+                    result.is_err(),
+                    "wrong source vertex, identity or whole pole connector must refuse"
+                );
+                assert!(!witnesses[0].certificate.is_certified());
+                assert!(!witnesses[2].certificate.is_certified());
+            }
+        }
+    }
 
     #[test]
     fn rational_declared_chart_identity_keeps_global_scale_and_internal_c0_knots() {
@@ -2811,7 +3504,7 @@ mod tests {
         )
         .unwrap()
         .expect("complete original affine LINE projection");
-        assert!(witness.certified && !witness.declared_source);
+        assert!(witness.certificate.is_certified() && !witness.declared_source);
         assert!(witness.error_mm < 1e-7);
         assert!(
             witness
@@ -2922,7 +3615,7 @@ mod tests {
             )
             .unwrap()
             .expect("true original affine frame and whole conic correspondence");
-            assert!(witness.certified && !witness.declared_source);
+            assert!(witness.certificate.is_certified() && !witness.declared_source);
             assert!(witness.error_mm > 0. && witness.error_mm < 1e-7);
             assert!(
                 witness
@@ -3036,7 +3729,7 @@ mod tests {
         )
         .unwrap()
         .expect("complete original ellipse outside a nominal one-period window");
-        assert!(witness.certified && !witness.declared_source);
+        assert!(witness.certificate.is_certified() && !witness.declared_source);
         assert_eq!(witness.curve.unwrap().range_tuple(), (7.0, 8.0));
         let tau = std::f64::consts::TAU;
         let source = ellipse((0.0, tau), 1e-12, false);
@@ -3138,7 +3831,7 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-            witnesses[0].certified
+            witnesses[0].certificate.is_certified()
         };
         assert!(repair(2, 0.0));
         assert!(
@@ -3179,7 +3872,7 @@ mod tests {
             source_associated_extrusion_chart(&original, &edge, &native, 1.0, &mut work, &cancel)
                 .unwrap()
                 .expect("original complete translated profile");
-        assert!(witness.certified && !witness.declared_source);
+        assert!(witness.certificate.is_certified() && !witness.declared_source);
         assert_eq!(witness.curve.unwrap().range_tuple(), edge.range_tuple());
         let mut wrong = points;
         wrong[1].y += 0.001;
@@ -3229,7 +3922,7 @@ mod tests {
         )
         .unwrap()
         .expect("complete generator at actual bounded pi endpoint");
-        assert!(proof.certified && !proof.declared_source);
+        assert!(proof.certificate.is_certified() && !proof.declared_source);
         assert!(proof.error_mm < 1.0e-7);
         assert_eq!(
             proof.curve.unwrap().range_tuple(),
@@ -3322,7 +4015,8 @@ mod tests {
         // Actual independently exported equator/meridian endpoint intervals.
         // Their longitude boxes are disjoint, but the whole connector image is
         // bounded against their same original source vertex.
-        let incoming = [Interval::point(pi * 0.5), Interval::point(1.570796326795)];
+        let source_angle: f64 = "1.570796326795".parse().unwrap();
+        let incoming = [Interval::point(pi * 0.5), Interval::point(source_angle)];
         let outgoing = [
             Interval {
                 lo: 1.5707963267948957,
@@ -3539,19 +4233,23 @@ mod tests {
         let curve = Curve::Line(Line(Point3::origin(), Point3::new(20., 0., 0.)));
         let original = StepCurve2D::Line(Line(Point2::origin(), Point2::new(1., 0.)));
         let proof = retain(
-            &source,
-            &curve,
-            &source_surface,
-            &surface,
-            SurfaceParameterMap::Identity,
-            Some(&original),
-            1.,
+            TrimInput {
+                source_curve: &source,
+                native_curve: &curve,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&original),
+            },
             [0.0; 2],
             &mut GeometryWorkBudget::new(1_000_000),
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert!(proof.certified && proof.declared_source);
+        assert!(proof.certificate.is_certified() && proof.declared_source);
         let chart = proof.curve.unwrap();
         assert_eq!(chart.range_tuple(), (0., 20.));
         let Curve2D::TrimmedCurve(retained) = chart else {
@@ -3587,6 +4285,24 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let chart = mapped_declaration(
+            Curve2D::Line(Line(Point2::origin(), Point2::new(2., 0.))),
+            (2., 5.),
+            Matrix3::identity(),
+            true,
+        );
+        assert!(
+            periodic_lift_proposal(
+                Some(&declared),
+                &chart,
+                [0., std::f64::consts::TAU],
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .is_none(),
+            "a literal bounded declaration cannot acquire a periodic lift",
+        );
         let raw = Line(Point2::origin(), Point2::new(2., 0.));
         let generated = StepCurve2D::TrimmedCurve(SourceTrimmedCurve::internal(Processor::new(
             TrimmedCurve::new(Box::new(StepCurve2D::Line(raw)), (2., 5.)),
@@ -3602,6 +4318,65 @@ mod tests {
             original_unbounded_line(&outer, &mut work, &cancel)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn periodic_lift_keeps_fixed_source_coefficients_and_reflected_active_interval() {
+        let tau = std::f64::consts::TAU;
+        let raw = Line(Point2::new(tau, 0.), Point2::new(tau, 1.));
+        let declaration = StepCurve2D::Line(raw);
+        let original = mapped_declaration(
+            Curve2D::Line(raw),
+            (2., 5.),
+            Matrix3::from_translation(Vector2::new(tau, 0.)),
+            false,
+        );
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000);
+        let proposal = periodic_lift_proposal(
+            Some(&declaration),
+            &original,
+            [-4. * tau, 0.],
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(proposal.range_tuple(), (2., 5.));
+        assert_eq!(proposal.subs(2.), Point2::new(-2. * tau, 5.));
+        assert_eq!(proposal.subs(5.), Point2::new(-2. * tau, 2.));
+        let Curve2D::TrimmedCurve(covering) = proposal else {
+            panic!("covering translation remains an explicit outer operator")
+        };
+        assert!(covering.orientation());
+        assert!(
+            same_coefficients(covering.entity().curve(), &original, &mut work, &cancel).unwrap(),
+            "the complete original raw map, LINE and reflection anchor stay unchanged",
+        );
+        assert_eq!(
+            periodic_lift_proposal(
+                Some(&declaration),
+                &original,
+                [-4. * tau, 0.],
+                &mut GeometryWorkBudget::new(0),
+                &cancel,
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            periodic_lift_proposal(
+                Some(&declaration),
+                &original,
+                [-4. * tau, 0.],
+                &mut work,
+                &AtomicBool::new(true),
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled,
         );
     }
 
@@ -3637,10 +4412,13 @@ mod tests {
                         raw,
                         Matrix3::identity(),
                         &wrong,
-                        &circle,
-                        &surface,
+                        NativeTrimGeometry {
+                            curve: &circle,
+                            surface: &surface,
+                            scale: 1.,
+                            domain: None,
+                        },
                         [0.; 2],
-                        1.,
                         &mut GeometryWorkBudget::new(2_000_000),
                         &AtomicBool::new(false)
                     )
@@ -3653,10 +4431,13 @@ mod tests {
                 raw,
                 Matrix3::identity(),
                 &right,
-                &circle,
-                &surface,
+                NativeTrimGeometry {
+                    curve: &circle,
+                    surface: &surface,
+                    scale: 1.,
+                    domain: None,
+                },
                 [0.; 2],
-                1.,
                 &mut GeometryWorkBudget::new(2_000_000),
                 &AtomicBool::new(false),
             )
@@ -3689,19 +4470,23 @@ mod tests {
         let curve = source.to_parameter_preserving_modeling().unwrap();
         let raw = Line(Point2::new(0., 0.), Point2::new(0., 1.));
         let proof = retain(
-            &source,
-            &curve,
-            &source_surface,
-            &surface,
-            SurfaceParameterMap::Identity,
-            Some(&StepCurve2D::Line(raw)),
-            1.,
+            TrimInput {
+                source_curve: &source,
+                native_curve: &curve,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&StepCurve2D::Line(raw)),
+            },
             [0.0; 2],
             &mut GeometryWorkBudget::new(2_000_000),
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert!(proof.certified && proof.declared_source);
+        assert!(proof.certificate.is_certified() && proof.declared_source);
         assert_eq!(proof.curve.unwrap().range_tuple(), (0., tau));
         let bounded = StepCurve2D::TrimmedCurve(
             monstertruck_io::step::load::step_geometry::SourceTrimmedCurve::internal(Processor::<
@@ -3712,19 +4497,23 @@ mod tests {
             )),
         );
         let proof = retain(
-            &source,
-            &curve,
-            &source_surface,
-            &surface,
-            SurfaceParameterMap::Identity,
-            Some(&bounded),
-            1.,
+            TrimInput {
+                source_curve: &source,
+                native_curve: &curve,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&bounded),
+            },
             [0.0; 2],
             &mut GeometryWorkBudget::new(2_000_000),
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert!(!proof.certified);
+        assert!(!proof.certificate.is_certified());
         assert_eq!(proof.curve.unwrap().range_tuple(), (0., 1.));
     }
 
@@ -3763,22 +4552,86 @@ mod tests {
         let source_surface = StepSurface::NurbsSurface(carrier.clone());
         let native_surface = Surface::NurbsSurface(carrier);
         let proof = retain(
-            &source_curve,
-            &native_curve,
-            &source_surface,
-            &native_surface,
-            SurfaceParameterMap::Identity,
-            Some(&StepCurve2D::Line(Line(
-                Point2::new(0., 0.),
-                Point2::new(1., 0.),
-            ))),
-            1.,
+            TrimInput {
+                source_curve: &source_curve,
+                native_curve: &native_curve,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &native_surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&StepCurve2D::Line(Line(
+                    Point2::new(0., 0.),
+                    Point2::new(1., 0.),
+                ))),
+            },
             [0.0; 2],
             &mut GeometryWorkBudget::new(4_000_000),
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert!(proof.certified && proof.declared_source);
+        assert!(proof.certificate.is_certified() && proof.declared_source);
+        assert!(
+            proof.forward.is_none(),
+            "a whole coefficient identity is not a numerical forward-error receipt",
+        );
         assert_eq!(proof.curve.unwrap().range_tuple(), (0., 4.));
+        let wrong = StepCurve2D::Line(Line(Point2::new(0., 1.), Point2::new(1., 1.)));
+        let refused = retain(
+            TrimInput {
+                source_curve: &source_curve,
+                native_curve: &native_curve,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &native_surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&wrong),
+            },
+            [0.; 2],
+            &mut GeometryWorkBudget::new(4_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(
+            !refused.certificate.is_certified(),
+            "a different original tensor row is not the curve"
+        );
+
+        let mut original =
+            Processor::<_, Matrix4>::new(TrimmedCurve::new(Box::new(source_curve), (0., 4.)));
+        original.invert();
+        let reflected_source = Curve3D::TrimmedCurve(
+            monstertruck_io::step::load::step_geometry::SourceTrimmedCurve::internal(original),
+        );
+        let mut retained =
+            Processor::<_, Matrix4>::new(TrimmedCurve::new(Box::new(native_curve), (0., 4.)));
+        retained.invert();
+        let reflected_native = Curve::TrimmedCurve(retained);
+        let declaration = StepCurve2D::Line(Line(Point2::origin(), Point2::new(1., 0.)));
+        let reflected = retain(
+            TrimInput {
+                source_curve: &reflected_source,
+                native_curve: &reflected_native,
+                surface: SurfaceInput {
+                    source_surface: &source_surface,
+                    native_surface: &native_surface,
+                    map: SurfaceParameterMap::Identity,
+                    scale: 1.,
+                },
+                declared: Some(&declaration),
+            },
+            [0.; 2],
+            &mut GeometryWorkBudget::new(4_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(reflected.certificate.is_certified() && reflected.declared_source);
+        let chart = reflected.curve.unwrap();
+        assert_eq!(chart.range_tuple(), (0., 4.));
+        assert_eq!(chart.subs(0.), Point2::new(4., 0.));
+        assert_eq!(chart.subs(4.), Point2::origin());
     }
 }

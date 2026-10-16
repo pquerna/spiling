@@ -61,6 +61,19 @@ pub(super) struct ChartWitness {
     pub margin_uv: [f64; 2],
     pub error_mm: f64,
 }
+
+/// A one-sheet meridian graph, NOT a two-coordinate spherical inverse.
+/// Its transverse/radial world tube stays separate from latitude uncertainty.
+#[derive(Clone, Copy)]
+pub(super) struct MeridianGraph {
+    pub latitude_axis: usize,
+    pub pole_endpoints: [bool; 2],
+}
+
+pub(super) struct MeridianWitness {
+    pub chart: ChartWitness,
+    pub graph: MeridianGraph,
+}
 fn p(x: f64) -> Interval {
     Interval::point(x)
 }
@@ -340,8 +353,8 @@ pub(super) fn affine_tensor_frame(
     {
         return Ok(None);
     }
-    for axis in 0..3 {
-        let Some(first) = exact_pair_sum(controls[0][0][axis], controls[1][1][axis]) else {
+    for (axis, coordinate) in controls[0][0].iter().take(3).enumerate() {
+        let Some(first) = exact_pair_sum(*coordinate, controls[1][1][axis]) else {
             return Ok(None);
         };
         if Some(first) != exact_pair_sum(controls[1][0][axis], controls[0][1][axis]) {
@@ -702,16 +715,25 @@ fn radial_squared_residual(c: &Coefficients, q: [[Interval; 2]; 3], r: [Interval
 /// cylindrical and conical STEP carriers. The frame is an outward enclosure of
 /// an ideal orthonormal frame; the stored almost-unit Rodrigues axis and any
 /// transverse profile component retain their own physical residual reserve.
-fn revolution_witness(
-    c: &Coefficients,
-    profile: &Line<Point3>,
+struct RevolutionFrame<'a> {
+    profile: &'a Line<Point3>,
     origin: Point3,
     axis: Vector3,
+}
+
+fn revolution_witness(
+    c: &Coefficients,
+    frame: RevolutionFrame<'_>,
     a: [f64; 2],
     b: [f64; 2],
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<([f64; 2], Interval)>, GeometryError> {
+    let RevolutionFrame {
+        profile,
+        origin,
+        axis,
+    } = frame;
     budget.charge(1, cancel).map_err(native_error)?;
     if (c.circle && a[0] != b[0]) || (!c.circle && a[1] != b[1]) {
         return Ok(None);
@@ -989,7 +1011,7 @@ pub(super) fn certify_in_place(
     let mut budget =
         ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
     let result = (|| {
-        let Some(candidate) = affine_chart(&chart, &mut budget, cancel)? else {
+        let Some(candidate) = affine_chart(chart, &mut budget, cancel)? else {
             return Ok(None);
         };
         let old = [candidate.start, candidate.end];
@@ -1098,9 +1120,11 @@ pub(super) fn certify_in_place(
             ) => {
                 let Some((tube, residual)) = revolution_witness(
                     &c,
-                    s.entity().entity_curve(),
-                    s.entity().origin(),
-                    s.entity().axis(),
+                    RevolutionFrame {
+                        profile: s.entity().entity_curve(),
+                        origin: s.entity().origin(),
+                        axis: s.entity().axis(),
+                    },
                     a,
                     b,
                     &mut budget,
@@ -1118,9 +1142,11 @@ pub(super) fn certify_in_place(
                 };
                 let Some((tube, residual)) = revolution_witness(
                     &c,
-                    profile,
-                    s.entity().origin(),
-                    s.entity().axis(),
+                    RevolutionFrame {
+                        profile,
+                        origin: s.entity().origin(),
+                        axis: s.entity().axis(),
+                    },
                     a,
                     b,
                     &mut budget,
@@ -1143,57 +1169,192 @@ pub(super) fn certify_in_place(
         if swapped {
             margin.swap(0, 1);
         }
+        Ok(
+            apply_chart_map(chart, old, map, margin, &mut budget, cancel)?
+                .map(|margin| (margin, error_mm)),
+        )
+    })();
+    crate::parametric::debit_native_work(work, budget.consumed(), cancel)?;
+    result
+}
+
+fn apply_chart_map(
+    chart: &mut Curve2D,
+    old: [Point2; 2],
+    map: SurfaceParameterMap,
+    margin: [f64; 2],
+    budget: &mut ValidatedGeometryBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[f64; 2]>, GeometryError> {
+    let affine = map.affine_transform().ok_or_else(|| {
+        error(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "source chart requires an unavailable nonlinear composition",
+        )
+    })?;
+    let ideal = old.map(|q| {
+        [
+            p(affine.x.x)
+                .mul(p(q.x))
+                .add(p(affine.y.x).mul(p(q.y)))
+                .add(p(affine.z.x)),
+            p(affine.x.y)
+                .mul(p(q.x))
+                .add(p(affine.y.y).mul(p(q.y)))
+                .add(p(affine.z.y)),
+        ]
+    });
+    if !matches!(map, SurfaceParameterMap::Identity) {
+        chart.transform_by(affine);
+    }
+    let Some(native) = affine_chart(chart, budget, cancel)? else {
+        return Ok(None);
+    };
+    let endpoints = [native.start, native.end];
+    let margin = std::array::from_fn(|axis| {
+        let coefficients = [affine[0][axis], affine[1][axis]];
+        p(coefficients[0].abs())
+            .mul(p(margin[0]))
+            .add(p(coefficients[1].abs()).mul(p(margin[1])))
+            .add(p((0..2)
+                .map(|i| ideal[i][axis].sub(p(endpoints[i][axis])).abs_upper())
+                .fold(0., f64::max)))
+            .add(p(native.error[axis]))
+            .hi
+    });
+    if margin
+        .into_iter()
+        .any(|bound| !bound.is_finite() || bound < 0.)
+    {
+        return Err(error(
+            GeometryErrorCode::ConditioningFailure,
+            "source analytic chart tube is not finite",
+        ));
+    }
+    Ok(Some(margin))
+}
+
+/// Original C(t) is a graph over alpha=atan2(C.z,C.r), with strictly positive
+/// projected radius and signed phase derivative on its COMPLETE original span.
+/// There is deliberately no division by the vanishing XY radius. The analytic
+/// sphere ray (cos(lambda),sin(lambda),0) is unit by the sphere formula, not by
+/// assuming any stored processor/frame is orthonormal or changing coefficients.
+/// A pending caller must still prove original/native relative tangents and both
+/// actual source-vertex joint images, requiring Native pole authority at poles.
+pub(super) fn certify_pole_meridian(
+    curve: &Curve3D,
+    surface: &Surface,
+    mut chart: Curve2D,
+    map: SurfaceParameterMap,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<MeridianWitness>, GeometryError> {
+    let mut budget =
+        ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
+    let result = (|| {
+        let Surface::ElementarySurface(ElementarySurface::Sphere(sphere)) = surface else {
+            return Ok(None);
+        };
+        let Some(candidate) = affine_chart(&chart, &mut budget, cancel)? else {
+            return Ok(None);
+        };
+        let old = [candidate.start, candidate.end];
+        let source_latitude = usize::from(sphere.orientation());
+        let longitude = 1 - source_latitude;
+        let a = old[0][source_latitude];
+        let b = old[1][source_latitude];
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        let poles = [a, b].map(|latitude| latitude == -half_pi || latitude == half_pi);
+        if old[0][longitude] != old[1][longitude]
+            || a == b
+            || a.min(b) < -half_pi
+            || a.max(b) > half_pi
+            || !poles.into_iter().any(|pole| pole)
+        {
+            return Ok(None);
+        }
+        let Some(c) = coefficients(
+            curve,
+            *sphere.transform(),
+            sphere.entity().0.center(),
+            &mut budget,
+            cancel,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !c.circle {
+            return Ok(None);
+        }
+        let (sine, cosine) = validated_sin_cos(native(p(old[0][longitude])), &mut budget, cancel)
+            .map_err(native_error)?;
+        let radial = [adapt(cosine), adapt(sine), p(0.)];
+        let transverse = [adapt(sine).neg(), adapt(cosine), p(0.)];
+        let z = vector(Vector3::unit_z());
+        let square = squared_radius(projected(&c, radial, z), &c.harmonics);
+        if square.lo <= 0. {
+            return Ok(None);
+        }
+        let derivative = angular_derivative(&c, radial, z)?;
+        if (a < b && derivative.lo <= 0.) || (b < a && derivative.hi >= 0.) {
+            return Ok(None);
+        }
+        let latitude = angular_margin(&c, radial, z, a, b, &mut budget, cancel)?;
+        // Isolate one signed-radial sheet. By monotonicity, any pole overrun
+        // admitted by the endpoint phase tube lies at that designated endpoint,
+        // not at an interior pole hidden by another longitude or wrapped phase.
+        if latitude >= 0.5 {
+            return Ok(None);
+        }
+        let radius = sphere.entity().0.radius();
+        if !radius.is_finite() || radius <= 0. {
+            return Ok(None);
+        }
+        let radial_error = square.sqrt()?.sub(p(radius)).abs_upper();
+        let (phase_sine, phase_cosine) = c.harmonics[0];
+        let normal_error = dot(c.c, transverse)
+            .add(dot(c.u, transverse).mul(phase_cosine))
+            .add(dot(c.v, transverse).mul(phase_sine))
+            .abs_upper();
+        let local_error = p(radial_error)
+            .square()
+            .add(p(normal_error).square())
+            .sqrt()?;
+        // The ORIGINAL affine processor may shear/scale/reflect: its full
+        // outward operator bound transports the true inverse-frame residual.
+        let error_mm = carrier_transform_error(*sphere.transform(), local_error, scale);
+        if !error_mm.is_finite() || error_mm > 1e-7 {
+            return Ok(None);
+        }
+        let mut margin = [0.; 2];
+        margin[source_latitude] = up(latitude + 2. * f64::EPSILON * half_pi);
         let affine = map.affine_transform().ok_or_else(|| {
             error(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "source chart requires an unavailable nonlinear composition",
+                "meridian chart map is nonlinear",
             )
         })?;
-        let ideal = old.map(|q| {
-            [
-                p(affine.x.x)
-                    .mul(p(q.x))
-                    .add(p(affine.y.x).mul(p(q.y)))
-                    .add(p(affine.z.x)),
-                p(affine.x.y)
-                    .mul(p(q.x))
-                    .add(p(affine.y.y).mul(p(q.y)))
-                    .add(p(affine.z.y)),
-            ]
-        });
-        if !matches!(map, SurfaceParameterMap::Identity) {
-            chart.transform_by(affine);
-        }
-        let Some(native) = affine_chart(&chart, &mut budget, cancel)? else {
+        let Some(latitude_axis) = (0..2)
+            .find(|&axis| affine[source_latitude][axis] != 0. && affine[longitude][axis] == 0.)
+        else {
             return Ok(None);
         };
-        let endpoints = [native.start, native.end];
-        let margin = std::array::from_fn(|axis| {
-            let coefficients = if axis == 0 {
-                [affine.x.x, affine.y.x]
-            } else {
-                [affine.x.y, affine.y.y]
-            };
-            let mapped = p(coefficients[0].abs())
-                .mul(p(margin[0]))
-                .add(p(coefficients[1].abs()).mul(p(margin[1])));
-            mapped
-                .add(p((0..2)
-                    .map(|i| ideal[i][axis].sub(p(endpoints[i][axis])).abs_upper())
-                    .fold(0., f64::max)))
-                .add(p(native.error[axis]))
-                .hi
-        });
-        if margin
-            .into_iter()
-            .any(|bound| !bound.is_finite() || bound < 0.)
-        {
-            return Err(error(
-                GeometryErrorCode::ConditioningFailure,
-                "source analytic chart tube is not finite",
-            ));
-        }
-        Ok(Some((margin, error_mm)))
+        let Some(margin_uv) = apply_chart_map(&mut chart, old, map, margin, &mut budget, cancel)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(MeridianWitness {
+            chart: ChartWitness {
+                curve: chart,
+                margin_uv,
+                error_mm,
+            },
+            graph: MeridianGraph {
+                latitude_axis,
+                pole_endpoints: poles,
+            },
+        }))
     })();
     crate::parametric::debit_native_work(work, budget.consumed(), cancel)?;
     result

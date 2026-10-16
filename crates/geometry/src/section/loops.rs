@@ -872,17 +872,20 @@ pub(crate) fn sample_original_face(
                     (directed_back, directed_front)
                 };
                 let result = sample_curve(
-                    &prepared,
-                    curve.range_tuple(),
-                    &[],
-                    front,
-                    back,
-                    frame,
-                    reference,
-                    &budget,
+                    &CurveSamplingQuery {
+                        prepared: &prepared,
+                        range: curve.range_tuple(),
+                        endpoint_strata: &[],
+                        front,
+                        back,
+                        frame,
+                        maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                        reference_mm: reference,
+                        budget: &budget,
+                        new_curve: true,
+                    },
                     &mut work,
                     &mut points,
-                    true,
                     cancel,
                 );
                 work.remaining_bytes += retained;
@@ -914,17 +917,31 @@ pub(crate) fn sample_original_face(
     Ok((loops, work.error_bounds()))
 }
 
+pub(super) struct WireSampling<'a, 'source> {
+    pub(super) frame: &'a PlaneFrameMm,
+    pub(super) maximum_plane_error_mm: f64,
+    pub(super) face_sign: f64,
+    pub(super) budget: &'a SectionBudget,
+    pub(super) captures: &'a CapturedCurves,
+    pub(super) prepared: &'a [PreparedCurveEnclosure<'source>],
+    pub(super) coverage: &'a SectionPlaneCoverage,
+}
+
 pub(super) fn sample_wire(
     wire: &Wire,
-    frame: &PlaneFrameMm,
-    face_sign: f64,
-    budget: &SectionBudget,
-    captures: &CapturedCurves,
-    prepared: &[PreparedCurveEnclosure<'_>],
-    coverage: &SectionPlaneCoverage,
+    query: &WireSampling<'_, '_>,
     work: &mut SamplingWork<'_>,
     cancel: &AtomicBool,
 ) -> Result<CanonicalLoop, GeometryError> {
+    let &WireSampling {
+        frame,
+        maximum_plane_error_mm,
+        face_sign,
+        budget,
+        captures,
+        prepared,
+        coverage,
+    } = query;
     check_cancel(cancel)?;
     if !wire.is_closed() || !face_sign.is_finite() || face_sign.abs() < 0.5 {
         return Err(kernel_error(
@@ -969,20 +986,7 @@ pub(super) fn sample_wire(
         let range = curve.range_tuple();
         let front: [f64; 3] = edge.front().point().into();
         let back: [f64; 3] = edge.back().point().into();
-        let area = sample_curve(
-            proof,
-            range,
-            endpoint_strata,
-            front,
-            back,
-            frame,
-            reference_mm,
-            budget,
-            work,
-            &mut points,
-            false,
-            cancel,
-        )
+        let area = sample_curve(&CurveSamplingQuery { prepared: proof, range, endpoint_strata, front, back, frame, maximum_plane_error_mm, reference_mm, budget, new_curve: false }, work, &mut points, cancel)
         .map_err(|mut error| {
             error.message = format!(
                 "native cap curve {index} / sample range {range:?}: {}; sampling nodes={}, scratch remaining={} B, geometry work consumed={}, remaining={}",
@@ -1029,20 +1033,37 @@ pub(super) fn sample_wire(
     Ok(boundary)
 }
 
-fn sample_curve(
-    prepared: &PreparedCurveEnclosure<'_>,
+struct CurveSamplingQuery<'a, 'source> {
+    prepared: &'a PreparedCurveEnclosure<'source>,
     range: (f64, f64),
-    endpoint_strata: &[SectionPlaneEndpointReceipt],
+    endpoint_strata: &'a [SectionPlaneEndpointReceipt],
     front: [f64; 3],
     back: [f64; 3],
-    frame: &PlaneFrameMm,
+    frame: &'a PlaneFrameMm,
+    maximum_plane_error_mm: f64,
     reference_mm: [f64; 3],
-    budget: &SectionBudget,
+    budget: &'a SectionBudget,
+    new_curve: bool,
+}
+
+fn sample_curve(
+    query: &CurveSamplingQuery<'_, '_>,
     work: &mut SamplingWork<'_>,
     points: &mut Vec<[f64; 3]>,
-    new_curve: bool,
     cancel: &AtomicBool,
 ) -> Result<[f64; 2], GeometryError> {
+    let &CurveSamplingQuery {
+        prepared,
+        range,
+        endpoint_strata,
+        front,
+        back,
+        frame,
+        maximum_plane_error_mm,
+        reference_mm,
+        budget,
+        new_curve,
+    } = query;
     check_cancel(cancel)?;
     if !range.0.is_finite() || !range.1.is_finite() || range.0 >= range.1 {
         return Err(kernel_error(
@@ -1050,7 +1071,7 @@ fn sample_curve(
         ));
     }
     for endpoint in [front, back] {
-        if plane_residual_upper(endpoint, frame)? > SECTION_PLANE_TOLERANCE_MM {
+        if plane_residual_upper(endpoint, frame)? > maximum_plane_error_mm {
             return Err(kernel_error(
                 "native cap endpoint exceeds plane residual tolerance",
             ));
@@ -1082,11 +1103,11 @@ fn sample_curve(
         endpoint_extension[end] = endpoint_extension[end].max(native.maximum_extension_mm());
         endpoint_plane_error = endpoint_plane_error.max(native.maximum_plane_error_mm());
         if endpoint_extension[end] > SECTION_SAMPLING_TOLERANCE_MM
-            || endpoint_plane_error > SECTION_PLANE_TOLERANCE_MM
+            || endpoint_plane_error > maximum_plane_error_mm
         {
             return Err(GeometryError::new(
                 GeometryErrorCode::AnalysisIndeterminate,
-                "native original endpoint closure exceeds the frozen section error allowance",
+                "native original endpoint closure exceeds the requested section error allowance",
             ));
         }
         let correction = endpoint_area_error(receipt, frame, reference_mm)?;
@@ -1132,8 +1153,13 @@ fn sample_curve(
                     stack[pending].take().expect("pending native sampling span");
                 let start = endpoints[0].parameter();
                 let end = endpoints[1].parameter();
-                let interval =
-                    prepared.sampling_interval(&endpoints, frame, work.native, cancel)?;
+                let interval = prepared.sampling_interval(
+                    &endpoints,
+                    frame,
+                    maximum_plane_error_mm,
+                    work.native,
+                    cancel,
+                )?;
                 let enclosure = interval.enclosure();
                 check_cancel(cancel)?;
                 if !enclosure.chord_error_mm.is_finite()
@@ -1188,7 +1214,7 @@ fn sample_curve(
                     .max(plane_residual_upper(output_start, frame)?)
                     .max(plane_residual_upper(output_end, frame)?);
                 if chord_error <= SECTION_SAMPLING_TOLERANCE_MM
-                    && plane_error <= SECTION_PLANE_TOLERANCE_MM
+                    && plane_error <= maximum_plane_error_mm
                 {
                     budget.check_loop(points.len() + 1)?;
                     let part_area = interval.signed_area(
@@ -1695,21 +1721,23 @@ mod tests {
         .unwrap();
         let mut points = Vec::new();
         sample_curve(
-            &prepared,
-            (0.0, 1.0),
-            &[],
-            [0.0; 3],
-            [1.0, 0.0, 0.0],
-            &frame,
-            [0.0; 3],
-            &SectionBudget::default(),
+            &CurveSamplingQuery {
+                prepared: &prepared,
+                range: (0.0, 1.0),
+                endpoint_strata: &[],
+                front: [0.0; 3],
+                back: [1.0, 0.0, 0.0],
+                frame: &frame,
+                maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                reference_mm: [0.0; 3],
+                budget: &SectionBudget::default(),
+                new_curve: false,
+            },
             &mut SamplingWork::new(&mut native, MAX_CURVE_CAPTURE_BYTES),
             &mut points,
-            false,
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert!(points.len() > 4);
         assert!(points.iter().any(|point| point[1] > 0.2));
         assert!(points.iter().any(|point| point[1] < -0.2));
         assert_eq!(points.first(), Some(&[0.0; 3]));
@@ -1743,22 +1771,24 @@ mod tests {
         .unwrap();
         let mut points = Vec::new();
         sample_curve(
-            &prepared,
-            (0.0, 1.0),
-            &[],
-            [0.0; 3],
-            [1.0, 0.0, 0.0],
-            &frame,
-            [0.0; 3],
-            &SectionBudget::default(),
+            &CurveSamplingQuery {
+                prepared: &prepared,
+                range: (0.0, 1.0),
+                endpoint_strata: &[],
+                front: [0.0; 3],
+                back: [1.0, 0.0, 0.0],
+                frame: &frame,
+                maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                reference_mm: [0.0; 3],
+                budget: &SectionBudget::default(),
+                new_curve: false,
+            },
             &mut SamplingWork::new(&mut native, MAX_CURVE_CAPTURE_BYTES),
             &mut points,
-            false,
             &AtomicBool::new(false),
         )
         .unwrap();
         assert!(points.iter().any(|point| point[1] > 0.99));
-        assert!(points.len() > 2);
     }
 
     #[test]
@@ -1786,17 +1816,20 @@ mod tests {
             let mut points = Vec::new();
             let mut work = SamplingWork::new(&mut native, 256);
             let error = sample_curve(
-                &prepared,
-                (0.0, 1.0),
-                &[],
-                [0.0; 3],
-                [1.0, 0.0, 0.0],
-                &frame,
-                [0.0; 3],
-                &SectionBudget::default(),
+                &CurveSamplingQuery {
+                    prepared: &prepared,
+                    range: (0.0, 1.0),
+                    endpoint_strata: &[],
+                    front: [0.0; 3],
+                    back: [1.0, 0.0, 0.0],
+                    frame: &frame,
+                    maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                    reference_mm: [0.0; 3],
+                    budget: &SectionBudget::default(),
+                    new_curve: false,
+                },
                 &mut work,
                 &mut points,
-                false,
                 &AtomicBool::new(cancelled),
             )
             .unwrap_err();

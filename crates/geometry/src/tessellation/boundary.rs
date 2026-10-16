@@ -101,12 +101,12 @@ impl<'a> BoundaryFace<'a> {
                 .iter()
                 .any(|point| in_box(*point, supported_parameter_box))
             {
-                if let Some(old) = found {
-                    if self.trim.native().joints()[self.natural[old]].vertex_id != joint.vertex_id {
-                        return Err(invalid(
-                            "one native triangle spans distinct natural boundary vertices",
-                        ));
-                    }
+                if let Some(old) = found
+                    && self.trim.native().joints()[self.natural[old]].vertex_id != joint.vertex_id
+                {
+                    return Err(invalid(
+                        "one native triangle spans distinct natural boundary vertices",
+                    ));
                 }
                 found = Some(index);
             }
@@ -209,14 +209,17 @@ impl<'a> BoundaryFace<'a> {
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
         coverage::certify_prepared(
-            definition,
-            ordinal,
-            polygon,
-            self.reserved_bytes
-                .saturating_add(extra_bytes)
-                .saturating_add(coverage::vector_bytes(&self.natural)),
-            &self.trim,
-            &self.natural,
+            &coverage::PreparedCoverageQuery {
+                definition,
+                ordinal,
+                polygon,
+                reserved: self
+                    .reserved_bytes
+                    .saturating_add(extra_bytes)
+                    .saturating_add(coverage::vector_bytes(&self.natural)),
+                prepared: &self.trim,
+                natural_indices: &self.natural,
+            },
             work,
             cancel,
         )

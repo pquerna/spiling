@@ -4,14 +4,15 @@
 
 //! A sufficient, representation-independent critical-neighborhood proof. Native
 //! face charts and oriented coedges form the complex; boxes are only a covering.
-//! Global convexity proves a disk complex. Alternatively, convex meridian fibers
-//! with positive radial degree about a separated represented core circle prove
-//! an annular complex. Metric proximity and component/void/tunnel incidence are
-//! separate obligations; neither sampled roots nor a surface family grant them.
+//! The closed capture is bounded by original material and actual halfspace cuts.
+//! Convexity proves a disk complex, or convex meridian fibers with positive
+//! radial degree about a separated represented core prove an annular complex.
+//! Whole-source convexity is separate, strictly stronger evidence.
 
 mod source_chart;
 
 use super::slab::HeightFunctional;
+use super::source_incidence::SourceEdgeIncidence;
 use super::{GeometryWorkBudget, SlabRequest};
 #[cfg(test)]
 use crate::kernel::prepare_face_trim_domain_with_byte_limit;
@@ -24,12 +25,8 @@ use crate::parametric::{
 use crate::section::OriginalTrimSource;
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, SectionLoopMm};
 use monstertruck_modeling::{BoundedCurve, Curve, Surface};
-use monstertruck_topology::EdgeId;
-use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode, MAX_STEP_ENTITIES};
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::AtomicBool},
-};
+use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
+use std::sync::{Arc, atomic::AtomicBool};
 
 const MAX_DEPTH: u8 = 52;
 const MAX_NEIGHBORHOODS: usize = 65_536;
@@ -161,6 +158,37 @@ struct ComponentVoidPairing {
     tunnel_cycles: usize,
 }
 
+/// These degrees are for ORIGINAL material intersected with the two actual
+/// height halfspaces, not for the polygon candidate's invented cap material.
+#[derive(Debug)]
+struct ClosedCaptureBoundary {
+    excluded_face_cells: u64,
+    excluded_coedge_cells: u64,
+}
+
+#[derive(Debug)]
+enum SourceBoundaryScope {
+    WholeSource,
+    ClosedCapture(ClosedCaptureBoundary),
+}
+
+/// The native sample and policy against which an existing slab proof is bound.
+pub(super) struct ProvedSlabSample<'a> {
+    pub(super) definition: &'a Definition,
+    pub(super) request: &'a SlabRequest,
+    pub(super) section: &'a NativeSection,
+    pub(super) boundary_motion_bound_mm: f64,
+}
+
+/// Original trimmed geometry evaluated at the captured height functional.
+pub(super) struct CriticalSlabQuery<'a, 'source, 'domains> {
+    pub(super) source: OriginalTrimSource<'source, 'domains>,
+    pub(super) request: &'a SlabRequest,
+    pub(super) section: &'a NativeSection,
+    pub(super) functional: HeightFunctional,
+    pub(super) actual_sample_height: Interval,
+}
+
 #[derive(Debug)]
 pub(super) struct CriticalSlabCertificate {
     pub(super) boundary_motion_bound_mm: f64,
@@ -171,7 +199,7 @@ pub(super) struct CriticalSlabCertificate {
     covered_face_cells: u64,
     covered_coedge_cells: u64,
     regular_flow_speed: Option<f64>,
-    global_native_convex_source: bool,
+    boundary_scope: Option<SourceBoundaryScope>,
 }
 impl CriticalSlabCertificate {
     pub(super) fn definition_id(&self) -> &DefinitionId {
@@ -190,14 +218,24 @@ impl CriticalSlabCertificate {
         self.pairing.tunnel_cycles
     }
     pub(super) fn covered_cells(&self) -> (u64, u64) {
-        (self.covered_face_cells, self.covered_coedge_cells)
+        match &self.boundary_scope {
+            Some(SourceBoundaryScope::ClosedCapture(proof)) => (
+                self.covered_face_cells + proof.excluded_face_cells,
+                self.covered_coedge_cells + proof.excluded_coedge_cells,
+            ),
+            _ => (self.covered_face_cells, self.covered_coedge_cells),
+        }
     }
     /// A whole-original-source property, never inferred from a local band,
     /// sample loop count, annular fiber proof, or regular continuation alone.
     /// Convexity is preserved by the accepted actual affine pose and by every
     /// linear height section; the enclosing SlabCapture binds those requests.
     pub(super) fn has_native_convex_section_topology_proof(&self) -> bool {
-        self.global_native_convex_source
+        self.pairing.tunnel_cycles == 0
+            && matches!(
+                self.boundary_scope.as_ref(),
+                Some(SourceBoundaryScope::WholeSource)
+            )
     }
     /// Euclidean transverse source-plane speed per unit captured height.
     /// World XY enclosures must additionally project the actual height flow
@@ -224,17 +262,20 @@ impl CriticalSlabCertificate {
     /// a proved open-slab submersion. Its closure carries the complete native
     /// sample's component/void cycles; outgoing original faces remain separate.
     pub(super) fn from_proved_regular_core(
-        definition: &Definition,
-        request: &SlabRequest,
-        section: &NativeSection,
+        sample: ProvedSlabSample<'_>,
         proof: &super::slab::RegularContinuation<'_>,
         strata: &[super::NativeEndpointStratum],
         endpoints: &[super::slab::EndpointFaceProof],
-        boundary_motion_bound_mm: f64,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
+        let ProvedSlabSample {
+            definition,
+            request,
+            section,
+            boundary_motion_bound_mm,
+        } = sample;
         work.charge(1, cancel)?;
         if proof.definition_id() != definition.id()
             || section.definition_id() != definition.id()
@@ -325,23 +366,26 @@ impl CriticalSlabCertificate {
             covered_face_cells,
             covered_coedge_cells,
             regular_flow_speed: Some(proof.speed()),
-            global_native_convex_source: false,
+            boundary_scope: None,
         })
     }
     /// The caller supplies the opaque proof constructed by the native closed
     /// round-carrier routine, not a family flag or an observed loop count.
     pub(super) fn from_proved_round(
-        definition: &Definition,
-        request: &SlabRequest,
-        section: &NativeSection,
+        sample: ProvedSlabSample<'_>,
         proof: &super::slab::RoundIncidenceProof<'_>,
         event_brackets: &[[f64; 2]],
-        boundary_motion_bound_mm: f64,
         occupied: Option<NativeSection>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
+        let ProvedSlabSample {
+            definition,
+            request,
+            section,
+            boundary_motion_bound_mm,
+        } = sample;
         work.charge(1, cancel)?;
         if section.definition_id() != definition.id()
             || proof.definition_id() != definition.id()
@@ -416,7 +460,9 @@ impl CriticalSlabCertificate {
             covered_face_cells: proof.source_face_count() as u64,
             covered_coedge_cells: 0,
             regular_flow_speed: None,
-            global_native_convex_source: proof.has_native_convex_source_proof(),
+            boundary_scope: proof
+                .has_native_convex_source_proof()
+                .then_some(SourceBoundaryScope::WholeSource),
         })
     }
 }
@@ -837,14 +883,14 @@ fn coefficient_tangent_join(
         return Ok(false);
     };
     let mut coefficients = None;
-    for coordinate in 0..3 {
+    for (coordinate, value) in h.iter().take(3).enumerate() {
         let Some(l) = derivative(reference, coordinate, true, work)? else {
             return Ok(false);
         };
         let Some(r) = derivative(reference, coordinate, false, work)? else {
             return Ok(false);
         };
-        let point = ExactCoefficient::point(h[coordinate]);
+        let point = ExactCoefficient::point(*value);
         let Some(mut determinant) = l.product(&weight, work, cancel)? else {
             return Ok(false);
         };
@@ -884,7 +930,7 @@ fn coefficient_tangent_join(
     for other in 0..other_count {
         work.charge(1, cancel)?;
         let center = control(other);
-        for coordinate in 0..4 {
+        for (coordinate, value) in center.iter().enumerate() {
             let Some(l) = derivative(other, coordinate, true, work)? else {
                 return Ok(false);
             };
@@ -897,8 +943,7 @@ fn coefficient_tangent_join(
             let Some(first) = mu.product(&l, work, cancel)? else {
                 return Ok(false);
             };
-            let Some(second) =
-                lambda.product(&ExactCoefficient::point(center[coordinate]), work, cancel)?
+            let Some(second) = lambda.product(&ExactCoefficient::point(*value), work, cancel)?
             else {
                 return Ok(false);
             };
@@ -1256,6 +1301,197 @@ fn intrinsically_smooth_carrier(surface: &Surface) -> bool {
     }
 }
 
+/// One original paired native occurrence link, shared by critical topology and
+/// height regularity. This is geometric G1 continuation, not height transversality.
+pub(super) fn same_face_source_seam_join(
+    surface: &Surface,
+    domain: &PreparedFaceTrimDomain<'_>,
+    first: usize,
+    second: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    let coedges = domain.native().coedges();
+    let (Some(a), Some(b)) = (coedges.get(first), coedges.get(second)) else {
+        return Ok(false);
+    };
+    if first == second
+        || a.identity.face_id != b.identity.face_id
+        || a.identity.face_id != domain.native().face().id()
+        || a.identity.edge_id != b.identity.edge_id
+        || a.identity.orientation == b.identity.orientation
+    {
+        return Ok(false);
+    }
+    match surface {
+        Surface::BsplineSurface(_) | Surface::NurbsSurface(_) => {
+            spline_seam_join(surface, domain, first, second, work, cancel)
+        }
+        _ => Ok(intrinsically_smooth_carrier(surface)),
+    }
+}
+
+/// This view can only be created while borrowing the ACTUAL owning native face's
+/// surface mutex. An unrelated surface cannot be attached to a retained domain.
+pub(super) struct OriginalSourceFace<'a, 'd> {
+    surface: &'a Surface,
+    domain: &'a PreparedFaceTrimDomain<'d>,
+    bounds: [[f64; 2]; 2],
+}
+pub(super) fn with_original_source_face<R>(
+    domain: &PreparedFaceTrimDomain<'_>,
+    bounds: [[f64; 2]; 2],
+    visit: impl FnOnce(OriginalSourceFace<'_, '_>) -> Result<R, GeometryError>,
+) -> Result<R, GeometryError> {
+    domain.native().face().with_surface(|surface| {
+        visit(OriginalSourceFace {
+            surface,
+            domain,
+            bounds,
+        })
+    })
+}
+impl<'a, 'd> OriginalSourceFace<'a, 'd> {
+    pub fn surface(&self) -> &'a Surface {
+        self.surface
+    }
+    pub fn prove_gluing(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<GluedSourceFace<'a, 'd>>, GeometryError> {
+        GluedSourceFace::prove(self.surface, self.domain, self.bounds, work, cancel)
+    }
+}
+
+/// A private whole-original-face G1 receipt bound to the exact borrowed carrier,
+/// retained native face/domain and admitted finite UV box. It never asserts C1
+/// parameter jets at a C0 knot or transfers to a different surface.
+pub(super) struct GluedSourceFace<'a, 'd> {
+    surface: &'a Surface,
+    domain: &'a PreparedFaceTrimDomain<'d>,
+    bounds: [[f64; 2]; 2],
+}
+impl<'a, 'd> GluedSourceFace<'a, 'd> {
+    fn prove(
+        surface: &'a Surface,
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        bounds: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        if !critical_face_gluing(surface, bounds, work, cancel)? {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            surface,
+            domain,
+            bounds,
+        }))
+    }
+    pub fn surface(&self) -> &Surface {
+        self.surface
+    }
+    pub fn domain(&self) -> &PreparedFaceTrimDomain<'d> {
+        self.domain
+    }
+    pub fn normal(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 3], GeometryError> {
+        for (axis, range) in uv.iter().enumerate() {
+            Interval::new(range[0], range[1])?;
+            if range[0] < self.bounds[axis][0] || range[1] > self.bounds[axis][1] {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "source normal query leaves its whole-face G1 receipt",
+                ));
+            }
+        }
+        let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
+            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+        );
+        let result = monstertruck_modeling::validated_surface_geometric_normal(
+            self.surface,
+            uv,
+            &mut native,
+            cancel,
+        );
+        crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
+        match result {
+            Ok(normal) => Ok(normal.map(|value| Interval {
+                lo: value.lower,
+                hi: value.upper,
+            })),
+            Err(monstertruck_modeling::ValidatedGeometryError::NonSmooth)
+                if one_sided_tensor_joint(self.surface, uv, work, cancel)? =>
+            {
+                // The positive original coefficient G1 theorem identifies all
+                // incident tangent planes. One-sided nonzero native jets supply
+                // their common NORMAL DIRECTION, never a fictitious C1 jet.
+                Ok(normal(
+                    &surface_enclosure(self.surface, uv, work, cancel)?,
+                    true,
+                ))
+            }
+            Err(cause) => Err(crate::parametric::native_error(cause)),
+        }
+    }
+}
+
+fn one_sided_tensor_joint(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let axes: [(&[f64], usize, usize); 2] = match surface {
+        Surface::BsplineSurface(s) => [
+            (
+                s.knot_vector_u().as_ref(),
+                s.udegree(),
+                s.control_points().len(),
+            ),
+            (
+                s.knot_vector_v().as_ref(),
+                s.vdegree(),
+                s.control_points()[0].len(),
+            ),
+        ],
+        Surface::NurbsSurface(s) => [
+            (
+                s.knot_vector_u().as_ref(),
+                s.udegree(),
+                s.control_points().len(),
+            ),
+            (
+                s.knot_vector_v().as_ref(),
+                s.vdegree(),
+                s.control_points()[0].len(),
+            ),
+        ],
+        _ => return Ok(false),
+    };
+    let mut joint = false;
+    for (axis, (knots, degree, count)) in axes.into_iter().enumerate() {
+        let levels = usize::BITS - knots.len().leading_zeros();
+        work.charge(4 * u64::from(levels) + 1, cancel)?;
+        let (lo, hi) = (uv[axis][0], uv[axis][1]);
+        let after = knots.partition_point(|knot| *knot <= lo);
+        if knots.get(after).is_some_and(|knot| *knot < hi) {
+            return Ok(false); // Never choose one side of a box crossing interiors.
+        }
+        if lo == hi && knots[degree] < lo && lo < knots[count] {
+            let first = knots.partition_point(|knot| *knot < lo);
+            joint |= after.saturating_sub(first) >= degree;
+        }
+    }
+    Ok(joint)
+}
+
 /// Global local-convexity needs geometric C1 gluing on the WHOLE source face,
 /// not just on the eventual adaptive cells. A direct tensor chart additionally
 /// admits exact homogeneous projective G1 identities at ALL internal knots.
@@ -1284,6 +1520,41 @@ pub(super) fn critical_face_gluing(
         joined = true;
     }
     Ok(joined)
+}
+
+/// A root tensor interface is needed only where its original image can meet
+/// the CLOSED capture. Every discarded interface has a whole-image height
+/// exclusion; unresolved/nested interfaces on active original spans still
+/// require the recursive span qualifier below, before adaptive subdivision.
+fn capture_face_gluing(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    functional: HeightFunctional,
+    request: &SlabRequest,
+    face: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    if critical_face_gluing(surface, uv, work, cancel)? {
+        return Ok(true);
+    }
+    for interface in surface_crease_interfaces(surface, uv, work, cancel)? {
+        let image =
+            crate::parametric::surface_piecewise_enclosure(surface, interface, work, cancel)?;
+        if overlaps(
+            functional.height(image.position),
+            request.height_interval_mm,
+        ) && !interface_regular_join(surface, interface, work, cancel)?
+        {
+            return Err(failure(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "closed capture has an unproved original C1/projective-G1 source interface",
+                face,
+                interface,
+            ));
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1677,6 +1948,43 @@ impl SamplePrism {
         })
     }
 
+    /// For the lower/upper actual halfspace cap the outward covector is
+    /// -dh/+dh, and its radial degree is h(witness)-lower / upper-h(witness).
+    /// Enclose the ENTIRE represented core circle when present: the native
+    /// sample frame and source height frame need not be exactly parallel.
+    fn closed_capture_boundary(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ClosedCaptureBoundary, GeometryError> {
+        work.charge(1, cancel)?;
+        let mut height = self.source_height.height(self.center.map(Interval::point));
+        if let Some(radius) = self.core_radius {
+            let angular = Interval { lo: -1.0, hi: 1.0 };
+            let transverse = add(
+                mul(self.source_height.dot(self.dual[0]), angular),
+                mul(self.source_height.dot(self.dual[1]), angular),
+            );
+            height = add(height, mul(Interval::point(radius), transverse));
+        }
+        let cap_radial_degree = [
+            height.sub(Interval::point(self.range[0])),
+            Interval::point(self.range[1]).sub(height),
+        ];
+        if cap_radial_degree.iter().any(|degree| degree.lo <= 0.0) {
+            return Err(failure(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "closed source halfspace caps have no strictly interior radial witness",
+                0,
+                (self.range, [height.lo, height.hi]),
+            ));
+        }
+        Ok(ClosedCaptureBoundary {
+            excluded_face_cells: 0,
+            excluded_coedge_cells: 0,
+        })
+    }
+
     fn next_vertex(&self, edge: usize) -> usize {
         if edge + 1 == self.outer_count {
             0
@@ -1899,19 +2207,7 @@ impl SamplePrism {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CoedgeUse {
-    face: usize,
-    coedge: usize,
-    wire: usize,
-    index: usize,
-    orientation: bool,
-}
-#[derive(Clone, Copy)]
-struct EdgeUses {
-    first: CoedgeUse,
-    second: Option<CoedgeUse>,
-}
+type PositionNormalEnclosure = ([Interval; 3], [Interval; 3]);
 
 /// UV and 3D edge parameters are independent. Cover the complete retained UV
 /// coedge in its OWN parameter, and exclude a UV subarc only by disjoint native
@@ -1949,8 +2245,8 @@ fn coedge_normal_enclosure(
             // a genuine parameter derivative jump, so evaluating a single jet
             // across it would refuse an otherwise exact regular source seam.
             let compatible = face.with_surface(
-                |surface| -> Result<Option<([Interval; 3], [Interval; 3])>, GeometryError> {
-                    let mut result: Option<([Interval; 3], [Interval; 3])> = None;
+                |surface| -> Result<Option<PositionNormalEnclosure>, GeometryError> {
+                    let mut result: Option<PositionNormalEnclosure> = None;
                     for patch in surface_parameter_boxes(surface, uv, work, cancel)? {
                         let jet = surface_enclosure(surface, patch, work, cancel)?;
                         if (0..3)
@@ -2003,16 +2299,26 @@ fn coedge_normal_enclosure(
         format!("critical source coedge {coedge_index} has no UV-position incidence covering native interval {position:?}")))
 }
 
-fn add_neighborhood(
-    events: &mut Vec<CriticalEventNeighborhood>,
-    capture: &Arc<CriticalCapture>,
+struct NeighborhoodInput {
     face: usize,
     height: Interval,
     root_proved: bool,
     pairing: ComponentVoidPairing,
+}
+
+fn add_neighborhood(
+    events: &mut Vec<CriticalEventNeighborhood>,
+    capture: &Arc<CriticalCapture>,
+    input: NeighborhoodInput,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    let NeighborhoodInput {
+        face,
+        height,
+        root_proved,
+        pairing,
+    } = input;
     if !height.lo.is_finite() || !height.hi.is_finite() {
         return Err(failure(
             GeometryErrorCode::ConditioningFailure,
@@ -2063,15 +2369,18 @@ fn add_neighborhood(
 /// Returns None only when the actual native sample is outside this sufficient
 /// one-component/no-void construction. No family label decides applicability.
 pub(super) fn certify_critical_slab(
-    source: OriginalTrimSource<'_, '_>,
-    request: &SlabRequest,
-    section: &NativeSection,
-    functional: HeightFunctional,
-    actual_sample_height: Interval,
+    query: CriticalSlabQuery<'_, '_, '_>,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<CriticalSlabCertificate>, GeometryError> {
+    let CriticalSlabQuery {
+        source,
+        request,
+        section,
+        functional,
+        actual_sample_height,
+    } = query;
     let definition = source.definition();
     work.charge(1, cancel)?;
     if section.definition_id() != definition.id() || !section.is_native_intersection() {
@@ -2119,6 +2428,8 @@ pub(super) fn certify_critical_slab(
             )
         })?;
     let prism = SamplePrism::new(section, request, actual_sample_height, work, cancel)?;
+    let mut closed_boundary = prism.closed_capture_boundary(work, cancel)?;
+    let mut whole_source = true;
     let chart_bytes = scratch_limit
         .checked_sub(
             fixed_scratch.saturating_add(
@@ -2151,7 +2462,7 @@ pub(super) fn certify_critical_slab(
     };
     let capture = CriticalCapture::new(definition, request, functional);
     let mut events = Vec::new();
-    let mut edges: HashMap<EdgeId<Curve>, EdgeUses> = HashMap::new();
+    let edges = SourceEdgeIncidence::new(definition, MAX_EDGE_BYTES, work, cancel)?;
     let mut covered_face_cells = 0_u64;
     let mut covered_coedge_cells = 0_u64;
     let mut bound = prism.vertical_return;
@@ -2159,76 +2470,42 @@ pub(super) fn certify_critical_slab(
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
         let domain = source.face_domain(face_index, chart_bytes, work, cancel)?;
-        for (coedge_index, coedge) in domain.native().coedges().iter().enumerate() {
-            work.charge(1, cancel)?;
-            let use_ = CoedgeUse {
-                face: face_index,
-                coedge: coedge_index,
-                wire: coedge.identity.wire_index,
-                index: coedge.identity.coedge_index,
-                orientation: coedge.identity.orientation,
-            };
-            if let Some(uses) = edges.get_mut(&coedge.identity.edge_id) {
-                if uses.second.is_some() || uses.first.orientation == use_.orientation {
-                    return Err(failure(
-                        GeometryErrorCode::SingularGeometry,
-                        "oriented source edge is not a two-sided manifold incidence",
-                        face_index,
-                        (use_.wire, use_.index),
-                    ));
-                }
-                uses.second = Some(use_);
-            } else {
-                if edges.len() >= 2 * MAX_STEP_ENTITIES as usize
-                    || (edges.len() + 16) * std::mem::size_of::<(EdgeId<Curve>, EdgeUses)>() * 4
-                        > MAX_EDGE_BYTES
-                {
-                    return Err(failure(
-                        GeometryErrorCode::ResourceLimit,
-                        "source incidence complex capacity exhausted",
-                        face_index,
-                        edges.len(),
-                    ));
-                }
-                edges.try_reserve(1).map_err(|_| {
-                    failure(
-                        GeometryErrorCode::ResourceLimit,
-                        "source incidence allocation refused",
-                        face_index,
-                        edges.len(),
-                    )
-                })?;
-                edges.insert(
-                    coedge.identity.edge_id,
-                    EdgeUses {
-                        first: use_,
-                        second: None,
-                    },
-                );
-            }
-        }
         face.with_surface(|surface| -> Result<(), GeometryError> {
             let source_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
-            if !critical_face_gluing(surface, domain.uv_bounds(), work, cancel)? {
-                return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
-                    "whole original face has no proved C1/projective-G1 internal source gluing", face_index, domain.uv_bounds()));
-            }
+            let face_glued = capture_face_gluing(surface, domain.uv_bounds(), functional, request, face_index, work, cancel)?;
+            whole_source &= face_glued;
             let mut spans = surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)?;
             let mut stack = Vec::with_capacity(usize::from(MAX_DEPTH) + 1);
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0_u8))) {
                 work.charge(1, cancel)?;
                 if domain.classify(uv, work, cancel)? == TrimClassification::Outside { continue; }
+                let span_smooth = depth != 0 || surface_parameter_span_smooth(surface, uv, work, cancel)?;
+                let jet = if span_smooth {
+                    surface_enclosure(surface, uv, work, cancel)?
+                } else {
+                    crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
+                };
+                let height = functional.height(jet.position);
+                let active = overlaps(height, request.height_interval_mm);
+                if !active && !whole_source {
+                    closed_boundary.excluded_face_cells += 1;
+                    continue;
+                }
                 // Qualify each ORIGINAL extracted source span before adaptive
                 // refinement. Subdivision cannot erase an unproved nested C0
                 // interface and turn two locally convex pieces into a global
                 // convex shell. Explicit root-carrier interfaces were proved
                 // by exact projective gluing above; this additionally follows
                 // every actual nested sweep/profile carrier.
-                if depth == 0 && !surface_parameter_span_smooth(surface, uv, work, cancel)? {
+                if !span_smooth {
+                    if !active {
+                        whole_source = false;
+                        closed_boundary.excluded_face_cells += 1;
+                        continue;
+                    }
                     return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
                         "original source span has an unresolved nested/reflected C0 curvature interface", face_index, uv));
                 }
-                let jet = surface_enclosure(surface, uv, work, cancel)?;
                 let n = match &source_chart {
                     Some(chart) => chart.normal(jet.position)?,
                     None => normal(&jet, face.orientation()),
@@ -2237,20 +2514,35 @@ pub(super) fn certify_critical_slab(
                     &jet, n, source_chart.as_ref().map(source_chart::SphereChart::convex),
                 )?;
                 let regular = length(n)?.lo > 0.0;
-                let height = functional.height(jet.position);
-                let active = overlaps(height, request.height_interval_mm);
                 let metric = if active { prism.boundary_distance(jet.position, work, cancel)? } else { 0.0 };
                 if !regular || radial_degree.lo <= 0.0 || !convex || metric > request.native_shape_error_mm {
+                    if !active && (radial_degree.hi <= 0.0 || depth >= MAX_DEPTH) {
+                        // The optional whole-source theorem failed, but this
+                        // complete original cell is proved outside BOTH cuts.
+                        whole_source = false;
+                        closed_boundary.excluded_face_cells += 1;
+                        continue;
+                    }
                     if depth >= MAX_DEPTH {
                         let obligation = if !regular { "source chart rank is unresolved" }
                             else if radial_degree.lo <= 0.0 { "source material/void radial degree is not positive" }
                             else if !convex { "source normal-curvature form is not convex" }
                             else { "whole native boundary cell exceeds candidate-prism shape policy" };
                         return Err(failure(if metric > request.native_shape_error_mm { GeometryErrorCode::ShapeErrorExceeded }
-                            else { GeometryErrorCode::AnalysisIndeterminate }, obligation, face_index, uv));
+                            else { GeometryErrorCode::AnalysisIndeterminate }, obligation, face_index,
+                            (uv, request.height_interval_mm, request.sample_height_mm)));
                     }
                     work.charge(2, cancel)?;
-                    for child in split(uv, depth, face_index)? { stack.push((child, depth + 1)); }
+                    let children = match split(uv, depth, face_index) {
+                        Ok(children) => children,
+                        Err(error) if !active && error.code == GeometryErrorCode::AnalysisIndeterminate => {
+                            whole_source = false;
+                            closed_boundary.excluded_face_cells += 1;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for child in children { stack.push((child, depth + 1)); }
                     continue;
                 }
                 covered_face_cells += 1;
@@ -2264,8 +2556,12 @@ pub(super) fn certify_critical_slab(
                         let member = domain.classify(root, work, cancel)?;
                         let root_height = functional.height(surface_enclosure(surface, root, work, cancel)?.position);
                         if member != TrimClassification::Outside {
-                            add_neighborhood(&mut events, &capture, face_index, root_height,
-                                member == TrimClassification::Inside, pairing, work, cancel)?;
+                            add_neighborhood(&mut events, &capture, NeighborhoodInput {
+                                face: face_index,
+                                height: root_height,
+                                root_proved: member == TrimClassification::Inside,
+                                pairing,
+                            }, work, cancel)?;
                         }
                     }
                     RootIsolation::ConvexCriticalCover => {
@@ -2273,16 +2569,21 @@ pub(super) fn certify_critical_slab(
                         // fibers prove every covered stratum attaches to the
                         // represented component/core, not a hidden void. Root
                         // existence is NOT claimed for a conservative cover.
-                        add_neighborhood(&mut events, &capture, face_index, height, false, pairing, work, cancel)?;
+                        add_neighborhood(&mut events, &capture, NeighborhoodInput {
+                            face: face_index,
+                            height,
+                            root_proved: false,
+                            pairing,
+                        }, work, cancel)?;
                     }
                 }
             }
             Ok(())
         })?;
     }
-    // Convex carrier patches alone do not prove a convex solid: a reentrant
-    // source edge is an independent failure. Test every actual oriented pair,
-    // including edges outside the slab, to establish the global degree proof.
+    // All original incidences remain mandatory. Only a WHOLE edge-cell height
+    // exclusion removes its geometric link from the clipped boundary; cells
+    // touching either CLOSED cut retain the complete nonreentrant link proof.
     for uses in edges.values() {
         let first = uses.first;
         let second = uses.second.ok_or_else(|| {
@@ -2295,20 +2596,16 @@ pub(super) fn certify_critical_slab(
         })?;
         if first.face == second.face {
             let domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
-            let smooth = domain
-                .native()
-                .face()
-                .with_surface(|surface| match surface {
-                    Surface::BsplineSurface(_) | Surface::NurbsSurface(_) => spline_seam_join(
-                        surface,
-                        &domain,
-                        first.coedge,
-                        second.coedge,
-                        work,
-                        cancel,
-                    ),
-                    _ => Ok(intrinsically_smooth_carrier(surface)),
-                })?;
+            let smooth = domain.native().face().with_surface(|surface| {
+                same_face_source_seam_join(
+                    surface,
+                    &domain,
+                    first.coedge,
+                    second.coedge,
+                    work,
+                    cancel,
+                )
+            })?;
             if smooth {
                 continue;
             }
@@ -2364,7 +2661,12 @@ pub(super) fn certify_critical_slab(
             // never a UV parameter or a nearby stored/sampled vertex.
             for parameter in [range.0, range.1] {
                 let height = functional.height(prepared.jet((parameter, parameter), work, cancel)?.position);
-                add_neighborhood(&mut events, &capture, first.face, height, false, pairing, work, cancel)?;
+                add_neighborhood(&mut events, &capture, NeighborhoodInput {
+                    face: first.face,
+                    height,
+                    root_proved: false,
+                    pairing,
+                }, work, cancel)?;
             }
             for span in prepared.parameter_intervals() {
                 let mut stack = Vec::with_capacity(usize::from(MAX_DEPTH) + 1);
@@ -2372,24 +2674,40 @@ pub(super) fn certify_critical_slab(
                 while let Some(((lo, hi), depth)) = stack.pop() {
                     work.charge(1, cancel)?;
                     let jet = prepared.jet((lo, hi), work, cancel)?;
+                    let h = functional.height(jet.position);
+                    let active = overlaps(h, request.height_interval_mm);
+                    if !active && !whole_source {
+                        closed_boundary.excluded_coedge_cells += 1;
+                        continue;
+                    }
                     let n1 = coedge_normal_enclosure(&first_domain, first.coedge, jet.position, work, cancel)?;
                     let n2 = coedge_normal_enclosure(&second_domain, second.coedge, jet.position, work, cancel)?;
                     let tangent = if first.orientation { jet.derivative } else { jet.derivative.map(Interval::neg) };
                     let dihedral = dot(n2, cross(n1, tangent));
                     if dihedral.hi > 0.0 {
+                        if !active && (dihedral.lo > 0.0 || depth >= MAX_DEPTH) {
+                            whole_source = false;
+                            closed_boundary.excluded_coedge_cells += 1;
+                            continue;
+                        }
                         let mid = lo * 0.5 + hi * 0.5;
                         if depth >= MAX_DEPTH || mid <= lo || mid >= hi {
+                            if !active {
+                                whole_source = false;
+                                closed_boundary.excluded_coedge_cells += 1;
+                                continue;
+                            }
                             return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
                                 "oriented source trim link cannot exclude a reentrant material/void attachment", first.face,
-                                (first.wire, first.index, second.face, [lo, hi], [dihedral.lo, dihedral.hi])));
+                                (first.wire, first.index, second.face, [lo, hi], [dihedral.lo, dihedral.hi],
+                                    request.height_interval_mm, request.sample_height_mm)));
                         }
                         work.charge(2, cancel)?;
                         stack.push(((lo, mid), depth + 1)); stack.push(((mid, hi), depth + 1));
                         continue;
                     }
                     covered_coedge_cells += 1;
-                    let h = functional.height(jet.position);
-                    if !overlaps(h, request.height_interval_mm) { continue; }
+                    if !active { continue; }
                     let derivative = functional.dot(jet.derivative);
                     if !derivative.contains_zero() { continue; }
                     let second_derivative = functional.dot(jet.second_derivative);
@@ -2410,19 +2728,30 @@ pub(super) fn certify_critical_slab(
                             neighborhood = functional.height(prepared.jet((root.lo, root.hi), work, cancel)?.position);
                         } else { continue; }
                     }
-                    add_neighborhood(&mut events, &capture, first.face, neighborhood, root_proved,
-                        pairing, work, cancel)?;
+                    add_neighborhood(&mut events, &capture, NeighborhoodInput {
+                        face: first.face,
+                        height: neighborhood,
+                        root_proved,
+                        pairing,
+                    }, work, cancel)?;
                 }
             }
             Ok(())
         })?;
     }
-    // Degree is calibrated by the actual native sample and separated material
-    // point/core cycle. Every native crossing has positive sign. Convex patch
-    // forms (disk) or restricted meridian forms (cycle), plus nonreentrant
-    // source links, prove the whole slab retracts to the represented sample's
-    // point/cycle. Components, bounded voids and tunnel pairing therefore have
-    // an independent source-oriented proof, not an inference from metric error.
+    // This is the CLOSED original material intersection, not a polygon cap:
+    // all retained source patches/links are locally convex and point outward
+    // with positive radial degree. Each halfspace cap is flat with the proved
+    // positive degree above; its source links are intersections of those SAME
+    // locally convex material sides with the actual closed halfspace.
+    //
+    // Radial projection of each resulting closed component is locally
+    // degree-positive, hence covers the point/core represented by the native
+    // sample. A disjoint extra component or inward void boundary cannot have
+    // this degree about that same separated witness. Convexity then gives the
+    // disk (or each meridian disk around the core), and the sample calibrates
+    // the represented component/cycle. Artificial caps grant neither a native
+    // sample nor cross-height coface incidence; those remain independent.
     let occupied = Some(occupied_projection(section, lower, upper, work, cancel)?);
     Ok(Some(CriticalSlabCertificate {
         boundary_motion_bound_mm: up(bound),
@@ -2433,7 +2762,11 @@ pub(super) fn certify_critical_slab(
         covered_face_cells,
         covered_coedge_cells,
         regular_flow_speed: None,
-        global_native_convex_source: prism.core_radius.is_none(),
+        boundary_scope: Some(if whole_source {
+            SourceBoundaryScope::WholeSource
+        } else {
+            SourceBoundaryScope::ClosedCapture(closed_boundary)
+        }),
     }))
 }
 
@@ -3213,5 +3546,271 @@ mod tests {
             Interval::point(2.0),
         ]);
         assert!(projected.lo <= 1.9 && projected.hi >= 2.1);
+    }
+
+    fn horizontal_request(range: [f64; 2], sample: f64) -> SlabRequest {
+        SlabRequest {
+            frame: PlaneFrameMm {
+                origin_mm: [0.0; 3],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 1.0, 0.0],
+                z_axis: [0.0, 0.0, 1.0],
+            },
+            height_interval_mm: range,
+            sample_height_mm: sample,
+            native_shape_error_mm: 0.1,
+        }
+    }
+
+    fn horizontal_section(
+        source: &crate::PreparedSectionSource<'_>,
+        height: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> NativeSection {
+        source
+            .section_with_byte_limit(
+                crate::PlaneMm {
+                    origin_mm: [0.0, 0.0, height],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                cancel,
+                (crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes()) as u32,
+                work,
+            )
+            .unwrap()
+    }
+
+    fn horizontal_critical(
+        source: &crate::PreparedSectionSource<'_>,
+        request: SlabRequest,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<CriticalSlabCertificate, GeometryError> {
+        let section = horizontal_section(source, request.sample_height_mm, work, cancel);
+        let height = super::super::slab::native_sample_height_band(
+            source.definition(),
+            request.frame,
+            &section,
+            work,
+            cancel,
+        )?;
+        certify_critical_slab(
+            CriticalSlabQuery {
+                source: source.trim_source(),
+                request: &request,
+                section: &section,
+                functional: HeightFunctional::from_frame(request.frame),
+                actual_sample_height: height,
+            },
+            crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes() - section.retained_bytes(),
+            work,
+            cancel,
+        )?
+        .ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "independent critical property has no represented native disk",
+            )
+        })
+    }
+
+    #[test]
+    fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoint() {
+        let cancel = AtomicBool::new(false);
+        for name in [
+            "native-parity-blind-pocket.step",
+            "native-parity-blind-pocket-nurbs-floor.step",
+        ] {
+            let definition = source(name);
+            let mut work = GeometryWorkBudget::new(100_000_000);
+            let prepared = crate::prepare_section_source(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &cancel,
+                &mut work,
+            )
+            .unwrap();
+            // The SAME immutable source has real void-facing walls above Z=4.
+            // Below that floor its actual closed material intersection is a disk.
+            let request = horizontal_request([1.99, 2.01], 2.0);
+            let proof = horizontal_critical(&prepared, request, &mut work, &cancel).unwrap();
+            assert_eq!(proof.definition_id(), definition.id());
+            assert_eq!(
+                proof.request().height_interval_mm,
+                request.height_interval_mm
+            );
+            assert_eq!(proof.material_component_count(), 1);
+            assert_eq!(proof.bounded_void_count(), 0);
+            assert!(
+                !proof.has_native_convex_section_topology_proof(),
+                "the actual upper pocket forbids a whole-source convex claim"
+            );
+            let Some(SourceBoundaryScope::ClosedCapture(boundary)) = &proof.boundary_scope else {
+                panic!("the original upper pocket needs explicit height-exclusion authority");
+            };
+            assert!(boundary.excluded_face_cells > 0);
+            assert!(boundary.excluded_coedge_cells > 0);
+            assert!(proof.boundary_motion_bound_mm <= request.native_shape_error_mm);
+            assert!(proof.covered_cells().0 > boundary.excluded_face_cells);
+            // Intersecting the pocket, or merely touching its floor at the
+            // CLOSED endpoint, must not reuse those previous exclusions.
+            for range in [[3.99, 4.01], [3.99, 4.0]] {
+                let failure = horizontal_critical(
+                    &prepared,
+                    horizontal_request(range, 3.995),
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err();
+                assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+                assert!(failure.message.contains("radial degree"), "{failure:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn actual_whole_source_convexity_is_not_replaced_by_capture_exclusions() {
+        let cancel = AtomicBool::new(false);
+        let definition = source("native-parity-nurbs-box.step");
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        let proof = horizontal_critical(
+            &prepared,
+            horizontal_request([1.99, 2.01], 2.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            proof.has_native_convex_section_topology_proof(),
+            "all original box faces and links, not only this section, were proved"
+        );
+    }
+
+    #[test]
+    fn original_halfspace_cap_degree_requires_a_strictly_interior_native_witness() {
+        let cancel = AtomicBool::new(false);
+        let definition = source("native-parity-blind-pocket.step");
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        let request = horizontal_request([1.9, 2.1], 2.0);
+        let section = horizontal_section(&prepared, 2.0, &mut work, &cancel);
+        let sample_height = super::super::slab::native_sample_height_band(
+            &definition,
+            request.frame,
+            &section,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let mut prism =
+            SamplePrism::new(&section, &request, sample_height, &mut work, &cancel).unwrap();
+        prism.closed_capture_boundary(&mut work, &cancel).unwrap();
+        let height = prism
+            .source_height
+            .height(prism.center.map(Interval::point));
+        for range in [[height.lo, height.hi + 0.1], [height.lo - 0.1, height.hi]] {
+            prism.range = range;
+            let failure = prism
+                .closed_capture_boundary(&mut work, &cancel)
+                .unwrap_err();
+            assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+        }
+    }
+
+    #[test]
+    fn closed_caps_enclose_the_whole_native_core_not_only_its_center() {
+        let cancel = AtomicBool::new(false);
+        let definition = source("native-parity-nurbs-torus.step");
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        let request = horizontal_request([-0.01, 0.01], 0.0);
+        let section = horizontal_section(&prepared, 0.0, &mut work, &cancel);
+        let band = super::super::slab::native_sample_height_band(
+            &definition,
+            request.frame,
+            &section,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let mut prism = SamplePrism::new(&section, &request, band, &mut work, &cancel).unwrap();
+        assert!(prism.core_radius.unwrap() > 1.0);
+        prism.closed_capture_boundary(&mut work, &cancel).unwrap();
+        // Tilt the ACTUAL cut covector relative to the captured native core.
+        // The center remains interior, but part of this same core leaves it.
+        prism.source_height.direction = [0.1, 0.0, 1.0].map(Interval::point);
+        let center_height = prism
+            .source_height
+            .height(prism.center.map(Interval::point));
+        prism.range = [center_height.lo - 0.01, center_height.hi + 0.01];
+        let failure = prism
+            .closed_capture_boundary(&mut work, &cancel)
+            .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+        assert!(failure.message.contains("strictly interior"));
+    }
+
+    #[test]
+    fn positive_face_degree_cannot_mask_an_active_reentrant_original_source_link() {
+        use monstertruck_io::step::load::step_geometry::Curve3D;
+        use monstertruck_modeling::builder;
+        let vertices = builder::vertices([
+            (0.0, 0.0, 0.0),
+            (20.0, 0.0, 0.0),
+            (20.0, 20.0, 0.0),
+            (12.0, 20.0, 0.0),
+            (10.0, 18.0, 0.0),
+            (8.0, 20.0, 0.0),
+            (0.0, 20.0, 0.0),
+        ]);
+        let wire = (0..vertices.len())
+            .map(|index| {
+                builder::line::<Curve3D>(&vertices[index], &vertices[(index + 1) % vertices.len()])
+            })
+            .collect();
+        let solid = crate::parity_fixtures::extruded(vec![wire], 4.0);
+        let text = crate::parity_fixtures::original("original-reentrant-star.step", solid);
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(text.as_bytes(), &cancel).unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        let failure = horizontal_critical(
+            &prepared,
+            horizontal_request([1.99, 2.01], 2.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+        assert!(
+            failure.message.contains("oriented source trim link"),
+            "{failure:?}"
+        );
     }
 }

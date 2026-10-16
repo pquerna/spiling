@@ -78,15 +78,20 @@ fn merge_shared(
     Ok(())
 }
 
+/// Realized object geometry and the retained native ownership used by support.
+pub(super) struct SupportInput<'a> {
+    pub(super) sections: &'a [SectionSpan],
+    pub(super) schedule: &'a [super::LayerElevation],
+    pub(super) native_points: usize,
+    pub(super) recipe: &'a PlanarPrintRecipe,
+}
+
 // Anchors come only from actual deposited capsules. Corridor exclusion consumes
 // every lower slab's continuous-target outer occupancy, separately from the
 // sampled/scheduled D used by walls and physical-distance skin classification.
 pub(super) fn realize(
     layers: &mut [PrintLayer],
-    sections: &[SectionSpan],
-    schedule: &[super::LayerElevation],
-    native_points: usize,
-    recipe: &PlanarPrintRecipe,
+    input: &SupportInput<'_>,
     segments: &mut usize,
     cancel: &AtomicBool,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
@@ -103,6 +108,12 @@ pub(super) fn realize(
         &mut spiling_geometry::GeometryWorkBudget,
     ) -> Result<ProtectedVoidSet, ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
+    let SupportInput {
+        sections,
+        schedule,
+        native_points,
+        recipe,
+    } = *input;
     let width = recipe.bead_width_mm;
     let mut demands: Vec<Demand> = Vec::new();
     let retained = native_points;
@@ -736,10 +747,12 @@ pub(super) fn realize(
     // and scoped positive void masks, after both raster/anchor alternatives.
     super::native::certify_support_clearance(
         layers,
-        sections,
-        schedule,
-        &protected,
-        &scopes,
+        &super::native::SupportClearanceGeometry {
+            sections,
+            schedule,
+            protected: &protected,
+            scopes: &scopes,
+        },
         recipe,
         native_work,
         &mut work,
@@ -1087,6 +1100,46 @@ fn remaining_geometry_budget(
         })
 }
 
+fn candidate_clearance_distance(
+    occupied: &Polygon<f64>,
+    column: &MultiPolygon<f64>,
+    requested: f64,
+) -> Result<f64, ManufacturingError> {
+    let a = occupied.bounding_rect().ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "native outer operand has no finite bounds",
+        )
+    })?;
+    let Some(b) = column.bounding_rect() else {
+        return Ok(requested);
+    };
+    // Offset allowance and Boolean padding only propose a candidate work
+    // frame. They do not prove raw-C containment after overlay. Final actual
+    // XYZ6 support capsules have a separate shared geometry proof.
+    let reserve = super::OFFSET_TOLERANCE_MM + 2.0f64.sqrt() * (super::LAYER_QUANTIZATION_MM * 0.5);
+    let base = (requested + reserve).next_up();
+    let min = [a.min().x.min(b.min().x), a.min().y.min(b.min().y)];
+    let max = [a.max().x.max(b.max().x), a.max().y.max(b.max().y)];
+    let padding = super::boolean::overlay_padding(
+        min.map(|v| (v - base - super::OFFSET_TOLERANCE_MM).next_down()),
+        max.map(|v| (v + base + super::OFFSET_TOLERANCE_MM).next_up()),
+    )?;
+    let guard = (2.0 * 2.0f64.sqrt() * padding).next_up();
+    let distance = (base + guard).next_up();
+    let actual_padding = super::boolean::overlay_padding(
+        min.map(|v| (v - distance - super::OFFSET_TOLERANCE_MM).next_down()),
+        max.map(|v| (v + distance + super::OFFSET_TOLERANCE_MM).next_up()),
+    )?;
+    if !distance.is_finite() || (2.0f64.sqrt() * actual_padding).next_up() > guard {
+        return Err(error(
+            ManufacturingErrorCode::NativeConditioningFailure,
+            "support exclusion candidate cannot admit its offset/overlay/XYZ6 work frame",
+        ));
+    }
+    Ok(distance)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,44 +1230,4 @@ mod tests {
                 .all(|path| path.kind == DepositionKind::SparseFill)
         );
     }
-}
-
-fn candidate_clearance_distance(
-    occupied: &Polygon<f64>,
-    column: &MultiPolygon<f64>,
-    requested: f64,
-) -> Result<f64, ManufacturingError> {
-    let a = occupied.bounding_rect().ok_or_else(|| {
-        error(
-            ManufacturingErrorCode::NativeAnalysisIndeterminate,
-            "native outer operand has no finite bounds",
-        )
-    })?;
-    let Some(b) = column.bounding_rect() else {
-        return Ok(requested);
-    };
-    // Offset allowance and Boolean padding only propose a candidate work
-    // frame. They do not prove raw-C containment after overlay. Final actual
-    // XYZ6 support capsules have a separate shared geometry proof.
-    let reserve = super::OFFSET_TOLERANCE_MM + 2.0f64.sqrt() * (super::LAYER_QUANTIZATION_MM * 0.5);
-    let base = (requested + reserve).next_up();
-    let min = [a.min().x.min(b.min().x), a.min().y.min(b.min().y)];
-    let max = [a.max().x.max(b.max().x), a.max().y.max(b.max().y)];
-    let padding = super::boolean::overlay_padding(
-        min.map(|v| (v - base - super::OFFSET_TOLERANCE_MM).next_down()),
-        max.map(|v| (v + base + super::OFFSET_TOLERANCE_MM).next_up()),
-    )?;
-    let guard = (2.0 * 2.0f64.sqrt() * padding).next_up();
-    let distance = (base + guard).next_up();
-    let actual_padding = super::boolean::overlay_padding(
-        min.map(|v| (v - distance - super::OFFSET_TOLERANCE_MM).next_down()),
-        max.map(|v| (v + distance + super::OFFSET_TOLERANCE_MM).next_up()),
-    )?;
-    if !distance.is_finite() || (2.0f64.sqrt() * actual_padding).next_up() > guard {
-        return Err(error(
-            ManufacturingErrorCode::NativeConditioningFailure,
-            "support exclusion candidate cannot admit its offset/overlay/XYZ6 work frame",
-        ));
-    }
-    Ok(distance)
 }

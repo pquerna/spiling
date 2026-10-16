@@ -38,6 +38,10 @@ impl SectionPlaneCoverage {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Temporary native continuation proofs stay inline; shared original proofs are borrowed without allocation."
+)]
 enum OriginalCurve<'a> {
     Borrowed(&'a PreparedValidatedCurve<'static>),
     Owned(PreparedValidatedCurve<'static>),
@@ -256,7 +260,7 @@ pub(crate) fn prepare_section_originals<'a>(
         for wire in &face.wires {
             for use_ in wire {
                 work.charge(1, cancel)?;
-                if !use_.source_chart_certified {
+                if !use_.source_chart_certificate.is_certified() {
                     return Ok(None);
                 }
             }

@@ -152,22 +152,37 @@ pub(super) struct ImportBoundsRefinement {
     allocated_bytes: usize,
 }
 
+type OriginalBoundarySlot = (
+    monstertruck_topology::compress::CompressedEdgeIndex,
+    (usize, usize),
+);
+
+/// Aligned original/native geometry tables admitted for one definition.
+pub(super) struct ImportBoundsInput<'a> {
+    pub solid: &'a Solid,
+    pub faces: &'a [FaceInfo],
+    pub source_trims: &'a [Vec<Vec<Option<Curve2D>>>],
+    pub parameters: &'a [crate::kernel::FaceParameterWitness],
+    pub continuations: &'a [Option<crate::kernel::OriginalBoundaryContinuation>],
+    pub proofs: &'a [monstertruck_modeling::PreparedValidatedCurve<'static>],
+    pub edge_count: usize,
+    pub source_slots: &'a [Vec<Vec<OriginalBoundarySlot>>],
+}
+
 pub(super) fn import_bounds(
-    solid: &Solid,
-    faces: &[FaceInfo],
-    source_trims: &[Vec<Vec<Option<Curve2D>>>],
-    parameters: &[crate::kernel::FaceParameterWitness],
-    continuations: &[Option<crate::kernel::OriginalBoundaryContinuation>],
-    proofs: &[monstertruck_modeling::PreparedValidatedCurve<'static>],
-    edge_count: usize,
-    source_slots: &[Vec<
-        Vec<(
-            monstertruck_topology::compress::CompressedEdgeIndex,
-            (usize, usize),
-        )>,
-    >],
+    input: ImportBoundsInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<(AabbMm, ImportBoundsRefinement), GeometryError> {
+    let ImportBoundsInput {
+        solid,
+        faces,
+        source_trims,
+        parameters,
+        continuations,
+        proofs,
+        edge_count,
+        source_slots,
+    } = input;
     let mut work = GeometryWorkBudget::new(MAX_IMPORT_BOUND_WORK);
     let mut bounds = None;
     let face_count = solid
@@ -589,11 +604,17 @@ mod tests {
             assert_eq!(face.geometry.domain.inner_loop_count, 512);
             assert_eq!(face.geometry.domain.trim_loop_count, 513);
             assert_eq!(boundary.wires.len(), 513);
+            assert!(boundary.wires.iter().all(|wire| {
+                wire.iter()
+                    .all(|coedge| coedge.source_chart_certificate.is_certified())
+            }));
             assert!(
                 boundary
                     .wires
                     .iter()
-                    .all(|wire| { wire.iter().all(|coedge| coedge.source_chart_certified) })
+                    .flatten()
+                    .all(|coedge| { coedge.source_chart_certificate.has_regular_inverse() }),
+                "planar hole caps retain ordinary source chart coordinates, not pole graph authority",
             );
         }
         assert_eq!(caps, 2);
@@ -752,12 +773,8 @@ mod tests {
         curve_bounds(&rational(-0.1), &mut bounds, &mut work, &cancel).unwrap();
         contains(bounds.unwrap(), [1.0, 0.0, 0.0]);
         let mut bounds = None;
-        assert_eq!(
-            curve_bounds(&rational(-1.0), &mut bounds, &mut work, &cancel)
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ConditioningFailure
-        );
+        curve_bounds(&rational(-1.0), &mut bounds, &mut work, &cancel)
+            .expect_err("an unresolved source denominator must never publish finite bounds");
     }
 
     #[test]

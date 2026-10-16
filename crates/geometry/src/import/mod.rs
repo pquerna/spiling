@@ -1159,21 +1159,20 @@ pub(crate) fn import_step(
                         "original edge interval disagrees between native coedge uses",
                     ));
                 }
-                if let Some(source_id) = source_use.source_edge {
-                    if original_edge_ids[edge_use.index]
+                if let Some(source_id) = source_use.source_edge
+                    && original_edge_ids[edge_use.index]
                         .replace(source_id)
                         .is_some_and(|previous| previous != source_id)
-                    {
-                        return Err(kernel(
-                            "native edge disagrees between original EDGE_CURVE identities",
-                        ));
-                    }
+                {
+                    return Err(kernel(
+                        "native edge disagrees between original EDGE_CURVE identities",
+                    ));
                 }
                 let mut trim = edge_use.trim_curve.take();
-                if !edge_use.orientation {
-                    if let Some(curve) = &mut trim {
-                        curve.invert();
-                    }
+                if !edge_use.orientation
+                    && let Some(curve) = &mut trim
+                {
+                    curve.invert();
                 }
                 trims.push(trim);
             }
@@ -1282,10 +1281,12 @@ pub(crate) fn import_step(
         if let Some(&(owner, _)) = continuation_owners.get(&key) {
             let shared = (owner < original_continuations.len()).then_some(owner);
             let (curve, mut branch, witness) = implicit::prepare(
-                &edge.curve,
-                original_range,
-                shared,
-                scale,
+                implicit::ContinuationInput {
+                    source: &edge.curve,
+                    whole: original_range,
+                    shared,
+                    scale,
+                },
                 &mut original_continuations,
                 &mut continuation_bytes,
                 query_proof_byte_limit,
@@ -1465,13 +1466,17 @@ pub(crate) fn import_step(
             {
                 check_cancel(cancel)?;
                 let witness = source_trim::retain_with_continuation(
-                    &shell.edges[coedge.index].curve,
-                    &modeled_edges[coedge.index].curve,
-                    &source.surface,
-                    &surface,
-                    conversion,
-                    declared_trim.as_ref(),
-                    scale,
+                    source_trim::TrimInput {
+                        source_curve: &shell.edges[coedge.index].curve,
+                        native_curve: &modeled_edges[coedge.index].curve,
+                        surface: source_trim::SurfaceInput {
+                            source_surface: &source.surface,
+                            native_surface: &surface,
+                            map: conversion,
+                            scale,
+                        },
+                        declared: declared_trim.as_ref(),
+                    },
                     boundary_continuations
                         .get(coedge.index)
                         .and_then(Option::as_ref)
@@ -1498,7 +1503,7 @@ pub(crate) fn import_step(
                     .get(coedge.index)
                     .and_then(Option::as_ref)
                     .is_some()
-                    && !witness.certified
+                    && !witness.certificate.is_certified()
                 {
                     return Err(error(
                         GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -1535,10 +1540,12 @@ pub(crate) fn import_step(
                         }],
                     }
                 },
-                &source.surface,
-                &surface,
-                conversion,
-                scale,
+                source_trim::SurfaceInput {
+                    source_surface: &source.surface,
+                    native_surface: &surface,
+                    map: conversion,
+                    scale,
+                },
                 &mut chart_work,
                 cancel,
                 &mut chart_diagnostic,
@@ -1560,7 +1567,7 @@ pub(crate) fn import_step(
                         witness.margin_uv,
                         witness.error_mm,
                         parameter_range,
-                        witness.certified,
+                        witness.certificate,
                         witness.declared_source,
                     ));
                     witness.curve
@@ -1660,14 +1667,16 @@ pub(crate) fn import_step(
         }
     }
     let (bounds, bound_refinement) = import_bounds(
-        &solid,
-        &faces,
-        &source_trims,
-        &face_parameters,
-        &boundary_continuations,
-        &original_continuations,
-        source_edge_count,
-        &trim_slots,
+        bounds::ImportBoundsInput {
+            solid: &solid,
+            faces: &faces,
+            source_trims: &source_trims,
+            parameters: &face_parameters,
+            continuations: &boundary_continuations,
+            proofs: &original_continuations,
+            edge_count: source_edge_count,
+            source_slots: &trim_slots,
+        },
         cancel,
     )?;
     let mut face_boundaries = Vec::with_capacity(faces.len());
@@ -1788,7 +1797,7 @@ pub(crate) fn import_step(
                     source_chart_parameter_range: source_trim_metadata[face_index][wire_index]
                         [coedge_index]
                         .2,
-                    source_chart_certified: source_trim_metadata[face_index][wire_index]
+                    source_chart_certificate: source_trim_metadata[face_index][wire_index]
                         [coedge_index]
                         .3,
                     source_chart_declared: source_trim_metadata[face_index][wire_index]

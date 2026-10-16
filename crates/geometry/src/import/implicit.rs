@@ -9,7 +9,7 @@ use super::{conversion_error, error, kernel};
 use crate::kernel::OriginalBoundaryContinuation;
 use crate::{GeometryError, GeometryWorkBudget, check_cancel, parametric};
 use monstertruck_io::step::load::step_geometry::{Curve3D, CurveParameterMap};
-use monstertruck_modeling::{BoundedCurve, Curve};
+use monstertruck_modeling::{BoundedCurve, Curve, ParametricSurface};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -37,10 +37,10 @@ pub(super) fn is_original_implicit(
 
 /// Only the loader's identity restriction may be removed for a lineage-proved
 /// periodic child. Actual original TRIMMED_CURVEs remain part of the source.
-pub(super) fn original_source<'a>(
-    source: &'a Curve3D,
+pub(super) fn original_source(
+    source: &Curve3D,
     whole: (f64, f64),
-) -> Result<&'a Curve3D, GeometryError> {
+) -> Result<&Curve3D, GeometryError> {
     if source.range_tuple() == whole {
         return Ok(source);
     }
@@ -83,11 +83,15 @@ pub(super) fn original_native_curve(
     Ok(wrapper.entity().curve().as_ref())
 }
 
+pub(super) struct ContinuationInput<'a> {
+    pub source: &'a Curve3D,
+    pub whole: (f64, f64),
+    pub shared: Option<usize>,
+    pub scale: f64,
+}
+
 pub(super) fn prepare(
-    source: &Curve3D,
-    whole: (f64, f64),
-    shared: Option<usize>,
-    scale: f64,
+    input: ContinuationInput<'_>,
     proofs: &mut Vec<monstertruck_modeling::PreparedValidatedCurve<'static>>,
     used: &mut usize,
     byte_limit: usize,
@@ -101,6 +105,12 @@ pub(super) fn prepare(
     ),
     GeometryError,
 > {
+    let ContinuationInput {
+        source,
+        whole,
+        shared,
+        scale,
+    } = input;
     check_cancel(cancel)?;
     original_source(source, whole)?;
     let (curve, metadata): (_, CurveParameterMap) =
@@ -320,28 +330,73 @@ fn root_chart<'a>(
 }
 
 impl RootChart<'_> {
-    fn tube(&self, range: [f64; 2]) -> Result<[parametric::Interval; 2], GeometryError> {
+    fn tube(
+        &self,
+        range: [f64; 2],
+        reference: [parametric::Interval; 2],
+        periods: [Option<f64>; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[parametric::Interval; 2], GeometryError> {
         use parametric::Interval;
+        work.charge(1, cancel)?;
+        if periods
+            .iter()
+            .flatten()
+            .any(|period| !period.is_finite() || *period <= 0.0)
+        {
+            return Err(unavailable(
+                "original implicit carrier has an invalid native period",
+            ));
+        }
         let mut parameter = Interval::new(range[0], range[1])?;
         for (a, b) in self.reflections[..self.count].iter().flatten() {
+            work.charge(1, cancel)?;
             parameter = Interval::point(*a).add(Interval::point(*b)).sub(parameter);
         }
         let active = self.leaf.range();
         parameter = Interval::new(parameter.lo.max(active[0]), parameter.hi.min(active[1]))?;
         let mut result: Option<[Interval; 2]> = None;
         let pieces = self.leaf.pieces();
-        let first = pieces.partition_point(|piece| piece.parameter[1] < parameter.lo);
+        let mut first = 0;
+        let mut last = pieces.len();
+        while first < last {
+            work.charge(1, cancel)?;
+            let middle = first + (last - first) / 2;
+            if pieces[middle].parameter[1] < parameter.lo {
+                first = middle + 1;
+            } else {
+                last = middle;
+            }
+        }
         for piece in pieces[first..]
             .iter()
             .take_while(|piece| piece.parameter[0] <= parameter.hi)
         {
-            let uv = piece.source_parameters.ok_or_else(|| {
+            work.charge(1, cancel)?;
+            let mut uv = piece.source_parameters.ok_or_else(|| {
                 unavailable("original implicit source UV continuation tube is unavailable")
             })?[self.carrier]
                 .map(|value| Interval {
                     lo: value.lower,
                     hi: value.upper,
                 });
+            for (axis, period) in periods.into_iter().enumerate() {
+                let Some(period) = period else { continue };
+                let turns = ((reference[axis].mid() - uv[axis].mid()) / period).round();
+                if !turns.is_finite() {
+                    return Err(unavailable(
+                        "original implicit periodic chart lift is not finite",
+                    ));
+                }
+                if turns != 0.0 {
+                    // This translates the SAME retained root in a covering
+                    // chart. The interval includes the period's rounding;
+                    // whole inverse/source correspondence still proves it.
+                    let period = Interval::new(parametric::down(period), parametric::up(period))?;
+                    uv[axis] = uv[axis].add(period.mul(Interval::point(turns)));
+                }
+            }
             result = Some(match result {
                 None => uv,
                 Some(previous) => std::array::from_fn(|axis| previous[axis].hull(uv[axis])),
@@ -389,18 +444,18 @@ pub(super) fn inverse_margin(
     }
     let mut rho = 0.0_f64;
     let mut norm = 0.0_f64;
-    for row in 0..2 {
+    for (row, coefficients) in a.into_iter().enumerate() {
         let mut row_defect = Interval::point(0.0);
         for (column, derivative) in [jet.du, jet.dv].into_iter().enumerate() {
             let product = (0..3).fold(Interval::point(0.0), |sum, axis| {
-                sum.add(Interval::point(a[row][axis]).mul(derivative[axis]))
+                sum.add(Interval::point(coefficients[axis]).mul(derivative[axis]))
             });
             let defect = Interval::point(if row == column { 1.0 } else { 0.0 }).sub(product);
             row_defect = row_defect.add(Interval::point(defect.abs_upper()));
         }
         rho = rho.max(row_defect.hi);
         norm = norm.max(
-            a[row]
+            coefficients
                 .into_iter()
                 .fold(Interval::point(0.0), |sum, value| {
                     sum.add(Interval::point(value.abs()))
@@ -420,19 +475,32 @@ pub(super) fn inverse_margin(
 
 /// Certifies positional UV uncertainty from the SAME original root's actual
 /// source-parameter tubes. Physical residual alone never supplies a UV margin.
+pub(super) struct UvMarginInput<'a> {
+    pub curve: &'a Curve,
+    pub prepared: &'a monstertruck_modeling::PreparedValidatedCurve<'static>,
+    pub surface: &'a monstertruck_modeling::Surface,
+    pub chart: &'a monstertruck_modeling::Curve2D,
+    pub physical_residual: f64,
+    pub coefficient_margin: [f64; 2],
+}
+
 pub(super) fn certify_uv_margin(
-    curve: &Curve,
-    prepared: &monstertruck_modeling::PreparedValidatedCurve<'static>,
-    surface: &monstertruck_modeling::Surface,
-    chart: &monstertruck_modeling::Curve2D,
-    physical_residual: f64,
-    coefficient_margin: [f64; 2],
+    input: UvMarginInput<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[f64; 2], GeometryError> {
+    let UvMarginInput {
+        curve,
+        prepared,
+        surface,
+        chart,
+        physical_residual,
+        coefficient_margin,
+    } = input;
     use parametric::Interval;
     let source = root_chart(curve, prepared, surface, work, cancel)?;
     let active = prepared.range();
+    let periods = [surface.period_u(), surface.period_v()];
     let range = curve.range_tuple();
     let range = [range.0.max(active[0]), range.1.min(active[1])];
     let uv_range = chart.range_tuple();
@@ -469,7 +537,7 @@ pub(super) fn certify_uv_margin(
         let candidate = candidate.ok_or_else(|| {
             unavailable("original implicit UV expression has no bounded image span")
         })?;
-        let actual = source.tube(cell)?;
+        let actual = source.tube(cell, candidate, periods, work, cancel)?;
         let box_uv = std::array::from_fn(|axis| {
             candidate[axis]
                 .add(Interval {
@@ -505,9 +573,9 @@ pub(super) fn certify_uv_margin(
         }
         let middle = cell[0] * 0.5 + cell[1] * 0.5;
         if depth == 48 || middle <= cell[0] || middle >= cell[1] {
-            return Err(unavailable(
-                "original implicit source UV inverse chart, pole or periodic lift remains unresolved",
-            ));
+            return Err(unavailable(&format!(
+                "original implicit source UV inverse chart, pole or periodic lift remains unresolved: source parameter={cell:?}, candidate={candidate:?}, retained original root={actual:?}, coefficient margin={coefficient_margin:?}, physical residual={physical_residual} mm",
+            )));
         }
         stack[live] = ([middle, cell[1]], depth + 1);
         stack[live + 1] = ([cell[0], middle], depth + 1);
@@ -539,7 +607,7 @@ mod tests {
         )
         .unwrap();
         let margin = inverse_margin(jet, 1.0e-7).unwrap().unwrap();
-        assert!(margin >= 0.1 && margin < 0.100001);
+        assert!((0.1..0.100001).contains(&margin));
         let mut singular = jet;
         singular.du[0] = parametric::Interval::new(-1.0e-6, 1.0e-6).unwrap();
         assert!(inverse_margin(singular, 1.0e-7).unwrap().is_none());
@@ -580,13 +648,22 @@ mod tests {
         let chart = Curve2D::Line(Line(Point2::new(0.0, 0.0), Point2::new(0.0, 1.0)));
         let mut work = GeometryWorkBudget::new(1_000_000);
         let margin = certify_uv_margin(
-            &curve, &prepared, &xy, &chart, 1.0e-9, [0.0; 2], &mut work, &cancel,
+            UvMarginInput {
+                curve: &curve,
+                prepared: &prepared,
+                surface: &xy,
+                chart: &chart,
+                physical_residual: 1.0e-9,
+                coefficient_margin: [0.0; 2],
+            },
+            &mut work,
+            &cancel,
         )
         .unwrap();
         assert!(
             margin
                 .into_iter()
-                .all(|bound| bound >= 1.0e-9 && bound < 1.1e-9)
+                .all(|bound| (1.0e-9..1.1e-9).contains(&bound))
         );
         let other = Surface::Plane(Plane::new(
             Point3::new(0.0, 0.0, 1.0),
@@ -594,7 +671,16 @@ mod tests {
             Point3::new(0.0, 1.0, 1.0),
         ));
         let cause = certify_uv_margin(
-            &curve, &prepared, &other, &chart, 1.0e-9, [0.0; 2], &mut work, &cancel,
+            UvMarginInput {
+                curve: &curve,
+                prepared: &prepared,
+                surface: &other,
+                chart: &chart,
+                physical_residual: 1.0e-9,
+                coefficient_margin: [0.0; 2],
+            },
+            &mut work,
+            &cancel,
         )
         .unwrap_err();
         assert_eq!(

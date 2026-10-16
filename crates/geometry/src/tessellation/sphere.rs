@@ -463,14 +463,13 @@ impl<'a> SphereChart<'a> {
                                 100,
                             )
                         };
-                        if let Some(parameter) = parameter {
-                            if parameter > a
-                                && parameter <= b
-                                && parameter.is_finite()
-                                && continuation.is_none_or(|old| parameter < old.1)
-                            {
-                                continuation = Some((direction, parameter));
-                            }
+                        if let Some(parameter) = parameter
+                            && parameter > a
+                            && parameter <= b
+                            && parameter.is_finite()
+                            && continuation.is_none_or(|old| parameter < old.1)
+                        {
+                            continuation = Some((direction, parameter));
                         }
                     }
                     let direction = continuation
@@ -595,10 +594,12 @@ impl<'a> SphereChart<'a> {
     ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
         curve.gnomonic_jet(
             range,
-            self.center,
-            self.x,
-            self.y,
-            self.normal,
+            &crate::parametric::GnomonicFrame {
+                center_mm: self.center,
+                x_axis: self.x,
+                y_axis: self.y,
+                normal: self.normal,
+            },
             work,
             cancel,
         )
@@ -686,40 +687,40 @@ impl<'a> SphereChart<'a> {
             }
             covered = covered.max(right);
             let jet = self.curve_jet(curve, (left, right), work, cancel)?;
-            if let Some((proposed_normal, normal_error, line_norm)) = &perpendicular {
+            if let Some((proposed_normal, normal_error, line_norm)) = &perpendicular
+                && monotone
+            {
+                let progress = (0..2).fold(Interval::point(0.0), |sum, axis| {
+                    sum.add(jet.derivative[axis].mul(direction[axis]))
+                });
+                monotone = progress.lo > 0.0;
                 if monotone {
-                    let progress = (0..2).fold(Interval::point(0.0), |sum, axis| {
-                        sum.add(jet.derivative[axis].mul(direction[axis]))
+                    let spatial = curve.jet((left, right), work, cancel)?;
+                    let displacement: [Interval; 3] = std::array::from_fn(|axis| {
+                        spatial.position[axis].sub(Interval::point(self.center[axis]))
                     });
-                    monotone = progress.lo > 0.0;
-                    if monotone {
-                        let spatial = curve.jet((left, right), work, cancel)?;
-                        let displacement: [Interval; 3] = std::array::from_fn(|axis| {
-                            spatial.position[axis].sub(Interval::point(self.center[axis]))
-                        });
-                        let denominator = dot(displacement, self.normal);
-                        let projected = curve.projected_position_enclosure(
-                            (left, right),
-                            self.center,
-                            *proposed_normal,
-                            work,
-                            cancel,
-                        )?;
-                        let defect = normal_error
-                            .iter()
-                            .zip(displacement)
-                            .fold(projected, |sum, (error, value)| sum.add(error.mul(value)));
-                        if denominator.lo <= 0.0 {
-                            return Err(unresolved(
-                                "native boundary interval crosses spherical chart horizon",
-                            ));
-                        }
-                        perpendicular_error = perpendicular_error.max(
-                            Interval::point(defect.abs_upper())
-                                .div(denominator.mul(*line_norm))?
-                                .hi,
-                        );
+                    let denominator = dot(displacement, self.normal);
+                    let projected = curve.projected_position_enclosure(
+                        (left, right),
+                        self.center,
+                        *proposed_normal,
+                        work,
+                        cancel,
+                    )?;
+                    let defect = normal_error
+                        .iter()
+                        .zip(displacement)
+                        .fold(projected, |sum, (error, value)| sum.add(error.mul(value)));
+                    if denominator.lo <= 0.0 {
+                        return Err(unresolved(
+                            "native boundary interval crosses spherical chart horizon",
+                        ));
                     }
+                    perpendicular_error = perpendicular_error.max(
+                        Interval::point(defect.abs_upper())
+                            .div(denominator.mul(*line_norm))?
+                            .hi,
+                    );
                 }
             }
             let fraction = |t| {
@@ -870,14 +871,16 @@ fn native_sphere_error(
     });
     let mut lower = f64::INFINITY;
     let mut upper = 0.0_f64;
-    for i in 0..3 {
-        let off = (0..3)
-            .filter(|&j| i != j)
-            .fold(Interval::point(0.0), |sum, j| {
-                sum.add(Interval::point(gram[i][j].abs_upper()))
+    for (i, row) in gram.iter().enumerate() {
+        let off = row
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| i != j)
+            .fold(Interval::point(0.0), |sum, (_, value)| {
+                sum.add(Interval::point(value.abs_upper()))
             });
-        lower = lower.min(gram[i][i].sub(off).lo);
-        upper = upper.max(gram[i][i].add(off).hi);
+        lower = lower.min(row[i].sub(off).lo);
+        upper = upper.max(row[i].add(off).hi);
     }
     if lower <= 0.0 {
         return Err(unresolved(

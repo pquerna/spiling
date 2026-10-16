@@ -175,8 +175,15 @@ pub(super) fn collect(
                         let output_is_back = source_endpoint_is_back != neighbor.orientation();
                         let source_cut_parameter = original_edge.with_curve(|curve| {
                             source_parameter(
-                                curve, source_edge, &cut.edge_derivations, derivation,
-                                output_domain, output_is_back, work, cancel,
+                                &SourceParameterQuery {
+                                    curve,
+                                    edge: source_edge,
+                                    graph: &cut.edge_derivations,
+                                    index: derivation,
+                                    domain: output_domain,
+                                    endpoint_is_back: output_is_back,
+                                },
+                                work, cancel,
                             )
                         }).map_err(|mut error| {
                             error.message = format!(
@@ -307,18 +314,30 @@ fn included_domain(domain: ParameterRange) -> Result<[f64; 2], GeometryError> {
     }
 }
 
+struct SourceParameterQuery<'a> {
+    curve: &'a Curve,
+    edge: EdgeId<Curve>,
+    graph: &'a [BooleanEdgeDerivation<Curve>],
+    index: usize,
+    domain: ParameterRange,
+    endpoint_is_back: bool,
+}
+
 /// Interpret the concrete native cut implementation, never an affine fit of
 /// reported parent/child domains. Every graph link and actual domain must agree.
 fn source_parameter(
-    curve: &Curve,
-    edge: EdgeId<Curve>,
-    graph: &[BooleanEdgeDerivation<Curve>],
-    mut index: usize,
-    mut domain: ParameterRange,
-    endpoint_is_back: bool,
+    query: &SourceParameterQuery<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
+    let &SourceParameterQuery {
+        curve,
+        edge,
+        graph,
+        mut index,
+        mut domain,
+        endpoint_is_back,
+    } = query;
     let gauge = curve_gauge(curve, 0, work, cancel)?;
     let bounds = included_domain(domain)?;
     let mut value = bounds[usize::from(endpoint_is_back)];

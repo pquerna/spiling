@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use std::fmt::Write;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 use step_p21::ast::{EntityInstance, Exchange, Name, Parameter, Record};
 
 pub fn parameters(r: &mut Record) -> &mut Vec<Parameter> {
@@ -40,10 +43,94 @@ pub fn add(exchange: &mut Exchange, id: u64, source: &str) {
         .push(EntityInstance::Simple { id, record });
 }
 
+fn fields(record: &Record) -> Option<&[Parameter]> {
+    match &record.parameter {
+        Parameter::List(fields) => Some(fields),
+        _ => None,
+    }
+}
+
+fn referenced<'a>(records: &HashMap<u64, &'a Record>, reference: &Parameter) -> Option<&'a Record> {
+    let Parameter::Ref(Name::Entity(id)) = reference else {
+        return None;
+    };
+    records.get(id).copied()
+}
+
+fn associated_surface<'a>(
+    records: &HashMap<u64, &'a Record>,
+    association: &Parameter,
+) -> Option<&'a Record> {
+    let record = referenced(records, association)?;
+    if record.name == "PCURVE" {
+        referenced(records, fields(record)?.get(1)?)
+    } else {
+        Some(record)
+    }
+}
+
+/// Exact declared co-carrier identity, independent of a placement's X gauge.
+/// This authors explicit seams; it does not certify any remaining intersection.
+fn same_declared_carrier(records: &HashMap<u64, &Record>, first: &Record, second: &Record) -> bool {
+    if std::ptr::eq(first, second) {
+        return true;
+    }
+    if first.name != second.name
+        || !matches!(
+            first.name.as_str(),
+            "PLANE"
+                | "CYLINDRICAL_SURFACE"
+                | "CONICAL_SURFACE"
+                | "SPHERICAL_SURFACE"
+                | "TOROIDAL_SURFACE"
+        )
+    {
+        return false;
+    }
+    let same = || -> Option<bool> {
+        let a = fields(first)?;
+        let b = fields(second)?;
+        if a.get(2..)? != b.get(2..)? {
+            return Some(false);
+        }
+        let a = referenced(records, a.get(1)?)?;
+        let b = referenced(records, b.get(1)?)?;
+        if a.name != "AXIS2_PLACEMENT_3D" || b.name != "AXIS2_PLACEMENT_3D" {
+            return Some(false);
+        }
+        let a = fields(a)?;
+        let b = fields(b)?;
+        let pa = referenced(records, a.get(1)?)?;
+        let pb = referenced(records, b.get(1)?)?;
+        if pa.name != "CARTESIAN_POINT"
+            || pb.name != "CARTESIAN_POINT"
+            || fields(pa)?.get(1)? != fields(pb)?.get(1)?
+        {
+            return Some(false);
+        }
+        if first.name == "SPHERICAL_SURFACE" {
+            return Some(true);
+        }
+        match (a.get(2)?, b.get(2)?) {
+            (Parameter::NotProvided, Parameter::NotProvided) => Some(true),
+            (a, b) => {
+                let a = referenced(records, a)?;
+                let b = referenced(records, b)?;
+                Some(
+                    a.name == "DIRECTION"
+                        && b.name == "DIRECTION"
+                        && fields(a)?.get(1)? == fields(b)?.get(1)?,
+                )
+            }
+        }
+    };
+    same() == Some(true)
+}
+
 /// Original implicit-source variant of a controlled explicit-carrier recipe.
-/// Geometry, source entity IDs and carrier incidence stay unchanged; only the
-/// declared curve subtype changes. Its independent oracle remains the recipe's
-/// analytic solid, not an import/export or sampled-curve comparison.
+/// Keep proved co-carrier chart seams explicit: those carriers do not isolate
+/// a transverse curve. Geometry, source IDs, associations and master choice
+/// remain unchanged; the independent oracle is the recipe's analytic solid.
 pub fn implicit_intersections(source: &str, filename: &str) -> String {
     let mut exchange = step_p21::parser::parse(source).expect("controlled original STEP source");
     parameters(
@@ -54,10 +141,46 @@ pub fn implicit_intersections(source: &str, filename: &str) -> String {
             .expect("controlled original STEP filename"),
     )[0] = Parameter::String(filename.into());
     let mut changed = 0;
-    for record in records_mut(&mut exchange) {
-        if record.name == "SURFACE_CURVE" {
-            record.name = "INTERSECTION_CURVE".into();
-            changed += 1;
+    let seams: HashSet<u64> = {
+        let records: HashMap<_, _> = exchange.data[0]
+            .entities
+            .iter()
+            .filter_map(|entity| match entity {
+                EntityInstance::Simple { id, record } => Some((*id, record)),
+                _ => None,
+            })
+            .collect();
+        records
+            .iter()
+            .filter_map(|(id, record)| {
+                if record.name != "SURFACE_CURVE" {
+                    return None;
+                }
+                let Parameter::List(associations) = fields(record)?.get(2)? else {
+                    return None;
+                };
+                let [a, b] = associations.as_slice() else {
+                    return None;
+                };
+                let a = associated_surface(&records, a)?;
+                let b = associated_surface(&records, b)?;
+                same_declared_carrier(&records, a, b).then_some(*id)
+            })
+            .collect()
+    };
+    for entity in &mut exchange.data[0].entities {
+        let (id, records) = match entity {
+            EntityInstance::Simple { id, record } => (*id, std::slice::from_mut(record)),
+            EntityInstance::Complex { id, subsuper } => (*id, subsuper.0.as_mut_slice()),
+        };
+        if seams.contains(&id) {
+            continue;
+        }
+        for record in records {
+            if record.name == "SURFACE_CURVE" {
+                record.name = "INTERSECTION_CURVE".into();
+                changed += 1;
+            }
         }
     }
     assert!(

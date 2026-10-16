@@ -750,7 +750,7 @@ pub fn aliasing_source() -> String {
         }
         polynomial = next;
     }
-    let mut squared = vec![0.0; 19];
+    let mut squared = [0.0; 19];
     for (i, a) in polynomial.iter().enumerate() {
         for (j, b) in polynomial.iter().enumerate() {
             squared[i + j] -= 1e9 * a * b;

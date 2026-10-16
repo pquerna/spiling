@@ -9,6 +9,7 @@ mod joint;
 mod placed;
 mod planar;
 mod slab;
+mod source_incidence;
 mod voids;
 
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, check_cancel};
@@ -23,11 +24,12 @@ pub use collar::{
 };
 pub use critical::CriticalEventNeighborhood;
 pub use joint::{
-    CompletedNativeUnionProofSet, NativeCriticalCollarIncidence, NativeInterfaceAttachment,
-    NativeOwnedEndpoint, NativeSourceLeafProofKind, NativeSourceLeafReceipt,
-    NativeUnionBindingLedger, NativeUnionBoundaryEdge, NativeUnionBoundarySource,
-    NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
-    NativeUnionProofKind, NativeUnionSourceCapture, PendingNativeUnionProof,
+    CompletedNativeUnionProofSet, EndpointOwnershipRequest, NativeCriticalCollarIncidence,
+    NativeInterfaceAttachment, NativeOwnedEndpoint, NativeSourceLeafProofKind,
+    NativeSourceLeafReceipt, NativeUnionBindingLedger, NativeUnionBoundaryEdge,
+    NativeUnionBoundarySource, NativeUnionCoverage, NativeUnionOccurrence,
+    NativeUnionOccurrenceEvidence, NativeUnionPolicy, NativeUnionProofKind,
+    NativeUnionSourceCapture, PendingNativeUnionProof, SourceLeafRequest,
     certify_endpoint_ownership, certify_endpoint_stratum_ownership,
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
@@ -167,6 +169,15 @@ pub struct SlabRequest {
     pub sample_height_mm: f64,
     pub native_shape_error_mm: f64,
 }
+/// A source occurrence's actual world-height slab and native shape policy.
+#[derive(Debug)]
+pub struct PlacedSlabRequest {
+    pub pose: spiling_contracts::geometry::RigidPoseMm,
+    pub world_height_interval_mm: [f64; 2],
+    pub sample_world_z_mm: f64,
+    pub native_shape_error_mm: f64,
+}
+
 #[derive(Debug)]
 pub struct SlabAnalysis {
     pub(crate) section: NativeSection,

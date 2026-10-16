@@ -466,18 +466,21 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     let source = &compressed.faces[0].surface;
     let info = &definition.faces[0];
     let cancel = AtomicBool::new(false);
+    let input = FaceAuditInput {
+        polygon: &polygon,
+        surface: source,
+        native_orientation: face.orientation(),
+        info,
+        budget: MeshBudget::FROZEN,
+        sphere_chart: None,
+        boundary_face: None,
+        extra_retained_bytes: 0,
+    };
     assert!(
         audit_face(
-            &polygon,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &input,
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_ok()
     );
@@ -485,16 +488,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.normals_mut()[0] = Vector3::new(0.0, 0.0, 0.0);
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -502,16 +501,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.positions_mut()[0] = Point3::new(f64::NAN, 0.0, 0.0);
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -519,16 +514,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.uncheck_editor().faces.tri_faces_mut()[0][0].pos = polygon.positions().len();
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -536,16 +527,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.uncheck_editor().faces.tri_faces_mut()[0][0].nor = None;
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -553,16 +540,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.uncheck_editor().faces.tri_faces_mut()[0][0].uv = None;
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -570,16 +553,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad.uncheck_editor().faces.tri_faces_mut()[0].swap(0, 1);
     assert!(
         audit_face(
-            &bad,
-            source,
-            face.orientation(),
-            info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                polygon: &bad,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );
@@ -587,16 +566,12 @@ fn malformed_native_attributes_and_winding_are_refused_without_repair() {
     bad_info.orientation = !bad_info.orientation;
     assert!(
         audit_face(
-            &polygon,
-            source,
-            face.orientation(),
-            &bad_info,
-            &cancel,
-            MeshBudget::FROZEN,
+            &FaceAuditInput {
+                info: &bad_info,
+                ..input
+            },
             &mut crate::GeometryWorkBudget::new(20_000_000),
-            None,
-            None,
-            0
+            &cancel,
         )
         .is_err()
     );

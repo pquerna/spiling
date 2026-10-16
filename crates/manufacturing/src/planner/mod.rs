@@ -149,15 +149,19 @@ pub(crate) fn plan(
                         &spiling_contracts::geometry::OccurrenceRecord,
                     >()));
             let captured = native::collect_span(
-                input,
-                &occurrences,
-                &prepared_sources,
+                &native::NativeSourceInputs {
+                    input,
+                    occurrences: &occurrences,
+                    sources: &prepared_sources,
+                },
                 &mut admission,
                 &mut schedule,
-                index,
+                &native::NativeSpanRequest {
+                    index,
+                    retained_points,
+                    retained_output_bytes,
+                },
                 &mut native_stage,
-                retained_points,
-                retained_output_bytes,
                 &mut surface_work,
                 cancel,
             )?;
@@ -317,9 +321,10 @@ pub(crate) fn plan(
             for field in fields {
                 field.include_occupied_envelope(
                     occupied.as_mut().expect("owned finish occupied envelope"),
-                    slab_start,
-                    schedule[(end - 1) as usize].z,
-                    [native_bounds.min[2], native_bounds.max[2]],
+                    &surface::OccupiedHeightScope {
+                        requested: [slab_start, schedule[(end - 1) as usize].z],
+                        native: [native_bounds.min[2], native_bounds.max[2]],
+                    },
                     live_retained + native_points + region::point_count(&next),
                     &mut surface_work,
                     cancel,
@@ -714,10 +719,12 @@ pub(crate) fn plan(
     neighborhoods.freeze_retained_capacity();
     support::realize(
         &mut layers,
-        &sections,
-        &schedule,
-        skin_retained_points(retained_points, &neighborhoods, &[])?,
-        recipe,
+        &support::SupportInput {
+            sections: &sections,
+            schedule: &schedule,
+            native_points: skin_retained_points(retained_points, &neighborhoods, &[])?,
+            recipe,
+        },
         &mut segments,
         cancel,
         &mut admission.geometry_work,
@@ -795,9 +802,11 @@ pub(crate) fn plan(
             native::project_protected_voids(
                 input,
                 &mut native_coverage.protected_voids,
-                &admission.native_bounds,
-                demand_bounds,
-                point_limit,
+                &native::ProtectedVoidDemand {
+                    native_bounds: &admission.native_bounds,
+                    demand_bounds,
+                    point_limit,
+                },
                 support_work,
                 native_work,
                 cancel,

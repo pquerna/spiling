@@ -29,6 +29,12 @@ pub(super) use resolution::{ResolutionGeometry, collect_resolution};
 mod tests;
 use profile::PeriodicProfile;
 
+/// Requested occupied band together with the original placed-native Z scope.
+pub(super) struct OccupiedHeightScope {
+    pub(super) requested: [f64; 2],
+    pub(super) native: [f64; 2],
+}
+
 /// The planner sees only identity, bounds and accounting; carrier data stays here.
 pub(super) struct PreparedFinish {
     shape: PreparedShape,
@@ -73,13 +79,13 @@ impl PreparedFinish {
     pub(super) fn include_occupied_envelope(
         &self,
         occupied: &mut Arc<super::ContinuousOccupied>,
-        lower_z: f64,
-        upper_z: f64,
-        native_height: [f64; 2],
+        heights: &OccupiedHeightScope,
         retained_points: usize,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(), ManufacturingError> {
+        let [lower_z, upper_z] = heights.requested;
+        let native_height = heights.native;
         check_cancel(cancel)?;
         let bounds = self.bounds();
         if upper_z < native_height[0] || lower_z > native_height[1] {

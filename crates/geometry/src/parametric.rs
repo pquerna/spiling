@@ -636,10 +636,10 @@ impl Iterator for AxisSpans<'_> {
             return None;
         }
         let mut high = self.high;
-        if let Some(value) = self.pending.take() {
-            if value > self.low {
-                high = value.min(self.high);
-            }
+        if let Some(value) = self.pending.take()
+            && value > self.low
+        {
+            high = value.min(self.high);
         }
         if high == self.high {
             while self.index < self.knots.len() {
@@ -911,10 +911,10 @@ fn surface_span_smooth_at(
         Surface::ExtrusionSurface(s) => Some((s.entity_curve(), 0)),
         _ => None,
     };
-    if let Some((curve, axis)) = profile {
-        if domain[axis][0] != domain[axis][1] {
-            return curve_span_smooth_at(curve, domain[axis], depth + 1, work, cancel);
-        }
+    if let Some((curve, axis)) = profile
+        && domain[axis][0] != domain[axis][1]
+    {
+        return curve_span_smooth_at(curve, domain[axis], depth + 1, work, cancel);
     }
     Ok(true)
 }
@@ -1176,9 +1176,20 @@ pub(crate) struct PreparedCurveEnclosure<'a> {
     scale: f64,
     active: Option<(f64, f64)>,
 }
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Own a temporary native proof inline without a per-curve allocation; retained proofs remain borrowed."
+)]
 enum PreparedNative<'a> {
     Owned(monstertruck_modeling::PreparedValidatedCurve<'a>),
     Borrowed(&'a monstertruck_modeling::PreparedValidatedCurve<'static>),
+}
+
+pub(crate) struct GnomonicFrame {
+    pub(crate) center_mm: [f64; 3],
+    pub(crate) x_axis: [f64; 3],
+    pub(crate) y_axis: [f64; 3],
+    pub(crate) normal: [f64; 3],
 }
 
 /// One exact native parameter on one immutable prepared binding and unit view.
@@ -1449,9 +1460,10 @@ impl<'source> PreparedCurveEnclosure<'source> {
         }
         Ok(())
     }
-    /// Original explicit knots and retained continuation chart partitions.
-    /// These seed adaptive queries; they alone do not qualify a Taylor bound
-    /// across an underlying source-surface C0 stratum. Use `is_smooth_on`.
+    /// Retained native query pieces. An explicit binding may be ONE piece
+    /// across several original knots. These seed adaptive queries, not a C0
+    /// incidence inventory or Taylor qualification: use the separate knot
+    /// visitor and `is_smooth_on` for those obligations.
     pub(crate) fn parameter_intervals(&self) -> impl DoubleEndedIterator<Item = (f64, f64)> + '_ {
         self.native.pieces().iter().filter_map(move |piece| {
             let (a, b) = self
@@ -1464,6 +1476,65 @@ impl<'source> PreparedCurveEnclosure<'source> {
                 });
             (a < b).then_some((a, b))
         })
+    }
+    /// Stream every internal literal knot of an original explicit spline in
+    /// root-parameter order. A complete result qualifies each BETWEEN-knot span
+    /// analytically C1 with bounded one-sided second derivatives: the retained
+    /// Native whole-source piecewise jet already admitted all coefficients,
+    /// affine operators, finite support and denominators, and no knot is omitted.
+    /// This NEVER claims C1 across a joint. Unknown implicit/carrier-induced
+    /// knots and nonrepresentable mapped bands return false. No copied buffers.
+    pub(crate) fn visit_explicit_knots(
+        &self,
+        range: (f64, f64),
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visit: &mut impl FnMut(f64, &mut GeometryWorkBudget, &AtomicBool) -> Result<(), GeometryError>,
+    ) -> Result<bool, GeometryError> {
+        check_cancel(cancel)?;
+        self.check_range(range)?;
+        let Some(original) = self.native.native_curve() else {
+            return Ok(false);
+        };
+        let mut basis = original;
+        for depth in 0..=32 {
+            work.charge(1, cancel)?;
+            match basis {
+                Curve::TrimmedCurve(wrapper) if depth < 32 => {
+                    basis = wrapper.entity().curve().as_ref();
+                }
+                Curve::TrimmedCurve(_) => {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::ResourceLimit,
+                        "original coedge knot-wrapper nesting exceeds cap",
+                    ));
+                }
+                _ => break,
+            }
+        }
+        if !matches!(basis, Curve::BsplineCurve(_) | Curve::NurbsCurve(_)) {
+            return Ok(false);
+        }
+        // Reuse the original knot-axis walker, including every independent
+        // retained reflection anchor and its outward/exact TwoSum arithmetic.
+        let knots = profile_knots(original, work, cancel)?;
+        let mut previous = range.0;
+        for index in 0..knots.len() {
+            work.charge(1, cancel)?;
+            let knot = knots.value(index);
+            Interval::new(knot.lo, knot.hi)?;
+            if knot.hi <= range.0 || knot.lo >= range.1 {
+                continue;
+            }
+            if knot.lo != knot.hi || knot.lo < previous {
+                return Ok(false);
+            }
+            if knot.lo > previous {
+                visit(knot.lo, work, cancel)?;
+                previous = knot.lo;
+            }
+        }
+        Ok(true)
     }
     pub(crate) fn is_smooth_on(
         &self,
@@ -1693,13 +1764,16 @@ impl<'source> PreparedCurveEnclosure<'source> {
     pub(crate) fn gnomonic_jet(
         &self,
         range: (f64, f64),
-        center_mm: [f64; 3],
-        x_axis: [f64; 3],
-        y_axis: [f64; 3],
-        normal: [f64; 3],
+        frame: &GnomonicFrame,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<ChartCurveEnclosure, GeometryError> {
+        let &GnomonicFrame {
+            center_mm,
+            x_axis,
+            y_axis,
+            normal,
+        } = frame;
         work.charge(1, cancel)?;
         if center_mm
             .into_iter()
@@ -1795,10 +1869,20 @@ impl<'source> PreparedCurveEnclosure<'source> {
         &self,
         endpoints: &[CurveSamplingEndpoint<'_, 'source>; 2],
         frame: &PlaneFrameMm,
+        maximum_plane_error_mm: f64,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<CurveSamplingInterval<'_, 'source>, GeometryError> {
         frame.validate()?;
+        if !maximum_plane_error_mm.is_finite()
+            || maximum_plane_error_mm <= 0.0
+            || maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "native sampling plane error must narrow the frozen section allowance",
+            ));
+        }
         work.charge(1, cancel)?;
         let [start, end] = endpoints;
         if !std::ptr::eq(start.binding, self) || !std::ptr::eq(end.binding, self) {
@@ -1881,7 +1965,7 @@ impl<'source> PreparedCurveEnclosure<'source> {
                 )
             });
             let mut plane_error_mm = projection.abs_upper();
-            if smooth && plane_error_mm > SECTION_PLANE_TOLERANCE_MM {
+            if smooth && plane_error_mm > maximum_plane_error_mm {
                 plane_error_mm = self
                     .projected_with_native_budget(
                         range,
@@ -2194,16 +2278,27 @@ fn native_unit_normal(jet: &SurfaceEnclosure) -> Result<[f64; 3], GeometryError>
     Ok(unit)
 }
 
-fn certify_boundary_patch(
-    surface: &Surface,
+struct BoundaryPatchRequest {
     domain: [[f64; 2]; 2],
     fixed_axis: usize,
     fixed: f64,
     supported: [[f64; 2]; 2],
     vertex: [f64; 3],
+}
+
+fn certify_boundary_patch(
+    surface: &Surface,
+    request: &BoundaryPatchRequest,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    let &BoundaryPatchRequest {
+        domain,
+        fixed_axis,
+        fixed,
+        supported,
+        vertex,
+    } = request;
     let mut stack = [([[0.0; 2]; 2], 0_u8); 50];
     stack[0] = (domain, 0);
     let mut live = 1;
@@ -2315,11 +2410,13 @@ pub(crate) fn triangle_boundary_error_bound(
     }
     certify_boundary_patch(
         surface,
-        domain,
-        *fixed_axis,
-        *fixed_parameter,
-        *supported_parameter_box,
-        original_vertex_mm,
+        &BoundaryPatchRequest {
+            domain,
+            fixed_axis: *fixed_axis,
+            fixed: *fixed_parameter,
+            supported: *supported_parameter_box,
+            vertex: original_vertex_mm,
+        },
         work,
         cancel,
     )?;
@@ -2432,7 +2529,7 @@ mod tests {
         .unwrap();
         // The exact saddle z=u*v reaches 1/4 on this triangle's sloped edge,
         // although every mesh vertex lies on z=0.
-        assert!(bound >= 0.25 && bound <= 0.25000001);
+        assert!((0.25..=0.25000001).contains(&bound));
         for i in 0..=20 {
             for j in 0..=20 - i {
                 let u = f64::from(i) / 20.0;
@@ -2672,7 +2769,17 @@ mod tests {
         let y = [0.0, 1.0, 0.0];
         let normal = [0.0, 0.0, 1.0];
         let chart = prepared
-            .gnomonic_jet((0.0, 1.0), [0.0; 3], x, y, normal, &mut work, &cancel)
+            .gnomonic_jet(
+                (0.0, 1.0),
+                &crate::parametric::GnomonicFrame {
+                    center_mm: [0.0; 3],
+                    x_axis: x,
+                    y_axis: y,
+                    normal,
+                },
+                &mut work,
+                &cancel,
+            )
             .unwrap();
         for t in [0.0_f64, 0.3, 1.0] {
             let values = [
@@ -2695,10 +2802,12 @@ mod tests {
             prepared
                 .gnomonic_jet(
                     (0.0, 1.0),
-                    [0.0, 0.0, 1.5],
-                    x,
-                    y,
-                    normal,
+                    &GnomonicFrame {
+                        center_mm: [0.0, 0.0, 1.5],
+                        x_axis: x,
+                        y_axis: y,
+                        normal,
+                    },
                     &mut work,
                     &cancel
                 )
@@ -2708,7 +2817,17 @@ mod tests {
         );
         assert_eq!(
             prepared
-                .gnomonic_jet((0.0, 1.0), [0.0; 3], x, x, normal, &mut work, &cancel)
+                .gnomonic_jet(
+                    (0.0, 1.0),
+                    &GnomonicFrame {
+                        center_mm: [0.0; 3],
+                        x_axis: x,
+                        y_axis: x,
+                        normal
+                    },
+                    &mut work,
+                    &cancel,
+                )
                 .unwrap_err()
                 .code,
             GeometryErrorCode::ConditioningFailure
@@ -2785,7 +2904,13 @@ mod tests {
                 .unwrap()
         });
         let interval = prepared
-            .sampling_interval(&endpoints, &frame, &mut work, &cancel)
+            .sampling_interval(
+                &endpoints,
+                &frame,
+                SECTION_PLANE_TOLERANCE_MM,
+                &mut work,
+                &cancel,
+            )
             .unwrap();
         let bound = interval.enclosure();
         // Both endpoint tangents are finite and both pieces have C''=0, but
@@ -3013,7 +3138,13 @@ mod tests {
                 .sampling_endpoint(10.0 + f64::from(index + 1) / 4.0, &mut work, &cancel)
                 .unwrap();
             let interval = prepared
-                .sampling_interval(&[start, end], &frame, &mut work, &cancel)
+                .sampling_interval(
+                    &[start, end],
+                    &frame,
+                    SECTION_PLANE_TOLERANCE_MM,
+                    &mut work,
+                    &cancel,
+                )
                 .unwrap();
             let enclosure = interval.enclosure();
             let x0 = f64::from(index) / 16.0;
@@ -3062,7 +3193,13 @@ mod tests {
             .unwrap();
         for endpoints in [[start, foreign], [end, start]] {
             let error = prepared
-                .sampling_interval(&endpoints, &frame, &mut work, &cancel)
+                .sampling_interval(
+                    &endpoints,
+                    &frame,
+                    SECTION_PLANE_TOLERANCE_MM,
+                    &mut work,
+                    &cancel,
+                )
                 .err()
                 .expect("foreign binding or reversed native gauge must refuse");
             assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
@@ -3076,7 +3213,13 @@ mod tests {
             GeometryErrorCode::InvalidGeometry
         );
         let interval = prepared
-            .sampling_interval(&[start, end], &frame, &mut work, &cancel)
+            .sampling_interval(
+                &[start, end],
+                &frame,
+                SECTION_PLANE_TOLERANCE_MM,
+                &mut work,
+                &cancel,
+            )
             .unwrap();
         for endpoints in [[start, foreign], [end, start]] {
             let failure = interval
@@ -3107,7 +3250,13 @@ mod tests {
         );
         assert_eq!(
             prepared
-                .sampling_interval(&[start, end], &frame, &mut work, &cancelled)
+                .sampling_interval(
+                    &[start, end],
+                    &frame,
+                    SECTION_PLANE_TOLERANCE_MM,
+                    &mut work,
+                    &cancelled
+                )
                 .err()
                 .unwrap()
                 .code,

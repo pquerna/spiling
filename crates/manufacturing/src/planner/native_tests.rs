@@ -599,9 +599,12 @@ fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay()
     let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0000004)]);
     let mut enabled = intent(true);
     enabled.recipe.layer_height_mm = 0.2;
-    let SupportPolicy::Breakaway { z_gap_mm, .. } = enabled.recipe.supports else {
+    let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut enabled.recipe.supports else {
         panic!()
     };
+    // Preserve a non-micrometre minimum across independently rounded endpoints.
+    *z_gap_mm = 0.2000006;
+    let z_gap_mm = *z_gap_mm;
     let bundle = compile(scene.input(&enabled), &cancel).unwrap();
     let hash =
         spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
@@ -3126,67 +3129,6 @@ fn overlay_lost_native_notch_cannot_be_certified_merely_by_source_input_receipts
         ),
         "{failure}"
     );
-}
-
-#[test]
-fn fractional_native_contact_preserves_minimum_gap_in_fresh_actual_xyz6_replay() {
-    let cancel = AtomicBool::new(false);
-    let scene = NativeScene::new(BOX, &[translated(0.0, 0.0, 2.0000004)]);
-    let mut enabled = intent(true);
-    enabled.recipe.layer_height_mm = 0.2;
-    let SupportPolicy::Breakaway { z_gap_mm, .. } = &mut enabled.recipe.supports else {
-        panic!()
-    };
-    // A non-micrometre minimum must survive independently rounded endpoints.
-    *z_gap_mm = 0.2000006;
-    let z_gap_mm = *z_gap_mm;
-    let bundle = compile(scene.input(&enabled), &cancel).unwrap();
-    let hash =
-        spiling_contracts::geometry::SourceHash::from_bytes(&serde_json::to_vec(&bundle).unwrap());
-    let inspection =
-        crate::inspect_bundle(&bundle, &hash, VerificationOutput::ReportAndMotion, &cancel)
-            .unwrap();
-    assert!(inspection.report.verified);
-    let replay = inspection.replay.unwrap();
-    let mut object_bottom = f64::INFINITY;
-    let mut support_top = f64::NEG_INFINITY;
-    let mut interface_segments = 0usize;
-    for record in replay.bytes[REPLAY_HEADER_BYTES..]
-        .as_chunks::<REPLAY_RECORD_BYTES>()
-        .0
-    {
-        let z = f64::from_le_bytes(record[16..24].try_into().unwrap());
-        let role = record[46];
-        if matches!(role, 9 | 10) {
-            support_top = support_top.max(z);
-            interface_segments += usize::from(role == 10);
-        } else if matches!(role, 1..=5 | 8) {
-            let layer = u16::from_le_bytes(record[44..46].try_into().unwrap()) as usize;
-            object_bottom = object_bottom.min(z - bundle.plan.layers[layer].height_mm);
-        }
-    }
-    assert!(interface_segments > 0);
-    assert!(object_bottom.is_finite() && support_top.is_finite());
-    let actual_gap = object_bottom - support_top;
-    assert!(
-        actual_gap >= z_gap_mm,
-        "actual XYZ6 gap {actual_gap:.12} must not undershoot minimum {z_gap_mm:.12}"
-    );
-    assert!(
-        actual_gap - z_gap_mm < 4.0 * LAYER_QUANTIZATION_MM,
-        "emitter-aware mandatory contact must not unnecessarily lose a whole scheduled layer"
-    );
-    assert!(
-        bundle
-            .plan
-            .layers
-            .iter()
-            .any(|layer| layer.paths.is_empty())
-    );
-    assert!(bundle.plan.layers[0].paths.iter().any(|path| matches!(
-        path.kind,
-        DepositionKind::Support | DepositionKind::SupportInterface
-    )));
 }
 
 #[test]

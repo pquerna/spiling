@@ -24,6 +24,93 @@ const MAX_DEPTH: u8 = 64;
 type Box2 = [[f64; 2]; 2];
 type Matrix = [[Interval; 3]; 3];
 
+struct PortFaceCoverQuery<'a, 'source> {
+    face: &'a monstertruck_modeling::Face,
+    face_index: usize,
+    domain: &'a crate::kernel::PreparedFaceTrimDomain<'source>,
+    matrix: Matrix,
+    pose: RigidPoseMm,
+    ports: Option<&'a [NativeCollarPort]>,
+    cells: &'a [NativeCriticalCollarCell],
+    targets: &'a [NativeCriticalCollarMaterialTarget],
+    source_column: [f64; 2],
+    interval: [f64; 2],
+    policy: NativeCriticalCollarPolicy,
+    native_policy: f64,
+    count: usize,
+    byte_limit: usize,
+}
+
+struct FilledFaceCoverQuery<'a, 'source, 'target> {
+    definition: &'a Definition,
+    face: &'a monstertruck_modeling::Face,
+    face_index: usize,
+    domain: &'a crate::kernel::PreparedFaceTrimDomain<'source>,
+    matrix: Matrix,
+    pose: RigidPoseMm,
+    inputs: &'a [NativeCriticalCollarTarget<'target>],
+    targets: &'a [NativeCriticalCollarMaterialTarget],
+    source_column: [f64; 2],
+    event: Option<&'a NativeCollarFaceEvent>,
+    sample_band: [f64; 2],
+    policy: NativeCriticalCollarPolicy,
+    native_policy: f64,
+    byte_limit: usize,
+}
+
+struct SurfaceAffineImageQuery<'a> {
+    surface: &'a monstertruck_modeling::Surface,
+    uv: Box2,
+    whole: &'a crate::parametric::SurfaceEnclosure,
+    matrix: Matrix,
+    pose: RigidPoseMm,
+    chart_error_mm: f64,
+    maximum_error_mm: f64,
+}
+
+type OriginalEdgeUses = std::collections::HashMap<
+    monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+    super::slab::FlowEdgeUses,
+>;
+
+struct CriticalFaceBoundaryStarQuery<'a, 'source> {
+    definition: &'a Definition,
+    face_index: usize,
+    surface: &'a monstertruck_modeling::Surface,
+    domain: &'a crate::kernel::PreparedFaceTrimDomain<'source>,
+    cell: Box2,
+    functional: super::HeightFunctional,
+    request: &'a super::SlabRequest,
+    events: &'a [NativeCollarFaceEvent],
+    edges: &'a OriginalEdgeUses,
+}
+
+struct CriticalCoedgeNormalQuery<'a, 'source> {
+    source: crate::section::OriginalTrimSource<'a, 'source>,
+    face_index: usize,
+    wire: usize,
+    coedge: usize,
+    height: [f64; 2],
+    functional: super::HeightFunctional,
+    sign: i8,
+    remaining_bytes: usize,
+}
+
+struct CriticalEdgeBoundaryStarQuery<'a, 'source, 'curve> {
+    source: crate::section::OriginalTrimSource<'a, 'source>,
+    face_index: usize,
+    wire_index: usize,
+    coedge_index: usize,
+    prepared: &'a crate::parametric::PreparedCurveEnclosure<'curve>,
+    full: [f64; 2],
+    cell: [f64; 2],
+    functional: super::HeightFunctional,
+    request: &'a super::SlabRequest,
+    events: &'a [NativeCollarFaceEvent],
+    edges: &'a OriginalEdgeUses,
+    remaining_bytes: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct NativeCriticalCollarPolicy {
     pub maximum_xy_cover_error_mm: f64,
@@ -1153,16 +1240,18 @@ fn certify_native_critical_collar_using(
         // Holes and nonconvex components remain excluded by that authority;
         // births/deaths away from S still require every face/port cover below.
         let mut sample_cover = choose_material_target(
-            MaterialCoverage::FilledNativeSample {
-                approximation_mm: approximation,
+            MaterialTargetQuery {
+                coverage: MaterialCoverage::FilledNativeSample {
+                    approximation_mm: approximation,
+                },
+                inputs,
+                targets: &targets,
+                interval: occupied_interval,
+                event: None,
+                source_sample_band: [sample_heights.lo, sample_heights.hi],
+                policy,
+                native_policy,
             },
-            inputs,
-            &targets,
-            occupied_interval,
-            None,
-            [sample_heights.lo, sample_heights.hi],
-            policy,
-            native_policy,
             work,
             cancel,
         )?;
@@ -1183,14 +1272,16 @@ fn certify_native_critical_collar_using(
                 // A narrower collar policy may need a tighter geometric
                 // witness than the leaf's conservative correspondence bound.
                 choose_material_target(
-                    MaterialCoverage::Rectangle(outer),
-                    inputs,
-                    &targets,
-                    occupied_interval,
-                    None,
-                    [sample_heights.lo, sample_heights.hi],
-                    policy,
-                    native_policy,
+                    MaterialTargetQuery {
+                        coverage: MaterialCoverage::Rectangle(outer),
+                        inputs,
+                        targets: &targets,
+                        interval: occupied_interval,
+                        event: None,
+                        source_sample_band: [sample_heights.lo, sample_heights.hi],
+                        policy,
+                        native_policy,
+                    },
                     work,
                     cancel,
                 )
@@ -1252,13 +1343,11 @@ fn certify_native_critical_collar_using(
             .and_then(|complex| complex.events.iter().find(|event| event.face == face_index));
         let source_column = material_facing_source_column(occupied_interval, event);
         let mut port_count = 0_usize;
-        if !filled_only {
-            if let Some(ports) = &native_ports {
-                for port in ports.iter() {
-                    work.charge(1, cancel)?;
-                    if port.neighbor_face == face_index {
-                        port_count += 1;
-                    }
+        if !filled_only && let Some(ports) = &native_ports {
+            for port in ports.iter() {
+                work.charge(1, cancel)?;
+                if port.neighbor_face == face_index {
+                    port_count += 1;
                 }
             }
         }
@@ -1288,39 +1377,43 @@ fn certify_native_critical_collar_using(
         // complex and material-facing CLOSED shadow remain unchanged.
         let filled = if filled_only {
             try_filled_face_cover(
-                definition,
-                face,
-                face_index,
-                &domain,
-                matrix,
-                pose,
-                inputs,
-                &targets,
-                source_column,
-                event,
-                [sample_heights.lo, sample_heights.hi],
-                policy,
-                native_policy,
-                capacity.remaining(&cells, domain.owned_bytes())?,
+                FilledFaceCoverQuery {
+                    definition,
+                    face,
+                    face_index,
+                    domain: &domain,
+                    matrix,
+                    pose,
+                    inputs,
+                    targets: &targets,
+                    source_column,
+                    event,
+                    sample_band: [sample_heights.lo, sample_heights.hi],
+                    policy,
+                    native_policy,
+                    byte_limit: capacity.remaining(&cells, domain.owned_bytes())?,
+                },
                 work,
                 cancel,
             )
         } else {
             try_port_face_cover(
-                face,
-                face_index,
-                &domain,
-                matrix,
-                pose,
-                native_ports.as_deref().map(Vec::as_slice),
-                &cells,
-                &targets,
-                source_column,
-                interval,
-                policy,
-                native_policy,
-                port_count,
-                capacity.remaining(&cells, domain.owned_bytes())?,
+                PortFaceCoverQuery {
+                    face,
+                    face_index,
+                    domain: &domain,
+                    matrix,
+                    pose,
+                    ports: native_ports.as_deref().map(Vec::as_slice),
+                    cells: &cells,
+                    targets: &targets,
+                    source_column,
+                    interval,
+                    policy,
+                    native_policy,
+                    count: port_count,
+                    byte_limit: capacity.remaining(&cells, domain.owned_bytes())?,
+                },
                 work,
                 cancel,
             )
@@ -1371,14 +1464,16 @@ fn certify_native_critical_collar_using(
                 }
                 let bounds = [[world[0].lo, world[0].hi], [world[1].lo, world[1].hi]];
                 let mut target = match choose_material_target(
-                    MaterialCoverage::Rectangle(bounds),
-                    inputs,
-                    &targets,
-                    source_column,
-                    event,
-                    [sample_heights.lo, sample_heights.hi],
-                    policy,
-                    native_policy,
+                    MaterialTargetQuery {
+                        coverage: MaterialCoverage::Rectangle(bounds),
+                        inputs,
+                        targets: &targets,
+                        interval: source_column,
+                        event,
+                        source_sample_band: [sample_heights.lo, sample_heights.hi],
+                        policy,
+                        native_policy,
+                    },
                     work,
                     cancel,
                 )
@@ -1396,16 +1491,21 @@ fn certify_native_critical_collar_using(
                     other => other,
                 };
                 if matches!(&target, Ok(None)) {
-                    let affine = try_surface_affine_image(
-                        surface, uv, &jet, matrix, pose, domain.source_chart_error_mm(),
-                        policy.maximum_xy_cover_error_mm, work, cancel,
-                    );
+                    let affine = try_surface_affine_image(SurfaceAffineImageQuery { surface, uv, whole: &jet, matrix, pose, chart_error_mm: domain.source_chart_error_mm(), maximum_error_mm: policy.maximum_xy_cover_error_mm }, work, cancel);
                     match affine {
                         Ok(Some(image)) => {
                             match choose_material_target(
-                                MaterialCoverage::AffineImage(&image), inputs, &targets,
-                                source_column, event, [sample_heights.lo, sample_heights.hi],
-                                policy, native_policy, work, cancel,
+                                MaterialTargetQuery {
+                                    coverage: MaterialCoverage::AffineImage(&image),
+                                    inputs,
+                                    targets: &targets,
+                                    interval: source_column,
+                                    event,
+                                    source_sample_band: [sample_heights.lo, sample_heights.hi],
+                                    policy,
+                                    native_policy,
+                                },
+                                work, cancel,
                             ) {
                                 Ok(result) => target = Ok(result),
                                 Err(error) if matches!(error.code,
@@ -1607,14 +1707,16 @@ fn certify_native_critical_collar_using(
                         }
                         let bounds = [[world[0].lo, world[0].hi], [world[1].lo, world[1].hi]];
                         if let Some((index, dx, distance)) = choose_material_target(
-                            MaterialCoverage::Rectangle(bounds),
-                            inputs,
-                            &targets,
-                            source_column,
-                            Some(&event),
-                            [sample_heights.lo, sample_heights.hi],
-                            policy,
-                            native_policy,
+                            MaterialTargetQuery {
+                                coverage: MaterialCoverage::Rectangle(bounds),
+                                inputs,
+                                targets: &targets,
+                                interval: source_column,
+                                event: Some(&event),
+                                source_sample_band: [sample_heights.lo, sample_heights.hi],
+                                policy,
+                                native_policy,
+                            },
                             work,
                             cancel,
                         )
@@ -1667,9 +1769,9 @@ fn certify_native_critical_collar_using(
     let mut source_occupied_xy = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
     for cell in &cells {
         work.charge(1, cancel)?;
-        for axis in 0..2 {
-            source_occupied_xy[axis][0] = source_occupied_xy[axis][0].min(cell.world_xy[axis][0]);
-            source_occupied_xy[axis][1] = source_occupied_xy[axis][1].max(cell.world_xy[axis][1]);
+        for (axis, bounds) in source_occupied_xy.iter_mut().enumerate() {
+            bounds[0] = bounds[0].min(cell.world_xy[axis][0]);
+            bounds[1] = bounds[1].max(cell.world_xy[axis][1]);
         }
     }
     let mut occupied_xy = source_occupied_xy;
@@ -1839,25 +1941,27 @@ fn port_image_distance(
     Ok(best)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_port_face_cover(
-    face: &monstertruck_modeling::Face,
-    face_index: usize,
-    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
-    matrix: Matrix,
-    pose: RigidPoseMm,
-    ports: Option<&[NativeCollarPort]>,
-    cells: &[NativeCriticalCollarCell],
-    targets: &[NativeCriticalCollarMaterialTarget],
-    source_column: [f64; 2],
-    interval: [f64; 2],
-    policy: NativeCriticalCollarPolicy,
-    native_policy: f64,
-    count: usize,
-    byte_limit: usize,
+    query: PortFaceCoverQuery<'_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeCriticalCollarCell>, GeometryError> {
+    let PortFaceCoverQuery {
+        face,
+        face_index,
+        domain,
+        matrix,
+        pose,
+        ports,
+        cells,
+        targets,
+        source_column,
+        interval,
+        policy,
+        native_policy,
+        count,
+        byte_limit,
+    } = query;
     let Some(ports) = ports else { return Ok(None) };
     if count == 0 {
         return Ok(None);
@@ -2020,25 +2124,27 @@ fn try_port_face_cover(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn try_filled_face_cover(
-    definition: &Definition,
-    face: &monstertruck_modeling::Face,
-    face_index: usize,
-    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
-    matrix: Matrix,
-    pose: RigidPoseMm,
-    inputs: &[NativeCriticalCollarTarget<'_>],
-    targets: &[NativeCriticalCollarMaterialTarget],
-    source_column: [f64; 2],
-    event: Option<&NativeCollarFaceEvent>,
-    sample_band: [f64; 2],
-    policy: NativeCriticalCollarPolicy,
-    native_policy: f64,
-    byte_limit: usize,
+    query: FilledFaceCoverQuery<'_, '_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeCriticalCollarCell>, GeometryError> {
+    let FilledFaceCoverQuery {
+        definition,
+        face,
+        face_index,
+        domain,
+        matrix,
+        pose,
+        inputs,
+        targets,
+        source_column,
+        event,
+        sample_band,
+        policy,
+        native_policy,
+        byte_limit,
+    } = query;
     let uv = super::slab::trim_parameter_box(domain)?;
     let carrier = face.with_surface(|surface| -> Result<_, GeometryError> {
         let monstertruck_modeling::Surface::Plane(plane) = surface else {
@@ -2141,18 +2247,20 @@ fn try_filled_face_cover(
         .mul(Interval::point(scale))
         .hi;
     let chosen = choose_material_target(
-        MaterialCoverage::FilledOriginalProjection {
-            loops: &loops,
-            approximation_mm: tube,
-            byte_limit: remaining,
+        MaterialTargetQuery {
+            coverage: MaterialCoverage::FilledOriginalProjection {
+                loops: &loops,
+                approximation_mm: tube,
+                byte_limit: remaining,
+            },
+            inputs,
+            targets,
+            interval: source_column,
+            event,
+            source_sample_band: sample_band,
+            policy,
+            native_policy,
         },
-        inputs,
-        targets,
-        source_column,
-        event,
-        sample_band,
-        policy,
-        native_policy,
         work,
         cancel,
     )?;
@@ -2182,18 +2290,20 @@ struct SurfaceAffineImage {
 /// Taylor's affine image preserves the correlation lost by an axis-aligned
 /// position box. Midpoint coefficients remain interval enclosed. C1 plus
 /// bounded piecewise Hessians is independently qualified over the WHOLE box.
-#[allow(clippy::too_many_arguments)]
 fn try_surface_affine_image(
-    surface: &monstertruck_modeling::Surface,
-    uv: Box2,
-    whole: &crate::parametric::SurfaceEnclosure,
-    matrix: Matrix,
-    pose: RigidPoseMm,
-    chart_error_mm: f64,
-    maximum_error_mm: f64,
+    query: SurfaceAffineImageQuery<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SurfaceAffineImage>, GeometryError> {
+    let SurfaceAffineImageQuery {
+        surface,
+        uv,
+        whole,
+        matrix,
+        pose,
+        chart_error_mm,
+        maximum_error_mm,
+    } = query;
     if !crate::parametric::surface_parameter_span_smooth(surface, uv, work, cancel)? {
         return Ok(None);
     }
@@ -2320,18 +2430,32 @@ enum MaterialCoverage<'a> {
     },
 }
 
-fn choose_material_target(
-    coverage: MaterialCoverage<'_>,
-    inputs: &[NativeCriticalCollarTarget<'_>],
-    targets: &[NativeCriticalCollarMaterialTarget],
+struct MaterialTargetQuery<'a, 'leaf> {
+    coverage: MaterialCoverage<'a>,
+    inputs: &'a [NativeCriticalCollarTarget<'leaf>],
+    targets: &'a [NativeCriticalCollarMaterialTarget],
     interval: [f64; 2],
-    event: Option<&NativeCollarFaceEvent>,
+    event: Option<&'a NativeCollarFaceEvent>,
     source_sample_band: [f64; 2],
     policy: NativeCriticalCollarPolicy,
     native_policy: f64,
+}
+
+fn choose_material_target(
+    query: MaterialTargetQuery<'_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<(usize, f64, f64)>, GeometryError> {
+    let MaterialTargetQuery {
+        coverage,
+        inputs,
+        targets,
+        interval,
+        event,
+        source_sample_band,
+        policy,
+        native_policy,
+    } = query;
     let mut best: Option<(usize, f64, f64)> = None;
     let mut eligible = false;
     for (index, (input, target)) in inputs.iter().zip(targets).enumerate() {
@@ -2813,6 +2937,28 @@ fn literal_port_coordinate(
     Ok(true)
 }
 
+/// Propose coordinates from the original curve, then certify their exact whole
+/// literal branch. An outward face box is not an original endpoint identity.
+fn literal_port_span(
+    curve: &monstertruck_modeling::Curve2D,
+    coordinate: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[f64; 2]>, GeometryError> {
+    use monstertruck_modeling::{BoundedCurve, ParametricCurve};
+    let range = curve.range_tuple();
+    let endpoints = [range.0, range.1].map(|parameter| curve.subs(parameter)[coordinate]);
+    if !endpoints.into_iter().all(f64::is_finite) || endpoints[0] == endpoints[1] {
+        return Ok(None);
+    }
+    Ok(
+        literal_port_coordinate(curve, coordinate, endpoints, work, cancel)?.then_some([
+            endpoints[0].min(endpoints[1]),
+            endpoints[0].max(endpoints[1]),
+        ]),
+    )
+}
+
 fn original_port_uv(
     domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
     coedge: usize,
@@ -2840,10 +2986,9 @@ fn original_port_uv(
     Ok(bounds)
 }
 
-enum CriticalStratumCover {
-    Regular,
-    Owned(NativeCollarBoundaryCriticalBand),
-}
+// The caller's outer None is unresolved; Some(None) proves regularity and
+// Some(Some(band)) retains the owned critical incidence without allocation.
+type CriticalStratumCover = Option<NativeCollarBoundaryCriticalBand>;
 
 /// Asks native geometry to qualify an ORIGINAL joint's complete pole connection;
 /// an endpoint-uncertainty label is never itself pole or incidence authority.
@@ -2997,23 +3142,22 @@ fn critical_pole_connection(
     )))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn critical_face_boundary_star(
-    definition: &Definition,
-    face_index: usize,
-    surface: &monstertruck_modeling::Surface,
-    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
-    cell: Box2,
-    functional: super::HeightFunctional,
-    request: &super::SlabRequest,
-    events: &[NativeCollarFaceEvent],
-    edges: &std::collections::HashMap<
-        monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
-        super::slab::FlowEdgeUses,
-    >,
+    query: CriticalFaceBoundaryStarQuery<'_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<CriticalStratumCover>, GeometryError> {
+    let CriticalFaceBoundaryStarQuery {
+        definition,
+        face_index,
+        surface,
+        domain,
+        cell,
+        functional,
+        request,
+        events,
+        edges,
+    } = query;
     let source_face = definition
         .solid
         .face_iter()
@@ -3071,7 +3215,7 @@ fn critical_face_boundary_star(
             Err(_) => continue,
         };
         let Some(root) = root else {
-            return Ok(Some(CriticalStratumCover::Regular));
+            return Ok(Some(None));
         };
         if !source_face.orientation() {
             normal = normal.map(Interval::neg);
@@ -3222,29 +3366,29 @@ fn critical_face_boundary_star(
             let Some(height) = critical_star_height(root_height, attachment, event, request) else {
                 continue;
             };
-            return Ok(Some(CriticalStratumCover::Owned(
-                NativeCollarBoundaryCriticalBand {
-                    event_face: owner,
-                    source_face: face_index,
-                    source_coedge: None,
-                    source_uv: Some(envelope),
-                    native_parameter_interval: None,
-                    qualified_uv: Some(strip),
-                    qualified_parameter_interval: None,
-                    height,
-                    outward_height_sign: sign,
-                    owner: NativeCollarCriticalOwner::Vertex {
-                        vertex: joint.vertex_id,
-                    },
+            return Ok(Some(Some(NativeCollarBoundaryCriticalBand {
+                event_face: owner,
+                source_face: face_index,
+                source_coedge: None,
+                source_uv: Some(envelope),
+                native_parameter_interval: None,
+                qualified_uv: Some(strip),
+                qualified_parameter_interval: None,
+                height,
+                outward_height_sign: sign,
+                owner: NativeCollarCriticalOwner::Vertex {
+                    vertex: joint.vertex_id,
                 },
-            )));
+            })));
         }
 
         for (port_index, port) in domain.native().coedges().iter().enumerate() {
             work.charge(1, cancel)?;
             let identity = &definition.face_boundaries[face_index].wires[port.identity.wire_index]
                 [port.identity.coedge_index];
-            if !identity.source_chart_declared || !identity.source_chart_certified {
+            if !identity.source_chart_declared
+                || !identity.source_chart_certificate.has_regular_inverse()
+            {
                 continue;
             }
             if identity.source_chart_margin_uv[longitudinal] != 0.0 {
@@ -3272,19 +3416,17 @@ fn critical_face_boundary_star(
             }
             // An unrelated original coedge cannot attach this critical star.
             // Establish ownership before asking its whole coefficient proof.
-            let span = full[longitudinal];
-            if !literal_port_coordinate(port.curve, longitudinal, span, work, cancel)?
-                && !literal_port_coordinate(
-                    port.curve,
-                    longitudinal,
-                    [span[1], span[0]],
-                    work,
-                    cancel,
-                )?
+            let Some(span) = literal_port_span(port.curve, longitudinal, work, cancel)? else {
+                continue;
+            };
+            let port_uv = original_port_uv(domain, port_index, work, cancel)?;
+            // The interval is only a coverage enclosure. Endpoint/side identity
+            // below uses the original literal span, never its rounded bounds.
+            if port_uv[longitudinal][0] > full[longitudinal][0]
+                || port_uv[longitudinal][1] < full[longitudinal][1]
             {
                 continue;
             }
-            let port_uv = original_port_uv(domain, port_index, work, cancel)?;
             if root[transverse][0] < port_uv[transverse][0]
                 || root[transverse][1] > port_uv[transverse][1]
             {
@@ -3373,8 +3515,7 @@ fn critical_face_boundary_star(
                     [coedge.identity.wire_index][coedge.identity.coedge_index];
                 if !shares_endpoint
                     || !identity.source_chart_declared
-                    || !identity.source_chart_certified
-                    || identity.source_chart_margin_uv[longitudinal] != 0.0
+                    || !identity.source_chart_certificate.has_regular_inverse()
                 {
                     complete = false;
                     break;
@@ -3413,41 +3554,41 @@ fn critical_face_boundary_star(
             let Some(height) = critical_star_height(root_height, attachment, event, request) else {
                 continue;
             };
-            return Ok(Some(CriticalStratumCover::Owned(
-                NativeCollarBoundaryCriticalBand {
-                    event_face: event.face,
-                    source_face: face_index,
-                    source_coedge: None,
-                    source_uv: Some(connection),
-                    native_parameter_interval: None,
-                    qualified_uv: Some(strip),
-                    qualified_parameter_interval: None,
-                    height,
-                    outward_height_sign: sign,
-                    owner: NativeCollarCriticalOwner::Port {
-                        wire: port.identity.wire_index,
-                        coedge: port.identity.coedge_index,
-                    },
+            return Ok(Some(Some(NativeCollarBoundaryCriticalBand {
+                event_face: event.face,
+                source_face: face_index,
+                source_coedge: None,
+                source_uv: Some(connection),
+                native_parameter_interval: None,
+                qualified_uv: Some(strip),
+                qualified_parameter_interval: None,
+                height,
+                outward_height_sign: sign,
+                owner: NativeCollarCriticalOwner::Port {
+                    wire: port.identity.wire_index,
+                    coedge: port.identity.coedge_index,
                 },
-            )));
+            })));
         }
     }
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn critical_coedge_normal_sign(
-    source: crate::section::OriginalTrimSource<'_, '_>,
-    face_index: usize,
-    wire: usize,
-    coedge: usize,
-    height: [f64; 2],
-    functional: super::HeightFunctional,
-    sign: i8,
-    remaining_bytes: usize,
+    query: CriticalCoedgeNormalQuery<'_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
+    let CriticalCoedgeNormalQuery {
+        source,
+        face_index,
+        wire,
+        coedge,
+        height,
+        functional,
+        sign,
+        remaining_bytes,
+    } = query;
     let domain = source
         .face_domain(face_index, remaining_bytes, work, cancel)
         .map_err(|error| {
@@ -3560,26 +3701,25 @@ fn critical_coedge_normal_sign(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn critical_edge_boundary_star(
-    source: crate::section::OriginalTrimSource<'_, '_>,
-    face_index: usize,
-    wire_index: usize,
-    coedge_index: usize,
-    prepared: &crate::parametric::PreparedCurveEnclosure<'_>,
-    full: [f64; 2],
-    cell: [f64; 2],
-    functional: super::HeightFunctional,
-    request: &super::SlabRequest,
-    events: &[NativeCollarFaceEvent],
-    edges: &std::collections::HashMap<
-        monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
-        super::slab::FlowEdgeUses,
-    >,
-    remaining_bytes: usize,
+    query: CriticalEdgeBoundaryStarQuery<'_, '_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<CriticalStratumCover>, GeometryError> {
+    let CriticalEdgeBoundaryStarQuery {
+        source,
+        face_index,
+        wire_index,
+        coedge_index,
+        prepared,
+        full,
+        cell,
+        functional,
+        request,
+        events,
+        edges,
+        remaining_bytes,
+    } = query;
     let definition = source.definition();
     let face = definition
         .solid
@@ -3612,7 +3752,7 @@ fn critical_edge_boundary_star(
     let newton = Interval::point(midpoint).sub(derivative.div(second)?);
     let root = [cell[0].max(newton.lo), cell[1].min(newton.hi)];
     if root[0] > root[1] {
-        return Ok(Some(CriticalStratumCover::Regular));
+        return Ok(Some(None));
     }
     for (parameter, vertex) in [
         (full[0], edge.absolute_front()),
@@ -3718,14 +3858,16 @@ fn critical_edge_boundary_star(
         let mut complete = true;
         for use_ in [&pair.first, second_use] {
             if !critical_coedge_normal_sign(
-                source,
-                use_.face,
-                use_.wire,
-                use_.index,
-                height,
-                functional,
-                sign,
-                remaining_bytes,
+                CriticalCoedgeNormalQuery {
+                    source,
+                    face_index: use_.face,
+                    wire: use_.wire,
+                    coedge: use_.index,
+                    height,
+                    functional,
+                    sign,
+                    remaining_bytes,
+                },
                 work,
                 cancel,
             )? {
@@ -3736,22 +3878,20 @@ fn critical_edge_boundary_star(
         if !complete {
             continue;
         }
-        return Ok(Some(CriticalStratumCover::Owned(
-            NativeCollarBoundaryCriticalBand {
-                event_face: owner,
-                source_face: face_index,
-                source_coedge: Some((wire_index, coedge_index)),
-                source_uv: None,
-                native_parameter_interval: Some(connection),
-                height,
-                outward_height_sign: sign,
-                qualified_uv: None,
-                qualified_parameter_interval: Some(cell),
-                owner: NativeCollarCriticalOwner::Vertex {
-                    vertex: vertex.id(),
-                },
+        return Ok(Some(Some(NativeCollarBoundaryCriticalBand {
+            event_face: owner,
+            source_face: face_index,
+            source_coedge: Some((wire_index, coedge_index)),
+            source_uv: None,
+            native_parameter_interval: Some(connection),
+            height,
+            outward_height_sign: sign,
+            qualified_uv: None,
+            qualified_parameter_interval: Some(cell),
+            owner: NativeCollarCriticalOwner::Vertex {
+                vertex: vertex.id(),
             },
-        )));
+        })));
     }
     Ok(None)
 }
@@ -3814,7 +3954,6 @@ impl ProjectedCriticalLink {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn critical_vertex_projection_degree_one(
     source: crate::section::OriginalTrimSource<'_, '_>,
     vertex: monstertruck_topology::VertexId<monstertruck_modeling::Point3>,
@@ -3837,10 +3976,10 @@ fn critical_vertex_projection_degree_one(
         return Ok(false);
     }
     let mut projection = [[Interval::point(0.0); 3]; 2];
-    for row in 0..2 {
+    for (row, coefficients) in projection.iter_mut().enumerate() {
         let coordinate = (axis + 1 + row) % 3;
-        projection[row][coordinate] = Interval::point(1.0);
-        projection[row][axis] = functional.direction[coordinate]
+        coefficients[coordinate] = Interval::point(1.0);
+        coefficients[axis] = functional.direction[coordinate]
             .div(functional.direction[axis])?
             .neg();
     }
@@ -4036,7 +4175,9 @@ fn critical_vertex_projection_degree_one(
                     let use_ = domain.native().coedges()[index].identity;
                     let identity = &definition.face_boundaries[face_index].wires[use_.wire_index]
                         [use_.coedge_index];
-                    if !identity.source_chart_declared || !identity.source_chart_certified {
+                    if !identity.source_chart_declared
+                        || !identity.source_chart_certificate.has_regular_inverse()
+                    {
                         return Ok(false);
                     }
                     let edge =
@@ -4106,7 +4247,7 @@ fn critical_vertex_projection_degree_one(
             }
         }
     }
-    Ok(occurrences % 2 == 0 && link.is_degree_one(occurrences / 2))
+    Ok(occurrences.is_multiple_of(2) && link.is_degree_one(occurrences / 2))
 }
 
 /// Prove the ordinary horizontal-coface lane and complete adjacent native
@@ -4125,14 +4266,23 @@ pub(super) fn certify_native_collar_complex(
 ) -> Result<Option<NativeCollarComplex>, GeometryError> {
     certify_collar_complex(
         source,
-        request,
-        functional,
-        None,
-        None,
+        CollarComplexQuery {
+            request,
+            functional,
+            seed: None,
+            world_capture: None,
+        },
         remaining_bytes,
         work,
         cancel,
     )
+}
+
+pub(super) struct PlacedCollarComplexQuery<'a> {
+    pub(super) seed: &'a NativeCollarComplex,
+    pub(super) pose: RigidPoseMm,
+    pub(super) interval: [f64; 2],
+    pub(super) sample: f64,
 }
 
 /// Re-prove a captured original event-face complex under the actual accepted
@@ -4142,14 +4292,17 @@ pub(super) fn certify_native_collar_complex(
 /// Partial event-face clipping without complete level-set incidence refuses.
 pub(super) fn place_native_collar_complex(
     source: crate::section::OriginalTrimSource<'_, '_>,
-    seed: &NativeCollarComplex,
-    pose: RigidPoseMm,
-    interval: [f64; 2],
-    sample: f64,
+    query: PlacedCollarComplexQuery<'_>,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeCollarComplex, GeometryError> {
+    let PlacedCollarComplexQuery {
+        seed,
+        pose,
+        interval,
+        sample,
+    } = query;
     let definition = source.definition();
     work.charge(1, cancel)?;
     if seed.definition_id() != definition.id() {
@@ -4176,14 +4329,16 @@ pub(super) fn place_native_collar_complex(
     };
     certify_collar_complex(
         source,
-        &request,
-        functional,
-        Some(seed),
-        Some(NativeCollarWorldCapture {
-            pose,
-            interval,
-            sample,
-        }),
+        CollarComplexQuery {
+            request: &request,
+            functional,
+            seed: Some(seed),
+            world_capture: Some(NativeCollarWorldCapture {
+                pose,
+                interval,
+                sample,
+            }),
+        },
         remaining_bytes,
         work,
         cancel,
@@ -4193,16 +4348,26 @@ pub(super) fn place_native_collar_complex(
     })
 }
 
+struct CollarComplexQuery<'a> {
+    request: &'a super::SlabRequest,
+    functional: super::HeightFunctional,
+    seed: Option<&'a NativeCollarComplex>,
+    world_capture: Option<NativeCollarWorldCapture>,
+}
+
 fn certify_collar_complex(
     source: crate::section::OriginalTrimSource<'_, '_>,
-    request: &super::SlabRequest,
-    functional: super::HeightFunctional,
-    seed: Option<&NativeCollarComplex>,
-    world_capture: Option<NativeCollarWorldCapture>,
+    query: CollarComplexQuery<'_>,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeCollarComplex>, GeometryError> {
+    let CollarComplexQuery {
+        request,
+        functional,
+        seed,
+        world_capture,
+    } = query;
     let definition = source.definition();
     work.charge(1, cancel)?;
     if !request
@@ -4339,20 +4504,19 @@ fn certify_collar_complex(
                 .map_err(|error| {
                     critical_geometry_error(error, index, "constant event-height inventory")
                 })?
+            && active(height, request.height_interval_mm)
         {
-            if active(height, request.height_interval_mm) {
-                if height.lo <= request.sample_height_mm && request.sample_height_mm <= height.hi {
-                    return Err(unresolved(format!(
-                        "native collar source sample meets constant face {index} interval [{},{}]",
-                        height.lo, height.hi
-                    )));
-                }
-                events.push(NativeCollarFaceEvent {
-                    face: index,
-                    height: [height.lo, height.hi],
-                    outward_height_sign: 0,
-                });
+            if height.lo <= request.sample_height_mm && request.sample_height_mm <= height.hi {
+                return Err(unresolved(format!(
+                    "native collar source sample meets constant face {index} interval [{},{}]",
+                    height.lo, height.hi
+                )));
             }
+            events.push(NativeCollarFaceEvent {
+                face: index,
+                height: [height.lo, height.hi],
+                outward_height_sign: 0,
+            });
         }
     }
     if events.is_empty() {
@@ -4532,17 +4696,12 @@ fn certify_collar_complex(
                     if covered {
                         accepted = true;
                         critical_owned = true;
-                    } else if let Some(cover) = critical_face_boundary_star(
-                        definition, index, surface, &domain, uv, functional, request,
-                        &events, &edges, work, cancel)? {
-                        match cover {
-                            CriticalStratumCover::Regular => {}
-                            CriticalStratumCover::Owned(band) => {
-                                if boundary_critical_bands.len() == band_capacity {
-                                    return Err(failure(GeometryErrorCode::ResourceLimit, "critical star band capacity exhausted"));
-                                }
-                                boundary_critical_bands.push(band);
+                    } else if let Some(cover) = critical_face_boundary_star(CriticalFaceBoundaryStarQuery { definition, face_index: index, surface, domain: &domain, cell: uv, functional, request, events: &events, edges: &edges }, work, cancel)? {
+                        if let Some(band) = cover {
+                            if boundary_critical_bands.len() == band_capacity {
+                                return Err(failure(GeometryErrorCode::ResourceLimit, "critical star band capacity exhausted"));
                             }
+                            boundary_critical_bands.push(band);
                         }
                         accepted = true;
                         critical_owned = true;
@@ -4550,12 +4709,12 @@ fn certify_collar_complex(
                     if critical_owned { world_regular_boundary_xy_speed = None; }
                 }
                 if accepted {
-                    if event_index.is_none() && !critical_owned {
-                        if let (Some(matrix),Some(previous))=(world_matrix,world_regular_boundary_xy_speed) {
-                            work.charge(32,cancel)?;
-                            world_regular_boundary_xy_speed=best_face_world_xy_speed(&jet,functional,matrix)
-                                .map(|speed|previous.max(speed));
-                        }
+                    if event_index.is_none() && !critical_owned
+                        && let (Some(matrix),Some(previous))=(world_matrix,world_regular_boundary_xy_speed)
+                    {
+                        work.charge(32,cancel)?;
+                        world_regular_boundary_xy_speed=best_face_world_xy_speed(&jet,functional,matrix)
+                            .map(|speed|previous.max(speed));
                     }
                     hash_uv(&mut hash, uv);
                     for point in jet.position { hash_interval(&mut hash, point); }
@@ -4708,22 +4867,14 @@ fn certify_collar_complex(
                                     if covered {
                                         accepted = true;
                                         critical_owned = true;
-                                    } else if let Some(cover) = critical_edge_boundary_star(
-                                        source, index, wire_index, coedge_index, &prepared,
-                                        [curve.range_tuple().0, curve.range_tuple().1], cell[0],
-                                        functional, request, &events, &edges,
-                                        limit.saturating_sub(occupied)
-                                            .saturating_sub(domain.retained_bytes())
-                                            .saturating_sub(prepared.retained_bytes()),
-                                        work, cancel)? {
-                                        match cover {
-                                            CriticalStratumCover::Regular => {}
-                                            CriticalStratumCover::Owned(band) => {
-                                                if boundary_critical_bands.len() == band_capacity {
-                                                    return Err(failure(GeometryErrorCode::ResourceLimit, "critical star edge capacity exhausted"));
-                                                }
-                                                boundary_critical_bands.push(band);
+                                    } else if let Some(cover) = critical_edge_boundary_star(CriticalEdgeBoundaryStarQuery { source, face_index: index, wire_index, coedge_index, prepared: &prepared, full: [curve.range_tuple().0, curve.range_tuple().1], cell: cell[0], functional, request, events: &events, edges: &edges, remaining_bytes: limit.saturating_sub(occupied)
+                                        .saturating_sub(domain.retained_bytes())
+                                        .saturating_sub(prepared.retained_bytes()) }, work, cancel)? {
+                                        if let Some(band) = cover {
+                                            if boundary_critical_bands.len() == band_capacity {
+                                                return Err(failure(GeometryErrorCode::ResourceLimit, "critical star edge capacity exhausted"));
                                             }
+                                            boundary_critical_bands.push(band);
                                         }
                                         accepted = true;
                                         critical_owned = true;
@@ -4731,12 +4882,12 @@ fn certify_collar_complex(
                                     if critical_owned { world_regular_boundary_xy_speed = None; }
                                 }
                                 if accepted {
-                                    if !attached_event && !critical_owned {
-                                        if let (Some(matrix),Some(previous))=(world_matrix,world_regular_boundary_xy_speed) {
-                                            work.charge(16,cancel)?;
-                                            world_regular_boundary_xy_speed=world_xy_tangent_speed(jet.derivative,
-                                                functional.dot(jet.derivative),matrix).map(|speed|previous.max(speed));
-                                        }
+                                    if !attached_event && !critical_owned
+                                        && let (Some(matrix),Some(previous))=(world_matrix,world_regular_boundary_xy_speed)
+                                    {
+                                        work.charge(16,cancel)?;
+                                        world_regular_boundary_xy_speed=world_xy_tangent_speed(jet.derivative,
+                                            functional.dot(jet.derivative),matrix).map(|speed|previous.max(speed));
                                     }
                                     hash_uv(&mut hash, cell);
                                 } else {
@@ -5080,7 +5231,17 @@ mod tests {
         let mut work = GeometryWorkBudget::new(100_000);
         let whole = surface_piecewise_enclosure(&surface, uv, &mut work, &cancel).unwrap();
         let image = try_surface_affine_image(
-            &surface, uv, &whole, matrix, pose, 0.0, 0.01, &mut work, &cancel,
+            SurfaceAffineImageQuery {
+                surface: &surface,
+                uv,
+                whole: &whole,
+                matrix,
+                pose,
+                chart_error_mm: 0.0,
+                maximum_error_mm: 0.01,
+            },
+            &mut work,
+            &cancel,
         )
         .unwrap()
         .unwrap();
@@ -5106,7 +5267,17 @@ mod tests {
         );
         assert!(
             try_surface_affine_image(
-                &surface, uv, &whole, matrix, pose, 0.1, 0.01, &mut work, &cancel
+                SurfaceAffineImageQuery {
+                    surface: &surface,
+                    uv,
+                    whole: &whole,
+                    matrix,
+                    pose,
+                    chart_error_mm: 0.1,
+                    maximum_error_mm: 0.01
+                },
+                &mut work,
+                &cancel,
             )
             .unwrap()
             .is_none(),
@@ -5134,7 +5305,17 @@ mod tests {
         let matrix = super::super::placed::rotation(pose).unwrap();
         assert!(
             try_surface_affine_image(
-                &surface, uv, &whole, matrix, pose, 0.0, 10.0, &mut work, &cancel
+                SurfaceAffineImageQuery {
+                    surface: &surface,
+                    uv,
+                    whole: &whole,
+                    matrix,
+                    pose,
+                    chart_error_mm: 0.0,
+                    maximum_error_mm: 10.0
+                },
+                &mut work,
+                &cancel,
             )
             .unwrap()
             .is_none()
@@ -5162,7 +5343,7 @@ mod tests {
         let endpoints = [[[0.1, 0.2], [0.0, 0.0]], [[3.8, 3.9], [0.0, 0.0]]];
         let port = [[0.1, 3.9], [0.0, 0.0]];
         let vertical = distance(endpoints, port, [2.0, 0.0]);
-        assert!(vertical >= 0.4 && vertical < 0.400000000001);
+        assert!((0.4..0.400000000001).contains(&vertical));
         assert!(distance(endpoints, port, [2.0, 1.0]) >= 10.4);
         let short = [[[1.0, 1.0], [0.0, 0.0]], [[3.0, 3.0], [0.0, 0.0]]];
         assert!(distance(short, port, [2.0, 0.0]) >= 2.0);
@@ -5265,10 +5446,12 @@ mod tests {
         .unwrap();
         let analysis = prepared
             .analyze_placed_slab(
-                pose,
-                [0.0, 0.1],
-                0.05,
-                0.1,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: [0.0, 0.1],
+                    sample_world_z_mm: 0.05,
+                    native_shape_error_mm: 0.1,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
                 &mut work,
                 &cancel,
@@ -5279,13 +5462,15 @@ mod tests {
         assert!(!analysis.section().loops().is_empty());
         let actual = candidate(&analysis);
         let leaf = super::super::joint::certify_native_source_leaf(
-            &definition,
-            &OccurrenceId::new(76).unwrap(),
-            pose,
-            &analysis,
-            &actual,
-            super::super::joint::NativeUnionPolicy {
-                candidate_coordinate_error_mm: 0.0,
+            &super::super::joint::SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &OccurrenceId::new(76).unwrap(),
+                pose,
+                analysis: &analysis,
+                actual_used_source_loops: &actual,
+                policy: super::super::joint::NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
             },
             &mut work,
             &cancel,
@@ -5301,13 +5486,15 @@ mod tests {
         }
         false_hole.push(hole);
         let error = super::super::joint::certify_native_source_leaf(
-            &definition,
-            &OccurrenceId::new(77).unwrap(),
-            pose,
-            &analysis,
-            &false_hole,
-            super::super::joint::NativeUnionPolicy {
-                candidate_coordinate_error_mm: 0.0,
+            &super::super::joint::SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &OccurrenceId::new(77).unwrap(),
+                pose,
+                analysis: &analysis,
+                actual_used_source_loops: &false_hole,
+                policy: super::super::joint::NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
             },
             &mut work,
             &cancel,
@@ -5334,10 +5521,12 @@ mod tests {
         let pose = RigidPoseMm::IDENTITY;
         let current = prepared
             .analyze_placed_slab(
-                pose,
-                [base, base + 0.2],
-                base + 0.1,
-                0.3,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: [base, base + 0.2],
+                    sample_world_z_mm: base + 0.1,
+                    native_shape_error_mm: 0.3,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
                 &mut work,
                 &cancel,
@@ -5345,13 +5534,15 @@ mod tests {
             .unwrap();
         let actual = candidate(&current);
         let leaf = super::super::joint::certify_native_source_leaf(
-            &definition,
-            &OccurrenceId::new(75).unwrap(),
-            pose,
-            &current,
-            &actual,
-            super::super::joint::NativeUnionPolicy {
-                candidate_coordinate_error_mm: 0.0,
+            &super::super::joint::SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &OccurrenceId::new(75).unwrap(),
+                pose,
+                analysis: &current,
+                actual_used_source_loops: &actual,
+                policy: super::super::joint::NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
             },
             &mut work,
             &cancel,
@@ -5557,7 +5748,7 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        assert!(distance >= 1e-9 && distance <= 0.025);
+        assert!((1e-9..=0.025).contains(&distance));
         let holed = [
             rectangle(-4.0, -4.0, 4.0, 4.0, false),
             rectangle(-1.0, -1.0, 1.0, 1.0, true),
@@ -5770,10 +5961,12 @@ mod tests {
         let occurrence = OccurrenceId::new(74).unwrap();
         let current = prepared
             .analyze_placed_slab(
-                pose,
-                [0.0, 0.2],
-                0.1,
-                0.3,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: [0.0, 0.2],
+                    sample_world_z_mm: 0.1,
+                    native_shape_error_mm: 0.3,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
                 &mut work,
                 &cancel,
@@ -5781,13 +5974,15 @@ mod tests {
             .unwrap();
         let actual = candidate(&current);
         let leaf = super::super::joint::certify_native_source_leaf(
-            &definition,
-            &occurrence,
-            pose,
-            &current,
-            &actual,
-            super::super::joint::NativeUnionPolicy {
-                candidate_coordinate_error_mm: 0.0,
+            &super::super::joint::SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &occurrence,
+                pose,
+                analysis: &current,
+                actual_used_source_loops: &actual,
+                policy: super::super::joint::NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
             },
             &mut work,
             &cancel,
@@ -5827,10 +6022,12 @@ mod tests {
 
         let empty_current = prepared
             .analyze_placed_slab(
-                pose,
-                [-0.2, 0.01],
-                -0.1,
-                0.3,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: [-0.2, 0.01],
+                    sample_world_z_mm: -0.1,
+                    native_shape_error_mm: 0.3,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
                 &mut work,
                 &cancel,
@@ -5839,10 +6036,12 @@ mod tests {
         assert!(empty_current.section().loops().is_empty());
         let adjacent = prepared
             .analyze_placed_slab(
-                pose,
-                [0.01, 0.21],
-                0.1,
-                0.3,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: [0.01, 0.21],
+                    sample_world_z_mm: 0.1,
+                    native_shape_error_mm: 0.3,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES
                     .saturating_sub(prepared.retained_bytes())
                     .saturating_sub(empty_current.retained_bytes()),
@@ -5852,13 +6051,15 @@ mod tests {
             .unwrap();
         let actual = candidate(&adjacent);
         let leaf = super::super::joint::certify_native_source_leaf(
-            &definition,
-            &occurrence,
-            pose,
-            &adjacent,
-            &actual,
-            super::super::joint::NativeUnionPolicy {
-                candidate_coordinate_error_mm: 0.0,
+            &super::super::joint::SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &occurrence,
+                pose,
+                analysis: &adjacent,
+                actual_used_source_loops: &actual,
+                policy: super::super::joint::NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
             },
             &mut work,
             &cancel,
@@ -5932,10 +6133,12 @@ mod tests {
             .unwrap();
             let adjacent = prepared
                 .analyze_placed_slab(
-                    pose,
-                    [4.07, 4.09],
-                    4.08,
-                    0.1,
+                    &super::super::PlacedSlabRequest {
+                        pose,
+                        world_height_interval_mm: [4.07, 4.09],
+                        sample_world_z_mm: 4.08,
+                        native_shape_error_mm: 0.1,
+                    },
                     crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(prepared.retained_bytes()),
                     &mut work,
                     &cancel,
@@ -5943,10 +6146,12 @@ mod tests {
                 .unwrap();
             let current = prepared
                 .analyze_placed_slab(
-                    pose,
-                    [4.09, 4.11],
-                    4.105,
-                    0.1,
+                    &super::super::PlacedSlabRequest {
+                        pose,
+                        world_height_interval_mm: [4.09, 4.11],
+                        sample_world_z_mm: 4.105,
+                        native_shape_error_mm: 0.1,
+                    },
                     crate::MAX_PREPARED_SECTION_BYTES
                         .saturating_sub(prepared.retained_bytes())
                         .saturating_sub(adjacent.retained_bytes()),
@@ -5974,13 +6179,15 @@ mod tests {
             );
             let actual = candidate(&adjacent);
             let leaf = super::super::joint::certify_native_source_leaf(
-                &definition,
-                &OccurrenceId::new(73).unwrap(),
-                pose,
-                &adjacent,
-                &actual,
-                super::super::joint::NativeUnionPolicy {
-                    candidate_coordinate_error_mm: 0.0,
+                &super::super::joint::SourceLeafRequest {
+                    definition: &definition,
+                    occurrence_id: &OccurrenceId::new(73).unwrap(),
+                    pose,
+                    analysis: &adjacent,
+                    actual_used_source_loops: &actual,
+                    policy: super::super::joint::NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
                 },
                 &mut work,
                 &cancel,
@@ -5988,13 +6195,15 @@ mod tests {
             .unwrap();
             let current_actual = candidate(&current);
             let current_leaf = super::super::joint::certify_native_one_sided_source_leaf(
-                &definition,
-                &OccurrenceId::new(73).unwrap(),
-                pose,
-                &current,
-                &current_actual,
-                super::super::joint::NativeUnionPolicy {
-                    candidate_coordinate_error_mm: 0.0,
+                &super::super::joint::SourceLeafRequest {
+                    definition: &definition,
+                    occurrence_id: &OccurrenceId::new(73).unwrap(),
+                    pose,
+                    analysis: &current,
+                    actual_used_source_loops: &current_actual,
+                    policy: super::super::joint::NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
                 },
                 &mut work,
                 &cancel,
@@ -6190,10 +6399,12 @@ mod tests {
                 );
             let current = prepared
                 .analyze_placed_slab(
-                    pose,
-                    [4.09, 4.11],
-                    4.105,
-                    0.1,
+                    &super::super::PlacedSlabRequest {
+                        pose,
+                        world_height_interval_mm: [4.09, 4.11],
+                        sample_world_z_mm: 4.105,
+                        native_shape_error_mm: 0.1,
+                    },
                     remaining,
                     &mut work,
                     &cancel,
@@ -6216,10 +6427,12 @@ mod tests {
             };
             let adjacent = prepared
                 .analyze_placed_slab(
-                    pose,
-                    range,
-                    sample,
-                    0.1,
+                    &super::super::PlacedSlabRequest {
+                        pose,
+                        world_height_interval_mm: range,
+                        sample_world_z_mm: sample,
+                        native_shape_error_mm: 0.1,
+                    },
                     remaining.saturating_sub(current.retained_bytes()),
                     &mut work,
                     &cancel,
@@ -6227,13 +6440,15 @@ mod tests {
                 .unwrap();
             let actual = candidate(&adjacent);
             let leaf = super::super::joint::certify_native_source_leaf(
-                &definition,
-                &OccurrenceId::new(index as u32 + 91).unwrap(),
-                pose,
-                &adjacent,
-                &actual,
-                super::super::joint::NativeUnionPolicy {
-                    candidate_coordinate_error_mm: 0.0,
+                &super::super::joint::SourceLeafRequest {
+                    definition: &definition,
+                    occurrence_id: &OccurrenceId::new(index as u32 + 91).unwrap(),
+                    pose,
+                    analysis: &adjacent,
+                    actual_used_source_loops: &actual,
+                    policy: super::super::joint::NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
                 },
                 &mut work,
                 &cancel,
@@ -6241,13 +6456,15 @@ mod tests {
             .unwrap();
             let current_actual = candidate(&current);
             let current_leaf = super::super::joint::certify_native_source_leaf(
-                &definition,
-                &OccurrenceId::new(index as u32 + 91).unwrap(),
-                pose,
-                &current,
-                &current_actual,
-                super::super::joint::NativeUnionPolicy {
-                    candidate_coordinate_error_mm: 0.0,
+                &super::super::joint::SourceLeafRequest {
+                    definition: &definition,
+                    occurrence_id: &OccurrenceId::new(index as u32 + 91).unwrap(),
+                    pose,
+                    analysis: &current,
+                    actual_used_source_loops: &current_actual,
+                    policy: super::super::joint::NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
                 },
                 &mut work,
                 &cancel,
@@ -6330,10 +6547,12 @@ mod tests {
         );
         let world = place_native_collar_complex(
             crate::section::OriginalTrimSource::standalone(&definition),
-            &seed,
-            pose,
-            [4.09, 4.11],
-            4.105,
+            PlacedCollarComplexQuery {
+                seed: &seed,
+                pose,
+                interval: [4.09, 4.11],
+                sample: 4.105,
+            },
             MAX_BYTES,
             &mut work,
             &cancel,

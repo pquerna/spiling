@@ -17,6 +17,57 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+/// Original compiler sources shared by capture and final native certification.
+pub(super) struct NativeSourceInputs<'a, 'model> {
+    pub input: &'a CompilerInput<'model>,
+    pub occurrences: &'a [&'a OccurrenceRecord],
+    pub sources: &'a BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'model>>,
+}
+
+pub(super) struct NativeSpanRequest {
+    pub index: u32,
+    pub retained_points: usize,
+    pub retained_output_bytes: usize,
+}
+
+struct SpanCaptureRequest {
+    index: u32,
+    end: u32,
+    tried_bias: bool,
+    retained_points: usize,
+    retained_bytes: usize,
+}
+
+struct AdjacentSourceMaterials<'a, I> {
+    lower: I,
+    upper: &'a [SourceMaterial],
+}
+
+pub(super) struct ProtectedVoidDemand<'a> {
+    pub native_bounds: &'a BTreeMap<OccurrenceId, spiling_contracts::geometry::AabbMm>,
+    pub demand_bounds: &'a [[[f64; 2]; 2]],
+    pub point_limit: usize,
+}
+
+pub(super) struct SupportClearanceGeometry<'a> {
+    pub sections: &'a [super::SectionSpan],
+    pub schedule: &'a [LayerElevation],
+    pub protected: &'a MultiPolygon<f64>,
+    pub scopes: &'a [spiling_geometry::ProtectedVoidHeightScope],
+}
+
+struct ForbiddenPolygonScope<'a> {
+    polygon: &'a geo::Polygon<f64>,
+    height: spiling_geometry::ProtectedVoidHeightScope,
+    label: &'a str,
+}
+
+struct ActualDepositionScope<'a> {
+    layers: &'a [PrintLayer],
+    schedule: &'a [LayerElevation],
+    vertical: [f64; 2],
+}
+
 pub(super) struct NativeSpan {
     pub end: u32,
     pub material: MultiPolygon<f64>,
@@ -149,15 +200,15 @@ pub(super) fn output_bytes(
                 .saturating_mul(std::mem::size_of::<super::NativeSurfaceSpan>()),
         );
     for (index, section) in sections.iter().enumerate() {
-        if let Some(occupied) = &section.occupied {
-            if !sections[..index].iter().any(|prior| {
+        if let Some(occupied) = &section.occupied
+            && !sections[..index].iter().any(|prior| {
                 prior
                     .occupied
                     .as_ref()
                     .is_some_and(|prior| Arc::ptr_eq(prior, occupied))
-            }) {
-                bytes = bytes.saturating_add(occupied_bytes(occupied));
-            }
+            })
+        {
+            bytes = bytes.saturating_add(occupied_bytes(occupied));
         }
     }
     for surface in surfaces {
@@ -416,18 +467,24 @@ impl ReadyStage {
 /// candidate. Real source leaves break the contact cycle; the final ordered
 /// ledger still requires their actual use in accepted final-M candidates.
 pub(super) fn collect_span(
-    input: &CompilerInput<'_>,
-    occurrences: &[&OccurrenceRecord],
-    sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'_>>,
+    source: &NativeSourceInputs<'_, '_>,
     admission: &mut preflight::Admission,
     schedule: &mut Vec<LayerElevation>,
-    index: u32,
+    request: &NativeSpanRequest,
     state: &mut NativeStageState,
-    retained_points: usize,
-    retained_output_bytes: usize,
     surface_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<NativeSpan, ManufacturingError> {
+    let NativeSourceInputs {
+        input,
+        occurrences,
+        sources,
+    } = *source;
+    let NativeSpanRequest {
+        index,
+        retained_points,
+        retained_output_bytes,
+    } = *request;
     // The map owns one preparation per distinct definition, regardless of how
     // many occurrences borrow it. Its retained bytes already include proofs.
     let resident_bytes = sources
@@ -438,16 +495,16 @@ pub(super) fn collect_span(
     if state.ready.is_empty() {
         let end = span_end(schedule, admission, input.intent, index, cancel)?;
         let first = capture_base(
-            input,
-            occurrences,
-            sources,
+            source,
             admission,
             schedule,
-            index,
-            end,
-            false,
-            retained_points,
-            resident_bytes.saturating_add(state.retained_proof_bytes()),
+            &SpanCaptureRequest {
+                index,
+                end,
+                tried_bias: false,
+                retained_points,
+                retained_bytes: resident_bytes.saturating_add(state.retained_proof_bytes()),
+            },
             surface_work,
             cancel,
         )?;
@@ -520,16 +577,16 @@ pub(super) fn collect_span(
                 }
                 let next_end = span_end(schedule, admission, input.intent, next_index, cancel)?;
                 let next = capture_base(
-                    input,
-                    occurrences,
-                    sources,
+                    source,
                     admission,
                     schedule,
-                    next_index,
-                    next_end,
-                    false,
-                    points,
-                    bytes,
+                    &SpanCaptureRequest {
+                        index: next_index,
+                        end: next_end,
+                        tried_bias: false,
+                        retained_points: points,
+                        retained_bytes: bytes,
+                    },
                     surface_work,
                     cancel,
                 )?;
@@ -553,26 +610,26 @@ pub(super) fn collect_span(
                 }));
             let proof = if let Some(previous) = frontier.last() {
                 certify_stage(
-                    input,
-                    occurrences,
-                    sources,
+                    source,
                     &mut current,
                     &candidate,
-                    previous.positive_materials(),
-                    upper,
+                    AdjacentSourceMaterials {
+                        lower: previous.positive_materials(),
+                        upper,
+                    },
                     coexisting,
                     &mut admission.geometry_work,
                     cancel,
                 )
             } else {
                 certify_stage(
-                    input,
-                    occurrences,
-                    sources,
+                    source,
                     &mut current,
                     &candidate,
-                    state.previous_positive.iter(),
-                    upper,
+                    AdjacentSourceMaterials {
+                        lower: state.previous_positive.iter(),
+                        upper,
+                    },
                     coexisting,
                     &mut admission.geometry_work,
                     cancel,
@@ -621,16 +678,16 @@ pub(super) fn collect_span(
                                 .saturating_mul(std::mem::size_of::<ReadyStage>()),
                         );
                     let next = capture_base(
-                        input,
-                        occurrences,
-                        sources,
+                        source,
                         admission,
                         schedule,
-                        retry_index,
-                        end,
-                        bias,
-                        points,
-                        bytes,
+                        &SpanCaptureRequest {
+                            index: retry_index,
+                            end,
+                            tried_bias: bias,
+                            retained_points: points,
+                            retained_bytes: bytes,
+                        },
                         surface_work,
                         cancel,
                     )?;
@@ -903,19 +960,25 @@ pub(super) fn collect_span(
 }
 
 fn capture_base(
-    input: &CompilerInput<'_>,
-    occurrences: &[&OccurrenceRecord],
-    sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'_>>,
+    source: &NativeSourceInputs<'_, '_>,
     admission: &mut preflight::Admission,
     schedule: &mut Vec<LayerElevation>,
-    index: u32,
-    mut end: u32,
-    mut tried_bias: bool,
-    retained_points: usize,
-    retained_bytes: usize,
+    request: &SpanCaptureRequest,
     surface_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<DraftStage, ManufacturingError> {
+    let NativeSourceInputs {
+        input,
+        occurrences,
+        sources,
+    } = *source;
+    let SpanCaptureRequest {
+        index,
+        mut end,
+        mut tried_bias,
+        retained_points,
+        retained_bytes,
+    } = *request;
     loop {
         check_cancel(cancel)?;
         let layer = &schedule[index as usize];
@@ -956,10 +1019,12 @@ fn capture_base(
                         )
                     })?;
                 let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
-                    occurrence.pose,
-                    interval,
-                    sample,
-                    input.intent.recipe.native_shape_error_mm,
+                    &spiling_geometry::PlacedSlabRequest {
+                        pose: occurrence.pose,
+                        world_height_interval_mm: interval,
+                        sample_world_z_mm: sample,
+                        native_shape_error_mm: input.intent.recipe.native_shape_error_mm,
+                    },
                     query_byte_limit,
                     &mut admission.geometry_work,
                     cancel,
@@ -1089,13 +1154,15 @@ fn capture_base(
                 spiling_geometry::certify_native_source_leaf
             };
             let leaf = match certify_leaf(
-                &input.definitions[&occurrence.definition_id],
-                &occurrence.occurrence_id,
-                occurrence.pose,
-                analysis,
-                &actual_source_loops,
-                spiling_geometry::NativeUnionPolicy {
-                    candidate_coordinate_error_mm: 0.0,
+                &spiling_geometry::SourceLeafRequest {
+                    definition: &input.definitions[&occurrence.definition_id],
+                    occurrence_id: &occurrence.occurrence_id,
+                    pose: occurrence.pose,
+                    analysis,
+                    actual_used_source_loops: &actual_source_loops,
+                    policy: spiling_geometry::NativeUnionPolicy {
+                        candidate_coordinate_error_mm: 0.0,
+                    },
                 },
                 &mut admission.geometry_work,
                 cancel,
@@ -1820,13 +1887,16 @@ fn admit_bytes(
 pub(super) fn project_protected_voids(
     input: &CompilerInput<'_>,
     captures: &mut Vec<CapturedProtectedVoid>,
-    native_bounds: &BTreeMap<OccurrenceId, spiling_contracts::geometry::AabbMm>,
-    demand_bounds: &[[[f64; 2]; 2]],
-    point_limit: usize,
+    demand: &ProtectedVoidDemand<'_>,
     support_work: &mut usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<super::support::ProtectedVoidSet, ManufacturingError> {
+    let ProtectedVoidDemand {
+        native_bounds,
+        demand_bounds,
+        point_limit,
+    } = *demand;
     let mut retained_native = captures
         .capacity()
         .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>())
@@ -2024,17 +2094,20 @@ pub(super) fn project_protected_voids(
 }
 
 fn certify_stage<'a>(
-    input: &CompilerInput<'_>,
-    occurrences: &[&OccurrenceRecord],
-    prepared_sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'_>>,
+    source: &NativeSourceInputs<'_, '_>,
     current: &mut DraftStage,
     candidate: &Vec<spiling_geometry::SectionLoopMm>,
-    lower: impl Iterator<Item = &'a SourceMaterial> + Clone,
-    upper: &[SourceMaterial],
+    adjacent: AdjacentSourceMaterials<'_, impl Iterator<Item = &'a SourceMaterial> + Clone>,
     coexisting: usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<spiling_geometry::PendingNativeUnionProof, ManufacturingError> {
+    let NativeSourceInputs {
+        input,
+        occurrences,
+        sources: prepared_sources,
+    } = *source;
+    let AdjacentSourceMaterials { lower, upper } = adjacent;
     for ((occurrence, evidence), material) in occurrences
         .iter()
         .zip(&mut current.analyses)
@@ -2185,15 +2258,18 @@ fn certify_stage<'a>(
 /// raw continuous occupied piece and every relevant positive protected void.
 pub(super) fn certify_support_clearance(
     layers: &[PrintLayer],
-    sections: &[super::SectionSpan],
-    schedule: &[LayerElevation],
-    protected: &MultiPolygon<f64>,
-    scopes: &[spiling_geometry::ProtectedVoidHeightScope],
+    geometry: &SupportClearanceGeometry<'_>,
     recipe: &PlanarPrintRecipe,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let SupportClearanceGeometry {
+        sections,
+        schedule,
+        protected,
+        scopes,
+    } = *geometry;
     if protected.0.len() != scopes.len() {
         return Err(error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -2240,11 +2316,13 @@ pub(super) fn certify_support_clearance(
                 scoped_support_layers(layers, schedule, scope, vertical, support_work, cancel)?;
             certify_polygon_capsules(
                 applicable,
-                polygon,
-                scope,
+                &ForbiddenPolygonScope {
+                    polygon,
+                    height: scope,
+                    label: "continuous native/finish outer occupancy",
+                },
                 recipe.bead_width_mm,
                 xy_clearance_mm,
-                "continuous native/finish outer occupancy",
                 native_work,
                 support_work,
                 cancel,
@@ -2256,11 +2334,13 @@ pub(super) fn certify_support_clearance(
             scoped_support_layers(layers, schedule, *scope, vertical, support_work, cancel)?;
         certify_polygon_capsules(
             applicable,
-            polygon,
-            *scope,
+            &ForbiddenPolygonScope {
+                polygon,
+                height: *scope,
+                label: "projected protected native void",
+            },
             recipe.bead_width_mm,
             xy_clearance_mm,
-            "projected protected native void",
             native_work,
             support_work,
             cancel,
@@ -2270,9 +2350,11 @@ pub(super) fn certify_support_clearance(
     // Native target exclusion therefore does not replace this distinct actual
     // nominal-program footprint proof.
     certify_deposited_clearance(
-        layers,
-        schedule,
-        vertical,
+        &ActualDepositionScope {
+            layers,
+            schedule,
+            vertical,
+        },
         recipe.bead_width_mm,
         xy_clearance_mm,
         z_gap_mm,
@@ -2285,15 +2367,18 @@ pub(super) fn certify_support_clearance(
 
 fn certify_polygon_capsules(
     layers: &[PrintLayer],
-    polygon: &geo::Polygon<f64>,
-    scope: spiling_geometry::ProtectedVoidHeightScope,
+    forbidden: &ForbiddenPolygonScope<'_>,
     bead_width: f64,
     clearance: f64,
-    label: &str,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let ForbiddenPolygonScope {
+        polygon,
+        height: scope,
+        label,
+    } = *forbidden;
     let mut encoded = None;
     for layer in layers {
         charge_support_clearance(support_work, cancel)?;
@@ -2486,9 +2571,7 @@ fn partition_schedule(
 }
 
 fn certify_deposited_clearance(
-    layers: &[PrintLayer],
-    schedule: &[LayerElevation],
-    vertical: [f64; 2],
+    deposition: &ActualDepositionScope<'_>,
     bead_width: f64,
     xy_gap: f64,
     z_gap: f64,
@@ -2496,6 +2579,11 @@ fn certify_deposited_clearance(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    let ActualDepositionScope {
+        layers,
+        schedule,
+        vertical,
+    } = *deposition;
     for (index, support_layer) in layers.iter().enumerate() {
         charge_support_clearance(work, cancel)?;
         let mut applicable = None;
@@ -2673,9 +2761,11 @@ mod actual_deposition_tests {
             // Exercise the actual-deposition consumer and real native capsule
             // proof, independently of C or contact-anchor authority.
             let result = certify_deposited_clearance(
-                &layers,
-                &schedule,
-                vertical,
+                &ActualDepositionScope {
+                    layers: &layers,
+                    schedule: &schedule,
+                    vertical,
+                },
                 0.5,
                 0.2,
                 required,

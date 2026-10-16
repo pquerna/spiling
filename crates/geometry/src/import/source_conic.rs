@@ -156,8 +156,8 @@ impl SourceConic {
     }
 }
 
-pub(super) fn capture<'a>(
-    original: &'a Curve3D,
+pub(super) fn capture(
+    original: &Curve3D,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SourceConic>, GeometryError> {
@@ -166,8 +166,8 @@ pub(super) fn capture<'a>(
 
 /// Guide coefficients propose a chart only. They never establish membership of
 /// the projected intersection: that requires the retained continuation proof.
-pub(super) fn capture_guide_candidate<'a>(
-    original: &'a Curve3D,
+pub(super) fn capture_guide_candidate(
+    original: &Curve3D,
     budget: &mut ValidatedGeometryBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<SourceConic>, GeometryError> {

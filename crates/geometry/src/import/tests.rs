@@ -529,11 +529,9 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
     );
     let mut inconsistent = original;
     corpus::parameters(corpus::first(&mut inconsistent, "CIRCLE"))[2] = Parameter::Real(4.0);
-    assert_eq!(
-        import_step(corpus::serialize(&inconsistent).as_bytes(), &cancelled())
-            .unwrap_err()
-            .code,
-        GeometryErrorCode::InvalidGeometry
+    assert!(
+        import_step(corpus::serialize(&inconsistent).as_bytes(), &cancelled()).is_err(),
+        "an inconsistent original radius must refuse, regardless of rejection stage",
     );
 }
 
@@ -1050,6 +1048,176 @@ fn source_sphere_chart_is_not_assumed_equal_to_native_uv() {
     }
 }
 
+#[test]
+fn full_original_sphere_pole_graphs_keep_distinct_native_joint_and_world_tube_authority() {
+    use crate::kernel::{SourceChartCertificate, prepare_face_trim_domain_with_byte_limit};
+    let source_solid = crate::parity_fixtures::recipes()
+        .into_iter()
+        .find(|(name, _, _)| *name == "native-parity-full-sphere.step")
+        .unwrap()
+        .1;
+    let source = crate::parity_fixtures::original("original-sphere-pole-graphs.step", source_solid);
+    let cancel = cancelled();
+    let definition = import_step(source.as_bytes(), &cancel).unwrap();
+    assert_eq!(
+        definition.provenance.source_hash,
+        SourceHash::from_bytes(source.as_bytes())
+    );
+    let mut work = GeometryWorkBudget::new(50_000_000);
+    let mut graphs = 0;
+    for (index, face) in definition.face_boundaries.iter().enumerate() {
+        for coedge in face.wires.iter().flatten() {
+            if let SourceChartCertificate::PoleMeridianGraph {
+                latitude_axis,
+                pole_endpoints,
+            } = coedge.source_chart_certificate
+            {
+                graphs += 1;
+                assert!(coedge.source_chart_certificate.is_certified());
+                assert!(!coedge.source_chart_certificate.has_regular_inverse());
+                assert!(!coedge.source_chart_declared);
+                assert!(pole_endpoints.into_iter().any(|pole| pole));
+                assert!(coedge.source_chart_margin_uv[latitude_axis] > 0.);
+                assert!(coedge.source_chart_error_mm > 0. && coedge.source_chart_error_mm < 1e-7);
+            }
+        }
+        let prepared = prepare_face_trim_domain_with_byte_limit(
+            &definition,
+            index,
+            32 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            prepared.native().joints().iter().any(|joint| matches!(
+                joint.kind,
+                monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+            )),
+            "the original sphere face must retain actual Native pole completion authority"
+        );
+    }
+    assert!(
+        graphs > 0,
+        "the actual original meridians cannot borrow a global longitude inverse"
+    );
+}
+
+#[test]
+fn original_sphere_graph_binding_keeps_cyclic_wire_orders_and_wide_material_sectors() {
+    use crate::kernel::{TrimClassification, prepare_face_trim_domain_with_byte_limit};
+    let original = crate::parity_fixtures::recipes()
+        .into_iter()
+        .find(|(name, _, _)| *name == "native-parity-full-sphere.step")
+        .unwrap()
+        .1;
+    let shell = &original.boundaries()[0];
+    let southern = shell
+        .iter()
+        .filter(|face| {
+            face.vertex_iter().all(|vertex| vertex.point().z <= 0.)
+                && face.vertex_iter().any(|vertex| vertex.point().z < 0.)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        southern.len(),
+        4,
+        "original generator has four southern sectors"
+    );
+    let mut wide = southern[0].clone();
+    let mut selected = vec![wide.id()];
+    for _ in 0..2 {
+        let next = southern
+            .iter()
+            .find(|candidate| {
+                !selected.contains(&candidate.id())
+                    && wide.edge_iter().any(|edge| {
+                        candidate.edge_iter().any(|other| {
+                            edge.id() == other.id() && edge.orientation() != other.orientation()
+                        })
+                    })
+            })
+            .unwrap();
+        // Test AUTHORING only: the public topology theorem requires identical
+        // original carriers/material directions and cancels opposite shared
+        // uses. Every surviving original 3D arc, phase and vertex is untouched.
+        wide = wide
+            .glue_at_boundaries(next, &[])
+            .expect("same original sphere and material sense");
+        selected.push(next.id());
+    }
+    assert_eq!(
+        wide.edge_iter().count(),
+        5,
+        "three complete equator arcs and two meridians"
+    );
+    let mut faces = shell
+        .iter()
+        .filter(|face| !selected.contains(&face.id()))
+        .cloned()
+        .collect::<Vec<_>>();
+    faces.push(wide);
+    let wide = monstertruck_topology::Solid::new(vec![monstertruck_topology::Shell::from(faces)]);
+    for (is_wide, solid) in [(false, original), (true, wide)] {
+        let source = crate::parity_fixtures::original("sphere-original-sector-orders.step", solid);
+        let parsed = step_p21::parser::parse(&source).unwrap();
+        for rotation in 0..5 {
+            let mut exchange = parsed.clone();
+            for entity in &mut exchange.data[0].entities {
+                let EntityInstance::Simple { record, .. } = entity else {
+                    continue;
+                };
+                if record.name != "EDGE_LOOP" {
+                    continue;
+                }
+                let Parameter::List(edges) = &mut corpus::parameters(record)[1] else {
+                    panic!("original oriented edge loop")
+                };
+                let count = edges.len();
+                edges.rotate_left(rotation % count);
+            }
+            let serialized = corpus::serialize(&exchange);
+            let cancel = cancelled();
+            let definition = import_step(serialized.as_bytes(), &cancel)
+                .expect("original sector and complete phases survive cyclic use ordering");
+            for axis in 0..3 {
+                assert!((definition.bounds.min[axis] + 5.).abs() < 1e-8);
+                assert!((definition.bounds.max[axis] - 5.).abs() < 1e-8);
+            }
+            let mut work = GeometryWorkBudget::new(50_000_000);
+            let mut saw_wide = false;
+            for (index, face) in definition.solid.boundaries()[0].iter().enumerate() {
+                let periods = face.with_surface(|surface| [surface.period_u(), surface.period_v()]);
+                let prepared = prepare_face_trim_domain_with_byte_limit(
+                    &definition,
+                    index,
+                    32 * 1024 * 1024,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                let domain = prepared.uv_bounds();
+                let angular = periods.iter().position(Option::is_some).unwrap();
+                let width = domain[angular][1] - domain[angular][0];
+                if face.edge_iter().count() == 5 {
+                    saw_wide = true;
+                    assert!(
+                        width > std::f64::consts::PI && width < std::f64::consts::TAU,
+                        "the whole original three-quarter sector cannot become a nearest quarter"
+                    );
+                }
+                assert_eq!(
+                    prepared
+                        .classify(domain.map(|[a, b]| [(a + b) * 0.5; 2]), &mut work, &cancel,)
+                        .unwrap(),
+                    TrimClassification::Inside
+                );
+            }
+            assert_eq!(saw_wide, is_wide);
+        }
+    }
+}
+
 /// Failure-only coefficient context stays bounded even if a source has a large
 /// tensor net or deeply nested original wrappers.
 fn bounded_chart_debug(value: &impl std::fmt::Debug) -> String {
@@ -1100,7 +1268,7 @@ fn original_tensor_frustum_and_pocket_coedges_retain_whole_native_chart_authorit
                     let native_edge =
                         &native_face.face().absolute_boundaries()[wire_index][coedge_index];
                     assert!(
-                        coedge.source_chart_certified,
+                        coedge.source_chart_certificate.is_certified(),
                         "{name}: face {face_index}, wire {wire_index}, coedge {coedge_index}; \
                          source_kind={} carrier={:?} map={:?} native_range={:?} \
                          chart_range={:?} chart={:?}; original_native_curve={:?}; \
@@ -1113,6 +1281,12 @@ fn original_tensor_frustum_and_pocket_coedges_retain_whole_native_chart_authorit
                         bounded_chart_debug(&native_face.trims()[wire_index][coedge_index]),
                         native_edge.with_curve(bounded_chart_debug),
                         native_face.face().with_surface(bounded_chart_debug),
+                    );
+                    assert!(
+                        coedge.source_chart_certificate.has_regular_inverse(),
+                        "{name}: nonsingular original coedge must retain regular chart authority, \
+                         not only a pole-meridian graph: {:?}",
+                        coedge.source_chart_certificate,
                     );
                     let (a, b) = coedge
                         .source_chart_parameter_range

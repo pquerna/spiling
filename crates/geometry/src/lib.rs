@@ -22,8 +22,8 @@ mod tests;
 
 pub use analysis::{
     AnalysisPolicy, BoundsPolicy, CompletedNativeUnionProofSet, CriticalEventNeighborhood,
-    GeometryWorkBudget, HeightAnalysis, InvariantHeightDomain, NativeCollarHeightSpace,
-    NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
+    EndpointOwnershipRequest, GeometryWorkBudget, HeightAnalysis, InvariantHeightDomain,
+    NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,
     NativeCriticalCollarIncidence, NativeCriticalCollarMaterialTarget, NativeCriticalCollarPolicy,
     NativeCriticalCollarTarget, NativeCriticalCollarTargetSide, NativeEndpointStratum,
     NativeInterfaceAttachment, NativeOwnedEndpoint, NativeProjectedVoids,
@@ -31,14 +31,15 @@ pub use analysis::{
     NativeUnionBindingLedger, NativeUnionBoundaryEdge, NativeUnionBoundarySource,
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
-    PendingNativeUnionProof, PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm,
-    ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest,
-    analyze_height_domain, analyze_placed_height_domain, capture_projected_voids,
-    certify_endpoint_ownership, certify_endpoint_stratum_ownership,
-    certify_native_collar_incidence, certify_native_critical_collar,
-    certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
-    certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance, placed_bounds,
-    projected_bounds, projected_protected_void_envelopes,
+    PendingNativeUnionProof, PlacedSlabRequest, PlanarCapsuleClearance,
+    PlanarCapsuleClearancePolicy, PlanarCapsuleMm, ProjectedBounds, ProtectedVoidHeightScope,
+    ProtectedVoidPolicy, SlabAnalysis, SlabRequest, SourceLeafRequest, analyze_height_domain,
+    analyze_placed_height_domain, capture_projected_voids, certify_endpoint_ownership,
+    certify_endpoint_stratum_ownership, certify_native_collar_incidence,
+    certify_native_critical_collar, certify_native_one_sided_source_leaf,
+    certify_native_source_leaf, certify_native_union, certify_planar_capsule_clearance,
+    certify_planar_capsule_pair_clearance, placed_bounds, projected_bounds,
+    projected_protected_void_envelopes,
 };
 pub use kernel::Definition;
 pub use section::{
@@ -56,7 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "82100ce441ad3951fbc18011f5d05ad0b3460b0b";
+pub const KERNEL_REVISION: &str = "b14bb0c20056cb4c8599ce6e43798fcb06acf9a5";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
@@ -231,24 +232,12 @@ impl PreparedSectionSource<'_> {
     /// [`Self::analyze_slab`], including other occurrences' retained results.
     pub fn analyze_placed_slab(
         &self,
-        pose: spiling_contracts::geometry::RigidPoseMm,
-        world_height_interval_mm: [f64; 2],
-        sample_world_z_mm: f64,
-        native_shape_error_mm: f64,
+        request: &PlacedSlabRequest,
         query_byte_limit: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<SlabAnalysis, GeometryError> {
-        analysis::analyze_placed_slab(
-            self,
-            pose,
-            world_height_interval_mm,
-            sample_world_z_mm,
-            native_shape_error_mm,
-            query_byte_limit,
-            work,
-            cancel,
-        )
+        analysis::analyze_placed_slab(self, request, query_byte_limit, work, cancel)
     }
 }
 

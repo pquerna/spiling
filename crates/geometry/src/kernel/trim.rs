@@ -358,7 +358,7 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
             })
     {
         work.charge(1, cancel)?;
-        if !coedge.source_chart_certified {
+        if !coedge.source_chart_certificate.is_certified() {
             let source_use = definition
                 .source_topology
                 .faces
@@ -386,15 +386,14 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
             ));
         }
         source_chart_error_mm = source_chart_error_mm.max(coedge.source_chart_error_mm);
-        for axis in 0..2 {
-            let margin = coedge.source_chart_margin_uv[axis];
+        for (maximum, margin) in margin_uv.iter_mut().zip(coedge.source_chart_margin_uv) {
             if !margin.is_finite() || margin < 0.0 {
                 return Err(GeometryError::new(
                     GeometryErrorCode::ConditioningFailure,
                     "source/native chart uncertainty is invalid",
                 ));
             }
-            margin_uv[axis] = margin_uv[axis].max(margin);
+            *maximum = maximum.max(margin);
         }
     }
     let mut native_work =

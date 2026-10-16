@@ -5,6 +5,10 @@
 //! Coefficient-correlated forward comparison of native harmonic expressions.
 //! This is an arithmetic optimization, not a carrier or source-family permission:
 //! both original operands, their complete domains and relative tangents are proved.
+//! Constant-azimuth spherical charts use Native's polar/azimuth formula and
+//! original affine pose, including swapped processor axes. Their forward
+//! coefficient proof remains valid at poles but grants no inverse or source
+//! chart certificate.
 
 use crate::{
     GeometryError, GeometryWorkBudget,
@@ -199,7 +203,7 @@ fn tensor_harmonic(
         super::chart_proof::conic_support(conic.transform())?
     } else {
         let mut bounds = [p(0.0); 2];
-        for axis in 0..2 {
+        for (axis, bound) in bounds.iter_mut().enumerate() {
             let square = uv.cosine[axis].square().add(uv.sine[axis].square());
             let radius = Interval {
                 lo: square.lo.max(0.0),
@@ -207,7 +211,7 @@ fn tensor_harmonic(
             }
             .sqrt()?
             .hi;
-            bounds[axis] = uv.center[axis].add(Interval {
+            *bound = uv.center[axis].add(Interval {
                 lo: -radius,
                 hi: radius,
             });
@@ -409,10 +413,10 @@ pub(super) fn extrusion_profile_chart_proposal(
     if front.min(back) < native_range.0 || front.max(back) > native_range.1 {
         return Ok(None);
     }
-    if let ProfileParameterDomain::Bounded(domain) = original_domain {
-        if front.min(back) < domain[0] || front.max(back) > domain[1] {
-            return Ok(None);
-        }
+    if let ProfileParameterDomain::Bounded(domain) = original_domain
+        && (front.min(back) < domain[0] || front.max(back) > domain[1])
+    {
+        return Ok(None);
     }
     work.charge(
         (4 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<model::Point2>()) as u64,
@@ -520,6 +524,28 @@ fn affine_uv(
     }
 }
 
+// Common phase-tree reserve for affine harmonic composition. Translation stays
+// in the spatial reserve: only harmonic amplitudes amplify phase uncertainty.
+fn phase_roundoff(
+    native: &mut Harmonic<3>,
+    phase_scale: Interval,
+    slope: Interval,
+    slope_scale: Interval,
+) -> Interval {
+    let amplitude = native
+        .cosine
+        .into_iter()
+        .chain(native.sine)
+        .fold(p(0.0), |sum, value| sum.add(p(value.abs_upper())));
+    let phase_slope = p(slope.abs_upper());
+    let tangent = native
+        .arithmetic_scale
+        .mul(phase_slope)
+        .add(amplitude.mul(phase_scale.mul(phase_slope).add(slope_scale)));
+    native.arithmetic_scale = native.arithmetic_scale.add(amplitude.mul(phase_scale));
+    tangent
+}
+
 /// Bounded stack receipt, formatted only on a terminal correspondence failure.
 #[derive(Clone, Copy)]
 pub(super) struct HarmonicDiagnostic {
@@ -597,20 +623,33 @@ impl std::fmt::Display for HarmonicDiagnostic {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct HarmonicComparison<'a> {
+    pub curve: &'a model::Curve,
+    pub surface: &'a model::Surface,
+    pub chart: &'a model::Curve2D,
+    pub range: [f64; 2],
+    pub target: [f64; 2],
+    pub margin: [f64; 2],
+    pub tolerance: f64,
+    pub require_tangent: bool,
+}
+
 pub(super) fn certify(
-    curve: &model::Curve,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    range: [f64; 2],
-    target: [f64; 2],
-    margin: [f64; 2],
-    tolerance: f64,
-    require_tangent: bool,
+    comparison: HarmonicComparison<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: &mut HarmonicDiagnostic,
 ) -> Result<Option<f64>, GeometryError> {
+    let HarmonicComparison {
+        curve,
+        surface,
+        chart,
+        range,
+        target,
+        margin,
+        tolerance,
+        require_tangent,
+    } = comparison;
     *diagnostic = HarmonicDiagnostic::new(tolerance);
     diagnostic.stage = "source-coefficients";
     work.charge(512, cancel)?;
@@ -704,42 +743,12 @@ pub(super) fn certify(
             // parameter-dependent, even when a period translation cancels it.
             let phase_scale = uv.offset_scale[angle_axis]
                 .add(uv.slope_scale[angle_axis].mul(p(target[0].abs().max(target[1].abs()))));
-            // For H(phi) = c + u*cos(phi) + v*sin(phi), perturbing the
-            // computed phase by e changes position by at most
-            // (||u|| + ||v||)*|e|, since sin/cos are 1-Lipschitz. The
-            // coefficient enclosures already include the actual spatial map.
-            // In particular its world translation is in c, NOT in dH/dphi.
-            //
-            // Keep the original spatial evaluation majorant independently:
-            // at any computed phase, |sin|, |cos| <= 1 still bounds that
-            // evaluation's arithmetic. The unchanged gamma_n below bounds
-            // both this spatial error and the phase-tree error, so their SUM
-            // is gamma_n*(spatial_scale + amplitude*phase_scale). Multiplying
-            // spatial_scale by phase_scale would spuriously amplify absolute
-            // world translation, while dropping spatial_scale would lose
-            // original floating evaluation error despite coefficient equality.
-            // The L1 coefficient sum bounds both Euclidean amplitude norms
-            // without squaring tiny coefficients or overflowing large squares.
-            let phase_amplitude = native
-                .cosine
-                .into_iter()
-                .chain(native.sine)
-                .fold(p(0.0), |sum, component| sum.add(p(component.abs_upper())));
-            // Differentiating also evaluates the affine phase slope. Unlike
-            // position, that reserve must retain B1 even when |target| < 1.
-            // For dH/ds = H'(phi)*phi', phase error is amplified by |phi'|,
-            // while slope error is amplified by the same harmonic amplitude.
-            let phase_slope = p(slope.abs_upper());
-            let slope_scale = uv.slope_scale[angle_axis].mul(p(map_slope.abs_upper()));
-            tangent_arithmetic_scale = Some(
-                native
-                    .arithmetic_scale
-                    .mul(phase_slope)
-                    .add(phase_amplitude.mul(phase_scale.mul(phase_slope).add(slope_scale))),
-            );
-            native.arithmetic_scale = native
-                .arithmetic_scale
-                .add(phase_amplitude.mul(phase_scale));
+            tangent_arithmetic_scale = Some(phase_roundoff(
+                &mut native,
+                phase_scale,
+                slope,
+                uv.slope_scale[angle_axis].mul(p(map_slope.abs_upper())),
+            ));
             (native, front, slope, margin[angle_axis])
         }
         model::Surface::ExtrusionSurface(extrusion) => {
@@ -776,21 +785,124 @@ pub(super) fn certify(
             let slope = p(native.sense).mul(uv.slope[0]).mul(map_slope);
             let phase_scale = p(native.offset.abs_upper())
                 .add(uv.offset_scale[0].add(uv.slope_scale[0].mul(target_extent)));
-            let amplitude = native
-                .cosine
-                .into_iter()
-                .chain(native.sine)
-                .fold(p(0.0), |sum, value| sum.add(p(value.abs_upper())));
-            let phase_slope = p(slope.abs_upper());
-            let slope_scale = uv.slope_scale[0].mul(p(map_slope.abs_upper()));
-            tangent_arithmetic_scale = Some(
-                native
-                    .arithmetic_scale
-                    .mul(phase_slope)
-                    .add(amplitude.mul(phase_scale.mul(phase_slope).add(slope_scale))),
-            );
-            native.arithmetic_scale = native.arithmetic_scale.add(amplitude.mul(phase_scale));
+            tangent_arithmetic_scale = Some(phase_roundoff(
+                &mut native,
+                phase_scale,
+                slope,
+                uv.slope_scale[0].mul(p(map_slope.abs_upper())),
+            ));
             (native, front, slope, margin[0])
+        }
+        model::Surface::SphericalSurface(processor) => {
+            diagnostic.stage = "sphere-constant-azimuth-coefficients";
+            let matrix = processor.transform();
+            if !affine_matrix::<3>(|col, row| matrix[col][row]) {
+                return Ok(None);
+            }
+            let Some(uv) = affine_uv(chart, 0, work, cancel)? else {
+                return Ok(None);
+            };
+            let polar = usize::from(!processor.orientation());
+            let azimuth = 1 - polar;
+            if uv.slope[azimuth].lo != 0.0 || uv.slope[azimuth].hi != 0.0 {
+                diagnostic.stage = "varying-sphere-azimuth";
+                return Ok(None);
+            }
+            let target_interval = Interval {
+                lo: target[0].min(target[1]),
+                hi: target[0].max(target[1]),
+            };
+            let domain = std::array::from_fn(|axis| {
+                let bound = uv.offset[axis]
+                    .add(uv.slope[axis].mul(target_interval))
+                    .add(Interval {
+                        lo: -margin[axis],
+                        hi: margin[axis],
+                    });
+                [bound.lo, bound.hi]
+            });
+            // Admit the complete original operands, not a replacement sphere
+            // or a few successful evaluations. Poles do not imply an inverse.
+            let mut chart_budget = model::ValidatedGeometryBudget::new(
+                usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+            );
+            let chart_admission = model::validated_curve2d_jet(
+                chart,
+                [target_interval.lo, target_interval.hi],
+                &mut chart_budget,
+                cancel,
+            );
+            parametric::debit_native_work(work, chart_budget.consumed(), cancel)?;
+            chart_admission.map_err(parametric::native_error)?;
+            parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)?;
+            parametric::surface_enclosure(surface, domain, work, cancel)?;
+            let angle = uv.offset[azimuth].add(Interval {
+                lo: -margin[azimuth],
+                hi: margin[azimuth],
+            });
+            let mut budget = model::ValidatedGeometryBudget::new(
+                usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+            );
+            let trig = model::validated_sin_cos(
+                model::ValidatedInterval {
+                    lower: angle.lo,
+                    upper: angle.hi,
+                },
+                &mut budget,
+                cancel,
+            );
+            parametric::debit_native_work(work, budget.consumed(), cancel)?;
+            let (sine, cosine) = trig.map_err(parametric::native_error)?;
+            let sphere = processor.entity();
+            let center = sphere.center();
+            let radius = p(sphere.radius());
+            let mut native = Harmonic {
+                center: [center.x, center.y, center.z].map(p),
+                cosine: [p(0.0), p(0.0), radius],
+                sine: [
+                    radius.mul(Interval {
+                        lo: cosine.lower,
+                        hi: cosine.upper,
+                    }),
+                    radius.mul(Interval {
+                        lo: sine.lower,
+                        hi: sine.upper,
+                    }),
+                    p(0.0),
+                ],
+                offset: p(0.0),
+                sense: 1.0,
+                arithmetic_scale: p(center.x.abs().max(center.y.abs()).max(center.z.abs()))
+                    .add(p(sphere.radius().abs())),
+            };
+            native.transform(|col, row| matrix[col][row]);
+            let extent = p(target[0].abs().max(target[1].abs()));
+            let front = uv.offset[polar].add(uv.slope[polar].mul(p(target[0])));
+            let slope = uv.slope[polar].mul(map_slope);
+            // A general affine pose can amplify the azimuth derivative even
+            // when the meridian lies in its kernel. Retain both original
+            // equatorial columns, independently of world translation.
+            let azimuth_amplitude = (0..3).fold(p(0.0), |sum, row| {
+                sum.add(
+                    p(sphere.radius().abs())
+                        .mul(p(matrix[0][row].abs()).add(p(matrix[1][row].abs()))),
+                )
+            });
+            let azimuth_scale = uv.offset_scale[azimuth].add(uv.slope_scale[azimuth].mul(extent));
+            native.arithmetic_scale = native
+                .arithmetic_scale
+                .add(azimuth_amplitude.mul(azimuth_scale));
+            let phase_scale = uv.offset_scale[polar].add(uv.slope_scale[polar].mul(extent));
+            tangent_arithmetic_scale = Some(
+                phase_roundoff(
+                    &mut native,
+                    phase_scale,
+                    slope,
+                    uv.slope_scale[polar].mul(p(map_slope.abs_upper())),
+                )
+                .add(azimuth_amplitude.mul(uv.slope_scale[azimuth].mul(p(map_slope.abs_upper())))),
+            );
+            (native, front, slope, margin[polar])
         }
         _ => {
             diagnostic.stage = "unsupported-carrier-expression";
@@ -805,8 +917,39 @@ pub(super) fn certify(
         native.sine = native.sine.map(Interval::neg);
     }
     let source_front = source.offset.add(p(range[0]));
-    let phase_error = source_front
-        .sub(front)
+    let mut phase_anchor = source_front.sub(front);
+    if matches!(surface, model::Surface::SphericalSurface(_)) {
+        // Align the actual phase anchors algebraically, including their whole
+        // uncertainty. A meridian's original conic basis need not equal the
+        // native polar basis; compensating basis/phase changes are not errors.
+        let mut budget = model::ValidatedGeometryBudget::new(
+            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+        );
+        let trig = model::validated_sin_cos(
+            model::ValidatedInterval {
+                lower: phase_anchor.lo,
+                upper: phase_anchor.hi,
+            },
+            &mut budget,
+            cancel,
+        );
+        parametric::debit_native_work(work, budget.consumed(), cancel)?;
+        let (sine, cosine) = trig.map_err(parametric::native_error)?;
+        let sine = Interval {
+            lo: sine.lower,
+            hi: sine.upper,
+        };
+        let cosine = Interval {
+            lo: cosine.lower,
+            hi: cosine.upper,
+        };
+        let u = native.cosine;
+        let v = native.sine;
+        native.cosine = std::array::from_fn(|i| u[i].mul(cosine).sub(v[i].mul(sine)));
+        native.sine = std::array::from_fn(|i| u[i].mul(sine).add(v[i].mul(cosine)));
+        phase_anchor = p(0.0);
+    }
+    let phase_error = phase_anchor
         .add(p(1.0).sub(slope).mul(Interval {
             lo: 0.0,
             hi: p(range[1]).sub(p(range[0])).hi,
@@ -928,6 +1071,139 @@ pub(super) fn certify(
 mod tests {
     use super::*;
 
+    // Independent planar meridians: the source never evaluates the sphere.
+    fn sphere_meridian(
+        radius: f64,
+        center: Point3,
+        pose: Matrix4,
+        range: [f64; 2],
+        reflected: bool,
+    ) -> model::Curve {
+        let mut circle = model::Processor::<_, Matrix3>::new(model::TrimmedCurve::new(
+            model::UnitCircle::<Point2>::new(),
+            (range[0], range[1]),
+        ));
+        if reflected {
+            circle.invert();
+        }
+        let source = model::Curve::ParameterCurve(model::ParameterCurve::new(
+            model::Curve2D::Conic(model::Conic2D::Ellipse(circle)),
+            Box::new(model::Surface::Plane(model::Plane::from_origin_vectors(
+                center,
+                Vector3::new(0.0, 0.0, radius),
+                Vector3::new(radius, 0.0, 0.0),
+            ))),
+        ));
+        model::Curve::TrimmedCurve(model::Processor::with_transform(
+            model::TrimmedCurve::new(Box::new(source), (range[0], range[1])),
+            pose,
+        ))
+    }
+
+    #[test]
+    fn sphere_meridian_aligns_original_reversed_conic_basis_and_negative_polar_slope() {
+        let pi = std::f64::consts::PI;
+        let range = [2.0 * pi, 2.5 * pi];
+        let target = [0.0, 1.0];
+        let source = model::Curve::ParameterCurve(model::ParameterCurve::new(
+            model::Curve2D::Conic(model::Conic2D::Ellipse(
+                model::Processor::<_, Matrix3>::new(model::TrimmedCurve::new(
+                    model::UnitCircle::<Point2>::new(),
+                    (range[0], range[1]),
+                )),
+            )),
+            Box::new(model::Surface::Plane(model::Plane::from_origin_vectors(
+                Point3::origin(),
+                Vector3::new(0.0, 0.0, -2.0),
+                Vector3::new(2.0, 0.0, 0.0),
+            ))),
+        ));
+        let carrier = model::Surface::SphericalSurface(model::Processor::<_, Matrix4>::new(
+            model::Sphere::new(Point3::origin(), 2.0),
+        ));
+        let chart = model::Curve2D::BsplineCurve(model::BsplineCurve::new(
+            model::KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
+            vec![Point2::new(pi, 0.0), Point2::new(0.5 * pi, 0.0)],
+        ));
+        assert!(mapped_receipt(&source, &carrier, &chart, range, target, 1e-7).is_some());
+    }
+
+    fn sphere_chart(
+        range: [f64; 2],
+        target: [f64; 2],
+        reflected: bool,
+        swapped: bool,
+        phase: f64,
+        winding: f64,
+    ) -> model::Curve2D {
+        let polar = [
+            range[0] + phase,
+            range[0] + phase + winding * (range[1] - range[0]),
+        ];
+        let point = |value| {
+            if swapped {
+                Point2::new(0.0, value)
+            } else {
+                Point2::new(value, 0.0)
+            }
+        };
+        let mut chart = model::Processor::<_, Matrix3>::new(model::TrimmedCurve::new(
+            Box::new(model::Curve2D::BsplineCurve(model::BsplineCurve::new(
+                model::KnotVector::from(vec![target[0], target[0], target[1], target[1]]),
+                vec![point(polar[0]), point(polar[1])],
+            ))),
+            (target[0], target[1]),
+        ));
+        if reflected {
+            chart.invert();
+        }
+        model::Curve2D::TrimmedCurve(chart)
+    }
+
+    #[test]
+    fn microscopic_sphere_meridian_requires_matching_phase_and_relative_winding() {
+        let range = [0.25, 0.75];
+        let target = [2.0, 4.0];
+        let source = sphere_meridian(1e-12, Point3::origin(), Matrix4::identity(), range, false);
+        let carrier = model::Surface::SphericalSurface(model::Processor::<_, Matrix4>::new(
+            model::Sphere::new(Point3::origin(), 1e-12),
+        ));
+        for (phase, winding, expected) in [(0.0, 1.0, true), (0.5, 1.0, false), (0.0, 2.0, false)] {
+            let chart = sphere_chart(range, target, false, false, phase, winding);
+            assert_eq!(
+                mapped_receipt(&source, &carrier, &chart, range, target, 1e-7).is_some(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn affine_sphere_meridians_keep_reflections_axes_and_independent_finite_gauges() {
+        let range = [0.25, 2.75];
+        let center = Point3::new(0.5, -0.25, 0.125);
+        // Shear and nonuniform scale are intentionally not an orthogonal pose.
+        let pose = Matrix4::new(
+            2.0, 0.25, 0.0, 0.0, 0.5, 0.75, 0.125, 0.0, 0.25, 0.0, 1.5, 0.0, 12.0, -7.0, 3.0, 1.0,
+        );
+        for reflected in [false, true] {
+            for swapped in [false, true] {
+                let source = sphere_meridian(2.0, center, pose, range, reflected);
+                let mut sphere =
+                    model::Processor::with_transform(model::Sphere::new(center, 2.0), pose);
+                if swapped {
+                    sphere.invert();
+                }
+                let carrier = model::Surface::SphericalSurface(sphere);
+                for target in [[0.0, 0.5], [2.0, 4.0]] {
+                    let chart = sphere_chart(range, target, reflected, swapped, 0.0, 1.0);
+                    assert!(
+                        mapped_receipt(&source, &carrier, &chart, range, target, 1e-7).is_some()
+                    );
+                }
+            }
+        }
+    }
+
     fn original_ring(radius: f64, center: Point3, pose: Matrix4) -> model::Curve {
         let circle = model::Curve::ParameterCurve(model::ParameterCurve::new(
             model::Curve2D::Conic(model::Conic2D::Ellipse(
@@ -1000,14 +1276,16 @@ mod tests {
         tolerance: f64,
     ) -> Option<f64> {
         certify(
-            source,
-            carrier,
-            chart,
-            range,
-            target,
-            [0.0; 2],
-            tolerance,
-            true,
+            HarmonicComparison {
+                curve: source,
+                surface: carrier,
+                chart,
+                range,
+                target,
+                margin: [0.0; 2],
+                tolerance,
+                require_tangent: true,
+            },
             &mut GeometryWorkBudget::new(50_000),
             &AtomicBool::new(false),
             &mut HarmonicDiagnostic::new(tolerance),

@@ -134,7 +134,7 @@ fn revolution_witness(
         }
     };
     let swapped = !processor.orientation();
-    if let Some((center, u, v, a, b)) = circle_local(&witness, &inv) {
+    if let Some((center, u, v, a, b)) = circle_local(witness, &inv) {
         let d = center - origin;
         if (d - d.dot(axis) * axis).magnitude() > RESIDUAL
             || u.dot(axis).abs() > RESIDUAL
@@ -202,7 +202,7 @@ fn sphere_witness(
     processor: &monstertruck_io::step::load::step_geometry::SphericalSurface,
 ) -> Result<Option<Curve2D>, GeometryError> {
     let inv = inverse(processor.transform())?;
-    let Some((center, u, v, a, b)) = circle_local(&witness, &inv) else {
+    let Some((center, u, v, a, b)) = circle_local(witness, &inv) else {
         return Ok(None);
     };
     let sphere = processor.entity().0;
@@ -238,12 +238,15 @@ fn sphere_witness(
     let branch = ((la + lb) * 0.5 / TAU).round() * TAU;
     la -= branch;
     lb -= branch;
-    if la.min(lb) <= -PI / 2.0 || la.max(lb) >= PI / 2.0 {
-        // The opposite regular longitude chart may cover this bounded meridian.
+    if la.min(lb) < -PI / 2.0 || la.max(lb) > PI / 2.0 {
+        // Endpoints may belong to the original analytic pole stratum. This is
+        // only a proposal: coefficient tubes and the whole shared-vertex pole
+        // completion still qualify both incident uses. An interior crossing
+        // cannot be made regular by selecting another longitude.
         let shift = if (la + lb) * 0.5 >= 0.0 { PI } else { -PI };
         la -= shift;
         lb -= shift;
-        if la.min(lb) <= -PI / 2.0 || la.max(lb) >= PI / 2.0 {
+        if la.min(lb) < -PI / 2.0 || la.max(lb) > PI / 2.0 {
             return Err(error(
                 GeometryErrorCode::SingularGeometry,
                 "meridian trim crosses an unresolved spherical pole chart",
@@ -271,7 +274,7 @@ fn torus_witness(
     processor: &monstertruck_io::step::load::step_geometry::ToroidalSurface,
 ) -> Result<Option<Curve2D>, GeometryError> {
     let inv = inverse(processor.transform())?;
-    let Some((center, u, v, a, b)) = circle_local(&witness, &inv) else {
+    let Some((center, u, v, a, b)) = circle_local(witness, &inv) else {
         return Ok(None);
     };
     let torus = processor.entity();
@@ -478,5 +481,53 @@ pub(super) fn guide_chart(
             torus_witness(witness, s)
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spherical_meridian_proposals_include_only_original_pole_endpoints() {
+        let radius = 2.;
+        let mut carrier = Processor::new(monstertruck_io::step::load::step_geometry::Sphere(
+            monstertruck_modeling::Sphere::new(Point3::origin(), radius),
+        ));
+        let arc = |start_angle, end_angle| BoundaryCurveMm::CircleArc {
+            center_mm: [0.; 3],
+            u_mm: [radius, 0., 0.],
+            v_mm: [0., 0., radius],
+            start_angle,
+            end_angle,
+        };
+        let half_pi = PI / 2.;
+        for inverted in [false, true] {
+            if inverted {
+                carrier.invert();
+            }
+            for (a, b) in [(-half_pi, 0.), (0., half_pi), (half_pi, 0.), (0., -half_pi)] {
+                let proposal = sphere_witness(&arc(a, b), &carrier).unwrap().unwrap();
+                let start = if inverted {
+                    Point2::new(a, 0.)
+                } else {
+                    Point2::new(0., a)
+                };
+                let end = if inverted {
+                    Point2::new(b, 0.)
+                } else {
+                    Point2::new(0., b)
+                };
+                assert_eq!(proposal.subs(0.), start);
+                assert_eq!(proposal.subs(1.), end);
+            }
+            for (a, b) in [(0., PI), (-half_pi - 1e-4, 0.), (0., half_pi + 1e-4)] {
+                assert_eq!(
+                    sphere_witness(&arc(a, b), &carrier).unwrap_err().code,
+                    GeometryErrorCode::SingularGeometry,
+                    "an interior or outside pole crossing is not an endpoint stratum",
+                );
+            }
+        }
     }
 }

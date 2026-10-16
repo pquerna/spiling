@@ -216,26 +216,28 @@ pub(crate) fn tessellate(
                 None
             };
             let data = match audit_face(
-                &polygon,
-                &compressed.faces[0].surface,
-                face.orientation(),
-                info,
-                cancel,
-                builder.remaining_budget(),
+                &FaceAuditInput {
+                    polygon: &polygon,
+                    surface: &compressed.faces[0].surface,
+                    native_orientation: face.orientation(),
+                    info,
+                    budget: builder.remaining_budget(),
+                    sphere_chart: sphere_chart.as_ref(),
+                    boundary_face: boundary_face.as_ref(),
+                    extra_retained_bytes: extra_bytes
+                        .saturating_add(
+                            sphere_chart
+                                .as_ref()
+                                .map_or(0, |chart| chart.native_retained_bytes()),
+                        )
+                        .saturating_add(
+                            boundary_face
+                                .as_ref()
+                                .map_or(0, |face| face.native_retained_bytes()),
+                        ),
+                },
                 &mut work,
-                sphere_chart.as_ref(),
-                boundary_face.as_ref(),
-                extra_bytes
-                    .saturating_add(
-                        sphere_chart
-                            .as_ref()
-                            .map_or(0, |chart| chart.native_retained_bytes()),
-                    )
-                    .saturating_add(
-                        boundary_face
-                            .as_ref()
-                            .map_or(0, |face| face.native_retained_bytes()),
-                    ),
+                cancel,
             ) {
                 Ok(data) => data,
                 Err(cause)
@@ -358,18 +360,32 @@ impl FaceMesh {
     }
 }
 
-fn audit_face(
-    polygon: &PolygonMesh,
-    surface: &Surface,
+struct FaceAuditInput<'a, 'source> {
+    polygon: &'a PolygonMesh,
+    surface: &'a Surface,
     native_orientation: bool,
-    info: &FaceInfo,
-    cancel: &AtomicBool,
+    info: &'a FaceInfo,
     budget: MeshBudget,
-    work: &mut crate::GeometryWorkBudget,
-    sphere_chart: Option<&sphere::SphereChart<'_>>,
-    boundary_face: Option<&boundary::BoundaryFace<'_>>,
+    sphere_chart: Option<&'a sphere::SphereChart<'source>>,
+    boundary_face: Option<&'a boundary::BoundaryFace<'source>>,
     extra_retained_bytes: usize,
+}
+
+fn audit_face(
+    input: &FaceAuditInput<'_, '_>,
+    work: &mut crate::GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<FaceMesh, GeometryError> {
+    let &FaceAuditInput {
+        polygon,
+        surface,
+        native_orientation,
+        info,
+        budget,
+        sphere_chart,
+        boundary_face,
+        extra_retained_bytes,
+    } = input;
     if polygon.tri_faces().is_empty()
         || polygon.positions().is_empty()
         || !polygon.quad_faces().is_empty()
@@ -657,18 +673,18 @@ fn audit_face(
             "native boundary quotient cannot drop a complete source face",
         ));
     }
-    if let Some(face) = boundary_face {
-        if omitted.iter().enumerate().any(|(joint, &used)| {
+    if let Some(face) = boundary_face
+        && omitted.iter().enumerate().any(|(joint, &used)| {
             used != 0
                 && !result
                     .positions
                     .iter()
                     .any(|point| *point == face.vertex(joint))
-        }) {
-            return Err(invalid(
-                "omitted native pole patch has no surviving original vertex anchor",
-            ));
-        }
+        })
+    {
+        return Err(invalid(
+            "omitted native pole patch has no surviving original vertex anchor",
+        ));
     }
     Ok(result)
 }

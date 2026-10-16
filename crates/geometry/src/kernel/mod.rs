@@ -107,6 +107,28 @@ pub(crate) struct FaceBoundaryRefs {
     pub(crate) parameter: FaceParameterWitness,
 }
 
+/// Whole-source covering-chart authority. A pole graph does not prove a
+/// regular longitude inverse; its physical and UV bounds remain on the coedge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SourceChartCertificate {
+    Unproved,
+    InverseOrExact,
+    PoleMeridianGraph {
+        latitude_axis: usize,
+        pole_endpoints: [bool; 2],
+    },
+}
+
+impl SourceChartCertificate {
+    pub(crate) fn is_certified(self) -> bool {
+        !matches!(self, Self::Unproved)
+    }
+
+    pub(crate) fn has_regular_inverse(self) -> bool {
+        matches!(self, Self::InverseOrExact)
+    }
+}
+
 pub(crate) struct BoundaryCoedgeRef {
     pub(crate) witness: usize,
     pub(crate) orientation: bool,
@@ -116,9 +138,9 @@ pub(crate) struct BoundaryCoedgeRef {
     pub(crate) source_chart_error_mm: f64,
     /// UV trim parameters are independent of rational native edge parameters.
     pub(crate) source_chart_parameter_range: Option<(f64, f64)>,
-    /// False retains an original declared trim without authorizing operations
-    /// that need a proved source/native covering chart.
-    pub(crate) source_chart_certified: bool,
+    /// An unproved original declared trim remains retained without authorizing
+    /// operations that need a proved source/native covering chart.
+    pub(crate) source_chart_certificate: SourceChartCertificate,
     /// Retained original source PCURVE/literal parameter expression. A derived
     /// inverse or small physical residual alone never supplies this authority.
     pub(crate) source_chart_declared: bool,

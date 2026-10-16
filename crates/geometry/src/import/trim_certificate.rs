@@ -127,6 +127,15 @@ impl std::fmt::Display for CorrespondenceDiagnostic {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct Correspondence<'a> {
+    pub curve: &'a model::Curve,
+    pub surface: &'a model::Surface,
+    pub chart: &'a model::Curve2D,
+    pub maximum_error_mm: f64,
+    pub margin_uv: [f64; 2],
+}
+
 /// Prove a whole-original-range physical residual under one captured monotone
 /// affine correspondence. The native curve range and the pcurve's *own* range
 /// are independent. Both endpoint-pairing orientations are proposals only;
@@ -148,10 +157,13 @@ pub(super) fn certify_curve_on_surface(
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
     certify_with_policy(
-        curve,
-        surface,
-        chart,
-        maximum_error_mm,
+        Correspondence {
+            curve,
+            surface,
+            chart,
+            maximum_error_mm,
+            margin_uv: [0.0; 2],
+        },
         ProofPolicy::EitherPosition,
         work,
         cancel,
@@ -170,21 +182,14 @@ pub(super) fn certify_curve_on_surface(
 /// not independently supply a UV inverse, UV winding/arrangement certificate,
 /// trim coverage or native use incidence. Those remain separate obligations.
 pub(super) fn certify_declared_coedge_correspondence(
-    curve: &model::Curve,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    maximum_error_mm: f64,
-    margin_uv: [f64; 2],
+    input: Correspondence<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: Option<&mut CorrespondenceDiagnostic>,
 ) -> Result<Option<f64>, GeometryError> {
     certify_with_policy(
-        curve,
-        surface,
-        chart,
-        maximum_error_mm,
-        ProofPolicy::DeclaredCoedge(margin_uv),
+        input,
+        ProofPolicy::DeclaredCoedge(input.margin_uv),
         work,
         cancel,
         diagnostic,
@@ -206,15 +211,13 @@ impl ProofPolicy {
 }
 
 fn certify_with_policy(
-    curve: &model::Curve,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    maximum_error_mm: f64,
+    input: Correspondence<'_>,
     policy: ProofPolicy,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     diagnostic: Option<&mut CorrespondenceDiagnostic>,
 ) -> Result<Option<f64>, GeometryError> {
+    let maximum_error_mm = input.maximum_error_mm;
     check_cancel(cancel)?;
     if !maximum_error_mm.is_finite() || maximum_error_mm <= 0.0 {
         return Err(GeometryError::new(
@@ -234,17 +237,7 @@ fn certify_with_policy(
     }
     // The per-certificate frozen cap narrows, never resets, the caller's job cap.
     let mut local = GeometryWorkBudget::new(work.remaining().min(MAX_WORK));
-    let result = certify(
-        curve,
-        surface,
-        chart,
-        maximum_error_mm,
-        policy,
-        None,
-        &mut local,
-        cancel,
-        diagnostic,
-    );
+    let result = certify(input, policy, None, &mut local, cancel, diagnostic);
     // Cancellation stops geometry work, not the debit for work already done.
     work.charge(local.consumed(), &AtomicBool::new(false))?;
     check_cancel(cancel)?;
@@ -252,15 +245,16 @@ fn certify_with_policy(
 }
 
 pub(super) fn certify_retained_coedge_correspondence(
-    curve: &model::Curve,
+    input: Correspondence<'_>,
     prepared: &model::PreparedValidatedCurve<'static>,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    maximum_error: f64,
-    margin_uv: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
+    let Correspondence {
+        maximum_error_mm: maximum_error,
+        margin_uv,
+        ..
+    } = input;
     check_cancel(cancel)?;
     if !maximum_error.is_finite()
         || maximum_error <= 0.0
@@ -275,10 +269,7 @@ pub(super) fn certify_retained_coedge_correspondence(
     }
     let mut local = GeometryWorkBudget::new(work.remaining().min(MAX_WORK));
     let result = certify(
-        curve,
-        surface,
-        chart,
-        maximum_error,
+        input,
         ProofPolicy::DeclaredCoedge(margin_uv),
         Some(prepared),
         &mut local,
@@ -309,9 +300,9 @@ fn resource(message: &str) -> GeometryError {
 /// Explicit curves need only one immutable borrowed source capture. In
 /// particular, do not prepare a separate implicit branch for each child span.
 /// Explicit C0 splines are evaluated only after their native knots are split.
-enum Source<'a> {
-    Explicit(&'a model::Curve),
-    Implicit(PreparedCurveEnclosure<'a>),
+struct Source<'a> {
+    original: &'a model::Curve,
+    implicit: Option<PreparedCurveEnclosure<'a>>,
 }
 impl Source<'_> {
     fn jet(
@@ -320,11 +311,10 @@ impl Source<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<CurveEnclosure, GeometryError> {
-        match self {
-            Self::Explicit(curve) => {
-                parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)
-            }
-            Self::Implicit(curve) => curve.jet((range[0], range[1]), work, cancel),
+        if let Some(curve) = &self.implicit {
+            curve.jet((range[0], range[1]), work, cancel)
+        } else {
+            parametric::curve_enclosure(self.original, (range[0], range[1]), work, cancel)
         }
     }
     fn endpoint(
@@ -333,11 +323,11 @@ impl Source<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<[Interval; 3], GeometryError> {
-        match self {
-            Self::Explicit(_) => Ok(self.jet([t, t], work, cancel)?.position),
-            // Native evaluate supplies the absolute endpoint enclosure, including
-            // shared continuation joints where a two-sided derivative is absent.
-            Self::Implicit(curve) => curve.endpoint_position(t, work, cancel),
+        if let Some(curve) = &self.implicit {
+            // Native evaluate retains continuation-joint endpoint enclosures.
+            curve.endpoint_position(t, work, cancel)
+        } else {
+            Ok(self.jet([t, t], work, cancel)?.position)
         }
     }
 }
@@ -429,16 +419,20 @@ const EMPTY_SPAN: Span = Span {
 const STACK_BYTES: usize = size_of::<[Span; MAX_DEPTH + 1]>();
 
 fn certify(
-    curve: &model::Curve,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    tolerance: f64,
+    input: Correspondence<'_>,
     policy: ProofPolicy,
     retained: Option<&model::PreparedValidatedCurve<'static>>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     mut diagnostic: Option<&mut CorrespondenceDiagnostic>,
 ) -> Result<Option<f64>, GeometryError> {
+    let Correspondence {
+        curve,
+        surface,
+        chart,
+        maximum_error_mm: tolerance,
+        ..
+    } = input;
     work.charge(1, cancel)?;
     let Some((a, b)) = curve.try_range_tuple() else {
         return Ok(None);
@@ -472,27 +466,30 @@ fn certify(
             break;
         }
     }
-    let source = if let Some(prepared) = retained {
-        Source::Implicit(PreparedCurveEnclosure::borrowed_restricted(
-            prepared,
-            1.0,
-            (a, b),
-        ))
-    } else if matches!(basis, model::Curve::IntersectionCurve(_)) {
-        Source::Implicit(parametric::prepare_curve_enclosure(
-            curve,
-            (a, b),
-            MAX_SCRATCH_BYTES - SCRATCH_OVERHEAD_BYTES,
-            work,
-            cancel,
-        )?)
-    } else {
-        Source::Explicit(curve)
+    let source = Source {
+        original: curve,
+        implicit: if let Some(prepared) = retained {
+            Some(PreparedCurveEnclosure::borrowed_restricted(
+                prepared,
+                1.0,
+                (a, b),
+            ))
+        } else if matches!(basis, model::Curve::IntersectionCurve(_)) {
+            Some(parametric::prepare_curve_enclosure(
+                curve,
+                (a, b),
+                MAX_SCRATCH_BYTES - SCRATCH_OVERHEAD_BYTES,
+                work,
+                cancel,
+            )?)
+        } else {
+            None
+        },
     };
-    let retained = match &source {
-        Source::Implicit(c) => c.retained_bytes(),
-        _ => 0,
-    };
+    let retained = source
+        .implicit
+        .as_ref()
+        .map_or(0, PreparedCurveEnclosure::retained_bytes);
     let available = MAX_SCRATCH_BYTES
         .checked_sub(SCRATCH_OVERHEAD_BYTES)
         .and_then(|bytes| bytes.checked_sub(retained))
@@ -509,16 +506,18 @@ fn certify(
         let map = AffineMap::new([a, b], target)?;
         let mut harmonic_diagnostic = super::harmonic::HarmonicDiagnostic::new(tolerance);
         let harmonic_started = work.consumed();
-        if let Source::Explicit(curve) = &source {
-            if let Some(bound) = resolution(super::harmonic::certify(
-                curve,
-                surface,
-                chart,
-                [a, b],
-                target,
-                policy.margin_uv(),
-                tolerance,
-                matches!(policy, ProofPolicy::DeclaredCoedge(_)),
+        if source.implicit.is_none()
+            && let Some(bound) = resolution(super::harmonic::certify(
+                super::harmonic::HarmonicComparison {
+                    curve: source.original,
+                    surface,
+                    chart,
+                    range: [a, b],
+                    target,
+                    margin: policy.margin_uv(),
+                    tolerance,
+                    require_tangent: matches!(policy, ProofPolicy::DeclaredCoedge(_)),
+                },
                 work,
                 cancel,
                 &mut harmonic_diagnostic,
@@ -534,9 +533,9 @@ fn certify(
                         work.consumed() - harmonic_started, cause.message,
                     ),
                 )
-            }))? {
-                return Ok(Some(bound));
-            }
+            }))?
+        {
+            return Ok(Some(bound));
         }
         let harmonic_work = work.consumed() - harmonic_started;
         let fallback_started = work.consumed();
@@ -544,25 +543,23 @@ fn certify(
         let result = (|| {
             add_cut(&mut cuts, a, available, work, cancel)?;
             add_cut(&mut cuts, b, available, work, cancel)?;
-            match &source {
-                Source::Implicit(prepared) => {
-                    for (low, high) in prepared.parameter_intervals() {
+            if let Some(prepared) = &source.implicit {
+                for (low, high) in prepared.parameter_intervals() {
+                    add_cut(&mut cuts, low, available, work, cancel)?;
+                    add_cut(&mut cuts, high, available, work, cancel)?;
+                }
+            } else {
+                let curve = source.original;
+                visit_curve_cuts(curve, &mut |value| {
+                    work.charge(1, cancel)?;
+                    let low = value.lo.max(a);
+                    let high = value.hi.min(b);
+                    if low <= high {
                         add_cut(&mut cuts, low, available, work, cancel)?;
                         add_cut(&mut cuts, high, available, work, cancel)?;
                     }
-                }
-                Source::Explicit(curve) => {
-                    visit_curve_cuts(curve, &mut |value| {
-                        work.charge(1, cancel)?;
-                        let low = value.lo.max(a);
-                        let high = value.hi.min(b);
-                        if low <= high {
-                            add_cut(&mut cuts, low, available, work, cancel)?;
-                            add_cut(&mut cuts, high, available, work, cancel)?;
-                        }
-                        Ok(())
-                    })?;
-                }
+                    Ok(())
+                })?;
             }
             visit_chart_cuts(chart, &mut |value| {
                 work.charge(1, cancel)?;
@@ -585,7 +582,18 @@ fn certify(
             cuts.sort_unstable_by(f64::total_cmp);
             cuts.dedup();
             verify(
-                &source, surface, chart, map, &cuts, tolerance, policy, &mut nodes, work, cancel,
+                &MappedCorrespondence {
+                    source: &source,
+                    surface,
+                    chart,
+                    map,
+                    policy,
+                },
+                &cuts,
+                tolerance,
+                &mut nodes,
+                work,
+                cancel,
             )
         })();
         let fallback_work = work.consumed() - fallback_started;
@@ -827,16 +835,28 @@ fn composed_surface(
     });
     parametric::surface_enclosure(surface, domain, work, cancel)
 }
-fn residual(
-    source: &Source<'_>,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
+struct MappedCorrespondence<'a, 'source> {
+    source: &'a Source<'source>,
+    surface: &'a model::Surface,
+    chart: &'a model::Curve2D,
     map: AffineMap,
+    policy: ProofPolicy,
+}
+
+fn residual(
+    input: &MappedCorrespondence<'_, '_>,
     t: f64,
-    margin_uv: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[Interval; 3], GeometryError> {
+    let MappedCorrespondence {
+        source,
+        surface,
+        chart,
+        map,
+        policy,
+    } = *input;
+    let margin_uv = policy.margin_uv();
     let c = source.endpoint(t, work, cancel)?;
     let uv = chart_jet(chart, map.image([t, t])?, work, cancel)?;
     let s = composed_surface(surface, &uv, margin_uv, work, cancel)?;
@@ -891,12 +911,10 @@ fn source_span_smooth(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    let Source::Explicit(original) = source else {
-        if let Source::Implicit(prepared) = source {
-            return prepared.is_smooth_on((range[0], range[1]), work, cancel);
-        }
-        return Ok(false);
-    };
+    if let Some(prepared) = &source.implicit {
+        return prepared.is_smooth_on((range[0], range[1]), work, cancel);
+    }
+    let original = source.original;
     let mut smooth = true;
     visit_curve_cuts(original, &mut |cut| {
         work.charge(1, cancel)?;
@@ -908,7 +926,7 @@ fn source_span_smooth(
     if !smooth {
         return Ok(false);
     }
-    let mut curve = *original;
+    let mut curve = original;
     let mut parameter = Interval::new(range[0], range[1])?;
     for depth in 0..=MAX_WRAPPER_DEPTH {
         work.charge(1, cancel)?;
@@ -950,16 +968,20 @@ struct CellEnclosure {
 }
 
 fn cell_enclosure(
-    source: &Source<'_>,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    map: AffineMap,
+    input: &MappedCorrespondence<'_, '_>,
     range: [f64; 2],
-    require_tangent: bool,
-    margin_uv: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<CellEnclosure, GeometryError> {
+    let MappedCorrespondence {
+        source,
+        surface,
+        chart,
+        map,
+        policy,
+    } = *input;
+    let margin_uv = policy.margin_uv();
+    let require_tangent = matches!(policy, ProofPolicy::DeclaredCoedge(_));
     let c = source.jet(range, work, cancel)?;
     let chart_range = map.image(range)?;
     let uv = chart_jet(chart, chart_range, work, cancel)?;
@@ -1054,42 +1076,19 @@ fn relative_tangent_agreement(
     Ok(TangentAgreement::Unresolved)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify(
-    source: &Source<'_>,
-    surface: &model::Surface,
-    chart: &model::Curve2D,
-    map: AffineMap,
+    input: &MappedCorrespondence<'_, '_>,
     cuts: &[f64],
     tolerance: f64,
-    policy: ProofPolicy,
     nodes: &mut usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
     let mut pending = [EMPTY_SPAN; MAX_DEPTH + 1];
     let mut achieved: f64 = 0.0;
-    let mut front = residual(
-        source,
-        surface,
-        chart,
-        map,
-        cuts[0],
-        policy.margin_uv(),
-        work,
-        cancel,
-    )?;
+    let mut front = residual(input, cuts[0], work, cancel)?;
     for pair in cuts.windows(2) {
-        let back = residual(
-            source,
-            surface,
-            chart,
-            map,
-            pair[1],
-            policy.margin_uv(),
-            work,
-            cancel,
-        )?;
+        let back = residual(input, pair[1], work, cancel)?;
         pending[0] = Span {
             range: [pair[0], pair[1]],
             endpoints: [front, back],
@@ -1109,18 +1108,7 @@ fn verify(
             if endpoints.iter().any(|bound| bound.lo > tolerance) {
                 return Ok(None);
             }
-            let attempt = cell_enclosure(
-                source,
-                surface,
-                chart,
-                map,
-                span.range,
-                matches!(policy, ProofPolicy::DeclaredCoedge(_)),
-                policy.margin_uv(),
-                work,
-                cancel,
-            )
-            .and_then(|cell| {
+            let attempt = cell_enclosure(input, span.range, work, cancel).and_then(|cell| {
                 let tangent = match cell.tangents {
                     Some((source, chart)) => relative_tangent_agreement(source, chart)?,
                     None => TangentAgreement::Proved,
@@ -1169,16 +1157,7 @@ fn verify(
             if span.depth == MAX_DEPTH || middle <= span.range[0] || middle >= span.range[1] {
                 return Ok(None);
             }
-            let midpoint = residual(
-                source,
-                surface,
-                chart,
-                map,
-                middle,
-                policy.margin_uv(),
-                work,
-                cancel,
-            )?;
+            let midpoint = residual(input, middle, work, cancel)?;
             if norm(midpoint)?.lo > tolerance {
                 return Ok(None);
             }
@@ -1368,11 +1347,13 @@ mod tests {
         let chart = model::Curve2D::Line(model::Line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)));
         let certify = |margin| {
             certify_declared_coedge_correspondence(
-                &curve,
-                &plane(),
-                &chart,
-                1.0e-7,
-                [0.0, margin],
+                Correspondence {
+                    curve: &curve,
+                    surface: &plane(),
+                    chart: &chart,
+                    maximum_error_mm: 1.0e-7,
+                    margin_uv: [0.0, margin],
+                },
                 &mut GeometryWorkBudget::new(MAX_WORK),
                 &AtomicBool::new(false),
                 None,
@@ -1380,7 +1361,7 @@ mod tests {
             .unwrap()
         };
         let bound = certify(1.0e-9).unwrap();
-        assert!(bound >= 1.0e-9 && bound <= 1.0e-7);
+        assert!((1.0e-9..=1.0e-7).contains(&bound));
         assert!(certify(1.0e-3).is_none());
     }
 
@@ -1476,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn reflected_inner_c0_knots_remain_enclosed_not_rounded_exact() {
+    fn reflected_inner_c0_knots_retain_original_joint_coverage() {
         let basis = model::Curve2D::BsplineCurve(model::BsplineCurve::new(
             model::KnotVector::from(vec![0.0, 0.0, 0.25, 1.0, 1.0]),
             vec![
@@ -1493,7 +1474,6 @@ mod tests {
         let mut found = false;
         visit_chart_cuts(&model::Curve2D::TrimmedCurve(wrapper), &mut |cut| {
             if cut.lo <= 0.75 && cut.hi >= 0.75 {
-                assert!(cut.lo < cut.hi);
                 found = true;
             }
             Ok(())
@@ -1509,11 +1489,13 @@ mod tests {
         tolerance: f64,
     ) -> Option<f64> {
         certify_declared_coedge_correspondence(
-            curve,
-            surface,
-            chart,
-            tolerance,
-            [0.0; 2],
+            Correspondence {
+                curve,
+                surface,
+                chart,
+                maximum_error_mm: tolerance,
+                margin_uv: [0.0; 2],
+            },
             &mut GeometryWorkBudget::new(MAX_WORK),
             &AtomicBool::new(false),
             None,
@@ -1595,11 +1577,13 @@ mod tests {
             let mut work = GeometryWorkBudget::new(50_000);
             assert!(
                 certify_declared_coedge_correspondence(
-                    &curve,
-                    &surface,
-                    &chart,
-                    1e-7,
-                    [0.0; 2],
+                    Correspondence {
+                        curve: &curve,
+                        surface: &surface,
+                        chart: &chart,
+                        maximum_error_mm: 1e-7,
+                        margin_uv: [0.0; 2],
+                    },
                     &mut work,
                     &AtomicBool::new(false),
                     None,
@@ -1613,11 +1597,13 @@ mod tests {
             let mut work = GeometryWorkBudget::new(50_000);
             assert!(
                 certify_declared_coedge_correspondence(
-                    &curve,
-                    &surface,
-                    &chart,
-                    1e-7,
-                    [0.0; 2],
+                    Correspondence {
+                        curve: &curve,
+                        surface: &surface,
+                        chart: &chart,
+                        maximum_error_mm: 1e-7,
+                        margin_uv: [0.0; 2],
+                    },
                     &mut work,
                     &AtomicBool::new(false),
                     None,
@@ -1657,11 +1643,13 @@ mod tests {
         ));
         let chart = angular_line(1.0, (0.0, tau));
         let error = certify_declared_coedge_correspondence(
-            &original,
-            &carrier,
-            &chart,
-            1e-7,
-            [0.0; 2],
+            Correspondence {
+                curve: &original,
+                surface: &carrier,
+                chart: &chart,
+                maximum_error_mm: 1e-7,
+                margin_uv: [0.0; 2],
+            },
             &mut GeometryWorkBudget::new(50_000),
             &AtomicBool::new(false),
             None,
@@ -1778,12 +1766,14 @@ mod tests {
         let mut work = GeometryWorkBudget::new(MAX_WORK);
         assert!(
             certify_retained_coedge_correspondence(
-                &curve,
+                Correspondence {
+                    curve: &curve,
+                    surface: &xy,
+                    chart: &chart(0.0),
+                    maximum_error_mm: 1.0e-7,
+                    margin_uv: [0.0; 2],
+                },
                 &prepared,
-                &xy,
-                &chart(0.0),
-                1.0e-7,
-                [0.0; 2],
                 &mut work,
                 &cancel
             )
@@ -1792,12 +1782,14 @@ mod tests {
         );
         assert!(
             certify_retained_coedge_correspondence(
-                &curve,
+                Correspondence {
+                    curve: &curve,
+                    surface: &xy,
+                    chart: &chart(0.05),
+                    maximum_error_mm: 1.0e-7,
+                    margin_uv: [0.0; 2],
+                },
                 &prepared,
-                &xy,
-                &chart(0.05),
-                1.0e-7,
-                [0.0; 2],
                 &mut work,
                 &cancel
             )

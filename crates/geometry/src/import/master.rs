@@ -47,6 +47,14 @@ fn finite_range(range: (f64, f64)) -> Result<(f64, f64), GeometryError> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MasterAssociation<'a> {
+    active: Option<(f64, f64)>,
+    whole: Option<(f64, f64)>,
+    retained: Option<(&'a model::Curve, &'a model::PreparedValidatedCurve<'static>)>,
+    scale: f64,
+}
+
 /// Checks every original preferred association, including one below periodic
 /// split/restriction wrappers. No current-face lookup can substitute another
 /// association. CURVE_3D adds no preferred-pcurve obligation; genuine implicit
@@ -78,10 +86,12 @@ pub(super) fn validate_selected_master(
     let original_range = original_range.map(finite_range).transpose()?;
     visit(
         source,
-        None,
-        original_range,
-        retained,
-        scale,
+        MasterAssociation {
+            active: None,
+            whole: original_range,
+            retained,
+            scale,
+        },
         0,
         work,
         cancel,
@@ -90,14 +100,17 @@ pub(super) fn validate_selected_master(
 
 fn visit(
     source: &Curve3D,
-    active: Option<(f64, f64)>,
-    whole: Option<(f64, f64)>,
-    retained: Option<(&model::Curve, &model::PreparedValidatedCurve<'static>)>,
-    scale: f64,
+    association: MasterAssociation<'_>,
     depth: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    let MasterAssociation {
+        active,
+        whole,
+        retained,
+        scale,
+    } = association;
     work.charge(1, cancel)?;
     if depth > MAX_DEPTH {
         return Err(resource());
@@ -105,12 +118,12 @@ fn visit(
     match source {
         Curve3D::TrimmedCurve(trim) => {
             let range = finite_range(trim.entity().range_tuple())?;
-            if let Some(active) = active {
-                if active.0 < range.0 || active.1 > range.1 {
-                    return Err(unresolved(
-                        "nested selected-master restriction leaves its original active interval",
-                    ));
-                }
+            if let Some(active) = active
+                && (active.0 < range.0 || active.1 > range.1)
+            {
+                return Err(unresolved(
+                    "nested selected-master restriction leaves its original active interval",
+                ));
             }
             let gauge = trim
                 .raw_parameter_gauge()
@@ -148,10 +161,12 @@ fn visit(
                 };
             visit(
                 trim.entity().curve(),
-                Some(range),
-                whole,
-                retained,
-                scale,
+                MasterAssociation {
+                    active: Some(range),
+                    whole,
+                    retained,
+                    scale,
+                },
                 depth + 1,
                 work,
                 cancel,
@@ -172,11 +187,7 @@ fn visit(
                     ));
                 };
                 if surface_curve.kind() == SurfaceCurveKind::IntersectionCurve {
-                    let (curve, prepared) = retained.ok_or_else(||unresolved(
-                        "selected implicit master needs its already-owned whole root in the source carrier frame"))?;
-                    prove_retained(
-                        source, selected, whole, curve, prepared, scale, work, cancel,
-                    )?;
+                    prove_retained(source, selected, association, work, cancel)?;
                 } else {
                     prove(
                         surface_curve.leader(),
@@ -191,16 +202,7 @@ fn visit(
             if surface_curve.kind() == SurfaceCurveKind::IntersectionCurve {
                 return Ok(());
             }
-            visit(
-                surface_curve.leader(),
-                active,
-                whole,
-                retained,
-                scale,
-                depth + 1,
-                work,
-                cancel,
-            )
+            visit(surface_curve.leader(), association, depth + 1, work, cancel)
         }
         // The intersection's seed is not its exact world curve, nor a preferred
         // master. Its continuation receipt belongs to the implicit admission gate.
@@ -212,13 +214,19 @@ fn visit(
 fn prove_retained(
     source: &Curve3D,
     selected: &StepParameterCurve,
-    whole: Option<(f64, f64)>,
-    curve: &model::Curve,
-    prepared: &model::PreparedValidatedCurve<'static>,
-    scale: f64,
+    association: MasterAssociation<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    let MasterAssociation {
+        whole,
+        retained,
+        scale,
+        ..
+    } = association;
+    let (curve, prepared) = retained.ok_or_else(|| unresolved(
+        "selected implicit master needs its already-owned whole root in the source carrier frame",
+    ))?;
     let curve = prepared.native_curve().unwrap_or(curve);
     let prepared_range = prepared.range();
     let range = finite_range((prepared_range[0], prepared_range[1]))?;
@@ -294,12 +302,14 @@ fn prove_retained(
     // extraction and the explicit guide above supply proposals, never receipts.
     // This certificate borrows the SAME whole branch as every later consumer.
     if trim_certificate::certify_retained_coedge_correspondence(
-        curve,
+        trim_certificate::Correspondence {
+            curve,
+            surface: &surface,
+            chart: &chart,
+            maximum_error_mm: 1.0e-7 / scale,
+            margin_uv: margin,
+        },
         prepared,
-        &surface,
-        &chart,
-        1.0e-7 / scale,
-        margin,
         work,
         cancel,
     )?
@@ -315,12 +325,14 @@ fn prove_retained(
         // Never extend the owned branch to the unused natural basis interval.
         let chart = restrict_chart_proposal(chart, range, natural)?;
         if trim_certificate::certify_retained_coedge_correspondence(
-            curve,
+            trim_certificate::Correspondence {
+                curve,
+                surface: &surface,
+                chart: &chart,
+                maximum_error_mm: 1.0e-7 / scale,
+                margin_uv: margin,
+            },
             prepared,
-            &surface,
-            &chart,
-            1.0e-7 / scale,
-            margin,
             work,
             cancel,
         )?
@@ -329,9 +341,9 @@ fn prove_retained(
             return Ok(());
         }
     }
-    return Err(unresolved(
+    Err(unresolved(
         "selected original implicit PCURVE lacks whole retained-root forward correspondence",
-    ));
+    ))
 }
 
 fn restrict_chart_proposal(
@@ -426,13 +438,17 @@ fn prove(
     // once with the DECODED-to-native operator, retaining coefficient error.
     let (map, margin) = input_map(map, selected.input_parameter_chart())?;
     let retained = source_trim::retain(
-        leader,
-        &curve,
-        selected.surface(),
-        &surface,
-        map,
-        Some(selected.curve()),
-        scale,
+        source_trim::TrimInput {
+            source_curve: leader,
+            native_curve: &curve,
+            surface: source_trim::SurfaceInput {
+                source_surface: selected.surface(),
+                native_surface: &surface,
+                map,
+                scale,
+            },
+            declared: Some(selected.curve()),
+        },
         margin,
         work,
         cancel,
@@ -444,7 +460,8 @@ fn prove(
     // A bare UV LINE must have received an actual finite active branch from
     // retain's complete physical proof, never its default native unit interval.
     if matches!(selected.curve(), StepCurve2D::Line(_))
-        && (!retained.certified || !matches!(chart, model::Curve2D::TrimmedCurve(_)))
+        && (!retained.certificate.is_certified()
+            || !matches!(chart, model::Curve2D::TrimmedCurve(_)))
     {
         return Err(unresolved(
             "unbounded selected UV LINE has no proved finite active branch",
@@ -458,11 +475,13 @@ fn prove(
     // and current-face associations never grant selected-master authority.
     if !retained.proves_forward(1.0e-7 / scale, margin)
         && trim_certificate::certify_declared_coedge_correspondence(
-            &curve,
-            &surface,
-            chart,
-            1.0e-7 / scale,
-            margin,
+            trim_certificate::Correspondence {
+                curve: &curve,
+                surface: &surface,
+                chart,
+                maximum_error_mm: 1.0e-7 / scale,
+                margin_uv: margin,
+            },
             work,
             cancel,
             None,
@@ -587,15 +606,14 @@ fn input_map(
         ));
     }
     let mut offsets = [Interval::point(0.0); 2];
-    for i in 0..2 {
-        let axis = input.axes[i];
+    for (offset, axis) in offsets.iter_mut().zip(input.axes) {
         if axis.scale != 1.0 && axis.scale != -1.0 {
             return Err(unresolved(
                 "selected PCURVE input chart lacks an exact oriented axis",
             ));
         }
-        offsets[i] = Interval::new(axis.offset_enclosure.lower, axis.offset_enclosure.upper)?;
-        if !axis.offset.is_finite() || axis.offset < offsets[i].lo || axis.offset > offsets[i].hi {
+        *offset = Interval::new(axis.offset_enclosure.lower, axis.offset_enclosure.upper)?;
+        if !axis.offset.is_finite() || axis.offset < offset.lo || axis.offset > offset.hi {
             return Err(unresolved(
                 "selected PCURVE input chart translation is not enclosed",
             ));

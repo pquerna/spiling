@@ -128,8 +128,8 @@ impl SphereChart {
     pub(super) fn normal(&self, position: [Interval; 3]) -> Result<[Interval; 3], GeometryError> {
         let relative = std::array::from_fn(|axis| position[axis].sub(self.center[axis]));
         let mut local = [Interval::point(0.0); 3];
-        for axis in 0..3 {
-            local[axis] = dot(self.cofactors[axis], relative).div(self.determinant)?;
+        for (axis, value) in local.iter_mut().enumerate() {
+            *value = dot(self.cofactors[axis], relative).div(self.determinant)?;
         }
         let normal: [Interval; 3] = std::array::from_fn(|row| {
             (0..3).fold(Interval::point(0.0), |sum, column| {

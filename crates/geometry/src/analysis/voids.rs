@@ -73,6 +73,10 @@ struct NativeCapturedHole {
 /// The producer's original complete authority moves with the immutable slab
 /// capture. A collar is not a regular flow or a zero-void count.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Retain owned native proof inline; boxing adds per-query allocation and splits resource accounting"
+)]
 enum NativeVoidContinuation {
     Regular {
         source_speed: f64,
@@ -1216,27 +1220,25 @@ fn native_height_scopes(
                 }
             }
         }
-        if valid {
-            if let Some(index) = matched {
-                let candidate = if opening == Some(true) {
-                    ProtectedVoidHeightScope::OpenBelow {
-                        upper_mm: capture.world_interval[1],
-                    }
-                } else if opening == Some(false) && lower_world.is_finite() {
-                    ProtectedVoidHeightScope::Bounded {
-                        lower_mm: lower_world,
-                        upper_mm: capture.world_interval[1],
-                    }
-                } else {
-                    continue;
-                };
-                if result[index].is_some() {
-                    return Err(unresolved(
-                        "protected native Hole has ambiguous original wall components",
-                    ));
+        if valid && let Some(index) = matched {
+            let candidate = if opening == Some(true) {
+                ProtectedVoidHeightScope::OpenBelow {
+                    upper_mm: capture.world_interval[1],
                 }
-                result[index] = Some(candidate);
+            } else if opening == Some(false) && lower_world.is_finite() {
+                ProtectedVoidHeightScope::Bounded {
+                    lower_mm: lower_world,
+                    upper_mm: capture.world_interval[1],
+                }
+            } else {
+                continue;
+            };
+            if result[index].is_some() {
+                return Err(unresolved(
+                    "protected native Hole has ambiguous original wall components",
+                ));
             }
+            result[index] = Some(candidate);
         }
     }
     if result.iter().any(Option::is_none) {
@@ -1621,10 +1623,12 @@ mod tests {
         .unwrap();
         let analysis = source
             .analyze_placed_slab(
-                pose,
-                interval,
-                sample,
-                0.05,
+                &super::super::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: interval,
+                    sample_world_z_mm: sample,
+                    native_shape_error_mm: 0.05,
+                },
                 crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(source.retained_bytes()),
                 work,
                 &cancel,

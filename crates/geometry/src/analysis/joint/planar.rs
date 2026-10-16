@@ -19,6 +19,15 @@ struct SegmentIndex {
     nodes: Vec<Node>,
 }
 
+struct SegmentClearanceQuery<'a> {
+    ordinal: usize,
+    ri: usize,
+    edge: usize,
+    rings: &'a [Ring],
+    bounds: [[f64; 2]; 2],
+    margin: f64,
+}
+
 impl SegmentIndex {
     fn build(
         &mut self,
@@ -79,15 +88,18 @@ impl SegmentIndex {
     fn query(
         &self,
         node_index: usize,
-        ordinal: usize,
-        ri: usize,
-        edge: usize,
-        rings: &[Ring],
-        bounds: [[f64; 2]; 2],
-        margin: f64,
+        query: &SegmentClearanceQuery<'_>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<(), GeometryError> {
+        let &SegmentClearanceQuery {
+            ordinal,
+            ri,
+            edge,
+            rings,
+            bounds,
+            margin,
+        } = query;
         work.charge(1, cancel)?;
         let node = &self.nodes[node_index];
         if node.end <= ordinal + 1 {
@@ -131,9 +143,7 @@ impl SegmentIndex {
             }
         } else {
             for child in node.links {
-                self.query(
-                    child, ordinal, ri, edge, rings, bounds, margin, work, cancel,
-                )?;
+                self.query(child, query, work, cancel)?;
             }
         }
         Ok(())
@@ -206,7 +216,19 @@ pub(super) fn feature_clearance(
                         [f64::NEG_INFINITY, f64::INFINITY]
                     }
                 });
-                index.query(root, ordinal, ri, edge, rings, bounds, margin, work, cancel)?;
+                index.query(
+                    root,
+                    &SegmentClearanceQuery {
+                        ordinal,
+                        ri,
+                        edge,
+                        rings,
+                        bounds,
+                        margin,
+                    },
+                    work,
+                    cancel,
+                )?;
                 ordinal += 1;
             }
         }

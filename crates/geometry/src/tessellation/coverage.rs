@@ -175,27 +175,41 @@ pub(super) fn certify(
         cancel,
     )?;
     certify_prepared(
-        definition,
-        ordinal,
-        polygon,
-        reserved,
-        &prepared,
-        &[],
+        &PreparedCoverageQuery {
+            definition,
+            ordinal,
+            polygon,
+            reserved,
+            prepared: &prepared,
+            natural_indices: &[],
+        },
         work,
         cancel,
     )
 }
 
+pub(super) struct PreparedCoverageQuery<'a, 'source> {
+    pub(super) definition: &'a crate::kernel::Definition,
+    pub(super) ordinal: usize,
+    pub(super) polygon: &'a PolygonMesh,
+    pub(super) reserved: usize,
+    pub(super) prepared: &'a crate::kernel::PreparedFaceTrimDomain<'source>,
+    pub(super) natural_indices: &'a [usize],
+}
+
 pub(super) fn certify_prepared(
-    definition: &crate::kernel::Definition,
-    ordinal: usize,
-    polygon: &PolygonMesh,
-    reserved: usize,
-    prepared: &crate::kernel::PreparedFaceTrimDomain<'_>,
-    natural_indices: &[usize],
+    query: &PreparedCoverageQuery<'_, '_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
+    let &PreparedCoverageQuery {
+        definition,
+        ordinal,
+        polygon,
+        reserved,
+        prepared,
+        natural_indices,
+    } = query;
     check_memory(reserved.saturating_add(prepared.retained_bytes()))?;
     let circuits = if natural_indices.is_empty() {
         triangulated_boundary(
@@ -257,8 +271,8 @@ pub(super) fn certify_prepared(
         work.charge(1, cancel)?;
         let a = coedge.oriented_range[0].min(coedge.oriented_range[1]);
         let b = coedge.oriented_range[0].max(coedge.oriented_range[1]);
-        let start = endpoint(&domain, index, a, work, cancel)?;
-        let end = endpoint(&domain, index, b, work, cancel)?;
+        let start = endpoint(domain, index, a, work, cancel)?;
+        let end = endpoint(domain, index, b, work, cancel)?;
         let context = |error: GeometryError, endpoint: [Interval; 2], parameter: f64| {
             GeometryError::new(
                 error.code,
@@ -324,23 +338,25 @@ pub(super) fn certify_prepared(
                     100,
                 )
             };
-            if let Some(t) = t {
-                if t.is_finite() && t > a && t <= b {
-                    let error = span_error(
-                        domain,
-                        index,
-                        [a, t],
-                        [circuit[current], circuit[next]],
-                        certified_uv_domain,
-                        work,
-                        cancel,
-                    )?;
-                    // A clamped nearest proposal can be barely above the
-                    // endpoint on the wrong side. Select by its certified
-                    // displacement, not by the smallest proposed parameter.
-                    if continuation.is_none_or(|old| error < old.2) {
-                        continuation = Some((direction, t, error));
-                    }
+            if let Some(t) = t
+                && t.is_finite()
+                && t > a
+                && t <= b
+            {
+                let error = span_error(
+                    domain,
+                    index,
+                    [a, t],
+                    [circuit[current], circuit[next]],
+                    certified_uv_domain,
+                    work,
+                    cancel,
+                )?;
+                // A clamped nearest proposal can be barely above the
+                // endpoint on the wrong side. Select by its certified
+                // displacement, not by the smallest proposed parameter.
+                if continuation.is_none_or(|old| error < old.2) {
+                    continuation = Some((direction, t, error));
                 }
             }
         }
@@ -736,27 +752,38 @@ fn span_error(
 ) -> Result<f64, GeometryError> {
     let chord = chord.map(|corner| corner.uv.map(Interval::point));
     split_span_error(
-        domain,
-        coedge,
+        &TrimSpanQuery {
+            domain,
+            coedge,
+            certified_uv_domain,
+        },
         range,
         chord,
         0,
-        certified_uv_domain,
         work,
         cancel,
     )
 }
 
-fn split_span_error(
-    domain: &PreparedFaceParameterDomain<'_>,
+struct TrimSpanQuery<'a, 'source> {
+    domain: &'a PreparedFaceParameterDomain<'source>,
     coedge: usize,
+    certified_uv_domain: Option<[[f64; 2]; 2]>,
+}
+
+fn split_span_error(
+    query: &TrimSpanQuery<'_, '_>,
     range: [f64; 2],
     chord: [[Interval; 2]; 2],
     depth: u32,
-    certified_uv_domain: Option<[[f64; 2]; 2]>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
+    let &TrimSpanQuery {
+        domain,
+        coedge,
+        certified_uv_domain,
+    } = query;
     work.charge(1, cancel)?;
     if depth > 64 {
         return Err(GeometryError::new(
@@ -779,22 +806,26 @@ fn split_span_error(
             chord[0][axis].add(chord[1][axis].sub(chord[0][axis]).mul(fraction))
         });
         let left = split_span_error(
-            domain,
-            coedge,
+            &TrimSpanQuery {
+                domain,
+                coedge,
+                certified_uv_domain,
+            },
             [range[0], split],
             [chord[0], middle],
             depth + 1,
-            certified_uv_domain,
             work,
             cancel,
         )?;
         let right = split_span_error(
-            domain,
-            coedge,
+            &TrimSpanQuery {
+                domain,
+                coedge,
+                certified_uv_domain,
+            },
             [split, range[1]],
             [middle, chord[1]],
             depth + 1,
-            certified_uv_domain,
             work,
             cancel,
         )?;

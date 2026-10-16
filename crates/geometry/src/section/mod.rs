@@ -46,6 +46,21 @@ pub struct PreparedSectionSource<'a> {
     originals: Option<crate::parametric::PreparedSectionOriginals<'a>>,
 }
 
+/// A query may request stricter normal accuracy, never relax the frozen policy.
+pub(crate) struct SectionQuery {
+    pub(crate) plane: PlaneMm,
+    pub(crate) maximum_plane_error_mm: f64,
+}
+
+impl SectionQuery {
+    fn standard(plane: PlaneMm) -> Self {
+        Self {
+            plane,
+            maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+        }
+    }
+}
+
 /// Immutable original authority plus query-local admission, never a geometric cache.
 #[derive(Clone, Copy)]
 pub(crate) struct OriginalTrimSource<'s, 'd> {
@@ -214,7 +229,17 @@ impl PreparedSectionSource<'_> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        section_using(self.definition, plane, cancel, byte_limit, Some(self), work)
+        self.section_for_query(&SectionQuery::standard(plane), cancel, byte_limit, work)
+    }
+
+    pub(crate) fn section_for_query(
+        &self,
+        query: &SectionQuery,
+        cancel: &AtomicBool,
+        byte_limit: u32,
+        work: &mut GeometryWorkBudget,
+    ) -> Result<NativeSection, GeometryError> {
+        section_using(self.definition, query, cancel, byte_limit, Some(self), work)
     }
 }
 
@@ -305,18 +330,35 @@ pub(crate) fn section(
     byte_limit: u32,
     work: &mut GeometryWorkBudget,
 ) -> Result<NativeSection, GeometryError> {
-    section_using(definition, plane, cancel, byte_limit, None, work)
+    section_using(
+        definition,
+        &SectionQuery::standard(plane),
+        cancel,
+        byte_limit,
+        None,
+        work,
+    )
 }
 
 fn section_using(
     definition: &Definition,
-    plane: PlaneMm,
+    query: &SectionQuery,
     cancel: &AtomicBool,
     byte_limit: u32,
     prepared: Option<&PreparedSectionSource<'_>>,
     work: &mut GeometryWorkBudget,
 ) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
+    let plane = query.plane;
+    if !query.maximum_plane_error_mm.is_finite()
+        || query.maximum_plane_error_mm <= 0.0
+        || query.maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
+    {
+        return Err(GeometryError::new(
+            GeometryErrorCode::InvalidGeometry,
+            "section plane error must narrow the frozen sampling allowance",
+        ));
+    }
     if let Some(source) = prepared
         && !std::ptr::eq(source.definition, definition)
     {
@@ -400,7 +442,7 @@ fn section_using(
                     && signed_distance(carrier.origin().into(), &plane)?.abs()
                         <= SECTION_PLANE_TOLERANCE_MM
                 {
-                    Some(carrier.clone())
+                    Some(*carrier)
                 } else {
                     None
                 },
@@ -568,12 +610,15 @@ fn section_using(
             sampling_work.reserve_loop(&mut boundaries)?;
             let boundary = loops::sample_wire(
                 wire,
-                &frame,
-                face_sign,
-                &budget,
-                &captures,
-                &prepared_curves,
-                &coverage,
+                &loops::WireSampling {
+                    frame: &frame,
+                    maximum_plane_error_mm: query.maximum_plane_error_mm,
+                    face_sign,
+                    budget: &budget,
+                    captures: &captures,
+                    prepared: &prepared_curves,
+                    coverage: &coverage,
+                },
                 &mut sampling_work,
                 cancel,
             )

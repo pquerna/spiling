@@ -441,11 +441,42 @@ A nearby endpoint, longitude bound or rank failure alone is not a certificate.
 Require one chart sheet; aliases, interior folds, missing incidence and
 singular/projective maps do not acquire this proof.
 
+A meridian ending at a pole cannot obtain a regular longitude inverse by
+dividing by its vanishing projected XY radius. A separate meridian-graph
+receipt may instead prove a positive whole-range radius in the actual
+meridian plane, oriented latitude phase/monotonicity, and distinct transverse,
+radial and carrier-frame physical-error bounds. Retain actual affine processor
+coefficients and their uncertainty; floating axes are not assumed orthonormal.
+Whole original/native position and relative-tangent correspondence remains
+mandatory. This is a latitude graph with a world tube, not uniform zero UV
+uncertainty or an ordinary inverse receipt.
+
+Keep graph authority pending until both actual source-vertex joints receive
+Native whole-connection image certificates; every designated polar endpoint
+must qualify as `SphericalPole`. Ordinary endpoints retain their own Native
+joint obligations. One canonical private chart-certificate kind distinguishes
+unproved, inverse/exact and completed graph authority; do not persist a second
+certification boolean that can disagree. Explicit declarations are never
+replaced, and declared-source inverse shortcuts cannot consume graph authority.
+
+Transport may prefer a whole-coefficient/forward-qualified meridian with an
+oriented polar front as a search anchor when no literal constant anchor exists.
+The complete ordinary chain still transports its original phase, including
+wide sectors; all final joint, winding and bounded-sheet gates remain unchanged.
+Search ordering never authorizes a nearest-angle or source-domain shortcut.
+
 Retain all original source cells and their position, height, distance,
 radial-degree, stationary coverage, manifold and edge-link obligations. Use the
 same source geometric normal for face and coedge incidence. Do not snap UV,
 discard pole cells, replace the carrier or infer global material closure from
 the implicit equation alone.
+
+A closed co-carrier proof separately needs a strictly feasible original trim
+witness for every source face. This is an existence query: a proposed point
+must be certified `Inside` against the whole original boundary, not merely
+evaluated on the carrier. An unresolved seam/pole corner cannot abort search
+before other bounded candidates are considered. If none qualifies, refuse;
+an unresolved candidate never becomes a feasible witness or a complete cover.
 
 ### 5.9 Bound planar proof pairs and reuse exact oriented geometry
 
@@ -492,6 +523,15 @@ parameter query. Mean-value reconstruction outside that image requires jets on
 the complete convex connecting domain. Preserve the existing piecewise source
 admission policy without inventing whole-C1 or Hessian authority. Failed
 attempts and all actual evaluator work retain the existing gates.
+
+If original strict inclusion succeeds but reconstructed plane UV cannot fit
+its immutable chart domain, a bounded necessary-root image refinement may
+isolate each diagonal of the same centered interval equation. Require a
+separated interval denominator and intersect the existing genuine root image;
+then rebuild whole spatial, transversality and plane-UV receipts. The original
+existence/uniqueness domain never changes. Preserve the original healthy-path
+image/proposal arithmetic and charge every additional operation; stronger
+admission must not invalidate later original-branch endpoint obligations.
 
 Native's `max_retained_bytes` bounds owned source/proof storage, not evaluator
 stack memory. Fixed-capacity tensor/basis workspaces must be included in both
@@ -542,6 +582,22 @@ Sharper enclosures do not guarantee monotone numerical root proposals or
 preconditioners. Qualify actual implicit-curve consumers as well as independent
 surface-jet oracles before changing the published kernel pin.
 
+
+### 5.13 Reuse immutable source admission, not geometric assumptions
+
+A borrowed original-spline evaluator may admit the unchanged complete knot
+structure and active range once for repeated leader-knot queries. It owns no
+replacement controls, pointer cache or alternate parameterization. Charged
+binary span selection retains both closed incident spans; whole-range queries
+need no search. Coefficient/basis arithmetic, rational pole checks and physical
+continuity obligations remain independent and mandatory for each actual proof.
+
+A common-end query that already holds a sealed original subpath must evaluate
+its outer endpoints through that exact nested receipt, after checking the same
+prepared source, raw range, projection and containing original uniqueness
+domain. A generic whole-curve point query also consumes adjacent closed pieces
+and is a different obligation. Neither contract may guess a shared root from
+nearby positions or erase original interval/branch identity.
 
 ## 6. Generic geometry substrate and necessary specializations
 
@@ -655,7 +711,43 @@ Native intersection residuals, root completeness and trim classification require
 
 Sample actual native intersection curves. Certify whole parameter intervals against chord/plane budgets using derivative/Bezier bounds and adaptive subdivision; point/midpoint residual tests alone are insufficient. Partition at knot, seam, trim and singular events. Preserve exact closure and material-left orientation; classify islands/holes by robust topology, not polygon area sign alone near degeneracy.
 
+A narrow source slab may need a stricter normal-to-plane sampling bound than
+the frozen general section tolerance. An internal section query therefore
+carries its actual plane and requested maximum plane error; the request may
+only narrow that frozen allowance. Ordinary section consumers keep the
+existing default. Slab analysis derives a precision proposal from its actual
+interior sample clearance and height-functional scale, reserving half the
+clearance for origin/direction uncertainty. The final captured native-plane
+height band must still lie inside the original closed slab; the proposal is
+not authority and cannot enlarge the slab or move its sample.
+
+Thread that limit through native wire and curve sampling. Retain the original
+whole-interval coefficient projection before subdividing when an XYZ box alone
+cannot meet it; normal error, chord error, original endpoint extensions and
+actual output-vertex residuals remain separate. No ordinary query pays for
+stricter precision it did not request. Cancellation, native work, output
+capacity and subdivision depth use the existing cumulative limits.
+
 An implicit `IntersectionCurve` is not necessarily a rational curve with usable Bezier controls. For that path require a validated continuation tube: carrier transversality lower bound, root/endpoint uniqueness, complete interval coverage and trim-branch ownership. The leader polyline only seeds this solve; its chord error does not certify the intersection. Kernel structural carrier/pcurve enclosures are reusable bounds, not substitutes for this tube.
+
+Controlled implicit-source corpus authoring must distinguish actual transverse
+carrier intersections from explicit edges shared by co-carrier chart halves.
+Changing every `SURFACE_CURVE` subtype blindly does not create isolated native
+roots. Keep the original explicit declaration on a proved co-carrier seam;
+retain genuine transverse source declarations and all original geometry,
+master choice, face/edge identity and parameter gauges. This is source
+authorship, never a production import fallback or authority from a fixture name.
+
+An implicit root retains its original carrier UV tubes and exact source-time
+binding. For a genuinely periodic carrier, compare each participating retained
+piece in the candidate's covering chart before hulling adjacent pieces;
+otherwise a valid `0`/`2π` endpoint can create a false whole-period inverse box.
+Only the carrier's declared native period authorizes that translation, enclosed
+outward in the actual native parameter units. The lift is a chart proposal,
+not branch selection: original root identity, full cell coverage, physical
+source correspondence and the whole inverse bound remain mandatory. Include
+both closed incident pieces and charge their search/visitation; never snap an
+endpoint, replace the source chart or use nearest-point proximity as authority.
 
 Native preparation takes one optional `ValidatedFacePlaneSourceAnchor`: `Front`
 or `Back` in the original face chart. Prefer an actual original front cut;
@@ -692,6 +784,23 @@ an untrimmed conical carrier does not qualify an imported finite trimmed profile
 
 For downstream attribution, retain job-local spans mapping sampled boundary intervals to original face use(s), source edge/trim where applicable, native parameter interval and approximation certificate. An edge at a face intersection can have multiple source owners; do not arbitrarily pick one. Generated cap IDs are not persistent source FaceIds. Keep this data native/borrowed unless a real inspection consumer requests bounded diagnostics; do not bulk-copy it into every mesh/plan record.
 
+Whole overlap with an original boundary may reuse that original native edge
+only after original-coefficient plane identities, active-domain/endpoint
+binding, transverse carriers and a unique ordered branch are proved. Borrow
+literal curve/plane coefficients; converted or fitted controls are not exact
+source authority merely because their rounded values satisfy an equation.
+Retain the original curve, gauge and source lineage. A use on another carrier
+requires an explicit generated-use receipt scoped to the actual derivation and
+original operand/shell/face; missing original lineage is never a generic
+generated-face fallback.
+
+UV area is chart-dependent. Do not discard a finite nonzero loop or cancel a
+thin annulus by comparing its area with a world-space tolerance. An entire
+native backtracking walk may be omitted only after exact inverse-use reduction
+with shared native geometry and vertex identity. Unresolved zero/nonfinite
+area otherwise refuses; nearby coordinates, equal signed-area sums and distinct
+coincident curves are not empty-material proofs.
+
 ### 7.3 Periodicity and singularities
 
 - Lift periodic parameter intervals to a consistent chart for local work; preserve winding counts and exact identified seam endpoints. Two coincident seam uses are not duplicate material boundaries.
@@ -717,6 +826,32 @@ At an exact critical plane, return contact/event information. Diagnostic section
 Separate physical critical strata from conservative numerical partitions and source-chart bookkeeping. Physical height events include true trim-boundary extrema/corners, interior critical values, horizontal face patches, singularities and contacts where material topology can change. For a regular parametric face, interior height critical points solve d·Sᵤ = d·Sᵥ = 0. Restrict roots to the true trimmed domain. Root brackets need proof of exclusion/completeness, not a finite sample list. Horizontal patches and other continua require a classified critical set, not an assumption of isolated roots. Artificial seams/knot subdivisions can partition solver work but must not automatically force deposition boundaries or exporter-dependent sliver layers.
 
 Use analytic events where available; use interval subdivision/root isolation for general patches. Chart seams alone do not create physical events. Keep a bounded ordered set of height brackets and native witnesses. Distinct uncertain brackets cannot be merged merely because they are close; refine or explicitly refuse unresolved ordering.
+
+Inventory every original explicit curve knot through its exact retained
+parameter maps. Qualify each consecutive original span independently; a whole
+prepared curve piece is not a knot inventory. An uncertain mapped knot band
+cannot be rounded into a shared joint. Same-sign one-sided height derivatives
+prove a regular crossing; a genuine turn needs derivative or continuous-height
+bracketing evidence. Position existence at a parameter joint alone does not
+prove a critical height.
+
+Use one bounded original Native incidence index for height and closed-material
+analysis. A self-seam needs exactly paired, oppositely material-oriented native
+occurrences and the original carrier's positive G1 continuation proof. Exclude
+its constant-height event only after geometric height transversality over both
+complete source UV tubes. A vertex additionally needs one closed original
+corner/paired-edge link covering every incident use and transversality over all
+local endpoint/joint tubes; an unrelated extremum farther along an incident
+edge is not a vertex event.
+
+Internal tensor interfaces use the same owning-face-bound G1 and geometric
+normal proof, not a second seam convention. After that whole-source theorem,
+a one-sided tensor-joint normal may handle an original parameter C0 joint
+without claiming Native C1. Partition positive-width tubes at every original
+knot and retain every side. A nonzero enclosed normal crossed with the actual
+height direction excludes physical stationarity; parallel, uncertain or
+singular cases retain their critical obligations. Excluding a parameter
+interface never suppresses the independent original trim-boundary census.
 
 Height-event subdivision follows the existing directional-bounds priority:
 split the parameter axis with the larger projected derivative bound times
@@ -867,6 +1002,18 @@ The geometry-owned critical band remains distinct from original cap/port
 heights, is scoped to the exact closed request and strictly excludes its sample.
 This source-incidence receipt does not itself prove reverse closed-material
 coverage by the candidate or an accepted composed-source workflow.
+
+An original critical port's exact longitudinal endpoint identities come from
+its complete literal source curve, not from the face's outward UV bounding box.
+Candidate endpoint coordinates are only proposals until the original
+coefficient theorem proves them. The original port's full uncertainty enclosure
+must cover the face's longitudinal search extent; that interval test grants
+coverage, never endpoint equality. Preserve the port's exact longitudinal
+source-map identity and use its actual proved endpoint values to qualify the
+incident side ports. Their nonzero mapping margins remain physical uncertainty
+already charged to the connection, not permission to move an endpoint.
+Complete shared original vertex links, paired coedges, whole root-to-port
+regularity and source/coface material orientation remain mandatory.
 
 An opaque source-contributor leaf receipt binds an actual positive source-M candidate and its independent source-sample/forward-distance fact: original occurrence/definition, actual pose, closed interval, sample, actual candidate geometry hash, achieved error and numerical/source policy. A section receipt does not by itself prove reverse coverage of the source's closed slab or promise that an adjacent global union will succeed.
 

@@ -2229,10 +2229,9 @@ impl NativeUnionBindingLedger {
                         // Unlike raw-M boxes, this also proves diagonal clearance.
                         if let (Some(a), Some(b)) =
                             (previous_envelope.as_ref(), current_envelope.as_ref())
+                            && separated_tubes(Some(a), Some(b))
                         {
-                            if separated_tubes(Some(a), Some(b)) {
-                                continue;
-                            }
+                            continue;
                         }
                         let (Some(a), Some(b)) = (
                             previous.candidate_xy_bounds_mm,
@@ -2951,14 +2950,18 @@ fn candidate_hash(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[u8; 32], GeometryError> {
-    candidate_capture(loops, z, work, cancel).map(|capture| capture.0)
+    candidate_capture(loops, z, work, cancel).map(|capture| capture.geometry_sha256)
+}
+struct CandidateCapture {
+    geometry_sha256: [u8; 32],
+    xy_bounds_mm: Option<[[f64; 2]; 2]>,
 }
 fn candidate_capture(
     loops: &[SectionLoopMm],
     z: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<([u8; 32], Option<[[f64; 2]; 2]>), GeometryError> {
+) -> Result<CandidateCapture, GeometryError> {
     work.charge(1, cancel)?;
     let mut hash = Sha256::new();
     hash.update(b"spiling-native-union-candidate-1\0");
@@ -2993,7 +2996,10 @@ fn candidate_capture(
             }
         }
     }
-    Ok((hash.finalize().into(), any.then_some(bounds)))
+    Ok(CandidateCapture {
+        geometry_sha256: hash.finalize().into(),
+        xy_bounds_mm: any.then_some(bounds),
+    })
 }
 
 pub(super) fn verify_source_leaf_candidate(
@@ -3088,67 +3094,50 @@ pub(super) fn native_sample_hash(
     Ok(hash.finalize().into())
 }
 
+/// Original source, frozen slab and actual contributor geometry for a leaf proof.
+pub struct SourceLeafRequest<'a> {
+    pub definition: &'a Definition,
+    pub occurrence_id: &'a OccurrenceId,
+    pub pose: RigidPoseMm,
+    pub analysis: &'a SlabAnalysis,
+    pub actual_used_source_loops: &'a [SectionLoopMm],
+    pub policy: NativeUnionPolicy,
+}
+
 /// Prove the actual source-M contributor against the immutable CLOSED native
 /// slab. This native base fact does not depend on a global union receipt.
 pub fn certify_native_source_leaf(
-    definition: &Definition,
-    occurrence_id: &OccurrenceId,
-    pose: RigidPoseMm,
-    analysis: &SlabAnalysis,
-    actual_used_source_loops: &[SectionLoopMm],
-    policy: NativeUnionPolicy,
+    request: &SourceLeafRequest<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeSourceLeafReceipt, GeometryError> {
-    certify_source_leaf(
-        definition,
-        occurrence_id,
-        pose,
-        analysis,
-        actual_used_source_loops,
-        policy,
-        false,
-        work,
-        cancel,
-    )
+    certify_source_leaf(request, false, work, cancel)
 }
 
 /// A directed SAMPLE-prism -> original CLOSED source fact. It establishes
 /// neither reverse target coverage nor native event/interface incidence.
 pub fn certify_native_one_sided_source_leaf(
-    definition: &Definition,
-    occurrence_id: &OccurrenceId,
-    pose: RigidPoseMm,
-    analysis: &SlabAnalysis,
-    actual_used_source_loops: &[SectionLoopMm],
-    policy: NativeUnionPolicy,
+    request: &SourceLeafRequest<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeSourceLeafReceipt, GeometryError> {
-    certify_source_leaf(
+    certify_source_leaf(request, true, work, cancel)
+}
+
+fn certify_source_leaf(
+    request: &SourceLeafRequest<'_>,
+    sample_only: bool,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeSourceLeafReceipt, GeometryError> {
+    let &SourceLeafRequest {
         definition,
         occurrence_id,
         pose,
         analysis,
         actual_used_source_loops,
         policy,
-        true,
-        work,
-        cancel,
-    )
-}
-
-fn certify_source_leaf(
-    definition: &Definition,
-    occurrence_id: &OccurrenceId,
-    pose: RigidPoseMm,
-    analysis: &SlabAnalysis,
-    actual_used_source_loops: &[SectionLoopMm],
-    policy: NativeUnionPolicy,
-    sample_only: bool,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<NativeSourceLeafReceipt, GeometryError> {
+    } = request;
     work.charge(1, cancel)?;
     pose.validate()?;
     let interval = analysis.world_height_interval_mm().ok_or_else(|| {
@@ -3215,8 +3204,10 @@ fn certify_source_leaf(
             ));
         }
     }
-    let (candidate_geometry_sha256, candidate_xy_bounds_mm) =
-        candidate_capture(actual_used_source_loops, z, work, cancel)?;
+    let CandidateCapture {
+        geometry_sha256: candidate_geometry_sha256,
+        xy_bounds_mm: candidate_xy_bounds_mm,
+    } = candidate_capture(actual_used_source_loops, z, work, cancel)?;
     let native_sample_sha256 = native_sample_hash(analysis, work, cancel)?;
     let mut scratch = Scratch { bytes: 0 };
     let mut proof_kind = if sample_only {
@@ -3254,7 +3245,7 @@ fn certify_source_leaf(
                 None
             } else {
                 let mut halfplanes = [[Interval::point(0.0); 3]; 4];
-                for i in 0..4 {
+                for (i, halfplane) in halfplanes.iter_mut().enumerate() {
                     work.charge(1, cancel)?;
                     let a = actual.points[i];
                     let b = actual.points[(i + 1) % 4];
@@ -3266,13 +3257,13 @@ fn certify_source_leaf(
                         ));
                     }
                     let d = delta(b, a);
-                    halfplanes[i] = [
+                    *halfplane = [
                         d[1].neg(),
                         d[0],
                         d[1].mul(Interval::point(a[0]))
                             .sub(d[0].mul(Interval::point(a[1]))),
                     ];
-                    if halfplanes[i]
+                    if halfplane
                         .iter()
                         .any(|v| !v.lo.is_finite() || !v.hi.is_finite())
                     {
@@ -3295,10 +3286,10 @@ fn certify_source_leaf(
                 let mut deviation = f64::INFINITY;
                 for offset in 0..4 {
                     let mut maximum: f64 = 0.0;
-                    for i in 0..4 {
+                    for (i, &corner) in corners.iter().enumerate() {
                         work.charge(1, cancel)?;
-                        maximum = maximum
-                            .max(distance_upper(corners[i], actual.points[(i + offset) % 4])?);
+                        maximum =
+                            maximum.max(distance_upper(corner, actual.points[(i + offset) % 4])?);
                     }
                     deviation = deviation.min(maximum);
                 }
@@ -3556,22 +3547,36 @@ fn certify_source_leaf(
     })
 }
 
+/// Current placed slab and the adjacent positive leaf claiming endpoint ownership.
+pub struct EndpointOwnershipRequest<'a> {
+    pub definition: &'a Definition,
+    pub occurrence_id: &'a OccurrenceId,
+    pub pose: RigidPoseMm,
+    pub world_height_interval_mm: [f64; 2],
+    pub sample_world_z_mm: f64,
+    pub native_shape_error_mm: f64,
+    pub adjacent: &'a NativeSourceLeafReceipt,
+}
+
 /// Prove that the source has no positive-volume material in the open current
 /// slab, while a possible closed endpoint stratum has an actual native source-M
 /// base fact in the adjacent CLOSED slab. This records a pending positive-leaf
 /// obligation, not completed union success. Native directional support is
 /// queried independently; an uncertain endpoint bracket cannot be rounded away.
 pub fn certify_endpoint_ownership(
-    definition: &Definition,
-    occurrence_id: &OccurrenceId,
-    pose: RigidPoseMm,
-    world_height_interval_mm: [f64; 2],
-    sample_world_z_mm: f64,
-    native_shape_error_mm: f64,
-    adjacent: &NativeSourceLeafReceipt,
+    request: &EndpointOwnershipRequest<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeEndpointOwnership, GeometryError> {
+    let &EndpointOwnershipRequest {
+        definition,
+        occurrence_id,
+        pose,
+        world_height_interval_mm,
+        sample_world_z_mm,
+        native_shape_error_mm,
+        adjacent,
+    } = request;
     work.charge(1, cancel)?;
     pose.validate()?;
     let interval = world_height_interval_mm;
@@ -4131,12 +4136,14 @@ pub fn certify_native_union(
     let target_envelopes =
         prepare_target_envelopes(occurrences, &active, &mut scratch, work, cancel)?;
     let collar_attachments = certify_collar_cross_incidence(
-        occurrences,
-        &active,
-        &target_envelopes,
-        &endpoint_dependencies,
-        &collar_dependencies,
-        policy,
+        &CollarCrossIncidenceQuery {
+            occurrences,
+            active: &active,
+            target_envelopes: &target_envelopes,
+            endpoints: &endpoint_dependencies,
+            collars: &collar_dependencies,
+            policy,
+        },
         &mut scratch,
         work,
         cancel,
@@ -4168,11 +4175,13 @@ pub fn certify_native_union(
         preserved_source_occurrences,
         target_envelopes,
     } = certify_interaction_groups(
-        occurrences,
-        &active,
+        &InteractionGroupsQuery {
+            original: occurrences,
+            active: &active,
+            candidate: candidate_union_loops,
+            policy,
+        },
         target_envelopes,
-        candidate_union_loops,
-        policy,
         &mut scratch,
         work,
         cancel,
@@ -4320,13 +4329,13 @@ fn rectangle_leaf_contact(
         .add(Interval::point(left.coordinate_error_mm))
         .add(Interval::point(right.coordinate_error_mm));
     for rectangle in [left, right] {
-        for axis in 0..2 {
-            if Interval::point(point[axis])
+        for (axis, &coordinate) in point.iter().enumerate() {
+            if Interval::point(coordinate)
                 .sub(Interval::point(rectangle.bounds[axis][0]))
                 .lo
                 <= margin.hi
                 || Interval::point(rectangle.bounds[axis][1])
-                    .sub(Interval::point(point[axis]))
+                    .sub(Interval::point(coordinate))
                     .lo
                     <= margin.hi
             {
@@ -4395,17 +4404,29 @@ fn collar_endpoint_contact(
     }
     None
 }
-fn certify_collar_cross_incidence(
-    occurrences: &[NativeUnionOccurrence<'_>],
-    active: &[SlabOccurrence<'_>],
-    target_envelopes: &[NativeTargetEnvelope],
-    endpoints: &[NativeEndpointOwnership],
-    collars: &[NativeCriticalCollarIncidence],
+struct CollarCrossIncidenceQuery<'a, 'source> {
+    occurrences: &'a [NativeUnionOccurrence<'source>],
+    active: &'a [SlabOccurrence<'source>],
+    target_envelopes: &'a [NativeTargetEnvelope],
+    endpoints: &'a [NativeEndpointOwnership],
+    collars: &'a [NativeCriticalCollarIncidence],
     policy: NativeUnionPolicy,
+}
+
+fn certify_collar_cross_incidence(
+    query: &CollarCrossIncidenceQuery<'_, '_>,
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Vec<NativeInterfaceAttachment>, GeometryError> {
+    let &CollarCrossIncidenceQuery {
+        occurrences,
+        active,
+        target_envelopes,
+        endpoints,
+        collars,
+        policy,
+    } = query;
     let mut attachments = Vec::new();
     for collar in collars {
         let own = collar.current_leaf();
@@ -4417,10 +4438,10 @@ fn certify_collar_cross_incidence(
                 continue;
             }
             let id = occurrences[other.occurrence_index].occurrence_id;
-            if let (Some(a), Some(b)) = (own_target, target_envelopes[other_index].1.as_ref()) {
-                if separated_tubes(Some(a), Some(b)) {
-                    continue;
-                }
+            if let (Some(a), Some(b)) = (own_target, target_envelopes[other_index].1.as_ref())
+                && separated_tubes(Some(a), Some(b))
+            {
+                continue;
             }
             let other_collar = collars
                 .iter()
@@ -4756,13 +4777,13 @@ fn certify_contact_incidence(
                     | NativeUnionOccurrenceEvidence::SlabWithCollar { leaf, .. } => *leaf,
                     NativeUnionOccurrenceEvidence::EndpointOwned(_) => unreachable!(),
                 };
-                if contacts.len() == 1 && positive_count == 1 {
-                    if let Some(attachment) =
+                if contacts.len() == 1
+                    && positive_count == 1
+                    && let Some(attachment) =
                         rectangle_interface(contact, current_leaf, policy, work, cancel)?
-                    {
-                        scratch.push(&mut attachments, attachment, work, cancel)?;
-                        continue;
-                    }
+                {
+                    scratch.push(&mut attachments, attachment, work, cancel)?;
+                    continue;
                 }
                 return Err(original_pair_error(
                     occurrences,
@@ -5075,15 +5096,15 @@ fn native_tube_envelope(
 }
 fn ball_box_separated(ball: NativeProjectionBall, box_: [[f64; 2]; 2], reserve: Interval) -> bool {
     let mut squared = Interval::point(0.0);
-    for axis in 0..2 {
-        let distance = if ball.center[axis] < box_[axis][0] {
-            Interval::point(box_[axis][0])
+    for (axis, interval) in box_.iter().enumerate() {
+        let distance = if ball.center[axis] < interval[0] {
+            Interval::point(interval[0])
                 .sub(Interval::point(ball.center[axis]))
                 .lo
                 .max(0.0)
-        } else if ball.center[axis] > box_[axis][1] {
+        } else if ball.center[axis] > interval[1] {
             Interval::point(ball.center[axis])
-                .sub(Interval::point(box_[axis][1]))
+                .sub(Interval::point(interval[1]))
                 .lo
                 .max(0.0)
         } else {
@@ -5171,16 +5192,26 @@ struct NativePartitionProof {
     preserved_source_occurrences: Vec<OccurrenceId>,
     target_envelopes: Vec<NativeTargetEnvelope>,
 }
-fn certify_interaction_groups(
-    original: &[NativeUnionOccurrence<'_>],
-    active: &[SlabOccurrence<'_>],
-    mut envelopes: Vec<NativeTargetEnvelope>,
-    candidate: &[SectionLoopMm],
+struct InteractionGroupsQuery<'a, 'source> {
+    original: &'a [NativeUnionOccurrence<'source>],
+    active: &'a [SlabOccurrence<'source>],
+    candidate: &'a [SectionLoopMm],
     policy: NativeUnionPolicy,
+}
+
+fn certify_interaction_groups(
+    query: &InteractionGroupsQuery<'_, '_>,
+    mut envelopes: Vec<NativeTargetEnvelope>,
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativePartitionProof, GeometryError> {
+    let &InteractionGroupsQuery {
+        original,
+        active,
+        candidate,
+        policy,
+    } = query;
     let mut parents = Vec::new();
     let mut sizes = Vec::new();
     let mut neighbors = Vec::new();
@@ -5799,13 +5830,13 @@ pub(super) fn filled_projection_distance(
         }
     }
     feature_clearance(&native, original_tube, &mut scratch, work, cancel)?;
-    if maximum_distance >= 0.0 {
-        if let Some(exact) = exact_cycle_mapping(&native, &output, &mut scratch, work, cancel)? {
-            drop(exact);
-            // Native clearance retained its full source tube. Exact oriented
-            // filled-set identity reuses that stronger proof for output.
-            return Ok(0.0);
-        }
+    if maximum_distance >= 0.0
+        && let Some(exact) = exact_cycle_mapping(&native, &output, &mut scratch, work, cancel)?
+    {
+        drop(exact);
+        // Native clearance retained its full source tube. Exact oriented
+        // filled-set identity reuses that stronger proof for output.
+        return Ok(0.0);
     }
     feature_clearance(&output, 0.0, &mut scratch, work, cancel)?;
     let mut used = Vec::new();
@@ -6504,10 +6535,8 @@ fn native_profile<'a>(
                 if (b.0[1 - row] > a.0[1 - row]) != increasing {
                     std::mem::swap(&mut a, &mut b);
                 }
-                for axis in 0..2 {
-                    coordinate_error[axis] = coordinate_error[axis]
-                        .max(a.1[axis].abs())
-                        .max(b.1[axis].abs());
+                for (axis, error) in coordinate_error.iter_mut().enumerate() {
+                    *error = (*error).max(a.1[axis].abs()).max(b.1[axis].abs());
                 }
                 let face_id = &definition
                     .faces()
@@ -7073,10 +7102,12 @@ mod tests {
         .unwrap();
         prepared
             .analyze_placed_slab(
-                pose,
-                interval,
-                z,
-                0.1,
+                &crate::PlacedSlabRequest {
+                    pose,
+                    world_height_interval_mm: interval,
+                    sample_world_z_mm: z,
+                    native_shape_error_mm: 0.1,
+                },
                 remaining.saturating_sub(prepared.retained_bytes()),
                 work,
                 &cancel,
@@ -7504,12 +7535,14 @@ mod tests {
             certify_native_source_leaf
         };
         certify(
-            definition,
-            &OccurrenceId::new(id).unwrap(),
-            pose,
-            analysis,
-            &xy_candidate(analysis, z),
-            policy(0.0),
+            &SourceLeafRequest {
+                definition,
+                occurrence_id: &OccurrenceId::new(id).unwrap(),
+                pose,
+                analysis,
+                actual_used_source_loops: &xy_candidate(analysis, z),
+                policy: policy(0.0),
+            },
             work,
             &AtomicBool::new(false),
         )
@@ -7533,12 +7566,14 @@ mod tests {
         }
         rotated.reverse();
         let receipt = certify_native_source_leaf(
-            &definition,
-            &OccurrenceId::new(1).unwrap(),
-            pose,
-            &analysis,
-            &rotated,
-            policy(0.0),
+            &SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &OccurrenceId::new(1).unwrap(),
+                pose,
+                analysis: &analysis,
+                actual_used_source_loops: &rotated,
+                policy: policy(0.0),
+            },
             &mut work,
             &cancel,
         )
@@ -7563,12 +7598,14 @@ mod tests {
         };
         assert_eq!(
             certify_native_source_leaf(
-                &definition,
-                &OccurrenceId::new(1).unwrap(),
-                stale_pose,
-                &analysis,
-                &rotated,
-                policy(0.0),
+                &SourceLeafRequest {
+                    definition: &definition,
+                    occurrence_id: &OccurrenceId::new(1).unwrap(),
+                    pose: stale_pose,
+                    analysis: &analysis,
+                    actual_used_source_loops: &rotated,
+                    policy: policy(0.0),
+                },
                 &mut work,
                 &cancel,
             )
@@ -7904,13 +7941,15 @@ mod tests {
         )
         .unwrap();
         let ownership = certify_endpoint_ownership(
-            &box_,
-            &box_id,
-            RigidPoseMm::IDENTITY,
-            [8.0, 8.2],
-            8.1,
-            0.1,
-            &receipt,
+            &EndpointOwnershipRequest {
+                definition: &box_,
+                occurrence_id: &box_id,
+                pose: RigidPoseMm::IDENTITY,
+                world_height_interval_mm: [8.0, 8.2],
+                sample_world_z_mm: 8.1,
+                native_shape_error_mm: 0.1,
+                adjacent: &receipt,
+            },
             &mut work,
             &cancel,
         )
@@ -7989,13 +8028,15 @@ mod tests {
         );
         assert_eq!(
             certify_endpoint_ownership(
-                &box_,
-                &cylinder_id,
-                RigidPoseMm::IDENTITY,
-                [8.0, 8.2],
-                8.1,
-                0.1,
-                &receipt,
+                &EndpointOwnershipRequest {
+                    definition: &box_,
+                    occurrence_id: &cylinder_id,
+                    pose: RigidPoseMm::IDENTITY,
+                    world_height_interval_mm: [8.0, 8.2],
+                    sample_world_z_mm: 8.1,
+                    native_shape_error_mm: 0.1,
+                    adjacent: &receipt,
+                },
                 &mut work,
                 &cancel
             )
@@ -8005,13 +8046,15 @@ mod tests {
         );
         assert_eq!(
             certify_endpoint_ownership(
-                &box_,
-                &box_id,
-                RigidPoseMm::IDENTITY,
-                [7.9, 8.1],
-                8.0,
-                0.1,
-                &receipt,
+                &EndpointOwnershipRequest {
+                    definition: &box_,
+                    occurrence_id: &box_id,
+                    pose: RigidPoseMm::IDENTITY,
+                    world_height_interval_mm: [7.9, 8.1],
+                    sample_world_z_mm: 8.0,
+                    native_shape_error_mm: 0.1,
+                    adjacent: &receipt,
+                },
                 &mut work,
                 &cancel
             )
@@ -8053,13 +8096,15 @@ mod tests {
         )
         .unwrap();
         let endpoint = certify_endpoint_ownership(
-            &definition,
-            &id,
-            pose,
-            [7.8, 8.0],
-            7.9,
-            0.1,
-            &receipt,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                world_height_interval_mm: [7.8, 8.0],
+                sample_world_z_mm: 7.9,
+                native_shape_error_mm: 0.1,
+                adjacent: &receipt,
+            },
             &mut work,
             &cancel,
         )
@@ -8150,25 +8195,29 @@ mod tests {
                 && b_leaf.native_rectangle_source_faces().is_some()
         );
         let upper_birth = certify_endpoint_ownership(
-            &definition,
-            &b_id,
-            b_pose,
-            [7.8, 8.0],
-            7.9,
-            0.1,
-            &b_leaf,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &b_id,
+                pose: b_pose,
+                world_height_interval_mm: [7.8, 8.0],
+                sample_world_z_mm: 7.9,
+                native_shape_error_mm: 0.1,
+                adjacent: &b_leaf,
+            },
             &mut work,
             &cancel,
         )
         .unwrap();
         let lower_death = certify_endpoint_ownership(
-            &definition,
-            &a_id,
-            RigidPoseMm::IDENTITY,
-            [8.0, 8.2],
-            8.1,
-            0.1,
-            &a_leaf,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &a_id,
+                pose: RigidPoseMm::IDENTITY,
+                world_height_interval_mm: [8.0, 8.2],
+                sample_world_z_mm: 8.1,
+                native_shape_error_mm: 0.1,
+                adjacent: &a_leaf,
+            },
             &mut work,
             &cancel,
         )
@@ -8255,13 +8304,15 @@ mod tests {
         );
         let a_leaf = source_leaf(&definition, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let contact = certify_endpoint_ownership(
-            &definition,
-            &id,
-            RigidPoseMm::IDENTITY,
-            [8.0, 8.2],
-            8.1,
-            0.1,
-            &a_leaf,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose: RigidPoseMm::IDENTITY,
+                world_height_interval_mm: [8.0, 8.2],
+                sample_world_z_mm: 8.1,
+                native_shape_error_mm: 0.1,
+                adjacent: &a_leaf,
+            },
             &mut work,
             &cancel,
         )
@@ -8323,12 +8374,14 @@ mod tests {
         }
         let id = OccurrenceId::new(1).unwrap();
         let leaf = certify_native_source_leaf(
-            &definition,
-            &id,
-            RigidPoseMm::IDENTITY,
-            &analysis,
-            &actual,
-            policy(0.01),
+            &SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose: RigidPoseMm::IDENTITY,
+                analysis: &analysis,
+                actual_used_source_loops: &actual,
+                policy: policy(0.01),
+            },
             &mut work,
             &cancel,
         )
@@ -8464,13 +8517,15 @@ mod tests {
         let old = ranged_slab(&definition, pose, [8.0, 8.2], 8.1, 0, &mut work);
         let old_leaf = source_leaf(&definition, 7, pose, &old, &mut work);
         let old_owner = certify_endpoint_ownership(
-            &definition,
-            &id,
-            pose,
-            [7.8, 8.0],
-            7.9,
-            0.1,
-            &old_leaf,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                world_height_interval_mm: [7.8, 8.0],
+                sample_world_z_mm: 7.9,
+                native_shape_error_mm: 0.1,
+                adjacent: &old_leaf,
+            },
             &mut work,
             &cancel,
         )
@@ -8524,13 +8579,15 @@ mod tests {
             GeometryErrorCode::InvalidGeometry
         );
         let owner = certify_endpoint_ownership(
-            &definition,
-            &id,
-            pose,
-            [7.8, 8.0],
-            7.9,
-            0.1,
-            &refined_leaf,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                world_height_interval_mm: [7.8, 8.0],
+                sample_world_z_mm: 7.9,
+                native_shape_error_mm: 0.1,
+                adjacent: &refined_leaf,
+            },
             &mut work,
             &cancel,
         )
@@ -8849,13 +8906,15 @@ mod tests {
         let cert = source_leaf(&definition, 1, RigidPoseMm::IDENTITY, &previous, &mut work);
         assert_eq!(
             certify_endpoint_ownership(
-                &definition,
-                &id,
-                RigidPoseMm::IDENTITY,
-                [7.5, 7.7],
-                7.6,
-                0.1,
-                &cert,
+                &EndpointOwnershipRequest {
+                    definition: &definition,
+                    occurrence_id: &id,
+                    pose: RigidPoseMm::IDENTITY,
+                    world_height_interval_mm: [7.5, 7.7],
+                    sample_world_z_mm: 7.6,
+                    native_shape_error_mm: 0.1,
+                    adjacent: &cert,
+                },
                 &mut work,
                 &cancel
             )
@@ -8880,13 +8939,15 @@ mod tests {
             &mut work,
         );
         let endpoint = certify_endpoint_ownership(
-            &definition,
-            &id,
-            RigidPoseMm::IDENTITY,
-            [8.0, 8.2],
-            8.1,
-            0.1,
-            &previous,
+            &EndpointOwnershipRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose: RigidPoseMm::IDENTITY,
+                world_height_interval_mm: [8.0, 8.2],
+                sample_world_z_mm: 8.1,
+                native_shape_error_mm: 0.1,
+                adjacent: &previous,
+            },
             &mut work,
             &cancel,
         )

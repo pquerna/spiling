@@ -683,7 +683,7 @@ fn absent_hole_search_candidates_cannot_pass_whole_face_plane_coverage() {
                 };
                 (parallel(plane.normal().into(), [0.0, 0.0, 1.0])
                     && (plane.origin().z - 4.0).abs() <= SECTION_PLANE_TOLERANCE_MM)
-                    .then(|| (face.id(), plane.clone()))
+                    .then(|| (face.id(), *plane))
             })
         })
         .unwrap();
