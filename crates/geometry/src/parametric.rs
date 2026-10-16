@@ -1205,16 +1205,29 @@ impl CurveSamplingEndpoint<'_, '_> {
     }
 }
 
+/// Positive native C1 qualification on a closed range of one immutable binding.
+/// Private fields prevent a Hessian or an unqualified parent from creating proof.
+#[derive(Clone, Copy)]
+pub(crate) struct CurveSamplingSmoothRange<'binding, 'source> {
+    binding: &'binding PreparedCurveEnclosure<'source>,
+    range: (f64, f64),
+}
+
 /// Chord and Green queries share one certified whole-query curvature bound.
 pub(crate) struct CurveSamplingInterval<'a, 'source> {
     binding: &'a PreparedCurveEnclosure<'source>,
     range: (f64, f64),
     enclosure: CurveIntervalEnclosure,
     jet: Option<CurveEnclosure>,
+    smooth_range: Option<CurveSamplingSmoothRange<'a, 'source>>,
 }
-impl CurveSamplingInterval<'_, '_> {
+impl<'binding, 'source> CurveSamplingInterval<'binding, 'source> {
     pub(crate) fn enclosure(&self) -> &CurveIntervalEnclosure {
         &self.enclosure
+    }
+
+    pub(crate) fn smooth_range(&self) -> Option<CurveSamplingSmoothRange<'binding, 'source>> {
+        self.smooth_range
     }
 
     /// Integrates this exact interval from its original native endpoint receipts.
@@ -1868,6 +1881,7 @@ impl<'source> PreparedCurveEnclosure<'source> {
     pub(crate) fn sampling_interval(
         &self,
         endpoints: &[CurveSamplingEndpoint<'_, 'source>; 2],
+        inherited_smooth_range: Option<CurveSamplingSmoothRange<'_, 'source>>,
         frame: &PlaneFrameMm,
         maximum_plane_error_mm: f64,
         work: &mut GeometryWorkBudget,
@@ -1893,14 +1907,35 @@ impl<'source> PreparedCurveEnclosure<'source> {
         }
         let range = (start.parameter, end.parameter);
         self.check_range(range)?;
+        if let Some(receipt) = inherited_smooth_range {
+            work.charge(1, cancel)?;
+            // Identity also fixes the active restriction, native parameter gauge
+            // and unit view: all are immutable for this binding's borrowed life.
+            if !std::ptr::eq(receipt.binding, self) {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "native sampler smooth range belongs to another prepared source binding",
+                ));
+            }
+            self.check_range(receipt.range)?;
+            if range.0 < receipt.range.0 || range.1 > receipt.range.1 {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "native sampler interval leaves its qualified closed smooth range",
+                ));
+            }
+        }
         let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
             usize::try_from(work.remaining()).unwrap_or(usize::MAX),
         );
         let result = (|| -> Result<CurveSamplingInterval<'_, 'source>, GeometryError> {
-            let smooth = self
-                .native
-                .is_smooth_on([range.0, range.1], &mut native_work, cancel)
-                .map_err(native_error)?;
+            let smooth = match inherited_smooth_range {
+                Some(_) => true,
+                None => self
+                    .native
+                    .is_smooth_on([range.0, range.1], &mut native_work, cancel)
+                    .map_err(native_error)?,
+            };
             let start = &start.point;
             let end = &end.point;
             let start_mm = [start.position.x, start.position.y, start.position.z]
@@ -1986,6 +2021,10 @@ impl<'source> PreparedCurveEnclosure<'source> {
                     plane_error_mm,
                 },
                 jet: retained_jet,
+                smooth_range: smooth.then_some(CurveSamplingSmoothRange {
+                    binding: self,
+                    range,
+                }),
             })
         })();
         debit_native_work(work, native_work.consumed(), cancel)?;
@@ -2068,9 +2107,9 @@ pub(crate) fn prepare_section_curve_enclosure(
 mod green;
 mod section_coverage;
 pub(crate) use section_coverage::{
-    PreparedSectionOriginals, PreparedSectionPlaneRoots, SectionPlaneCoverage,
-    SectionPlaneEndpointReceipt, certify_section_plane_coverage, prepare_section_originals,
-    prepare_section_plane_roots,
+    EndpointChartProposals, PreparedSectionOriginals, PreparedSectionPlaneRoots,
+    SectionPlaneCoverage, SectionPlaneEndpointReceipt, certify_section_plane_coverage,
+    prepare_section_originals, prepare_section_plane_roots,
 };
 
 fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
@@ -2906,6 +2945,7 @@ mod tests {
         let interval = prepared
             .sampling_interval(
                 &endpoints,
+                None,
                 &frame,
                 SECTION_PLANE_TOLERANCE_MM,
                 &mut work,
@@ -2917,6 +2957,44 @@ mod tests {
         // the actual native midpoint is 1 mm from the returned straight chord.
         assert!(bound.chord_error_mm >= 1.0);
         assert!(bound.plane_error_mm >= 1.0);
+        let smooth_endpoints = [0.0, 0.25].map(|parameter| {
+            prepared
+                .sampling_endpoint(parameter, &mut work, &cancel)
+                .unwrap()
+        });
+        let smooth = prepared
+            .sampling_interval(
+                &smooth_endpoints,
+                None,
+                &frame,
+                SECTION_PLANE_TOLERANCE_MM,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .smooth_range()
+            .expect("a strict interior of the first linear piece is smooth");
+        // Adjacency and overlap do not extend a closed proof, especially across
+        // the real C0 corner whose complete-image error was established above.
+        for range in [[0.25, 0.5], [0.125, 0.375], [0.25, 0.75], [0.0, 1.0]] {
+            let endpoints = range.map(|parameter| {
+                prepared
+                    .sampling_endpoint(parameter, &mut work, &cancel)
+                    .unwrap()
+            });
+            let error = prepared
+                .sampling_interval(
+                    &endpoints,
+                    Some(smooth),
+                    &frame,
+                    SECTION_PLANE_TOLERANCE_MM,
+                    &mut work,
+                    &cancel,
+                )
+                .err()
+                .expect("an inherited smooth range must not authorize another range");
+            assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+        }
     }
 
     #[test]
@@ -3132,6 +3210,21 @@ mod tests {
         let mut start = prepared
             .sampling_endpoint(10.0, &mut work, &cancel)
             .unwrap();
+        let end = prepared
+            .sampling_endpoint(14.0, &mut work, &cancel)
+            .unwrap();
+        let smooth = prepared
+            .sampling_interval(
+                &[start, end],
+                None,
+                &frame,
+                SECTION_PLANE_TOLERANCE_MM,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .smooth_range()
+            .unwrap();
         let mut area = Interval::point(0.0);
         for index in 0..16 {
             let end = prepared
@@ -3140,6 +3233,7 @@ mod tests {
             let interval = prepared
                 .sampling_interval(
                     &[start, end],
+                    Some(smooth),
                     &frame,
                     SECTION_PLANE_TOLERANCE_MM,
                     &mut work,
@@ -3171,6 +3265,62 @@ mod tests {
     }
 
     #[test]
+    fn sampling_smooth_ranges_refuse_foreign_sources_units_and_restrictions() {
+        let native = quadratic_sampling_native();
+        let other_native = quadratic_sampling_native();
+        let prepared = PreparedCurveEnclosure::borrowed(&native, 1.0);
+        let same_source = PreparedCurveEnclosure::borrowed(&native, 1.0);
+        let other_units = PreparedCurveEnclosure::borrowed(&native, 25.4);
+        let restricted = PreparedCurveEnclosure::borrowed_restricted(&native, 1.0, (10.0, 11.0));
+        let other_source = PreparedCurveEnclosure::borrowed(&other_native, 1.0);
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let frame = PlaneFrameMm::from_plane(crate::PlaneMm {
+            origin_mm: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        })
+        .unwrap();
+        let endpoints = [10.0, 10.5].map(|parameter| {
+            prepared
+                .sampling_endpoint(parameter, &mut work, &cancel)
+                .unwrap()
+        });
+        let smooth = prepared
+            .sampling_interval(
+                &endpoints,
+                None,
+                &frame,
+                SECTION_PLANE_TOLERANCE_MM,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .smooth_range()
+            .unwrap();
+        for binding in [&same_source, &other_units, &restricted, &other_source] {
+            // These endpoints belong to the target and lie strictly inside the
+            // qualified range. Only the foreign smooth authority must refuse.
+            let endpoints = [10.125, 10.25].map(|parameter| {
+                binding
+                    .sampling_endpoint(parameter, &mut work, &cancel)
+                    .unwrap()
+            });
+            let error = binding
+                .sampling_interval(
+                    &endpoints,
+                    Some(smooth),
+                    &frame,
+                    SECTION_PLANE_TOLERANCE_MM,
+                    &mut work,
+                    &cancel,
+                )
+                .err()
+                .expect("a positive smooth proof cannot transfer prepared bindings");
+            assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+        }
+    }
+
+    #[test]
     fn sampling_receipts_reject_other_bindings_gauges_and_cancelled_reuse() {
         let native = quadratic_sampling_native();
         let prepared = PreparedCurveEnclosure::borrowed(&native, 1.0);
@@ -3195,6 +3345,7 @@ mod tests {
             let error = prepared
                 .sampling_interval(
                     &endpoints,
+                    None,
                     &frame,
                     SECTION_PLANE_TOLERANCE_MM,
                     &mut work,
@@ -3215,6 +3366,7 @@ mod tests {
         let interval = prepared
             .sampling_interval(
                 &[start, end],
+                None,
                 &frame,
                 SECTION_PLANE_TOLERANCE_MM,
                 &mut work,
@@ -3252,6 +3404,7 @@ mod tests {
             prepared
                 .sampling_interval(
                     &[start, end],
+                    interval.smooth_range(),
                     &frame,
                     SECTION_PLANE_TOLERANCE_MM,
                     &mut work,

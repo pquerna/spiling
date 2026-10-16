@@ -254,6 +254,18 @@ impl OriginalCoedgeCorrespondence {
     pub(crate) fn uv_range(&self) -> [f64; 2] {
         self.map.target
     }
+    /// Identity of the COMPLETE sealed affine native-to-original-UV parameter
+    /// law, including its orientation and normalized derivative enclosure.
+    /// This does not compare curve geometry or supply source/use ownership.
+    pub(crate) fn same_affine_native_uv_map(&self, other: &Self) -> bool {
+        self.provenance != OriginalCorrespondenceProvenance::CompletedPoleGraph
+            && other.provenance != OriginalCorrespondenceProvenance::CompletedPoleGraph
+            && self.map.source == other.map.source
+            && self.map.target == other.map.target
+            && self.map.identity == other.map.identity
+            && self.map.slope.lo == other.map.slope.lo
+            && self.map.slope.hi == other.map.slope.hi
+    }
     pub(crate) fn uv_parameter_image(&self, range: [f64; 2]) -> Result<Interval, GeometryError> {
         if range[0] < self.map.source[0] || range[1] > self.map.source[1] || range[0] > range[1] {
             return Err(GeometryError::new(
@@ -262,6 +274,34 @@ impl OriginalCoedgeCorrespondence {
             ));
         }
         self.map.image(range)
+    }
+    /// Enclose the native parameters of a qualified original-UV parameter
+    /// interval under this COMPLETE sealed affine law. This is parameter
+    /// algebra, not an inverse surface query or source/use ownership proof.
+    /// Completed pole graphs do not supply this affine-map authority.
+    pub(crate) fn affine_native_parameter_preimage(
+        &self,
+        range: [f64; 2],
+    ) -> Result<Option<Interval>, GeometryError> {
+        if self.provenance == OriginalCorrespondenceProvenance::CompletedPoleGraph {
+            return Ok(None);
+        }
+        if !range[0].is_finite()
+            || !range[1].is_finite()
+            || range[0] > range[1]
+            || range[0] < self.map.target[0].min(self.map.target[1])
+            || range[1] > self.map.target[0].max(self.map.target[1])
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original UV preimage query leaves its complete certified affine range",
+            ));
+        }
+        Ok(Some(
+            self.map
+                .preimage(range[0])?
+                .hull(self.map.preimage(range[1])?),
+        ))
     }
     pub(crate) fn uv_parameter_derivative(&self) -> Interval {
         self.map.slope
@@ -1747,6 +1787,76 @@ mod tests {
         )
         .unwrap()
         .map(|proof| proof.position_error_mm())
+    }
+
+    #[test]
+    fn sealed_affine_native_uv_map_rejects_changed_qualified_gauges() {
+        let surface = plane();
+        let curve = |a, b| {
+            model::Curve::BsplineCurve(model::BsplineCurve::new(
+                knots(a, b, 1),
+                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+            ))
+        };
+        let native_a = curve(10.0, 12.0);
+        let native_b = curve(20.0, 22.0);
+        let chart_a =
+            model::Curve2D::Line(model::Line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)));
+        let chart_b = model::Curve2D::BsplineCurve(model::BsplineCurve::new(
+            knots(2.0, 4.0, 1),
+            vec![Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)],
+        ));
+        let prove = |curve, chart| {
+            certify_declared_coedge_correspondence(
+                Correspondence {
+                    curve,
+                    surface: &surface,
+                    chart,
+                    maximum_error_mm: 1e-7,
+                    margin_uv: [0.0; 2],
+                },
+                &mut GeometryWorkBudget::new(MAX_WORK),
+                &AtomicBool::new(false),
+                None,
+            )
+            .unwrap()
+            .expect("actual whole-source affine correspondence")
+        };
+        let first = prove(&native_a, &chart_a);
+        let independent = prove(&native_a, &chart_a);
+        let native_gauge = prove(&native_b, &chart_a);
+        let uv_gauge = prove(&native_a, &chart_b);
+        assert!(first.same_affine_native_uv_map(&independent));
+        assert!(!first.same_affine_native_uv_map(&native_gauge));
+        assert!(!first.same_affine_native_uv_map(&uv_gauge));
+        let check_preimage = |proof: OriginalCoedgeCorrespondence, uv, expected| {
+            let image = proof
+                .affine_native_parameter_preimage(uv)
+                .unwrap()
+                .expect("completed original affine correspondence");
+            assert!(image.lo <= expected && expected <= image.hi);
+        };
+        check_preimage(first, [0.0, 0.0], 10.0);
+        check_preimage(first, [0.5, 0.5], 11.0);
+        check_preimage(first, [1.0, 1.0], 12.0);
+        check_preimage(native_gauge, [0.5, 0.5], 21.0);
+        check_preimage(uv_gauge, [3.0, 3.0], 11.0);
+        assert_eq!(
+            first
+                .affine_native_parameter_preimage([2.0, 4.0])
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        );
+        let mut completed_pole = first;
+        completed_pole.complete_pole_graph();
+        assert!(
+            completed_pole
+                .affine_native_parameter_preimage([0.0, 1.0])
+                .unwrap()
+                .is_none(),
+            "a completed graph must not inherit an unproved affine inverse",
+        );
     }
 
     #[test]

@@ -84,6 +84,70 @@ impl PreparedFaceTrimDomain<'_> {
         Ok(proof)
     }
 
+    /// Consume the same immutable spatial source as every boundary query,
+    /// reusing its preparation across a caller's whole germ or span census.
+    /// A retained continuation is borrowed before taking the modeling mutex;
+    /// the absence of one never authorizes an implicit guide as source geometry.
+    pub(crate) fn with_original_spatial_curve<T>(
+        &self,
+        coedge_index: usize,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visit: impl FnOnce(
+            &crate::parametric::PreparedCurveEnclosure<'_>,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        ) -> Result<T, GeometryError>,
+    ) -> Result<T, GeometryError> {
+        check_cancel(cancel)?;
+        let proof = self.original_coedge_correspondence(coedge_index)?;
+        let binding = proof.binding().expect("validated original ownership");
+        let native_range = proof.native_range();
+        let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
+        let edge = &face.face().absolute_boundaries()[binding.owner[1]][binding.owner[2]];
+        if face.face().id() != binding.face
+            || self.native.face().id() != binding.face
+            || edge.id() != binding.edge
+            || [edge.front().id(), edge.back().id()] != binding.endpoints
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original native coedge operands changed",
+            ));
+        }
+        if let Some(prepared) = self.definition.original_boundary_curve(
+            binding.edge,
+            (native_range[0], native_range[1]),
+            work,
+            cancel,
+        )? {
+            return visit(&prepared, work, cancel);
+        }
+        edge.with_curve(|curve| {
+            let mut basis = curve;
+            while let Curve::TrimmedCurve(wrapper) = basis {
+                work.charge(1, cancel)?;
+                basis = wrapper.entity().curve().as_ref();
+            }
+            if matches!(basis, Curve::IntersectionCurve(_)) {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original implicit coedge has no retained continuation authority",
+                ));
+            }
+            let prepared = self.definition.prepare_boundary_curve(
+                binding.edge,
+                curve,
+                (native_range[0], native_range[1]),
+                remaining_bytes,
+                work,
+                cancel,
+            )?;
+            visit(&prepared, work, cancel)
+        })
+    }
+
     /// Reevaluate unchanged native spatial and UV coefficient jets using the
     /// retained endpoint recipe. Both returned derivatives use native edge t.
     /// UV uncertainty remains separately available on the receipt.
@@ -103,29 +167,14 @@ impl PreparedFaceTrimDomain<'_> {
     > {
         check_cancel(cancel)?;
         let proof = self.original_coedge_correspondence(coedge_index)?;
-        let binding = proof.binding().expect("validated original ownership");
-        let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
-        let edge = &face.face().absolute_boundaries()[binding.owner[1]][binding.owner[2]];
-        if edge.id() != binding.edge || [edge.front().id(), edge.back().id()] != binding.endpoints {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original native coedge operands changed",
-            ));
-        }
         proof.uv_parameter_image(range)?;
-        let native_range = proof.native_range();
-        let spatial = edge.with_curve(|curve| {
-            self.definition
-                .prepare_boundary_curve(
-                    edge.id(),
-                    curve,
-                    (native_range[0], native_range[1]),
-                    remaining_bytes,
-                    work,
-                    cancel,
-                )?
-                .jet((range[0], range[1]), work, cancel)
-        })?;
+        let spatial = self.with_original_spatial_curve(
+            coedge_index,
+            remaining_bytes,
+            work,
+            cancel,
+            |prepared, work, cancel| prepared.jet((range[0], range[1]), work, cancel),
+        )?;
         Ok((
             spatial,
             self.original_coedge_uv_jet(coedge_index, range, work, cancel)?,

@@ -249,9 +249,13 @@ pub(crate) fn prove_source_wall_component(
             let domain = source.face_domain(use_.face, available, work, cancel)?;
             let scratch = available
                 .checked_sub(domain.owned_bytes())
+                .and_then(|bytes| bytes.checked_sub(UV_EMBEDDING_STACK_BYTES))
+                .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<OwnedUvRibbon<'_, '_>>()))
                 .ok_or_else(resource)?;
-            let collar = OriginalCollar::new(&domain, use_, work, cancel)?
-                .ok_or_else(|| refusal("source wall has no qualified original collar recipe"))?;
+            let collar =
+                OriginalCollar::for_enclosure(&domain, use_, work, cancel)?.ok_or_else(|| {
+                    refusal("source wall constructor has no original collar geometry")
+                })?;
             let face = domain.native().face();
             let edge = &face.absolute_boundaries()[use_.wire][use_.index];
             let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
@@ -268,13 +272,21 @@ pub(crate) fn prove_source_wall_component(
             let scratch = scratch
                 .checked_sub(cuts.capacity().saturating_mul(std::mem::size_of::<f64>()))
                 .ok_or_else(resource)?;
+            let central = links.central_native_range(
+                edge.id(),
+                correspondence.native_range(),
+                [use_.face, use_.wire, use_.index],
+            )?;
+            let embedding = collar
+                .owned_embedding(central, scratch, work, cancel)?
+                .ok_or_else(|| {
+                    refusal("source wall constructor has no complete boundary-owned UV ribbon")
+                })?;
             edge.with_curve(|curve| -> Result<(), GeometryError> {
                 let native = curve.range_tuple();
                 if correspondence.native_range() != [native.0, native.1] {
                     return Err(refusal("opposed source collar has a different original native parameter range"));
                 }
-                let central = links.central_native_range(edge.id(), [native.0, native.1],
-                    [use_.face, use_.wire, use_.index])?;
                 let prepared = definition.prepare_boundary_curve(edge.id(), curve, native, scratch, work, cancel)?;
                 for span in prepared.parameter_intervals() {
                     let lo = span.0.max(central[0]);
@@ -293,7 +305,7 @@ pub(crate) fn prove_source_wall_component(
                         let (range, depth) = stack[pending];
                         work.charge(1, cancel)?;
                         let jet = prepared.jet((range[0], range[1]), work, cancel)?;
-                        let cell = collar.geometry_cell(range, &jet, allowance, work, cancel)?;
+                        let cell = collar.geometry_cell(&embedding, range, &jet, allowance, work, cancel)?;
                         let acceptable = cell.as_ref().is_some_and(|c| {
                             if faces.contains(&use_.face) { inward(c.position, c.outward, center) }
                             else if constants[use_.face].is_some() {

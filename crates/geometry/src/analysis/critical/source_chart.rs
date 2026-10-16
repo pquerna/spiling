@@ -151,6 +151,191 @@ impl SphereChart {
     }
 }
 
+/// Cartesian coordinates of the ORIGINAL analytic sphere before its affine
+/// processor. The inverse is a hemisphere graph, not a fitted carrier or a
+/// replacement for the original covering chart and its trim operations.
+#[derive(Clone, Copy)]
+pub(super) struct PoleChart {
+    center: [Interval; 3],
+    columns: [[Interval; 3]; 3],
+    inverse: [[Interval; 3]; 3],
+    sign: f64,
+    polar_axis: usize,
+}
+
+impl PoleChart {
+    pub(super) fn coefficients(
+        surface: &Surface,
+        pole: SphericalPole,
+    ) -> Result<Option<Self>, GeometryError> {
+        let Some(sphere_chart) = SphereChart::coefficients(surface, true) else {
+            return Ok(None);
+        };
+        let Surface::SphericalSurface(processor) = surface else {
+            return Ok(None);
+        };
+        let radius = Interval::point(processor.entity().radius());
+        let matrix = processor.transform();
+        let columns = std::array::from_fn(|column| {
+            std::array::from_fn(|row| Interval::point(matrix[column][row]).mul(radius))
+        });
+        // Invertibility and the positive literal radius were established by
+        // SphereChart. Keep every division's outward enclosure.
+        let mut inverse = [[Interval::point(0.0); 3]; 3];
+        for (axis, row) in inverse.iter_mut().enumerate() {
+            for (column, value) in row.iter_mut().enumerate() {
+                *value = sphere_chart.cofactors[axis][column]
+                    .div(sphere_chart.determinant)?
+                    .div(radius)?;
+            }
+        }
+        Ok(Some(Self {
+            center: sphere_chart.center,
+            columns,
+            inverse,
+            polar_axis: usize::from(!processor.orientation()),
+            sign: match pole {
+                SphericalPole::North => 1.0,
+                SphericalPole::South => -1.0,
+            },
+        }))
+    }
+
+    pub(super) fn project(&self, position: [Interval; 3]) -> [Interval; 3] {
+        let relative = std::array::from_fn(|i| position[i].sub(self.center[i]));
+        self.inverse.map(|row| dot(row, relative))
+    }
+
+    pub(super) fn project_vector(&self, vector: [Interval; 3]) -> [Interval; 3] {
+        self.inverse.map(|row| dot(row, vector))
+    }
+
+    /// Affine equations q_xy = target and the ACTUAL positive pole-axis
+    /// half-ray. The rounded center is only an algebraic origin: its entire
+    /// residual is retained in the equation offsets and forward threshold.
+    pub(super) fn fiber_parameters(
+        &self,
+        target: [Interval; 2],
+    ) -> (
+        [f64; 3],
+        [[Interval; 3]; 2],
+        [Interval; 2],
+        [Interval; 3],
+        f64,
+    ) {
+        let origin = self.center.map(Interval::mid);
+        let residual = std::array::from_fn(|i| Interval::point(origin[i]).sub(self.center[i]));
+        let rows = [self.inverse[0], self.inverse[1]];
+        let offsets = std::array::from_fn(|i| dot(rows[i], residual).sub(target[i]));
+        let forward = self.inverse[2].map(|v| v.mul(Interval::point(self.sign)));
+        let min_forward = dot(forward, residual).neg().hi;
+        (origin, rows, offsets, forward, min_forward)
+    }
+
+    pub(super) fn same_hemisphere(&self, position: [Interval; 3]) -> bool {
+        self.project(position)[2].mul(Interval::point(self.sign)).lo > 0.0
+    }
+
+    pub(super) fn opposite_hemisphere(&self, position: [Interval; 3]) -> bool {
+        self.project(position)[2].mul(Interval::point(self.sign)).hi <= 0.0
+    }
+
+    fn vector(&self, local: [Interval; 3]) -> [Interval; 3] {
+        std::array::from_fn(|row| {
+            (0..3).fold(Interval::point(0.0), |sum, column| {
+                sum.add(self.columns[column][row].mul(local[column]))
+            })
+        })
+    }
+
+    /// The original covering law in local sphere coordinates, before the
+    /// literal radius/affine processor. Rounded PI remains a genuine
+    /// trigonometric operand; no pole-coordinate snapping participates.
+    pub(super) fn covering_jet(
+        &self,
+        uv: [Interval; 2],
+        first: [Interval; 2],
+        second: [Interval; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<([Interval; 2], [Interval; 2], [Interval; 2]), GeometryError> {
+        work.charge(1, cancel)?;
+        let mut trig = [[Interval::point(0.0); 2]; 2];
+        for (slot, axis) in [self.polar_axis, 1 - self.polar_axis]
+            .into_iter()
+            .enumerate()
+        {
+            let mut native = ValidatedGeometryBudget::new(
+                usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+            );
+            let result = monstertruck_modeling::validated_sin_cos(
+                ValidatedInterval {
+                    lower: uv[axis].lo,
+                    upper: uv[axis].hi,
+                },
+                &mut native,
+                cancel,
+            );
+            crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
+            let (sine, cosine) = result.map_err(crate::parametric::native_error)?;
+            trig[slot] = [sine, cosine].map(|value| Interval {
+                lo: value.lower,
+                hi: value.upper,
+            });
+        }
+        let [[sp, cp], [sa, ca]] = trig;
+        let q = [sp.mul(ca), sp.mul(sa)];
+        let qp = [cp.mul(ca), cp.mul(sa)];
+        let qa = [sp.mul(sa).neg(), sp.mul(ca)];
+        let qpa = [cp.mul(sa).neg(), cp.mul(ca)];
+        let p_s = first[self.polar_axis];
+        let a_s = first[1 - self.polar_axis];
+        let p_ss = second[self.polar_axis];
+        let a_ss = second[1 - self.polar_axis];
+        let derivative = std::array::from_fn(|i| qp[i].mul(p_s).add(qa[i].mul(a_s)));
+        let acceleration = std::array::from_fn(|i| {
+            q[i].neg()
+                .mul(p_s.square())
+                .add(Interval::point(2.0).mul(qpa[i]).mul(p_s).mul(a_s))
+                .add(q[i].neg().mul(a_s.square()))
+                .add(qp[i].mul(p_ss))
+                .add(qa[i].mul(a_ss))
+        });
+        Ok((q, derivative, acceleration))
+    }
+
+    /// Position and the first two derivatives along q(s)=q+s*direction.
+    /// The strict radicand proves a single original source hemisphere.
+    pub(super) fn graph_jet(
+        &self,
+        q: [Interval; 2],
+        direction: [Interval; 2],
+    ) -> Result<([Interval; 3], [Interval; 3], [Interval; 3]), GeometryError> {
+        let radicand = Interval::point(1.0).sub(q[0].square()).sub(q[1].square());
+        if radicand.lo <= 0.0 {
+            return Err(GeometryError::new(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "original spherical pole comparison leaves its open hemisphere",
+            ));
+        }
+        let z = radicand.sqrt()?.mul(Interval::point(self.sign));
+        let slope = q[0].mul(direction[0]).add(q[1].mul(direction[1]));
+        let speed2 = direction[0].square().add(direction[1].square());
+        let dz = slope.neg().div(z)?;
+        let ddz = speed2
+            .neg()
+            .div(z)?
+            .sub(slope.square().div(z.mul(z).mul(z))?);
+        let local = [q[0], q[1], z];
+        let position = self.vector(local);
+        Ok((
+            std::array::from_fn(|i| self.center[i].add(position[i])),
+            self.vector([direction[0], direction[1], dz]),
+            self.vector([Interval::point(0.0), Interval::point(0.0), ddz]),
+        ))
+    }
+}
+
 fn azimuth_is_single_sheet(range: [f64; 2]) -> Result<bool, GeometryError> {
     let width = Interval::new(range[0], range[1])?.width();
     Ok(up(width) < down(std::f64::consts::TAU))

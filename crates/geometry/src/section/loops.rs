@@ -4,8 +4,8 @@
 
 use super::{endpoint_genealogy, in_frame, kernel_error, resource_error};
 use crate::parametric::{
-    CurveSamplingEndpoint, CurveSamplingInterval, Interval, PreparedCurveEnclosure,
-    SectionPlaneCoverage, SectionPlaneEndpointReceipt,
+    CurveSamplingEndpoint, CurveSamplingInterval, CurveSamplingSmoothRange, Interval,
+    PreparedCurveEnclosure, SectionPlaneCoverage, SectionPlaneEndpointReceipt,
 };
 use crate::{
     Definition, GeometryError, GeometryWorkBudget, NativeSection, PlaneFrameMm, SectionLoopMm,
@@ -118,7 +118,11 @@ impl CanonicalLoop {
 const MAX_SAMPLING_NODES: usize = 1_000_000;
 const MAX_SAMPLING_DEPTH: u8 = 48;
 
-type SamplingNode<'a, 'source> = ([CurveSamplingEndpoint<'a, 'source>; 2], u8);
+type SamplingNode<'a, 'source> = (
+    [CurveSamplingEndpoint<'a, 'source>; 2],
+    Option<CurveSamplingSmoothRange<'a, 'source>>,
+    u8,
+);
 
 /// Shared by every cap/wire/edge in one query, including rejected subdivisions.
 pub(super) struct SamplingWork<'a> {
@@ -618,6 +622,17 @@ impl CapturedCurves {
             .and_then(|bytes| bytes.checked_add(self.retained_bytes))
             .filter(|bytes| *bytes <= byte_limit)
             .ok_or_else(|| resource_error("native continuation scratch exhausted"))?;
+        let mut chart_proposals = crate::parametric::EndpointChartProposals::new(
+            roots,
+            self.endpoint_origins.len(),
+            byte_limit - retained,
+            work,
+            cancel,
+        )?;
+        let candidate_byte_limit = byte_limit
+            .checked_sub(chart_proposals.retained_bytes())
+            .filter(|bytes| *bytes >= retained)
+            .ok_or_else(|| resource_error("native endpoint proposals exceed capture capacity"))?;
         for (candidate_index, (capture, owners)) in
             self.curves.iter().zip(&self.source_faces).enumerate()
         {
@@ -710,7 +725,7 @@ impl CapturedCurves {
                     continue;
                 }
                 if let Some(origin) = origin {
-                    source_charts[end] = Some(roots.endpoint_root_chart(origin, work, cancel)?);
+                    source_charts[end] = Some(chart_proposals.lookup(origin, work, cancel)?);
                 }
             }
             use monstertruck_modeling::ValidatedFacePlaneSourceAnchor;
@@ -738,7 +753,7 @@ impl CapturedCurves {
                         },
                         plane,
                         curve.range_tuple(),
-                        byte_limit - retained,
+                        candidate_byte_limit - retained,
                         work,
                         cancel,
                     );
@@ -771,10 +786,11 @@ impl CapturedCurves {
                 })?;
             retained = retained
                 .checked_add(proof.retained_bytes())
-                .filter(|bytes| *bytes <= byte_limit)
+                .filter(|bytes| *bytes <= candidate_byte_limit)
                 .ok_or_else(|| resource_error("native continuation scratch exhausted"))?;
             prepared.push(proof);
         }
+        drop(chart_proposals);
         Ok((prepared, byte_limit - retained))
     }
 }
@@ -1120,6 +1136,7 @@ fn sample_curve(
         [Option<SamplingNode<'_, '_>>; MAX_SAMPLING_DEPTH as usize + 1],
     >() + std::mem::size_of::<SamplingNode<'_, '_>>()
         + std::mem::size_of::<CurveSamplingInterval<'_, '_>>()
+        + std::mem::size_of::<Option<CurveSamplingSmoothRange<'_, '_>>>()
         + 3 * std::mem::size_of::<CurveSamplingEndpoint<'_, '_>>()
         + 3 * std::mem::size_of::<crate::parametric::CurveEnclosure>()
         + std::mem::size_of::<[[crate::parametric::Interval; 3]; 2]>()
@@ -1144,17 +1161,18 @@ fn sample_curve(
             };
             let end = prepared.sampling_endpoint(span.1, work.native, cancel)?;
             previous_end = Some(end);
-            stack[0] = Some(([start, end], 0_u8));
+            stack[0] = Some(([start, end], None, 0_u8));
             let mut pending = 1;
             while pending != 0 {
                 work.charge(cancel)?;
                 pending -= 1;
-                let (endpoints, depth) =
+                let (endpoints, inherited_smooth_range, depth) =
                     stack[pending].take().expect("pending native sampling span");
                 let start = endpoints[0].parameter();
                 let end = endpoints[1].parameter();
                 let interval = prepared.sampling_interval(
                     &endpoints,
+                    inherited_smooth_range,
                     frame,
                     maximum_plane_error_mm,
                     work.native,
@@ -1252,8 +1270,9 @@ fn sample_curve(
                     ));
                 }
                 let midpoint = prepared.sampling_endpoint(middle, work.native, cancel)?;
-                stack[pending] = Some(([midpoint, endpoints[1]], depth + 1));
-                stack[pending + 1] = Some(([endpoints[0], midpoint], depth + 1));
+                let smooth_range = interval.smooth_range();
+                stack[pending] = Some(([midpoint, endpoints[1]], smooth_range, depth + 1));
+                stack[pending + 1] = Some(([endpoints[0], midpoint], smooth_range, depth + 1));
                 pending += 2;
             }
         }

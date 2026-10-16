@@ -378,7 +378,7 @@ fn census_root_owned(
 }
 
 #[derive(Clone, Copy)]
-enum FiberNewton {
+pub(super) enum FiberNewton {
     Excluded,
     Enclosure { uv: [[f64; 2]; 2], unique: bool },
     Unresolved,
@@ -387,7 +387,7 @@ enum FiberNewton {
 /// A numerical midpoint inverse only proposes the preconditioner. Existence
 /// requires strict interval inclusion; uniqueness additionally requires an
 /// interval infinity-norm contraction on the ENTIRE owning original cell.
-fn fiber_krawczyk(
+pub(super) fn fiber_krawczyk(
     surface: &Surface,
     uv: [[f64; 2]; 2],
     jet: &SurfaceEnclosure,

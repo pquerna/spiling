@@ -33,7 +33,6 @@ pub(super) struct NativeSpanRequest {
 struct SpanCaptureRequest {
     index: u32,
     end: u32,
-    tried_bias: bool,
     retained_points: usize,
     retained_bytes: usize,
 }
@@ -389,7 +388,6 @@ struct DraftStage {
     end: u32,
     interval: [f64; 2],
     sample: f64,
-    tried_bias: bool,
     analyses: Vec<CapturedEvidence>,
     leaves: Vec<SourceMaterial>,
     material: MultiPolygon<f64>,
@@ -506,7 +504,6 @@ pub(super) fn collect_span(
             &SpanCaptureRequest {
                 index,
                 end,
-                tried_bias: false,
                 retained_points,
                 retained_bytes: resident_bytes.saturating_add(state.retained_proof_bytes()),
             },
@@ -588,7 +585,6 @@ pub(super) fn collect_span(
                     &SpanCaptureRequest {
                         index: next_index,
                         end: next_end,
-                        tried_bias: false,
                         retained_points: points,
                         retained_bytes: bytes,
                     },
@@ -650,13 +646,10 @@ pub(super) fn collect_span(
                     settled.clear();
                     let retry_index = current.index;
                     let mut end = current.end;
-                    let mut bias = current.tried_bias;
                     refine_candidate(
                         schedule,
                         retry_index,
                         &mut end,
-                        &mut bias,
-                        &admission.material_domains,
                         "composed native shape-error refinement",
                     )?;
                     drop(candidate);
@@ -689,7 +682,6 @@ pub(super) fn collect_span(
                         &SpanCaptureRequest {
                             index: retry_index,
                             end,
-                            tried_bias: bias,
                             retained_points: points,
                             retained_bytes: bytes,
                         },
@@ -980,7 +972,6 @@ fn capture_base(
     let SpanCaptureRequest {
         index,
         mut end,
-        mut tried_bias,
         retained_points,
         retained_bytes,
     } = *request;
@@ -1092,8 +1083,6 @@ fn capture_base(
                 schedule,
                 index,
                 &mut end,
-                &mut tried_bias,
-                &admission.material_domains,
                 "native/field shape-error refinement",
             )?;
             continue;
@@ -1245,8 +1234,6 @@ fn capture_base(
                 schedule,
                 index,
                 &mut end,
-                &mut tried_bias,
-                &admission.material_domains,
                 "actual source-M leaf shape-error refinement",
             )?;
             continue;
@@ -1273,7 +1260,6 @@ fn capture_base(
             end,
             interval,
             sample,
-            tried_bias,
             analyses,
             leaves,
             material,
@@ -1293,23 +1279,13 @@ fn refine_candidate(
     schedule: &mut Vec<LayerElevation>,
     index: u32,
     end: &mut u32,
-    tried_bias: &mut bool,
-    domains: &BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
     context: &str,
 ) -> Result<(), ManufacturingError> {
     if *end > index + 1 {
         *end = index + 1;
         return Ok(());
     }
-    if !*tried_bias {
-        *tried_bias = true;
-        if let Some(sample) = terminal_sample(&schedule[index as usize], domains) {
-            schedule[index as usize].sample = sample;
-            return Ok(());
-        }
-    }
     split_layer(schedule, index, context)?;
-    *tried_bias = false;
     *end = index + 1;
     Ok(())
 }
@@ -1794,34 +1770,6 @@ fn span_end(
         .next()
         .copied()
         .unwrap_or(schedule.len() as u32))
-}
-
-fn terminal_sample(
-    layer: &LayerElevation,
-    domains: &BTreeMap<spiling_contracts::geometry::OccurrenceId, [[f64; 2]; 2]>,
-) -> Option<f64> {
-    let mut lower = false;
-    let mut upper = false;
-    for [minimum, maximum] in domains.values() {
-        lower |= minimum[0] <= layer.lower_z + super::LAYER_QUANTIZATION_MM
-            && minimum[1] >= layer.lower_z - super::LAYER_QUANTIZATION_MM;
-        upper |= maximum[0] <= layer.z + super::LAYER_QUANTIZATION_MM
-            && maximum[1] >= layer.z - super::LAYER_QUANTIZATION_MM;
-    }
-    if lower == upper {
-        return None;
-    }
-    let width = layer.z - layer.lower_z;
-    let offset = width * 0.001 + 2.0 * spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM;
-    if offset >= width * 0.5 {
-        return None;
-    }
-    let sample = if lower {
-        layer.z - offset
-    } else {
-        layer.lower_z + offset
-    };
-    (sample > layer.lower_z && sample < layer.z && sample != layer.sample).then_some(sample)
 }
 
 fn split_layer(

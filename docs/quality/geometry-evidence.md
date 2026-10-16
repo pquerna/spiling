@@ -60,6 +60,64 @@ This is a bounded native-kernel checkpoint, not full STEP, Spiling fitting/housi
 Compile, workbench, physical printing or packaged geometry qualification. The
 older frozen corpus below retains its actual producer and support envelope.
 
+### Curved source ownership: bounded properties, operator gate still open
+
+The planner-9 parity work on the same native pin separately exercises original
+curved UV ownership and closed source-vertex transport. Seven focused geometry
+properties passed together in 36.88 seconds with one test thread: both UV-error
+terms in owning-complement separation, collapsed-germ rejection, the fitting's
+unchanged circular-rim normal embedding, every fitting paired source collar
+over its complete canonical central range, the housing's lowest original
+spherical-pole ownership, noncolumn material-facing refusal, and full-height
+protected-void rejection of a changed material recipe. These are source-local
+properties, not a whole-part Compile qualification.
+
+The original fitting query over `[0, 0.2]` at sample `0.1` now reaches the final
+shape certificate, whose current upper bound is `0.10500389602602886` mm against
+a `0.1` mm policy. This is a need for adaptive refinement, not proof that the
+actual geometric distance exceeds policy. Its fixture-specific unconditional
+acceptance assertion was removed rather than shortening its interval, raising
+the policy, or pinning that particular conservative refusal.
+
+Actual CLI `project edit --preflight --compile --verify --save` runs retain the
+same whole-part intent and cumulative 20,000,000-work limit. With the completed
+inner-ribbon ownership implementation, the tapered fitting still refused at
+layer 0 after exhausting work during another native Boolean; the rounded
+housing refused in layer-0 closed-source vertex links, consuming the remaining
+12,883,467 work units after 7,116,533 were already spent. They finished in
+34.81 and 22.39 seconds respectively under separate serialized 1 GiB memory /
+64 MiB swap scopes. Neither produced a qualified G-code artifact. Whole-job
+affordability, adaptive scheduling, fresh replay/reopen/export and matching
+workbench acceptance for these parts remain open. Resource limits, source
+geometry and approximation policy were not relaxed.
+
+Removing the same-interval end-biased shape retry then let the unchanged fitting
+operator reach the composed metric/feature gate at layer 1 in 21.58 seconds.
+It now refuses with `AnalysisIndeterminate`: a native critical band lacks
+original coface/root-incidence authority or an independently sealed whole-source
+convexity proof. This is not a successful Compile and must not be bypassed using
+the metric certificate alone. The housing's separate whole-job work refusal
+also remains open.
+
+The matched engine/CLI still completes the exact historical baseline
+`fixtures/geometry/box-mm.step` (SHA-256
+`1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98`)
+from a fresh project: certified bed placement, Compile, independent verification,
+export and save passed in 2.39 seconds. Its 41 certified layers use five slabs
+and 1,395,917 geometry-work units. A fresh read-only engine reopen, preflight,
+verification, packed replay retrieval and export passed in 1.13 seconds; both
+exports retain program hash
+`dd2edddb214c66deb877ebd14912e14d57341cccc5c85b352dad47f2ab8c1ffd`.
+
+That success does not qualify every box representation: the independent OCCT
+box (SHA-256
+`809bae57212f4c640016cafe3bfe4487f7f899326ee00e663774be6a673a1b82`)
+with the same inert intent exhausted the unchanged 20,000,000-work limit at
+layer 31 during source-support central-coedge preparation. It is a distinct
+source, not a regression claim against the historical baseline. Repeated
+source-bound work and conservative material-height critical bands remain
+important generic acceptance work, not grounds for exporter-specific dispatch.
+
 ### Original upstream source failure
 
 Candidate kernel: Monstertruck 0.4.1, Git revision `1fbc7a52555df6ccfe66aee7c877097ab1852146`. Its public repository clones without recursively fetching submodules. Its `.gitmodules` includes:

@@ -170,7 +170,7 @@ impl ClosedRadialLinks {
             };
             if let Some((prism, request)) = field {
                 let Some(proof) =
-                    plan.prove_radial(prism, request, remaining_bytes, work, cancel)?
+                    plan.prove_radial(source, prism, request, remaining_bytes, work, cancel)?
                 else {
                     return Err(failure(
                         GeometryErrorCode::AnalysisIndeterminate,

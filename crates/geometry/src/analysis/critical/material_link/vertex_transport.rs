@@ -11,11 +11,17 @@ use crate::analysis::source_incidence::CoedgeUse;
 use monstertruck_modeling::{Curve, Point3};
 use monstertruck_topology::{EdgeId, VertexId};
 
+mod uv_ownership;
+use uv_ownership::{OriginalCornerComparison, UvComparisonPreparation, UvPrepareStage};
+
 type Box3 = [Interval; 3];
 type Box2 = [Interval; 2];
 const CONICAL_STACK_BYTES: usize = 4
     * std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
-    + std::mem::size_of::<[([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1]>();
+    + std::mem::size_of::<[([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1]>()
+    + UV_EMBEDDING_STACK_BYTES
+    + std::mem::size_of::<UvRibbonEmbedding<'static, 'static>>()
+    + uv_ownership::OWNERSHIP_STACK_BYTES;
 
 #[derive(Clone, Copy)]
 struct Corner {
@@ -40,6 +46,7 @@ struct ConeCell {
 /// All retained cells belong to one original definition and NativeV.
 pub(super) struct SourceVertexTransportPlan<'d> {
     definition: &'d Definition,
+    vertex: VertexId<Point3>,
     point: [f64; 3],
     fraction: f64,
     rows: [Box3; 2],
@@ -136,6 +143,8 @@ struct CornerRecipe {
     outgoing: End,
     incoming: End,
     bulge: Box2,
+    comparison: Option<OriginalCornerComparison>,
+    comparison_refusal: Option<UvPrepareStage>,
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +337,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         outgoing,
                         incoming,
                         bulge: [Interval::point(0.0); 2],
+                        comparison: None,
+                        comparison_refusal: None,
                     });
                 }
                 // Finish all radius refutations before starting ANY theta cover.
@@ -437,10 +448,38 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     && !cells.is_empty()
                     && super::vertex_fan::projected_vertex_fan(&rays, work, cancel)?
                 {
+                    drop(rays);
+                    let retained = recipes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<CornerRecipe>())
+                        .saturating_add(
+                            cells
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<ConeCell>()),
+                        );
+                    let comparison_scratch = scratch.checked_sub(retained).ok_or_else(|| {
+                        GeometryError::new(
+                            GeometryErrorCode::ResourceLimit,
+                            "fixed source comparison exceeds coexistent geometry capacity",
+                        )
+                    })?;
+                    stage = "fixed realization source correspondence";
+                    qualify_fixed_source_costs(
+                        source,
+                        vertex,
+                        point,
+                        allowance,
+                        comparison_scratch,
+                        &mut recipes,
+                        &mut cells,
+                        work,
+                        cancel,
+                    )?;
                     let source_error_mm =
                         cells.iter().map(|cell| cell.error_mm).fold(0.0, f64::max);
                     return Ok(Some(Self {
                         definition: source.definition(),
+                        vertex,
                         point,
                         fraction,
                         rows,
@@ -586,6 +625,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 "source conical geometry lost its original definition owner",
             ));
         }
+        let allowance = source_allowance(self.definition)?;
         let scratch = remaining_bytes
             .checked_sub(self.retained_bytes().saturating_add(CONICAL_STACK_BYTES))
             .ok_or_else(|| {
@@ -598,6 +638,12 @@ impl<'d> SourceVertexTransportPlan<'d> {
             work.charge(1, cancel)?;
             let face = recipe.outgoing.use_.face;
             let domain = source.face_domain(face, scratch, work, cancel)?;
+            let owned_scratch = scratch.checked_sub(domain.owned_bytes()).ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "relative source UV ownership exceeds coexistent domain storage",
+                )
+            })?;
             if !collar_graph_transverse(&domain, recipe.outgoing, self.rows, work, cancel)?
                 || !collar_graph_transverse(&domain, recipe.incoming, self.rows, work, cancel)?
             {
@@ -614,74 +660,137 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 work,
                 cancel,
             )?;
+            let comparison_owned = if convex_owned {
+                false
+            } else if let Some(comparison) = &recipe.comparison {
+                comparison.validates(&domain, recipe, self.vertex)?;
+                comparison.disk_owned(&domain, recipe, owned_scratch, work, cancel)?
+            } else {
+                // Reconstruct full finite diagnostics ONLY on this refusal
+                // path; successful plans retain no large diagnostic payload.
+                match OriginalCornerComparison::prepare(
+                    &domain,
+                    recipe,
+                    self.vertex,
+                    allowance,
+                    owned_scratch,
+                    work,
+                    cancel,
+                )? {
+                    UvComparisonPreparation::Refused(reason) => {
+                        let stable = recipe.comparison_refusal == Some(reason.stage);
+                        return Err(refusal(format!(
+                            "{reason}; immutable_admission_stage_matches={stable} definition={} source_endpoint_fraction={}",
+                            self.definition.id().as_str(),
+                            self.fraction,
+                        )));
+                    }
+                    UvComparisonPreparation::Prepared(_) => {
+                        return Err(self.gate_failure(
+                            face,
+                            "fixed source comparison was not retained after proved admission",
+                        ));
+                    }
+                }
+            };
+            if !convex_owned && !comparison_owned {
+                return Err(self.gate_failure(
+                    face,
+                    "relative source UV disk did not retain complete ownership authority",
+                ));
+            }
+            let sphere_chart = domain.native().face().with_surface(|surface| {
+                source_chart::SphereChart::new(surface, &domain, work, cancel)
+            })?;
             for cell in self.cells.iter().filter(|cell| cell.recipe == index) {
                 work.charge(1, cancel)?;
                 let t = Interval {
                     lo: cell.parameter[0],
                     hi: cell.parameter[1],
                 };
-                if !convex_owned
-                    && !trim_owns(
+                if !comparison_owned {
+                    let boundary = boundary_jet(
+                        &domain,
+                        recipe.outgoing,
+                        recipe.incoming,
+                        cell.piece,
+                        t,
+                        recipe.bulge,
+                        work,
+                        cancel,
+                    )?;
+                    if !outer_cutover_owned(
                         &domain,
                         recipe.outgoing,
                         recipe.incoming,
                         cell.piece,
                         recipe.bulge,
-                        t,
+                        &boundary,
                         work,
                         cancel,
-                    )?
-                {
-                    return Err(self.gate_failure(
-                        face,
-                        "active source vertex UV star lacks original trim and joint ownership",
-                    ));
+                    )? {
+                        return Err(self.gate_failure(face,
+                            "active source vertex outer trace lacks unchanged/paired-G collar cutover ownership"));
+                    }
                 }
-                let boundary = boundary_jet(
-                    &domain,
-                    recipe.outgoing,
-                    recipe.incoming,
-                    cell.piece,
-                    t,
-                    recipe.bulge,
-                    work,
-                    cancel,
-                )?;
-                if !outer_cutover_owned(
-                    &domain,
-                    recipe.outgoing,
-                    recipe.incoming,
-                    cell.piece,
-                    recipe.bulge,
-                    &boundary,
-                    work,
-                    cancel,
-                )? {
-                    return Err(self.gate_failure(face,
-                        "active source vertex outer trace lacks unchanged/paired-G collar cutover ownership"));
-                }
-                let h = star_jet(
-                    &domain,
-                    recipe.outgoing,
-                    recipe.incoming,
-                    cell.piece,
-                    Interval { lo: 0.0, hi: 1.0 },
-                    t,
-                    recipe.bulge,
-                    work,
-                    cancel,
-                )?;
-                let transverse = domain.native().face().with_surface(|surface| {
-                    let jet = surface_enclosure(surface, uv_box(h.uv), work, cancel)?;
-                    let n = if let Some(chart) =
-                        source_chart::SphereChart::new(surface, &domain, work, cancel)?
-                    {
-                        chart.normal(jet.position)?
+                let transverse = if let Some(chart) = &sphere_chart {
+                    // This is a whole physical SOURCE enclosure, including the
+                    // comparison carrier homotopy. Its ambient box need not lie
+                    // on-carrier; the original quadric gradient bounds all
+                    // source normals inside it. Actual G normals are separate.
+                    dot(
+                        chart.normal(cell.source)?,
+                        cross(self.rows[0], self.rows[1]),
+                    )
+                    .lo > 0.0
+                } else {
+                    let h = star_jet(
+                        &domain,
+                        recipe.outgoing,
+                        recipe.incoming,
+                        cell.piece,
+                        Interval { lo: 0.0, hi: 1.0 },
+                        t,
+                        recipe.bulge,
+                        work,
+                        cancel,
+                    )?;
+                    let comparison_uv = if comparison_owned {
+                        let comparison = recipe
+                            .comparison
+                            .as_ref()
+                            .and_then(OriginalCornerComparison::native_uv)
+                            .ok_or_else(|| {
+                                self.gate_failure(
+                                    face,
+                                    "non-spherical source graph lost its native-UV comparison",
+                                )
+                            })?;
+                        comparison
+                            .star_jet(
+                                &domain,
+                                recipe,
+                                cell.piece,
+                                Interval { lo: 0.0, hi: 1.0 },
+                                t,
+                                work,
+                                cancel,
+                            )?
+                            .uv
                     } else {
-                        normal(&jet, domain.native().face().orientation())
+                        h.uv
                     };
-                    Ok(dot(n, cross(self.rows[0], self.rows[1])).lo > 0.0)
-                })?;
+                    domain.native().face().with_surface(|surface| {
+                        let jet = surface_enclosure(
+                            surface,
+                            uv_box(hull2(h.uv, comparison_uv)),
+                            work,
+                            cancel,
+                        )?;
+                        let n = normal(&jet, domain.native().face().orientation());
+                        Ok(dot(n, cross(self.rows[0], self.rows[1])).lo > 0.0)
+                    })?
+                };
                 if !transverse {
                     return Err(self.gate_failure(
                         face,
@@ -690,7 +799,6 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 }
             }
         }
-        let allowance = source_allowance(self.definition)?;
         let support = self
             .cells
             .iter()
@@ -712,6 +820,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
 
     pub(super) fn prove_radial<'a>(
         &'a self,
+        source: OriginalTrimSource<'_, 'd>,
         prism: &SamplePrism,
         request: &SlabRequest,
         remaining_bytes: usize,
@@ -739,12 +848,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 outside_closed_slab: true,
             }));
         }
-        self.qualify_geometry(
-            OriginalTrimSource::standalone(self.definition),
-            remaining_bytes,
-            work,
-            cancel,
-        )?;
+        self.qualify_geometry(source, remaining_bytes, work, cancel)?;
         for cell in &self.cells {
             work.charge(1, cancel)?;
             let h = functional.height(cell.realized);
@@ -1225,6 +1329,181 @@ fn source_radius_refuted(
     )))
 }
 
+/// Direct comparison with the ORIGINAL shared three-dimensional edge. The
+/// actual cone germ is V+s(C(exit)-V), not an invented carrier intersection.
+/// Linear interpolation's C2 remainder plus the literal NativeV residual
+/// bounds the complete edge in BOTH directions under the same parameter.
+fn original_endpoint_chord_error(
+    definition: &Definition,
+    domain: &PreparedFaceTrimDomain<'_>,
+    end: End,
+    point: [f64; 3],
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
+    work.charge(1, cancel)?;
+    let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
+    let binding = proof
+        .binding()
+        .ok_or_else(|| refusal("original shared-edge chord lost its source binding"))?;
+    let edge = &domain.native().face().absolute_boundaries()[end.use_.wire][end.use_.index];
+    if edge.id() != end.edge
+        || edge.id() != binding.edge
+        || [edge.front().id(), edge.back().id()] != binding.endpoints
+    {
+        return Err(refusal("original shared-edge chord operands changed"));
+    }
+    let span = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
+    proof.uv_parameter_image(span)?;
+    let native_range = proof.native_range();
+    edge.with_curve(|curve| {
+        // Prepare the bound original spatial source ONCE, then reuse its
+        // immutable query index for the endpoint and whole C2 restriction.
+        let prepared = definition.prepare_boundary_curve(
+            edge.id(),
+            curve,
+            (native_range[0], native_range[1]),
+            remaining_bytes,
+            work,
+            cancel,
+        )?;
+        let endpoint = prepared.jet((end.endpoint, end.endpoint), work, cancel)?;
+        let whole = prepared.jet((span[0], span[1]), work, cancel)?;
+        endpoint_chord_error_bound(
+            point,
+            endpoint.position,
+            whole.second_derivative,
+            end.delta_t,
+        )
+    })
+}
+
+fn endpoint_chord_error_bound(
+    point: [f64; 3],
+    endpoint: Box3,
+    second_derivative: Box3,
+    delta: Interval,
+) -> Result<f64, GeometryError> {
+    let residual = length(relative(endpoint, point))?;
+    let curvature = length(second_derivative)?;
+    let error = residual.add(curvature.mul(delta.square()).mul(Interval::point(0.125)));
+    if !error.hi.is_finite() {
+        return Err(refusal(
+            "original shared-edge chord has no finite source error bound",
+        ));
+    }
+    Ok(error.hi)
+}
+
+/// Strengthen the SOURCE comparison only AFTER geometry/radius selection.
+/// Failure here refuses that fixed M; it never selects a query-specific finer
+/// radius. Every support and downstream error consumer sees the charged cost.
+#[allow(clippy::too_many_arguments)]
+fn qualify_fixed_source_costs(
+    source: OriginalTrimSource<'_, '_>,
+    vertex: VertexId<Point3>,
+    point: [f64; 3],
+    allowance: f64,
+    remaining_bytes: usize,
+    recipes: &mut [CornerRecipe],
+    cells: &mut [ConeCell],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    let available = remaining_bytes;
+    let mut edge_error_mm = 0.0_f64;
+    for recipe in recipes.iter() {
+        let domain = source.face_domain(recipe.outgoing.use_.face, available, work, cancel)?;
+        let scratch = available.checked_sub(domain.owned_bytes()).ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ResourceLimit,
+                "original shared-edge comparison exceeds remaining source storage",
+            )
+        })?;
+        // Each outgoing germ occurs once in the complete native corner cycle;
+        // its opposed incoming use was checked against the SAME literal exit.
+        edge_error_mm = edge_error_mm.max(original_endpoint_chord_error(
+            source.definition(),
+            &domain,
+            recipe.outgoing,
+            point,
+            scratch,
+            work,
+            cancel,
+        )?);
+    }
+    if edge_error_mm > allowance {
+        return Err(refusal(format!(
+            "fixed source realization shared-edge chord exceeds admitted source error: vertex_mm={point:?} bound_mm={edge_error_mm} admitted_mm={allowance}"
+        )));
+    }
+    for (index, recipe) in recipes.iter_mut().enumerate() {
+        let domain = source.face_domain(recipe.outgoing.use_.face, available, work, cancel)?;
+        let owned_scratch = available.checked_sub(domain.owned_bytes()).ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ResourceLimit,
+                "fixed source UV correspondence exceeds coexistent domain storage",
+            )
+        })?;
+        match OriginalCornerComparison::prepare(
+            &domain,
+            recipe,
+            vertex,
+            allowance,
+            owned_scratch,
+            work,
+            cancel,
+        )? {
+            UvComparisonPreparation::Prepared(comparison) => {
+                recipe.comparison = Some(comparison);
+                recipe.comparison_refusal = None;
+            }
+            UvComparisonPreparation::Refused(reason) => {
+                recipe.comparison = None;
+                recipe.comparison_refusal = Some(reason.stage);
+            }
+        }
+        for cell in cells.iter_mut().filter(|cell| cell.recipe == index) {
+            work.charge(1, cancel)?;
+            cell.error_mm = cell.error_mm.max(edge_error_mm);
+            if let Some(comparison) = &recipe.comparison {
+                if comparison.is_identity() {
+                    // This is exact original-operand identity, not a small
+                    // shift threshold: the already proved source cost is reused.
+                    continue;
+                }
+                let cost = comparison.source_cost(
+                    &domain,
+                    recipe,
+                    cell.piece,
+                    Interval {
+                        lo: cell.parameter[0],
+                        hi: cell.parameter[1],
+                    },
+                    point,
+                    work,
+                    cancel,
+                )?;
+                if !cost.homotopy_mm.is_finite()
+                    || cost.homotopy_mm < 0.0
+                    || !cost.error_mm.is_finite()
+                    || cost.error_mm > allowance
+                {
+                    return Err(refusal(format!(
+                        "fixed source realization completed UV comparison exceeds admitted source error: vertex_mm={point:?} source_face={} bound_mm={} completion_mm={} admitted_mm={allowance}",
+                        recipe.outgoing.use_.face, cost.error_mm, cost.homotopy_mm,
+                    )));
+                }
+                cell.source = hull3(cell.source, cost.source);
+                cell.displacement = hull3(cell.displacement, cost.displacement);
+                cell.error_mm = cell.error_mm.max(cost.error_mm);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn star_jet(
     domain: &PreparedFaceTrimDomain<'_>,
     a: End,
@@ -1332,39 +1611,6 @@ fn boundary_jet(
         displacement: jet.boundary_displacement.map(|v| weight.mul(v)),
         uv: jet.uv,
     })
-}
-
-fn trim_owns(
-    domain: &PreparedFaceTrimDomain<'_>,
-    a: End,
-    b: End,
-    piece: Piece,
-    bulge: Box2,
-    t: Interval,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-    stack[0] = ([0.0, 1.0], 0);
-    let mut pending = 1;
-    while pending != 0 {
-        pending -= 1;
-        let (s, depth) = stack[pending];
-        work.charge(1, cancel)?;
-        let s = Interval { lo: s[0], hi: s[1] };
-        let h = star_jet(domain, a, b, piece, s, t, bulge, work, cancel)?;
-        if domain.classify(uv_box(h.uv), work, cancel)? == TrimClassification::Inside {
-            continue;
-        }
-        let mid = s.mid();
-        if depth >= MAX_DEPTH || mid <= s.lo || mid >= s.hi {
-            return Ok(false);
-        }
-        stack[pending] = ([mid, s.hi], depth + 1);
-        stack[pending + 1] = ([s.lo, mid], depth + 1);
-        pending += 2;
-    }
-    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2127,9 +2373,51 @@ fn collar_graph_transverse(
     if !end.collar {
         return Ok(true);
     }
-    let Some(collar) = OriginalCollar::new(domain, end.use_, work, cancel)? else {
-        return Ok(false);
+    let Some(collar) = OriginalCollar::for_enclosure(domain, end.use_, work, cancel)? else {
+        return Err(failure(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "outside-G collar geometry unavailable before UV embedding",
+            end.use_.face,
+            (end.use_.coedge, end.exit),
+        ));
     };
+    let step = (end.exit - end.endpoint).abs() * 0.5;
+    let nominal_cut = (collar.range[1] - collar.range[0])
+        * domain.material_realization().endpoint_support_fraction();
+    let germ = if end.absolute_back {
+        [end.exit - step, end.exit]
+    } else {
+        [end.exit, end.exit + step]
+    };
+    let remains_central = if end.absolute_back {
+        germ[0] > collar.range[0] + nominal_cut
+    } else {
+        germ[1] < collar.range[1] - nominal_cut
+    };
+    if !remains_central || germ[0] >= germ[1] {
+        return Err(failure(
+            GeometryErrorCode::ConditioningFailure,
+            "outside-G source-only germ has no proved central parameter scope",
+            end.use_.face,
+            (end.use_.coedge, germ),
+        ));
+    }
+    let Some(embedding) = collar.embedding(germ, [0.0, 1.0], work, cancel)? else {
+        return Err(failure(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "outside-G collar constructor cannot prove scoped original UV embedding",
+            end.use_.face,
+            (end.use_.coedge, germ),
+        ));
+    };
+    if !embedding.covers(&collar, [end.exit; 2], [0.0, 1.0]) {
+        return Err(failure(
+            GeometryErrorCode::InvalidGeometry,
+            "outside-G scoped UV embedding lost its actual exit cross-section",
+            end.use_.face,
+            (end.use_.coedge, end.exit),
+        ));
+    }
     let CarrierTransport::Collar { width, inward } = collar.transport else {
         return Ok(false);
     };
@@ -2144,6 +2432,8 @@ fn collar_graph_transverse(
     let across = std::array::from_fn(|i| {
         uv.position[i].add(Interval { lo: 0.0, hi: 1.0 }.mul(end.offset[i]))
     });
+    // boundary_jet acquires this same carrier mutex.
+    let cross_section = collar.boundary_jet(end.exit, [0.0, 1.0], &end.spatial, work, cancel)?;
     domain.native().face().with_surface(|surface| {
         let boundary = surface_enclosure(
             surface,
@@ -2159,8 +2449,6 @@ fn collar_graph_transverse(
         )?;
         let boundary_t = compose_first(&boundary, uv.derivative);
         let d_t: Box3 = std::array::from_fn(|i| end.spatial.derivative[i].sub(boundary_t[i]));
-        let cross_section =
-            collar.boundary_jet(end.exit, [0.0, 1.0], &end.spatial, work, cancel)?;
         let f_t = compose_first(&patch, a_t);
         let f_w = compose_first(&patch, end.offset);
         let g_t = std::array::from_fn(|i| f_t[i].add(Interval { lo: 0.0, hi: 1.0 }.mul(d_t[i])));
@@ -2171,7 +2459,16 @@ fn collar_graph_transverse(
         if !end.use_.orientation {
             n = n.map(Interval::neg);
         }
-        Ok(dot(n, cross(rows[0], rows[1])).lo > 0.0)
+        let projection = dot(n, cross(rows[0], rows[1]));
+        if projection.lo <= 0.0 {
+            return Err(failure(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "outside-G local physical source-P graph dot is not strictly positive",
+                end.use_.face,
+                (end.use_.coedge, end.exit, projection),
+            ));
+        }
+        Ok(true)
     })
 }
 
@@ -2259,6 +2556,62 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn direct_original_curve_chord_bound_retains_native_vertex_residual() {
+        use monstertruck_modeling::{BsplineCurve, KnotVector};
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let linear = [1.0, 2.0, 0.5];
+        for shift in [-16.0, 0.0, 1024.0] {
+            let origin = [shift, -2.0 * shift, 0.5 * shift];
+            for quadratic in [[0.0; 3], [0.25, -0.5, 1.0], [-1.0, 2.0, 0.5]] {
+                let points = [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)].map(
+                    |(linear_weight, quadratic_weight)| {
+                        let p: [f64; 3] = std::array::from_fn(|i| {
+                            origin[i] + linear_weight * linear[i] + quadratic_weight * quadratic[i]
+                        });
+                        Point3::new(p[0], p[1], p[2])
+                    },
+                );
+                let curve = Curve::BsplineCurve(BsplineCurve::new(
+                    KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                    points.to_vec(),
+                ));
+                let endpoint =
+                    crate::parametric::curve_enclosure(&curve, (0.0, 0.0), &mut work, &cancel)
+                        .unwrap();
+                for span in [0.125, 0.5] {
+                    let jet =
+                        crate::parametric::curve_enclosure(&curve, (0.0, span), &mut work, &cancel)
+                            .unwrap();
+                    for residual in [0.0, 1.0 / 262144.0] {
+                        let point = [origin[0] + residual, origin[1], origin[2]];
+                        let bound = endpoint_chord_error_bound(
+                            point,
+                            endpoint.position,
+                            jet.second_derivative,
+                            Interval::point(span),
+                        )
+                        .unwrap();
+                        let midpoint_error: [f64; 3] = std::array::from_fn(|i| {
+                            quadratic[i] * span * span * 0.25
+                                + if i == 0 { residual * 0.5 } else { 0.0 }
+                        });
+                        let expected = midpoint_error
+                            .into_iter()
+                            .map(|x| x * x)
+                            .sum::<f64>()
+                            .sqrt();
+                        assert!(
+                            bound >= expected && bound >= residual,
+                            "original coefficient curvature and NativeV datum both belong to source cost"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! Whole-source convexity is separate, strictly stronger evidence.
 
 pub(crate) mod material_link;
+mod ray_index;
 mod source_chart;
 
 use super::slab::HeightFunctional;
@@ -1774,6 +1775,7 @@ fn orient(a: [Interval; 2], b: [Interval; 2], p: [Interval; 2]) -> Interval {
 
 struct SamplePrism {
     vertices: Vec<[Interval; 2]>,
+    ray_index: Option<ray_index::RayEdgeIndex>,
     outer_count: usize,
     center: [f64; 3],
     frame: PlaneFrameMm,
@@ -1787,7 +1789,57 @@ struct SamplePrism {
     approximation: f64,
     vertical_return: f64,
 }
+
+fn next_sample_vertex(edge: usize, outer_count: usize, count: usize) -> usize {
+    if edge + 1 == outer_count {
+        0
+    } else if edge + 1 == count {
+        outer_count
+    } else {
+        edge + 1
+    }
+}
 impl SamplePrism {
+    fn required_heap_bytes(count: usize, annular: bool) -> Option<usize> {
+        let vertices = count.checked_mul(std::mem::size_of::<[Interval; 2]>())?;
+        vertices.checked_add(if annular {
+            ray_index::RayEdgeIndex::required_heap_bytes(count)?
+        } else {
+            0
+        })
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.vertices
+            .capacity()
+            .saturating_mul(std::mem::size_of::<[Interval; 2]>())
+            .saturating_add(
+                self.ray_index
+                    .as_ref()
+                    .map_or(0, ray_index::RayEdgeIndex::heap_bytes),
+            )
+    }
+
+    fn ray_index(
+        vertices: &[[Interval; 2]],
+        outer_count: usize,
+        heap_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ray_index::RayEdgeIndex, GeometryError> {
+        ray_index::RayEdgeIndex::new(
+            vertices.len(),
+            heap_limit,
+            |edge| {
+                let a = vertices[edge];
+                let b = vertices[next_sample_vertex(edge, outer_count, vertices.len())];
+                std::array::from_fn(|axis| a[axis].hull(b[axis]))
+            },
+            work,
+            cancel,
+        )
+    }
+
     fn new(
         section: &NativeSection,
         request: &SlabRequest,
@@ -1823,8 +1875,7 @@ impl SamplePrism {
         }
         let outer_count = section.loops[outer].points_mm.len() - 1;
         let count = outer_count + hole.map_or(0, |index| section.loops[index].points_mm.len() - 1);
-        if count
-            .checked_mul(std::mem::size_of::<[Interval; 2]>())
+        if Self::required_heap_bytes(count, hole.is_some())
             .is_none_or(|bytes| bytes > MAX_SAMPLE_BYTES)
         {
             return Err(failure(
@@ -1990,8 +2041,32 @@ impl SamplePrism {
             Interval::point(height_vertical_norm),
         )
         .hi + approximation);
+        let index = if core_radius.is_some() {
+            let vertex_bytes = vertices
+                .capacity()
+                .checked_mul(std::mem::size_of::<[Interval; 2]>())
+                .and_then(|bytes| MAX_SAMPLE_BYTES.checked_sub(bytes))
+                .ok_or_else(|| {
+                    failure(
+                        GeometryErrorCode::ResourceLimit,
+                        "sample vertices exceed ray-index admission",
+                        0,
+                        count,
+                    )
+                })?;
+            Some(Self::ray_index(
+                &vertices,
+                outer_count,
+                vertex_bytes,
+                work,
+                cancel,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             vertices,
+            ray_index: index,
             outer_count,
             center,
             frame,
@@ -2045,13 +2120,7 @@ impl SamplePrism {
     }
 
     fn next_vertex(&self, edge: usize) -> usize {
-        if edge + 1 == self.outer_count {
-            0
-        } else if edge + 1 == self.vertices.len() {
-            self.outer_count
-        } else {
-            edge + 1
-        }
+        next_sample_vertex(edge, self.outer_count, self.vertices.len())
     }
 
     /// Exact stored frame rows and their interval-enclosed dual columns define
@@ -2161,9 +2230,16 @@ impl SamplePrism {
     fn boundary_distance(
         &self,
         position: [Interval; 3],
+        sufficient_error_mm: f64,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
+        let scale = position
+            .into_iter()
+            .map(Interval::abs_upper)
+            .fold(1.0_f64, f64::max);
+        let with_reserve =
+            |distance| up(distance + 3.0 * self.approximation + up(scale * f64::EPSILON * 128.0));
         let p = project(position, self.frame);
         let rho = length([p[0], p[1], Interval::point(0.0)])?;
         let mut inside = true;
@@ -2180,6 +2256,7 @@ impl SamplePrism {
                 break;
             }
         }
+        let inside_outer = inside;
         if self.core_radius.is_some() && rho.lo <= self.inner_radius_upper {
             inside = false;
         }
@@ -2197,17 +2274,27 @@ impl SamplePrism {
             Interval::point(self.height_vertical_norm),
         )
         .hi;
-        let mut distance = f64::INFINITY;
-        if inside {
+        let cap_distance = || {
             let vertical = height
                 .sub(Interval::point(self.range[0]))
                 .abs_upper()
                 .min(height.sub(Interval::point(self.range[1])).abs_upper());
-            distance = mul(
+            mul(
                 Interval::point(vertical),
                 Interval::point(self.height_vertical_norm),
             )
-            .hi;
+            .hi
+        };
+        let mut distance = if inside {
+            cap_distance()
+        } else {
+            f64::INFINITY
+        };
+        // A feasible cap witness already within the requested policy needs no
+        // additional side witness. Zero requests the full minimum of bounds.
+        let cap_bound = with_reserve(distance);
+        if cap_bound <= sufficient_error_mm {
+            return Ok(cap_bound);
         }
         if self.core_radius.is_some() && rho.lo > 0.0 {
             let cosine = p[0].div(rho)?;
@@ -2221,7 +2308,16 @@ impl SamplePrism {
             let scale = length(radial)?.hi;
             let mut loop_bounds = [0.0_f64; 2];
             let mut candidates = [0_usize; 2];
-            for edge in 0..self.vertices.len() {
+            let mut all_inner_intersections_before = true;
+            let index = self.ray_index.as_ref().ok_or_else(|| {
+                failure(
+                    GeometryErrorCode::InvalidGeometry,
+                    "annular sample is missing its admitted ray index",
+                    0,
+                    self.vertices.len(),
+                )
+            })?;
+            index.visit(p, work, cancel, |edge, work| {
                 work.charge(1, cancel)?;
                 let inner = usize::from(edge >= self.outer_count);
                 let a = self.vertices[edge];
@@ -2234,7 +2330,7 @@ impl SamplePrism {
                 let first = mul(sign, orient([Interval::point(0.0); 2], a, p));
                 let second = mul(sign, orient([Interval::point(0.0); 2], p, b));
                 if first.hi < 0.0 || second.hi < 0.0 {
-                    continue;
+                    return Ok(());
                 }
                 let support = mul(sign, orient(a, b, [Interval::point(0.0); 2]));
                 let edge_length = length([b[0].sub(a[0]), b[1].sub(a[1]), Interval::point(0.0)])?;
@@ -2256,13 +2352,26 @@ impl SamplePrism {
                 );
                 let reserve = if denominator.lo > 0.0 {
                     let parameter = support.div(denominator)?;
+                    if inner == 1 {
+                        all_inner_intersections_before &= parameter.hi <= 1.0;
+                    }
                     let radial_error = mul(rho, Interval::point(1.0).sub(parameter)).abs_upper();
                     mul(Interval::point(radial_error), Interval::point(scale)).hi
                 } else {
+                    if inner == 1 {
+                        all_inner_intersections_before = false;
+                    }
                     fallback
                 };
                 loop_bounds[inner] = loop_bounds[inner].max(reserve);
                 candidates[inner] += 1;
+                Ok(())
+            })?;
+            // The enclosing disk is only a sufficient outside-hole test.
+            // Every compatible actual ray intersection may prove the same
+            // cap material even when that disk test is inconclusive.
+            if !inside && inside_outer && candidates[1] > 0 && all_inner_intersections_before {
+                distance = distance.min(cap_distance());
             }
             // Each actual star loop has a ray intersection. Enumerate every
             // interval-compatible edge: MAX, not min, bounds the unknown feasible
@@ -2304,13 +2413,7 @@ impl SamplePrism {
         // The cap material is convex globally (disk complex) or in each proven
         // meridian fiber (cycle complex). Native sampling transfers that exact
         // source region to its actual polygon in both directions.
-        let scale = position
-            .into_iter()
-            .map(Interval::abs_upper)
-            .fold(1.0_f64, f64::max);
-        Ok(up(distance
-            + 3.0 * self.approximation
-            + up(scale * f64::EPSILON * 128.0)))
+        Ok(with_reserve(distance))
     }
 }
 
@@ -2658,15 +2761,28 @@ pub(super) fn certify_critical_slab(
     let fixed_scratch = MAX_EVENT_BYTES
         + MAX_EDGE_BYTES
         + material_link::MAX_CORRECTION_BYTES
+        + material_link::UV_EMBEDDING_STACK_BYTES
+        + std::mem::size_of::<material_link::PairedMaterialLink<'_, '_>>()
         + RESERVED_STACK_BYTES
         + capture_bytes
         + 4096;
-    let sample_bytes = section
+    let sample_count = section
         .loops
         .iter()
         .map(|boundary| boundary.points_mm.len().saturating_sub(1))
-        .sum::<usize>()
-        .saturating_mul(std::mem::size_of::<[Interval; 2]>());
+        .sum::<usize>();
+    let sample_bytes = SamplePrism::required_heap_bytes(
+        sample_count,
+        section.loops.iter().any(|boundary| boundary.is_hole),
+    )
+    .ok_or_else(|| {
+        failure(
+            GeometryErrorCode::ResourceLimit,
+            "critical sample index capacity overflow",
+            0,
+            sample_count,
+        )
+    })?;
     scratch_limit
         .checked_sub(fixed_scratch.saturating_add(sample_bytes))
         .ok_or_else(|| {
@@ -2700,14 +2816,7 @@ pub(super) fn certify_critical_slab(
     let mut closed_boundary = prism.closed_capture_boundary(work, cancel)?;
     let mut whole_source = definition.material_transport_is_proved_zero(work, cancel)?;
     let chart_bytes = scratch_limit
-        .checked_sub(
-            fixed_scratch.saturating_add(
-                prism
-                    .vertices
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<[Interval; 2]>()),
-            ),
-        )
+        .checked_sub(fixed_scratch.saturating_add(prism.heap_bytes()))
         .ok_or_else(|| {
             failure(
                 GeometryErrorCode::ResourceLimit,
@@ -2725,6 +2834,7 @@ pub(super) fn certify_critical_slab(
     let mut events = Vec::new();
     let mut edges = SourceEdgeIncidence::new(definition, MAX_EDGE_BYTES, work, cancel)?;
     edges.prepare_vertices(MAX_EDGE_BYTES, work, cancel)?;
+    let vertex_before = work.consumed();
     let mut material_links = material_link::ClosedRadialLinks::new(
         source,
         &edges,
@@ -2733,7 +2843,10 @@ pub(super) fn certify_critical_slab(
         chart_bytes,
         work,
         cancel,
-    )?;
+    )
+    .map_err(|error| {
+        work.annotate_error(error, vertex_before, "closed material source vertex links")
+    })?;
     let mut regular_flow = material_links
         .all_vertex_supports_outside_closed_slab()
         .then_some(0.0);
@@ -2757,6 +2870,7 @@ pub(super) fn certify_critical_slab(
     let mut lower = [f64::INFINITY; 2];
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
+        let face_before = work.consumed();
         let domain = source.face_domain(face_index, chart_bytes, work, cancel)?;
         face.with_surface(|surface| -> Result<(), GeometryError> {
             let source_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
@@ -2804,7 +2918,7 @@ pub(super) fn certify_critical_slab(
                 )?;
                 whole_source &= convex;
                 let regular = length(n)?.lo > 0.0;
-                let metric = if active { prism.boundary_distance(jet.position, work, cancel)? } else { 0.0 };
+                let metric = if active { prism.boundary_distance(jet.position, request.native_shape_error_mm, work, cancel)? } else { 0.0 };
                 if !regular || radial_degree.lo <= 0.0 || metric > request.native_shape_error_mm {
                     if !active && (radial_degree.hi <= 0.0 || depth >= MAX_DEPTH) {
                         // The optional whole-source theorem failed, but this
@@ -2870,12 +2984,14 @@ pub(super) fn certify_critical_slab(
                 }
             }
             Ok(())
-        })?;
+        }).map_err(|error| work.annotate_error(error, face_before,
+            format_args!("closed material original face cover; source_face={face_index}")))?;
     }
     // All original incidences remain mandatory. Only a WHOLE edge-cell height
     // exclusion removes its geometric link from the clipped boundary; cells
     // touching either CLOSED cut retain the complete two-sided material link.
     for uses in edges.values() {
+        let edge_before = work.consumed();
         let first = uses.first;
         let second = uses.second.ok_or_else(|| {
             failure(
@@ -2894,12 +3010,33 @@ pub(super) fn certify_critical_slab(
         )?;
         let first_face = first_domain.native().face();
         let second_face = second_domain.native().face();
+        let edge = &first_face.absolute_boundaries()[first.wire][first.index];
+        let central_range = material_links.central_native_range(
+            edge.id(),
+            first_domain
+                .original_coedge_correspondence(first.coedge)?
+                .native_range(),
+            [first.face, first.wire, first.index],
+        )?;
+        let paired_scratch = chart_bytes
+            .checked_sub(first_domain.owned_bytes())
+            .and_then(|bytes| bytes.checked_sub(second_domain.owned_bytes()))
+            .ok_or_else(|| {
+                failure(
+                    GeometryErrorCode::ResourceLimit,
+                    "paired source ownership exceeds coexistent domain admission",
+                    first.face,
+                    central_range,
+                )
+            })?;
         let material_link = material_link::PairedMaterialLink::new(
             definition,
             &first_domain,
             first,
             &second_domain,
             second,
+            central_range,
+            paired_scratch,
             work,
             cancel,
         )?;
@@ -2931,7 +3068,6 @@ pub(super) fn certify_critical_slab(
         } else {
             None
         };
-        let edge = &first_face.absolute_boundaries()[first.wire][first.index];
         // Visit before borrowing this edge's curve: the inventory visitor
         // acquires the same original coefficient owner.
         let partition_bytes = chart_bytes
@@ -2959,13 +3095,10 @@ pub(super) fn certify_critical_slab(
         )?;
         edge.with_curve(|curve| -> Result<(), GeometryError> {
             let range = curve.range_tuple();
-            let central_range = material_links.central_native_range(
-                edge.id(), [range.0, range.1], [first.face, first.wire, first.index],
-            )?;
             // Events grow while this native owner remains live: reserve their
             // complete bounded capacity, not just the capacity before capture.
             let occupied_scratch = fixed_scratch
-                + prism.vertices.capacity() * std::mem::size_of::<[Interval; 2]>()
+                + prism.heap_bytes()
                 + first_domain.owned_bytes() + second_domain.owned_bytes()
                 + source_cuts.capacity() * std::mem::size_of::<f64>();
             let remaining = scratch_limit.checked_sub(occupied_scratch).ok_or_else(|| failure(
@@ -3017,25 +3150,28 @@ pub(super) fn certify_critical_slab(
                     }
                     let proved = match &material_link {
                         Some(link) => link.cell([lo, hi], &jet, &prism, work, cancel)?,
-                        None => None,
+                        None => Err(material_link::MaterialLinkRefusal::ConstructorSourceEmbedding),
                     };
-                    let Some(proved) = proved else {
-                        if !active {
-                            whole_source = false;
-                            closed_boundary.excluded_coedge_cells += 1;
+                    let proved = match proved {
+                        Ok(proved) => proved,
+                        Err(stage) => {
+                            if !active {
+                                whole_source = false;
+                                closed_boundary.excluded_coedge_cells += 1;
+                                continue;
+                            }
+                            let mid = lo * 0.5 + hi * 0.5;
+                            if material_link.is_none() || depth >= MAX_DEPTH || mid <= lo || mid >= hi {
+                                return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
+                                    "original paired material collar has no complete positive radial link", first.face,
+                                    (stage, first.wire, first.index, second.face, [lo, hi],
+                                        request.height_interval_mm, request.sample_height_mm)));
+                            }
+                            work.charge(2, cancel)?;
+                            stack.push(((lo, mid), depth + 1));
+                            stack.push(((mid, hi), depth + 1));
                             continue;
                         }
-                        let mid = lo * 0.5 + hi * 0.5;
-                        if material_link.is_none() || depth >= MAX_DEPTH || mid <= lo || mid >= hi {
-                            return Err(failure(GeometryErrorCode::AnalysisIndeterminate,
-                                "original paired material collar has no complete positive radial link", first.face,
-                                (first.wire, first.index, second.face, [lo, hi],
-                                    request.height_interval_mm, request.sample_height_mm)));
-                        }
-                        work.charge(2, cancel)?;
-                        stack.push(((lo, mid), depth + 1));
-                        stack.push(((mid, hi), depth + 1));
-                        continue;
                     };
                     whole_source &= proved.convex_link;
                     material_links.record(&proved, work, cancel)?;
@@ -3084,13 +3220,24 @@ pub(super) fn certify_critical_slab(
                 }
             }
             Ok(())
-        })?;
+        }).map_err(|error| work.annotate_error(error, edge_before,
+            format_args!("closed material paired coedge cover; source_faces={}/{} source_coedges={}/{}",
+                first.face, second.face, first.coedge, second.coedge)))?;
     }
     // Local radial signs are insufficient: a second disconnected sheet or a
     // nonunit toroidal covering has the same local signs. The COMPLETE regular
     // fiber census counts all original faces and excludes every corrected
     // collar/vertex/cap support before granting total degree one.
-    material_links.degree_one(source, &prism, request, chart_bytes, work, cancel)?;
+    let degree_before = work.consumed();
+    material_links
+        .degree_one(source, &prism, request, chart_bytes, work, cancel)
+        .map_err(|error| {
+            work.annotate_error(
+                error,
+                degree_before,
+                "closed material complete source fiber degree",
+            )
+        })?;
     let realization_error = material_links.source_error_mm;
     let vertical_reverse_bound = up(prism.vertical_return + realization_error);
     let reverse_bound = if let Some(rate) = regular_flow {
@@ -3295,20 +3442,30 @@ mod tests {
             [0.0, 1.0, 0.0].map(Interval::point),
             [0.0, 0.0, 1.0].map(Interval::point),
         ];
+        let vertices = [
+            [-10.0, -10.0],
+            [10.0, -10.0],
+            [10.0, 10.0],
+            [-10.0, 10.0],
+            [-3.0, 0.0],
+            [0.0, 3.0],
+            [3.0, 0.0],
+            [0.0, -3.0],
+        ]
+        .into_iter()
+        .map(|p| p.map(Interval::point))
+        .collect::<Vec<_>>();
+        let index = SamplePrism::ray_index(
+            &vertices,
+            4,
+            MAX_SAMPLE_BYTES,
+            &mut GeometryWorkBudget::new(100_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         SamplePrism {
-            vertices: [
-                [-10.0, -10.0],
-                [10.0, -10.0],
-                [10.0, 10.0],
-                [-10.0, 10.0],
-                [-3.0, 0.0],
-                [0.0, 3.0],
-                [3.0, 0.0],
-                [0.0, -3.0],
-            ]
-            .into_iter()
-            .map(|p| p.map(Interval::point))
-            .collect(),
+            vertices,
+            ray_index: Some(index),
             outer_count: 4,
             center: [0.0; 3],
             frame: request.frame,
@@ -3332,6 +3489,7 @@ mod tests {
         let distance = prism
             .boundary_distance(
                 [10.0, -10.0, 0.100001].map(Interval::point),
+                0.0,
                 &mut work,
                 &cancel,
             )
@@ -3341,7 +3499,12 @@ mod tests {
             "same-ray edge witness must contract: {distance}"
         );
         let outside = prism
-            .boundary_distance([10.0, -10.0, 0.3].map(Interval::point), &mut work, &cancel)
+            .boundary_distance(
+                [10.0, -10.0, 0.3].map(Interval::point),
+                0.0,
+                &mut work,
+                &cancel,
+            )
             .unwrap();
         assert!(
             outside >= 0.19999 && outside < 0.20001,
@@ -3357,6 +3520,7 @@ mod tests {
                     },
                     Interval::point(0.0),
                 ],
+                0.0,
                 &mut work,
                 &cancel,
             )
@@ -3378,6 +3542,7 @@ mod tests {
         let distance = prism
             .boundary_distance(
                 [-10.0 - 0.25 * z, -10.0, z].map(Interval::point),
+                0.0,
                 &mut GeometryWorkBudget::new(100_000),
                 &AtomicBool::new(false),
             )
@@ -3385,6 +3550,39 @@ mod tests {
         assert!(
             distance > 1.02e-6 && distance < 1.1e-6,
             "a normal-only cap shift is not inside this oblique corner: {distance}"
+        );
+    }
+
+    #[test]
+    fn annular_cap_witness_uses_actual_hole_not_its_enclosing_disk() {
+        let prism = annular_metric_candidate();
+        let cap_z = prism.range[0];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        // Outside the actual diamond hole, but inside its enclosing disk.
+        let cap = prism
+            .boundary_distance(
+                [2.0, 2.0, cap_z].map(Interval::point),
+                0.0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert!(
+            cap < 1e-10,
+            "actual closed cap must remain available: {cap}"
+        );
+        let hole = prism
+            .boundary_distance(
+                [1.0, 1.0, cap_z].map(Interval::point),
+                0.0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert!(
+            hole > 0.1,
+            "a hole point must not acquire a cap witness: {hole}"
         );
     }
 

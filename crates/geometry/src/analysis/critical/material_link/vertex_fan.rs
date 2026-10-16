@@ -1229,6 +1229,67 @@ pub(super) fn original_uv_endpoints_equal(
     Ok(true)
 }
 
+// Fixed coefficient, homogeneous-point and bounded wrapper-operator scratch
+// coexisting in the affine coordinate-function proof below. No heap storage.
+pub(super) const ORIGINAL_UV_AFFINE_COORDINATE_STACK_BYTES: usize = 64
+    * std::mem::size_of::<ExactCoefficient>()
+    + 2 * std::mem::size_of::<[Option<monstertruck_modeling::Matrix3>; 32]>();
+
+/// Equality of one ORIGINAL affine UV coordinate FUNCTION on a common
+/// qualified parameter interval. Complete coefficients establish affinity
+/// first; the two exact homogeneous values then determine that function.
+/// Neither rounded endpoint samples nor a zero-containing box are identities.
+/// The caller retains both source/map/use bindings and supplies their common
+/// original parameter interval; this helper does not supply that association.
+pub(super) fn original_uv_affine_coordinate_functions_equal(
+    first: &monstertruck_modeling::Curve2D,
+    second: &monstertruck_modeling::Curve2D,
+    parameters: [f64; 2],
+    axis: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if axis >= 2
+        || parameters.into_iter().any(|value| !value.is_finite())
+        || parameters[0] == parameters[1]
+    {
+        return Ok(false);
+    }
+    for curve in [first, second] {
+        let range = curve.range_tuple();
+        if parameters
+            .into_iter()
+            .any(|value| value < range.0 || value > range.1)
+            || !original_uv_affine(curve, work, cancel)?
+        {
+            return Ok(false);
+        }
+    }
+    for parameter in parameters {
+        work.charge(1, cancel)?;
+        let Some(a) = affine_uv_point(first, parameter, work, cancel)? else {
+            return Ok(false);
+        };
+        let Some(b) = affine_uv_point(second, parameter, work, cancel)? else {
+            return Ok(false);
+        };
+        if a[2].sign() == 0 || b[2].sign() == 0 {
+            return Ok(false);
+        }
+        let Some(mut left) = a[axis].product(&b[2], work, cancel)? else {
+            return Ok(false);
+        };
+        let Some(right) = b[axis].product(&a[2], work, cancel)? else {
+            return Ok(false);
+        };
+        if left.subtract(&right).is_none() || left.sign() != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn original_affine_uv_point(
     curve: &monstertruck_modeling::Curve2D,
     parameter: f64,
@@ -1668,6 +1729,96 @@ fn endpoint_support_span(range: [f64; 2], high: bool) -> Result<[f64; 2], Geomet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_affine_uv_coordinate_identity_keeps_closed_gauges_and_one_ulp_kinks() {
+        use monstertruck_modeling::{BsplineCurve, Curve2D, KnotVector, Line, Point2};
+        let line =
+            |last_x: f64, y: f64| Curve2D::Line(Line(Point2::new(3.0, y), Point2::new(last_x, y)));
+        let a = line(2.0, 1.0);
+        let b = line(2.0, 7.0);
+        let perturbed = line(2.0_f64.next_up(), 7.0);
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        for parameters in [[0.0, 1.0], [0.25, 0.75], [1.0, 0.0]] {
+            assert!(
+                original_uv_affine_coordinate_functions_equal(
+                    &a, &b, parameters, 0, &mut work, &cancel,
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &b,
+                [0.0, 1.0],
+                1,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &perturbed,
+                [0.0, 1.0],
+                0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let nonlinear = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            vec![
+                Point2::new(3.0, 7.0),
+                Point2::new(2.75, 7.0),
+                Point2::new(2.0, 7.0),
+            ],
+        ));
+        // Equal endpoint values do not make the entire original function affine.
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &nonlinear,
+                [0.0, 1.0],
+                0,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        for parameters in [[-0.25, 1.0], [0.5, 0.5]] {
+            assert!(
+                !original_uv_affine_coordinate_functions_equal(
+                    &a, &b, parameters, 0, &mut work, &cancel,
+                )
+                .unwrap()
+            );
+        }
+        let error = original_uv_affine_coordinate_functions_equal(
+            &a,
+            &b,
+            [0.0, 1.0],
+            0,
+            &mut GeometryWorkBudget::new(0),
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+        let error = original_uv_affine_coordinate_functions_equal(
+            &a,
+            &b,
+            [0.0, 1.0],
+            0,
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::Cancelled);
+    }
 
     #[test]
     fn original_uv_endpoint_identity_preserves_rational_values_and_rejects_rounding() {

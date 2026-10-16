@@ -8,14 +8,19 @@ use crate::section::endpoint_genealogy::SectionPlaneEndpointOrigin;
 use crate::{Definition, GeometryError, GeometryWorkBudget};
 use monstertruck_modeling::{
     BoundedCurve, Curve, Plane, PreparedFaceParameterDomain, PreparedFacePlaneRoots,
-    PreparedValidatedCurve, ValidatedCurveOptions, ValidatedGeometryBudget, ValidatedGeometryError,
-    ValidatedPlaneCoverageOptions, ValidatedPlaneCoverageQuery, ValidatedPlaneCoverageWitness,
-    ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
+    PreparedValidatedCurve, Surface, ValidatedCurveOptions, ValidatedGeometryBudget,
+    ValidatedGeometryError, ValidatedPlaneCoverageOptions, ValidatedPlaneCoverageQuery,
+    ValidatedPlaneCoverageWitness, ValidatedPlaneTrimBoundaryBinding, ValidatedPlaneTrimEndpoint,
     ValidatedPlaneTrimEndpointBinding,
 };
-use monstertruck_topology::EdgeId;
+use monstertruck_topology::{EdgeId, FaceId};
 use spiling_contracts::geometry::{GeometryErrorCode, SECTION_SAMPLING_TOLERANCE_MM};
-use std::{collections::HashMap, hash::Hash, mem::size_of, sync::atomic::AtomicBool};
+use std::{
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    mem::size_of,
+    sync::atomic::AtomicBool,
+};
 
 #[derive(Debug)]
 pub(crate) struct SectionPlaneEndpointReceipt {
@@ -93,7 +98,13 @@ impl<'a> PreparedSectionOriginals<'a> {
             .checked_sub(size_of::<Self>())
             .ok_or_else(|| resource("native section original owner exceeds source capacity"))?;
         let mut faces = Vec::new();
-        reserve(&mut faces, definition.faces.len(), &mut remaining, work, cancel)?;
+        reserve(
+            &mut faces,
+            definition.faces.len(),
+            &mut remaining,
+            work,
+            cancel,
+        )?;
         for face_index in 0..definition.faces.len() {
             let before = work.consumed();
             let domain = prepare_original_face_domain(
@@ -101,7 +112,10 @@ impl<'a> PreparedSectionOriginals<'a> {
             ).map_err(|error| work.annotate_error(
                 error, before, format_args!("standalone SourceOriginals source_face={face_index} trim-domain preparation"),
             ))?;
-            faces.push(OriginalFace { domain, uses: Vec::new() });
+            faces.push(OriginalFace {
+                domain,
+                uses: Vec::new(),
+            });
         }
         Ok(Self {
             definition,
@@ -345,9 +359,8 @@ pub(crate) fn prepare_section_originals<'a>(
     let registry_bytes =
         registry.capacity() * 2 * (size_of::<((EdgeId<Curve>, u64, u64), usize)>() + 32);
     for face_index in 0..definition.faces.len() {
-        let domain = prepare_original_face_domain(
-            definition, face_index, &mut remaining, work, cancel,
-        )?;
+        let domain =
+            prepare_original_face_domain(definition, face_index, &mut remaining, work, cancel)?;
         let face = domain.native().face();
         let mut uses = Vec::new();
         reserve(
@@ -482,6 +495,130 @@ impl PreparedSectionPlaneRoots<'_> {
         Ok(result
             .map_err(native_error)?
             .map(|interval| interval.midpoint()))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct EndpointChartProposalKey {
+    shell_index: usize,
+    face_index: usize,
+    face_id: FaceId<Surface>,
+    wire_index: usize,
+    coedge_index: usize,
+    edge_id: EdgeId<Curve>,
+    orientation: bool,
+    source_cut_bits: u64,
+}
+impl EndpointChartProposalKey {
+    fn new(origin: &SectionPlaneEndpointOrigin) -> Self {
+        Self {
+            shell_index: origin.shell_index,
+            face_index: origin.face_index,
+            face_id: origin.identity.face_id,
+            wire_index: origin.identity.wire_index,
+            coedge_index: origin.identity.coedge_index,
+            edge_id: origin.identity.edge_id,
+            orientation: origin.identity.orientation,
+            source_cut_bits: origin.source_cut_parameter.to_bits(),
+        }
+    }
+}
+
+struct EndpointChartProposal {
+    key: EndpointChartProposalKey,
+    chart: [f64; 2],
+}
+
+/// Numerical UV proposals for one borrowed immutable exact-plane inventory.
+/// Candidate association, continuation and coverage never consume this table.
+pub(crate) struct EndpointChartProposals<'query, 'source> {
+    roots: &'query PreparedSectionPlaneRoots<'source>,
+    slots: Vec<Option<EndpointChartProposal>>,
+    retained_bytes: usize,
+}
+impl<'query, 'source> EndpointChartProposals<'query, 'source> {
+    pub(crate) fn new(
+        roots: &'query PreparedSectionPlaneRoots<'source>,
+        maximum_endpoint_requests: usize,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        work.charge(1, cancel)?;
+        let mut remaining = remaining_bytes
+            .checked_sub(size_of::<Self>())
+            .ok_or_else(|| resource("endpoint chart proposal owner exceeds query capacity"))?;
+        // Capacity is optional search storage, not an extra geometry allowance.
+        // Prefer half occupancy, but narrow to the caller's current free bytes.
+        let capacity = maximum_endpoint_requests
+            .saturating_mul(2)
+            .min(remaining / size_of::<Option<EndpointChartProposal>>());
+        let mut slots = Vec::new();
+        reserve(&mut slots, capacity, &mut remaining, work, cancel)?;
+        work.charge(
+            u64::try_from(slots.capacity())
+                .map_err(|_| resource("endpoint chart proposal initialization work overflow"))?,
+            cancel,
+        )?;
+        slots.resize_with(slots.capacity(), || None);
+        Ok(Self {
+            roots,
+            slots,
+            retained_bytes: remaining_bytes - remaining,
+        })
+    }
+
+    /// Includes this owner and its fixed table capacity, never the borrowed roots.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub(crate) fn lookup(
+        &mut self,
+        origin: &SectionPlaneEndpointOrigin,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[f64; 2], GeometryError> {
+        work.charge(1, cancel)?;
+        // Validate the complete directed original occurrence before any hit.
+        let (_, use_) = self.roots.originals.original_use(origin, work, cancel)?;
+        let range = self.roots.originals.boundaries[use_.boundary].range;
+        if !origin.source_cut_parameter.is_finite()
+            || origin.source_cut_parameter < range[0]
+            || origin.source_cut_parameter > range[1]
+        {
+            return Err(native_error(ValidatedGeometryError::ParameterOutOfRange));
+        }
+        let key = EndpointChartProposalKey::new(origin);
+        let mut vacant = None;
+        if !self.slots.is_empty() {
+            let mut hash = DefaultHasher::new();
+            key.hash(&mut hash);
+            let mut index = (hash.finish() % self.slots.len() as u64) as usize;
+            for _ in 0..self.slots.len() {
+                work.charge(1, cancel)?;
+                match &self.slots[index] {
+                    Some(proposal) if proposal.key == key => return Ok(proposal.chart),
+                    Some(_) => {}
+                    None => {
+                        vacant = Some(index);
+                        break;
+                    }
+                }
+                index += 1;
+                if index == self.slots.len() {
+                    index = 0;
+                }
+            }
+        }
+        // Capacity exhaustion changes cost only: retain the same qualified
+        // backend, including all of its errors, without growing the table.
+        let chart = self.roots.endpoint_root_chart(origin, work, cancel)?;
+        if let Some(index) = vacant {
+            work.charge(1, cancel)?;
+            self.slots[index] = Some(EndpointChartProposal { key, chart });
+        }
+        Ok(chart)
     }
 }
 pub(crate) fn prepare_section_plane_roots<'a>(
@@ -788,4 +925,111 @@ pub(crate) fn certify_section_plane_coverage(
         endpoints,
         retained_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monstertruck_modeling::{ParametricCurve, Point3};
+    use std::path::Path;
+
+    #[test]
+    fn endpoint_proposals_preserve_original_occurrence_range_and_plane() {
+        let cancel = AtomicBool::new(false);
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step"),
+        )
+        .unwrap();
+        let definition = crate::import_step(&bytes, &cancel).unwrap();
+        let foreign = crate::import_step(&bytes, &cancel).unwrap();
+        let byte_limit = 32 * 1024 * 1024;
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let originals = prepare_section_originals(&definition, byte_limit, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        let (origin, range, point) = originals
+            .faces
+            .iter()
+            .enumerate()
+            .find_map(|(face_index, face)| {
+                face.domain
+                    .native()
+                    .coedges()
+                    .iter()
+                    .zip(&face.uses)
+                    .find_map(|(coedge, use_)| {
+                        let range = originals.boundaries[use_.boundary].range;
+                        let identity = coedge.identity;
+                        let edge = &face.domain.native().face().absolute_boundaries()
+                            [identity.wire_index][identity.coedge_index];
+                        let parameter = range[0] + (range[1] - range[0]) * 0.5;
+                        edge.with_curve(|curve| {
+                            let a = curve.subs(range[0]);
+                            let b = curve.subs(range[1]);
+                            ((a.z - b.z).abs() > 0.1).then(|| {
+                                (
+                                    SectionPlaneEndpointOrigin {
+                                        shell_index: 0,
+                                        face_index,
+                                        identity,
+                                        candidate_index: 0,
+                                        endpoint_is_back: false,
+                                        source_cut_parameter: parameter,
+                                    },
+                                    range,
+                                    curve.subs(parameter),
+                                )
+                            })
+                        })
+                    })
+            })
+            .expect("box original has a transverse vertical boundary");
+        let plane = Plane::new(
+            point,
+            Point3::new(point.x + 1.0, point.y, point.z),
+            Point3::new(point.x, point.y + 1.0, point.z),
+        );
+        let roots = prepare_section_plane_roots(&originals, &plane, byte_limit, &mut work, &cancel)
+            .unwrap();
+        let mut proposals =
+            EndpointChartProposals::new(&roots, 1, byte_limit, &mut work, &cancel).unwrap();
+        proposals.lookup(&origin, &mut work, &cancel).unwrap();
+
+        let mut wrong_source = origin;
+        wrong_source.identity.face_id = foreign.face_boundaries[origin.face_index].face;
+        let mut reversed = origin;
+        reversed.identity.orientation = !reversed.identity.orientation;
+        let mut wrong_shell = origin;
+        wrong_shell.shell_index = 1;
+        for invalid in [wrong_source, reversed, wrong_shell] {
+            assert_eq!(
+                proposals
+                    .lookup(&invalid, &mut work, &cancel)
+                    .unwrap_err()
+                    .code,
+                GeometryErrorCode::AnalysisIndeterminate,
+            );
+        }
+        for parameter in [f64::NAN, f64::INFINITY, range[0] - 1.0, range[1] + 1.0] {
+            let mut invalid = origin;
+            invalid.source_cut_parameter = parameter;
+            assert!(proposals.lookup(&invalid, &mut work, &cancel).is_err());
+        }
+
+        let absent_plane = Plane::new(
+            Point3::new(point.x, point.y, point.z + 10_000.0),
+            Point3::new(point.x + 1.0, point.y, point.z + 10_000.0),
+            Point3::new(point.x, point.y + 1.0, point.z + 10_000.0),
+        );
+        let absent_roots =
+            prepare_section_plane_roots(&originals, &absent_plane, byte_limit, &mut work, &cancel)
+                .unwrap();
+        let mut absent_proposals =
+            EndpointChartProposals::new(&absent_roots, 1, byte_limit, &mut work, &cancel).unwrap();
+        assert!(
+            absent_proposals
+                .lookup(&origin, &mut work, &cancel)
+                .is_err()
+        );
+    }
 }
