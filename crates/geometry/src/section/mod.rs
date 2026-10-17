@@ -66,6 +66,7 @@ impl SectionQuery {
 pub(crate) struct OriginalTrimSource<'s, 'd> {
     definition: &'d Definition,
     originals: Option<&'s crate::parametric::PreparedSectionOriginals<'d>>,
+    vertex_plans: Option<&'s crate::analysis::PreparedSourceVertexPlans<'d>>,
 }
 
 impl<'s, 'd> OriginalTrimSource<'s, 'd> {
@@ -73,11 +74,26 @@ impl<'s, 'd> OriginalTrimSource<'s, 'd> {
         Self {
             definition,
             originals: None,
+            vertex_plans: None,
         }
     }
 
     pub(crate) fn definition(self) -> &'d Definition {
         self.definition
+    }
+
+    pub(crate) fn vertex_plans(self) -> Option<&'s crate::analysis::PreparedSourceVertexPlans<'d>> {
+        self.vertex_plans
+    }
+
+    pub(crate) fn borrowing_vertex_plans(
+        self,
+        vertex_plans: &'s crate::analysis::PreparedSourceVertexPlans<'d>,
+    ) -> Self {
+        Self {
+            vertex_plans: Some(vertex_plans),
+            ..self
+        }
     }
 
     /// A standalone full query owns preparation once; prepared sources already
@@ -93,10 +109,15 @@ impl<'s, 'd> OriginalTrimSource<'s, 'd> {
         }
         let before = work.consumed();
         crate::parametric::PreparedSectionOriginals::prepare_trim_domains(
-            self.definition, remaining_bytes, work, cancel,
-        ).map(Some).map_err(|error| work.annotate_error(
-            error, before, "standalone SourceOriginals preparation",
-        ))
+            self.definition,
+            remaining_bytes,
+            work,
+            cancel,
+        )
+        .map(Some)
+        .map_err(|error| {
+            work.annotate_error(error, before, "standalone SourceOriginals preparation")
+        })
     }
 
     pub(crate) fn borrowing_domains(
@@ -106,6 +127,7 @@ impl<'s, 'd> OriginalTrimSource<'s, 'd> {
         Self {
             definition: self.definition,
             originals: self.originals.or(originals),
+            vertex_plans: self.vertex_plans,
         }
     }
 
@@ -217,15 +239,16 @@ fn source_header_bytes(has_originals: bool) -> usize {
         }
 }
 
-impl PreparedSectionSource<'_> {
-    pub(crate) fn definition(&self) -> &Definition {
+impl<'d> PreparedSectionSource<'d> {
+    pub(crate) fn definition(&self) -> &'d Definition {
         self.definition
     }
 
-    pub(crate) fn trim_source(&self) -> OriginalTrimSource<'_, '_> {
+    pub(crate) fn trim_source(&self) -> OriginalTrimSource<'_, 'd> {
         OriginalTrimSource {
             definition: self.definition,
             originals: self.originals.as_ref(),
+            vertex_plans: None,
         }
     }
 

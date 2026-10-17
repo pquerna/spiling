@@ -1198,7 +1198,7 @@ fn place_endpoint_strata(
 }
 
 pub(crate) fn analyze_placed_slab(
-    source: &PreparedSectionSource<'_>,
+    source: &crate::PreparedMaterialSource<'_>,
     request: &PlacedSlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,

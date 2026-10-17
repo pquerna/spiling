@@ -99,24 +99,80 @@ convexity proof. This is not a successful Compile and must not be bypassed using
 the metric certificate alone. The housing's separate whole-job work refusal
 also remains open.
 
-The matched engine/CLI still completes the exact historical baseline
+Carrier-first post-selection vertex separation subsequently exposed another
+original spherical-pole exit ownership refusal while 8,415,241 work units
+remained. A common-polar-function support proof now handles that closed cutover
+without changing G or widening the inverse. Five focused properties passed
+together in 13.89 seconds: every original housing pole/joint and complete
+cutover with wrong-sign/gauge/branch rejection, the retained lowest pole,
+all fitting paired collars, full protected-void scope and actual hole-versus-cap
+separation. The unchanged housing operator then cleared layer 0 and refused
+at layer 1's original-face cover under the same cumulative work cap
+(17.39 seconds). This does not establish a completed housing Compile.
+
+A separate long-cell regression reproduced the disk witness's fixed-midpoint
+overestimate: a box wholly on an actual prism side returned
+`0.10000000000028424` mm against a `0.01` mm witness target. Point-dependent
+orthogonal projection onto the actual finite segment, including endpoint
+clamping, now passes that case. Six focused metric/void properties passed
+together in 4.28 seconds, retaining closed-height, sampling, oblique-frame,
+annular-ray and actual-hole guarantees. The matched whole housing run still
+exhausted the cumulative work cap at layer 1's face cover (17.93 seconds).
+The local certificate improvement therefore does not establish whole-job
+affordability or completed slicing.
+
+A debugger-only repeated-query diagnostic isolated source selection on the
+pre-reuse production binary, with the actual housing source hash and pose and
+one cumulative 20-million-work counter. Each `[0, 0.1]` query sampled at `0.05`
+consumed 2,067,749 work units; 28 source vertex-plan preparations accounted for
+910,962 units on each query. No source-geometry qualification ran in this probe.
+The local result retained transition material and `closed_shape_error_mm=None`;
+its one-sided sample-to-closed-source bound was `0.05016815073036809` mm.
+This identifies repeated source selection, not completed closed-material
+coverage or sufficient whole-part savings.
+
+After the explicit owner cutover, those same repeated queries each consume
+1,156,860 work units with unchanged metric scope and bound. One-time material
+preparation consumes 944,693 units and retains 3,260,160 bytes, compared with
+3,007,824 bytes for the former raw preparation. The single cumulative counter
+remains in force; the saving comes from retained selection, not skipped
+qualification or query proofs.
+
+The material-owner cutover's focused run passed retained-plan
+identity/cancellation/resource rejection, finite-side projection, exhausted
+query capacity and independent raw-section exact-fit properties. The existing
+regular-family property still refused the positive generated spherical-belt
+query `[-0.01, 0.01]` sampled at zero: original plane-root preparation returned
+`AmbiguousBranch` on face 1. A no-rebuild source trace established that the
+cone-frustum positive query and its wider-closed-span/same-sample metric
+rejection completed first. The spherical failure remains a representation
+admission gap; it is not repinned to an expected failure or counted as parity.
+
+The matched material-owner engine/CLI completes the exact historical baseline
 `fixtures/geometry/box-mm.step` (SHA-256
 `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98`)
 from a fresh project: certified bed placement, Compile, independent verification,
-export and save passed in 2.39 seconds. Its 41 certified layers use five slabs
-and 1,395,917 geometry-work units. A fresh read-only engine reopen, preflight,
-verification, packed replay retrieval and export passed in 1.13 seconds; both
-exports retain program hash
-`dd2edddb214c66deb877ebd14912e14d57341cccc5c85b352dad47f2ab8c1ffd`.
+export and save passed in 2.40 seconds. Its 41 certified layers use five slabs
+and 1,396,095 geometry-work units.
 
-That success does not qualify every box representation: the independent OCCT
-box (SHA-256
+The independent OCCT box (SHA-256
 `809bae57212f4c640016cafe3bfe4487f7f899326ee00e663774be6a673a1b82`)
-with the same inert intent exhausted the unchanged 20,000,000-work limit at
-layer 31 during source-support central-coedge preparation. It is a distinct
-source, not a regression claim against the historical baseline. Repeated
-source-bound work and conservative material-height critical bands remain
-important generic acceptance work, not grounds for exporter-specific dispatch.
+now also completes under the unchanged 20,000,000-work limit, rather than
+exhausting it at layer 31. With the same inert intent, 41 certified layers and
+41 slabs consume 19,212,714 work units; Compile, emitted-byte verification,
+export and save passed in 18.75 seconds. Fresh read-only engine reopen,
+preflight, verification, packed replay retrieval and export passed in
+1.19 seconds. Both exports and the historical baseline retain program hash
+`dd2edddb214c66deb877ebd14912e14d57341cccc5c85b352dad47f2ab8c1ffd`.
+Verification decodes 898 deposition and 892 travel segments. The independent
+box remains close to the work cap; this is not a general scale qualification.
+
+The same cutover moves the rounded housing past its former work-limit refusal.
+Its actual operator run instead reaches the layer-1 composed metric/feature
+gate in 16.40 seconds: a conservative native critical band still requires
+original coface/root incidence or independent closed-material topology
+authority. This is the fitting's remaining gate as well, not completed
+mechanical-part slicing or permission to ignore critical bands.
 
 ### Original upstream source failure
 

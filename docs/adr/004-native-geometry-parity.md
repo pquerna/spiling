@@ -237,6 +237,27 @@ Count all owned preparation and pinned definition proofs once in the source
 pool. A one-off section uses the same preparation rules, not a second geometry
 implementation.
 
+`PreparedMaterialSource` is the explicit manufacturing owner: one raw section
+preparation plus a bounded immutable inventory of selected source vertex
+transport plans for that same definition instance. Prepare this owner once per
+distinct definition before publishing its retained-byte count. Occurrences and
+adaptive retries borrow those plans rather than selecting `G`, its frame,
+fraction, exits or physical correspondence again. Raw section APIs remain on
+`PreparedSectionSource`; they do not acquire material-admission prerequisites.
+
+Retained plan lookup checks exact definition and Native vertex ownership and
+cancellation. It reuses source-only geometry selection, **not** source geometry
+qualification or any closed-slab, radial, flow, metric, candidate or posed
+authority. Keep those proofs fresh, including the existing inactive-support
+exclusion before qualification. Standalone material queries use the identical
+algorithms with local plan ownership, not another realization convention.
+
+Count selected-plan records and owned capacities once in the existing source
+pool, before capture. Pinned plan storage is not deducted a second time from
+query scratch; locally owned plans still reserve their simultaneous storage.
+No lazy retained growth, cached error or counter reset is allowed. Drop material
+preparation at the existing compilation source-lifetime boundary.
+
 Within one section query, an opaque native `PreparedFacePlaneRoots` retains
 the complete ordered original-3D and source-chart trim-root inventories.
 `ValidatedPlaneTrimBoundaryBinding` supplies the original oriented coedge,
@@ -476,6 +497,22 @@ Whole original/native position and relative-tangent correspondence remains
 mandatory. This is a latitude graph with a world tube, not uniform zero UV
 uncertainty or an ordinary inverse receipt.
 
+A closed before-exit comparison may use a stronger scalar support instead of
+an ill-resolved two-dimensional inverse. Seal equality of the complete original
+affine polar functions, full Native-to-UV maps, literal endpoints/exits and
+normalized gauges; polar offsets and the actual middle bulge must be zero.
+Then every raw star piece has the same polar function `phi(s)` and its outer
+trace the same `phi(1)`. Fresh validated trigonometry must prove the retained
+principal branch/hemisphere, `0 < R² = sin²(phi(1)) < 1`, strictly positive
+whole-range `d sin²(phi(s))/ds`, and the matching support-row/polar-derivative
+orientation. Do not assume a floating representation of pi has zero sine.
+The raw squared covering radius is at most `R²`, strictly before `s=1`;
+the reference radius is `s² R²`. Convexity of squared norm controls the entire
+Cartesian comparison homotopy. Exact common endpoint expressions retain the
+closed zero at `s=1`; complete outer-boundary ownership still excludes every
+unauthorized zero. This sufficient lane neither changes canonical G nor
+widens an inverse proposal; unproved guards retain the original inverse path.
+
 Keep graph authority pending until both actual source-vertex joints receive
 Native whole-connection image certificates; every designated polar endpoint
 must qualify as `SphericalPole`. Ordinary endpoints retain their own Native
@@ -661,6 +698,20 @@ the original incidence inventory. Require exactly two opposed uses of the same
 actual native edge. Source IDs determine incidence; spatial bounds only reject
 nonincident contacts. The certificate proves local material degree one, not
 convexity, C1 continuity or a new source parameterization.
+
+Post-selection source-vertex separation may first enclose the complete
+original carrier position over an admitted UV knot cell. A box disjoint from
+the allowance-expanded vertex support excludes its trimmed subset without a
+winding query. Otherwise retain native trim classification and ordinary
+subdivision. Use the existing Cartesian functional-jet position enclosure
+rather than computing unused Hessians; continuous-C0 position coverage is
+sufficient here, not for normal or graph proofs. Native errors, cancellation
+and consumed work remain authoritative. This optimization cannot change the
+selected source frame, fraction, bulge, exits or canonical G recipe.
+The closed-capture raw-face census likewise checks its existing
+allowance-expanded carrier height before trim winding. Entire carriers
+outside both closed cuts need no trim query. Retain the full second jet
+there: annular meridian and independent convexity obligations consume it.
 
 Select the realization lane from immutable original coefficients and topology,
 not the success of a placement/slab query. Prefer a proved **carrier-preserving
@@ -1198,6 +1249,25 @@ contacts, the polygon's degree proof and all sampling/plane/roundoff reserves.
 This changes witness availability, never source geometry or the error policy.
 Once a cap witness, including every reserve, meets the actual shape policy,
 there is no obligation to compute a tighter side witness.
+For a disk complex the same first-fit rule applies to any independently
+feasible side witness. The first violated outer supporting edge may propose
+the initial candidate, but every accepted distance still includes actual
+closed-cut height, sampling and roundoff reserves. Reserve the later source
+realization charge before choosing the witness target. A zero target retains
+the complete minimum-of-bounds query. Annular same-azimuth searches still
+exhaust all compatible edges and use their maximum; this rule never turns that
+required covering census into a nearest-edge minimum.
+Side witnesses must cover the whole source cell, not use one midpoint target
+for a long boundary-aligned cell. In the actual physical dual frame, set
+`delta = dual_xy * (p_xy-a)` and `D = dual_xy * (b-a)` for the actual polygon
+edge. When `|D|` is separated from zero, the point-dependent orthogonal
+projection has `tau = delta·D / |D|²`. Clamping each actual tau to `[0,1]`
+gives the uniform feasible-segment bound
+`|delta×D|/|D| + max(0,-tau.lo,tau.hi-1)*|D|`, with all terms outward
+enclosed. Add the independent closed-height and ordinary error reserves.
+This is projection onto an actual sampled candidate edge, not a fitted source
+primitive. An unresolved denominator retains the independently feasible
+fixed-point witness; it does not authorize a line extension beyond endpoints.
 
 A balanced index of actual interval polygon-edge bounds may accelerate ray
 candidate enumeration, following the existing geometry-owned segment-index
@@ -1232,6 +1302,167 @@ obligations. Refinement invalidates dependent staged leaves and joint proofs,
 never their already consumed work. Other diagnostic categories still refuse.
 
 A topological birth/death at a closed cap is not permission to erase the terminal material. Conversely, contact-only strata do not require zero-height deposition paths. If a native feature cannot survive the current bead/offset/serialization policy, diagnose process resolution instead of pretending the surface family is unsupported. A floating sphere may be importable/sliceable but still need a different pose or supported manufacturing strategy; parity does not promise every pose prints.
+
+#### Closed actual-material radial products
+
+This is a required producer design, not an existing qualified interpretation
+of `regular_flow_speed`. A distance certificate, positive local speed or
+three-dimensional radial degree cannot discharge source topology by itself.
+Keep conservative transport-support event covers; attach a separate proof
+when they contain no actual height event.
+
+For radially graph-like material, use a proper cylinder covering rather than
+requiring a general-purpose stratified-flow solver. This is a geometric
+criterion over actual source-owned M, not a cone/cylinder family dispatch or a
+fixture exception. Choose one captured invertible coordinate system `q` with
+`q_z` equal to the exact intended height, and a common angular center `c`.
+The wall projection is
+`Pi(q) = ((q_xy-c)/|q_xy-c|, q_z)`.
+Its surface Jacobian has the sign of
+`N_q · (q_x-c_x, q_y-c_y, 0)`.
+Transform normals by the cofactor/inverse-transpose law with determinant
+orientation; an approximately orthogonal pose is not an exact rotation law.
+Interval row families may enclose intended coefficients only when every
+following predicate is uniform over that family.
+
+An opaque `ClosedRadialMaterialProduct` producer must prove a filled disk
+product or a filled annular product: exactly one outer wall and respectively
+zero or one inner wall. The exhaustive actual-M census proves this kind;
+neither a surface-family label nor the candidate's hole count selects it.
+The producer must prove:
+
+1. **Complete actual atlas.** Every active carrier remainder, G strip, physical
+   seam, G/F cutover, native/chart-knot interface and interface intersection
+   belongs to the fixed realization. The clipped wall is embedded and closed
+   in the bounded realization. Its only boundary is the two requested cuts;
+   compact coordinate bounds alone do not establish properness. NativeUse
+   identity and directed coface ownership determine gluing. Initially exclude
+   every vertex/completion support and unresolved terminal stratum from the
+   **closed** scope; a support touching either cut is not excluded.
+2. **Local cylinder charts.** Radius is strictly positive and each actual
+   patch has one strict oriented cylinder-Jacobian sign for its declared
+   inner/outer wall role. At each glued interface prove exact shared trace,
+   nonzero projected tangent and opposite projected half-neighbourhoods.
+   For G/F, the recipe gives `G_lambda(t,1)=F(U(t,1))` and the same along-trace
+   derivative; its transverse derivatives generally differ. Uniform normal
+   boxes may prove both endpoint-side signs, but never imply transverse C1.
+   Include the complementary F-domain boundary orientation. Consume actual
+   geometric G1 knot laws or retain/prove the interface; do not ignore C0
+   knots or unenumerated G preimages of knot lines.
+3. **Closed endpoints.** The wall continues through both cuts with regular
+   boundary half-charts, or a separate exact physical endpoint law establishes
+   the same conclusion. Open-band regularity does not certify a closed slab.
+4. **Cylinder degree per role.** Exhaustively count one complete cylinder
+   fibre for each declared wall, including disconnected components. It must
+   have exactly one actual-M preimage with the correct orientation. Reuse
+   the source-wall affine-family census pattern and complete correction
+   exclusion, not the sphere/torus radial census under a new name. Exclude
+   both removed-source and added-realization supports before treating an
+   untouched original root as an actual-M root. Make inward/outward roles
+   explicit; an inward-root helper cannot silently certify the outer wall.
+   A single original face can contribute to both wall roles on different
+   active parameter components. Partition by qualified physical cells/root
+   roles, not by a one-face/one-wall assumption or a surface-family label.
+5. **Filled material.** These are all side walls. For an annulus, embedded
+   noncontact and a calibrated ordering establish `r_inner < r_outer`
+   everywhere; material-side orientation selects the region between them.
+   For a disk, complete material-side ownership fills the radial interval
+   from the axis to the unique outer graph. Rule out additional islands,
+   bounded voids and unaccounted components in either kind.
+
+These premises give a proper local homeomorphism onto the closed cylinder.
+The image is open and closed relative to the cylinder; a nonempty calibration
+establishes surjectivity. Constant covering cardinality and degree one make
+each wall a single radial graph over angle and height. This theorem is
+separate from shape accuracy, continuous outer occupancy and deposited-anchor
+support obligations.
+
+Calibrate directly against the **actual used** polygon, not through an assumed
+horizontal native section. A second private `ActualPolygonRadialRegion`
+receipt proves the complete contributor encoding has exactly one outer and
+the matching zero/one inner simple ring, correct fill orientation, positive
+boundary radius, degree-one angular projection over entire edges, strict
+inner/outer ordering when present, and no extra region. Adjacent endpoints
+are identified by incidence, not proximity. The common angular frame is the
+actual-world frame of the source product proof.
+
+Lift that exact polygon at the literal captured `sample_world_z_mm`, strictly
+inside the closed request. For each angle and height, interpolate the ordered
+actual-M radii with the polygon radii. For a disk the inner radius is identically
+zero; for an annulus both inner radii remain positive. The positive material
+gap remains positive under convex interpolation, yielding a fibre-preserving
+topology correspondence with the candidate prism. This is not a
+bounded-displacement isotopy and supplies no shape, clearance, occupancy or
+support bound.
+
+This route needs no new `NativeSection` fields, retained raw branch graph,
+or exact native-plane-to-M topology algorithm. It does **not** assert that an
+interval sample band is an exact plane. Keep original native-section
+completeness/genealogy and the existing independent actual-candidate metric,
+native-sample mapping and coordinate-error obligations unchanged. The opaque
+combined leaf authority binds the cylinder receipt, actual polygon receipt,
+literal world lift and existing metric/native hashes. It identifies canonical
+inner/outer material roles, not individual source-face branch genealogy;
+face-specific consumers retain their separate original-owner authority.
+
+Keep the implementation within geometry's material-link/critical ownership:
+the atlas and census consume borrowed originals and bounded existing proof
+workspaces; retain compact completed authority, not copied kernel objects or
+an unbounded branch cache. Charge interface inventories, refinement, census,
+retained metadata and coordinate correspondence to the existing allowances.
+Failure is a typed indeterminate/unsupported/resource refusal, never a request
+to erase an event or reselect canonical G.
+
+Bind source, realization recipe, actual frame/functional, pose, closed range,
+sample plane/band, native sample hash, actual contributor hash and coordinate
+policy through `SlabAnalysis` into `NativeSourceLeafReceipt`. Constructors stay
+private; a hash identifies already-proved authority, not its substitute.
+Update leaf equality, hashing, retained-byte accounting and refinement
+invalidation together. Preserve independent metric proof kinds and original
+endpoint/collar obligations.
+
+The placed geometry facade supplies opaque intended cylinder coordinates from
+the captured caller frame and pose, including all three affine rows and
+offsets. Do not reconstruct actual-world XY from a normalized native sampling
+plane or infer exact orthogonality. A standalone source-frame proof is not
+automatically an actual-world proof. Existing source/placed capture binding
+must establish that these intended coordinates are the ones enclosed by the
+producer's coefficient families; no new RPC or manufacturing-side coordinate
+derivation is needed.
+
+Use one fixed source anchor independent of the queried sample height. Its
+intended transformed world-XY position defines the common angular center.
+Evaluate relative XY as the actual pose rows applied to `P-anchor`; retain
+actual world height with its own translation. This gives the affine-family
+fibre census the identical physical ray without approximating an inverse
+source-center point or shrinking its forward half-ray. Candidate region
+proofs must hold uniformly over the enclosed intended world center; do not
+replace it with an unrelated midpoint. Shared-axis identity across leaves
+binds the same source anchor, pose and angular rows, not independently
+height-dependent sample centers.
+
+Initially a joint request uses this authority only for its sole original
+occurrence's conservative transport bands. Preserve all cross-occurrence
+tangency/union gates. The stream also needs an explicit same-occurrence
+interface proof: exact shared cut, compatible source/recipe/frame/pose,
+identified shared fibres and the actual polygon attachment. For radial annuli,
+a sufficient attachment proof is a uniformly positive common radial interval
+at every angle:
+`max(inner_previous, inner_next) < min(outer_previous, outer_next)`.
+Prove it over complete edge-induced angular partitions or an independently
+qualified global gap, not sampled angles. Two separately valid annuli can
+occupy disjoint radial ranges and must not be accepted as a connected printed
+interface. Keep existing actual-interface gates until an explicit theorem
+replaces them. Manufacturing remains a consumer of geometry-qualified leaves;
+add no second normal/classifier path.
+
+Qualification includes nonzero-G and reversed/posed source representations,
+not just an exact column: reject an extra covering sheet, disappearing inner
+wall, folded cutover, unsupported knot intersection, completion touching a
+closed cut, wrong sample plane, stale refined leaf and cross-occurrence
+tangency. Retain full same-intent fitting/housing CLI Compile, independent
+replay, save/reopen/export and workbench gates. Numeric flow availability alone
+does not count as any of these outcomes.
 
 ### 8.3 Reuse requires proof
 

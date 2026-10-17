@@ -7136,7 +7136,7 @@ mod tests {
     ) -> SlabAnalysis {
         let cancel = AtomicBool::new(false);
         let remaining = crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(retained);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             definition,
             remaining.min(crate::MAX_PREPARED_SECTION_SOURCE_BYTES),
             &cancel,

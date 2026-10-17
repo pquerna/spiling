@@ -106,6 +106,9 @@ impl ClosedRadialLinks {
         visitor: &mut impl FnMut(usize, [Interval; 3], [Interval; 3]) -> Result<(), GeometryError>,
     ) -> Result<Self, GeometryError> {
         let definition = source.definition();
+        if let Some(plans) = source.vertex_plans() {
+            plans.validate_source(definition, work, cancel)?;
+        }
         let allowance = source_allowance(definition)?;
         let vertices = incidence.vertices().ok_or_else(|| {
             failure(
@@ -152,7 +155,7 @@ impl ClosedRadialLinks {
                     matches!(proof, vertex_fan::OriginalVertexFanProof::OutsideClosedSlab);
                 continue;
             }
-            let Some(plan) = vertex_transport::SourceVertexTransportPlan::prepare(
+            let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
                 source,
                 incidence,
                 vertex,
@@ -168,9 +171,18 @@ impl ClosedRadialLinks {
                     vertex_diagnostic(definition, incidence, vertex),
                 ));
             };
+            let plan = selection.plan();
+            let scratch = remaining_bytes.checked_sub(selection.owned_bytes()).ok_or_else(|| {
+                failure(
+                    GeometryErrorCode::ResourceLimit,
+                    "local source vertex plan exceeds query scratch allowance",
+                    0,
+                    vertex_diagnostic(definition, incidence, vertex),
+                )
+            })?;
             if let Some((prism, request)) = field {
                 let Some(proof) =
-                    plan.prove_radial(source, prism, request, remaining_bytes, work, cancel)?
+                    plan.prove_radial(source, prism, request, scratch, work, cancel)?
                 else {
                     return Err(failure(
                         GeometryErrorCode::AnalysisIndeterminate,
@@ -198,7 +210,7 @@ impl ClosedRadialLinks {
                 result.all_vertex_supports_outside &= proof.outside_closed_slab();
                 result.source_error_mm = result.source_error_mm.max(proof.source_error_mm());
             } else {
-                plan.visit_qualified_geometry(source, remaining_bytes, work, cancel, visitor)?;
+                plan.visit_qualified_geometry(source, scratch, work, cancel, visitor)?;
                 result.source_error_mm = result.source_error_mm.max(plan.source_error_mm());
             }
             plan.visit_position_supports(work, cancel, &mut |_realized, homotopy| {

@@ -37,10 +37,7 @@ use crate::parametric::{
     Interval, PreparedCurveEnclosure, down, surface_crease_interfaces, surface_enclosure,
     surface_parameter_boxes, up,
 };
-use crate::{
-    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, PreparedSectionSource,
-    SectionLoopMm,
-};
+use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, SectionLoopMm};
 use monstertruck_modeling::{BoundedCurve, Curve, Point3, Surface};
 use monstertruck_topology::{EdgeId, VertexId};
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -1495,9 +1492,10 @@ fn analyze_height_functional(
             )?,
             work,
             cancel,
-        ).map_err(|error| work.annotate_error(
-            error, transport_before, "material height transport support",
-        ))?
+        )
+        .map_err(|error| {
+            work.annotate_error(error, transport_before, "material height transport support")
+        })?
     };
     let scratch_limit = remaining_scratch_with_limit(
         scratch_limit,
@@ -1511,9 +1509,14 @@ fn analyze_height_functional(
             remaining_scratch_with_limit(scratch_limit, HEIGHT_EVENT_SCRATCH_BYTES)?,
             work,
             cancel,
-        ).map_err(|error| work.annotate_error(
-            error, raw_before, "raw height census round continuation after material transport",
-        ))?
+        )
+        .map_err(|error| {
+            work.annotate_error(
+                error,
+                raw_before,
+                "raw height census round continuation after material transport",
+            )
+        })?
     } else {
         None
     } {
@@ -1554,9 +1557,13 @@ fn analyze_height_functional(
     let mut source_links: Option<HeightSourceLinks> = None;
     for (index, face) in definition.solid.face_iter().enumerate() {
         let face_before = work.consumed();
-        work.charge(1, cancel).map_err(|error| work.annotate_error(
-            error, face_before, format_args!("raw height census source_face={index} begin face"),
-        ))?;
+        work.charge(1, cancel).map_err(|error| {
+            work.annotate_error(
+                error,
+                face_before,
+                format_args!("raw height census source_face={index} begin face"),
+            )
+        })?;
         let face_reserved = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(face)?);
         let reserved = face_reserved.saturating_add(
             source_links
@@ -1570,7 +1577,15 @@ fn analyze_height_functional(
                 work,
                 cancel,
             )
-            .map_err(|error| work.annotate_error(error, face_before, format_args!("raw height census source_face={index} prepare original trim domain")))?;
+            .map_err(|error| {
+                work.annotate_error(
+                    error,
+                    face_before,
+                    format_args!(
+                        "raw height census source_face={index} prepare original trim domain"
+                    ),
+                )
+            })?;
         let bounded_uv = trim_parameter_box(&domain)?;
         let mut stage = "source face qualification";
         let mut curve_owner: Option<(usize, usize)> = None;
@@ -2225,45 +2240,51 @@ fn isolate_smooth_curve_span_events(
     let before = work.consumed();
     let mut window = span;
     let result = (|| {
-    let mut stack = vec![(span, 0u8)];
-    while let Some(((lo, hi), depth)) = stack.pop() {
-        window = (lo, hi);
-        work.charge(1, cancel)?;
-        let jet = curve.jet((lo, hi), work, cancel)?;
-        let h = functional.height(jet.position);
-        if !overlaps(h, heights) || !functional.dot(jet.derivative).contains_zero() {
-            continue;
-        }
-        let mut root_height = None;
-        if h.width() <= uncertainty {
-            let Some(h) =
-                necessary_curve_critical_height(curve, (lo, hi), &jet, functional, work, cancel)?
-            else {
+        let mut stack = vec![(span, 0u8)];
+        while let Some(((lo, hi), depth)) = stack.pop() {
+            window = (lo, hi);
+            work.charge(1, cancel)?;
+            let jet = curve.jet((lo, hi), work, cancel)?;
+            let h = functional.height(jet.position);
+            if !overlaps(h, heights) || !functional.dot(jet.derivative).contains_zero() {
                 continue;
-            };
-            // A strict sign change proves an interior height extremum by
-            // continuity, rather than labelling a zero-containing box a root.
-            // Enlarge inside the SAME retained owner/span to catch a root
-            // lying on an artificial binary subdivision boundary.
-            let expanded = (
-                down(lo - (hi - lo)).max(span.0),
-                up(hi + (hi - lo)).min(span.1),
-            );
-            let left_range = if one_sided_endpoints && expanded.0 == span.0 {
-                (expanded.0, expanded.0.next_up().min(expanded.1))
-            } else {
-                (expanded.0, expanded.0)
-            };
-            let right_range = if one_sided_endpoints && expanded.1 == span.1 {
-                (expanded.1.next_down().max(expanded.0), expanded.1)
-            } else {
-                (expanded.1, expanded.1)
-            };
-            let left = functional.dot(curve.jet(left_range, work, cancel)?.derivative);
-            let right = functional.dot(curve.jet(right_range, work, cancel)?.derivative);
-            if (left.hi < 0.0 && right.lo > 0.0) || (left.lo > 0.0 && right.hi < 0.0) {
-                let expanded_jet = curve.jet(expanded, work, cancel)?;
-                root_height = Some(
+            }
+            let mut root_height = None;
+            if h.width() <= uncertainty {
+                let Some(h) = necessary_curve_critical_height(
+                    curve,
+                    (lo, hi),
+                    &jet,
+                    functional,
+                    work,
+                    cancel,
+                )?
+                else {
+                    continue;
+                };
+                // A strict sign change proves an interior height extremum by
+                // continuity, rather than labelling a zero-containing box a root.
+                // Enlarge inside the SAME retained owner/span to catch a root
+                // lying on an artificial binary subdivision boundary.
+                let expanded = (
+                    down(lo - (hi - lo)).max(span.0),
+                    up(hi + (hi - lo)).min(span.1),
+                );
+                let left_range = if one_sided_endpoints && expanded.0 == span.0 {
+                    (expanded.0, expanded.0.next_up().min(expanded.1))
+                } else {
+                    (expanded.0, expanded.0)
+                };
+                let right_range = if one_sided_endpoints && expanded.1 == span.1 {
+                    (expanded.1.next_down().max(expanded.0), expanded.1)
+                } else {
+                    (expanded.1, expanded.1)
+                };
+                let left = functional.dot(curve.jet(left_range, work, cancel)?.derivative);
+                let right = functional.dot(curve.jet(right_range, work, cancel)?.derivative);
+                if (left.hi < 0.0 && right.lo > 0.0) || (left.lo > 0.0 && right.hi < 0.0) {
+                    let expanded_jet = curve.jet(expanded, work, cancel)?;
+                    root_height = Some(
                     necessary_curve_critical_height(
                         curve,
                         expanded,
@@ -2278,27 +2299,27 @@ fn isolate_smooth_curve_span_events(
                         )
                     })?,
                 );
-            }
-            if root_height.is_none_or(|root| root.width() <= uncertainty) {
-                add_event(events, h, heights, uncertainty, work, cancel)?;
-                if let Some(root) = root_height {
-                    add_event(events, root, heights, uncertainty, work, cancel)?;
-                    add_event(proved, root, heights, uncertainty, work, cancel)?;
                 }
-                continue;
+                if root_height.is_none_or(|root| root.width() <= uncertainty) {
+                    add_event(events, h, heights, uncertainty, work, cancel)?;
+                    if let Some(root) = root_height {
+                        add_event(events, root, heights, uncertainty, work, cancel)?;
+                        add_event(proved, root, heights, uncertainty, work, cancel)?;
+                    }
+                    continue;
+                }
             }
+            let mid = lo * 0.5 + hi * 0.5;
+            if depth >= MAX_DEPTH || mid <= lo || mid >= hi {
+                return Err(indeterminate(
+                    "trim critical-height roots could not be isolated",
+                ));
+            }
+            work.charge(2, cancel)?;
+            stack.push(((mid, hi), depth + 1));
+            stack.push(((lo, mid), depth + 1));
         }
-        let mid = lo * 0.5 + hi * 0.5;
-        if depth >= MAX_DEPTH || mid <= lo || mid >= hi {
-            return Err(indeterminate(
-                "trim critical-height roots could not be isolated",
-            ));
-        }
-        work.charge(2, cancel)?;
-        stack.push(((mid, hi), depth + 1));
-        stack.push(((lo, mid), depth + 1));
-    }
-    Ok(())
+        Ok(())
     })();
     result.map_err(|error| work.annotate_error(
         error, before, format_args!("raw height census smooth original coedge native_parameter_bounds={span:?} curve_window={window:?}"),
@@ -3728,7 +3749,7 @@ fn certified_empty_slab(
     })
 }
 pub(crate) fn analyze_slab(
-    source: &PreparedSectionSource<'_>,
+    source: &crate::PreparedMaterialSource<'_>,
     request: SlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
@@ -4973,7 +4994,11 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
-        assert!(error.message.contains("standalone SourceOriginals preparation"));
+        assert!(
+            error
+                .message
+                .contains("standalone SourceOriginals preparation")
+        );
         assert!(error.message.contains("work_before="));
         assert!(error.message.contains("work_delta=0"));
         assert!(error.message.contains("work_remaining="));
@@ -5111,7 +5136,7 @@ mod tests {
         )
         .unwrap();
         let mut work = GeometryWorkBudget::new(5_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -5152,7 +5177,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(20_000_000);
-            let prepared = crate::prepare_section_source(
+            let prepared = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -5183,7 +5208,27 @@ mod tests {
                     .as_ref()
                     .is_some_and(|occupied| !occupied.loops.is_empty())
             );
-            assert!(work.consumed() > 0);
+            drop(result);
+            // The selected source geometry may be retained, but the identical
+            // sample cannot authorize a wider CLOSED material interval.
+            let wide = analyze_slab(
+                &prepared,
+                SlabRequest {
+                    frame: frame(),
+                    height_interval_mm: [sample - 1.25, sample + 1.25],
+                    sample_height_mm: sample,
+                    native_shape_error_mm: 0.1,
+                },
+                crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap_err();
+            assert_eq!(
+                wide.code,
+                GeometryErrorCode::ShapeErrorExceeded,
+                "{name}: {wide}"
+            );
         }
     }
     #[test]
@@ -5891,7 +5936,7 @@ mod tests {
         let definition = parity_definition("native-parity-blind-pocket.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(70_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -5968,7 +6013,7 @@ mod tests {
         let definition = parity_definition("native-parity-nurbs-cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(70_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6125,7 +6170,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(90_000_000);
-            let source = crate::prepare_section_source(
+            let source = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -6281,7 +6326,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(50_000_000);
-            let source = crate::prepare_section_source(
+            let source = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -6341,7 +6386,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(70_000_000);
-            let source = crate::prepare_section_source(
+            let source = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -6397,7 +6442,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-blind-pocket-nurbs-floor.step");
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6443,7 +6488,7 @@ mod tests {
         )
         .unwrap();
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6674,7 +6719,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-full-sphere.step");
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6721,7 +6766,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-ring-torus.step");
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6754,7 +6799,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-full-sphere.step");
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,

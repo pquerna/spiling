@@ -1928,7 +1928,7 @@ mod tests {
         work: &mut GeometryWorkBudget,
     ) -> NativeVoidProjectionCapture {
         let cancel = AtomicBool::new(false);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -2290,7 +2290,7 @@ mod tests {
         let definition = recipe("native-parity-nurbs-cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -2389,7 +2389,7 @@ mod tests {
         let definition = recipe("native-parity-ring-torus.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_section_source(
+        let source = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,

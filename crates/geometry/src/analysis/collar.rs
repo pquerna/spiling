@@ -935,7 +935,7 @@ pub fn certify_native_critical_collar(
     )
 }
 
-impl crate::PreparedSectionSource<'_> {
+impl crate::PreparedMaterialSource<'_> {
     /// Certify the actual collar while borrowing this source's original trim proofs.
     /// `policy.byte_limit` excludes every retained source and coexisting buffer.
     pub fn certify_native_critical_collar(
@@ -5461,7 +5461,7 @@ mod tests {
             ..RigidPoseMm::IDENTITY
         };
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -5534,7 +5534,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = crate::import_step(source, &cancel).unwrap();
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -5974,7 +5974,7 @@ mod tests {
         let definition = source("native-parity-bspline-box.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(500_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -6148,7 +6148,7 @@ mod tests {
                 translation_mm: [0.0, 0.0, 0.1],
                 ..RigidPoseMm::IDENTITY
             };
-            let prepared = crate::prepare_section_source(
+            let prepared = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -6390,7 +6390,7 @@ mod tests {
         let definition = source("native-parity-blind-pocket-nurbs-floor.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(500_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,

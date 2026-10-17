@@ -27,6 +27,7 @@ use owned_uv_ribbon::OwnedUvRibbon;
 pub(crate) use transport::{
     SourceTransportOwner, SourceTransportSupport, source_transport_supports,
 };
+pub(crate) use vertex_transport::PreparedSourceVertexPlans;
 pub(crate) use wall::prove_source_wall_component;
 
 pub(super) struct MaterialLinkCell {

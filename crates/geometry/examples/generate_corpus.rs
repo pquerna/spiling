@@ -253,7 +253,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         let sample = expectation["section_z_mm"]
             .as_f64()
             .ok_or("implicit section height oracle")?;
-        let source = spiling_geometry::prepare_section_source(
+        let source = spiling_geometry::prepare_material_source(
             &definition,
             spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,

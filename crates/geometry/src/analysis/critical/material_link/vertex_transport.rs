@@ -11,7 +11,10 @@ use crate::analysis::source_incidence::CoedgeUse;
 use monstertruck_modeling::{Curve, Point3};
 use monstertruck_topology::{EdgeId, VertexId};
 
+mod prepared;
 mod uv_ownership;
+pub(crate) use prepared::PreparedSourceVertexPlans;
+pub(super) use prepared::SourceVertexPlan;
 use uv_ownership::{OriginalCornerComparison, UvComparisonPreparation, UvPrepareStage};
 
 type Box3 = [Interval; 3];
@@ -593,6 +596,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// incident star: source graph, trim ownership, cutovers and separation.
     /// The normal has its nonnegative radial parameter factored out; field
     /// consumers must retain the endpoint fan and prove their own projection.
+    /// `remaining_bytes` is scratch after any locally owned plan reservation;
+    /// retained source plans are charged only by their immutable source owner.
     pub(super) fn visit_qualified_geometry(
         &self,
         source: OriginalTrimSource<'_, 'd>,
@@ -627,7 +632,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
         }
         let allowance = source_allowance(self.definition)?;
         let scratch = remaining_bytes
-            .checked_sub(self.retained_bytes().saturating_add(CONICAL_STACK_BYTES))
+            .checked_sub(CONICAL_STACK_BYTES)
             .ok_or_else(|| {
                 GeometryError::new(
                     GeometryErrorCode::ResourceLimit,
@@ -818,6 +823,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
         Ok(())
     }
 
+    /// The caller reserves local plan storage before lending query scratch.
+    /// Activity is still tested before any source geometry qualification.
     pub(super) fn prove_radial<'a>(
         &'a self,
         source: OriginalTrimSource<'_, 'd>,
@@ -1808,13 +1815,19 @@ fn separate_nonincident(
                     pending -= 1;
                     let (uv, depth) = stack[pending];
                     work.charge(1, cancel)?;
-                    if domain.classify(uv, work, cancel)? == TrimClassification::Outside {
-                        continue;
-                    }
-                    let position =
-                        crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
-                            .position;
-                    if disjoint(position, support) {
+                    // Exclude the complete carrier before classifying its
+                    // trimmed subset. Only position is needed, including at
+                    // continuous native knot interfaces.
+                    let position = centered_source_point(
+                        surface,
+                        uv.map(|[lo, hi]| Interval { lo, hi }),
+                        [0.0; 3],
+                        work,
+                        cancel,
+                    )?;
+                    if disjoint(position, support)
+                        || domain.classify(uv, work, cancel)? == TrimClassification::Outside
+                    {
                         continue;
                     }
                     if depth >= MAX_DEPTH {
@@ -2537,6 +2550,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nonincident_carrier_exclusion_preserves_trimmed_holes_and_actual_caps() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(
+            include_bytes!("../../../../../../fixtures/geometry/through-hole.step"),
+            &cancel,
+        )
+        .unwrap();
+        // The bottom carrier covers both points, but the original cap has a
+        // radius-three hole centered at (10,10). Empty trim is not material;
+        // the same plane's filled annulus must still block a vertex support.
+        for (center, separated) in [([10.0, 10.0, 0.0], true), ([15.0, 10.0, 0.0], false)] {
+            let support = center.map(|coordinate| Interval {
+                lo: coordinate - 0.05,
+                hi: coordinate + 0.05,
+            });
+            let mut work = GeometryWorkBudget::new(20_000_000);
+            assert_eq!(
+                separate_nonincident(
+                    OriginalTrimSource::standalone(&definition),
+                    &[],
+                    support,
+                    MAX_SCRATCH_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+                separated,
+                "source support centered at {center:?}"
+            );
+        }
+    }
+
+    #[test]
     fn normalized_recipe_reflection_uses_proved_domain_not_roundoff_as_geometry() {
         let unit = source_unit_complement(Interval { lo: 0.0, hi: 1.0 }).unwrap();
         assert_eq!([unit.lo, unit.hi], [0.0, 1.0]);
@@ -3007,6 +3053,161 @@ mod tests {
         assert_eq!(
             before,
             serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap()
+        );
+    }
+
+    #[test]
+    fn retained_source_plans_preserve_supports_and_reject_foreign_cancelled_or_underfunded_access()
+    {
+        let definition = housing();
+        let foreign = housing();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let section =
+            crate::prepare_section_source(&definition, MAX_SCRATCH_BYTES, &cancel, &mut work)
+                .unwrap();
+        let source = section.trim_source();
+        let plans =
+            PreparedSourceVertexPlans::prepare(source, MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
+        let retained_source = source.borrowing_vertex_plans(&plans);
+        let vertex = spherical_corner(&definition);
+        let source_incidence = incidence(&definition, &mut work, &cancel);
+        let selected = SourceVertexPlan::prepare(
+            retained_source,
+            &source_incidence,
+            vertex,
+            0,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .expect("retained source selection needs no local plan allocation");
+        assert!(selected.plan().source_error_mm() <= source_allowance(&definition).unwrap());
+        assert_eq!(
+            SourceVertexPlan::prepare(source, &source_incidence, vertex, 0, &mut work, &cancel,)
+                .err()
+                .expect("standalone selection must reserve its local plan storage")
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            plans
+                .plan(&definition, spherical_corner(&foreign), &mut work, &cancel)
+                .err()
+                .expect("a foreign NativeV must not borrow a retained plan")
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+
+        let direction = [0.0, 0.0, 1.0].map(Interval::point);
+        let local = source_transport_supports(
+            source,
+            direction,
+            None,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let retained = source_transport_supports(
+            retained_source,
+            direction,
+            None,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let summary = |supports: &[SourceTransportSupport]| {
+            let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 3];
+            let mut error = 0.0f64;
+            for support in supports {
+                for (bound, interval) in bounds.iter_mut().zip([
+                    support.base_interval,
+                    support.corrected_interval,
+                    support.displacement_interval,
+                ]) {
+                    bound[0] = bound[0].min(interval[0]);
+                    bound[1] = bound[1].max(interval[1]);
+                }
+                error = error.max(support.source_error_mm);
+            }
+            (supports.len(), bounds, error)
+        };
+        assert_eq!(summary(&local), summary(&retained));
+        let foreign_source =
+            OriginalTrimSource::standalone(&foreign).borrowing_vertex_plans(&plans);
+        assert_eq!(
+            source_transport_supports(
+                foreign_source,
+                direction,
+                None,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .err()
+            .expect("scalar consumers must reject a foreign source owner")
+            .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+        let foreign_incidence = incidence(&foreign, &mut work, &cancel);
+        assert_eq!(
+            ClosedRadialLinks::geometry(
+                foreign_source,
+                &foreign_incidence,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+                &mut |_, _, _| Ok(()),
+            )
+            .err()
+            .expect("critical consumers must reject a foreign source owner")
+            .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            source_transport_supports(
+                retained_source,
+                direction,
+                None,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancelled,
+            )
+            .err()
+            .expect("retained scalar access must still check cancellation")
+            .code,
+            GeometryErrorCode::Cancelled,
+        );
+        assert_eq!(
+            ClosedRadialLinks::geometry(
+                retained_source,
+                &source_incidence,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancelled,
+                &mut |_, _, _| Ok(()),
+            )
+            .err()
+            .expect("retained critical access must still check cancellation")
+            .code,
+            GeometryErrorCode::Cancelled,
+        );
+        assert_eq!(
+            PreparedSourceVertexPlans::prepare(
+                source,
+                plans.retained_bytes() - 1,
+                &mut work,
+                &cancel,
+            )
+            .err()
+            .expect("retained-byte admission must reject insufficient capacity")
+            .code,
+            GeometryErrorCode::ResourceLimit,
         );
     }
 

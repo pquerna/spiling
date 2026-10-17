@@ -32,15 +32,15 @@ pub use analysis::{
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
     PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
-    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, ProjectedBounds,
-    ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest, SourceLeafRequest,
-    analyze_height_domain, analyze_placed_height_domain, capture_projected_voids,
-    certify_endpoint_ownership, certify_endpoint_stratum_ownership,
+    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedMaterialSource,
+    ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest,
+    SourceLeafRequest, analyze_height_domain, analyze_placed_height_domain,
+    capture_projected_voids, certify_endpoint_ownership, certify_endpoint_stratum_ownership,
     certify_native_collar_incidence, certify_native_critical_collar,
     certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
     certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
-    material_projected_bounds, placed_bounds, placed_material_bounds, projected_bounds,
-    projected_protected_void_envelopes,
+    material_projected_bounds, placed_bounds, placed_material_bounds, prepare_material_source,
+    projected_bounds, projected_protected_void_envelopes,
 };
 pub use kernel::Definition;
 pub use section::{
@@ -214,34 +214,6 @@ impl PreparedSectionSource<'_> {
         cancel: &AtomicBool,
     ) -> Result<NativeSection, GeometryError> {
         analysis::section_placed_with_work(self, pose, plane, query_byte_limit, work, cancel)
-    }
-    /// Analyze the complete native slab, including its occupied projection.
-    /// A sampled section alone never authorizes material reuse or support.
-    /// The query allowance is the shared 64 MiB pool remaining after **all**
-    /// retained prepared sources (including pinned proofs), prior results and
-    /// other coexisting owned query/output buffers. It is not a per-occurrence
-    /// allowance; individual numerical scratch limits remain unchanged.
-    pub fn analyze_slab(
-        &self,
-        request: SlabRequest,
-        query_byte_limit: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<SlabAnalysis, GeometryError> {
-        analysis::analyze_slab(self, request, query_byte_limit, work, cancel)
-    }
-
-    /// Capture the actual occurrence transform and certify a world-height slab.
-    /// The caller supplies the remaining shared query allowance described by
-    /// [`Self::analyze_slab`], including other occurrences' retained results.
-    pub fn analyze_placed_slab(
-        &self,
-        request: &PlacedSlabRequest,
-        query_byte_limit: usize,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<SlabAnalysis, GeometryError> {
-        analysis::analyze_placed_slab(self, request, query_byte_limit, work, cancel)
     }
 }
 

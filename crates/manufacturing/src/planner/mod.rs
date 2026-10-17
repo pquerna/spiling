@@ -963,7 +963,7 @@ fn prepare_sources<'a>(
     input: &'a CompilerInput<'_>,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'a>>, ManufacturingError>
+) -> Result<BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'a>>, ManufacturingError>
 {
     let mut prepared = BTreeMap::new();
     let mut remaining = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
@@ -972,19 +972,19 @@ fn prepare_sources<'a>(
         if prepared.contains_key(&occurrence.definition_id) {
             continue;
         }
-        let source = spiling_geometry::prepare_section_source(
+        let source = spiling_geometry::prepare_material_source(
             &input.definitions[&occurrence.definition_id],
             remaining,
             cancel,
             work,
         )
-        .map_err(|e| native_error(e, "native section preparation"))?;
+        .map_err(|e| native_error(e, "native material preparation"))?;
         remaining = remaining
             .checked_sub(source.retained_bytes())
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "aggregate prepared native section capacity exceeded",
+                    "aggregate prepared native material capacity exceeded",
                 )
             })?;
         prepared.insert(occurrence.definition_id.clone(), source);

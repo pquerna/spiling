@@ -10,6 +10,7 @@
 //! Whole-source convexity is separate, strictly stronger evidence.
 
 pub(crate) mod material_link;
+pub(crate) use material_link::PreparedSourceVertexPlans;
 mod ray_index;
 mod source_chart;
 
@@ -2243,6 +2244,7 @@ impl SamplePrism {
         let p = project(position, self.frame);
         let rho = length([p[0], p[1], Interval::point(0.0)])?;
         let mut inside = true;
+        let mut first_side = 0;
         for edge in 0..self.outer_count {
             work.charge(1, cancel)?;
             if orient(
@@ -2253,6 +2255,7 @@ impl SamplePrism {
             .lo < 0.0
             {
                 inside = false;
+                first_side = edge;
                 break;
             }
         }
@@ -2382,32 +2385,75 @@ impl SamplePrism {
                 }
             }
         } else if self.core_radius.is_none() {
-            for edge in 0..self.vertices.len() {
+            // A violated support proposes a nearby side; it grants no metric
+            // authority. Every witness below is independently bounded.
+            for offset in 0..self.vertices.len() {
+                let candidate = first_side + offset;
+                let edge = if candidate >= self.vertices.len() {
+                    candidate - self.vertices.len()
+                } else {
+                    candidate
+                };
                 work.charge(1, cancel)?;
                 let a = self.vertices[edge];
                 let b = self.vertices[self.next_vertex(edge)];
-                let d = [b[0].mid() - a[0].mid(), b[1].mid() - a[1].mid()];
-                let denominator = d[0] * d[0] + d[1] * d[1];
-                if denominator <= 0.0 || !denominator.is_finite() {
-                    continue;
+                let side: [Interval; 3] = std::array::from_fn(|axis| {
+                    add(
+                        mul(b[0].sub(a[0]), self.height_dual[0][axis]),
+                        mul(b[1].sub(a[1]), self.height_dual[1][axis]),
+                    )
+                });
+                let relative: [Interval; 3] = std::array::from_fn(|axis| {
+                    add(
+                        mul(p[0].sub(a[0]), self.height_dual[0][axis]),
+                        mul(p[1].sub(a[1]), self.height_dual[1][axis]),
+                    )
+                });
+                let squared_length = side.into_iter()
+                    .map(Interval::square).fold(Interval::point(0.0), add);
+                let transverse = if squared_length.lo > 0.0 && squared_length.hi.is_finite() {
+                    let side_length = squared_length.sqrt()?;
+                    let parameter = dot(relative, side).div(squared_length)?;
+                    let overshoot = (-parameter.lo)
+                        .max(parameter.sub(Interval::point(1.0)).hi)
+                        .max(0.0);
+                    // One feasible orthogonal projection for EACH actual point,
+                    // clamped to the actual finite segment. The cross product
+                    // preserves the along-side cancellation of a long cell.
+                    let perpendicular = Interval::point(length(cross(relative, side))?.hi)
+                        .div(Interval::point(side_length.lo))?;
+                    add(
+                        perpendicular,
+                        mul(Interval::point(overshoot), side_length),
+                    ).hi
+                } else {
+                    // An unresolved interval denominator still has an actual
+                    // finite-segment witness at this fixed proposed parameter.
+                    let d = [b[0].mid() - a[0].mid(), b[1].mid() - a[1].mid()];
+                    let denominator = d[0] * d[0] + d[1] * d[1];
+                    if denominator <= 0.0 || !denominator.is_finite() {
+                        continue;
+                    }
+                    let parameter = (((p[0].mid() - a[0].mid()) * d[0]
+                        + (p[1].mid() - a[1].mid()) * d[1]) / denominator).clamp(0.0, 1.0);
+                    let q: [Interval; 2] = std::array::from_fn(|axis| {
+                        add(
+                            mul(a[axis], Interval::point(1.0 - parameter)),
+                            mul(b[axis], Interval::point(parameter)),
+                        )
+                    });
+                    length(std::array::from_fn(|axis| {
+                        add(
+                            mul(p[0].sub(q[0]), self.height_dual[0][axis]),
+                            mul(p[1].sub(q[1]), self.height_dual[1][axis]),
+                        )
+                    }))?.hi
+                };
+                distance = distance.min(up(transverse + side_height_error));
+                let side_bound = with_reserve(distance);
+                if sufficient_error_mm > 0.0 && side_bound <= sufficient_error_mm {
+                    return Ok(side_bound);
                 }
-                let parameter = (((p[0].mid() - a[0].mid()) * d[0]
-                    + (p[1].mid() - a[1].mid()) * d[1])
-                    / denominator)
-                    .clamp(0.0, 1.0);
-                let q: [Interval; 2] = std::array::from_fn(|axis| {
-                    add(
-                        mul(a[axis], Interval::point(1.0 - parameter)),
-                        mul(b[axis], Interval::point(parameter)),
-                    )
-                });
-                let difference = std::array::from_fn(|axis| {
-                    add(
-                        mul(p[0].sub(q[0]), self.height_dual[0][axis]),
-                        mul(p[1].sub(q[1]), self.height_dual[1][axis]),
-                    )
-                });
-                distance = distance.min(up(length(difference)?.hi + side_height_error));
             }
         }
         // The cap material is convex globally (disk complex) or in each proven
@@ -2867,6 +2913,12 @@ pub(super) fn certify_critical_slab(
     let mut covered_face_cells = 0_u64;
     let mut covered_coedge_cells = 0_u64;
     let mut bound = prism.approximation;
+    // Leave room for the later actual-source realization charge and its final
+    // upward rounding. This target selects a witness, never changes policy.
+    let witness_target_mm = Interval::point(down(request.native_shape_error_mm))
+        .sub(Interval::point(source_allowance))
+        .lo
+        .max(0.0);
     let mut lower = [f64::INFINITY; 2];
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
@@ -2880,13 +2932,16 @@ pub(super) fn certify_critical_slab(
             let mut stack = Vec::with_capacity(usize::from(MAX_DEPTH) + 1);
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0_u8))) {
                 work.charge(1, cancel)?;
-                if domain.classify(uv, work, cancel)? == TrimClassification::Outside { continue; }
                 let span_smooth = depth != 0 || surface_parameter_span_smooth(surface, uv, work, cancel)?;
                 let jet = if span_smooth {
                     surface_enclosure(surface, uv, work, cancel)?
                 } else {
                     crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
                 };
+                // The allowance-expanded carrier excludes its entire trimmed
+                // subset from this closed capture; no winding query is needed.
+                // Keep full jets: annular meridian/convexity obligations below
+                // still consume their second derivatives.
                 let height = functional.height(jet.position.map(|value|
                     value.add(Interval { lo: -source_allowance, hi: source_allowance })));
                 let active = overlaps(height, request.height_interval_mm);
@@ -2894,6 +2949,7 @@ pub(super) fn certify_critical_slab(
                     closed_boundary.excluded_face_cells += 1;
                     continue;
                 }
+                if domain.classify(uv, work, cancel)? == TrimClassification::Outside { continue; }
                 // Qualify each ORIGINAL extracted source span before adaptive
                 // refinement. Subdivision cannot erase an unproved nested C0
                 // interface and turn two locally convex pieces into a global
@@ -2918,7 +2974,7 @@ pub(super) fn certify_critical_slab(
                 )?;
                 whole_source &= convex;
                 let regular = length(n)?.lo > 0.0;
-                let metric = if active { prism.boundary_distance(jet.position, request.native_shape_error_mm, work, cancel)? } else { 0.0 };
+                let metric = if active { prism.boundary_distance(jet.position, witness_target_mm, work, cancel)? } else { 0.0 };
                 if !regular || radial_degree.lo <= 0.0 || metric > request.native_shape_error_mm {
                     if !active && (radial_degree.hi <= 0.0 || depth >= MAX_DEPTH) {
                         // The optional whole-source theorem failed, but this
@@ -3482,6 +3538,70 @@ mod tests {
     }
 
     #[test]
+    fn disk_side_witness_covers_complete_segment_and_clamps_endpoints() {
+        let mut prism = annular_metric_candidate();
+        prism.ray_index = None;
+        prism.vertices.truncate(prism.outer_count);
+        prism.core_radius = None;
+        let mut work = GeometryWorkBudget::new(100_000);
+        let cancel = AtomicBool::new(false);
+        let along_side = prism.boundary_distance(
+            [
+                Interval::point(10.0),
+                Interval { lo: -9.0, hi: 9.0 },
+                Interval::point(0.0),
+            ],
+            0.01,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        assert!(along_side <= 0.01, "the entire box is on one actual side: {along_side}");
+        let over_endpoint = prism.boundary_distance(
+            [
+                Interval::point(10.0),
+                Interval { lo: 9.9, hi: 10.1 },
+                Interval::point(0.0),
+            ],
+            0.2,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        assert!(over_endpoint >= 0.09999 && over_endpoint < 0.10001);
+    }
+
+    #[test]
+    fn disk_side_witness_preserves_closed_height_and_sampling_reserves() {
+        let mut prism = annular_metric_candidate();
+        prism.ray_index = None;
+        prism.vertices.truncate(prism.outer_count);
+        prism.core_radius = None;
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let near_cut = prism.boundary_distance(
+            [10.0, -10.0, 0.100001].map(Interval::point),
+            0.01,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        assert!(near_cut >= 0.999e-6 && near_cut < 1.1e-6);
+        let outside = prism.boundary_distance(
+            [10.0, -10.0, 0.3].map(Interval::point),
+            0.01,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        assert!(outside >= 0.19999 && outside < 0.20001);
+        prism.approximation = 0.004;
+        let reserved = prism.boundary_distance(
+            [10.0, 0.0, 0.0].map(Interval::point),
+            0.01,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        assert!(reserved >= 0.012 && reserved < 0.012001);
+    }
+
+    #[test]
     fn annular_ray_edge_functional_contracts_at_square_corner_and_closed_cut() {
         let prism = annular_metric_candidate();
         let mut work = GeometryWorkBudget::new(100_000);
@@ -3611,7 +3731,7 @@ mod tests {
         ] {
             let definition = source(name);
             let mut work = GeometryWorkBudget::new(30_000_000);
-            let prepared = crate::prepare_section_source(
+            let prepared = crate::prepare_material_source(
                 &definition,
                 crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
                 &cancel,
@@ -3658,7 +3778,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = source("native-parity-nurbs-torus.step");
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -3843,7 +3963,7 @@ mod tests {
         };
         let terminal = 8.0 * cosine + 5.0 * sine;
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,

@@ -6,6 +6,7 @@ mod bounds;
 mod collar;
 mod critical;
 mod joint;
+mod material_source;
 mod placed;
 mod planar;
 mod slab;
@@ -23,6 +24,7 @@ pub use collar::{
     NativeCriticalCollarTargetSide, certify_native_critical_collar,
 };
 pub use critical::CriticalEventNeighborhood;
+pub(crate) use critical::PreparedSourceVertexPlans;
 pub use joint::{
     CompletedNativeUnionProofSet, EndpointOwnershipRequest, NativeCriticalCollarIncidence,
     NativeInterfaceAttachment, NativeOwnedEndpoint, NativeSourceLeafProofKind,
@@ -34,6 +36,7 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
+pub use material_source::{PreparedMaterialSource, prepare_material_source};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
     placed_material_bounds,

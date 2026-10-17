@@ -36,6 +36,115 @@ struct RawBoundary {
     displacement: Box3,
 }
 
+/// Call-local coefficient law. Borrowing all three immutable authorities keeps
+/// the normalized common polar function bound to its actual source operands.
+#[derive(Clone, Copy)]
+struct SharedPolarGerm<'a, 'd> {
+    comparison: &'a PoleComparison,
+    domain: &'a PreparedFaceTrimDomain<'d>,
+    recipe: &'a CornerRecipe,
+}
+
+#[derive(Clone, Copy)]
+struct ExitSupport<'a, 'd> {
+    row: Box2,
+    shared_polar: Option<SharedPolarGerm<'a, 'd>>,
+}
+
+type ExitEvidence<'a, 'd> = Result<ExitSupport<'a, 'd>, (Interval, Interval)>;
+
+fn polar_sin_cos(
+    polar: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(Interval, Interval), GeometryError> {
+    let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
+        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+    );
+    let result = monstertruck_modeling::validated_sin_cos(
+        monstertruck_modeling::ValidatedInterval {
+            lower: polar.lo,
+            upper: polar.hi,
+        },
+        &mut native,
+        cancel,
+    );
+    crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
+    let (sine, cosine) = result.map_err(crate::parametric::native_error)?;
+    let adapt = |value: monstertruck_modeling::ValidatedInterval| Interval {
+        lo: value.lower,
+        hi: value.upper,
+    };
+    Ok((adapt(sine), adapt(cosine)))
+}
+
+impl SharedPolarGerm<'_, '_> {
+    /// No two-dimensional inverse is needed for this scalar support. The
+    /// sealed affine FUNCTION identity makes phi(s) common to every piece and
+    /// theta, including each original offset and the actual middle bulge.
+    fn before_exit(
+        &self,
+        lower_s: f64,
+        row: Box2,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        let s = source_unit_parameter(Interval::new(lower_s, 1.0)?)?;
+        let polar = self.comparison.polar_axis;
+        let angular = 1 - polar;
+        if row[angular].lo != 0.0 || row[angular].hi != 0.0 {
+            return Ok(false);
+        }
+        let germ = end_curve(self.domain, self.recipe.outgoing, s, work, cancel)?;
+        let phi = germ.position[polar];
+        // This is the SAME principal covering branch as the ordinary inverse.
+        // A native pole endpoint outside it is not snapped or discarded: that
+        // case retains the general geometric/inverse proof.
+        if phi.lo <= 0.0 || phi.hi >= down(std::f64::consts::PI) {
+            return Ok(false);
+        }
+        let (sine, cosine) = polar_sin_cos(phi, work, cancel)?;
+        let hemisphere = match self.comparison.pole {
+            SphericalPole::North => 1.0,
+            SphericalPole::South => -1.0,
+        };
+        if cosine.mul(Interval::point(hemisphere)).lo <= 0.0
+            || row[polar].mul(germ.derivative[polar]).lo <= 0.0
+        {
+            return Ok(false);
+        }
+        let radius_squared_s = Interval::point(2.0)
+            .mul(sine)
+            .mul(cosine)
+            .mul(germ.derivative[polar]);
+        if radius_squared_s.lo <= 0.0 {
+            return Ok(false);
+        }
+        let exit = end_curve(
+            self.domain,
+            self.recipe.outgoing,
+            Interval::point(1.0),
+            work,
+            cancel,
+        )?;
+        let (exit_sine, _) = polar_sin_cos(exit.position[polar], work, cancel)?;
+        let radius_squared = exit_sine.square();
+        if radius_squared.lo <= 0.0 || radius_squared.hi >= 1.0 {
+            return Ok(false);
+        }
+        // SAME endpoint operands give r_raw(1)^2=R^2, not equality of two
+        // rounded evaluations. Integrating the strict derivative factors
+        // R^2-r_raw(s)^2 by (1-s), including its CLOSED zero at s=1.
+        // The reference has r_ref(s)^2=s^2 R^2 by the literal sphere law.
+        // Convexity of squared norm therefore puts the ENTIRE Cartesian
+        // lambda homotopy inside R^2, strictly for s<1. Principal-branch
+        // monotonicity and the checked row*phi' sign give before-exit support.
+        // The caller STILL proves all outer zero-locus/cutover ownership.
+        Ok(true)
+    }
+}
+
 // Account for the nested native-range / cap-image DFS, canonical original
 // curve storage, and simultaneously live coefficient/local-inverse jets.
 // This is independent of the parent's combined ownership-scratch constant.
@@ -48,7 +157,7 @@ pub(super) const STACK_BYTES: usize =
         + 6 * std::mem::size_of::<PoleChart>()
         + 4 * std::mem::size_of::<RawBoundary>()
         + 4 * std::mem::size_of::<PoleImage>()
-        + std::mem::size_of::<[Option<Result<Box2, (Interval, Interval)>>; 2]>()
+        + std::mem::size_of::<[Option<ExitEvidence<'static, 'static>>; 2]>()
         + std::mem::size_of::<Option<Box2>>()
         + std::mem::size_of::<Option<(Box2, TrimClassification)>>();
 
@@ -997,6 +1106,7 @@ impl PoleComparison {
         index: usize,
         row: Box2,
         at: Box2,
+        exact_exit: bool,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
@@ -1014,7 +1124,7 @@ impl PoleComparison {
         if dot2(row, own_curve.derivative).lo <= 0.0 {
             return Ok(false);
         }
-        if self.exact_shared_exit_level(domain, recipe, row, work, cancel)? {
+        if exact_exit {
             // Equality fixes the normal-support ZERO SET, not its ownership.
             // The whole boundary theorem still excludes every nonowning zero.
             return self.outer_boundary_owned(domain, recipe, index, work, cancel);
@@ -1076,6 +1186,33 @@ impl PoleComparison {
             work,
             cancel,
         )
+    }
+
+    /// The existing exit law fixes the outer level. Equal LITERAL native
+    /// endpoint/exit operands additionally fix the same affine normalized
+    /// parameter for both germs; same_end already checks its stored delta
+    /// against that exact subtraction expression, not interval overlap.
+    fn exit_polar_law<'a, 'd>(
+        &'a self,
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        recipe: &'a CornerRecipe,
+        row: Box2,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(bool, Option<SharedPolarGerm<'a, 'd>>), GeometryError> {
+        let exact_exit = self.exact_shared_exit_level(domain, recipe, row, work, cancel)?;
+        let a = recipe.outgoing;
+        let b = recipe.incoming;
+        let shared = (exact_exit
+            && a.endpoint == b.endpoint
+            && a.exit == b.exit
+            && a.absolute_back == b.absolute_back)
+            .then_some(SharedPolarGerm {
+                comparison: self,
+                domain,
+                recipe,
+            });
+        Ok((exact_exit, shared))
     }
 
     /// When an entire outer arc has zero normal support, zero does NOT mean
@@ -1147,9 +1284,15 @@ impl PoleComparison {
         piece: Piece,
         cell: [[f64; 2]; 2],
         row: Box2,
+        shared_polar: Option<SharedPolarGerm<'_, '_>>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Result<(), (&'static str, Option<Interval>)>, GeometryError> {
+        if let Some(law) = shared_polar {
+            if law.before_exit(cell[0][0], row, work, cancel)? {
+                return Ok(Ok(()));
+            }
+        }
         let chart = self.chart(domain)?;
         let image = self.image(
             domain,
@@ -1220,7 +1363,7 @@ impl PoleComparison {
         let mut native_pending = 1;
         // The source-only outer trace and exact coefficient law do not change
         // during the native-cell census. Retain each owned exit proof once.
-        let mut exit_supports: [Option<Result<Box2, (Interval, Interval)>>; 2] = [None; 2];
+        let mut exit_supports: [Option<ExitEvidence<'_, '_>>; 2] = [None; 2];
         while native_pending != 0 {
             native_pending -= 1;
             let (range, depth) = native_stack[native_pending];
@@ -1243,16 +1386,19 @@ impl PoleComparison {
                         let at =
                             chart_jet(domain, owned.use_.coedge, [owned.exit; 2], work, cancel)?;
                         let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
+                        let (exact_exit, shared_polar) =
+                            self.exit_polar_law(domain, recipe, row, work, cancel)?;
                         let evidence = if self.outer_before_exit(
                             domain,
                             recipe,
                             index,
                             row,
                             at.position,
+                            exact_exit,
                             work,
                             cancel,
                         )? {
-                            Ok(row)
+                            Ok(ExitSupport { row, shared_polar })
                         } else {
                             let other_end = if index == 0 {
                                 recipe.incoming
@@ -1278,14 +1424,15 @@ impl PoleComparison {
                         evidence
                     }
                 };
-                let row = match evidence {
-                    Ok(row) => row,
+                let support = match evidence {
+                    Ok(support) => support,
                     Err((support, bulge)) => {
                         last_support =
                             Some(("outer_exit_support", index, Some(support), bulge, None));
                         continue;
                     }
                 };
+                let row = support.row;
                 if if owned.absolute_back {
                     range[1] > owned.exit
                 } else {
@@ -1366,9 +1513,16 @@ impl PoleComparison {
                         if disjoint(image.position, other_world) || disjoint(image.q, other_q) {
                             continue;
                         }
-                        let inverse_refusal = match self
-                            .cell_before_exit(domain, recipe, piece, cell, row, work, cancel)?
-                        {
+                        let inverse_refusal = match self.cell_before_exit(
+                            domain,
+                            recipe,
+                            piece,
+                            cell,
+                            row,
+                            support.shared_polar,
+                            work,
+                            cancel,
+                        )? {
                             Ok(()) => continue,
                             Err(reason) => reason,
                         };
@@ -1521,6 +1675,168 @@ impl PoleComparison {
 #[cfg(test)]
 mod properties {
     use super::*;
+
+    #[test]
+    fn all_original_housing_poles_keep_complete_closed_cutover_ownership() {
+        let cancel = AtomicBool::new(false);
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        )
+        .unwrap();
+        let definition = crate::import_step(&bytes, &cancel).unwrap();
+        let geometry_before =
+            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let standalone = OriginalTrimSource::standalone(&definition);
+        let originals = standalone
+            .prepare_domains_if_missing(MAX_SCRATCH_BYTES, &mut work, &cancel)
+            .unwrap()
+            .expect("one complete original-domain owner");
+        let source = standalone.borrowing_domains(Some(&originals));
+        let available = MAX_SCRATCH_BYTES
+            .checked_sub(originals.retained_bytes())
+            .unwrap();
+        let mut poles = Vec::new();
+        let mut vertices = Vec::new();
+        for (face, _) in definition.solid.face_iter().enumerate() {
+            let domain = source
+                .face_domain(face, available, &mut work, &cancel)
+                .unwrap();
+            for (joint, original) in domain.native().joints().iter().enumerate() {
+                if matches!(original.kind, TrimJointKind::SphericalPole { .. }) {
+                    poles.push((face, joint, original.vertex_id));
+                    if !vertices.contains(&original.vertex_id) {
+                        vertices.push(original.vertex_id);
+                    }
+                }
+            }
+        }
+        assert!(
+            poles.len() > 1,
+            "all original poles, not only the lowest, must be exercised"
+        );
+        let mut incidence =
+            SourceEdgeIncidence::new(&definition, available, &mut work, &cancel).unwrap();
+        incidence
+            .prepare_vertices(available, &mut work, &cancel)
+            .unwrap();
+        let available = available.checked_sub(incidence.owned_bytes()).unwrap();
+        let mut seen = vec![false; poles.len()];
+        let mut polar_laws = 0;
+        for vertex in vertices {
+            // One canonical source-only plan per ACTUAL NativeV. Neither
+            // pole selection nor cutovers are chosen from failure coordinates.
+            let plan = SourceVertexTransportPlan::prepare(
+                source, &incidence, vertex, available, &mut work, &cancel,
+            )
+            .unwrap()
+            .expect("every original housing pole has its fixed G plan");
+            let allowance = source_allowance(&definition).unwrap();
+            assert!(plan.source_error_mm() <= allowance);
+            for (recipe_index, recipe) in plan.recipes.iter().enumerate() {
+                let Some(OriginalCornerComparison::SphericalPole(comparison)) = recipe.comparison
+                else {
+                    continue;
+                };
+                let face = recipe.outgoing.use_.face;
+                let index = poles
+                    .iter()
+                    .position(|&(f, j, v)| {
+                        f == face && j == comparison.joint_index && v == comparison.vertex
+                    })
+                    .expect("comparison belongs to an actual original pole/joint/NativeV");
+                assert!(!seen[index], "one comparison per original pole joint");
+                let domain = source
+                    .face_domain(face, available, &mut work, &cancel)
+                    .unwrap();
+                let scratch = available
+                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
+                    .unwrap();
+                comparison.validate(&domain, recipe, vertex).unwrap();
+                assert!(
+                    comparison
+                        .disk_owned(&domain, recipe, scratch, &mut work, &cancel,)
+                        .unwrap(),
+                    "complete closed pole ownership face={face} joint={}",
+                    comparison.joint_index
+                );
+                let mut cells = 0;
+                for cell in plan.cells.iter().filter(|cell| cell.recipe == recipe_index) {
+                    let cost = comparison
+                        .source_cost(
+                            &domain,
+                            recipe,
+                            cell.piece,
+                            Interval::new(cell.parameter[0], cell.parameter[1]).unwrap(),
+                            plan.point,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap();
+                    assert!(cost.error_mm.is_finite() && cost.error_mm <= allowance);
+                    assert!(cost.homotopy_mm.is_finite() && cost.homotopy_mm <= allowance);
+                    assert!(length(cost.displacement).unwrap().hi <= allowance);
+                    cells += 1;
+                }
+                assert!(cells > 0);
+                let direction = if recipe.outgoing.absolute_back {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let at = chart_jet(
+                    &domain,
+                    recipe.outgoing.use_.coedge,
+                    [recipe.outgoing.exit; 2],
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
+                if let (_, Some(law)) = comparison
+                    .exit_polar_law(&domain, recipe, row, &mut work, &cancel)
+                    .unwrap()
+                {
+                    assert!(law.before_exit(0.5, row, &mut work, &cancel).unwrap());
+                    assert!(
+                        !law.before_exit(0.5, row.map(Interval::neg), &mut work, &cancel,)
+                            .unwrap(),
+                        "a radius derivative alone cannot authorize the opposite cutover sign"
+                    );
+                    polar_laws += 1;
+                }
+                let mut wrong_gauge = *recipe;
+                wrong_gauge.outgoing.endpoint = up(wrong_gauge.outgoing.endpoint);
+                match comparison.exit_polar_law(&domain, &wrong_gauge, row, &mut work, &cancel) {
+                    Err(error) => assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate),
+                    Ok(_) => panic!("changed literal original normalization must refuse"),
+                }
+                let mut wrong_branch = comparison;
+                wrong_branch.pole = match comparison.pole {
+                    SphericalPole::North => SphericalPole::South,
+                    SphericalPole::South => SphericalPole::North,
+                };
+                match wrong_branch.exit_polar_law(&domain, recipe, row, &mut work, &cancel) {
+                    Err(error) => assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate),
+                    Ok(_) => panic!("foreign original pole branch must refuse"),
+                }
+                seen[index] = true;
+            }
+        }
+        assert!(
+            seen.into_iter().all(|value| value),
+            "every original pole and closed cutover was consumed"
+        );
+        assert!(
+            polar_laws > 0,
+            "original affine polar functions exercise the closed support lemma"
+        );
+        assert_eq!(
+            geometry_before,
+            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+        );
+    }
 
     #[test]
     fn lowest_original_housing_pole_consumes_fixed_source_plan_and_full_closed_ownership() {

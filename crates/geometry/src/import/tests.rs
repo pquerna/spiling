@@ -716,7 +716,7 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
         .unwrap();
         assert!(height.event_brackets_mm().is_empty());
         drop(height);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancel,
@@ -832,7 +832,7 @@ fn original_implicit_query_proof_limit_refuses_and_does_not_poison_later_imports
     };
     for imported in [&definition, &recovered] {
         let mut work = crate::GeometryWorkBudget::new(20_000_000);
-        let prepared = crate::prepare_section_source(
+        let prepared = crate::prepare_material_source(
             imported,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
             &cancelled(),

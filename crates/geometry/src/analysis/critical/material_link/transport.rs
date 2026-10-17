@@ -7,7 +7,7 @@
 //! additionally requires the closed radial link and complete degree proof.
 
 use super::*;
-use vertex_transport::SourceVertexTransportPlan;
+use vertex_transport::SourceVertexPlan;
 
 #[derive(Clone, Copy)]
 pub(crate) enum SourceTransportOwner {
@@ -251,6 +251,9 @@ pub(crate) fn source_transport_supports(
         ));
     }
     let definition = source.definition();
+    if let Some(plans) = source.vertex_plans() {
+        plans.validate_source(definition, work, cancel)?;
+    }
     if definition.material_transport_is_proved_zero(work, cancel)? {
         return Ok(Vec::new());
     }
@@ -405,7 +408,7 @@ pub(crate) fn source_transport_supports(
             .checked_sub(output_bytes(&output))
             .ok_or_else(resource)?;
         let before = work.consumed();
-        let Some(plan) = SourceVertexTransportPlan::prepare(
+        let Some(selection) = SourceVertexPlan::prepare(
             source, &incidence, vertex, plan_limit, work, cancel,
         ).map_err(|error| work.annotate_error(error, before,
             format_args!("source support corner-owner preparation; source_vertex_ordinal={vertex_ordinal}")))?
@@ -417,6 +420,7 @@ pub(crate) fn source_transport_supports(
                 format_args!("source_vertex_ordinal={vertex_ordinal}"),
             ));
         };
+        let plan = selection.plan();
         if plan.source_error_mm() > allowance {
             return Err(failure(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -426,7 +430,7 @@ pub(crate) fn source_transport_supports(
             ));
         }
         let output_limit = available
-            .checked_sub(plan.retained_bytes())
+            .checked_sub(selection.owned_bytes())
             .ok_or_else(resource)?;
         let before = work.consumed();
         plan.visit_supports(direction, work, cancel, &mut |support| {

@@ -87,10 +87,12 @@ fn original_trim_queries_bind_the_immutable_definition_and_face() {
     let source = OriginalTrimSource {
         definition: &definition,
         originals: Some(&originals),
+        vertex_plans: None,
     };
     let wrong = OriginalTrimSource {
         definition: &other,
         originals: Some(&originals),
+        vertex_plans: None,
     };
     for (index, identity) in definition.face_boundaries.iter().enumerate() {
         let domain = source

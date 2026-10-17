@@ -21,7 +21,7 @@ use std::{
 pub(super) struct NativeSourceInputs<'a, 'model> {
     pub input: &'a CompilerInput<'model>,
     pub occurrences: &'a [&'a OccurrenceRecord],
-    pub sources: &'a BTreeMap<DefinitionId, spiling_geometry::PreparedSectionSource<'model>>,
+    pub sources: &'a BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'model>>,
 }
 
 pub(super) struct NativeSpanRequest {
