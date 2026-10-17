@@ -177,9 +177,7 @@ export function useManufacturing(host: ManufacturingHost) {
         inspectionRef.current = historical;
         setInspection(historical);
       }
-      void hostRef.current.clearReplay().catch((error: unknown) => {
-        if (mounted.current) setMessage(String(error));
-      });
+      // Project replacement owns awaited GPU cleanup; session teardown disposes the viewport.
     }
     if (!session) return;
     const token = hostRef.current.token();
@@ -189,17 +187,21 @@ export function useManufacturing(host: ManufacturingHost) {
     });
   }, [session, projectId, revision, currentAuthority]);
   useEffect(() => {
-    if (inspection && status && !sameArtifact(status.artifact, inspection.result.record)) {
+    if (
+      inspection &&
+      !inspection.invalidated &&
+      inspection.authority === currentAuthority &&
+      status &&
+      !sameArtifact(status.artifact, inspection.result.record)
+    ) {
       void hostRef.current.clearReplay().catch((error: unknown) => {
         if (mounted.current) setMessage(String(error));
       });
-      if (!inspection.invalidated) {
-        const historical = { ...inspection, replay: null, displayReady: false, invalidated: true };
-        inspectionRef.current = historical;
-        setInspection(historical);
-      }
+      const historical = { ...inspection, replay: null, displayReady: false, invalidated: true };
+      inspectionRef.current = historical;
+      setInspection(historical);
     }
-  }, [status, inspection]);
+  }, [status, inspection, currentAuthority]);
 
   async function selectIntent(relativePath?: string) {
     if (!writable) return;

@@ -1307,6 +1307,7 @@ mod tests {
                     project_id: project_info(false).project_id,
                     input_revision: spiling_contracts::project::ProjectRevision::ZERO,
                     input_hash: record.input_hash.clone(),
+                    surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
                     kernel: spiling_contracts::geometry::KernelIdentity {
                         name: "native".into(),
                         version: "1".into(),

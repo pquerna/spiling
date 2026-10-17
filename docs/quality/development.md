@@ -32,6 +32,8 @@ without an optimized desktop-stack rebuild. Use one warm target and serialize
 compiler, native workload and CEF verification on constrained hosts. Numerical
 optimization does not relax source, work, memory, tolerance or watchdog limits.
 
+Linux hardware startup enables CEF's native Vulkan compositor without overriding driver or adapter safety blocks. The executable directly links the shipped `libvulkan.so.1`: GTK's transitive Vulkan import does not inherit executable `$ORIGIN` RUNPATH, and mixing its system loader with Dawn's pinned loader can prevent device initialization. Keep the pinned distribution and its loader together; no `LD_LIBRARY_PATH` or replacement native library is required.
+
 ## Running the development shell
 
 After checking out the source and installing the prerequisites:
@@ -227,13 +229,11 @@ SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 xvfb-run -a pnpm smoke:desk
 
 Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
 
-Linux startup selects Chromium's native Vulkan compositor through the merging CEF feature API, retaining driver/adapter blocklists. This is distinct from forcing unsafe WebGPU or overriding a blocked Vulkan/GL interop path. The executable directly links the already-shipped, pinned CEF `libvulkan.so.1`: its `$ORIGIN` RUNPATH then selects that loader before GTK's transitive Vulkan dependency, preventing GTK and Dawn from binding different loaders' instance functions. Do not replace archive libraries or rely on a development `LD_LIBRARY_PATH` override as a packaging fix.
-
-Linux preserves normal GPU bootstrap ordering so X11 connections initialize before Chromium attempts GPU sandbox entry. Driver-created workers can prevent its mono-threaded GPU sandbox initialization. The approved **local hardware-workflow security exception** accepts Chromium's existing unsandboxed GPU fallback in that case; the shell does not force GPU sandbox disablement and leaves browser/renderer CEF sandbox policy unchanged. No `--no-sandbox`, `--disable-gpu-sandbox`, software rendering, unsafe-WebGPU enablement or driver/adapter-block bypass is authorized by this exception.
-
-Record actual GPU sandbox status and renderer seccomp state separately in hardware evidence. A run with GPU `sandboxed:false` and renderer `Seccomp:2` must be labelled accordingly, never fully sandboxed. This local exception is not approval to ship an unsandboxed GPU process or evidence of general platform/package qualification. Fully sandboxed GPU support remains a separate gate requiring compatible resource/worker initialization ordering; early X11 sandbox entry and switching ANGLE itself to Vulkan are not fixes for that prerequisite.
+Spiling runs trusted packaged desktop UI; loading arbitrary websites is not its product model. Normal CEF renderer isolation is defense in depth, not a hostile-web-content qualification project. The approved **local Linux hardware workflow** permits Chromium's existing GPU-process sandbox fallback on the pinned CEF/driver stack without global sandbox-disable flags. Keep upstream warnings visible and describe the actual GPU/renderer isolation accurately; GPU sandbox qualification does not block local manufacturing delivery. The privileged browser/host is outside the renderer sandbox by design. Imported STEP, images and projects still require malformed-data validation and resource bounds. Hardware device admission establishes neither real-dialog, packaged-platform nor physical-machine qualification.
 
 For development-native checks, build current frontend assets and stage the matching engine **before** building the desktop: `pnpm build` implements that order. A direct desktop Cargo build can copy an old staged sidecar over the engine executable; sharing a warm target does not validate sidecar identity.
+
+The viewport panel stays window-height bounded independently of long manufacturing reports. Both WebGPU canvases cap drawing-buffer pixel ratio against the actual device's texture limit and update dimensions/ratio atomically; changing pixel ratio against old dimensions can allocate an oversized intermediate texture.
 
 `--scenario manufacturing` exercises the actual production panel, native intent/history/compile/verification, motion transport, exclusive export, source-independent read-only reopen and child restart/cleanup. It requires working WebGPU by default. On a headless Linux diagnostic host, `--diagnostic-no-gpu` explicitly preserves the startup GPU rejection, then enables a startup-gated native-panel attachment:
 
