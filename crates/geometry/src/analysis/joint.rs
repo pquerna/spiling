@@ -1599,9 +1599,12 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
         hash.update(radial.product_sha256);
         hash.update(radial.axis_sha256);
         hash.update([radial.kind as u8]);
-        for value in radial.center.into_iter().flatten().chain([
-            radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm,
-        ]) {
+        for value in radial
+            .center
+            .into_iter()
+            .flatten()
+            .chain([radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm])
+        {
             hash.update(value.to_bits().to_le_bytes());
         }
     }
@@ -2400,18 +2403,23 @@ impl NativeUnionBindingLedger {
                                 GeometryErrorCode::AnalysisIndeterminate,
                                 format!(
                                     "cross-height critical source interface lacks the actual native coface/port ownership proof; cut={interface:?}; previous={:?}/{:?}/radial={:?}; current={:?}/{:?}/radial={:?}; radial_pair={:?}",
-                                    previous.world_height_interval_mm, previous.proof_kind,
+                                    previous.world_height_interval_mm,
+                                    previous.proof_kind,
                                     previous.radial_product.map(|p| p.kind),
-                                    current.world_height_interval_mm, current.proof_kind,
+                                    current.world_height_interval_mm,
+                                    current.proof_kind,
                                     current.radial_product.map(|p| p.kind),
-                                    previous.radial_product.zip(current.radial_product).map(|(a, b)| (
-                                        previous.source.same_material_recipe(&current.source),
-                                        previous.pose() == current.pose(),
-                                        a.axis_sha256 == b.axis_sha256, a.center == b.center,
-                                        a.kind == b.kind,
-                                        a.inner_cover_radius_mm.max(b.inner_cover_radius_mm),
-                                        a.outer_kernel_radius_mm.min(b.outer_kernel_radius_mm),
-                                    )),
+                                    previous.radial_product.zip(current.radial_product).map(
+                                        |(a, b)| (
+                                            previous.source.same_material_recipe(&current.source),
+                                            previous.pose() == current.pose(),
+                                            a.axis_sha256 == b.axis_sha256,
+                                            a.center == b.center,
+                                            a.kind == b.kind,
+                                            a.inner_cover_radius_mm.max(b.inner_cover_radius_mm),
+                                            a.outer_kernel_radius_mm.min(b.outer_kernel_radius_mm),
+                                        )
+                                    ),
                                 ),
                             ));
                         }
@@ -3317,6 +3325,17 @@ fn certify_source_leaf(
         xy_bounds_mm: candidate_xy_bounds_mm,
     } = candidate_capture(actual_used_source_loops, z, work, cancel)?;
     let native_sample_sha256 = native_sample_hash(analysis, work, cancel)?;
+    let radial_slab = analysis.radial_slab.as_ref();
+    if let Some(radial) = radial_slab {
+        if !radial.product.matches_world(definition, pose, interval, z)
+            || !radial.matches_native(&analysis.section.loops, work, cancel)?
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "closed radial product does not bind the exact native source/pose/scope/sample",
+            ));
+        }
+    }
     let mut scratch = Scratch { bytes: 0 };
     let mut proof_kind = if sample_only {
         NativeSourceLeafProofKind::SampleToClosedSource
@@ -3335,6 +3354,8 @@ fn certify_source_leaf(
     };
     let mut loop_mapping = Vec::new();
     let mut exact_rectangle_bound = None;
+    // Radial fidelity does not supply the original cap/interface arrangement.
+    // Retain an available affine product for later cross-source attachment.
     let profile = if analysis.section.loops.is_empty() {
         None
     } else {
@@ -3508,19 +3529,19 @@ fn certify_source_leaf(
             cancel,
         )?,
     };
-    let radial_product = if let Some(radial) = &analysis.radial_slab {
-        if !radial.product.matches_world(definition, pose, interval, z)
-            || !radial.matches_native(&analysis.section.loops, work, cancel)?
-        {
-            return Err(error(GeometryErrorCode::InvalidGeometry,
-                "closed radial product does not bind the exact native source/pose/scope/sample"));
-        }
+    let radial_product = if let Some(radial) = radial_slab {
         let Some(region) = certify_actual_polygon_radial_region(
-            actual_used_source_loops, radial.product.coordinates(),
-            radial.product.kind(), work, cancel,
-        )? else {
-            return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-                "actual used source-M polygon has no matching closed radial region"));
+            actual_used_source_loops,
+            radial.product.coordinates(),
+            radial.product.kind(),
+            work,
+            cancel,
+        )?
+        else {
+            return Err(error(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "actual used source-M polygon has no matching closed radial region",
+            ));
         };
         Some(NativeRadialLeaf {
             product_sha256: radial.product.identity_sha256(),
@@ -3530,7 +3551,9 @@ fn certify_source_leaf(
             outer_kernel_radius_mm: region.outer_kernel_radius_mm(),
             inner_cover_radius_mm: region.inner_cover_radius_mm(),
         })
-    } else { None };
+    } else {
+        None
+    };
     let sample_region_error_mm = Interval::point(analysis.section.achieved_chord_error_mm())
         .add(Interval::point(analysis.section.achieved_plane_error_mm()))
         .add(Interval::point(analysis.section.boolean_tolerance_mm))
@@ -6504,6 +6527,9 @@ fn native_profile<'a>(
         let mut coordinate_error = [0.0_f64; 2];
         for (face_index, face) in definition.solid.face_iter().enumerate() {
             work.charge(1, cancel)?;
+            let Some(affine) = face.with_surface(affine_face) else {
+                return Ok(None);
+            };
             // Every original trim is prepared, including every hole wire on both
             // caps. Retained pcurves without whole source correspondence refuse.
             let domain = crate::kernel::prepare_face_trim_domain_with_byte_limit(
@@ -6524,9 +6550,6 @@ fn native_profile<'a>(
                 ));
             }
             scratch.bytes += trim_bytes;
-            let Some(affine) = face.with_surface(affine_face) else {
-                return Ok(None);
-            };
             let normal = [
                 Interval::point(affine.u[1])
                     .mul(Interval::point(affine.v[2]))

@@ -434,7 +434,7 @@ function Workbench() {
             Import parts…
           </button>
           <p>
-            Independent planar/cylindrical STEP parts. Multi-select imports sequentially; earlier
+            Independent bounded native STEP parts. Multi-select imports sequentially; earlier
             successful parts remain if a later import fails.
           </p>
           {state.runtime?.geometry_debug_enabled && (
@@ -557,6 +557,7 @@ function Workbench() {
         )}
         <div className="view-actions">
           <button
+            data-testid="fit-scene"
             disabled={!running}
             onClick={() => {
               void workbench.fit();

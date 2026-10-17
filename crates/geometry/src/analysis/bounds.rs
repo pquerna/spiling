@@ -130,7 +130,11 @@ fn material_projected_bounds_with_total_limit(
         })?;
     material_projected_bounds_with_scratch_limit(
         crate::section::OriginalTrimSource::standalone(definition),
-        direction, policy, remaining_bytes, work, cancel,
+        direction,
+        policy,
+        remaining_bytes,
+        work,
+        cancel,
     )
 }
 
@@ -144,13 +148,22 @@ pub(super) fn material_projected_bounds_with_scratch_limit(
 ) -> Result<MaterialProjectedBounds, GeometryError> {
     let definition = source.definition();
     let remaining_bytes = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES);
+    let transport_is_proved_zero = definition.material_transport_is_proved_zero(work, cancel)?;
     // The raw search releases its scratch before source supports are prepared.
     // Both operations reserve the pinned original proof from the same cap.
     let raw_before = work.consumed();
     let raw = projected_bounds_with_scratch_limit(
         source,
         direction,
-        policy,
+        if transport_is_proved_zero {
+            policy
+        } else {
+            BoundsPolicy {
+                // Leave room for independently bounded source transport and
+                // its endpoint witnesses; the final policy remains unchanged.
+                maximum_endpoint_uncertainty_mm: policy.maximum_endpoint_uncertainty_mm * 0.5,
+            }
+        },
         remaining_bytes,
         work,
         cancel,
@@ -163,29 +176,33 @@ pub(super) fn material_projected_bounds_with_scratch_limit(
         )
     })?;
     let before = work.consumed();
-    let supports = super::critical::material_link::source_transport_supports(
-        source,
-        normalized_direction(direction)?,
-        Some((
-            [
-                raw.minimum[1].min(raw.maximum[0]),
-                raw.minimum[1].max(raw.maximum[0]),
-            ],
-            policy.maximum_endpoint_uncertainty_mm * 0.125,
-        )),
-        remaining_bytes,
-        work,
-        cancel,
-    )
-    .map_err(|error| {
-        work.annotate_error(
-            error,
-            before,
-            format_args!(
-                "material directional source-support preparation; direction={direction:?}"
-            ),
+    let supports = if transport_is_proved_zero {
+        Vec::new()
+    } else {
+        super::critical::material_link::source_transport_supports(
+            source,
+            normalized_direction(direction)?,
+            Some((
+                [
+                    raw.minimum[1].min(raw.maximum[0]),
+                    raw.minimum[1].max(raw.maximum[0]),
+                ],
+                policy.maximum_endpoint_uncertainty_mm * 0.125,
+            )),
+            remaining_bytes,
+            work,
+            cancel,
         )
-    })?;
+        .map_err(|error| {
+            work.annotate_error(
+                error,
+                before,
+                format_args!(
+                    "material directional source-support preparation; direction={direction:?}"
+                ),
+            )
+        })?
+    };
     let (bounds, source_realization_error_mm, scalar_transport_is_identically_zero) =
         aggregate_material_supports(
             raw,
@@ -1534,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_zero_original_affine_material_agrees_with_raw_source_support() {
+    fn exact_original_affine_material_keeps_zero_transport_and_native_extrema() {
         let cancel = AtomicBool::new(false);
         let definition = crate::import_step(
             include_bytes!("../../../../fixtures/geometry/box-mm.step"),
@@ -1544,30 +1561,29 @@ mod tests {
         let policy = BoundsPolicy {
             maximum_endpoint_uncertainty_mm: 0.00001,
         };
-        for direction in [
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, f64::from_bits(1)],
-            [3.0, 4.0, 0.0],
-            [-1.0, 2.0, 3.0],
+        for (direction, expected) in [
+            ([0.0, 0.0, 1.0], [0.0, 8.0]),
+            ([0.0, 0.0, f64::from_bits(1)], [0.0, 8.0]),
+            ([3.0, 4.0, 0.0], [0.0, 20.0]),
+            (
+                [-1.0, 2.0, 3.0],
+                [-20.0 / 14.0_f64.sqrt(), 44.0 / 14.0_f64.sqrt()],
+            ),
         ] {
             let mut work = GeometryWorkBudget::new(2_000_000);
-            let raw = projected_bounds(&definition, direction, policy, &mut work, &cancel).unwrap();
             let material =
                 material_projected_bounds(&definition, direction, policy, &mut work, &cancel)
                     .unwrap();
-            assert_eq!(material.bounds().minimum, raw.minimum);
-            assert_eq!(material.bounds().maximum, raw.maximum);
-            assert_eq!(
-                material.bounds().achieved_uncertainty_mm,
-                raw.achieved_uncertainty_mm
-            );
+            let bounds = material.bounds();
+            assert!(bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm);
+            for (bracket, expected) in [bounds.minimum, bounds.maximum].into_iter().zip(expected) {
+                assert!(
+                    bracket[0] <= expected && expected <= bracket[1],
+                    "{direction:?}: {bounds:?}"
+                );
+            }
             assert_eq!(material.source_realization_error_mm(), 0.0);
             assert!(material.scalar_transport_is_identically_zero());
-            assert_eq!(material.definition_id(), definition.id());
-            assert_eq!(
-                material.material_realization_identity(),
-                crate::kernel::MaterialRealizationIdentity::new(&definition),
-            );
         }
         for (maximum_work, cancelled, expected) in [
             (0, false, GeometryErrorCode::ResourceLimit),

@@ -12,29 +12,18 @@ use crate::parametric::Interval;
 use crate::{GeometryError, GeometryWorkBudget, SectionLoopMm};
 use std::sync::atomic::AtomicBool;
 
-/// A borrowed filled-region proof, not a replacement contour or a metric bound.
-/// The literal horizontal lift is at `coordinates.sample_world_z()`: input Z
-/// coordinates remain the native plane-tube owner's responsibility.
+/// Ephemeral calibration bounds for the exact input filled region.
+/// The caller binds its candidate separately; this is not a retained receipt.
 #[derive(Debug)]
-pub(super) struct ActualPolygonRadialRegion<'a> {
-    actual: &'a [SectionLoopMm],
-    coordinates: MaterialCoordinatesCapture,
+pub(super) struct ActualPolygonRadialRegion {
     kind: RadialRegionKind,
     outer_kernel_radius_mm: f64,
     inner_cover_radius_mm: f64,
 }
 
-impl ActualPolygonRadialRegion<'_> {
+impl ActualPolygonRadialRegion {
     pub(super) fn kind(&self) -> RadialRegionKind {
         self.kind
-    }
-
-    pub(super) fn coordinates(&self) -> &MaterialCoordinatesCapture {
-        &self.coordinates
-    }
-
-    pub(super) fn matches_actual(&self, actual: &[SectionLoopMm]) -> bool {
-        std::ptr::eq(self.actual, actual)
     }
 
     pub(super) fn outer_kernel_radius_mm(&self) -> f64 {
@@ -46,13 +35,13 @@ impl ActualPolygonRadialRegion<'_> {
     }
 }
 
-pub(super) fn certify_actual_polygon_radial_region<'a>(
-    loops: &'a [SectionLoopMm],
+pub(super) fn certify_actual_polygon_radial_region(
+    loops: &[SectionLoopMm],
     coordinates: &MaterialCoordinatesCapture,
     kind: RadialRegionKind,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<ActualPolygonRadialRegion<'a>>, GeometryError> {
+) -> Result<Option<ActualPolygonRadialRegion>, GeometryError> {
     work.charge(1, cancel)?;
     let Some([outer_kernel_radius_mm, inner_cover_radius_mm]) = radial_region_bounds(
         loops,
@@ -60,12 +49,11 @@ pub(super) fn certify_actual_polygon_radial_region<'a>(
         kind,
         work,
         cancel,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     Ok(Some(ActualPolygonRadialRegion {
-        actual: loops,
-        coordinates: *coordinates,
         kind,
         outer_kernel_radius_mm,
         inner_cover_radius_mm,
@@ -87,13 +75,16 @@ pub(super) fn radial_region_bounds(
         RadialRegionKind::Annulus => 2,
     };
     if loops.len() != count
-        || center.iter().any(|axis| {
-            axis.iter().any(|value| !value.is_finite()) || axis[0] > axis[1]
-        })
+        || center
+            .iter()
+            .any(|axis| axis.iter().any(|value| !value.is_finite()) || axis[0] > axis[1])
     {
         return Ok(None);
     }
-    let center = center.map(|axis| Interval { lo: axis[0], hi: axis[1] });
+    let center = center.map(|axis| Interval {
+        lo: axis[0],
+        hi: axis[1],
+    });
     let mut outer = None;
     let mut inner = None;
     for ring in loops {
@@ -156,10 +147,12 @@ fn radial_ring_bound(
         let direction = delta(b, a);
         let to_center = std::array::from_fn(|i| center[i].sub(Interval::point(a[i])));
         let determinant = cross(direction, to_center);
-        let signed = if ring.is_hole { -determinant.hi } else { determinant.lo };
+        let signed = if ring.is_hole {
+            -determinant.hi
+        } else {
+            determinant.lo
+        };
         if !signed.is_finite() || signed <= 0.0 {
-            eprintln!("PARITY_REGION_REFUSAL hole={} center={center:?} edge={a:?}->{b:?} signed={signed}",
-                ring.is_hole);
             return Ok(None);
         }
 
@@ -215,17 +208,35 @@ mod tests {
     use spiling_contracts::geometry::GeometryErrorCode;
 
     fn ring(points: &[[f64; 2]], hole: bool) -> SectionLoopMm {
-        let mut points_mm: Vec<_> = points.iter().map(|p| [p[0], p[1], 7.0 + p[0] * 0.125]).collect();
+        let mut points_mm: Vec<_> = points
+            .iter()
+            .map(|p| [p[0], p[1], 7.0 + p[0] * 0.125])
+            .collect();
         points_mm.push(points_mm[0]);
-        SectionLoopMm { is_hole: hole, points_mm }
+        SectionLoopMm {
+            is_hole: hole,
+            points_mm,
+        }
     }
 
-    fn graph(count: usize, phase: f64, scale: f64, center: [f64; 2], hole: bool, concave: bool) -> SectionLoopMm {
-        let points: Vec<_> = (0..count).map(|i| {
-            let theta = phase + std::f64::consts::TAU * i as f64 / count as f64;
-            let radius = scale * if concave && i % 2 == 1 { 0.45 } else { 1.0 };
-            [center[0] + radius * theta.cos(), center[1] + radius * theta.sin()]
-        }).collect();
+    fn graph(
+        count: usize,
+        phase: f64,
+        scale: f64,
+        center: [f64; 2],
+        hole: bool,
+        concave: bool,
+    ) -> SectionLoopMm {
+        let points: Vec<_> = (0..count)
+            .map(|i| {
+                let theta = phase + std::f64::consts::TAU * i as f64 / count as f64;
+                let radius = scale * if concave && i % 2 == 1 { 0.45 } else { 1.0 };
+                [
+                    center[0] + radius * theta.cos(),
+                    center[1] + radius * theta.sin(),
+                ]
+            })
+            .collect();
         let mut result = ring(&points, hole);
         if hole {
             result.points_mm.reverse();
@@ -233,8 +244,19 @@ mod tests {
         result
     }
 
-    fn bounds(loops: &[SectionLoopMm], center: [[f64; 2]; 2], kind: RadialRegionKind) -> Option<[f64; 2]> {
-        radial_region_bounds(loops, center, kind, &mut GeometryWorkBudget::new(1_000_000), &AtomicBool::new(false)).unwrap()
+    fn bounds(
+        loops: &[SectionLoopMm],
+        center: [[f64; 2]; 2],
+        kind: RadialRegionKind,
+    ) -> Option<[f64; 2]> {
+        radial_region_bounds(
+            loops,
+            center,
+            kind,
+            &mut GeometryWorkBudget::new(1_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -251,7 +273,8 @@ mod tests {
                         assert_eq!(disk[1], 0.0);
                         let outer = graph(count, phase, scale, center, false, concave);
                         let inner = graph(count, phase + 0.05, scale * 0.05, center, true, concave);
-                        let annulus = bounds(&[inner, outer], family, RadialRegionKind::Annulus).unwrap();
+                        let annulus =
+                            bounds(&[inner, outer], family, RadialRegionKind::Annulus).unwrap();
                         assert!(annulus[1] >= scale * 0.05);
                         assert!(annulus[1] < annulus[0]);
                     }
@@ -262,16 +285,38 @@ mod tests {
 
     #[test]
     fn star_kernel_pentagram_is_not_a_one_sheeted_angular_cover() {
-        let points = [[0.0, 5.0], [-3.0, -4.0], [5.0, 2.0], [-5.0, 2.0], [3.0, -4.0]];
+        let points = [
+            [0.0, 5.0],
+            [-3.0, -4.0],
+            [5.0, 2.0],
+            [-5.0, 2.0],
+            [3.0, -4.0],
+        ];
         for i in 0..points.len() {
             let a = points[i];
             let b = points[(i + 1) % points.len()];
             assert!(a[0] * b[1] - a[1] * b[0] > 0.0);
         }
-        assert!(bounds(&[ring(&points, false)], [[0.0; 2]; 2], RadialRegionKind::Disk).is_none());
+        assert!(
+            bounds(
+                &[ring(&points, false)],
+                [[0.0; 2]; 2],
+                RadialRegionKind::Disk
+            )
+            .is_none()
+        );
         let mut hole = ring(&points, true);
         hole.points_mm.reverse();
-        assert!(radial_ring_bound(&hole, [Interval::point(0.0); 2], &mut GeometryWorkBudget::new(100), &AtomicBool::new(false)).unwrap().is_none());
+        assert!(
+            radial_ring_bound(
+                &hole,
+                [Interval::point(0.0); 2],
+                &mut GeometryWorkBudget::new(100),
+                &AtomicBool::new(false)
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -281,7 +326,10 @@ mod tests {
             for inner_hole in [false, true] {
                 let outer = graph(8, 0.0, 8.0, [0.0; 2], outer_hole, false);
                 let inner = graph(8, 0.0, 1.0, [0.0; 2], inner_hole, false);
-                assert_eq!(bounds(&[outer, inner], center, RadialRegionKind::Annulus).is_some(), !outer_hole && inner_hole);
+                assert_eq!(
+                    bounds(&[outer, inner], center, RadialRegionKind::Annulus).is_some(),
+                    !outer_hole && inner_hole
+                );
             }
         }
         let mut clockwise_outer = graph(8, 0.0, 8.0, [0.0; 2], true, false);
@@ -290,7 +338,14 @@ mod tests {
         let outer = graph(8, 0.0, 8.0, [0.0; 2], false, false);
         let mut counterclockwise_hole = graph(8, 0.0, 1.0, [0.0; 2], false, false);
         counterclockwise_hole.is_hole = true;
-        assert!(bounds(&[outer, counterclockwise_hole], center, RadialRegionKind::Annulus).is_none());
+        assert!(
+            bounds(
+                &[outer, counterclockwise_hole],
+                center,
+                RadialRegionKind::Annulus
+            )
+            .is_none()
+        );
         for extra_hole in [false, true] {
             let loops = [
                 graph(8, 0.0, 8.0, [0.0; 2], false, false),
@@ -301,8 +356,22 @@ mod tests {
             assert!(bounds(&loops, center, RadialRegionKind::Disk).is_none());
         }
         assert!(bounds(&[], center, RadialRegionKind::Disk).is_none());
-        assert!(bounds(&[graph(8, 0.0, 8.0, [0.0; 2], false, false)], center, RadialRegionKind::Annulus).is_none());
-        assert!(bounds(&[graph(8, 0.0, 1.0, [0.0; 2], true, false)], center, RadialRegionKind::Disk).is_none());
+        assert!(
+            bounds(
+                &[graph(8, 0.0, 8.0, [0.0; 2], false, false)],
+                center,
+                RadialRegionKind::Annulus
+            )
+            .is_none()
+        );
+        assert!(
+            bounds(
+                &[graph(8, 0.0, 1.0, [0.0; 2], true, false)],
+                center,
+                RadialRegionKind::Disk
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -310,16 +379,27 @@ mod tests {
         let diamond = [[4.0, 0.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]];
         for offset in [0.0, 35_184_372_088_832.0] {
             for first in 0..4 {
-                let points: Vec<_> = (0..4).map(|i| {
-                    let p = diamond[(first + i) % 4];
-                    [p[0] + offset, p[1] - offset]
-                }).collect();
+                let points: Vec<_> = (0..4)
+                    .map(|i| {
+                        let p = diamond[(first + i) % 4];
+                        [p[0] + offset, p[1] - offset]
+                    })
+                    .collect();
                 let center = [[offset, offset], [-offset, -offset]];
                 let disk = bounds(&[ring(&points, false)], center, RadialRegionKind::Disk).unwrap();
                 assert!(disk[0] > 2.8 && disk[0] < 2.9);
                 let mut hole = ring(&points, true);
                 hole.points_mm.reverse();
-                assert!(radial_ring_bound(&hole, [Interval::point(offset), Interval::point(-offset)], &mut GeometryWorkBudget::new(100), &AtomicBool::new(false)).unwrap().is_some());
+                assert!(
+                    radial_ring_bound(
+                        &hole,
+                        [Interval::point(offset), Interval::point(-offset)],
+                        &mut GeometryWorkBudget::new(100),
+                        &AtomicBool::new(false)
+                    )
+                    .unwrap()
+                    .is_some()
+                );
             }
         }
     }
@@ -331,7 +411,14 @@ mod tests {
             vec![[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
             vec![[-4.0, 0.0], [4.0, 0.0], [0.0, 4.0]],
             vec![[4.0, 0.0], [0.0, 4.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]],
-            vec![[4.0, 0.0], [0.0, 4.0], [0.0, 5.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]],
+            vec![
+                [4.0, 0.0],
+                [0.0, 4.0],
+                [0.0, 5.0],
+                [0.0, 4.0],
+                [-4.0, 0.0],
+                [0.0, -4.0],
+            ],
         ] {
             assert!(bounds(&[ring(&points, false)], center, RadialRegionKind::Disk).is_none());
         }
@@ -351,7 +438,15 @@ mod tests {
     fn annular_material_requires_strict_uniform_nesting_not_just_two_degree_one_rings() {
         for inner_radius in [4.0, 8.0, 9.0] {
             let outer = ring(&[[-4.0, -4.0], [4.0, -4.0], [4.0, 4.0], [-4.0, 4.0]], false);
-            let mut inner = ring(&[[inner_radius, 0.0], [0.0, inner_radius], [-inner_radius, 0.0], [0.0, -inner_radius]], true);
+            let mut inner = ring(
+                &[
+                    [inner_radius, 0.0],
+                    [0.0, inner_radius],
+                    [-inner_radius, 0.0],
+                    [0.0, -inner_radius],
+                ],
+                true,
+            );
             inner.points_mm.reverse();
             assert!(bounds(&[outer, inner], [[0.0; 2]; 2], RadialRegionKind::Annulus).is_none());
         }
@@ -363,9 +458,23 @@ mod tests {
     #[test]
     fn cancellation_and_exhaustion_propagate_instead_of_minting_authority() {
         let loops = [graph(8, 0.0, 8.0, [0.0; 2], false, false)];
-        let cancelled = radial_region_bounds(&loops, [[0.0; 2]; 2], RadialRegionKind::Disk, &mut GeometryWorkBudget::new(100), &AtomicBool::new(true)).unwrap_err();
+        let cancelled = radial_region_bounds(
+            &loops,
+            [[0.0; 2]; 2],
+            RadialRegionKind::Disk,
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
         assert_eq!(cancelled.code, GeometryErrorCode::Cancelled);
-        let exhausted = radial_region_bounds(&loops, [[0.0; 2]; 2], RadialRegionKind::Disk, &mut GeometryWorkBudget::new(2), &AtomicBool::new(false)).unwrap_err();
+        let exhausted = radial_region_bounds(
+            &loops,
+            [[0.0; 2]; 2],
+            RadialRegionKind::Disk,
+            &mut GeometryWorkBudget::new(2),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert_eq!(exhausted.code, GeometryErrorCode::ResourceLimit);
     }
 }

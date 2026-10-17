@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: proposed. This RFC specifies a target architecture and acceptance gates, not implemented support. Current executable contracts and recorded evidence remain authoritative until an explicit cutover. No new kernel, mesh-based slicing fallback or physical printer qualification is proposed.
+Status: interface cutover implemented; operation qualification incomplete. Generic native faces and independent display availability use `step-native-trimmed-v2`, `mesh-trimmed-mm-0.05-v2`, project5/manufacturing6/planner9. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) records exercised flows and explicit fitting/housing limits. No alternate kernel, mesh slicing fallback or physical printer qualification is introduced.
 
 ## 1. Decision and user outcome
 
@@ -25,11 +25,11 @@ Decisions:
 
 Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alternate kernels; continuous multi-axis deposition; a new printer backend; color mixing; physically certified output. Broader source geometry does not imply those capabilities.
 
-## 2. Grounded baseline and gaps
+## 2. Historical design baseline and qualification gaps
 
-Current consumer pin: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), all eleven lockfile Git sources and `crates/geometry::KERNEL_REVISION` select `26719dfe587653457c8803f0a2114fa54861ba15`. The source-inspection design baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. These pins are provenance, not acceptance: [geometry evidence](../quality/geometry-evidence.md) separates historical measured revisions from the unexercised literal-source UV consumer integration.
+Current consumer pin: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), all eleven lockfile Git sources and `crates/geometry::KERNEL_REVISION` select `d5de658a8b589efdeb78970d79a0563c789c268a`. The source-inspection baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`; its restrictions describe the pre-cutover design baseline, not current generic admission. Pins are provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates measured producers and remaining numerical/manufacturing limits.
 
-| Family | Pinned kernel path, from source inspection | Current Spiling restriction | Work required here |
+| Family | Kernel path at the design baseline, from source inspection | Pre-cutover Spiling restriction | Work identified by the design |
 | --- | --- | --- | --- |
 | Plane and circular cylinder | Native plane / posed line revolution, STEP conversion | Admitted with bounded line/circle trim profile | Migrate without regression; keep exact fast paths |
 | Cone | STEP cone becomes posed line revolution | Rejected carrier/entity | Cone metadata, apex handling, bounds, intersection and approximation coverage |
@@ -46,7 +46,7 @@ Current consumer pin: all five workspace Monstertruck declarations in [Cargo.tom
 
 Known upstream exceptions include spindle/lemon tori and some degenerate toroidal cases. Horn-torus representation is not a claim that its singularity satisfies manufacturing topology. Unimplemented builder branches are not admitted operations. Track these individually; never advertise universal support from kernel enum membership.
 
-Current integration seams:
+Historical integration seams at that baseline:
 
 - [Geometry facade](../../crates/geometry/src/lib.rs): `import_step_with_face_limit`, `projected_extent`, `prepare_section_source`, `section_with_byte_limit`, `tessellate_with_budget`.
 - [Private native definition](../../crates/geometry/src/kernel/mod.rs): `Definition`, positional `FaceBoundaryRefs`, `BoundaryCoedgeRef`, line/circle `BoundaryCurveMm`.
@@ -60,7 +60,7 @@ Pinned kernel references: [surface representations](https://github.com/pquerna/m
 
 Reuse available kernel ingredients rather than rebuilding them: bounded patch evaluation/derivatives, positive-weight structural bounds, strict mesh refusal, periodic meshing and prepared Boolean budgets. Their limits matter: the current generic curve divider uses sampled interior deviation, native bounds may be loose and need a roundoff audit, and public plane-cut helpers lack the full prepared/cancellation/provenance contract of Spiling's current section adapter. None is automatically an all-domain certificate.
 
-The prior CLI investigation imported/sectioned the box and explicitly refused the rational B-spline fixture at the importer profile gate. That is evidence of current admission behavior, not a general NURBS numerical test. This RFC itself introduces no new runtime evidence.
+The baseline CLI investigation imported/sectioned the box and refused the rational B-spline fixture at the former importer profile gate. It is historical behavior, not a current support statement or a general NURBS numerical test. Current acceptance belongs in the linked evidence.
 
 ## 3. Ownership and module boundaries
 

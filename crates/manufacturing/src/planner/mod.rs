@@ -40,7 +40,6 @@ pub(crate) fn plan(
     cancel: &AtomicBool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
     let (mut admission, geometry_sources) = preflight::admit(input, cancel)?;
-    eprintln!("PARITY_BUDGET phase=admission work={}", admission.geometry_work.consumed());
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
         disposition @ (PreflightDisposition::Refused | PreflightDisposition::Unresolved) => {
@@ -91,9 +90,7 @@ pub(crate) fn plan(
     }
     let recipe = &input.intent.recipe;
     preflight::resolve_native_events(input, &mut admission, &geometry_sources, cancel)?;
-    eprintln!("PARITY_BUDGET phase=height-discovery work={}", admission.geometry_work.consumed());
     let prepared_sources = prepare_sources(geometry_sources, &mut admission.geometry_work, cancel)?;
-    eprintln!("PARITY_BUDGET phase=source-preparation work={}", admission.geometry_work.consumed());
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
@@ -968,11 +965,20 @@ type PreparedGeometrySources<'a> =
 fn geometry_query_limit(
     sources: &PreparedGeometrySources<'_>,
 ) -> Result<usize, ManufacturingError> {
-    sources.values().try_fold(spiling_geometry::MAX_PREPARED_SECTION_BYTES, |remaining, source| {
-        remaining.checked_sub(source.retained_bytes()).filter(|bytes| *bytes > 0)
-            .ok_or_else(|| error(ManufacturingErrorCode::ResourceLimit,
-                "original material geometry exhausts shared query capacity"))
-    })
+    sources.values().try_fold(
+        spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+        |remaining, source| {
+            remaining
+                .checked_sub(source.retained_bytes())
+                .filter(|bytes| *bytes > 0)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "original material geometry exhausts shared query capacity",
+                    )
+                })
+        },
+    )
 }
 
 fn prepare_sources<'a>(
@@ -983,25 +989,41 @@ fn prepare_sources<'a>(
 {
     let mut prepared = BTreeMap::new();
     let mut remaining = sources.values().try_fold(
-        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES, |remaining, source| {
-            remaining.checked_sub(source.retained_bytes()).ok_or_else(|| error(
-                ManufacturingErrorCode::ResourceLimit,
-                "aggregate original material geometry capacity exceeded",
-            ))
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        |remaining, source| {
+            remaining
+                .checked_sub(source.retained_bytes())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "aggregate original material geometry capacity exceeded",
+                    )
+                })
         },
     )?;
     for (definition_id, source) in sources {
         check_cancel(cancel)?;
         // Replace this owner's storage; all other original/prepared owners
         // still coexist. Promotion moves its domains/plans without rebuilding.
-        let allowance = remaining.checked_add(source.retained_bytes()).ok_or_else(|| error(
-            ManufacturingErrorCode::ResourceLimit, "material source replacement capacity overflow",
-        ))?;
-        let source = source.prepare_sections(allowance, cancel, work)
+        let allowance = remaining
+            .checked_add(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "material source replacement capacity overflow",
+                )
+            })?;
+        let source = source
+            .prepare_sections(allowance, cancel, work)
             .map_err(|e| native_error(e, "native material preparation"))?;
-        remaining = allowance.checked_sub(source.retained_bytes()).ok_or_else(|| error(
-            ManufacturingErrorCode::ResourceLimit, "aggregate prepared native material capacity exceeded",
-        ))?;
+        remaining = allowance
+            .checked_sub(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "aggregate prepared native material capacity exceeded",
+                )
+            })?;
         prepared.insert(definition_id, source);
     }
     Ok(prepared)

@@ -39,11 +39,13 @@ pub(super) struct FiberDegreeOne;
 /// actual-material receipt. Consumers must independently exclude BOTH removed
 /// source and added realization supports from this identical fiber.
 pub(super) struct CylinderFiberCensus {
+    #[cfg(test)]
     outer_forward: Interval,
     inner_forward: Option<Interval>,
 }
 
 impl CylinderFiberCensus {
+    #[cfg(test)]
     pub(super) fn outer_forward(&self) -> Interval {
         self.outer_forward
     }
@@ -61,12 +63,18 @@ struct FiberRoots {
 
 impl FiberRoots {
     fn record(&mut self, inward: bool, forward: Interval) -> bool {
-        let slot = if inward { &mut self.inward } else { &mut self.outward };
+        let slot = if inward {
+            &mut self.inward
+        } else {
+            &mut self.outward
+        };
         if slot.is_some() {
             return false;
         }
         *slot = Some(forward);
-        self.inward.zip(self.outward).is_none_or(|(inner, outer)| inner.hi < outer.lo)
+        self.inward
+            .zip(self.outward)
+            .is_none_or(|(inner, outer)| inner.hi < outer.lo)
     }
 }
 
@@ -179,12 +187,23 @@ pub(super) fn original_cylinder_fiber_census(
             "cylinder fiber census cannot omit an inner radial core",
         ));
     }
-    let restriction = CensusRestriction { height, request, faces: None, inward: None };
-    Ok(census_original_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?
-        .and_then(|roots| roots.outward.map(|outer_forward| CylinderFiberCensus {
-            outer_forward,
-            inner_forward: roots.inward,
-        })))
+    let restriction = CensusRestriction {
+        height,
+        request,
+        faces: None,
+        inward: None,
+    };
+    Ok(
+        census_original_fiber(source, fiber, restriction, remaining_bytes, work, cancel)?.and_then(
+            |roots| {
+                roots.outward.map(|_outer_forward| CylinderFiberCensus {
+                    #[cfg(test)]
+                    outer_forward: _outer_forward,
+                    inner_forward: roots.inward,
+                })
+            },
+        ),
+    )
 }
 
 fn census_original_fiber(
@@ -345,9 +364,10 @@ fn validate_fiber(fiber: &OriginalFiber) -> Result<(), GeometryError> {
             .any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
         || !fiber.min_forward.is_finite()
         || fiber.min_forward < 0.0
-        || fiber.forward.iter().any(|value| {
-            !value.lo.is_finite() || !value.hi.is_finite() || value.lo > value.hi
-        })
+        || fiber
+            .forward
+            .iter()
+            .any(|value| !value.lo.is_finite() || !value.hi.is_finite() || value.lo > value.hi)
         || dot(fiber.forward, exact_forward).lo <= 0.0
         || length(exact_forward)?.lo <= 0.0
     {
@@ -386,7 +406,8 @@ pub(super) fn fiber_forward(fiber: &OriginalFiber, position: [Interval; 3]) -> I
     dot(
         fiber.forward,
         std::array::from_fn(|i| position[i].sub(Interval::point(fiber.center[i]))),
-    ).add(fiber.forward_offset)
+    )
+    .add(fiber.forward_offset)
 }
 
 fn fiber_core_radius(core: FiberCore, position: [Interval; 3]) -> Interval {
@@ -445,7 +466,10 @@ fn census_root_owned(
         }
         None => fiber_forward(fiber, position).lo > fiber.min_forward,
     };
-    if !positive_half || h.lo <= request.height_interval_mm[0] || h.hi >= request.height_interval_mm[1] {
+    if !positive_half
+        || h.lo <= request.height_interval_mm[0]
+        || h.hi >= request.height_interval_mm[1]
+    {
         return None;
     }
     // A normal pairs with the physical ray TANGENT, never with the positive
@@ -458,7 +482,9 @@ fn census_root_owned(
     } else {
         return None;
     };
-    inward.is_none_or(|required| required == role).then_some(role)
+    inward
+        .is_none_or(|required| required == role)
+        .then_some(role)
 }
 
 #[derive(Clone, Copy)]
@@ -577,7 +603,9 @@ fn qualify_fiber_root(
             return Ok(QualifiedRoot::Excluded);
         }
         if membership == TrimClassification::Inside {
-            if let Some(inward) = census_root_owned(fiber, jet.position, normal(&jet, orientation), restriction) {
+            if let Some(inward) =
+                census_root_owned(fiber, jet.position, normal(&jet, orientation), restriction)
+            {
                 return Ok(QualifiedRoot::Owned {
                     inward,
                     forward: fiber_forward(fiber, jet.position),
@@ -910,10 +938,19 @@ mod tests {
         let position = [2.0, 0.0, 2.0].map(Interval::point);
         let normal = [1.0, -1.0, 0.0].map(Interval::point);
         assert!(dot(normal, ray.forward).hi < 0.0);
-        assert_eq!(census_root_owned(&ray, position, normal, restriction), Some(false));
-        assert_eq!(census_root_owned(&ray, position, normal.map(Interval::neg), restriction), Some(true));
+        assert_eq!(
+            census_root_owned(&ray, position, normal, restriction),
+            Some(false)
+        );
+        assert_eq!(
+            census_root_owned(&ray, position, normal.map(Interval::neg), restriction),
+            Some(true)
+        );
         ray.forward = [-1.0, 4.0, 0.0].map(Interval::point);
-        assert_eq!(validate_fiber(&ray).unwrap_err().code, GeometryErrorCode::ConditioningFailure);
+        assert_eq!(
+            validate_fiber(&ray).unwrap_err().code,
+            GeometryErrorCode::ConditioningFailure
+        );
     }
 
     #[test]
@@ -935,10 +972,30 @@ mod tests {
             inward: None,
         };
         let regular = [1.0, 0.0, 0.0].map(Interval::point);
-        let folded = [Interval::new(-0.1, 1.0).unwrap(), Interval::point(0.0), Interval::point(0.0)];
-        assert_eq!(census_root_owned(&ray, [2.0, 0.0, 2.0].map(Interval::point), folded, restriction), None);
+        let folded = [
+            Interval::new(-0.1, 1.0).unwrap(),
+            Interval::point(0.0),
+            Interval::point(0.0),
+        ];
+        assert_eq!(
+            census_root_owned(
+                &ray,
+                [2.0, 0.0, 2.0].map(Interval::point),
+                folded,
+                restriction
+            ),
+            None
+        );
         for cut in request.height_interval_mm {
-            assert_eq!(census_root_owned(&ray, [2.0, 0.0, cut].map(Interval::point), regular, restriction), None);
+            assert_eq!(
+                census_root_owned(
+                    &ray,
+                    [2.0, 0.0, cut].map(Interval::point),
+                    regular,
+                    restriction
+                ),
+                None
+            );
         }
     }
 
@@ -973,8 +1030,7 @@ mod tests {
         let mut request = request();
         request.height_interval_mm = [-1.0, 1.0];
         request.sample_height_mm = 0.37;
-        let rows = [[-0.37, 1.0, 0.0], [0.0, 0.0, 1.0]]
-            .map(|r| r.map(Interval::point));
+        let rows = [[-0.37, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|r| r.map(Interval::point));
         let mut ray = OriginalFiber {
             center: [0.0, 0.0, 0.37],
             rows,
@@ -992,21 +1048,27 @@ mod tests {
             MAX_SCRATCH_BYTES,
             &mut GeometryWorkBudget::new(100_000_000),
             &cancel,
-        ).unwrap().expect("complete single-face source has both radial roles");
+        )
+        .unwrap()
+        .expect("complete single-face source has both radial roles");
         assert!(census.inner_forward().unwrap().lo > 0.0);
         assert!(census.inner_forward().unwrap().hi < census.outer_forward().lo);
         // Same infinite line and same carrier, but the positive half-ray now
         // crosses both sides of the torus: two inner and two outer sheets.
         // A source-face label cannot distinguish or silently drop these roots.
         ray.center = [-10.0, -3.7, 0.37];
-        assert!(original_cylinder_fiber_census(
-            OriginalTrimSource::standalone(&definition),
-            &ray,
-            &request,
-            HeightFunctional::from_frame(request.frame),
-            MAX_SCRATCH_BYTES,
-            &mut GeometryWorkBudget::new(100_000_000),
-            &cancel,
-        ).unwrap().is_none());
+        assert!(
+            original_cylinder_fiber_census(
+                OriginalTrimSource::standalone(&definition),
+                &ray,
+                &request,
+                HeightFunctional::from_frame(request.frame),
+                MAX_SCRATCH_BYTES,
+                &mut GeometryWorkBudget::new(100_000_000),
+                &cancel,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }

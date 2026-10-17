@@ -4,45 +4,43 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# B0: packaged bootstrap
-
-B0 delivers a packaged Tauri 3/CEF workbench, a supervised Rust sidecar, a CLI using the same bounded protocol, generated TypeScript contracts, and a WebGPU diagnostic triangle. It does not implement CAD import, project authoring, or manufacturing. Monstertruck is the configured future default kernel, not an available B0 geometry capability.
+# Runtime build boundaries
 
 ## Build boundaries
 
-- `crates/contracts`: flat versioned control schemas, bounded framing, explicit diagnostic triangle layout, Rust-to-TypeScript generation.
-- `crates/engine-client`: async child-process lifecycle and protocol client shared by CLI and shell; its separate crate is justified by those two consumers.
-- `apps/engine`: handshake-gated request dispatch; framed stdout and structured stderr.
-- `apps/cli`: real engine diagnostics, synthetic triangle transfer, orderly exit.
-- `apps/desktop/src-tauri`: CEF entry point, supervision, bounded binary invoke bridge, packaging.
-- `apps/desktop/src`: license assent, GPU gating, status/diagnostics, lifecycle controls.
-- `packages/protocol`: generated contracts and validated binary decoder.
-- `packages/viewport`: Three.js WebGPU rendering and resource disposal; no Tauri dependency.
-- `tools`: reproducible bootstrap, generation/drift checks, verification and packaging.
+| Owner                                                     | Responsibility                                                                                    | Boundary                                               |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| [`crates/contracts`](../../crates/contracts/)             | Domain DTOs, checked protobuf adapters, Rust-derived TypeScript and packed-payload specifications | No desktop, renderer or kernel dependency              |
+| [`crates/engine-client`](../../crates/engine-client/)     | `EngineClient` child ownership, authenticated RPCs, deadlines and orderly reap                    | Shared by CLI and shell; no planner or project writer  |
+| [`apps/engine`](../../apps/engine/)                       | Compose Core, geometry, manufacturing and durable operations                                      | Sole project writer; native work stays off Tokio       |
+| [`apps/cli`](../../apps/cli/)                             | Scriptable operator workflows through the shared client                                           | No alternate import, planner or verifier               |
+| [`apps/desktop/src-tauri`](../../apps/desktop/src-tauri/) | CEF entry point, native admission tokens, supervision and binary bridge                           | No renderer geometry or filesystem paths exposed to UI |
+| [`apps/desktop/src`](../../apps/desktop/src/)             | Operator review and transient interaction state                                                   | Explicit Apply; native receipts settle durable changes |
+| [`packages/protocol`](../../packages/protocol/)           | Generated views and checked packed-byte decoding                                                  | No UI or Tauri dependency                              |
+| [`packages/viewport`](../../packages/viewport/)           | WebGPU scene, source-face picking and bounded GPU ownership                                       | Display is approximate; no manufacturing authority     |
+| [`tools/run.mjs`](../../tools/run.mjs)                    | Build/generation/staging/package order                                                            | One matching engine, frontend and shell generation     |
 
-Each owning area receives current AGENT-RULES.md and AGENT-VISION.md. Source and manifests use OSL-3.0 notices. Private research lives in the separate `/root/spiling-brain` repository, not this checkout. No empty future domain crates.
+## Build and authority flow
 
-## Dependency order
+`tools/run.mjs build` generates contracts, builds/stages the engine and CLI,
+builds frontend assets, then builds the native shell. A direct desktop Cargo
+build can copy a stale staged sidecar over the engine binary. Use the canonical
+order before real-surface acceptance and do not build while the desktop is live.
 
-1. Verify and pin Tauri 3.0.0-alpha.4, runtime-cef 3.0.0-alpha.5, build 3.0.0-alpha.3 and upstream CEF 152.3.0 packaging APIs. Pin Rust 1.99.0, Node 24 and pnpm 10.32.1.
-2. Establish Cargo/pnpm workspaces and area documentation.
-3. Implement schemas, generator, framing, engine and shared client; frontend binary decoder can proceed from the frozen wire specification.
-4. Integrate CLI, native shell, and frontend. Detect WebGPU before starting the sidecar; no system-webview/WebGL/browser-fixture fallback.
-5. Build distributables and exercise the real surfaces, including failure states and shutdown.
-6. Commit and push meaningful checkpoints. Record measured acceptance separately from this execution plan.
+The shell admits the local license and a WebGPU device before normal engine
+startup. `EngineClient` supervises the child; authenticated gRPC, Google
+Operations and ByteStream carry control, asynchronous work and artifact bytes.
+Stdout is bounded startup metadata, not a second request protocol. Source and
+manufacturing authority stay native; the synthetic triangle is diagnostic only.
 
-## Acceptance procedures
+## Release boundary
 
-- Bootstrap on a documented fresh environment with pinned toolchains and checksummed native downloads.
-- Run CLI handshake, ping and binary triangle transfer against the actual child executable; check protocol mismatch, malformed/truncated/oversized frames and shutdown.
-- Run generated-contract drift checks and Rust/TypeScript correctness checks.
-- Open a packaged CEF application without a separately installed browser. Confirm license display/assent, renderer backend, sidecar PID/build/protocol, diagnostic triangle and measured transfer bytes.
-- Interrupt the real engine; observe an actionable interrupted state and restart to a new PID. Exercise mismatch and GPU-unavailable states without beginning an engine session.
-- Close the application and confirm its child exits. Account for CEF helpers separately from the engine.
-- Repeat packaged capability detection and lifecycle checks on declared Linux, macOS and Windows reference machines. CI builds alone and software rendering do not establish hardware acceptance.
+A build or local development smoke does not qualify an installed platform.
+Release acceptance requires a clean source identity, matching sidecar/CEF assets,
+license/notices/source availability, installation/signing behavior, actual GPU
+presentation and picking, lifecycle/failure cleanup and explicit reference-machine
+coverage. Physical manufacturing is a separate qualification.
 
-## Evidence and release gate
-
-Record build identity, lockfiles, dependency versions, host/GPU/driver, package, procedures, observed results and failures in `docs/quality/B0-evidence.md`. Physical access to Windows/macOS reference machines is an acceptance prerequisite; do not mark unexecuted checks passed. Build provenance, third-party notices, available source and the OSL assent mechanism must accompany release packaging.
-
-Owner and reviewer assignments are required before final milestone acceptance. B0 is not complete solely because code compiles or Linux software-rendered smoke succeeds.
+Use [development](development.md) for commands, [runtime failure boundaries](B0-evidence.md)
+for diagnosis and [SOURCE](SOURCE.md) for distribution obligations. Record each
+release's verification in its commit/PR and artifacts, not a new chapter here.

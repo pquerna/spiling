@@ -4,7 +4,10 @@
 
 //! Native public-facade goldens; kept separate from cheap kernel-independent vectors.
 use serde_json::{Value, json};
-use spiling_contracts::{display::SectionChunkBuilder, geometry::*};
+use spiling_contracts::{
+    display::{SECTION_HEADER_BYTES, SectionChunkBuilder},
+    geometry::*,
+};
 use spiling_geometry::{import_step, section, tessellate};
 use std::{error::Error, path::Path, sync::atomic::AtomicBool};
 
@@ -68,9 +71,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     if native.loops().len() != 2 || native.loops()[0].is_hole || !native.loops()[1].is_hole {
         return Err("native through-hole topology changed".into());
     }
+    // One SPLS loop has two u32 offsets followed by aligned f64 triples.
+    // Derive its cap from actual native points, not an incidental sample count.
+    let complete_loop_cap = u32::try_from(
+        native
+            .loops()
+            .iter()
+            .map(|boundary| {
+                SECTION_HEADER_BYTES
+                    + 2 * std::mem::size_of::<u32>()
+                    + boundary.points_mm.len() * std::mem::size_of::<[f64; 3]>()
+            })
+            .max()
+            .ok_or("native section has no complete loop")?,
+    )?;
     for (name, artifact, cap) in [
         ("native-section.json", 2, MAX_GEOMETRY_CHUNK_BYTES),
-        ("native-section-multichunk.json", 3, 1632),
+        ("native-section-multichunk.json", 3, complete_loop_cap),
     ] {
         let mut builder = SectionChunkBuilder::with_chunk_limit(
             session.clone(),

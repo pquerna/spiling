@@ -31,4 +31,4 @@ spiling-cli project create PROJECT --import fixtures/geometry/box-mm.step --inte
 spiling-cli project inspect PROJECT --preflight --verify --manufacturing-out NEW_REOPEN_EXPORT --replay-out NEW_REOPEN_MOTION.splr --engine ENGINE
 ```
 
-See [development](../../docs/quality/development.md#real-engine-and-cli), [control protocol](../../docs/protocol/control.md) and [project format](../../docs/protocol/project.md).
+See [development](../../docs/quality/development.md#native-cli-workflows), [control protocol](../../docs/protocol/control.md) and [project format](../../docs/protocol/project.md).

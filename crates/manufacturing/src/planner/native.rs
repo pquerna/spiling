@@ -1078,7 +1078,6 @@ fn capture_base(
                             "native slab has no remaining shared source/query byte allowance",
                         )
                     })?;
-                let query_before = admission.geometry_work.consumed();
                 let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
                     &spiling_geometry::PlacedSlabRequest {
                         pose: occurrence.pose,
@@ -1089,11 +1088,6 @@ fn capture_base(
                     query_byte_limit,
                     &mut admission.geometry_work,
                     cancel,
-                );
-                eprintln!(
-                    "PARITY_BUDGET phase=slab index={index} end={end} interval={interval:?} sample={sample} before={query_before} after={} result={:?}",
-                    admission.geometry_work.consumed(),
-                    analysis.as_ref().map(|_| ()).map_err(|error| error.code)
                 );
                 let analysis = match analysis {
                     Ok(analysis) => analysis,

@@ -23,8 +23,8 @@ use std::sync::atomic::AtomicBool;
 
 mod material_coordinates;
 mod sample_candidate;
-use sample_candidate::WorldSampleCandidate;
 pub(super) use material_coordinates::{ActualMaterialCoordinates, MaterialCoordinatesCapture};
+use sample_candidate::WorldSampleCandidate;
 
 pub(super) type Matrix = [[Interval; 3]; 3];
 
@@ -471,10 +471,20 @@ pub fn placed_material_bounds(
 ) -> Result<PlacedMaterialProjectedBounds, GeometryError> {
     let remaining_bytes = super::slab::MAX_SLAB_SCRATCH_BYTES
         .checked_sub(definition.retained_query_proof_bytes())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit, "placed bounds proof capacity exhausted"))?;
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "placed bounds proof capacity exhausted",
+            )
+        })?;
     placed_material_bounds_with_scratch_limit(
         crate::section::OriginalTrimSource::standalone(definition),
-        pose, world_direction, policy, remaining_bytes, work, cancel,
+        pose,
+        world_direction,
+        policy,
+        remaining_bytes,
+        work,
+        cancel,
     )
 }
 
@@ -709,10 +719,20 @@ pub fn analyze_placed_height_domain(
 ) -> Result<HeightAnalysis, GeometryError> {
     let remaining_bytes = super::slab::MAX_SLAB_SCRATCH_BYTES
         .checked_sub(definition.retained_query_proof_bytes())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit, "placed height proof capacity exhausted"))?;
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "placed height proof capacity exhausted",
+            )
+        })?;
     analyze_placed_height_domain_with_scratch_limit(
         crate::section::OriginalTrimSource::standalone(definition),
-        pose, world_height_interval_mm, policy, remaining_bytes, work, cancel,
+        pose,
+        world_height_interval_mm,
+        policy,
+        remaining_bytes,
+        work,
+        cancel,
     )
 }
 
@@ -981,7 +1001,6 @@ struct SamplePlacement<'a> {
     sigma: f64,
     extent: [f64; 3],
 }
-
 
 // A source occupied envelope bounds the transverse projection. World XY also
 // sees the axial component R*n*(h-h_sample)/|n|²; dropping it assumes exact
@@ -1265,12 +1284,14 @@ pub(crate) fn analyze_placed_slab(
         sample_height_mm: sample,
         native_shape_error_mm: source_policy,
     };
-    let mut prepared = super::slab::prepare_slab_sample(
-        source, source_request, query_byte_limit, work, cancel,
-    )?;
+    let mut prepared =
+        super::slab::prepare_slab_sample(source, source_request, query_byte_limit, work, cancel)?;
     let placement = SamplePlacement {
-        map: &map, pose: request.pose, sample: request.sample_world_z_mm,
-        sigma, extent: source_extent(source.definition()),
+        map: &map,
+        pose: request.pose,
+        sample: request.sample_world_z_mm,
+        sigma,
+        extent: source_extent(source.definition()),
     };
     let fixed = coexisting_bytes
         .saturating_add(prepared.section.retained_bytes())
@@ -1278,81 +1299,132 @@ pub(crate) fn analyze_placed_slab(
         .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
         .saturating_add(std::mem::size_of_val(&prepared));
     let world_candidate = WorldSampleCandidate::prepare(
-        &prepared.section, &placement, super::slab::remaining_scratch(fixed)?, work, cancel,
+        &prepared.section,
+        &placement,
+        super::slab::remaining_scratch(fixed)?,
+        work,
+        cancel,
     )?;
     let candidate_bytes = world_candidate.retained_bytes();
-    prepared.source_retained_bytes = prepared.source_retained_bytes.checked_add(candidate_bytes)
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "coexisting world candidate capacity overflow"))?;
-    // The complete radial product needs no meridian-convexity premise. For an
-    // annular candidate, try it before the older sufficient meridian theorem:
-    // a ruled meridian can have exactly zero curvature that interval Hessians
-    // cannot certify by subdivision. Both lanes still require complete proofs.
-    let radial_first = prepared.section.loops.len() == 2
-        && prepared.section.loops.iter().filter(|ring| ring.is_hole).count() == 1;
+    prepared.source_retained_bytes = prepared
+        .source_retained_bytes
+        .checked_add(candidate_bytes)
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "coexisting world candidate capacity overflow",
+            )
+        })?;
+    // Preserve the cheap exact-source continuation lane. A source with
+    // nonzero correspondence uncertainty cannot acquire exact invariance;
+    // try its complete actual-coordinate radial proof before the expensive
+    // sufficient face cover. Annuli also avoid a meridian-convexity premise.
+    // This only orders proof attempts, never authorizes a geometry family.
+    let radial_first = !prepared.material_transport_zero
+        || prepared.section.loops.len() == 2
+            && prepared
+                .section
+                .loops
+                .iter()
+                .filter(|ring| ring.is_hole)
+                .count()
+                == 1;
     let source_proof = if radial_first {
         None
     } else {
-        Some(match super::slab::analyze_slab_sample(source, &prepared, work, cancel) {
-            Ok(proof) => Ok(proof),
-            Err(failure) if matches!(failure.code,
-                GeometryErrorCode::AnalysisIndeterminate | GeometryErrorCode::ShapeErrorExceeded
-                    | GeometryErrorCode::ParameterCorrespondenceUnavailable) => Err(failure),
-            Err(failure) => return Err(failure),
-        })
+        Some(
+            match super::slab::analyze_slab_sample(source, &prepared, work, cancel) {
+                Ok(proof) => Ok(proof),
+                Err(failure)
+                    if matches!(
+                        failure.code,
+                        GeometryErrorCode::AnalysisIndeterminate
+                            | GeometryErrorCode::ShapeErrorExceeded
+                            | GeometryErrorCode::ParameterCorrespondenceUnavailable
+                    ) =>
+                {
+                    Err(failure)
+                }
+                Err(failure) => return Err(failure),
+            },
+        )
     };
     let needs_radial_metric = source_proof.as_ref().is_none_or(|proof| match proof {
         Ok(proof) => proof.has_transition_material(),
         Err(_) => true,
     });
     let proof_inline_bytes = std::mem::size_of_val(&source_proof);
-    let radial_fixed = fixed
-        .saturating_add(proof_inline_bytes)
-        .saturating_add(source_proof.as_ref().and_then(|proof| proof.as_ref().ok())
-            .map_or(0, |proof| proof.retained_bytes()));
+    let radial_fixed = fixed.saturating_add(proof_inline_bytes).saturating_add(
+        source_proof
+            .as_ref()
+            .and_then(|proof| proof.as_ref().ok())
+            .map_or(0, |proof| proof.retained_bytes()),
+    );
     let radial_shape_failure = if needs_radial_metric {
         let coordinates = ActualMaterialCoordinates::placed(
-            source.definition(), &map, request.world_height_interval_mm,
-            request.sample_world_z_mm, work, cancel,
+            source.definition(),
+            &map,
+            request.world_height_interval_mm,
+            request.sample_world_z_mm,
+            work,
+            cancel,
         )?;
-        let radial_before = work.consumed();
         let radial = if prepared.section.loops.is_empty() {
             Ok(None)
         } else {
             super::joint::certify_closed_radial_slab(
-                source.trim_source(), &source_request, &coordinates,
-                &world_candidate.loops, request.native_shape_error_mm,
+                source.trim_source(),
+                &source_request,
+                &coordinates,
+                &world_candidate.loops,
+                request.native_shape_error_mm,
                 super::slab::remaining_scratch(
                     radial_fixed.saturating_add(world_candidate.retained_bytes()),
-                )?, work, cancel,
+                )?,
+                work,
+                cancel,
             )
         };
-        eprintln!("PARITY_PROOF lane=radial before={radial_before} after={} result={:?}",
-            work.consumed(), radial.as_ref().map(|proof| proof.is_some()).map_err(|failure| (&failure.code, &failure.message)));
         match radial {
             Ok(Some(radial)) => {
                 // Only a COMPLETE topology+filled-metric proof wins. Keep the
                 // unchanged raw sample available for the other sufficient lane.
                 drop(source_proof);
                 let mut capture = super::SlabCapture::new(
-                    source.definition(), source_request, &prepared.section, work, cancel,
+                    source.definition(),
+                    source_request,
+                    &prepared.section,
+                    work,
+                    cancel,
                 )?;
                 let band = capture.source_sample_height_band_mm;
                 if band[0] < range[0] || band[1] > range[1] {
-                    return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-                        "actual native sample plane is not inside the captured slab"));
+                    return Err(error(
+                        GeometryErrorCode::AnalysisIndeterminate,
+                        "actual native sample plane is not inside the captured slab",
+                    ));
                 }
-                let transform_limit = query_byte_limit.checked_sub(
-                    capture.definition_id.allocated_bytes()
-                        + ActualMaterialCoordinates::SCRATCH_BYTES
-                        + std::mem::size_of_val(&radial)
-                        + std::mem::size_of_val(&prepared)
-                        + proof_inline_bytes
-                        + std::mem::size_of::<WorldSampleCandidate>(),
-                ).ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-                    "closed radial sample commit exceeds coexisting capacity"))?;
+                let transform_limit = query_byte_limit
+                    .checked_sub(
+                        capture.definition_id.allocated_bytes()
+                            + ActualMaterialCoordinates::SCRATCH_BYTES
+                            + std::mem::size_of_val(&radial)
+                            + std::mem::size_of_val(&prepared)
+                            + proof_inline_bytes
+                            + std::mem::size_of::<WorldSampleCandidate>(),
+                    )
+                    .ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::ResourceLimit,
+                            "closed radial sample commit exceeds coexisting capacity",
+                        )
+                    })?;
                 world_candidate.commit(
-                    &mut prepared.section, &placement, transform_limit, work, cancel,
+                    &mut prepared.section,
+                    &placement,
+                    transform_limit,
+                    work,
+                    cancel,
                 )?;
                 let bound = radial.bound_mm();
                 let occupied_bytes = coexisting_bytes
@@ -1363,8 +1435,11 @@ pub(crate) fn analyze_placed_slab(
                     .saturating_add(std::mem::size_of_val(&prepared))
                     .saturating_add(proof_inline_bytes);
                 let occupied = super::slab::occupied_envelope(
-                    &prepared.section, bound,
-                    super::slab::remaining_scratch(occupied_bytes)?, work, cancel,
+                    &prepared.section,
+                    bound,
+                    super::slab::remaining_scratch(occupied_bytes)?,
+                    work,
+                    cancel,
                 )?;
                 capture.placed = Some(PlacedSlabCapture {
                     pose: request.pose,
@@ -1373,16 +1448,28 @@ pub(crate) fn analyze_placed_slab(
                     native_shape_error_mm: request.native_shape_error_mm,
                 });
                 return Ok(SlabAnalysis {
-                    section: prepared.section, occupied: Some(occupied),
-                    boundary_motion_bound_mm: bound, invariance: None,
-                    critical: None, endpoint_strata: Vec::new(), collar_complex: None,
-                    radial_slab: Some(radial), capture,
+                    section: prepared.section,
+                    occupied: Some(occupied),
+                    boundary_motion_bound_mm: bound,
+                    invariance: None,
+                    critical: None,
+                    endpoint_strata: Vec::new(),
+                    collar_complex: None,
+                    radial_slab: Some(radial),
+                    capture,
                 });
             }
             Ok(None) => None,
             Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => Some(failure),
-            Err(failure) if matches!(failure.code,
-                GeometryErrorCode::AnalysisIndeterminate | GeometryErrorCode::ParameterCorrespondenceUnavailable) => None,
+            Err(failure)
+                if matches!(
+                    failure.code,
+                    GeometryErrorCode::AnalysisIndeterminate
+                        | GeometryErrorCode::ParameterCorrespondenceUnavailable
+                ) =>
+            {
+                None
+            }
             Err(failure) => return Err(failure),
         }
     } else {
@@ -1395,10 +1482,16 @@ pub(crate) fn analyze_placed_slab(
     };
     let mut result = match source_proof {
         Ok(proof) => proof.into_analysis(prepared.section),
-        Err(failure) if matches!(failure.code,
-            GeometryErrorCode::AnalysisIndeterminate | GeometryErrorCode::ShapeErrorExceeded
-                | GeometryErrorCode::ParameterCorrespondenceUnavailable) =>
-            return Err(radial_shape_failure.unwrap_or(failure)),
+        Err(failure)
+            if matches!(
+                failure.code,
+                GeometryErrorCode::AnalysisIndeterminate
+                    | GeometryErrorCode::ShapeErrorExceeded
+                    | GeometryErrorCode::ParameterCorrespondenceUnavailable
+            ) =>
+        {
+            return Err(radial_shape_failure.unwrap_or(failure));
+        }
         Err(failure) => return Err(failure),
     };
     if !result.matches_original_material(source.definition())
@@ -1462,7 +1555,11 @@ pub(crate) fn analyze_placed_slab(
             )
         })?;
     let arithmetic = world_candidate.commit(
-        &mut result.section, &placement, section_byte_limit, work, cancel,
+        &mut result.section,
+        &placement,
+        section_byte_limit,
+        work,
+        cancel,
     )?;
     let bound = finite(add(
         add(
@@ -1512,19 +1609,36 @@ pub(crate) fn analyze_placed_slab(
         && !result.has_native_convex_section_topology_proof()
     {
         let coordinates = ActualMaterialCoordinates::placed(
-            source.definition(), &map, request.world_height_interval_mm,
-            request.sample_world_z_mm, work, cancel,
+            source.definition(),
+            &map,
+            request.world_height_interval_mm,
+            request.sample_world_z_mm,
+            work,
+            cancel,
         )?;
         let remaining = super::slab::remaining_scratch(
-            coexisting_bytes.saturating_sub(candidate_bytes)
+            coexisting_bytes
+                .saturating_sub(candidate_bytes)
                 .saturating_add(result.retained_bytes())
                 .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES),
         )?;
-        if let Some(product) = super::critical::material_link::certify_closed_radial_material_product(
-            source.trim_source(), &source_request, &coordinates, remaining, work, cancel,
-        )? {
+        if let Some(product) =
+            super::critical::material_link::certify_closed_radial_material_product(
+                source.trim_source(),
+                &source_request,
+                &coordinates,
+                remaining,
+                work,
+                cancel,
+            )?
+        {
             result.radial_slab = super::joint::seal_closed_radial_slab_from_complete_metric(
-                source.definition(), &result, product, remaining, work, cancel,
+                source.definition(),
+                &result,
+                product,
+                remaining,
+                work,
+                cancel,
             )?;
         }
     }
@@ -2011,15 +2125,28 @@ mod tests {
         let declared = 5.0 + SECTION_PLANE_TOLERANCE_MM * 0.25;
         let mut work = GeometryWorkBudget::new(1_000);
         let placement = SamplePlacement {
-            map: &map, pose, sample: declared, sigma: 1.0, extent: [2.0; 3],
+            map: &map,
+            pose,
+            sample: declared,
+            sigma: 1.0,
+            extent: [2.0; 3],
         };
         WorldSampleCandidate::prepare(
-            &section, &placement, spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
-            &mut work, &AtomicBool::new(false),
-        ).unwrap().commit(
-            &mut section, &placement, spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
-            &mut work, &AtomicBool::new(false),
-        ).unwrap();
+            &section,
+            &placement,
+            spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .commit(
+            &mut section,
+            &placement,
+            spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert!(section.is_native_intersection());
         assert_eq!(section.loops[0].points_mm[0], [4.0, -7.0, 5.0]);
         assert_eq!(section.plane.origin_mm[2], declared);
@@ -2142,17 +2269,28 @@ mod tests {
         };
         let mut work = GeometryWorkBudget::new(1_000);
         let placement = SamplePlacement {
-            map: &map, pose: RigidPoseMm::IDENTITY,
+            map: &map,
+            pose: RigidPoseMm::IDENTITY,
             sample: 2.0 + 2.0 * SECTION_PLANE_TOLERANCE_MM,
-            sigma: 1.0, extent: [2.0; 3],
+            sigma: 1.0,
+            extent: [2.0; 3],
         };
         let failure = WorldSampleCandidate::prepare(
-            &section, &placement, spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
-            &mut work, &AtomicBool::new(false),
-        ).unwrap().commit(
-            &mut section, &placement, spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
-            &mut work, &AtomicBool::new(false),
-        ).unwrap_err();
+            &section,
+            &placement,
+            spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .commit(
+            &mut section,
+            &placement,
+            spiling_contracts::geometry::MAX_SECTION_BYTES as usize,
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ShapeErrorExceeded);
         assert_eq!(section.sampling_tolerance_mm, SECTION_SAMPLING_TOLERANCE_MM);
     }

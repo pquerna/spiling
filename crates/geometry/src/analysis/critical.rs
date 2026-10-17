@@ -11,9 +11,7 @@
 
 pub(crate) mod material_link;
 pub(crate) use material_link::PreparedSourceVertexPlans;
-pub(super) use material_link::{
-    ClosedRadialMaterialProduct, RadialRegionKind,
-};
+pub(super) use material_link::{ClosedRadialMaterialProduct, RadialRegionKind};
 pub(super) mod ray_index;
 mod source_chart;
 
@@ -574,7 +572,10 @@ fn split_metric(
     // variation, not a contracted straight direction merely to alternate axes.
     // This changes scheduling only; every child retains the full proof tests.
     let variation = |derivative: &[Interval; 3], range: [f64; 2]| {
-        derivative.iter().map(|value| value.abs_upper()).fold(0.0_f64, f64::max)
+        derivative
+            .iter()
+            .map(|value| value.abs_upper())
+            .fold(0.0_f64, f64::max)
             * (range[1] - range[0])
     };
     let u = variation(&jet.du, uv[0]);
@@ -1791,17 +1792,25 @@ impl SamplePrism {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         let count = vertices.len();
-        if count < 3 { return Ok(false); }
+        if count < 3 {
+            return Ok(false);
+        }
         // The sum lies inside the first edge's angular sector. Unlike a fixed
         // axis, it does not deliberately run through an ordinary polygon vertex.
         let ray = std::array::from_fn(|axis| add(vertices[0][axis], vertices[1][axis]));
         let side = |p: [Interval; 2]| {
             let value = orient([Interval::point(0.0); 2], ray, p);
-            if value.lo > 0.0 { Some(true) }
-            else if value.hi < 0.0 { Some(false) }
-            else { None }
+            if value.lo > 0.0 {
+                Some(true)
+            } else if value.hi < 0.0 {
+                Some(false)
+            } else {
+                None
+            }
         };
-        let Some(mut previous_side) = side(vertices[count - 1]) else { return Ok(false); };
+        let Some(mut previous_side) = side(vertices[count - 1]) else {
+            return Ok(false);
+        };
         let mut crossings = 0;
         for index in 0..count {
             work.charge(1, cancel)?;
@@ -1810,10 +1819,14 @@ impl SamplePrism {
             if orient(vertices[previous], vertices[index], vertices[next]).lo < 0.0 {
                 return Ok(false);
             }
-            let Some(current_side) = side(vertices[index]) else { return Ok(false); };
+            let Some(current_side) = side(vertices[index]) else {
+                return Ok(false);
+            };
             if !previous_side && current_side {
                 crossings += 1;
-                if crossings > 1 { return Ok(false); }
+                if crossings > 1 {
+                    return Ok(false);
+                }
             }
             previous_side = current_side;
         }
@@ -2044,8 +2057,8 @@ impl SamplePrism {
         } else {
             None
         };
-        let convex_disk = core_radius.is_none()
-            && Self::convex_radial_polygon(&vertices, work, cancel)?;
+        let convex_disk =
+            core_radius.is_none() && Self::convex_radial_polygon(&vertices, work, cancel)?;
         Ok(Self {
             vertices,
             ray_index: index,
@@ -2115,20 +2128,27 @@ impl SamplePrism {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<usize>, GeometryError> {
-        if !self.convex_disk { return Ok(None); }
+        if !self.convex_disk {
+            return Ok(None);
+        }
         let count = self.outer_count;
         // This ray is strictly inside the first edge's angular sector.
         // Ordering v1,...,v(n-1),v0 starts immediately after that ray.
-        let ray = std::array::from_fn(|axis|
-            add(self.vertices[0][axis], self.vertices[1][axis]));
+        let ray = std::array::from_fn(|axis| add(self.vertices[0][axis], self.vertices[1][axis]));
         let half = |value| {
             let side = orient([Interval::point(0.0); 2], ray, value);
-            if side.lo > 0.0 { Some(false) }
-            else if side.hi < 0.0 { Some(true) }
-            else { None }
+            if side.lo > 0.0 {
+                Some(false)
+            } else if side.hi < 0.0 {
+                Some(true)
+            } else {
+                None
+            }
         };
         work.charge(1, cancel)?;
-        let Some(p_half) = half(p) else { return Ok(None); };
+        let Some(p_half) = half(p) else {
+            return Ok(None);
+        };
         let vertex_at = |ordered| if ordered + 1 == count { 0 } else { ordered + 1 };
         let mut lower = 0;
         let mut upper = count;
@@ -2136,17 +2156,27 @@ impl SamplePrism {
             let middle = lower + (upper - lower) / 2;
             let vertex = self.vertices[vertex_at(middle)];
             work.charge(1, cancel)?;
-            let Some(vertex_half) = half(vertex) else { return Ok(None); };
+            let Some(vertex_half) = half(vertex) else {
+                return Ok(None);
+            };
             let before = if vertex_half != p_half {
                 !vertex_half
             } else {
                 work.charge(1, cancel)?;
                 let side = orient([Interval::point(0.0); 2], vertex, p);
-                if side.lo > 0.0 { true }
-                else if side.hi < 0.0 { false }
-                else { return Ok(None); }
+                if side.lo > 0.0 {
+                    true
+                } else if side.hi < 0.0 {
+                    false
+                } else {
+                    return Ok(None);
+                }
             };
-            if before { lower = middle + 1; } else { upper = middle; }
+            if before {
+                lower = middle + 1;
+            } else {
+                upper = middle;
+            }
         }
         let previous = if lower == 0 { count - 1 } else { lower - 1 };
         Ok(Some(vertex_at(previous)))
@@ -2263,23 +2293,29 @@ impl SamplePrism {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<f64>, GeometryError> {
-        if !self.convex_disk { return Ok(None); }
+        if !self.convex_disk {
+            return Ok(None);
+        }
         let p = project(position, self.frame);
         for edge in 0..self.outer_count {
             work.charge(1, cancel)?;
             let a = self.vertices[edge];
             let b = self.vertices[self.next_vertex(edge)];
             let signed = orient(a, b, p);
-            if signed.hi >= 0.0 { continue; }
+            if signed.hi >= 0.0 {
+                continue;
+            }
             let delta = [b[0].sub(a[0]), b[1].sub(a[1])];
-            let gradient = std::array::from_fn(|axis|
+            let gradient = std::array::from_fn(|axis| {
                 mul(delta[0], Interval::point(self.frame.y_axis[axis]))
-                    .sub(mul(delta[1], Interval::point(self.frame.x_axis[axis]))));
+                    .sub(mul(delta[1], Interval::point(self.frame.x_axis[axis])))
+            });
             let scale = length(gradient)?.hi;
             if scale > 0.0 && scale.is_finite() {
-                let separation = Interval::point(-signed.hi)
-                    .div(Interval::point(scale))?.lo;
-                if separation > minimum_mm { return Ok(Some(separation)); }
+                let separation = Interval::point(-signed.hi).div(Interval::point(scale))?.lo;
+                if separation > minimum_mm {
+                    return Ok(Some(separation));
+                }
             }
         }
         Ok(None)
@@ -2301,21 +2337,29 @@ impl SamplePrism {
             .fold(1.0_f64, f64::max);
         let reserve = add(
             mul(Interval::point(3.0), Interval::point(self.approximation)),
-            mul(Interval::point(scale), Interval::point(f64::EPSILON * 128.0)),
-        ).hi;
-        let original = self.boundary_witness_distance(
-            position, sufficient_error_mm, reserve, work, cancel,
-        )?;
+            mul(
+                Interval::point(scale),
+                Interval::point(f64::EPSILON * 128.0),
+            ),
+        )
+        .hi;
+        let original =
+            self.boundary_witness_distance(position, sufficient_error_mm, reserve, work, cancel)?;
         if original <= sufficient_error_mm || sufficient_error_mm <= 0.0 || !self.convex_disk {
             return Ok(original);
         }
         let half_height = mul(
-            mul(Interval::point(self.range[1]).sub(Interval::point(self.range[0])),
-                Interval::point(0.5)),
+            mul(
+                Interval::point(self.range[1]).sub(Interval::point(self.range[0])),
+                Interval::point(0.5),
+            ),
             Interval::point(self.height_vertical_norm),
-        ).hi;
+        )
+        .hi;
         let mut bound = up(half_height + reserve);
-        if bound > sufficient_error_mm { return Ok(original); }
+        if bound > sufficient_error_mm {
+            return Ok(original);
+        }
         // Distance to the FILLED convex prism is convex, so its maximum over
         // this Cartesian source box is bounded by its eight extreme points.
         // Outside, a closest filled-prism point lies on the boundary. Inside,
@@ -2323,13 +2367,23 @@ impl SamplePrism {
         // This is a complete box bound, not sampled source-surface authority.
         for mask in 0..8 {
             work.charge(1, cancel)?;
-            let point = std::array::from_fn(|axis| Interval::point(
-                if mask & (1 << axis) == 0 { position[axis].lo } else { position[axis].hi },
-            ));
+            let point = std::array::from_fn(|axis| {
+                Interval::point(if mask & (1 << axis) == 0 {
+                    position[axis].lo
+                } else {
+                    position[axis].hi
+                })
+            });
             bound = bound.max(self.boundary_witness_distance(
-                point, sufficient_error_mm, reserve, work, cancel,
+                point,
+                sufficient_error_mm,
+                reserve,
+                work,
+                cancel,
             )?);
-            if bound > sufficient_error_mm { return Ok(original); }
+            if bound > sufficient_error_mm {
+                return Ok(original);
+            }
         }
         Ok(original.min(bound))
     }
@@ -2351,8 +2405,11 @@ impl SamplePrism {
             work.charge(1, cancel)?;
             first_side = edge;
             inside = orient(
-                self.vertices[edge], self.vertices[self.next_vertex(edge)], p,
-            ).lo >= 0.0;
+                self.vertices[edge],
+                self.vertices[self.next_vertex(edge)],
+                p,
+            )
+            .lo >= 0.0;
         } else {
             for edge in 0..self.outer_count {
                 work.charge(1, cancel)?;
@@ -2360,7 +2417,9 @@ impl SamplePrism {
                     self.vertices[edge],
                     self.vertices[self.next_vertex(edge)],
                     p,
-                ).lo < 0.0 {
+                )
+                .lo < 0.0
+                {
                     inside = false;
                     first_side = edge;
                     break;
@@ -2517,8 +2576,10 @@ impl SamplePrism {
                         mul(p[1].sub(a[1]), self.height_dual[1][axis]),
                     )
                 });
-                let squared_length = side.into_iter()
-                    .map(Interval::square).fold(Interval::point(0.0), add);
+                let squared_length = side
+                    .into_iter()
+                    .map(Interval::square)
+                    .fold(Interval::point(0.0), add);
                 let transverse = if squared_length.lo > 0.0 && squared_length.hi.is_finite() {
                     let side_length = squared_length.sqrt()?;
                     let parameter = dot(relative, side).div(squared_length)?;
@@ -2530,10 +2591,7 @@ impl SamplePrism {
                     // preserves the along-side cancellation of a long cell.
                     let perpendicular = Interval::point(length(cross(relative, side))?.hi)
                         .div(Interval::point(side_length.lo))?;
-                    add(
-                        perpendicular,
-                        mul(Interval::point(overshoot), side_length),
-                    ).hi
+                    add(perpendicular, mul(Interval::point(overshoot), side_length)).hi
                 } else {
                     // An unresolved interval denominator still has an actual
                     // finite-segment witness at this fixed proposed parameter.
@@ -2543,7 +2601,9 @@ impl SamplePrism {
                         continue;
                     }
                     let parameter = (((p[0].mid() - a[0].mid()) * d[0]
-                        + (p[1].mid() - a[1].mid()) * d[1]) / denominator).clamp(0.0, 1.0);
+                        + (p[1].mid() - a[1].mid()) * d[1])
+                        / denominator)
+                        .clamp(0.0, 1.0);
                     let q: [Interval; 2] = std::array::from_fn(|axis| {
                         add(
                             mul(a[axis], Interval::point(1.0 - parameter)),
@@ -2555,7 +2615,8 @@ impl SamplePrism {
                             mul(p[0].sub(q[0]), self.height_dual[0][axis]),
                             mul(p[1].sub(q[1]), self.height_dual[1][axis]),
                         )
-                    }))?.hi
+                    }))?
+                    .hi
                 };
                 distance = distance.min(up(transverse + side_height_error));
                 let side_bound = with_reserve(distance);
@@ -3043,17 +3104,26 @@ pub(super) fn certify_critical_slab(
     let height_target = Interval {
         lo: request.height_interval_mm[0],
         hi: request.height_interval_mm[1],
-    }.sub(functional.dot([Interval { lo: -source_allowance, hi: source_allowance }; 3]));
+    }
+    .sub(functional.dot(
+        [Interval {
+            lo: -source_allowance,
+            hi: source_allowance,
+        }; 3],
+    ));
     // A negative witness leaves even the existing realization/approximation
     // reserves on the rejected side. It never raises the acceptance policy.
     let rejection_target_mm = Interval::point(request.native_shape_error_mm)
         .add(Interval::point(source_allowance))
-        .add(mul(Interval::point(3.0), Interval::point(prism.approximation))).hi;
+        .add(mul(
+            Interval::point(3.0),
+            Interval::point(prism.approximation),
+        ))
+        .hi;
     let mut lower = [f64::INFINITY; 2];
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
         let face_before = work.consumed();
-        let mut diagnostic_depths = 0_u64;
         let domain = source.face_domain(face_index, chart_bytes, work, cancel)?;
         (|| -> Result<(), GeometryError> {
             let (source_chart, face_glued) = face.with_surface(|surface| -> Result<_, GeometryError> {
@@ -3114,7 +3184,6 @@ pub(super) fn certify_critical_slab(
                     closed_boundary.excluded_face_cells += 1;
                     continue;
                 }
-                if domain.classify(uv, work, cancel)? == TrimClassification::Outside { continue; }
                 // Qualify each ORIGINAL extracted source span before adaptive
                 // refinement. Subdivision cannot erase an unproved nested C0
                 // interface and turn two locally convex pieces into a global
@@ -3122,6 +3191,7 @@ pub(super) fn certify_critical_slab(
                 // by exact projective gluing above; this additionally follows
                 // every actual nested sweep/profile carrier.
                 if !span_smooth {
+                    if domain.classify(uv, work, cancel)? == TrimClassification::Outside { continue; }
                     if !active {
                         whole_source = false;
                         closed_boundary.excluded_face_cells += 1;
@@ -3137,15 +3207,23 @@ pub(super) fn certify_critical_slab(
                 let (radial_degree, convex) = prism.patch_incidence(
                     &jet, n, source_chart.as_ref().map(source_chart::SphereChart::convex),
                 )?;
-                whole_source &= convex;
                 let regular = length(n)?.lo > 0.0;
-                let metric_before = work.consumed();
                 let metric = if active { prism.boundary_distance(jet.position, witness_target_mm, work, cancel)? } else { 0.0 };
-                if face_index == 0 && diagnostic_depths & (1_u64 << depth) == 0 {
-                    diagnostic_depths |= 1_u64 << depth;
-                    eprintln!("PARITY_FACE depth={depth} uv={uv:?} active={active} regular={regular} degree={radial_degree:?} convex={convex} metric={metric} metric_work={} total={}",
-                        work.consumed() - metric_before, work.consumed());
+                let needs_refinement = !regular || radial_degree.lo <= 0.0
+                    || metric > request.native_shape_error_mm;
+                // A successful full-carrier cell also covers its complete
+                // original trimmed subset, including trim/cap contact. Asking
+                // winding first repeatedly subdivides intersecting trim arcs
+                // even when no trim exclusion is needed. Only unresolved
+                // cells need that exclusion before refinement or refusal.
+                // Preserve the optional whole-source convexity theorem by
+                // excluding irrelevant nonconvex carrier cells separately.
+                if (needs_refinement || whole_source && !convex)
+                    && domain.classify(uv, work, cancel)? == TrimClassification::Outside
+                {
+                    continue;
                 }
+                whole_source &= convex;
                 if propose_negative && active && regular && radial_degree.lo > 0.0
                     && metric > request.native_shape_error_mm
                     && let Some(separation) = prism.exterior_separation(
@@ -3166,7 +3244,7 @@ pub(super) fn certify_critical_slab(
                         }));
                     }
                 }
-                if !regular || radial_degree.lo <= 0.0 || metric > request.native_shape_error_mm {
+                if needs_refinement {
                     if !active && (radial_degree.hi <= 0.0 || depth >= MAX_DEPTH) {
                         // The optional whole-source theorem failed, but this
                         // complete original cell is proved outside BOTH cuts.
@@ -3785,16 +3863,21 @@ mod tests {
         prism.ray_index = None;
         prism.core_radius = None;
         prism.vertices = [[4.0, 0.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]]
-            .into_iter().map(|p| p.map(Interval::point)).collect();
+            .into_iter()
+            .map(|p| p.map(Interval::point))
+            .collect();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        prism.convex_disk = SamplePrism::convex_radial_polygon(
-            &prism.vertices, &mut work, &cancel,
-        ).unwrap();
-        let bound = prism.boundary_distance(
-            [[3.8, 4.01], [-0.2, 0.2], [-0.02, 0.02]].map(|[lo, hi]| Interval { lo, hi }),
-            0.2, &mut work, &cancel,
-        ).unwrap();
+        prism.convex_disk =
+            SamplePrism::convex_radial_polygon(&prism.vertices, &mut work, &cancel).unwrap();
+        let bound = prism
+            .boundary_distance(
+                [[3.8, 4.01], [-0.2, 0.2], [-0.02, 0.02]].map(|[lo, hi]| Interval { lo, hi }),
+                0.2,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         // The two exterior corners use different sides of the actual diamond.
         let actual_exterior_distance = (4.01 + 0.2 - 4.0) / 2.0_f64.sqrt();
         assert!(bound >= actual_exterior_distance && bound < 0.15, "{bound}");
@@ -3808,13 +3891,16 @@ mod tests {
         prism.vertices.truncate(prism.outer_count);
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        prism.convex_disk = SamplePrism::convex_radial_polygon(
-            &prism.vertices, &mut work, &cancel,
-        ).unwrap();
-        let bound = prism.boundary_distance(
-            [[-10.0, 10.0], [-10.0, 10.0], [-0.1, 0.1]].map(|[lo, hi]| Interval { lo, hi }),
-            0.15, &mut work, &cancel,
-        ).unwrap();
+        prism.convex_disk =
+            SamplePrism::convex_radial_polygon(&prism.vertices, &mut work, &cancel).unwrap();
+        let bound = prism
+            .boundary_distance(
+                [[-10.0, 10.0], [-10.0, 10.0], [-0.1, 0.1]].map(|[lo, hi]| Interval { lo, hi }),
+                0.15,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         // Every corner has zero boundary distance, but the center is 0.1 mm
         // from either cap. Filled-set convexity alone would miss this maximum.
         assert!(bound >= 0.1 && bound < 0.101, "{bound}");
@@ -3823,11 +3909,20 @@ mod tests {
     #[test]
     fn convex_radial_predicate_rejects_twice_wound_positive_turn_cycle() {
         let vertices = [[4.0, 0.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]];
-        let twice = vertices.iter().cycle().take(8)
-            .map(|p| p.map(Interval::point)).collect::<Vec<_>>();
-        assert!(!SamplePrism::convex_radial_polygon(
-            &twice, &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-        ).unwrap());
+        let twice = vertices
+            .iter()
+            .cycle()
+            .take(8)
+            .map(|p| p.map(Interval::point))
+            .collect::<Vec<_>>();
+        assert!(
+            !SamplePrism::convex_radial_polygon(
+                &twice,
+                &mut GeometryWorkBudget::new(100),
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -3836,30 +3931,42 @@ mod tests {
         prism.ray_index = None;
         prism.core_radius = None;
         prism.outer_count = 8;
-        prism.vertices = (0..prism.outer_count).map(|index| {
-            let angle = std::f64::consts::TAU * index as f64 / prism.outer_count as f64;
-            [angle.cos(), angle.sin()].map(Interval::point)
-        }).collect();
+        prism.vertices = (0..prism.outer_count)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / prism.outer_count as f64;
+                [angle.cos(), angle.sin()].map(Interval::point)
+            })
+            .collect();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        prism.convex_disk = SamplePrism::convex_radial_polygon(
-            &prism.vertices, &mut work, &cancel,
-        ).unwrap();
+        prism.convex_disk =
+            SamplePrism::convex_radial_polygon(&prism.vertices, &mut work, &cancel).unwrap();
         for index in 0..64 {
             // Includes the angular wrap, original vertices and the reference
             // ray: ambiguous closed comparisons must retain the full scan.
             let angle = std::f64::consts::TAU * index as f64 / 64.0;
-            let exterior = prism.boundary_distance(
-                [1.5 * angle.cos(), 1.5 * angle.sin(), 0.0].map(Interval::point),
-                0.15, &mut work, &cancel,
-            ).unwrap();
+            let exterior = prism
+                .boundary_distance(
+                    [1.5 * angle.cos(), 1.5 * angle.sin(), 0.0].map(Interval::point),
+                    0.15,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
             // The entire polygon lies in the unit disk, independently of
             // which finite polygon side supplies the returned upper bound.
-            assert!(exterior.is_finite() && exterior >= 0.49, "{index}: {exterior}");
-            let interior = prism.boundary_distance(
-                [0.25 * angle.cos(), 0.25 * angle.sin(), 0.0].map(Interval::point),
-                0.15, &mut work, &cancel,
-            ).unwrap();
+            assert!(
+                exterior.is_finite() && exterior >= 0.49,
+                "{index}: {exterior}"
+            );
+            let interior = prism
+                .boundary_distance(
+                    [0.25 * angle.cos(), 0.25 * angle.sin(), 0.0].map(Interval::point),
+                    0.15,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
             assert!(interior >= 0.1 && interior < 0.101, "{index}: {interior}");
         }
     }
@@ -3872,27 +3979,34 @@ mod tests {
         prism.core_radius = None;
         let mut work = GeometryWorkBudget::new(100_000);
         let cancel = AtomicBool::new(false);
-        let along_side = prism.boundary_distance(
-            [
-                Interval::point(10.0),
-                Interval { lo: -9.0, hi: 9.0 },
-                Interval::point(0.0),
-            ],
-            0.01,
-            &mut work,
-            &cancel,
-        ).unwrap();
-        assert!(along_side <= 0.01, "the entire box is on one actual side: {along_side}");
-        let over_endpoint = prism.boundary_distance(
-            [
-                Interval::point(10.0),
-                Interval { lo: 9.9, hi: 10.1 },
-                Interval::point(0.0),
-            ],
-            0.2,
-            &mut work,
-            &cancel,
-        ).unwrap();
+        let along_side = prism
+            .boundary_distance(
+                [
+                    Interval::point(10.0),
+                    Interval { lo: -9.0, hi: 9.0 },
+                    Interval::point(0.0),
+                ],
+                0.01,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert!(
+            along_side <= 0.01,
+            "the entire box is on one actual side: {along_side}"
+        );
+        let over_endpoint = prism
+            .boundary_distance(
+                [
+                    Interval::point(10.0),
+                    Interval { lo: 9.9, hi: 10.1 },
+                    Interval::point(0.0),
+                ],
+                0.2,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         assert!(over_endpoint >= 0.09999 && over_endpoint < 0.10001);
     }
 
@@ -3904,27 +4018,33 @@ mod tests {
         prism.core_radius = None;
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        let near_cut = prism.boundary_distance(
-            [10.0, -10.0, 0.100001].map(Interval::point),
-            0.01,
-            &mut work,
-            &cancel,
-        ).unwrap();
+        let near_cut = prism
+            .boundary_distance(
+                [10.0, -10.0, 0.100001].map(Interval::point),
+                0.01,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         assert!(near_cut >= 0.999e-6 && near_cut < 1.1e-6);
-        let outside = prism.boundary_distance(
-            [10.0, -10.0, 0.3].map(Interval::point),
-            0.01,
-            &mut work,
-            &cancel,
-        ).unwrap();
+        let outside = prism
+            .boundary_distance(
+                [10.0, -10.0, 0.3].map(Interval::point),
+                0.01,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         assert!(outside >= 0.19999 && outside < 0.20001);
         prism.approximation = 0.004;
-        let reserved = prism.boundary_distance(
-            [10.0, 0.0, 0.0].map(Interval::point),
-            0.01,
-            &mut work,
-            &cancel,
-        ).unwrap();
+        let reserved = prism
+            .boundary_distance(
+                [10.0, 0.0, 0.0].map(Interval::point),
+                0.01,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
         assert!(reserved >= 0.012 && reserved < 0.012001);
     }
 
@@ -4790,10 +4910,12 @@ mod tests {
             crate::MAX_PREPARED_SECTION_BYTES
                 .checked_sub(source.retained_bytes())
                 .and_then(|remaining| remaining.checked_sub(section.retained_bytes()))
-                .ok_or_else(|| GeometryError::new(
-                    GeometryErrorCode::ResourceLimit,
-                    "independent critical proof input exceeds remaining query capacity",
-                ))?,
+                .ok_or_else(|| {
+                    GeometryError::new(
+                        GeometryErrorCode::ResourceLimit,
+                        "independent critical proof input exceeds remaining query capacity",
+                    )
+                })?,
             work,
             cancel,
         )?

@@ -44,7 +44,7 @@ pub(crate) struct SourceTransportSupport {
     pub(crate) source_error_mm: f64,
 }
 
-fn resource() -> GeometryError {
+pub(super) fn resource() -> GeometryError {
     GeometryError::new(
         GeometryErrorCode::ResourceLimit,
         "source material support exhausts the existing allocation cap",
@@ -56,12 +56,12 @@ fn unavailable(message: &'static str) -> GeometryError {
         message,
     )
 }
-fn output_bytes(output: &Vec<SourceTransportSupport>) -> usize {
+pub(super) fn output_bytes(output: &Vec<SourceTransportSupport>) -> usize {
     output
         .capacity()
         .saturating_mul(std::mem::size_of::<SourceTransportSupport>())
 }
-fn push(
+pub(super) fn push(
     output: &mut Vec<SourceTransportSupport>,
     support: SourceTransportSupport,
     limit: usize,
@@ -90,7 +90,7 @@ fn push(
 
 /// Fold the covector into original homogeneous coefficients before bounding
 /// the scalar ratio. Piecewise first jets also supply the mean-value theorem.
-fn scalar_surface_jet(
+pub(super) fn scalar_surface_jet(
     surface: &monstertruck_modeling::Surface,
     uv: [[f64; 2]; 2],
     direction: [Interval; 3],
@@ -433,9 +433,22 @@ pub(crate) fn source_transport_supports(
             .checked_sub(selection.owned_bytes())
             .ok_or_else(resource)?;
         let before = work.consumed();
-        plan.visit_supports(direction, work, cancel, &mut |support| {
-            push(&mut output, support, output_limit)
-        })
+        if let Some((reference, tolerance)) = scalar_refinement {
+            plan.visit_endpoint_supports(
+                source,
+                direction,
+                reference,
+                tolerance,
+                output_limit,
+                work,
+                cancel,
+                &mut output,
+            )
+        } else {
+            plan.visit_supports(direction, work, cancel, &mut |support| {
+                push(&mut output, support, output_limit)
+            })
+        }
         .map_err(|error| {
             work.annotate_error(
                 error,

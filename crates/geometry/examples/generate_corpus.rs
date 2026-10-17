@@ -630,6 +630,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         "scenes/two-parts.scene.json",
         "scenes/repeated-128.scene.json",
         "scenes/large-origin.scene.json",
+        "scenes/realistic-native.scene.json",
     ] {
         write_or_check(&root.join(format!("{name}.license")), ASSET_NOTICE, check)?;
     }

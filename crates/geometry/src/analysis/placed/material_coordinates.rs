@@ -3,7 +3,9 @@
 // Licensed under the Open Software License version 3.0
 
 use super::{HeightMap, Matrix, add, cross, dot, error, finite, sub};
-use crate::{Definition, GeometryError, GeometryWorkBudget, PlaneFrameMm, parametric::Interval};
+#[cfg(test)]
+use crate::PlaneFrameMm;
+use crate::{Definition, GeometryError, GeometryWorkBudget, parametric::Interval};
 use sha2::{Digest, Sha256};
 use spiling_contracts::geometry::{GeometryErrorCode, RigidPoseMm};
 use std::sync::atomic::AtomicBool;
@@ -29,6 +31,7 @@ pub(in crate::analysis) struct MaterialCoordinatesCapture {
 
 enum AxisInput<'a> {
     World(&'a RigidPoseMm),
+    #[cfg(test)]
     Source(&'a PlaneFrameMm),
 }
 
@@ -61,6 +64,7 @@ fn axis_hash(definition: &Definition, anchor: [f64; 3], input: AxisInput<'_>) ->
                 hash.update(value.to_le_bytes());
             }
         }
+        #[cfg(test)]
         AxisInput::Source(frame) => {
             hash.update([0]);
             for vector in [frame.origin_mm, frame.x_axis, frame.y_axis, frame.z_axis] {
@@ -104,6 +108,7 @@ impl MaterialCoordinatesCapture {
             self.axis_sha256 == axis_hash(definition, anchor, AxisInput::World(&pose))
         })
     }
+    #[cfg(test)]
     pub(in crate::analysis) fn matches_source(
         &self,
         definition: &Definition,
@@ -144,11 +149,13 @@ impl<'m> ActualMaterialCoordinates<'m> {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::analysis) fn source_rows(frame: &PlaneFrameMm) -> Result<Matrix, GeometryError> {
         frame.validate()?;
         Ok([frame.x_axis, frame.y_axis, frame.z_axis].map(|row| row.map(Interval::point)))
     }
 
+    #[cfg(test)]
     pub(in crate::analysis) fn source(
         definition: &Definition,
         frame: &PlaneFrameMm,
@@ -161,14 +168,28 @@ impl<'m> ActualMaterialCoordinates<'m> {
         frame.validate()?;
         for (actual, expected) in rows.iter().zip([frame.x_axis, frame.y_axis, frame.z_axis]) {
             for (actual, expected) in actual.iter().zip(expected) {
-                if actual.lo.to_bits() != expected.to_bits() || actual.hi.to_bits() != expected.to_bits() {
-                    return Err(error(GeometryErrorCode::InvalidGeometry, "source material coordinate rows do not match their captured frame"));
+                if actual.lo.to_bits() != expected.to_bits()
+                    || actual.hi.to_bits() != expected.to_bits()
+                {
+                    return Err(error(
+                        GeometryErrorCode::InvalidGeometry,
+                        "source material coordinate rows do not match their captured frame",
+                    ));
                 }
             }
         }
         let origin = frame.origin_mm.map(Interval::point);
         let offset = std::array::from_fn(|i| sub(Interval::point(0.0), dot(rows[i], origin)));
-        Self::new(definition, rows, offset, AxisInput::Source(frame), interval, sample, work, cancel)
+        Self::new(
+            definition,
+            rows,
+            offset,
+            AxisInput::Source(frame),
+            interval,
+            sample,
+            work,
+            cancel,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -183,46 +204,92 @@ impl<'m> ActualMaterialCoordinates<'m> {
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         work.charge(1, cancel)?;
-        if interval.iter().any(|v| !v.is_finite()) || !sample.is_finite() || !(interval[0] < sample && sample < interval[1]) {
-            return Err(error(GeometryErrorCode::InvalidGeometry, "material coordinates require a finite CLOSED interval and literal interior sample"));
+        if interval.iter().any(|v| !v.is_finite())
+            || !sample.is_finite()
+            || !(interval[0] < sample && sample < interval[1])
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "material coordinates require a finite CLOSED interval and literal interior sample",
+            ));
         }
-        let cofactor = [cross(rows[1], rows[2]), cross(rows[2], rows[0]), cross(rows[0], rows[1])];
+        let cofactor = [
+            cross(rows[1], rows[2]),
+            cross(rows[2], rows[0]),
+            cross(rows[0], rows[1]),
+        ];
         if finite(dot(rows[0], cofactor[0]))?.lo <= 0.0 {
-            return Err(error(GeometryErrorCode::ConditioningFailure, "material coordinates require a proved positive affine orientation"));
+            return Err(error(
+                GeometryErrorCode::ConditioningFailure,
+                "material coordinates require a proved positive affine orientation",
+            ));
         }
         let anchor = source_anchor(definition)?;
         let anchor_intervals = anchor.map(Interval::point);
-        let at_anchor = std::array::from_fn::<_, 3, _>(|i| add(dot(rows[i], anchor_intervals), offset[i]));
-        let at_anchor = [finite(at_anchor[0])?, finite(at_anchor[1])?, finite(at_anchor[2])?];
+        let at_anchor =
+            std::array::from_fn::<_, 3, _>(|i| add(dot(rows[i], anchor_intervals), offset[i]));
+        let at_anchor = [
+            finite(at_anchor[0])?,
+            finite(at_anchor[1])?,
+            finite(at_anchor[2])?,
+        ];
         let capture = MaterialCoordinatesCapture {
             axis_sha256: axis_hash(definition, anchor, input),
-            center: [[at_anchor[0].lo, at_anchor[0].hi], [at_anchor[1].lo, at_anchor[1].hi]],
+            center: [
+                [at_anchor[0].lo, at_anchor[0].hi],
+                [at_anchor[1].lo, at_anchor[1].hi],
+            ],
             interval,
             sample,
         };
-        Ok(Self { rows, cofactor, source_anchor: anchor, height_at_anchor: at_anchor[2], capture })
+        Ok(Self {
+            rows,
+            cofactor,
+            source_anchor: anchor,
+            height_at_anchor: at_anchor[2],
+            capture,
+        })
     }
 
-    pub(in crate::analysis) fn source_anchor(&self) -> [f64; 3] { self.source_anchor }
-    pub(in crate::analysis) fn affine_rows(&self) -> &Matrix { self.rows }
-    pub(in crate::analysis) fn height_at_anchor(&self) -> Interval { self.height_at_anchor }
-    pub(in crate::analysis) fn world_interval(&self) -> [f64; 2] { self.capture.interval }
-    pub(in crate::analysis) fn sample_world_z(&self) -> f64 { self.capture.sample }
-    pub(in crate::analysis) fn capture(&self) -> MaterialCoordinatesCapture { self.capture }
+    pub(in crate::analysis) fn source_anchor(&self) -> [f64; 3] {
+        self.source_anchor
+    }
+    pub(in crate::analysis) fn affine_rows(&self) -> &Matrix {
+        self.rows
+    }
+    pub(in crate::analysis) fn height_at_anchor(&self) -> Interval {
+        self.height_at_anchor
+    }
+    pub(in crate::analysis) fn world_interval(&self) -> [f64; 2] {
+        self.capture.interval
+    }
+    pub(in crate::analysis) fn sample_world_z(&self) -> f64 {
+        self.capture.sample
+    }
+    pub(in crate::analysis) fn capture(&self) -> MaterialCoordinatesCapture {
+        self.capture
+    }
 
     /// Intended transformed anchor minus every independent member of the
     /// captured center box. The two occurrences are deliberately independent.
     pub(in crate::analysis) fn center_offset_family(&self) -> [Interval; 2] {
         self.capture.center.map(|bounds| {
-            let center = Interval { lo: bounds[0], hi: bounds[1] };
+            let center = Interval {
+                lo: bounds[0],
+                hi: bounds[1],
+            };
             sub(center, center)
         })
     }
 
     /// The same intended center is subtracted algebraically. Do not subtract
     /// an independently rounded world-center midpoint from transformed points.
-    pub(in crate::analysis) fn position(&self, source: [Interval; 3]) -> Result<[Interval; 3], GeometryError> {
-        let relative = std::array::from_fn(|i| sub(source[i], Interval::point(self.source_anchor[i])));
+    pub(in crate::analysis) fn position(
+        &self,
+        source: [Interval; 3],
+    ) -> Result<[Interval; 3], GeometryError> {
+        let relative =
+            std::array::from_fn(|i| sub(source[i], Interval::point(self.source_anchor[i])));
         Ok([
             finite(dot(self.rows[0], relative))?,
             finite(dot(self.rows[1], relative))?,
@@ -246,8 +313,15 @@ impl<'m> ActualMaterialCoordinates<'m> {
 
     /// Oriented area normal, not a normalized direction. Positive determinant
     /// is proved by construction; no exact-orthogonal transform is assumed.
-    pub(in crate::analysis) fn normal(&self, normal: [Interval; 3]) -> Result<[Interval; 3], GeometryError> {
-        Ok([finite(dot(self.cofactor[0], normal))?, finite(dot(self.cofactor[1], normal))?, finite(dot(self.cofactor[2], normal))?])
+    pub(in crate::analysis) fn normal(
+        &self,
+        normal: [Interval; 3],
+    ) -> Result<[Interval; 3], GeometryError> {
+        Ok([
+            finite(dot(self.cofactor[0], normal))?,
+            finite(dot(self.cofactor[1], normal))?,
+            finite(dot(self.cofactor[2], normal))?,
+        ])
     }
 }
 
@@ -258,7 +332,11 @@ mod tests {
     fn coordinates(rows: &Matrix) -> ActualMaterialCoordinates<'_> {
         ActualMaterialCoordinates {
             rows,
-            cofactor: [cross(rows[1], rows[2]), cross(rows[2], rows[0]), cross(rows[0], rows[1])],
+            cofactor: [
+                cross(rows[1], rows[2]),
+                cross(rows[2], rows[0]),
+                cross(rows[0], rows[1]),
+            ],
             source_anchor: [1.0, 2.0, 3.0],
             height_at_anchor: Interval::point(-6.0),
             capture: MaterialCoordinatesCapture {
@@ -272,8 +350,8 @@ mod tests {
 
     #[test]
     fn affine_area_normal_matches_transformed_tangents_not_rotated_normal() {
-        let rows = [[2.0, 1.0, 0.0], [0.0, 3.0, 1.0], [0.0, 0.0, 4.0]]
-            .map(|row| row.map(Interval::point));
+        let rows =
+            [[2.0, 1.0, 0.0], [0.0, 3.0, 1.0], [0.0, 0.0, 4.0]].map(|row| row.map(Interval::point));
         let coordinates = coordinates(&rows);
         let u = [0.0, 0.0, 1.0].map(Interval::point);
         let v = [1.0, 0.0, 0.0].map(Interval::point);
@@ -281,7 +359,9 @@ mod tests {
         let transformed_v = std::array::from_fn(|i| dot(rows[i], v));
         let geometric = cross(transformed_u, transformed_v);
         let normal = coordinates.normal(cross(u, v)).unwrap();
-        for ((actual, geometric), expected) in normal.into_iter().zip(geometric).zip([0.0, 8.0, -2.0]) {
+        for ((actual, geometric), expected) in
+            normal.into_iter().zip(geometric).zip([0.0, 8.0, -2.0])
+        {
             assert!(actual.lo <= expected && expected <= actual.hi);
             assert!(geometric.lo <= expected && expected <= geometric.hi);
         }
@@ -291,16 +371,21 @@ mod tests {
 
     #[test]
     fn large_translation_cancels_only_the_intended_center_not_the_center_family() {
-        let rows = [[2.0, 1.0, 0.0], [0.0, 3.0, 1.0], [0.0, 0.0, 4.0]]
-            .map(|row| row.map(Interval::point));
+        let rows =
+            [[2.0, 1.0, 0.0], [0.0, 3.0, 1.0], [0.0, 0.0, 4.0]].map(|row| row.map(Interval::point));
         let coordinates = coordinates(&rows);
         let point = [2.0, 3.0, 4.0].map(Interval::point);
         let intended = coordinates.position(point).unwrap();
         for (actual, expected) in intended.into_iter().zip([3.0, 4.0, -2.0]) {
             assert_eq!([actual.lo, actual.hi], [expected; 2]);
         }
-        let family = coordinates.position_relative_to_center_family(point).unwrap();
-        for (axis, range) in [[1.0, 5.0], [2.0, 6.0], [-2.0, -2.0]].into_iter().enumerate() {
+        let family = coordinates
+            .position_relative_to_center_family(point)
+            .unwrap();
+        for (axis, range) in [[1.0, 5.0], [2.0, 6.0], [-2.0, -2.0]]
+            .into_iter()
+            .enumerate()
+        {
             assert!(family[axis].lo <= range[0] && range[1] <= family[axis].hi);
         }
         assert!(family[0].lo < intended[0].lo && family[0].hi > intended[0].hi);

@@ -1019,7 +1019,7 @@ async fn twenty_remove_reimport_cycles_keep_live_scene_and_artifact_pins_bounded
                 &mut client,
                 GeometryCommand::ReleaseArtifact {
                     session_id: summary.session_id,
-                    artifact_id: definition.mesh_artifact_id
+                    artifact_id: mesh_artifact(&definition)
                 }
             )
             .await,
@@ -1034,7 +1034,7 @@ async fn twenty_remove_reimport_cycles_keep_live_scene_and_artifact_pins_bounded
                 &mut client,
                 GeometryCommand::GetArtifactPage {
                     session_id: empty.session_id,
-                    artifact_id: definition.mesh_artifact_id,
+                    artifact_id: mesh_artifact(&definition),
                     kind: ArtifactPageKind::Chunks,
                     offset: 0,
                 },
@@ -1114,7 +1114,7 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
             &mut client,
             GeometryCommand::ReleaseArtifact {
                 session_id: empty.session_id.clone(),
-                artifact_id: definition.mesh_artifact_id
+                artifact_id: mesh_artifact(&definition)
             }
         )
         .await,
@@ -1125,7 +1125,7 @@ async fn frozen_plate_transfers_real_bounded_chunks_and_releases_the_lease() {
             &mut client,
             GeometryCommand::GetArtifactPage {
                 session_id: empty.session_id,
-                artifact_id: definition.mesh_artifact_id,
+                artifact_id: mesh_artifact(&definition),
                 kind: ArtifactPageKind::Chunks,
                 offset: 0,
             },

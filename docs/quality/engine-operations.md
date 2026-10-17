@@ -4,23 +4,22 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Engine operation evidence
+# Engine operation ownership
 
-Executed on 2026-10-07 in the Linux cloud workspace, against the working-tree implementation based on commit `97f9df1326519e5462dc605b3c46d366c4ef717f`. This is development evidence, not release or physical GPU acceptance.
+[Control protocol](../protocol/control.md) owns authentication, service schemas, lifecycle, limits and ByteStream semantics. [Authoring](authoring-evidence.md) maps Core/storage. Operations are durable observation records, not native handles or a second project authority.
 
-## Procedures and observed results
+## Follow admission to publication
 
-- The real-child integration suite passed fourteen tests covering admission, UUID retries and conflicts, queued/running cancellation, completion races, partial snapshots and reconnect, jobs beyond unary deadlines, restart recovery and deduplication, exclusive store ownership, parent-bound pagination, ranged binary retrieval, slow consumers, authentication, ownership EOF, capacity bounds and child reaping.
-- CLI smoke passed, including incremental retrieval, Rust-to-TypeScript binary decoding, malformed binary rejection and Linux non-UTF-8 executable paths. The four-chunk diagnostic produced partial updates before completion.
-- TypeScript checking, frontend production build, generated contract checking, Rust formatting, warning-denying Clippy and repository formatting passed. The native desktop debug build passed.
-- `tools/smoke-desktop.mjs --scenario engine-operations` passed against the real CEF application under Xvfb. Through native invokes it observed a running operation with a complete 64-byte artifact, downloaded the bytes, cancelled with canonical code 1, retained engine availability, restarted and recovered an interrupted operation with canonical code 10. Closing the native window exited both application and engine.
+- [Jobs](../../apps/engine/src/jobs/mod.rs): `Jobs::open` holds the exclusive ledger lock and configures SQLite WAL/FULL; `start` admits diagnostics. [Native admission](../../apps/engine/src/jobs/native.rs), `start_native` / `accept_native`, persists typed request identity and captured revisions before acknowledgement. Retained equivalent UUID retries deduplicate before live-session checks; conflicting parameters fail. RPC drop does not cancel admitted work.
+- [Native dispatcher](../../apps/engine/src/native.rs) owns short controls and output capture; [Worker](../../apps/engine/src/geometry/worker.rs) alone runs kernel/storage work. One shared execution permit covers diagnostics/native jobs. [Runtime::event](../../apps/engine/src/geometry/mod.rs) checks cancellation/staleness, reserves pins, sends promotion/discard, then waits for matching worker ACK before Core/scene publication. Staged output is never public.
+- [Watchdog / CommitToken](../../apps/engine/src/session/mod.rs) serialize cancellation with promotion/save commit. Cancellation records intent, not rollback; committed results win late cancellation. Missing safe-boundary ACK terminates the engine rather than inventing successful cancellation. Owner EOF/shutdown drains native work before interrupting unfinished ledger records.
+- Dispatcher `publish_terminal` captures immutable bytes before another short edit can intervene; `Jobs::native_finish` atomically commits descriptors/blobs and terminal outcome. `terminal_error` preserves a committed uncertain-save receipt with its typed IO failure. Ledger failure after native/disk commit exits the process; reopen/reconcile explicitly, never auto-retry.
+- `Jobs::open` / `interrupt_all` mark unfinished work Interrupted/ABORTED without resuming computation. Terminal states never change. Durable historical operations/blobs survive restart; expired session references cannot activate old scenes. Watchers coalesce complete committed snapshots rather than replaying every event; partial diagnostic output means complete individual artifacts, not successful overall work.
 
-The native smoke deliberately bypasses GPU admission and makes no rendering claim. It uses debug CDP, explicitly unsandboxed CEF and SwiftShader in this container. GTK/D-Bus and Chromium environment warnings occurred without failing the bridge assertions. Normal viewport presentation and physical GPU acceptance were not rerun as part of this operation test.
+## Minimal diagnostic flow and limits
 
-## Environment preparation
+```sh
+target/debug/spiling-cli job --engine "$PWD/target/debug/spiling-engine" --chunks 4 --delay-ms 250
+```
 
-Tool versions are pinned by the repository and activated through the workspace setup. CEF's downloader encountered a certificate trust failure. System-trusted HTTPS downloaded the exact pinned upstream archive; the official extraction helper verified its upstream SHA-1 (`9711b86c105fb590da576fe5a829802f1a79d520`) before extraction. TLS verification was not disabled. Missing local development-library symlink targets were connected to matching already-installed system runtime libraries within the workspace tooling directory.
-
-## Scope and limits
-
-This validates durable diagnostic operations and the native communication path. It does not validate geometry correctness, native-kernel fault isolation, automatic computational resumption or remote engine service deployment. Retention is bounded to 128 operations and a conservative 32 MiB reserved output budget; deletion and garbage collection are not implemented. Exhaustion returns a resource-exhausted error. Unfinished operations become interrupted on engine shutdown or recovery, retaining completed output.
+Use matching built binaries; progress is stderr and final JSON follows child cleanup. The [canonical service procedure](../protocol/control.md#exercising-the-actual-services) covers persistent-store/request-ID reuse. Admission, output reservations, observers and downloads are independently bounded; exhaustion refuses explicitly, with no deletion/GC API. Complete bytes use checked immutable descriptors and ranged ByteStream reads. Diagnostic/native bridge success does not establish geometry correctness, automatic computational resumption, remote-service security, power-loss durability, physical GPU or machine qualification.

@@ -366,7 +366,7 @@ fn actual_output_refuses_coordinates_without_unique_xyz6_numeric_correspondence(
         crate::backend::emit(&plan, &intent, &AtomicBool::new(false))
             .unwrap_err()
             .code,
-        ManufacturingErrorCode::NativeConditioningFailure
+        ManufacturingErrorCode::ProgramCoordinateConditioningFailure
     );
 }
 

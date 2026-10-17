@@ -549,7 +549,12 @@ pub(super) fn clip_height_box(
         let value = crate::parametric::surface_piecewise_enclosure(surface, strip, work, cancel)?;
         let height = functional.height(value.position);
         let contracted = Interval::point(mid).add(
-            Interval { lo: heights[0], hi: heights[1] }.sub(height).div(derivative)?,
+            Interval {
+                lo: heights[0],
+                hi: heights[1],
+            }
+            .sub(height)
+            .div(derivative)?,
         );
         let previous = uv[axis];
         uv[axis][0] = uv[axis][0].max(contracted.lo);
@@ -3836,7 +3841,7 @@ pub(super) struct PreparedSlabSample {
     pub(super) section: NativeSection,
     pub(super) request: SlabRequest,
     pub(super) source_retained_bytes: usize,
-    material_transport_zero: bool,
+    pub(super) material_transport_zero: bool,
     transport_height_padding: f64,
     origin_error: f64,
     norm_squared: Interval,
@@ -3942,8 +3947,13 @@ pub(super) fn prepare_slab_sample(
         work,
     )?;
     Ok(PreparedSlabSample {
-        section, request, source_retained_bytes, material_transport_zero,
-        transport_height_padding, origin_error, norm_squared,
+        section,
+        request,
+        source_retained_bytes,
+        material_transport_zero,
+        transport_height_padding,
+        origin_error,
+        norm_squared,
     })
 }
 
@@ -3964,8 +3974,10 @@ pub(super) fn analyze_slab_sample(
     } = *sample;
     let definition = source.definition();
     if section.definition_id() != definition.id() {
-        return Err(error(GeometryErrorCode::InvalidGeometry,
-            "prepared slab sample belongs to another original source"));
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "prepared slab sample belongs to another original source",
+        ));
     }
     let range = request.height_interval_mm;
     let n = request.frame.z_axis;
