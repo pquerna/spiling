@@ -88,6 +88,7 @@ enum NativeVoidContinuation {
         source_realization_error_mm: f64,
     },
     OriginalCollar(super::collar::NativeCollarComplex),
+    ClosedRadial(super::critical::ClosedRadialMaterialProduct),
     Unresolved,
 }
 impl NativeVoidContinuation {
@@ -131,6 +132,7 @@ impl NativeVoidContinuation {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<(Option<usize>, [f64; 2], bool)>()),
             Self::OriginalCollar(complex) => complex.retained_bytes(),
+            Self::ClosedRadial(product) => product.retained_bytes(),
             _ => 0,
         }
     }
@@ -352,6 +354,10 @@ pub fn capture_projected_voids(
     } else if let Some(complex) = analysis.collar_complex.take() {
         storage.debit(complex.retained_bytes(), work, cancel)?;
         NativeVoidContinuation::OriginalCollar(complex)
+    } else if let Some(radial) = analysis.radial_slab.take() {
+        let product = radial.into_product();
+        storage.debit(product.retained_bytes(), work, cancel)?;
+        NativeVoidContinuation::ClosedRadial(product)
     } else {
         NativeVoidContinuation::Unresolved
     };
@@ -1516,6 +1522,12 @@ pub fn projected_protected_void_envelopes(
     storage.reserve(&mut envelopes, capture.holes.len(), work, cancel)?;
     if capture.holes.is_empty() && capture.continuation.critical_counts() != Some([0, 0]) {
         let no_void = match &capture.continuation {
+            NativeVoidContinuation::ClosedRadial(product) => {
+                product.kind() == super::critical::RadialRegionKind::Disk
+                    && capture.pose.is_some_and(|pose| product.matches_world(
+                        definition, pose, capture.world_interval, capture.world_sample,
+                    ))
+            }
             NativeVoidContinuation::OriginalCollar(complex)
                 if complex.definition_id() == definition.id()
                     && complex.material_realization_identity() == capture.material_realization =>

@@ -36,6 +36,173 @@ fn vertex_diagnostic(
     ))
 }
 
+/// A negative-witness prerequisite only: the caller supplies the original
+/// carrier evaluation of this SAME UV box. Strict original trim ownership and
+/// exclusion of every removed R/K_F support prove that evaluation is still F
+/// in the fixed realization. This grants no positive material/topology proof.
+/// `remaining_bytes` excludes caller-owned domain/incidence/input storage.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::analysis::critical) fn source_f_point_is_retained(
+    source: OriginalTrimSource<'_, '_>,
+    domain: &PreparedFaceTrimDomain<'_>,
+    face_index: usize,
+    uv: [[f64; 2]; 2],
+    position: [Interval; 3],
+    incidence: &SourceEdgeIncidence,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    const FIXED_BYTES: usize = std::mem::size_of::<ChartCurveEnclosure>()
+        + std::mem::size_of::<[[f64; 2]; 2]>()
+        + 2 * std::mem::size_of::<[Interval; 3]>()
+        + std::mem::size_of::<Option<vertex_transport::CompletePositionCoverFailure>>();
+    let before = work.consumed();
+    let mut phase = "original source/domain binding";
+    let mut active_coedge = None;
+    let mut active_vertex = None;
+    let outcome = (|| {
+        work.charge(1, cancel)?;
+        let available = remaining_bytes.min(MAX_SCRATCH_BYTES).checked_sub(FIXED_BYTES)
+            .ok_or_else(|| failure(GeometryErrorCode::ResourceLimit,
+                "retained original-F witness exceeds remaining scratch", face_index, ()))?;
+        if uv.iter().any(|v| !v[0].is_finite() || !v[1].is_finite() || v[0] > v[1])
+            || position.iter().any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
+        {
+            return Ok(false);
+        }
+        let definition = source.definition();
+        let Some(face) = definition.solid.face_iter().nth(face_index) else { return Ok(false); };
+        let Some(original) = definition.face_boundaries.get(face_index) else { return Ok(false); };
+        let boundaries = face.absolute_boundaries();
+        if domain.native().face().id() != face.id() || original.face != face.id()
+            || original.wires.is_empty() || original.wires.len() != boundaries.len()
+        {
+            return Ok(false);
+        }
+        let Some(first) = original.wires.iter().flatten().next() else { return Ok(false); };
+        // Bind the literal immutable metadata owner, not a matching source ID.
+        // This is an input guard; actual trim/curve bounds below grant proof.
+        if !std::ptr::eq(domain.original_coedge(0)?, first) { return Ok(false); }
+        phase = "strict whole original trim Inside";
+        let inclusive = available.checked_add(domain.retained_bytes()).ok_or_else(|| {
+            failure(GeometryErrorCode::ResourceLimit,
+                "retained original-F classifier storage overflow", face_index, ())
+        })?.min(MAX_SCRATCH_BYTES);
+        if domain.classify_with_byte_limit(uv, inclusive, work, cancel)? != TrimClassification::Inside {
+            return Ok(false);
+        }
+        phase = "all complete original reference-R overcovers";
+        let point_uv = uv.map(|v| Interval { lo: v[0], hi: v[1] });
+        let mut flat = 0;
+        for (wire_index, (wire, references)) in
+            boundaries.iter().zip(&original.wires).enumerate()
+        {
+            if wire.is_empty() || wire.len() != references.len() { return Ok(false); }
+            for (index, (edge, reference)) in wire.iter().zip(references).enumerate() {
+                work.charge(1, cancel)?;
+                active_coedge = Some((wire_index, index, flat));
+                if !std::ptr::eq(domain.original_coedge(flat)?, reference)
+                    || reference.edge != edge.id() || reference.orientation != edge.orientation()
+                {
+                    return Ok(false);
+                }
+                let use_ = CoedgeUse {
+                    face: face_index, coedge: flat, wire: wire_index, index,
+                    orientation: edge.orientation() == face.orientation(),
+                };
+                let Some(uses) = incidence.get(edge.id()) else { return Ok(false); };
+                if (uses.first != use_ && uses.second != Some(use_))
+                    || uses.vertices != [edge.absolute_front().id(), edge.absolute_back().id()]
+                {
+                    return Ok(false);
+                }
+                let proof = domain.original_coedge_correspondence(flat)?;
+                let Some(binding) = proof.binding() else { return Ok(false); };
+                if binding.face != face.id() || binding.edge != edge.id()
+                    || binding.owner != [face_index, wire_index, index]
+                    || binding.endpoints != [edge.front().id(), edge.back().id()]
+                    || proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+                {
+                    return Ok(false);
+                }
+                let mapped = proof.uv_range();
+                if proof.affine_native_parameter_preimage(
+                    [mapped[0].min(mapped[1]), mapped[0].max(mapped[1])],
+                )?.is_none() {
+                    return Ok(false);
+                }
+                let range = proof.native_range();
+                let width = (range[1] - range[0])
+                    * domain.material_realization().collar_parameter_fraction();
+                if !width.is_finite() || width <= 0.0 { return Ok(false); }
+                // beta∈[0,1/4], w∈[0,1], and BOTH possible inward signs.
+                // The complete original piecewise first jet includes knots
+                // and closed endpoints; no gamma C1/embedding is inferred.
+                let jet = domain.original_coedge_uv_piecewise_jet(flat, range, work, cancel)?;
+                let radius = mul(Interval::point(width), Interval::point(0.25)).hi;
+                let rotated = rotate(jet.derivative, 1.0);
+                let tube = add_margin(std::array::from_fn(|i| add(
+                    jet.position[i], mul(rotated[i], Interval { lo: -radius, hi: radius }),
+                )), proof.margin_uv());
+                if !(0..2).any(|i|
+                    point_uv[i].hi < tube[i].lo || tube[i].hi < point_uv[i].lo)
+                {
+                    return Ok(false);
+                }
+                flat += 1;
+            }
+        }
+        if flat != domain.native().coedges().len() { return Ok(false); }
+        // Only a source-coefficient identity may eliminate all K_F recipes.
+        if definition.material_transport_is_proved_zero(work, cancel)? { return Ok(true); }
+        let Some(vertices) = incidence.vertices() else { return Ok(false); };
+        let mut found_owner = false;
+        phase = "all owning original reference-K_F position overcovers";
+        for vertex in vertices {
+            work.charge(1, cancel)?;
+            let mut owns_face = false;
+            for edge in incidence.vertex_edges(vertex) {
+                work.charge(1, cancel)?;
+                let Some(uses) = incidence.get(edge) else { return Ok(false); };
+                if uses.first.face == face_index
+                    || uses.second.is_some_and(|use_| use_.face == face_index)
+                {
+                    owns_face = true;
+                    break;
+                }
+            }
+            if !owns_face { continue; }
+            found_owner = true;
+            active_vertex = vertex_diagnostic(definition, incidence, vertex);
+            let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
+                source, incidence, vertex, available, work, cancel,
+            )? else { return Ok(false); };
+            let scratch = available.checked_sub(selection.owned_bytes()).ok_or_else(|| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "retained original-F corner selection exceeds scratch", face_index, ())
+            })?;
+            let mut failed_cover = None;
+            if !selection.plan().complete_incident_positions_miss(
+                source, scratch, work, cancel, &mut failed_cover,
+                &mut |cover| Ok((0..3).any(|i|
+                    position[i].hi < cover[i].lo || cover[i].hi < position[i].lo)),
+            )? {
+                // No promotion of cell.source and no implicit empty support.
+                eprintln!("SOURCE_F_K_REFUSAL face={face_index} uv={uv:?} point={position:?} vertex={active_vertex:?} cover={failed_cover:?}");
+                return Ok(false);
+            }
+        }
+        Ok(found_owner)
+    })();
+    if matches!(&outcome, Ok(false)) {
+        eprintln!("SOURCE_F_REFUSAL face={face_index} uv={uv:?} point={position:?} phase={phase} coedge={active_coedge:?}");
+    }
+    outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+        "retained original-F negative witness face={face_index} uv={uv:?} phase={phase} coedge={active_coedge:?} vertex_owner_mm={active_vertex:?}"
+    )))
+}
+
 #[derive(Clone, Copy)]
 struct NativeEndpointExit {
     edge: monstertruck_topology::EdgeId<Curve>,
@@ -107,6 +274,10 @@ impl ClosedRadialLinks {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
+        let mut active_before = work.consumed();
+        let mut phase = "immutable source vertex plan validation";
+        let mut active_vertex = None;
+        let outcome = (|| {
         let definition = source.definition();
         if let Some(plans) = source.vertex_plans() {
             plans.validate_source(definition, work, cancel)?;
@@ -114,8 +285,10 @@ impl ClosedRadialLinks {
         let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
         let allowance = source_allowance(definition)?;
         let interval = coordinates.world_interval();
-        let outside = |position| -> Result<bool, GeometryError> {
-            let z = coordinates.position(position)?[2];
+        let outside = |position: [Interval; 3]| -> Result<bool, GeometryError> {
+            let expanded = position.map(|value| add(value,
+                Interval { lo: -allowance, hi: allowance }));
+            let z = coordinates.position(expanded)?[2];
             Ok(z.hi < interval[0] || z.lo > interval[1])
         };
         let vertices = incidence.vertices().ok_or_else(|| {
@@ -153,16 +326,20 @@ impl ClosedRadialLinks {
             }
         }
         for vertex in vertices {
+            active_before = work.consumed();
+            active_vertex = None;
+            phase = "literal original incident cycle";
             work.charge(1, cancel)?;
             if !incidence.vertex_link_is_cycle(definition, vertex, work, cancel)? {
                 return Ok(None);
             }
-            let Some((_, point)) = vertex_diagnostic(definition, incidence, vertex) else {
+            let Some((owner, point)) = vertex_diagnostic(definition, incidence, vertex) else {
                 return Err(failure(GeometryErrorCode::KernelFailure,
                     "original vertex inventory lost its literal point", 0, ()));
             };
-            let original = point.map(|v| add(Interval::point(v),
-                Interval { lo: -allowance, hi: allowance }));
+            active_vertex = Some((owner, point));
+            phase = "closed original vertex position exclusion";
+            let original = point.map(Interval::point);
             if !outside(original)? {
                 return Ok(None);
             }
@@ -173,20 +350,44 @@ impl ClosedRadialLinks {
                 failure(GeometryErrorCode::ResourceLimit,
                     "closed cylinder endpoint inventory exceeds scratch allowance", 0, ())
             })?;
+            phase = "immutable source corner plan preparation";
             let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
                 source, incidence, vertex, available, work, cancel,
             )? else {
                 return Ok(None);
             };
             let plan = selection.plan();
-            let mut excluded = true;
-            plan.visit_position_supports(work, cancel, &mut |_realized, source_and_realized| {
-                excluded &= outside(source_and_realized)?;
-                Ok(())
+            let scratch = available.checked_sub(selection.owned_bytes()).ok_or_else(|| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder corner qualification exceeds scratch allowance", 0, ())
             })?;
-            if !excluded {
-                return Ok(None);
+            phase = "complete original incident-face/added-G position cover";
+            let mut failed_cover = None;
+            if !plan.complete_incident_positions_miss(
+                source, scratch, work, cancel, &mut failed_cover,
+                &mut |position| outside(position),
+            )? {
+                // A failed conservative cover grants nothing. Preserve the
+                // complete exact removed-domain qualification before using
+                // the tighter reference-star/comparison source support.
+                phase = "complete removed-corner domain/active-cone qualification";
+                let qualification_before = work.consumed();
+                plan.visit_qualified_geometry(source, scratch, work, cancel,
+                    &mut |_, _, _| Ok(())).map_err(|error| {
+                    work.annotate_error(error, qualification_before, format_args!(
+                        "failed complete corner cover phase_face_source_box={:?}",
+                        failed_cover.map(|cover| (cover.phase, cover.source_face, cover.position))
+                    ))
+                })?;
+                phase = "complete source/reference/G support exclusion";
+                let mut excluded = true;
+                plan.visit_position_supports(work, cancel, &mut |_realized, source_and_realized| {
+                    excluded &= outside(source_and_realized)?;
+                    Ok(())
+                })?;
+                if !excluded { return Ok(None); }
             }
+            phase = "literal native central exits";
             plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter| {
                 if result.exits.len() == result.exits.capacity()
                     && !result.exits.iter().any(|previous|
@@ -204,6 +405,10 @@ impl ClosedRadialLinks {
             result.source_error_mm = result.source_error_mm.max(plan.source_error_mm());
         }
         Ok(Some(result))
+        })();
+        outcome.map_err(|error| work.annotate_error(error, active_before, format_args!(
+            "closed radial corner support vertex_owner_mm={active_vertex:?} phase={phase}"
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -470,6 +675,19 @@ impl ClosedRadialLinks {
     }
 
     fn record_support(&mut self, position: [Interval; 3]) -> Result<(), GeometryError> {
+        self.record_support_with_byte_limit(position, MAX_CORRECTION_BYTES)
+    }
+
+    pub(super) fn record_support_with_byte_limit(
+        &mut self,
+        position: [Interval; 3],
+        remaining_bytes: usize,
+    ) -> Result<(), GeometryError> {
+        let limit = remaining_bytes.min(MAX_CORRECTION_BYTES);
+        if self.allocated_bytes() > limit {
+            return Err(failure(GeometryErrorCode::ResourceLimit,
+                "material correction support exceeds live scratch allowance", 0, ()));
+        }
         if self.supports.len() == self.supports.capacity() {
             let capacity = self
                 .supports
@@ -486,7 +704,7 @@ impl ClosedRadialLinks {
                                     .saturating_mul(std::mem::size_of::<NativeEndpointExit>()),
                             )
                         })
-                        .is_some_and(|bytes| bytes <= MAX_CORRECTION_BYTES)
+                        .is_some_and(|bytes| bytes <= limit)
                 })
                 .ok_or_else(|| {
                     failure(
@@ -506,7 +724,7 @@ impl ClosedRadialLinks {
                         capacity,
                     )
                 })?;
-            if self.allocated_bytes() > MAX_CORRECTION_BYTES {
+            if self.allocated_bytes() > limit {
                 return Err(failure(
                     GeometryErrorCode::ResourceLimit,
                     "material correction support allocator capacity exceeded",
@@ -530,9 +748,9 @@ impl ClosedRadialLinks {
     ) -> Result<(), GeometryError> {
         work.charge(1, cancel)?;
         // Cap exclusion is proved against the complete corrected source AABB.
-        // In disk mode the fiber has constant height. In core mode its exact
-        // meridian relation is pz=beta*(rho-R); candidate beta is bounded below
-        // so every fiber point inside that AABB stays between BOTH closed cuts.
+        // The exact meridian relation is pz=beta*(rho-R), with R=0 for a
+        // disk. The same whole-source bound below keeps tilted disk rays and
+        // core meridians strictly between BOTH closed cuts.
         if prism.frame.z_axis != request.frame.z_axis {
             return Err(failure(
                 GeometryErrorCode::AnalysisIndeterminate,
@@ -610,9 +828,6 @@ impl ClosedRadialLinks {
                 -beta_bound * 0.5,
             ] {
                 work.charge(1, cancel)?;
-                if prism.core_radius.is_none() && beta != 0.0 {
-                    continue;
-                }
                 if add(
                     Interval::point(transverse_height),
                     mul(
@@ -624,13 +839,9 @@ impl ClosedRadialLinks {
                 {
                     continue;
                 }
-                let meridian = if prism.core_radius.is_some() {
-                    std::array::from_fn(|axis| {
-                        z[axis].sub(mul(mul(Interval::point(beta), normalization), x[axis]))
-                    })
-                } else {
-                    z
-                };
+                let meridian = std::array::from_fn(|axis| {
+                    z[axis].sub(mul(mul(Interval::point(beta), normalization), x[axis]))
+                });
                 let rows = [angular, meridian];
                 let offsets = [
                     Interval::point(0.0),
@@ -709,5 +920,35 @@ impl ClosedRadialLinks {
             return Ok(false);
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod closed_support_tests {
+    use super::*;
+
+    #[test]
+    fn support_growth_is_refused_before_a_smaller_caller_budget_allocates() {
+        let mut links = ClosedRadialLinks {
+            supports: Vec::new(),
+            exits: Vec::new(),
+            source_error_mm: 0.0,
+            unchanged_source: false,
+            all_vertex_supports_outside: true,
+        };
+        let support = [Interval::point(1.0); 3];
+        let requested_capacity_bytes = 64 * std::mem::size_of::<[Interval; 3]>();
+        let error = links.record_support_with_byte_limit(support,
+            requested_capacity_bytes - 1).unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(links.allocated_bytes(), 0);
+        assert!(links.supports.is_empty());
+        links.record_support_with_byte_limit(support, requested_capacity_bytes).unwrap();
+        assert_eq!(links.supports.len(), 1);
+        let retained = links.allocated_bytes();
+        let error = links.record_support_with_byte_limit(support, retained - 1).unwrap_err();
+        assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(links.allocated_bytes(), retained);
+        assert_eq!(links.supports.len(), 1);
     }
 }

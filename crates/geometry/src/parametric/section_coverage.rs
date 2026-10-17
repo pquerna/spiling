@@ -332,17 +332,30 @@ pub(crate) fn prepare_section_originals<'a>(
             }
         }
     }
-    let mut remaining = byte_limit
-        .checked_sub(size_of::<PreparedSectionOriginals<'_>>())
-        .ok_or_else(|| resource("native section original owner exceeds source capacity"))?;
-    let mut faces = Vec::new();
-    reserve(
-        &mut faces,
-        definition.faces.len(),
-        &mut remaining,
-        work,
-        cancel,
-    )?;
+    let originals = PreparedSectionOriginals::prepare_trim_domains(definition, byte_limit, work, cancel)?;
+    originals.prepare_boundaries(byte_limit, work, cancel).map(Some)
+}
+
+impl<'a> PreparedSectionOriginals<'a> {
+    pub(crate) fn prepare_boundaries(
+        mut self,
+        byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+    let definition = self.definition;
+    for face in &definition.face_boundaries {
+        for wire in &face.wires {
+            for use_ in wire {
+                work.charge(1, cancel)?;
+                if !use_.source_chart_certificate.is_certified() {
+                    return Err(unresolved("native section original boundary has no certified source chart"));
+                }
+            }
+        }
+    }
+    let mut remaining = byte_limit.checked_sub(self.retained_bytes)
+        .ok_or_else(|| resource("native section originals exceed source capacity"))?;
     let coedge_count = definition
         .face_boundaries
         .iter()
@@ -358,9 +371,8 @@ pub(crate) fn prepare_section_originals<'a>(
     reserve_registry(&mut registry, coedge_count, &mut remaining, work, cancel)?;
     let registry_bytes =
         registry.capacity() * 2 * (size_of::<((EdgeId<Curve>, u64, u64), usize)>() + 32);
-    for face_index in 0..definition.faces.len() {
-        let domain =
-            prepare_original_face_domain(definition, face_index, &mut remaining, work, cancel)?;
+    for (face_index, original_face) in self.faces.iter_mut().enumerate() {
+        let domain = &original_face.domain;
         let face = domain.native().face();
         let mut uses = Vec::new();
         reserve(
@@ -450,18 +462,16 @@ pub(crate) fn prepare_section_originals<'a>(
                 chart_error_mm: source_use.source_chart_error_mm,
             });
         }
-        faces.push(OriginalFace { domain, uses });
+        original_face.uses = uses;
     }
     drop(registry);
     remaining = remaining
         .checked_add(registry_bytes)
         .ok_or_else(|| resource("native section original registry byte overflow"))?;
-    Ok(Some(PreparedSectionOriginals {
-        definition,
-        faces,
-        boundaries,
-        retained_bytes: byte_limit - remaining,
-    }))
+    self.boundaries = boundaries;
+    self.retained_bytes = byte_limit - remaining;
+    Ok(self)
+    }
 }
 
 /// Query-local inventory borrows stable original owners and the exact clip plane.

@@ -128,7 +128,22 @@ fn material_projected_bounds_with_total_limit(
                 "retained native query proof exhausts material directional allocation cap",
             )
         })?;
-    let source = crate::section::OriginalTrimSource::standalone(definition);
+    material_projected_bounds_with_scratch_limit(
+        crate::section::OriginalTrimSource::standalone(definition),
+        direction, policy, remaining_bytes, work, cancel,
+    )
+}
+
+pub(super) fn material_projected_bounds_with_scratch_limit(
+    source: crate::section::OriginalTrimSource<'_, '_>,
+    direction: [f64; 3],
+    policy: BoundsPolicy,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<MaterialProjectedBounds, GeometryError> {
+    let definition = source.definition();
+    let remaining_bytes = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES);
     // The raw search releases its scratch before source supports are prepared.
     // Both operations reserve the pinned original proof from the same cap.
     let raw_before = work.consumed();

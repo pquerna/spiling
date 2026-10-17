@@ -48,7 +48,7 @@ use std::sync::atomic::AtomicBool;
 
 const MAX_DEPTH: u8 = 64;
 const MAX_EVENT_BRACKETS: usize = 65_536;
-const MAX_SLAB_SCRATCH_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_SLAB_SCRATCH_BYTES: usize = 32 * 1024 * 1024;
 const STACK_SCRATCH_BYTES: usize = 128 * 1024;
 const HEIGHT_EVENT_SCRATCH_BYTES: usize = 2 * MAX_EVENT_BRACKETS * std::mem::size_of::<[f64; 2]>();
 
@@ -516,6 +516,52 @@ impl HeightFunctional {
     pub(crate) fn vertex(self, position: [f64; 3]) -> Interval {
         self.height(position.map(Interval::point))
     }
+}
+/// Interval Newton contraction in a height-monotone UV direction. Evaluation
+/// on the midpoint *strip* retains every value of the other parameter, so this
+/// is a whole-domain exclusion/contractor, not a sampled height test.
+/// Continuous-source images and one-sided first derivatives suffice; this
+/// scalar mean-value bound grants no C1, Hessian, normal or regularity authority.
+pub(super) fn clip_height_box(
+    surface: &Surface,
+    mut uv: [[f64; 2]; 2],
+    functional: HeightFunctional,
+    heights: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
+    let mut jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
+    for axis in 0..2 {
+        let h = functional.height(jet.position);
+        if h.hi < heights[0] || h.lo > heights[1] {
+            return Ok(None);
+        }
+        if heights[0] <= h.lo && h.hi <= heights[1] {
+            return Ok(Some((uv, jet)));
+        }
+        let derivative = functional.dot(if axis == 0 { jet.du } else { jet.dv });
+        if derivative.contains_zero() {
+            continue;
+        }
+        let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+        let mut strip = uv;
+        strip[axis] = [mid, mid];
+        let value = crate::parametric::surface_piecewise_enclosure(surface, strip, work, cancel)?;
+        let height = functional.height(value.position);
+        let contracted = Interval::point(mid).add(
+            Interval { lo: heights[0], hi: heights[1] }.sub(height).div(derivative)?,
+        );
+        let previous = uv[axis];
+        uv[axis][0] = uv[axis][0].max(contracted.lo);
+        uv[axis][1] = uv[axis][1].min(contracted.hi);
+        if uv[axis][0] > uv[axis][1] {
+            return Ok(None);
+        }
+        if uv[axis] != previous {
+            jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
+        }
+    }
+    Ok(Some((uv, jet)))
 }
 // Error-free transforms preserve a zero-width event only when binary64
 // operations really are exact. They are not magnitude-based snapping.
@@ -1323,33 +1369,6 @@ pub(super) fn analyze_literal_native_height_domain(
         cancel,
         true,
         HeightCensusScope::LiteralNative,
-    )
-}
-pub(crate) fn analyze_height_domain_enclosed(
-    definition: &Definition,
-    frame: PlaneFrameMm,
-    functional: HeightFunctional,
-    height_interval_mm: [f64; 2],
-    policy: AnalysisPolicy,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<HeightAnalysis, GeometryError> {
-    work.charge(1, cancel)?;
-    let remaining_bytes = remaining_scratch_with_limit(
-        MAX_SLAB_SCRATCH_BYTES,
-        definition.retained_query_proof_bytes(),
-    )?;
-    analyze_height_domain_enclosed_with_scratch_limit(
-        &HeightDomainQuery {
-            source: crate::section::OriginalTrimSource::standalone(definition),
-            frame,
-            functional,
-            height_interval_mm,
-            policy,
-        },
-        remaining_bytes,
-        work,
-        cancel,
     )
 }
 /// Scratch-only boundary: the caller has already reserved the pinned proof.
@@ -3525,7 +3544,6 @@ pub(super) fn native_sample_height_band(
 struct SlabSourceQuery<'q, 's, 'd> {
     source: crate::section::OriginalTrimSource<'s, 'd>,
     request: &'q SlabRequest,
-    coordinates: &'q super::placed::ActualMaterialCoordinates<'q>,
     source_retained_bytes: usize,
 }
 
@@ -3534,17 +3552,16 @@ struct SlabSourceQuery<'q, 's, 'd> {
 /// a reverse distance from all CLOSED C to the current candidate prism.
 fn recover_critical_slab(
     query: &SlabSourceQuery<'_, '_, '_>,
-    section: NativeSection,
+    section: &NativeSection,
     capture: super::SlabCapture,
     endpoints: EndpointDecomposition,
     unresolved: GeometryError,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<SlabAnalysis, GeometryError> {
+) -> Result<SourceSlabProof, GeometryError> {
     let SlabSourceQuery {
         source,
         request,
-        coordinates,
         source_retained_bytes,
     } = *query;
     let definition = source.definition();
@@ -3593,13 +3610,12 @@ fn recover_critical_slab(
         )? {
             let occupied = Some(occupied_envelope_from_definition_bounds(
                 definition,
-                &section,
+                section,
                 remaining_scratch(reserved.saturating_add(complex.retained_bytes()))?,
                 work,
                 cancel,
             )?);
-            return Ok(SlabAnalysis {
-                section,
+            return Ok(SourceSlabProof {
                 occupied,
                 boundary_motion_bound_mm: one_sided,
                 invariance: None,
@@ -3622,8 +3638,7 @@ fn recover_critical_slab(
         super::critical::CriticalSlabQuery {
             source,
             request,
-            coordinates,
-            section: &section,
+            section,
             functional: HeightFunctional::from_frame(request.frame),
             actual_sample_height: sample_height,
         },
@@ -3654,7 +3669,7 @@ fn recover_critical_slab(
     let occupied = match critical.occupied.take() {
         Some(occupied) => Some(occupied),
         None => Some(occupied_envelope(
-            &section,
+            section,
             bound,
             remaining_scratch(
                 source_retained_bytes
@@ -3666,8 +3681,7 @@ fn recover_critical_slab(
             cancel,
         )?),
     };
-    Ok(SlabAnalysis {
-        section,
+    Ok(SourceSlabProof {
         occupied,
         boundary_motion_bound_mm: bound,
         invariance: None,
@@ -3711,13 +3725,13 @@ fn certify_endpoint_transition_complex(
 }
 
 fn certified_empty_slab(
-    section: NativeSection,
+    section: &NativeSection,
     definition: &Definition,
     request: SlabRequest,
     source_retained_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<SlabAnalysis, GeometryError> {
+) -> Result<SourceSlabProof, GeometryError> {
     if !section.loops.is_empty() {
         return Err(error(
             GeometryErrorCode::NativeIntersectionFailure,
@@ -3729,8 +3743,8 @@ fn certified_empty_slab(
             .saturating_add(section.retained_bytes())
             .saturating_add(2 * definition.id().allocated_bytes()),
     )?;
-    let capture = super::SlabCapture::new(definition, request, &section, work, cancel)?;
-    let occupied = Some(occupied_envelope(&section, 0.0, remaining, work, cancel)?);
+    let capture = super::SlabCapture::new(definition, request, section, work, cancel)?;
+    let occupied = Some(occupied_envelope(section, 0.0, remaining, work, cancel)?);
     // Only a whole CLOSED-slab support exclusion authorizes exact empty reuse.
     // A regular empty sample or endpoint-only contact is not this witness.
     let invariance = Some(InvariantHeightDomain {
@@ -3740,8 +3754,7 @@ fn certified_empty_slab(
         height_interval_mm: request.height_interval_mm,
         pose: None,
     });
-    Ok(SlabAnalysis {
-        section,
+    Ok(SourceSlabProof {
         occupied,
         boundary_motion_bound_mm: 0.0,
         invariance,
@@ -3751,6 +3764,84 @@ fn certified_empty_slab(
         capture,
     })
 }
+
+/// Source proof parts independent of the immutable native sample they certify.
+pub(super) struct SourceSlabProof {
+    occupied: Option<NativeSection>,
+    boundary_motion_bound_mm: f64,
+    invariance: Option<InvariantHeightDomain>,
+    endpoint_strata: Vec<super::NativeEndpointStratum>,
+    critical: Option<super::critical::CriticalSlabCertificate>,
+    collar_complex: Option<super::collar::NativeCollarComplex>,
+    capture: super::SlabCapture,
+}
+
+impl SourceSlabProof {
+    /// Selects sufficient-proof lanes only; this does not authorize a metric.
+    pub(super) fn has_transition_material(&self) -> bool {
+        self.collar_complex.is_some() || !self.endpoint_strata.is_empty()
+    }
+
+    /// Retained proof buffers, excluding the borrowed sample and inline self.
+    pub(super) fn retained_bytes(&self) -> usize {
+        let mut bytes = self.capture.definition_id.allocated_bytes();
+        if let Some(occupied) = &self.occupied {
+            bytes = bytes.saturating_add(occupied.retained_bytes());
+        }
+        if let Some(invariance) = &self.invariance {
+            bytes = bytes.saturating_add(invariance.definition_id.allocated_bytes());
+        }
+        if let Some(critical) = &self.critical {
+            bytes = bytes.saturating_add(critical.retained_bytes());
+        }
+        if let Some(complex) = &self.collar_complex {
+            bytes = bytes.saturating_add(complex.retained_bytes());
+        }
+        bytes = bytes.saturating_add(
+            self.endpoint_strata
+                .capacity()
+                .saturating_mul(std::mem::size_of::<super::NativeEndpointStratum>()),
+        );
+        self.endpoint_strata.iter().fold(bytes, |bytes, stratum| {
+            bytes.saturating_add(stratum.retained_bytes())
+        })
+    }
+
+    pub(super) fn into_analysis(self, section: NativeSection) -> SlabAnalysis {
+        let Self {
+            occupied,
+            boundary_motion_bound_mm,
+            invariance,
+            endpoint_strata,
+            critical,
+            collar_complex,
+            capture,
+        } = self;
+        SlabAnalysis {
+            section,
+            occupied,
+            boundary_motion_bound_mm,
+            invariance,
+            endpoint_strata,
+            critical,
+            collar_complex,
+            radial_slab: None,
+            capture,
+        }
+    }
+}
+
+/// One owned native sample, prepared once before selecting a sufficient proof.
+pub(super) struct PreparedSlabSample {
+    pub(super) section: NativeSection,
+    pub(super) request: SlabRequest,
+    pub(super) source_retained_bytes: usize,
+    material_transport_zero: bool,
+    transport_height_padding: f64,
+    origin_error: f64,
+    norm_squared: Interval,
+}
+
 pub(crate) fn analyze_slab(
     source: &crate::PreparedMaterialSource<'_>,
     request: SlabRequest,
@@ -3758,33 +3849,18 @@ pub(crate) fn analyze_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
-    let rows = super::placed::ActualMaterialCoordinates::source_rows(&request.frame)?;
-    let coordinates = super::placed::ActualMaterialCoordinates::source(
-        source.definition(),
-        &request.frame,
-        &rows,
-        request.height_interval_mm,
-        request.sample_height_mm,
-        work,
-        cancel,
-    )?;
-    analyze_slab_captured(source, request, &coordinates, query_byte_limit, work, cancel)
+    let sample = prepare_slab_sample(source, request, query_byte_limit, work, cancel)?;
+    let proof = analyze_slab_sample(source, &sample, work, cancel)?;
+    Ok(proof.into_analysis(sample.section))
 }
 
-pub(crate) fn analyze_slab_captured(
+pub(super) fn prepare_slab_sample(
     source: &crate::PreparedMaterialSource<'_>,
     request: SlabRequest,
-    coordinates: &super::placed::ActualMaterialCoordinates<'_>,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<SlabAnalysis, GeometryError> {
-    // Coordinate coefficients and their cofactor remain live alongside the
-    // captured proof. Reserve their fixed stack storage in the shared pool.
-    let coordinate_bytes = super::placed::ActualMaterialCoordinates::SCRATCH_BYTES;
-    let query_byte_limit = query_byte_limit.checked_sub(coordinate_bytes).ok_or_else(|| {
-        error(GeometryErrorCode::ResourceLimit, "material coordinate input exceeds remaining query capacity")
-    })?;
+) -> Result<PreparedSlabSample, GeometryError> {
     validate(
         request.frame,
         request.height_interval_mm,
@@ -3865,6 +3941,34 @@ pub(crate) fn analyze_slab_captured(
         section_bytes as u32,
         work,
     )?;
+    Ok(PreparedSlabSample {
+        section, request, source_retained_bytes, material_transport_zero,
+        transport_height_padding, origin_error, norm_squared,
+    })
+}
+
+pub(super) fn analyze_slab_sample(
+    source: &crate::PreparedMaterialSource<'_>,
+    sample: &PreparedSlabSample,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SourceSlabProof, GeometryError> {
+    let PreparedSlabSample {
+        ref section,
+        request,
+        source_retained_bytes,
+        material_transport_zero,
+        transport_height_padding,
+        origin_error,
+        norm_squared,
+    } = *sample;
+    let definition = source.definition();
+    if section.definition_id() != definition.id() {
+        return Err(error(GeometryErrorCode::InvalidGeometry,
+            "prepared slab sample belongs to another original source"));
+    }
+    let range = request.height_interval_mm;
+    let n = request.frame.z_axis;
     let source = source.trim_source();
     work.charge(
         section
@@ -3960,7 +4064,7 @@ pub(crate) fn analyze_slab_captured(
             );
         }
     }
-    let capture = super::SlabCapture::new(definition, request, &section, work, cancel)?;
+    let capture = super::SlabCapture::new(definition, request, section, work, cancel)?;
     if !section.loops.is_empty()
         && (capture.source_sample_height_band_mm[0] < range[0]
             || capture.source_sample_height_band_mm[1] > range[1])
@@ -4017,7 +4121,6 @@ pub(crate) fn analyze_slab_captured(
                     &SlabSourceQuery {
                         source,
                         request: &request,
-                        coordinates,
                         source_retained_bytes,
                     },
                     section,
@@ -4044,14 +4147,13 @@ pub(crate) fn analyze_slab_captured(
         }
         if endpoints.strata.is_empty() {
             let occupied = Some(occupied_envelope(
-                &section,
+                section,
                 0.0,
                 remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
                 work,
                 cancel,
             )?);
-            return Ok(SlabAnalysis {
-                section,
+            return Ok(SourceSlabProof {
                 occupied,
                 boundary_motion_bound_mm: 0.0,
                 invariance: None,
@@ -4065,7 +4167,7 @@ pub(crate) fn analyze_slab_captured(
             indeterminate("empty material core lacks an original-source continuation proof")
         })?;
         let occupied = Some(occupied_envelope_with_strata(
-            &section,
+            section,
             0.0,
             &endpoints.strata,
             remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
@@ -4077,7 +4179,7 @@ pub(crate) fn analyze_slab_captured(
                 super::critical::ProvedSlabSample {
                     definition,
                     request: &request,
-                    section: &section,
+                    section,
                     boundary_motion_bound_mm: 0.0,
                 },
                 proof,
@@ -4106,8 +4208,7 @@ pub(crate) fn analyze_slab_captured(
             work,
             cancel,
         )?;
-        return Ok(SlabAnalysis {
-            section,
+        return Ok(SourceSlabProof {
             occupied,
             boundary_motion_bound_mm: 0.0,
             invariance: None,
@@ -4174,7 +4275,6 @@ pub(crate) fn analyze_slab_captured(
             &SlabSourceQuery {
                 source,
                 request: &request,
-                coordinates,
                 source_retained_bytes,
             },
             section,
@@ -4191,7 +4291,7 @@ pub(crate) fn analyze_slab_captured(
     // At a proved round critical stratum the actual source branches close on
     // a ring/pole; sample approximation tubes, not event separation, stay apart.
     certify_loop_separation(
-        &section,
+        section,
         if round.is_some() {
             approximation
         } else {
@@ -4208,7 +4308,7 @@ pub(crate) fn analyze_slab_captured(
                 .map_or(0, |_| definition.id().allocated_bytes()),
         );
     let mut occupied = Some(occupied_envelope_with_strata(
-        &section,
+        section,
         bound,
         &endpoints.strata,
         remaining_scratch(output_resident)?,
@@ -4233,7 +4333,7 @@ pub(crate) fn analyze_slab_captured(
             super::critical::ProvedSlabSample {
                 definition,
                 request: &request,
-                section: &section,
+                section,
                 boundary_motion_bound_mm: bound,
             },
             &round.incidence_proof(),
@@ -4251,7 +4351,7 @@ pub(crate) fn analyze_slab_captured(
                 super::critical::ProvedSlabSample {
                     definition,
                     request: &request,
-                    section: &section,
+                    section,
                     boundary_motion_bound_mm: bound,
                 },
                 proof,
@@ -4282,8 +4382,7 @@ pub(crate) fn analyze_slab_captured(
         work,
         cancel,
     )?;
-    Ok(SlabAnalysis {
-        section,
+    Ok(SourceSlabProof {
         occupied,
         boundary_motion_bound_mm: bound,
         invariance,
@@ -4802,7 +4901,7 @@ fn certify_loop_separation(
 /// the outward rectangle of every material loop and dropping holes deliberately
 /// over-approximates their swept union; a disappearing hole is never promoted
 /// into safe unoccupied support space. No display vertices are consulted.
-fn occupied_envelope(
+pub(super) fn occupied_envelope(
     section: &NativeSection,
     radius: f64,
     remaining_bytes: usize,

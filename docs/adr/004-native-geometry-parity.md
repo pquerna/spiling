@@ -27,7 +27,7 @@ Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alter
 
 ## 2. Grounded baseline and gaps
 
-Design baseline: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml) pin `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Earlier entries in the [geometry evidence](../quality/geometry-evidence.md) describe their own measured revisions, not automatic acceptance of this RFC.
+Current consumer pin: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), all eleven lockfile Git sources and `crates/geometry::KERNEL_REVISION` select `26719dfe587653457c8803f0a2114fa54861ba15`. The source-inspection design baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. These pins are provenance, not acceptance: [geometry evidence](../quality/geometry-evidence.md) separates historical measured revisions from the unexercised literal-source UV consumer integration.
 
 | Family | Pinned kernel path, from source inspection | Current Spiling restriction | Work required here |
 | --- | --- | --- | --- |
@@ -237,20 +237,27 @@ Count all owned preparation and pinned definition proofs once in the source
 pool. A one-off section uses the same preparation rules, not a second geometry
 implementation.
 
-`PreparedMaterialSource` is the explicit manufacturing owner: one raw section
-preparation plus a bounded immutable inventory of selected source vertex
-transport plans for that same definition instance. Prepare this owner once per
-distinct definition before publishing its retained-byte count. Occurrences and
-adaptive retries borrow those plans rather than selecting `G`, its frame,
-fraction, exits or physical correspondence again. Raw section APIs remain on
+`PreparedGeometrySource` owns a bounded immutable inventory of original trim
+domains and selected source vertex transport plans for one definition instance,
+without native Boolean seeds. Prepare it once per distinct definition; bounds
+and complete height discovery borrow those same owners. Consuming promotion to
+`PreparedMaterialSource` moves the domains/plans and adds native section seeds,
+with all other retained sources excluded from its replacement allowance.
+Occurrences and adaptive retries do not select `G`, its frame, fraction, exits
+or physical correspondence again. Raw section APIs remain on
 `PreparedSectionSource`; they do not acquire material-admission prerequisites.
 
 Retained plan lookup checks exact definition and Native vertex ownership and
-cancellation. It reuses source-only geometry selection, **not** source geometry
-qualification or any closed-slab, radial, flow, metric, candidate or posed
-authority. Keep those proofs fresh, including the existing inactive-support
-exclusion before qualification. Standalone material queries use the identical
-algorithms with local plan ownership, not another realization convention.
+cancellation. A fixed inline, success-only qualification may retain the complete
+immutable source-star graph, trim ownership, cutover and nonincident-separation
+theorem for that exact selected plan. It has no pose, height, radial field,
+sample or shape-policy operand. Publish success only after every source
+obligation completes; never retain errors or hold a cache lock across native
+geometry traversal. Concurrent first use may repeat fully charged work.
+Closed-slab, radial, flow, metric, candidate and posed authority remains fresh,
+including the existing inactive-support exclusion before qualification.
+Standalone material queries use identical algorithms with local plan ownership,
+not another realization convention.
 
 Count selected-plan records and owned capacities once in the existing source
 pool, before capture. Pinned plan storage is not deducted a second time from
@@ -1277,6 +1284,39 @@ This is projection onto an actual sampled candidate edge, not a fitted source
 primitive. An unresolved denominator retains the independently feasible
 fixed-point witness; it does not authorize a line extension beyond endpoints.
 
+For an independently proved **convex actual disk polygon**, the filled prism
+is convex under the same physical inverse-affine map. Distance to that filled
+set over a Cartesian source-position box is bounded by its eight extreme
+points. Outside the prism, a closest filled-set point lies on the boundary;
+inside it, the nearer height cap is at most
+`(upper-lower)/2 * |height_dual[2]|` away. Thus the maximum of the corner
+boundary bounds and this cap bound, with the **same global reserves** on both
+branches, bounds the entire box. Prove simple degree-one angular traversal and
+nonnegative turns before using convexity; local turns alone are insufficient.
+An ambiguous predicate retains the original whole-box witness. This does not
+sample a source surface, simplify the polygon, or change annular witnesses.
+
+Height-preimage contraction may remove only parameters proved unable to enter
+the allowance-expanded closed capture. Use a whole-box first derivative and a
+midpoint strip retaining the entire other parameter; continuous piecewise
+derivatives grant no C1 or curvature authority. Retained descendants inherit a
+completed contraction rather than repeating native strip queries. Optional
+whole-source convexity still covers the complete original carrier domain.
+
+Critical-patch bisection alternates parameter axes rather than comparing raw
+U/V widths: their units are unrelated, and height contraction may make only
+one range narrow. If that axis has no representable interior midpoint, try the
+other. Both closed children still cover the parent; the unchanged depth/work
+limits and full incidence/metric obligations decide acceptance.
+
+A proved negative metric witness may terminate refinement early. It must be
+inside the actual closed height scope and strictly inside the original trim,
+outside **every** removed reference-R and complete reference-K_F overcover.
+Unqualified `cell.source` boxes do not establish this membership. A convex
+candidate's support plane can then prove exterior separation beyond policy and
+the retained realization/approximation reserves. An upper bound that merely
+fails policy, an unowned midpoint or an unavailable reference cover cannot.
+
 A balanced index of actual interval polygon-edge bounds may accelerate ray
 candidate enumeration, following the existing geometry-owned segment-index
 pattern. Omit a subtree only after a conservative positive-ray/AABB exclusion;
@@ -1378,6 +1418,62 @@ The producer must prove:
    from the axis to the unique outer graph. Rule out additional islands,
    bounded voids and unaccounted components in either kind.
 
+The sufficient interval atlas may conservatively overcover the literal original
+F remainder after removing reference-ribbon and corner interiors. These boxes
+are not a disjoint active-F partition and never supply the material-root census.
+Removed corner coverage requires either a complete original incident-domain
+overcover, or the complete owned reference star (including any retained original
+comparison domain), not only a hull of realized cones and their outer traces.
+The former uses the literal set inclusion `removed F ⊆ original incident face`:
+freshly bound the entire original carrier parameter domain and every complete
+added-G cone support. If all miss the closed scope strictly, no local corner
+ownership or graph theorem is consumed there. A failed overcover grants nothing;
+the tighter reference-star route still requires its exact domain qualification.
+Exclude the complete selected support and every closed terminal cross-section
+before using an untouched original cylinder fibre.
+A tighter ordinary source-set overcover can intersect that original parameter
+domain with the Cartesian UV box of the **complete** literal reference boundary:
+both raw and completed endpoint germs, every selected outer-B piece, and the
+exact matching original native joint connector enclosure. Every bounded
+winding/Jordan interior lies in this box. Evaluate F over the entire intersected
+box, not merely the reference star image; preserve literal maps, lifts and finite
+support. Missing ordinary-UV boundary authority retains the whole-face or fresh
+exact-ownership route. Complete added-G supports must still miss independently.
+
+An existing original-pole comparison has completed germs `q(s)=s*q_exit` in
+its validated original Cartesian pole chart, **not** substitute UV germs.
+Bind the actual Native pole, ordered uses, vertex, original maps and complete
+joint connector. Cover removed original F with the entire raw boundary UV box
+intersected with its admitted original domain. Separately enclose all raw
+reference formula images, the complete raw boundary box and every outer-B
+projection in that same original pole chart; add the exact analytic pole
+`q=0`. This convex projected box contains the completed germs, all reference
+radial expressions and their straight comparison homotopies. Require the
+entire raw source box and outer B to remain strictly in the selected original
+hemisphere, and require a strictly positive graph radicand over the **whole**
+projected rectangle before evaluating the existing original hemisphere graph.
+This is an overcover of the complete source sets, not star-surjectivity or
+disk-ownership authority. No rounded-PI snapping, guessed UV lift, fitted
+surface or changed pole branch is allowed. Failure retains fresh existing
+qualification; complete realized-G supports remain an independent exclusion.
+
+For continuous locally Lipschitz carrier or C3D knots, a stricter sufficient
+local-inverse test encloses all entries of every one-sided **first derivative
+matrix**, including all convex combinations and knot intersections. Cross that
+matrix enclosure, not a hull of independently computed normals. The canonical
+normal ribbon still requires genuinely C1 literal gamma. A paired seam uses
+the identical original C3D parameter and endpoint germs, its nonzero common
+projected tangent, and opposite directed native coface halves; separate side
+signs or a matching source identifier do not establish gluing. These are proof
+obligations, not a claim that an unexecuted implementation has been qualified.
+Once that paired common FIRST column is sealed, linearity of the cylinder
+determinant in the transverse column can prove its complete convex family
+directly. Enclose all common tangent derivatives, apply the identical radial
+form to both transverse columns, and require the resulting scalar interval
+hull to have one strict sign. A Cartesian transverse box can invent a zero
+column at a perfectly regular rectangular corner; the exact convex-pair proof
+avoids that artifact without discarding any generalized first matrix.
+
 These premises give a proper local homeomorphism onto the closed cylinder.
 The image is open and closed relative to the cylinder; a nonempty calibration
 establishes surjectivity. Constant covering cardinality and degree one make
@@ -1412,6 +1508,20 @@ combined leaf authority binds the cylinder receipt, actual polygon receipt,
 literal world lift and existing metric/native hashes. It identifies canonical
 inner/outer material roles, not individual source-face branch genealogy;
 face-specific consumers retain their separate original-owner authority.
+
+An already complete symmetric **world-space closed-material** metric may be
+sealed with this independent topology product and exact polygon calibration;
+the metric need not use the product's angular correspondence. Preserve its
+achieved bound and charges rather than recomputing a stricter same-angle metric
+or charging realization/placement twice. Directed, regular-core and collar-only
+metrics cannot be promoted this way. Keep the single owned native sample
+available until a complete sufficient proof wins; alternative proofs do not
+require another native section or a geometry copy.
+
+A completed closed cylinder rules out height events throughout its captured
+scope, including both cuts. It discharges conservative source stationary-root
+overcovers, not actual coface/collar obligations. Adjacent actual source-M
+polygons still require their independent positive-attachment proof.
 
 Keep the implementation within geometry's material-link/critical ownership:
 the atlas and census consume borrowed originals and bounded existing proof
@@ -1474,7 +1584,7 @@ does not count as any of these outcomes.
 
 ### 8.3 Reuse requires proof
 
-Retain `PreparedSections` as job-local borrowed native preparation. It accelerates searches; it does not certify identical slices. Generalize invariant native slabs into an opaque certificate keyed by source/pose/height range/policy/producer. Unknown means compute actual sections. No family name, shared bounds, repeated mesh or same sampled polygon authorizes reuse.
+Retain `PreparedSections` as job-local borrowed native preparation. It accelerates searches; it does not certify identical slices. One fixed sampled M prism may serve multiple layers only under the same complete captured source/pose/height-range/policy/producer proof: exact source invariance or a sealed closed radial slab combining full world metric, native material topology and polygon calibration. The latter does not assert identical C sections, a separate clipped-layer or same-height XY error bound, or permission to extend the interval. Retain the original whole-interval authority; do not manufacture narrower per-layer certificates. Unknown means compute actual sections. No family name, shared bounds, repeated mesh or same sampled polygon authorizes reuse.
 
 M and D remain separate identities. Finish realization must independently prove invariance before D reuse. Skin neighborhoods and support regeneration consume the same final D. Optional cache hits cannot weaken work/memory accounting; eviction/recomputation remains charged. First implementation may rebuild all new-family analyses per compile rather than inventing persistent caches.
 

@@ -12,9 +12,9 @@
 pub(crate) mod material_link;
 pub(crate) use material_link::PreparedSourceVertexPlans;
 pub(super) use material_link::{
-    ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+    ClosedRadialMaterialProduct, RadialRegionKind,
 };
-mod ray_index;
+pub(super) mod ray_index;
 mod source_chart;
 
 use super::slab::HeightFunctional;
@@ -191,7 +191,6 @@ pub(super) struct ProvedSlabSample<'a> {
 pub(super) struct CriticalSlabQuery<'a, 'source, 'domains> {
     pub(super) source: OriginalTrimSource<'source, 'domains>,
     pub(super) request: &'a SlabRequest,
-    pub(super) coordinates: &'a super::placed::ActualMaterialCoordinates<'a>,
     pub(super) section: &'a NativeSection,
     pub(super) functional: HeightFunctional,
     pub(super) actual_sample_height: Interval,
@@ -562,8 +561,43 @@ fn strictly_contains(a: Interval, b: Interval) -> bool {
     a.lo < b.lo && b.hi < a.hi
 }
 fn split(uv: [[f64; 2]; 2], depth: u8, face: usize) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
-    let axis = usize::from(uv[1][1] - uv[1][0] > uv[0][1] - uv[0][0]);
-    let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+    split_axis(uv, depth, face, usize::from(depth & 1 != 0))
+}
+
+fn split_metric(
+    uv: [[f64; 2]; 2],
+    depth: u8,
+    face: usize,
+    jet: &SurfaceEnclosure,
+) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
+    // Parameter widths have unrelated units. Refine the larger physical
+    // variation, not a contracted straight direction merely to alternate axes.
+    // This changes scheduling only; every child retains the full proof tests.
+    let variation = |derivative: &[Interval; 3], range: [f64; 2]| {
+        derivative.iter().map(|value| value.abs_upper()).fold(0.0_f64, f64::max)
+            * (range[1] - range[0])
+    };
+    let u = variation(&jet.du, uv[0]);
+    let v = variation(&jet.dv, uv[1]);
+    let axis = if u.is_finite() && v.is_finite() && u != v {
+        usize::from(v > u)
+    } else {
+        usize::from(depth & 1 != 0)
+    };
+    split_axis(uv, depth, face, axis)
+}
+
+fn split_axis(
+    uv: [[f64; 2]; 2],
+    depth: u8,
+    face: usize,
+    mut axis: usize,
+) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
+    let mut mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+    if mid <= uv[axis][0] || mid >= uv[axis][1] {
+        axis ^= 1;
+        mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+    }
     if depth >= MAX_DEPTH || mid <= uv[axis][0] || mid >= uv[axis][1] {
         return Err(failure(
             GeometryErrorCode::AnalysisIndeterminate,
@@ -589,105 +623,7 @@ fn locally_convex(jet: &SurfaceEnclosure, n: [Interval; 3]) -> bool {
     a.lo >= 0.0 && c.lo >= 0.0 && determinant.lo >= 0.0
 }
 
-/// A bounded error-free expansion used only for coefficient IDENTITIES. It
-/// never turns a small numerical residual into a zero. Products outside the
-/// exponent range in which their FMA remainder is representable are refused.
-#[derive(Clone)]
-struct ExactCoefficient {
-    terms: [f64; 128],
-    len: usize,
-}
-impl ExactCoefficient {
-    fn point(value: f64) -> Self {
-        let mut result = Self {
-            terms: [0.0; 128],
-            len: 0,
-        };
-        if value != 0.0 {
-            result.terms[0] = value;
-            result.len = 1;
-        }
-        result
-    }
-    fn sign(&self) -> i8 {
-        if self.len == 0 {
-            0
-        } else if self.terms[self.len - 1] > 0.0 {
-            1
-        } else {
-            -1
-        }
-    }
-    fn push(&mut self, value: f64) -> Option<()> {
-        if value == 0.0 {
-            return Some(());
-        }
-        let mut carry = value;
-        let mut length = 0;
-        for index in 0..self.len {
-            let other = self.terms[index];
-            let sum = carry + other;
-            if !sum.is_finite() {
-                return None;
-            }
-            let virtual_other = sum - carry;
-            let residual = (carry - (sum - virtual_other)) + (other - virtual_other);
-            if residual != 0.0 {
-                self.terms[length] = residual;
-                length += 1;
-            }
-            carry = sum;
-        }
-        if carry != 0.0 {
-            if length == self.terms.len() {
-                return None;
-            }
-            self.terms[length] = carry;
-            length += 1;
-        }
-        self.len = length;
-        Some(())
-    }
-    fn subtract(&mut self, other: &Self) -> Option<()> {
-        for term in &other.terms[..other.len] {
-            self.push(-term)?;
-        }
-        Some(())
-    }
-    fn difference(a: f64, b: f64) -> Option<Self> {
-        let mut result = Self::point(a);
-        result.push(-b)?;
-        Some(result)
-    }
-    fn product(
-        &self,
-        other: &Self,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<Self>, GeometryError> {
-        let mut result = Self::point(0.0);
-        for &a in &self.terms[..self.len] {
-            for &b in &other.terms[..other.len] {
-                work.charge(1, cancel)?;
-                let ea = ((a.abs().to_bits() >> 52) & 0x7ff) as i32;
-                let eb = ((b.abs().to_bits() >> 52) & 0x7ff) as i32;
-                if ea == 0 || eb == 0 || !(-900..=900).contains(&(ea + eb - 2046)) {
-                    return Ok(None);
-                }
-                let value = a * b;
-                let remainder = a.mul_add(b, -value);
-                if !value.is_finite()
-                    || !remainder.is_finite()
-                    || result.push(remainder).is_none()
-                    || result.push(value).is_none()
-                {
-                    return Ok(None);
-                }
-            }
-        }
-        Ok(Some(result))
-    }
-}
+use crate::exact_coefficient::ExactCoefficient;
 /// Exact equality of a linear functional on two homogeneous coefficients.
 /// The common value need not be representable in binary64.
 pub(super) fn exact_homogeneous_height_identity(
@@ -1788,6 +1724,7 @@ struct SamplePrism {
     height_dual: [[Interval; 3]; 3],
     height_vertical_norm: f64,
     core_radius: Option<f64>,
+    convex_disk: bool,
     inner_radius_upper: f64,
     range: [f64; 2],
     source_height: HeightFunctional,
@@ -1843,6 +1780,44 @@ impl SamplePrism {
             work,
             cancel,
         )
+    }
+
+    /// Strict center-to-edge determinants are already proved by `new`.
+    /// A single positive-ray crossing gives angular degree one and simplicity;
+    /// nonnegative turns then prove convexity. Neither premise alone suffices.
+    fn convex_radial_polygon(
+        vertices: &[[Interval; 2]],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let count = vertices.len();
+        if count < 3 { return Ok(false); }
+        // The sum lies inside the first edge's angular sector. Unlike a fixed
+        // axis, it does not deliberately run through an ordinary polygon vertex.
+        let ray = std::array::from_fn(|axis| add(vertices[0][axis], vertices[1][axis]));
+        let side = |p: [Interval; 2]| {
+            let value = orient([Interval::point(0.0); 2], ray, p);
+            if value.lo > 0.0 { Some(true) }
+            else if value.hi < 0.0 { Some(false) }
+            else { None }
+        };
+        let Some(mut previous_side) = side(vertices[count - 1]) else { return Ok(false); };
+        let mut crossings = 0;
+        for index in 0..count {
+            work.charge(1, cancel)?;
+            let previous = if index == 0 { count - 1 } else { index - 1 };
+            let next = if index + 1 == count { 0 } else { index + 1 };
+            if orient(vertices[previous], vertices[index], vertices[next]).lo < 0.0 {
+                return Ok(false);
+            }
+            let Some(current_side) = side(vertices[index]) else { return Ok(false); };
+            if !previous_side && current_side {
+                crossings += 1;
+                if crossings > 1 { return Ok(false); }
+            }
+            previous_side = current_side;
+        }
+        Ok(crossings == 1)
     }
 
     fn new(
@@ -2069,6 +2044,8 @@ impl SamplePrism {
         } else {
             None
         };
+        let convex_disk = core_radius.is_none()
+            && Self::convex_radial_polygon(&vertices, work, cancel)?;
         Ok(Self {
             vertices,
             ray_index: index,
@@ -2079,6 +2056,7 @@ impl SamplePrism {
             height_dual,
             height_vertical_norm,
             core_radius,
+            convex_disk,
             inner_radius_upper,
             range: request.height_interval_mm,
             source_height,
@@ -2126,6 +2104,52 @@ impl SamplePrism {
 
     fn next_vertex(&self, edge: usize) -> usize {
         next_sample_vertex(edge, self.outer_count, self.vertices.len())
+    }
+
+    /// Locate one angular sector of the proved convex, degree-one disk.
+    /// Every comparison must hold for the entire position box. Ambiguity
+    /// retains the complete support scan; no nearest-edge inference is used.
+    fn convex_ray_sector(
+        &self,
+        p: [Interval; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<usize>, GeometryError> {
+        if !self.convex_disk { return Ok(None); }
+        let count = self.outer_count;
+        // This ray is strictly inside the first edge's angular sector.
+        // Ordering v1,...,v(n-1),v0 starts immediately after that ray.
+        let ray = std::array::from_fn(|axis|
+            add(self.vertices[0][axis], self.vertices[1][axis]));
+        let half = |value| {
+            let side = orient([Interval::point(0.0); 2], ray, value);
+            if side.lo > 0.0 { Some(false) }
+            else if side.hi < 0.0 { Some(true) }
+            else { None }
+        };
+        work.charge(1, cancel)?;
+        let Some(p_half) = half(p) else { return Ok(None); };
+        let vertex_at = |ordered| if ordered + 1 == count { 0 } else { ordered + 1 };
+        let mut lower = 0;
+        let mut upper = count;
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2;
+            let vertex = self.vertices[vertex_at(middle)];
+            work.charge(1, cancel)?;
+            let Some(vertex_half) = half(vertex) else { return Ok(None); };
+            let before = if vertex_half != p_half {
+                !vertex_half
+            } else {
+                work.charge(1, cancel)?;
+                let side = orient([Interval::point(0.0); 2], vertex, p);
+                if side.lo > 0.0 { true }
+                else if side.hi < 0.0 { false }
+                else { return Ok(None); }
+            };
+            if before { lower = middle + 1; } else { upper = middle; }
+        }
+        let previous = if lower == 0 { count - 1 } else { lower - 1 };
+        Ok(Some(vertex_at(previous)))
     }
 
     /// Exact stored frame rows and their interval-enclosed dual columns define
@@ -2229,6 +2253,38 @@ impl SamplePrism {
         Ok((radial_degree, dot(n, acceleration).hi <= 0.0))
     }
 
+    /// A convex polygon support halfspace also contains its entire filled
+    /// prism. Return a proved Euclidean separation of EVERY point in this box,
+    /// not a failed upper-distance estimate or an unqualified point sample.
+    fn exterior_separation(
+        &self,
+        position: [Interval; 3],
+        minimum_mm: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<f64>, GeometryError> {
+        if !self.convex_disk { return Ok(None); }
+        let p = project(position, self.frame);
+        for edge in 0..self.outer_count {
+            work.charge(1, cancel)?;
+            let a = self.vertices[edge];
+            let b = self.vertices[self.next_vertex(edge)];
+            let signed = orient(a, b, p);
+            if signed.hi >= 0.0 { continue; }
+            let delta = [b[0].sub(a[0]), b[1].sub(a[1])];
+            let gradient = std::array::from_fn(|axis|
+                mul(delta[0], Interval::point(self.frame.y_axis[axis]))
+                    .sub(mul(delta[1], Interval::point(self.frame.x_axis[axis]))));
+            let scale = length(gradient)?.hi;
+            if scale > 0.0 && scale.is_finite() {
+                let separation = Interval::point(-signed.hi)
+                    .div(Interval::point(scale))?.lo;
+                if separation > minimum_mm { return Ok(Some(separation)); }
+            }
+        }
+        Ok(None)
+    }
+
     /// Every witness is on the actual polygon prism. In annular mode side
     /// witnesses use the SAME azimuth as the source point, as required by the
     /// convex-meridian artificial-cap covering proof.
@@ -2243,24 +2299,72 @@ impl SamplePrism {
             .into_iter()
             .map(Interval::abs_upper)
             .fold(1.0_f64, f64::max);
-        let with_reserve =
-            |distance| up(distance + 3.0 * self.approximation + up(scale * f64::EPSILON * 128.0));
+        let reserve = add(
+            mul(Interval::point(3.0), Interval::point(self.approximation)),
+            mul(Interval::point(scale), Interval::point(f64::EPSILON * 128.0)),
+        ).hi;
+        let original = self.boundary_witness_distance(
+            position, sufficient_error_mm, reserve, work, cancel,
+        )?;
+        if original <= sufficient_error_mm || sufficient_error_mm <= 0.0 || !self.convex_disk {
+            return Ok(original);
+        }
+        let half_height = mul(
+            mul(Interval::point(self.range[1]).sub(Interval::point(self.range[0])),
+                Interval::point(0.5)),
+            Interval::point(self.height_vertical_norm),
+        ).hi;
+        let mut bound = up(half_height + reserve);
+        if bound > sufficient_error_mm { return Ok(original); }
+        // Distance to the FILLED convex prism is convex, so its maximum over
+        // this Cartesian source box is bounded by its eight extreme points.
+        // Outside, a closest filled-prism point lies on the boundary. Inside,
+        // the nearer height cap gives the independent half-height bound above.
+        // This is a complete box bound, not sampled source-surface authority.
+        for mask in 0..8 {
+            work.charge(1, cancel)?;
+            let point = std::array::from_fn(|axis| Interval::point(
+                if mask & (1 << axis) == 0 { position[axis].lo } else { position[axis].hi },
+            ));
+            bound = bound.max(self.boundary_witness_distance(
+                point, sufficient_error_mm, reserve, work, cancel,
+            )?);
+            if bound > sufficient_error_mm { return Ok(original); }
+        }
+        Ok(original.min(bound))
+    }
+
+    fn boundary_witness_distance(
+        &self,
+        position: [Interval; 3],
+        sufficient_error_mm: f64,
+        reserve: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<f64, GeometryError> {
+        let with_reserve = |distance| up(distance + reserve);
         let p = project(position, self.frame);
         let rho = length([p[0], p[1], Interval::point(0.0)])?;
         let mut inside = true;
         let mut first_side = 0;
-        for edge in 0..self.outer_count {
+        if let Some(edge) = self.convex_ray_sector(p, work, cancel)? {
             work.charge(1, cancel)?;
-            if orient(
-                self.vertices[edge],
-                self.vertices[self.next_vertex(edge)],
-                p,
-            )
-            .lo < 0.0
-            {
-                inside = false;
-                first_side = edge;
-                break;
+            first_side = edge;
+            inside = orient(
+                self.vertices[edge], self.vertices[self.next_vertex(edge)], p,
+            ).lo >= 0.0;
+        } else {
+            for edge in 0..self.outer_count {
+                work.charge(1, cancel)?;
+                if orient(
+                    self.vertices[edge],
+                    self.vertices[self.next_vertex(edge)],
+                    p,
+                ).lo < 0.0 {
+                    inside = false;
+                    first_side = edge;
+                    break;
+                }
             }
         }
         let inside_outer = inside;
@@ -2465,6 +2569,17 @@ impl SamplePrism {
         // source region to its actual polygon in both directions.
         Ok(with_reserve(distance))
     }
+}
+
+/// Numeric proposal only; original F membership is checked after releasing the
+/// native surface mutex. No borrowed kernel object crosses that boundary.
+struct SourceFNegativeProposal {
+    cell_uv: [[f64; 2]; 2],
+    depth: u8,
+    height_preconditioned: bool,
+    point_uv: [[f64; 2]; 2],
+    position: [Interval; 3],
+    separation: f64,
 }
 
 type PositionNormalEnclosure = ([Interval; 3], [Interval; 3]);
@@ -2776,7 +2891,6 @@ pub(super) fn certify_critical_slab(
     let CriticalSlabQuery {
         source,
         request,
-        coordinates,
         section,
         functional,
         actual_sample_height,
@@ -2816,6 +2930,8 @@ pub(super) fn certify_critical_slab(
         + std::mem::size_of::<material_link::PairedMaterialLink<'_, '_>>()
         + RESERVED_STACK_BYTES
         + capture_bytes
+        + std::mem::size_of::<SourceFNegativeProposal>()
+        + 4 * std::mem::size_of::<[[f64; 2]; 2]>()
         + 4096;
     let sample_count = section
         .loops
@@ -2924,24 +3040,68 @@ pub(super) fn certify_critical_slab(
         .sub(Interval::point(source_allowance))
         .lo
         .max(0.0);
+    let height_target = Interval {
+        lo: request.height_interval_mm[0],
+        hi: request.height_interval_mm[1],
+    }.sub(functional.dot([Interval { lo: -source_allowance, hi: source_allowance }; 3]));
+    // A negative witness leaves even the existing realization/approximation
+    // reserves on the rejected side. It never raises the acceptance policy.
+    let rejection_target_mm = Interval::point(request.native_shape_error_mm)
+        .add(Interval::point(source_allowance))
+        .add(mul(Interval::point(3.0), Interval::point(prism.approximation))).hi;
     let mut lower = [f64::INFINITY; 2];
     let mut upper = [f64::NEG_INFINITY; 2];
     for (face_index, face) in definition.solid.face_iter().enumerate() {
         let face_before = work.consumed();
+        let mut diagnostic_depths = 0_u64;
         let domain = source.face_domain(face_index, chart_bytes, work, cancel)?;
-        face.with_surface(|surface| -> Result<(), GeometryError> {
-            let source_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
-            let face_glued = capture_face_gluing(surface, domain.uv_bounds(), functional, request, face_index, work, cancel)?;
+        (|| -> Result<(), GeometryError> {
+            let (source_chart, face_glued) = face.with_surface(|surface| -> Result<_, GeometryError> {
+                Ok((
+                    source_chart::SphereChart::new(surface, &domain, work, cancel)?,
+                    capture_face_gluing(surface, domain.uv_bounds(), functional, request, face_index, work, cancel)?,
+                ))
+            })?;
             whole_source &= face_glued;
-            let mut spans = surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)?;
             let mut stack = Vec::with_capacity(usize::from(MAX_DEPTH) + 1);
-            while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0_u8))) {
+            let mut spans_seen = 0;
+            let mut active_span = domain.uv_bounds();
+            let mut propose_negative = true;
+            loop {
+            let proposal = face.with_surface(|surface| -> Result<Option<SourceFNegativeProposal>, GeometryError> {
+            let mut spans = surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)?
+                .skip(spans_seen);
+            while let Some((uv, depth, height_preconditioned)) =
+                stack.pop().or_else(|| spans.next().map(|uv| {
+                    active_span = uv;
+                    spans_seen += 1;
+                    (uv, 0_u8, false)
+                }))
+            {
                 work.charge(1, cancel)?;
                 let span_smooth = depth != 0 || surface_parameter_span_smooth(surface, uv, work, cancel)?;
-                let jet = if span_smooth {
-                    surface_enclosure(surface, uv, work, cancel)?
+                let (uv, jet, height_preconditioned) = if !whole_source && !height_preconditioned {
+                    let Some((clipped, jet)) = super::slab::clip_height_box(
+                        surface, uv, functional, [height_target.lo, height_target.hi], work, cancel,
+                    )? else {
+                        closed_boundary.excluded_face_cells += 1;
+                        continue;
+                    };
+                    let h = functional.height(jet.position);
+                    let preconditioned = clipped != uv
+                        || (height_target.lo <= h.lo && h.hi <= height_target.hi);
+                    (clipped, jet, preconditioned)
                 } else {
-                    crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
+                    // The optional whole-source theorem always keeps its full
+                    // original domain. Descendants of a contracted box already
+                    // inherit that necessary height preimage; do not solve the
+                    // same cut with fresh native strip queries at every split.
+                    let jet = if span_smooth {
+                        surface_enclosure(surface, uv, work, cancel)?
+                    } else {
+                        crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
+                    };
+                    (uv, jet, height_preconditioned)
                 };
                 // The allowance-expanded carrier excludes its entire trimmed
                 // subset from this closed capture; no winding query is needed.
@@ -2979,7 +3139,33 @@ pub(super) fn certify_critical_slab(
                 )?;
                 whole_source &= convex;
                 let regular = length(n)?.lo > 0.0;
+                let metric_before = work.consumed();
                 let metric = if active { prism.boundary_distance(jet.position, witness_target_mm, work, cancel)? } else { 0.0 };
+                if face_index == 0 && diagnostic_depths & (1_u64 << depth) == 0 {
+                    diagnostic_depths |= 1_u64 << depth;
+                    eprintln!("PARITY_FACE depth={depth} uv={uv:?} active={active} regular={regular} degree={radial_degree:?} convex={convex} metric={metric} metric_work={} total={}",
+                        work.consumed() - metric_before, work.consumed());
+                }
+                if propose_negative && active && regular && radial_degree.lo > 0.0
+                    && metric > request.native_shape_error_mm
+                    && let Some(separation) = prism.exterior_separation(
+                        jet.position, rejection_target_mm, work, cancel,
+                    )?
+                {
+                    let point_uv = uv.map(|range| [range[0] * 0.5 + range[1] * 0.5; 2]);
+                    let point = surface_enclosure(surface, point_uv, work, cancel)?.position;
+                    let point_height = functional.height(point.map(|value| value.add(
+                        Interval { lo: -source_allowance, hi: source_allowance },
+                    )));
+                    if point_height.lo >= request.height_interval_mm[0]
+                        && point_height.hi <= request.height_interval_mm[1]
+                    {
+                        return Ok(Some(SourceFNegativeProposal {
+                            cell_uv: uv, depth, height_preconditioned,
+                            point_uv, position: point, separation,
+                        }));
+                    }
+                }
                 if !regular || radial_degree.lo <= 0.0 || metric > request.native_shape_error_mm {
                     if !active && (radial_degree.hi <= 0.0 || depth >= MAX_DEPTH) {
                         // The optional whole-source theorem failed, but this
@@ -2997,7 +3183,7 @@ pub(super) fn certify_critical_slab(
                             (uv, request.height_interval_mm, request.sample_height_mm)));
                     }
                     work.charge(2, cancel)?;
-                    let children = match split(uv, depth, face_index) {
+                    let children = match split_metric(uv, depth, face_index, &jet) {
                         Ok(children) => children,
                         Err(error) if !active && error.code == GeometryErrorCode::AnalysisIndeterminate => {
                             whole_source = false;
@@ -3006,7 +3192,7 @@ pub(super) fn certify_critical_slab(
                         }
                         Err(error) => return Err(error),
                     };
-                    for child in children { stack.push((child, depth + 1)); }
+                    for child in children { stack.push((child, depth + 1, height_preconditioned)); }
                     continue;
                 }
                 covered_face_cells += 1;
@@ -3044,9 +3230,59 @@ pub(super) fn certify_critical_slab(
                     }
                 }
             }
+            Ok(None)
+            })?;
+            let Some(proposal) = proposal else { break; };
+            // Multi-face reference qualification can revisit this face. The
+            // native surface guard must already be gone before entering it.
+            let midpoint = active_span.map(|range| [range[0] * 0.5 + range[1] * 0.5; 2]);
+            let candidates = [
+                proposal.point_uv,
+                [proposal.point_uv[0], midpoint[1]],
+                [midpoint[0], proposal.point_uv[1]],
+            ];
+            for (index, &point_uv) in candidates.iter().enumerate() {
+                if candidates[..index].contains(&point_uv) { continue; }
+                let (point, separation) = if index == 0 {
+                    (proposal.position, proposal.separation)
+                } else {
+                    // Coordinate-centered proposals stay in this already
+                    // admitted original span, not a fitted/source family.
+                    let point = face.with_surface(|surface|
+                        surface_enclosure(surface, point_uv, work, cancel)
+                    )?.position;
+                    let height = functional.height(point.map(|value| value.add(
+                        Interval { lo: -source_allowance, hi: source_allowance },
+                    )));
+                    if height.lo < request.height_interval_mm[0]
+                        || height.hi > request.height_interval_mm[1] { continue; }
+                    let Some(separation) = prism.exterior_separation(
+                        point, rejection_target_mm, work, cancel,
+                    )? else { continue; };
+                    (point, separation)
+                };
+                if material_link::source_f_point_is_retained(
+                    source, &domain, face_index, point_uv, point, &edges,
+                    chart_bytes.checked_sub(domain.owned_bytes()).ok_or_else(|| failure(
+                        GeometryErrorCode::ResourceLimit,
+                        "source-F counterexample exceeds coexistent domain capacity",
+                        face_index, point_uv,
+                    ))?, work, cancel,
+                )? {
+                    return Err(failure(GeometryErrorCode::ShapeErrorExceeded,
+                        "retained original F point has proved exterior candidate-prism separation",
+                        face_index, (point_uv, request.height_interval_mm, separation)));
+                }
+            }
+            // Keep all completed cells. Resume only the uncommitted cell and
+            // its stack; rebuilding the borrowed span cursor copies no knots.
+            propose_negative = false;
+            stack.push((proposal.cell_uv, proposal.depth, proposal.height_preconditioned));
+            }
             Ok(())
-        }).map_err(|error| work.annotate_error(error, face_before,
-            format_args!("closed material original face cover; source_face={face_index}")))?;
+        })().map_err(|error| work.annotate_error(error, face_before,
+            format_args!("closed material original face cover; source_face={face_index} scope={:?} sample={}",
+                request.height_interval_mm, request.sample_height_mm)))?;
     }
     // All original incidences remain mandatory. Only a WHOLE edge-cell height
     // exclusion removes its geometric link from the clipped boundary; cells
@@ -3534,11 +3770,97 @@ mod tests {
             height_dual: dual,
             height_vertical_norm: 1.0,
             core_radius: Some(6.0),
+            convex_disk: false,
             inner_radius_upper: 3.0,
             range: request.height_interval_mm,
             source_height: HeightFunctional::from_frame(request.frame),
             approximation: 0.0,
             vertical_return: 0.1,
+        }
+    }
+
+    #[test]
+    fn convex_box_distance_allows_different_actual_boundary_witnesses() {
+        let mut prism = annular_metric_candidate();
+        prism.ray_index = None;
+        prism.core_radius = None;
+        prism.vertices = [[4.0, 0.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]]
+            .into_iter().map(|p| p.map(Interval::point)).collect();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        prism.convex_disk = SamplePrism::convex_radial_polygon(
+            &prism.vertices, &mut work, &cancel,
+        ).unwrap();
+        let bound = prism.boundary_distance(
+            [[3.8, 4.01], [-0.2, 0.2], [-0.02, 0.02]].map(|[lo, hi]| Interval { lo, hi }),
+            0.2, &mut work, &cancel,
+        ).unwrap();
+        // The two exterior corners use different sides of the actual diamond.
+        let actual_exterior_distance = (4.01 + 0.2 - 4.0) / 2.0_f64.sqrt();
+        assert!(bound >= actual_exterior_distance && bound < 0.15, "{bound}");
+    }
+
+    #[test]
+    fn convex_box_distance_keeps_cap_bound_when_all_corners_are_on_boundary() {
+        let mut prism = annular_metric_candidate();
+        prism.ray_index = None;
+        prism.core_radius = None;
+        prism.vertices.truncate(prism.outer_count);
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        prism.convex_disk = SamplePrism::convex_radial_polygon(
+            &prism.vertices, &mut work, &cancel,
+        ).unwrap();
+        let bound = prism.boundary_distance(
+            [[-10.0, 10.0], [-10.0, 10.0], [-0.1, 0.1]].map(|[lo, hi]| Interval { lo, hi }),
+            0.15, &mut work, &cancel,
+        ).unwrap();
+        // Every corner has zero boundary distance, but the center is 0.1 mm
+        // from either cap. Filled-set convexity alone would miss this maximum.
+        assert!(bound >= 0.1 && bound < 0.101, "{bound}");
+    }
+
+    #[test]
+    fn convex_radial_predicate_rejects_twice_wound_positive_turn_cycle() {
+        let vertices = [[4.0, 0.0], [0.0, 4.0], [-4.0, 0.0], [0.0, -4.0]];
+        let twice = vertices.iter().cycle().take(8)
+            .map(|p| p.map(Interval::point)).collect::<Vec<_>>();
+        assert!(!SamplePrism::convex_radial_polygon(
+            &twice, &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
+        ).unwrap());
+    }
+
+    #[test]
+    fn convex_disk_metric_never_assigns_cap_witnesses_to_exterior_angles() {
+        let mut prism = annular_metric_candidate();
+        prism.ray_index = None;
+        prism.core_radius = None;
+        prism.outer_count = 8;
+        prism.vertices = (0..prism.outer_count).map(|index| {
+            let angle = std::f64::consts::TAU * index as f64 / prism.outer_count as f64;
+            [angle.cos(), angle.sin()].map(Interval::point)
+        }).collect();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        prism.convex_disk = SamplePrism::convex_radial_polygon(
+            &prism.vertices, &mut work, &cancel,
+        ).unwrap();
+        for index in 0..64 {
+            // Includes the angular wrap, original vertices and the reference
+            // ray: ambiguous closed comparisons must retain the full scan.
+            let angle = std::f64::consts::TAU * index as f64 / 64.0;
+            let exterior = prism.boundary_distance(
+                [1.5 * angle.cos(), 1.5 * angle.sin(), 0.0].map(Interval::point),
+                0.15, &mut work, &cancel,
+            ).unwrap();
+            // The entire polygon lies in the unit disk, independently of
+            // which finite polygon side supplies the returned upper bound.
+            assert!(exterior.is_finite() && exterior >= 0.49, "{index}: {exterior}");
+            let interior = prism.boundary_distance(
+                [0.25 * angle.cos(), 0.25 * angle.sin(), 0.0].map(Interval::point),
+                0.15, &mut work, &cancel,
+            ).unwrap();
+            assert!(interior >= 0.1 && interior < 0.101, "{index}: {interior}");
         }
     }
 
@@ -4457,16 +4779,10 @@ mod tests {
             work,
             cancel,
         )?;
-        let rows = super::super::placed::ActualMaterialCoordinates::source_rows(&request.frame)?;
-        let coordinates = super::super::placed::ActualMaterialCoordinates::source(
-            source.definition(), &request.frame, &rows,
-            request.height_interval_mm, request.sample_height_mm, work, cancel,
-        )?;
         certify_critical_slab(
             CriticalSlabQuery {
                 source: source.trim_source(),
                 request: &request,
-                coordinates: &coordinates,
                 section: &section,
                 functional: HeightFunctional::from_frame(request.frame),
                 actual_sample_height: height,
@@ -4474,9 +4790,6 @@ mod tests {
             crate::MAX_PREPARED_SECTION_BYTES
                 .checked_sub(source.retained_bytes())
                 .and_then(|remaining| remaining.checked_sub(section.retained_bytes()))
-                .and_then(|remaining| remaining.checked_sub(
-                    super::super::placed::ActualMaterialCoordinates::SCRATCH_BYTES,
-                ))
                 .ok_or_else(|| GeometryError::new(
                     GeometryErrorCode::ResourceLimit,
                     "independent critical proof input exceeds remaining query capacity",

@@ -74,7 +74,7 @@ pub(super) fn certify_actual_polygon_radial_region<'a>(
 
 /// The complete encoding, not a selected subset, must match the source kind.
 /// A common positive radial interval is a conservative, uniform nesting proof.
-fn radial_region_bounds(
+pub(super) fn radial_region_bounds(
     loops: &[SectionLoopMm],
     center: [[f64; 2]; 2],
     kind: RadialRegionKind,
@@ -158,6 +158,8 @@ fn radial_ring_bound(
         let determinant = cross(direction, to_center);
         let signed = if ring.is_hole { -determinant.hi } else { determinant.lo };
         if !signed.is_finite() || signed <= 0.0 {
+            eprintln!("PARITY_REGION_REFUSAL hole={} center={center:?} edge={a:?}->{b:?} signed={signed}",
+                ring.is_hole);
             return Ok(None);
         }
 

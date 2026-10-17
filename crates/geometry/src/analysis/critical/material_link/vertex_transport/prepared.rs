@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Immutable source-only selections. The fixed half-full identity index borrows
-//! no query authority; qualification and every query proof remain fresh.
+//! Immutable source selections and successful source-star qualifications.
+//! The fixed identity index borrows no closed-slab or posed query authority.
 
 use super::*;
 use std::{

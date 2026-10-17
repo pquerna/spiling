@@ -123,6 +123,60 @@ fn translated(x: f64, y: f64, z: f64) -> RigidPoseMm {
     }
 }
 
+fn original_section_polygons(scene: &NativeScene, z: f64) -> MultiPolygon<f64> {
+    assert_eq!(scene.definitions.len(), 1);
+    assert_eq!(scene.occurrences[0].pose, RigidPoseMm::IDENTITY);
+    let cancel = AtomicBool::new(false);
+    let section = spiling_geometry::section(
+        scene.definitions.values().next().unwrap(),
+        PlaneMm {
+            origin_mm: [0.0, 0.0, z],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    )
+    .unwrap();
+    assert!(section.is_native_intersection());
+    region::from_native(&section, &RigidPoseMm::IDENTITY, z, &cancel).unwrap()
+}
+
+fn visit_fresh_replayed_object_segments(
+    bundle: &ManufacturingBundle,
+    mut visit: impl FnMut([f64; 3], [f64; 3]),
+) {
+    let encoded = serde_json::to_vec(bundle).unwrap();
+    let reopened = decode_bundle(&encoded).unwrap();
+    let hash = spiling_contracts::geometry::SourceHash::from_bytes(&encoded);
+    let inspection = crate::inspect_bundle(
+        &reopened,
+        &hash,
+        VerificationOutput::ReportAndMotion,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(inspection.report.verified && inspection.report.deposition_segments > 0);
+    let replay = inspection.replay.unwrap();
+    let mut previous: Option<([f64; 3], f64)> = None;
+    let mut object_segments = 0;
+    for record in replay.bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+    {
+        let end = std::array::from_fn(|axis| {
+            f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
+        });
+        let extrusion = f64::from_le_bytes(record[24..32].try_into().unwrap());
+        if matches!(record[46], 1..=5 | 8) {
+            let (start, prior_e) = previous.expect("deposition has a preceding emitted endpoint");
+            assert!(extrusion > prior_e, "serialized object extrusion must remain positive");
+            visit(start, end);
+            object_segments += 1;
+        }
+        previous = Some((end, extrusion));
+    }
+    assert!(object_segments > 0);
+}
+
 // These fixtures have one actual contact height. Read the declared program
 // representation, not an assumed nominal/native floor or an exact stop value.
 fn actual_fixture_contact_gap(bundle: &ManufacturingBundle, source_floor: f64) -> f64 {
@@ -316,6 +370,111 @@ fn native_nonintegral_top_and_non_grid_shelf_preserve_every_event() {
         }
         assert_eq!(bundle.provenance.definitions, scene.stored);
     }
+}
+
+#[test]
+fn off_grid_native_tunnel_split_merge_and_near_tangency_preserve_replayed_material() {
+    let cancel = AtomicBool::new(false);
+    let baseline = NativeScene::new(&generated("nonintegral-top"), &[RigidPoseMm::IDENTITY]);
+    let changed = NativeScene::new(
+        &generated("off-grid-circular-tunnel"),
+        &[RigidPoseMm::IDENTITY],
+    );
+    // Both native sources have exactly the same ordinary selected sections.
+    // The changed original has a through-Y cylindrical void between them:
+    // gap(z) = 2*sqrt(0.24^2 - (z-1.37)^2), with real split/merge at
+    // 1.13/1.61. This is neither a component birth nor a static overlapping union.
+    for z in [1.0, 2.0] {
+        let a = original_section_polygons(&baseline, z);
+        let b = original_section_polygons(&changed, z);
+        assert!(a.xor(&b).unsigned_area() < 1e-6);
+    }
+    let middle = original_section_polygons(&changed, 1.37);
+    assert_eq!(middle.0.len(), 2);
+    assert!((middle.unsigned_area() - 195.2).abs() < 1e-5);
+    // Approach each smooth cylindrical tangency from the split side. The
+    // smallest true gap is below the manufacturing shape-error budget, but
+    // that budget never licenses epsilon-merging the two native components.
+    for event in [1.13, 1.61] {
+        for delta in [0.06, 0.012, 0.003] {
+            let z = if event < 1.37 { event + delta } else { event - delta };
+            let section = original_section_polygons(&changed, z);
+            let gap = 2.0 * (0.24f64.powi(2) - (z - 1.37).powi(2)).sqrt();
+            assert_eq!(section.0.len(), 2, "event {event}, distance {delta}");
+            assert!((section.unsigned_area() - (200.0 - 10.0 * gap)).abs() < 1e-5);
+        }
+        let outside = if event < 1.37 { event - 0.003 } else { event + 0.003 };
+        assert_eq!(original_section_polygons(&changed, outside).0.len(), 1);
+        let failure = spiling_geometry::section(
+            changed.definitions.values().next().unwrap(),
+            PlaneMm {
+                origin_mm: [0.0, 0.0, event],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::DegenerateSection);
+    }
+
+    let intent = intent(false);
+    let unchanged = compile(baseline.input(&intent), &cancel).unwrap();
+    let bundle = compile(changed.input(&intent), &cancel).unwrap();
+    assert_eq!(bundle.provenance.definitions, changed.stored);
+    assert_eq!(bundle.plan.native_geometry.evidence, PreflightEvidence::Certified);
+    assert!(bundle.plan.native_geometry.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+    assert_eq!(
+        bundle.plan.native_geometry.certified_layer_count,
+        bundle.plan.layers.len() as u32
+    );
+    assert!((bundle.plan.layers.last().unwrap().z_mm - 7.85).abs() < 1e-6);
+    for event in [1.13, 1.61] {
+        assert!(
+            bundle.plan.layers.iter().any(|layer| (layer.z_mm - event).abs() < 1e-6),
+            "the actual off-grid split/merge must partition the emitted schedule"
+        );
+    }
+    assert_ne!(
+        unchanged.plan.layers.iter().map(|layer| layer.z_mm).collect::<Vec<_>>(),
+        bundle.plan.layers.iter().map(|layer| layer.z_mm).collect::<Vec<_>>()
+    );
+    let mut split_layers = 0;
+    for layer in &bundle.plan.layers {
+        let half_gap = if (1.13..1.61).contains(&layer.section_z_mm) {
+            split_layers += 1;
+            (0.24f64.powi(2) - (layer.section_z_mm - 1.37).powi(2)).sqrt()
+        } else {
+            0.0
+        };
+        assert!(
+            (layer.region_coverage.source_section_area_mm2 - (200.0 - 20.0 * half_gap)).abs() < 1e-5
+        );
+    }
+    assert!(split_layers > 0, "matching endpoint samples cannot hide the native tunnel");
+    let mut witnessed = [false; 4];
+    visit_fresh_replayed_object_segments(&bundle, |start, end| {
+        let layer = bundle.plan.layers.iter()
+            .find(|layer| (layer.z_mm - end[2]).abs() <= 0.000001)
+            .expect("emitted object stroke belongs to a scheduled layer");
+        let sample = layer.section_z_mm;
+        if (1.13..1.61).contains(&sample) {
+            let half_gap = (0.24f64.powi(2) - (sample - 1.37).powi(2)).sqrt();
+            let left = start[0] <= 10.0 - half_gap && end[0] <= 10.0 - half_gap;
+            let right = start[0] >= 10.0 + half_gap && end[0] >= 10.0 + half_gap;
+            assert!(left || right, "actual emitted segment crosses the native split void");
+            witnessed[1] |= left;
+            witnessed[2] |= right;
+        } else if start[0].min(end[0]) < 10.0 && start[0].max(end[0]) > 10.0 {
+            witnessed[if sample < 1.13 { 0 } else { 3 }] = true;
+        }
+    });
+    assert!(witnessed.into_iter().all(|present| present), "fresh replay must retain connected→split→connected material");
+    visit_fresh_replayed_object_segments(&unchanged, |start, end| {
+        for point in [start, end] {
+            assert!((0.0..=20.0).contains(&point[0]));
+            assert!((0.0..=10.0).contains(&point[1]));
+        }
+    });
 }
 
 #[test]
@@ -1142,7 +1301,7 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
     assert_eq!(finished.provenance.surface_overlays, scene.surface_overlays);
     let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
-    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
     let sample = finished.plan.layers[0].section_z_mm;
     let native_section = spiling_geometry::section_with_byte_limit(
         native,
@@ -1460,7 +1619,7 @@ fn finished_native_cantilever_keeps_ribs_through_actual_anchor_support_realizati
     assert!(bundle.verification.support_deposited_volume_mm3 > 0.0);
     let native = &scene.definitions[&scene.occurrences[0].definition_id];
     let cert = native.vertical_wall_face(&face_id).unwrap();
-    let admitted = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+    let (admitted, _) = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
     let source = region::from_native(
         &spiling_geometry::section_with_byte_limit(
             native,
@@ -1565,7 +1724,7 @@ fn multiple_certified_finishes_preserve_exact_native_hole_rings_across_pose_and_
     );
     let quarter = std::f64::consts::FRAC_1_SQRT_2;
     scene.occurrences[0].pose.rotation_xyzw = [0.0, 0.0, quarter, quarter];
-    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     for occurrence in &scene.occurrences {
         let source = region::from_native(
@@ -1750,7 +1909,7 @@ fn cylindrical_source_phase_pose_and_flipped_z_preserve_native_closed_material()
                 .layers
                 .push(cylinder_layer(&scene, phase));
             let native = &scene.definitions[&scene.occurrences[0].definition_id];
-            let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+            let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
             assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
             let sample = 2.0;
             let local_z = inverse(&pose, [0.0, 0.0, sample])[2];
@@ -2062,7 +2221,7 @@ fn blank_image_interval_returns_exact_native_material_and_no_invented_added_area
         parameters,
     );
     let intent = intent(false);
-    let admitted = preflight::admit(&scene.input(&intent), &cancel).unwrap();
+    let (admitted, _) = preflight::admit(&scene.input(&intent), &cancel).unwrap();
     assert_eq!(admitted.report.disposition, PreflightDisposition::Admitted);
     let occurrence = &scene.occurrences[0];
     let native = &scene.definitions[&occurrence.definition_id];
@@ -2364,7 +2523,7 @@ fn steep_image_support_succeeds_from_real_bed_corridor_and_lower_image_rebuild_b
                 .iter()
                 .any(|path| path.kind == DepositionKind::SupportInterface)
         }));
-        let admitted = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
+        let (admitted, _) = preflight::admit(&scene.input(&enabled), &cancel).unwrap();
         let occurrence = &scene.occurrences[0];
         let native = &scene.definitions[&occurrence.definition_id];
         let cert = native
@@ -2501,6 +2660,115 @@ fn parity_source(name: &str) -> Vec<u8> {
             .join(format!("../../fixtures/geometry/native-parity-{name}.step")),
     )
     .expect("parent must generate the genuine native parity corpus before integration regressions")
+}
+
+#[test]
+fn equivalent_analytic_and_rational_sources_preserve_sections_material_and_fresh_replay() {
+    let cancel = AtomicBool::new(false);
+    for (name, analytic, rational, perimeter, hole_radius) in [
+        ("box", BOX.to_vec(), parity_source("nurbs-box"), 60.0, 0.0),
+        (
+            "cylinder",
+            FULL_CYLINDER.to_vec(),
+            parity_source("nurbs-cylinder"),
+            10.0 * std::f64::consts::PI,
+            0.0,
+        ),
+        (
+            "pocket",
+            parity_source("blind-pocket"),
+            parity_source("blind-pocket-nurbs-floor"),
+            80.0 + 6.0 * std::f64::consts::PI,
+            3.0,
+        ),
+    ] {
+        let a = NativeScene::new(&analytic, &[RigidPoseMm::IDENTITY]);
+        let b = NativeScene::new(&rational, &[RigidPoseMm::IDENTITY]);
+        assert_ne!(a.occurrences[0].definition_id, b.occurrences[0].definition_id);
+        assert_ne!(a.stored, b.stored, "equivalent geometry must not erase original provenance");
+        // These recipe pairs have matching physical dimensions, not merely
+        // matching family labels. Compare actual sections on both sides of
+        // the pocket floor; two independent chord tubes bound symmetric loss.
+        let chord = spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM;
+        let area_tube = perimeter * chord + std::f64::consts::PI * chord * chord;
+        for z in [1.0, 3.9, 4.1, 7.0] {
+            let left = original_section_polygons(&a, z);
+            let right = original_section_polygons(&b, z);
+            assert_eq!(left.0.len(), right.0.len(), "{name} at {z}");
+            assert_eq!(
+                left.0.iter().map(|polygon| polygon.interiors().len()).sum::<usize>(),
+                right.0.iter().map(|polygon| polygon.interiors().len()).sum::<usize>(),
+                "{name} at {z}"
+            );
+            assert!(
+                left.xor(&right).unsigned_area() <= 2.0 * area_tube,
+                "{name} at {z}: changed source encoding must preserve physical material"
+            );
+        }
+        let intent = intent(false);
+        let bundles = [
+            compile(a.input(&intent), &cancel).unwrap(),
+            compile(b.input(&intent), &cancel).unwrap(),
+        ];
+        assert_eq!(bundles[0].provenance.definitions, a.stored);
+        assert_eq!(bundles[1].provenance.definitions, b.stored);
+        let mut volumes = [0.0; 2];
+        for (index, bundle) in bundles.iter().enumerate() {
+            let coverage = &bundle.plan.native_geometry;
+            assert_eq!(coverage.evidence, PreflightEvidence::Certified);
+            assert_eq!(coverage.certified_layer_count, bundle.plan.layers.len() as u32);
+            assert!(coverage.achieved_shape_error_mm <= intent.recipe.native_shape_error_mm);
+            assert!((bundle.plan.layers.last().unwrap().z_mm - 8.0).abs() < 1e-6);
+            for layer in &bundle.plan.layers {
+                let expected = match name {
+                    "box" => 200.0,
+                    "cylinder" => 25.0 * std::f64::consts::PI,
+                    _ if layer.section_z_mm > 4.0 => 400.0 - 9.0 * std::f64::consts::PI,
+                    _ => 400.0,
+                };
+                assert!(
+                    (layer.region_coverage.source_section_area_mm2 - expected).abs() <= area_tube,
+                    "{name}: original-material area must agree with the separate analytic oracle"
+                );
+                volumes[index] += layer.region_coverage.source_section_area_mm2 * layer.height_mm;
+            }
+            if hole_radius > 0.0 {
+                assert!(bundle.plan.layers.iter().any(|layer| (layer.z_mm - 4.0).abs() < 1e-6));
+            }
+            visit_fresh_replayed_object_segments(bundle, |start, end| {
+                if name == "cylinder" {
+                    assert!(start[0].hypot(start[1]) <= 5.0 && end[0].hypot(end[1]) <= 5.0);
+                } else {
+                    let depth = if name == "box" { 10.0 } else { 20.0 };
+                    for point in [start, end] {
+                        assert!((0.0..=20.0).contains(&point[0]));
+                        assert!((0.0..=depth).contains(&point[1]));
+                    }
+                    let layer = bundle.plan.layers.iter()
+                        .find(|layer| (layer.z_mm - end[2]).abs() <= 0.000001)
+                        .unwrap();
+                    if hole_radius > 0.0 && layer.section_z_mm > 4.0 {
+                        let offset = [start[0] - 10.0, start[1] - 10.0];
+                        let delta = [end[0] - start[0], end[1] - start[1]];
+                        let squared = delta[0] * delta[0] + delta[1] * delta[1];
+                        let t = if squared == 0.0 {
+                            0.0
+                        } else {
+                            (-(offset[0] * delta[0] + offset[1] * delta[1]) / squared).clamp(0.0, 1.0)
+                        };
+                        assert!(
+                            (offset[0] + t * delta[0]).hypot(offset[1] + t * delta[1]) >= hole_radius,
+                            "fresh emitted bytes must not fill the equivalently encoded native pocket"
+                        );
+                    }
+                }
+            });
+        }
+        assert!(
+            (volumes[0] - volumes[1]).abs() <= 16.0 * area_tube,
+            "{name}: representation changes cannot change scheduled native material volume"
+        );
+    }
 }
 
 #[test]

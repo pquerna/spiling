@@ -320,16 +320,31 @@ pub fn prepare_section_source<'a>(
         .ok_or_else(|| resource_error("prepared native section capacity exhausted"))?;
     let originals =
         crate::parametric::prepare_section_originals(definition, original_allowance, work, cancel)?;
-    let original_bytes = originals
-        .as_ref()
-        .map_or(0, |source| source.retained_bytes());
+    prepare_section_source_from_originals(definition, originals, source_allowance, cancel, work)
+}
+
+/// Move already admitted original domains into native section preparation.
+pub(crate) fn prepare_section_source_from_originals<'a>(
+    definition: &'a Definition,
+    originals: Option<crate::parametric::PreparedSectionOriginals<'a>>,
+    remaining_prepared_bytes: usize,
+    cancel: &AtomicBool,
+    work: &mut GeometryWorkBudget,
+) -> Result<PreparedSectionSource<'a>, GeometryError> {
+    work.charge(1, cancel)?;
+    let pinned_bytes = definition.retained_query_proof_bytes();
+    let source_allowance = remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES);
+    let original_bytes = originals.as_ref().map_or(0, |source| source.retained_bytes());
     let header_bytes = source_header_bytes(originals.is_some());
     let native_source_bytes = source_allowance
         .checked_sub(pinned_bytes)
         .and_then(|bytes| bytes.checked_sub(header_bytes))
         .and_then(|bytes| bytes.checked_sub(original_bytes))
         .ok_or_else(|| resource_error("prepared original section capacity exhausted"))?;
-    let native_prepared_bytes = MAX_PREPARED_SECTION_BYTES
+    // The caller's source allowance already excludes coexisting owners/plans.
+    // Preserve only the frozen independent query headroom above that allowance.
+    let native_prepared_bytes = source_allowance
+        .saturating_add(MAX_PREPARED_SECTION_BYTES - MAX_PREPARED_SECTION_SOURCE_BYTES)
         .checked_sub(pinned_bytes)
         .and_then(|bytes| bytes.checked_sub(original_bytes))
         .and_then(|bytes| bytes.checked_sub(header_bytes))

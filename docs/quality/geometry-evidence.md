@@ -79,6 +79,29 @@ Both runs used the same generated STEP bytes (SHA-256
 from the existing `native-parity-sphere-belt.step` recipe/exporter. This
 qualifies that raw section path, not closed-material manufacturing.
 
+### Literal-source continuous-piecewise UV substrate
+
+The current consumer pin is public native revision
+[`26719dfe587653457c8803f0a2114fa54861ba15`](https://github.com/pquerna/monstertruck/tree/26719dfe587653457c8803f0a2114fa54861ba15).
+All five workspace declarations, eleven lockfile Git sources and
+`crates/geometry::KERNEL_REVISION` select that same immutable revision.
+Its `validated_curve2d_piecewise_jet` encloses continuous C0 UV positions and
+both incident closed-knot one-sided derivatives; it rejects discontinuous
+knots and does not confer C1 authority. The original-coedge adapter retains
+the literal source trim, original affine parameter image and native-edge
+derivative scaling. Strict gamma consumers additionally require structural C1
+or exact homogeneous derivative identities, including unequal knot lengths
+and weights; a positive G1 tangent scale is insufficient.
+
+The handoff records two focused native properties passing for this revision:
+`continuous_piecewise_source_policy_does_not_admit_discontinuities` and
+`uv_piecewise_policy_keeps_closed_knot_sides_and_refuses_jumps`.
+Those native results are historical evidence, not an exercised Spiling
+integration gate. The newly added consumer regressions have not been run at
+this implementation checkpoint. No fitting/housing manufacturing, whole
+geometry suite or physical qualification is claimed.
+
+
 ### Curved source ownership: bounded properties, operator gate still open
 
 The planner-9 parity work on the e6ff checkpoint separately exercises original

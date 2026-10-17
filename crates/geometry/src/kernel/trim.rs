@@ -181,8 +181,9 @@ impl PreparedFaceTrimDomain<'_> {
         ))
     }
 
-    /// Reevaluate only the unchanged UV coefficients. Spatial consumers can
-    /// reuse an already prepared original edge instead of recapturing per cell.
+    /// Strict gamma jet: only the literal original source can qualify C1.
+    /// Exactly C1 joins may use native piecewise evaluation after coefficient
+    /// qualification; a genuine C0 corner never acquires ribbon authority.
     pub(crate) fn original_coedge_uv_jet(
         &self,
         coedge_index: usize,
@@ -190,11 +191,52 @@ impl PreparedFaceTrimDomain<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<crate::parametric::ChartCurveEnclosure, GeometryError> {
+        self.original_coedge_uv_c1_jet(coedge_index, range, work, cancel)?
+            .ok_or_else(|| GeometryError::new(
+                GeometryErrorCode::SingularGeometry,
+                "original coedge UV source is not qualified C1 on the closed interval",
+            ))
+    }
+
+    /// Retain the already evaluated literal jet when C1 is qualified; callers
+    /// can use it for a position cover without a second original-curve query.
+    pub(crate) fn original_coedge_uv_c1_jet(
+        &self,
+        coedge_index: usize,
+        native_range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<crate::parametric::ChartCurveEnclosure>, GeometryError> {
+        self.original_coedge_uv_evaluation(coedge_index, native_range, true, work, cancel)
+    }
+
+    /// Continuous C0 boundary-image exclusion may use both incident one-sided
+    /// jets. This API does not qualify gamma or change the immutable recipe.
+    pub(crate) fn original_coedge_uv_piecewise_jet(
+        &self,
+        coedge_index: usize,
+        native_range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::parametric::ChartCurveEnclosure, GeometryError> {
+        Ok(self.original_coedge_uv_evaluation(
+            coedge_index, native_range, false, work, cancel,
+        )?.expect("piecewise evaluation has no C1 qualification"))
+    }
+
+    fn original_coedge_uv_evaluation(
+        &self,
+        coedge_index: usize,
+        native_range: [f64; 2],
+        require_c1: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<crate::parametric::ChartCurveEnclosure>, GeometryError> {
         check_cancel(cancel)?;
         let proof = self.original_coedge_correspondence(coedge_index)?;
         let binding = proof.binding().expect("validated original ownership");
         let face = &self.definition.trimmed_solid.boundaries()[0].faces()[self.face_index];
-        let uv_range = proof.uv_parameter_image(range)?;
+        let uv_range = proof.uv_parameter_image(native_range)?;
         let chart = face.trims()[binding.owner[1]][binding.owner[2]]
             .as_ref()
             .ok_or_else(|| {
@@ -203,26 +245,18 @@ impl PreparedFaceTrimDomain<'_> {
                     "original coedge UV coefficients are unavailable",
                 )
             })?;
-        let mut native_work =
-            ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-        let result = monstertruck_modeling::validated_curve2d_jet(
-            chart,
-            [uv_range.lo, uv_range.hi],
-            &mut native_work,
-            cancel,
-        );
-        crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
-        let jet = result.map_err(crate::parametric::native_error)?;
-        let adapt = |v: monstertruck_modeling::ValidatedInterval| crate::parametric::Interval {
-            lo: v.lower,
-            hi: v.upper,
+        let range = [uv_range.lo, uv_range.hi];
+        let jet = if require_c1 {
+            crate::parametric::curve2d_c1_jet(chart, range, work, cancel)?
+        } else {
+            Some(crate::parametric::curve2d_piecewise_jet(chart, range, work, cancel)?)
         };
         let slope = proof.uv_parameter_derivative();
-        Ok(crate::parametric::ChartCurveEnclosure {
-            position: jet.position.map(adapt),
-            derivative: jet.first.map(|v| adapt(v).mul(slope)),
-            second_derivative: jet.second.map(|v| adapt(v).mul(slope.square())),
-        })
+        Ok(jet.map(|jet| crate::parametric::ChartCurveEnclosure {
+            position: jet.position,
+            derivative: jet.derivative.map(|v| v.mul(slope)),
+            second_derivative: jet.second_derivative.map(|v| v.mul(slope.square())),
+        }))
     }
 
     pub(crate) fn material_realization(&self) -> super::OriginalMaterialRealization<'_> {
@@ -730,6 +764,40 @@ mod retained_receipt_tests {
                         chart.position.map(|v| [v.lo, v.hi]),
                         uv.position.map(|v| [v.lo, v.hi])
                     );
+                    assert!(domain.original_coedge_uv_c1_jet(
+                        index, [a, b], &mut work, &cancel,
+                    ).unwrap().is_some());
+                    let piecewise = domain.original_coedge_uv_piecewise_jet(
+                        index, [a, b], &mut work, &cancel,
+                    ).unwrap();
+                    let strict = domain.original_coedge_uv_jet(
+                        index, [a, b], &mut work, &cancel,
+                    ).unwrap();
+                    assert_eq!(
+                        piecewise.position.map(|v| [v.lo, v.hi]),
+                        strict.position.map(|v| [v.lo, v.hi]),
+                    );
+                    let face = &definition.trimmed_solid.boundaries()[0].faces()[face_index];
+                    let literal = face.trims()[binding.owner[1]][binding.owner[2]]
+                        .as_ref().unwrap();
+                    let image = proof.uv_parameter_image([a, b]).unwrap();
+                    let raw = crate::parametric::curve2d_piecewise_jet(
+                        literal, [image.lo, image.hi], &mut work, &cancel,
+                    ).unwrap();
+                    let slope = proof.uv_parameter_derivative();
+                    for axis in 0..2 {
+                        let expected = raw.derivative[axis].mul(slope);
+                        assert_eq!(
+                            [strict.derivative[axis].lo, strict.derivative[axis].hi],
+                            [expected.lo, expected.hi],
+                        );
+                        let expected = raw.second_derivative[axis].mul(slope.square());
+                        assert_eq!(
+                            [piecewise.second_derivative[axis].lo,
+                             piecewise.second_derivative[axis].hi],
+                            [expected.lo, expected.hi],
+                        );
+                    }
                     assert!(
                         spatial
                             .position
@@ -799,6 +867,16 @@ mod retained_receipt_tests {
                 .err()
                 .unwrap()
                 .code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        );
+        assert_eq!(
+            domain.original_coedge_uv_c1_jet(0, [0.0, 0.0], &mut work, &cancel)
+                .unwrap_err().code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        );
+        assert_eq!(
+            domain.original_coedge_uv_piecewise_jet(0, [0.0, 0.0], &mut work, &cancel)
+                .unwrap_err().code,
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
         );
     }

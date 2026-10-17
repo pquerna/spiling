@@ -13,7 +13,7 @@ struct Node {
     edge: Option<usize>,
 }
 
-pub(super) struct RayEdgeIndex {
+pub(in crate::analysis) struct RayEdgeIndex {
     nodes: Vec<Node>,
 }
 
@@ -25,7 +25,7 @@ fn resource() -> GeometryError {
 }
 
 impl RayEdgeIndex {
-    pub(super) fn required_heap_bytes(edges: usize) -> Option<usize> {
+    pub(in crate::analysis) fn required_heap_bytes(edges: usize) -> Option<usize> {
         if edges == 0 {
             return Some(0);
         }
@@ -35,7 +35,7 @@ impl RayEdgeIndex {
             .checked_mul(std::mem::size_of::<Node>())
     }
 
-    pub(super) fn new(
+    pub(in crate::analysis) fn new(
         edges: usize,
         heap_limit: usize,
         mut edge_bounds: impl FnMut(usize) -> [Interval; 2],
@@ -106,13 +106,13 @@ impl RayEdgeIndex {
         Ok(index)
     }
 
-    pub(super) fn heap_bytes(&self) -> usize {
+    pub(in crate::analysis) fn heap_bytes(&self) -> usize {
         self.nodes
             .capacity()
             .saturating_mul(std::mem::size_of::<Node>())
     }
 
-    pub(super) fn visit(
+    pub(in crate::analysis) fn visit(
         &self,
         direction: [Interval; 2],
         work: &mut GeometryWorkBudget,

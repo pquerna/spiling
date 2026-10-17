@@ -3,6 +3,14 @@
 // Licensed under the Open Software License version 3.0
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        // GTK's transitive Vulkan import does not inherit the executable's
+        // $ORIGIN RUNPATH. Load the shipped CEF loader as a direct dependency,
+        // before GTK and Dawn can bind different loaders' instance functions.
+        println!(
+            "cargo:rustc-link-arg=-Wl,--push-state,--no-as-needed,-l:libvulkan.so.1,--pop-state"
+        );
+    }
     let manifest = tauri_build::AppManifest::new().commands(&[
         "engine_start",
         "engine_status",

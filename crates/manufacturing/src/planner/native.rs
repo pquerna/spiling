@@ -1014,6 +1014,7 @@ fn capture_base(
                             "native slab has no remaining shared source/query byte allowance",
                         )
                     })?;
+                let query_before = admission.geometry_work.consumed();
                 let analysis = sources[&occurrence.definition_id].analyze_placed_slab(
                     &spiling_geometry::PlacedSlabRequest {
                         pose: occurrence.pose,
@@ -1025,6 +1026,8 @@ fn capture_base(
                     &mut admission.geometry_work,
                     cancel,
                 );
+                eprintln!("PARITY_BUDGET phase=slab index={index} end={end} interval={interval:?} sample={sample} before={query_before} after={} result={:?}",
+                    admission.geometry_work.consumed(), analysis.as_ref().map(|_| ()).map_err(|error| error.code));
                 let analysis = match analysis {
                     Ok(analysis) => analysis,
                     Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
@@ -1090,7 +1093,8 @@ fn capture_base(
         if end > index + 1
             && analyses
                 .iter()
-                .any(|evidence| evidence.analysis.invariance().is_none())
+                .any(|evidence| evidence.analysis.invariance().is_none()
+                    && !evidence.analysis.has_closed_radial_material_product())
         {
             end = index + 1;
             continue;
@@ -1739,9 +1743,9 @@ fn span_end(
     index: u32,
     cancel: &AtomicBool,
 ) -> Result<u32, ManufacturingError> {
-    if !admission.reuse_slabs {
-        return Ok(index + 1);
-    }
+    // Event partitions propose spans, never authorize reuse. capture_base
+    // requires exact invariance or a complete closed radial material product;
+    // varying realized finishes retain their separate per-layer invariance gate.
     let mut boundaries = BTreeSet::new();
     for event in &admission.horizontal_events {
         check_cancel(cancel)?;

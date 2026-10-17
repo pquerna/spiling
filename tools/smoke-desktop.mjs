@@ -120,6 +120,10 @@ const port = Number(option("--port", "9222"));
 const scenario = option("--scenario", "normal");
 const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
 const customManufacturingSource = option("--manufacturing-source");
+const requireHardwareGpu = args.includes("--require-hardware-gpu");
+if (requireHardwareGpu && (scenario !== "manufacturing" || manufacturingDiagnostic ||
+    process.env.SPILING_CEF_SOFTWARE_GPU === "1" || process.env.SPILING_CEF_UNSANDBOXED === "1"))
+  throw new Error("--require-hardware-gpu requires normal sandboxed manufacturing without software GPU overrides");
 if (args.includes("--manufacturing-source") &&
     (!customManufacturingSource || customManufacturingSource.startsWith("--")))
   throw new Error("--manufacturing-source requires a relative STEP source path");
@@ -136,7 +140,7 @@ const manufacturingSource = customManufacturingSource ? basename(customManufactu
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -269,7 +273,8 @@ async function click(id) {
 async function screenshot(name) {
   await mkdir("artifacts", { recursive: true });
   const capture = await cdp("Page.captureScreenshot", { format: "png" });
-  await writeFile(`artifacts/${name}.png`, Buffer.from(capture.data, "base64"));
+  const sourceTag = customManufacturingSource ? `-${basename(customManufacturingSource).replace(/[^a-zA-Z0-9_-]/g, "-")}` : "";
+  await writeFile(`artifacts/${name}${sourceTag}.png`, Buffer.from(capture.data, "base64"));
 }
 async function geometryState() {
   return JSON.parse(await text("geometry-state"));
@@ -792,6 +797,72 @@ async function manufacturingState() {
 async function surfaceState() {
   return JSON.parse(await text("surface-state"));
 }
+async function inspectManufacturingSource(stage) {
+  const scene = await until(async () => {
+    const current = await geometryState();
+    return current.occurrences.length === 1 && !current.active_job &&
+      !current.stale && !current.transferring ? current : false;
+  }, "settled native source inspection", 65000);
+  const occurrence = scene.occurrences[0];
+  const definition = scene.definitions.find((row) => row.definition_id === occurrence.definition_id);
+  assert.ok(definition?.face_count > 0, "Source has inspectable native faces");
+  await until(async () => !(await surfaceState()).working, "native face list ready");
+  await input('[data-testid="surface-occurrence"]', occurrence.occurrence_id);
+  const faceId = await until(() => evaluate(
+    "[...document.querySelector('[data-testid=\"surface-face\"]').options].map(option => option.value).find(Boolean)",
+  ), "native source face list");
+  await input('[data-testid="surface-face"]', faceId);
+  const inspected = await until(async () => {
+    const current = await surfaceState();
+    return current.selectedFaceRef?.face_id === faceId ? current.selectedFaceRef : false;
+  }, "native source face inspection");
+  assert.equal(inspected.occurrence_id, occurrence.occurrence_id);
+  assert.equal(inspected.definition_id, occurrence.definition_id);
+  await until(async () => (await geometryState()).inspection?.reference.face_id === faceId,
+    "native inspected carrier response");
+  const carrier = await evaluate(
+    "JSON.parse(document.querySelector('[data-testid=\"face-inspection\"] pre').textContent)",
+  );
+  let picked = null;
+  let adapter = null;
+  if (!manufacturingDiagnostic) {
+    assert.equal(definition.display.kind, "mesh", "Manufacturing acceptance requires certified source display");
+    await input('[data-testid="surface-occurrence"]', "");
+    await until(async () => (await geometryState()).inspection === null,
+      "cleared list inspection before actual canvas picking");
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    adapter = await evaluate(
+      "[...document.querySelectorAll('dt')].find(node => node.textContent === 'WebGPU')?.nextElementSibling?.textContent",
+    );
+    assert.ok(adapter && adapter !== "No active device", "Active WebGPU adapter is reported");
+    if (requireHardwareGpu)
+      assert.doesNotMatch(adapter, /swiftshader|lavapipe|llvmpipe|software|fallback|unknown|identity not disclosed/i,
+        "Hardware acceptance rejects software or unidentified adapters");
+    const bounds = await evaluate(
+      "(() => {const r=document.querySelector('[data-testid=\"viewport\"]').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};})()",
+    );
+    for (const y of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+      for (const x of [0.5, 0.35, 0.65, 0.2, 0.8, 0.1, 0.9]) {
+        const position = {x:bounds.x + bounds.width*x, y:bounds.y + bounds.height*y, button:"left", clickCount:1};
+        await cdp("Input.dispatchMouseEvent", {...position, type:"mousePressed"});
+        await cdp("Input.dispatchMouseEvent", {...position, type:"mouseReleased"});
+        await delay(100);
+        picked = (await geometryState()).inspection;
+        if (picked) break;
+      }
+      if (picked) break;
+    }
+    assert.ok(picked, "Actual viewport pointer route resolves a native source face");
+    assert.equal(picked.reference.occurrence_id, occurrence.occurrence_id);
+    assert.equal(picked.reference.definition_id, occurrence.definition_id);
+    assert.equal(picked.reference.session_id, scene.session_id);
+    assert.equal(picked.reference.scene_revision, scene.scene.revision);
+    assert.match(picked.face.face_id, /^step:[0-9]+$/);
+  }
+  await screenshot(`manufacturing-${stage}-source-inspection`);
+  return {reference:inspected, carrier, picked, adapter, display:definition.display,
+    canvasPicking: !manufacturingDiagnostic, hardwareRequired:requireHardwareGpu};
+}
 async function inspectSurfaceFinishAuthoring() {
   await until(
     () => evaluate("!!document.querySelector('[data-testid=\"surface-panel\"]')"),
@@ -994,14 +1065,16 @@ async function inspectManufacturing() {
     "real native token import",
     65000,
   );
+  const sourceInspection = scenario === "manufacturing"
+    ? await inspectManufacturingSource("imported") : null;
   await input('[data-testid="manufacturing-intent-path"]', "operator.intent.json");
   await click("manufacturing-debug-intent");
   await until(async () => {
     const current = await manufacturingState();
     return current.draft_changed && !current.working;
   }, "native bounded inert profile selection and single-use load");
-  await input('[data-testid="manufacturing-top_skin_thickness_mm"]', "0.6");
-  await input('[data-testid="manufacturing-bottom_skin_thickness_mm"]', "0.4");
+  await input('[data-testid="manufacturing-top_skin_thickness_mm"]', customManufacturingSource ? "0.8" : "0.6");
+  await input('[data-testid="manufacturing-bottom_skin_thickness_mm"]', customManufacturingSource ? "0.8" : "0.4");
   await input('[data-testid="manufacturing-infill_fraction"]', "0.25");
   const beforeInvalidLoad = await manufacturingState();
   const beforeInvalidMessage = await text("manufacturing-message");
@@ -1017,7 +1090,7 @@ async function inspectManufacturing() {
     await evaluate(
       "document.querySelector('[data-testid=\"manufacturing-top_skin_thickness_mm\"]').value",
     ),
-    "0.6",
+    customManufacturingSource ? "0.8" : "0.6",
     "Failed profile loading preserves the existing operator draft",
   );
   await click("manufacturing-apply");
@@ -1025,14 +1098,14 @@ async function inspectManufacturing() {
     const current = await manufacturingState();
     return current.selected_intent && !current.working && !current.draft_changed ? current : false;
   }, "full intent Apply");
-  assert.equal(state.selected_intent.recipe.top_skin_thickness_mm, 0.6);
-  assert.equal(state.selected_intent.recipe.bottom_skin_thickness_mm, 0.4);
+  assert.equal(state.selected_intent.recipe.top_skin_thickness_mm, customManufacturingSource ? 0.8 : 0.6);
+  assert.equal(state.selected_intent.recipe.bottom_skin_thickness_mm, customManufacturingSource ? 0.8 : 0.4);
   assert.equal(state.selected_intent.recipe.infill_fraction, 0.25);
-  assert.ok(
-    ["diagnostic_body_only", "complete_marlin"].includes(
-      state.selected_intent.printer.workflow.kind,
-    ),
-  );
+  assert.equal(state.selected_intent.printer.workflow.kind, "complete_marlin");
+  if (customManufacturingSource)
+    assert.deepEqual(state.selected_intent,
+      JSON.parse(await readFile(resolve(fixtureRoot, "operator.intent.json"), "utf8")),
+      "Custom-source acceptance preserves the entire unchanged complete-sparse intent");
   assert.equal(
     await evaluate("document.querySelector('[data-testid=\"manufacturing-apply\"]').disabled"),
     true,
@@ -1152,6 +1225,13 @@ async function inspectManufacturing() {
   }, "revision-captured read-only native Preflight");
   assert.equal(state.preflight.disposition, "admitted");
   assert.equal(state.preflight.software_only, true);
+  assert.ok(state.preflight.checks.length > 0, "Preflight exposes actual bounded checks");
+  for (const check of state.preflight.checks) {
+    assert.ok(check.code && check.message);
+    if (check.required) assert.equal(check.evidence, "certified",
+      `Admitted required check ${check.code} must have certified evidence`);
+  }
+  const preflight = state.preflight;
   assert.equal(state.project_revision, beforePreflight.project_revision);
   assert.deepEqual(state.selected_artifact, beforePreflight.selected_artifact);
   const appliedRevision = state.project_revision;
@@ -1585,6 +1665,31 @@ async function inspectManufacturing() {
     "fresh session-independent replay after restart",
     65000,
   );
+  assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
+  assert.equal(state.report.verified, true);
+  assert.deepEqual(state.selected_artifact, record);
+  if (customManufacturingSource)
+    assert.deepEqual(state.selected_intent,
+      JSON.parse(await readFile(resolve(fixtureRoot, "operator.intent.json"), "utf8")),
+      "Fresh engine retains unchanged complete-sparse intent");
+  const reopenedSourceInspection = scenario === "manufacturing"
+    ? await inspectManufacturingSource("fresh-engine") : null;
+  if (sourceInspection) {
+    for (const key of ["occurrence_id", "definition_id", "face_id"])
+      assert.equal(reopenedSourceInspection.reference[key], sourceInspection.reference[key],
+        `Source deletion and fresh-engine reopen preserve native ${key}`);
+    assert.notEqual(reopenedSourceInspection.reference.session_id, sourceInspection.reference.session_id);
+  }
+  await input('[data-testid="manufacturing-export-path"]', "export-fresh-engine");
+  await click("manufacturing-debug-export");
+  await until(async () => /Committed/.test(await text("manufacturing-message")),
+    "fresh-engine read-only exclusive four-file export");
+  for (const name of ["plan.json", "program.gcode", "provenance.json"]) {
+    assert.equal(await readFile(resolve(fixtureRoot, "export-fresh-engine", name), "utf8"),
+      exported[name], `Fresh engine exports identical immutable ${name}`);
+  }
+  assert.deepEqual(JSON.parse(await readFile(
+    resolve(fixtureRoot, "export-fresh-engine", "verification.json"), "utf8")), state.report);
   if (imageReliefScenario) {
     const beforePreview = (await surfaceState()).revision;
     await inspectCanonicalImagePreview(surface.document.images[0], true);
@@ -1597,6 +1702,9 @@ async function inspectManufacturing() {
   );
   await screenshot(surface ? `${scenario}-production-panel` : "manufacturing-production-panel");
   return {
+    sourceInspection,
+    reopenedSourceInspection,
+    preflight,
     record,
     report: state.report,
     provenance: state.provenance,

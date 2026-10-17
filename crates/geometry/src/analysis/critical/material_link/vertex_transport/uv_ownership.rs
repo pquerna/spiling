@@ -20,6 +20,25 @@ pub(super) enum OriginalCornerComparison {
     SphericalPole(PoleComparison),
 }
 
+/// Conservative source-set cover only, never corner/disk ownership.
+pub(super) enum SourcePositionOvercover {
+    Unavailable(&'static str),
+    EmptyOriginalDomain,
+    Bounded(Box3),
+}
+
+fn original_domain_intersection(
+    domain: &PreparedFaceTrimDomain<'_>,
+    cover: Box2,
+) -> Option<Box2> {
+    let original = domain.uv_bounds();
+    let clipped = std::array::from_fn::<_, 2, _>(|i| intersection(
+        cover[i], Interval { lo: original[i][0], hi: original[i][1] },
+    ));
+    let [Some(u), Some(v)] = clipped else { return None; };
+    Some([u, v])
+}
+
 type NativeUse = monstertruck_topology::trimmed::ChartCoedgeIdentity<
     monstertruck_modeling::Curve,
     monstertruck_modeling::Surface,
@@ -676,6 +695,39 @@ impl OriginalCornerComparison {
         }
     }
 
+    /// Fresh complete boundary-based source-position cover in the comparison's
+    /// actual coordinate chart. The variants keep their distinct original UV
+    /// and validated original-pole graph laws; neither borrows the other's map.
+    pub(super) fn source_position_overcover(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        recipe: &CornerRecipe,
+        vertex: VertexId<Point3>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SourcePositionOvercover, GeometryError> {
+        match self {
+            Self::NativeUv(comparison) => {
+                let Some(cover) = comparison.source_boundary_parameter_cover(
+                    domain, recipe, vertex, work, cancel,
+                )? else {
+                    return Ok(SourcePositionOvercover::Unavailable(
+                        "NativeUv complete reference boundary unavailable"));
+                };
+                let Some(clipped) = original_domain_intersection(domain, cover) else {
+                    return Ok(SourcePositionOvercover::EmptyOriginalDomain);
+                };
+                domain.native().face().with_surface(|surface| {
+                    crate::parametric::surface_piecewise_enclosure(
+                        surface, uv_box(clipped), work, cancel,
+                    ).map(|jet| SourcePositionOvercover::Bounded(jet.position))
+                })
+            }
+            Self::SphericalPole(comparison) =>
+                comparison.source_position_overcover(domain, recipe, vertex, work, cancel),
+        }
+    }
+
     pub(super) fn validates(
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
@@ -831,6 +883,53 @@ impl UvJointComparison {
             return Err(refusal("comparison cannot borrow a foreign actual NativeV"));
         }
         self.validate(domain, recipe)
+    }
+
+    /// Complete original-reference boundary overcover, NOT disk ownership.
+    /// Every bounded winding/Jordan interior lies in the Cartesian coordinate
+    /// box of its whole boundary. Include raw and completed source germs,
+    /// every selected outer-B trace, and the literal native joint connector
+    /// enclosure. No inverse, star surjectivity or source-P graph is asserted.
+    pub(super) fn source_boundary_parameter_cover(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        recipe: &CornerRecipe,
+        vertex: VertexId<Point3>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Box2>, GeometryError> {
+        work.charge(1, cancel)?;
+        self.validates(domain, recipe, vertex)?;
+        let mut cover = self.joint;
+        match self.authority {
+            EndpointAuthority::ExactNativeAdjacency => {}
+            EndpointAuthority::EndpointUncertaintyJoint { index, .. } => {
+                // validates checked this exact joint's two original NativeUse
+                // operands, vertex, kind and complete retained enclosure.
+                let joint = &domain.native().joints()[index];
+                cover = hull2(cover, joint.enclosure.map(|v| Interval {
+                    lo: v.lower, hi: v.upper,
+                }));
+            }
+            EndpointAuthority::SphericalPoleJoint { .. } => return Ok(None),
+        }
+        for (index, end) in [recipe.outgoing, recipe.incoming].into_iter().enumerate() {
+            work.charge(1, cancel)?;
+            cover = hull2(cover, end_curve(domain, end, UNIT, work, cancel)?.position);
+            cover = hull2(cover,
+                self.completed_end_jet(domain, recipe, index, UNIT, work, cancel)?.position);
+        }
+        for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
+            work.charge(1, cancel)?;
+            cover = hull2(cover, boundary_jet(
+                domain, recipe.outgoing, recipe.incoming, piece, UNIT, recipe.bulge,
+                work, cancel,
+            )?.uv);
+            cover = hull2(cover, self.star_jet(
+                domain, recipe, piece, Interval::point(1.0), UNIT, work, cancel,
+            )?.uv);
+        }
+        Ok(Some(cover))
     }
 
     fn germ_correction(&self, index: usize, s: Interval) -> Result<CorrectionJet, GeometryError> {
@@ -1805,6 +1904,11 @@ impl UvJointComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
+        let before = work.consumed();
+        let mut phase = "original NativeUv operand validation";
+        let mut active_boundary = None;
+        let mut active_joint = None;
+        let outcome = (|| {
         work.charge(1, cancel)?;
         self.validate(domain, recipe)?;
         if scratch < OWNERSHIP_STACK_BYTES {
@@ -1813,12 +1917,15 @@ impl UvJointComparison {
                 "closed comparison-star ownership scratch exceeds remaining allowance",
             ));
         }
+        phase = "complete closed boundary simplicity";
         if !self.simple_boundary(domain, recipe, work, cancel)? {
             return Err(ownership_failure(recipe, "simpleBoundary"));
         }
+        phase = "complete reference-star factored Jacobian";
         if !self.regular_closed_star(domain, recipe, work, cancel)? {
             return Err(ownership_failure(recipe, "factoredJac"));
         }
+        phase = "nonowning original collar inventory";
         let Some(collar) =
             OriginalCollar::for_enclosure(domain, recipe.outgoing.use_, work, cancel)?
         else {
@@ -1839,8 +1946,11 @@ impl UvJointComparison {
                 while pending != 0 {
                     pending -= 1;
                     let (range, depth) = stack[pending];
+                    active_boundary = Some((index, range, depth));
+                    phase = "foreign original trim/collar image";
                     work.charge(1, cancel)?;
                     let image = collar.other_collar_enclosure(index, range, work, cancel)?;
+                    phase = "reference homotopy vs foreign trim/collar exclusion";
                     if self.image_misses_box(domain, recipe, image, work, cancel)? {
                         continue;
                     }
@@ -1859,7 +1969,10 @@ impl UvJointComparison {
                 }
             }
         }
+        active_boundary = None;
         for joint in domain.native().joints() {
+            active_joint = Some((joint.incoming.coedge_index, joint.outgoing.coedge_index));
+            phase = "foreign original joint exclusion";
             work.charge(1, cancel)?;
             let owned = joint.vertex_id == self.vertex
                 && joint.incoming.face_id == domain.native().face().id()
@@ -1889,12 +2002,15 @@ impl UvJointComparison {
                 ));
             }
         }
+        active_joint = None;
+        phase = "owning outgoing/incoming central exclusion";
         if !self.owned_central_misses(domain, recipe, recipe.outgoing, work, cancel)?
             || recipe.incoming.edge != recipe.outgoing.edge
                 && !self.owned_central_misses(domain, recipe, recipe.incoming, work, cancel)?
         {
             return Err(ownership_failure(recipe, "ownedCentral"));
         }
+        phase = "strict Inside calibration source anchor";
         let anchor = self
             .star_jet(
                 domain,
@@ -1906,6 +2022,7 @@ impl UvJointComparison {
                 cancel,
             )?
             .uv;
+        phase = "strict original Inside classification";
         if domain.classify(uv_box(anchor), work, cancel)? != TrimClassification::Inside {
             return Err(ownership_failure(
                 recipe,
@@ -1913,6 +2030,12 @@ impl UvJointComparison {
             ));
         }
         Ok(true)
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "NativeUv disk ownership face={} coedges={:?} phase={phase} foreign_boundary={active_boundary:?} foreign_joint={active_joint:?}",
+            recipe.outgoing.use_.face,
+            [recipe.outgoing.use_.coedge, recipe.incoming.use_.coedge]
+        )))
     }
 }
 

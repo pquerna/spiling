@@ -16,7 +16,6 @@ pub(super) struct Admission {
     pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
     pub native_event_bands: Vec<[f64; 2]>,
     pub material_domains: BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
-    pub reuse_slabs: bool,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
     pub geometry_work: spiling_geometry::GeometryWorkBudget,
@@ -26,13 +25,13 @@ pub fn preflight(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreflightReport, ManufacturingError> {
-    Ok(admit(input, cancel)?.report)
+    Ok(admit(input, cancel)?.0.report)
 }
 
-pub(super) fn admit(
-    input: &CompilerInput<'_>,
+pub(super) fn admit<'a>(
+    input: &'a CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<Admission, ManufacturingError> {
+) -> Result<(Admission, super::PreparedGeometrySources<'a>), ManufacturingError> {
     check_cancel(cancel)?;
     let mut result = Admission {
         bounds: None,
@@ -40,7 +39,6 @@ pub(super) fn admit(
         native_bounds: BTreeMap::new(),
         native_event_bands: Vec::new(),
         material_domains: BTreeMap::new(),
-        reuse_slabs: true,
         surface_fields: BTreeMap::new(),
         geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_BOOLEAN_PAIRS as u64),
         report: PreflightReport {
@@ -155,6 +153,8 @@ pub(super) fn admit(
     let mut occurrence_bounds = BTreeMap::new();
     let mut surface_samples = 0usize;
     let envelope = input.intent.printer.build_envelope;
+    let mut geometry_sources = BTreeMap::new();
+    let mut remaining_prepared = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
     'occurrences: for occurrence in input.occurrences.iter().take(MAX_OCCURRENCES as usize) {
         check_cancel(cancel)?;
         if let Err(e) = occurrence.pose.validate() {
@@ -175,19 +175,38 @@ pub(super) fn admit(
             );
             continue;
         };
+        if !geometry_sources.contains_key(&occurrence.definition_id) {
+            let source = match spiling_geometry::prepare_geometry_source(
+                definition, remaining_prepared, cancel, &mut result.geometry_work,
+            ) {
+                Ok(source) => source,
+                Err(e) if matches!(e.code, GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit) => {
+                    return Err(super::native_error(e, "original material geometry preparation"));
+                }
+                Err(e) => {
+                    add(native_check_code(e.code), e.to_string(), Some(occurrence.occurrence_id), None);
+                    continue 'occurrences;
+                }
+            };
+            remaining_prepared = remaining_prepared.checked_sub(source.retained_bytes())
+                .ok_or_else(|| error(ManufacturingErrorCode::ResourceLimit,
+                    "aggregate original material geometry capacity exceeded"))?;
+            geometry_sources.insert(occurrence.definition_id.clone(), source);
+        }
+        let query_bytes = super::geometry_query_limit(&geometry_sources)?;
         let mut placed = AabbMm {
             min: [0.0; 3],
             max: [0.0; 3],
         };
         for axis in 0..3 {
             let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
-            let extent = match spiling_geometry::placed_material_bounds(
-                definition,
+            let extent = match geometry_sources[&occurrence.definition_id].placed_material_bounds(
                 occurrence.pose,
                 direction,
                 spiling_geometry::BoundsPolicy {
                     maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
                 },
+                query_bytes,
                 &mut result.geometry_work,
                 cancel,
             ) {
@@ -420,7 +439,7 @@ pub(super) fn admit(
         });
     }
     result.report.validate()?;
-    Ok(result)
+    Ok((result, geometry_sources))
 }
 
 /// Deep Compile-only discovery. An uncertainty endpoint remains bookkeeping
@@ -428,6 +447,7 @@ pub(super) fn admit(
 pub(super) fn resolve_native_events(
     input: &CompilerInput<'_>,
     admission: &mut Admission,
+    geometry_sources: &super::PreparedGeometrySources<'_>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
@@ -436,14 +456,15 @@ pub(super) fn resolve_native_events(
         maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,
     };
     let mut completed_bounds: Option<AabbMm> = None;
+    let query_bytes = super::geometry_query_limit(geometry_sources)?;
     for occurrence in input.occurrences {
         check_cancel(cancel)?;
         let bounds = admission.native_bounds[&occurrence.occurrence_id];
-        let analysis = spiling_geometry::analyze_placed_height_domain(
-            &input.definitions[&occurrence.definition_id],
+        let analysis = geometry_sources[&occurrence.definition_id].analyze_placed_height_domain(
             occurrence.pose,
             [bounds.min[2], bounds.max[2]],
             policy,
+            query_bytes,
             &mut admission.geometry_work,
             cancel,
         )
@@ -464,7 +485,6 @@ pub(super) fn resolve_native_events(
         // owns the material terminals. Covered raw candidates remain obligations
         // of the geometry capture rather than extra mandatory slicing planes.
         let domain = admission.material_domains[&occurrence.occurrence_id];
-        admission.reuse_slabs &= analysis.invariance().is_some();
         for bracket in analysis.material_plane_event_brackets_mm().chain(domain) {
             if !bracket.iter().all(|z| z.is_finite())
                 || bracket[0] > bracket[1]

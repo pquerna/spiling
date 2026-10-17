@@ -36,7 +36,9 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub use material_source::{PreparedMaterialSource, prepare_material_source};
+pub use material_source::{
+    PreparedGeometrySource, PreparedMaterialSource, prepare_geometry_source, prepare_material_source,
+};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
     placed_material_bounds,
@@ -47,7 +49,7 @@ pub use planar::{
     certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
 };
 pub use slab::analyze_height_domain;
-pub(crate) use slab::{HeightFunctional, analyze_height_domain_enclosed, analyze_slab, analyze_slab_captured};
+pub(crate) use slab::{HeightFunctional, analyze_slab};
 pub use voids::{
     NativeProjectedVoids, NativeProtectedVoidEnvelope, NativeVoidProjectionCapture,
     ProtectedVoidHeightScope, ProtectedVoidPolicy, capture_projected_voids,
@@ -273,6 +275,7 @@ pub struct SlabAnalysis {
     endpoint_strata: Vec<NativeEndpointStratum>,
     critical: Option<critical::CriticalSlabCertificate>,
     collar_complex: Option<collar::NativeCollarComplex>,
+    radial_slab: Option<joint::ClosedRadialSlab>,
     capture: SlabCapture,
 }
 
@@ -445,6 +448,13 @@ impl SlabAnalysis {
                 && proof.has_native_convex_section_topology_proof()
         })
     }
+    /// A fixed sampled source M is certified over this entire CLOSED request
+    /// by a complete native material cylinder, full world metric and exact
+    /// polygon calibration. This does not assert equal source sections, extend
+    /// the captured interval, or authorize reuse of realized D.
+    pub fn has_closed_radial_material_product(&self) -> bool {
+        self.radial_slab.is_some()
+    }
     pub fn has_transition_material(&self) -> bool {
         self.collar_complex.is_some() || !self.endpoint_strata.is_empty()
     }
@@ -471,6 +481,9 @@ impl SlabAnalysis {
         }
         if let Some(complex) = &self.collar_complex {
             bytes = bytes.saturating_add(complex.retained_bytes());
+        }
+        if let Some(radial) = &self.radial_slab {
+            bytes = bytes.saturating_add(std::mem::size_of_val(radial));
         }
         bytes = bytes.saturating_add(
             self.endpoint_strata

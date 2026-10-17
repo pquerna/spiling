@@ -210,6 +210,15 @@ impl<'m> ActualMaterialCoordinates<'m> {
     pub(in crate::analysis) fn sample_world_z(&self) -> f64 { self.capture.sample }
     pub(in crate::analysis) fn capture(&self) -> MaterialCoordinatesCapture { self.capture }
 
+    /// Intended transformed anchor minus every independent member of the
+    /// captured center box. The two occurrences are deliberately independent.
+    pub(in crate::analysis) fn center_offset_family(&self) -> [Interval; 2] {
+        self.capture.center.map(|bounds| {
+            let center = Interval { lo: bounds[0], hi: bounds[1] };
+            sub(center, center)
+        })
+    }
+
     /// The same intended center is subtracted algebraically. Do not subtract
     /// an independently rounded world-center midpoint from transformed points.
     pub(in crate::analysis) fn position(&self, source: [Interval; 3]) -> Result<[Interval; 3], GeometryError> {
@@ -229,9 +238,8 @@ impl<'m> ActualMaterialCoordinates<'m> {
         source: [Interval; 3],
     ) -> Result<[Interval; 3], GeometryError> {
         let mut position = self.position(source)?;
-        for (axis, value) in position[..2].iter_mut().enumerate() {
-            let center = Interval::new(self.capture.center[axis][0], self.capture.center[axis][1])?;
-            *value = finite(add(*value, sub(center, center)))?;
+        for (value, offset) in position[..2].iter_mut().zip(self.center_offset_family()) {
+            *value = finite(add(*value, offset))?;
         }
         Ok(position)
     }

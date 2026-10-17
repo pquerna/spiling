@@ -8,6 +8,7 @@
 //! can discharge an event.
 
 use super::joint::NativeSourceLeafReceipt;
+use super::slab::{HeightFunctional, clip_height_box};
 use super::{GeometryWorkBudget, SlabAnalysis};
 use crate::kernel::TrimClassification;
 use crate::parametric::{
@@ -755,52 +756,6 @@ fn split_axis(bounds: Box2, depth: u8, axis: usize) -> Result<[Box2; 2], Geometr
     Ok(children)
 }
 
-/// Interval Newton contraction in a height-monotone UV direction. Evaluation
-/// on the midpoint *strip* retains every value of the other parameter, so this
-/// is a whole-domain exclusion/contractor, not a sampled height test.
-/// Continuous-source images and one-sided first derivatives suffice; this
-/// scalar mean-value bound grants no C1, Hessian, normal or regularity authority.
-fn clip_height_box(
-    surface: &monstertruck_modeling::Surface,
-    mut uv: Box2,
-    matrix: Matrix,
-    pose: RigidPoseMm,
-    heights: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<Option<Box2>, GeometryError> {
-    for axis in 0..2 {
-        let jet = surface_piecewise_enclosure(surface, uv, work, cancel)?;
-        let h = super::placed::transformed_position(matrix, pose, jet.position)?[2];
-        if h.hi < heights[0] || h.lo > heights[1] {
-            return Ok(None);
-        }
-        let derivative = dot(matrix[2], if axis == 0 { jet.du } else { jet.dv });
-        if derivative.contains_zero() {
-            continue;
-        }
-        let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
-        let mut strip = uv;
-        strip[axis] = [mid, mid];
-        let value = surface_piecewise_enclosure(surface, strip, work, cancel)?;
-        let height = super::placed::transformed_position(matrix, pose, value.position)?[2];
-        let contracted = Interval::point(mid).add(
-            Interval {
-                lo: heights[0],
-                hi: heights[1],
-            }
-            .sub(height)
-            .div(derivative)?,
-        );
-        uv[axis][0] = uv[axis][0].max(contracted.lo);
-        uv[axis][1] = uv[axis][1].min(contracted.hi);
-        if uv[axis][0] > uv[axis][1] {
-            return Ok(None);
-        }
-    }
-    Ok(Some(uv))
-}
-
 fn spatial_split(
     uv: Box2,
     depth: u8,
@@ -1460,16 +1415,17 @@ fn certify_native_critical_collar_using(
             })?;
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0))) {
                 work.charge(1, cancel)?;
-                let Some(uv) = clip_height_box(surface, uv, matrix, pose, interval, work, cancel)
+                let Some((uv, jet)) = clip_height_box(
+                    surface, uv,
+                    HeightFunctional { direction: matrix[2], offset: Interval::point(pose.translation_mm[2]) },
+                    interval, work, cancel,
+                )
                     .map_err(|error| {
                         cell_context(error, "CLOSED height clipping", Some(face_index), uv, depth)
                     })?
                 else {
                     continue;
                 };
-                let jet = surface_piecewise_enclosure(surface, uv, work, cancel).map_err(|error| {
-                    cell_context(error, "surface enclosure", Some(face_index), uv, depth)
-                })?;
                 let world = super::placed::transformed_position(matrix, pose, jet.position)?;
                 if world[2].hi < interval[0] || world[2].lo > interval[1] {
                     continue;
@@ -1981,7 +1937,11 @@ fn try_port_face_cover(
     }
     let full_uv = super::slab::trim_parameter_box(domain)?;
     let image = face.with_surface(|surface| -> Result<_, GeometryError> {
-        let Some(uv) = clip_height_box(surface, full_uv, matrix, pose, interval, work, cancel)?
+        let Some((uv, _)) = clip_height_box(
+            surface, full_uv,
+            HeightFunctional { direction: matrix[2], offset: Interval::point(pose.translation_mm[2]) },
+            interval, work, cancel,
+        )?
         else {
             return Ok(None);
         };
@@ -5827,11 +5787,14 @@ mod tests {
             world_h.lo < world_h.hi,
             "nonrepresentable rational plus translation is never midpoint equality"
         );
-        let clipped = clip_height_box(
+        let functional = HeightFunctional {
+            direction: matrix[2],
+            offset: Interval::point(pose.translation_mm[2]),
+        };
+        let (clipped, _) = clip_height_box(
             &surface,
             uv,
-            matrix,
-            pose,
+            functional,
             [world_h.lo, world_h.hi],
             &mut work,
             &cancel,
@@ -5843,7 +5806,7 @@ mod tests {
             "the entire actual constant-height face survives its true interval event band"
         );
         assert!(
-            clip_height_box(&surface, uv, matrix, pose, [0.6, 0.7], &mut work, &cancel)
+            clip_height_box(&surface, uv, functional, [0.6, 0.7], &mut work, &cancel)
                 .unwrap()
                 .is_none()
         );
@@ -5880,14 +5843,17 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let pose = RigidPoseMm::IDENTITY;
         let matrix = super::super::placed::rotation(pose).unwrap();
+        let functional = HeightFunctional {
+            direction: matrix[2],
+            offset: Interval::point(pose.translation_mm[2]),
+        };
         let mut work = GeometryWorkBudget::new(100_000);
         let continuous = surface(false);
         let uv = [[0.0, 1.0]; 2];
-        let retained = clip_height_box(
+        let (retained, _) = clip_height_box(
             &continuous,
             uv,
-            matrix,
-            pose,
+            functional,
             [0.25, 0.75],
             &mut work,
             &cancel,
@@ -5902,8 +5868,7 @@ mod tests {
             clip_height_box(
                 &continuous,
                 uv,
-                matrix,
-                pose,
+                functional,
                 [10.0, 11.0],
                 &mut work,
                 &cancel,
@@ -5915,8 +5880,7 @@ mod tests {
             clip_height_box(
                 &surface(true),
                 uv,
-                matrix,
-                pose,
+                functional,
                 [0.25, 0.75],
                 &mut work,
                 &cancel,

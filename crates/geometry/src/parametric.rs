@@ -802,6 +802,229 @@ pub(crate) fn curve2d_parameter_spans<'a>(
     Ok(AxisSpans::new(knots, range))
 }
 
+/// C1 qualification of the literal UV source, followed by the native
+/// continuous-piecewise evaluator. A knot at a CLOSED endpoint is included:
+/// the evaluator retains both incident sides there, not a chosen smooth side.
+/// None means C1 was not proved; it never grants a normal-coordinate ribbon.
+pub(crate) fn curve2d_c1_jet(
+    curve: &monstertruck_modeling::Curve2D,
+    range: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<ChartCurveEnclosure>, GeometryError> {
+    if !curve2d_source_is_c1(curve, range, work, cancel)? {
+        return Ok(None);
+    }
+    curve2d_piecewise_jet(curve, range, work, cancel).map(Some)
+}
+
+/// Continuous C0 positions and bounded one-sided derivatives, not C1 authority.
+pub(crate) fn curve2d_piecewise_jet(
+    curve: &monstertruck_modeling::Curve2D,
+    range: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<ChartCurveEnclosure, GeometryError> {
+    let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
+        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+    );
+    let result = monstertruck_modeling::validated_curve2d_piecewise_jet(
+        curve, range, &mut native, cancel,
+    );
+    debit_native_work(work, native.consumed(), cancel)?;
+    let jet = result.map_err(native_error)?;
+    let adapt = |v: monstertruck_modeling::ValidatedInterval| Interval {
+        lo: v.lower,
+        hi: v.upper,
+    };
+    Ok(ChartCurveEnclosure {
+        position: jet.position.map(adapt),
+        derivative: jet.first.map(adapt),
+        second_derivative: jet.second.map(adapt),
+    })
+}
+
+fn curve2d_source_is_c1(
+    mut curve: &monstertruck_modeling::Curve2D,
+    range: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    use monstertruck_modeling::Curve2D;
+    let mut parameter = Interval::new(range[0], range[1])?;
+    for depth in 0..=32 {
+        work.charge(1, cancel)?;
+        match curve {
+            Curve2D::TrimmedCurve(wrapper) => {
+                if depth == 32 {
+                    break;
+                }
+                if !wrapper.orientation() {
+                    let (a, b) = wrapper.try_range_tuple().ok_or_else(|| {
+                        GeometryError::new(
+                            GeometryErrorCode::ConditioningFailure,
+                            "unbounded original UV trim",
+                        )
+                    })?;
+                    parameter = Interval::point(a).add(Interval::point(b)).sub(parameter);
+                }
+                // Native evaluation below checks the unchanged matrix and its
+                // denominator. A smooth admitted projective image preserves C1.
+                curve = wrapper.entity().curve().as_ref();
+            }
+            Curve2D::BsplineCurve(c) => {
+                return spline_curve2d_is_c1(
+                    c.knot_vector().as_ref(), c.degree(), c.control_points().len(),
+                    |i| {
+                        let p = c.control_points()[i];
+                        [p.x, p.y, 1.0]
+                    },
+                    parameter, work, cancel,
+                );
+            }
+            Curve2D::NurbsCurve(c) => {
+                return spline_curve2d_is_c1(
+                    c.knot_vector().as_ref(), c.degree(), c.control_points().len(),
+                    |i| {
+                        let p = c.control_points()[i];
+                        [p.x, p.y, p.z]
+                    },
+                    parameter, work, cancel,
+                );
+            }
+            Curve2D::Polyline(c) => {
+                let points = c.as_slice();
+                for i in 1..points.len().saturating_sub(1) {
+                    work.charge(1, cancel)?;
+                    if parameter.lo <= i as f64 && i as f64 <= parameter.hi {
+                        let control = |j: usize| [points[j].x, points[j].y, 1.0];
+                        if !exact_curve2d_c1_join(
+                            control(i - 1), control(i), control(i + 1),
+                            [i as f64 - 1.0, i as f64, i as f64 + 1.0],
+                            work, cancel,
+                        )? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                return Ok(true);
+            }
+            Curve2D::Line(_) | Curve2D::Conic(_) => return Ok(true),
+        }
+    }
+    Err(GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "original UV C1 wrapper nesting exceeds cap",
+    ))
+}
+
+fn spline_curve2d_is_c1(
+    knots: &[f64],
+    degree: usize,
+    count: usize,
+    control: impl Fn(usize) -> [f64; 3],
+    range: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    if degree == 0 || count <= degree || knots.len() != count + degree + 1 {
+        return Ok(false);
+    }
+    let mut start = knots.partition_point(|k| *k < range.lo);
+    while start < knots.len() && knots[start] <= range.hi {
+        work.charge(1, cancel)?;
+        let value = knots[start];
+        let mut end = start + 1;
+        while end < knots.len() && knots[end] == value {
+            work.charge(1, cancel)?;
+            end += 1;
+        }
+        if knots[degree] < value && value < knots[count] && end - start >= degree {
+            // At multiplicity p the two homogeneous endpoint values are the
+            // SAME control coefficient. p+1 is a jump, not C0 authority.
+            if end - start != degree || start == 0 || end >= knots.len() {
+                return Ok(false);
+            }
+            let Some(shared) = end.checked_sub(degree + 1) else {
+                return Ok(false);
+            };
+            if shared == 0 || shared + 1 >= count
+                || !exact_curve2d_c1_join(
+                    control(shared - 1), control(shared), control(shared + 1),
+                    [knots[start - 1], value, knots[end]], work, cancel,
+                )?
+            {
+                return Ok(false);
+            }
+        }
+        start = end;
+    }
+    Ok(true)
+}
+
+/// For H=(X,Y,W), d(X/W)=(dX W-X dW)/W². At a multiplicity-p
+/// join the degree and shared W² cancel. Cross-multiply the DISTINCT exact
+/// source knot lengths; neither normalized tangents nor a positive G1 scale
+/// proves this identity. No derivative division or rounded knot subtraction.
+fn exact_curve2d_c1_join(
+    left: [f64; 3],
+    center: [f64; 3],
+    right: [f64; 3],
+    knots: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    use crate::exact_coefficient::ExactCoefficient;
+    if left.into_iter().chain(center).chain(right).chain(knots)
+        .any(|v| !v.is_finite())
+    {
+        return Ok(false);
+    }
+    let Some(left_span) = ExactCoefficient::difference(knots[1], knots[0]) else {
+        return Ok(false);
+    };
+    let Some(right_span) = ExactCoefficient::difference(knots[2], knots[1]) else {
+        return Ok(false);
+    };
+    if left_span.sign() <= 0 || right_span.sign() <= 0 || center[2] == 0.0 {
+        return Ok(false);
+    }
+    for axis in 0..2 {
+        let determinant = |a: f64, b: f64, c: f64, d: f64,
+                           work: &mut GeometryWorkBudget|
+         -> Result<Option<ExactCoefficient>, GeometryError> {
+            let Some(mut first) = ExactCoefficient::point(a)
+                .product(&ExactCoefficient::point(b), work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(second) = ExactCoefficient::point(c)
+                .product(&ExactCoefficient::point(d), work, cancel)? else {
+                return Ok(None);
+            };
+            if first.subtract(&second).is_none() {
+                return Ok(None);
+            }
+            Ok(Some(first))
+        };
+        let Some(l) = determinant(center[axis], left[2], left[axis], center[2], work)? else {
+            return Ok(false);
+        };
+        let Some(r) = determinant(right[axis], center[2], center[axis], right[2], work)? else {
+            return Ok(false);
+        };
+        let Some(mut l) = l.product(&right_span, work, cancel)? else {
+            return Ok(false);
+        };
+        let Some(r) = r.product(&left_span, work, cancel)? else {
+            return Ok(false);
+        };
+        if l.subtract(&r).is_none() || l.sign() != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn surface_knots<'a>(
     surface: &'a Surface,
     work: &mut GeometryWorkBudget,
@@ -3041,6 +3264,111 @@ mod tests {
                 )
                 .unwrap(),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn literal_rational_uv_c1_uses_exact_weights_and_distinct_span_lengths() {
+        use monstertruck_modeling::{BsplineCurve, Curve2D, KnotVector, NurbsCurve, Vector3};
+        let curve = |right_x| Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 3.0, 3.0, 3.0]),
+            vec![
+                Vector3::new(-1.0, 1.0, 1.0),
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(2.0, 0.0, 2.0),
+                Vector3::new(right_x, 0.0, 3.0),
+                Vector3::new(8.0, 2.0, 2.0),
+            ],
+        )));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let exact = curve(5.0);
+        // The native STRICT structural policy alone cannot admit this C1 join.
+        assert!(monstertruck_modeling::validated_curve2d_jet(
+            &exact, [0.0, 3.0],
+            &mut monstertruck_modeling::ValidatedGeometryBudget::new(1_000_000),
+            &cancel,
+        ).is_err());
+        assert!(curve2d_c1_jet(&exact, [0.0, 3.0], &mut work, &cancel)
+            .unwrap().is_some());
+        let knot = curve2d_c1_jet(&exact, [1.0; 2], &mut work, &cancel)
+            .unwrap().unwrap();
+        assert!(knot.derivative[0].lo <= 1.0 && 1.0 <= knot.derivative[0].hi);
+        assert!(knot.derivative[1].lo <= 0.0 && 0.0 <= knot.derivative[1].hi);
+
+        // Same positive tangent direction, different native t speed: G1 only.
+        let g1 = curve(6.0);
+        for range in [[0.0, 3.0], [1.0; 2], [0.0, 1.0], [1.0, 3.0]] {
+            assert!(curve2d_c1_jet(&g1, range, &mut work, &cancel)
+                .unwrap().is_none());
+        }
+        let sides = curve2d_piecewise_jet(&g1, [1.0; 2], &mut work, &cancel).unwrap();
+        assert!(sides.derivative[0].lo <= 1.0 && 1.5 <= sides.derivative[0].hi);
+        assert!(curve2d_c1_jet(&g1, [0.0, 0.5], &mut work, &cancel)
+            .unwrap().is_some());
+
+        // A one-ULP coefficient residual is not an exact identity.
+        let near = curve(f64::from_bits(5.0_f64.to_bits() + 1));
+        assert!(curve2d_c1_jet(&near, [0.0, 3.0], &mut work, &cancel)
+            .unwrap().is_none());
+    }
+
+    #[test]
+    fn literal_uv_c1_preserves_reversed_posed_wrapper_and_structural_joins() {
+        use monstertruck_modeling::{
+            BsplineCurve, Curve2D, Invertible, KnotVector, Matrix3, Point2,
+            Processor, TrimmedCurve, Vector2,
+        };
+        let basis = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 3.0, 3.0, 3.0]),
+            vec![
+                Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+                Point2::new(1.0, 2.0), Point2::new(3.0, 2.0),
+            ],
+        ));
+        let mut wrapped = Processor::with_transform(
+            TrimmedCurve::new(Box::new(basis.clone()), (0.0, 3.0)),
+            Matrix3::from_translation(Vector2::new(4.0, -2.0)),
+        );
+        wrapped.invert();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let original = curve2d_c1_jet(&basis, [1.0; 2], &mut work, &cancel)
+            .unwrap().unwrap();
+        let reflected = curve2d_c1_jet(
+            &Curve2D::TrimmedCurve(wrapped), [2.0; 2], &mut work, &cancel,
+        ).unwrap().unwrap();
+        for axis in 0..2 {
+            let shift = [4.0, -2.0][axis];
+            let expected = original.position[axis].mid() + shift;
+            assert!(reflected.position[axis].lo <= expected
+                && expected <= reflected.position[axis].hi);
+            let derivative = -original.derivative[axis].mid();
+            assert!(reflected.derivative[axis].lo <= derivative
+                && derivative <= reflected.derivative[axis].hi);
+        }
+    }
+
+    #[test]
+    fn literal_uv_jump_refuses_piecewise_even_at_closed_knot() {
+        use monstertruck_modeling::{BsplineCurve, Curve2D, KnotVector, Point2};
+        let jump = Curve2D::BsplineCurve(BsplineCurve::new(
+            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
+            vec![
+                Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
+                Point2::new(2.0, 0.0), Point2::new(3.0, 0.0),
+            ],
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        for range in [[0.0, 2.0], [1.0; 2]] {
+            assert!(curve2d_c1_jet(&jump, range, &mut work, &cancel)
+                .unwrap().is_none());
+            assert_eq!(
+                curve2d_piecewise_jet(&jump, range, &mut work, &cancel)
+                    .unwrap_err().code,
+                GeometryErrorCode::SingularGeometry,
             );
         }
     }

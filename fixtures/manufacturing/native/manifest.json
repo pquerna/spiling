@@ -77,6 +77,34 @@
         ]
       ],
       "sha256": "d8aa2bcb2baa178dfaf886f8cfcd1af2d4aa61741b105606da222ceaac8048e9"
+    },
+    {
+      "depth_mm": 10.0,
+      "file": "off-grid-circular-tunnel.step",
+      "native_xz_vertices_mm": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          20.0,
+          0.0
+        ],
+        [
+          20.0,
+          7.85
+        ],
+        [
+          0.0,
+          7.85
+        ]
+      ],
+      "native_y_tunnel_circle_xz_mm": [
+        10.0,
+        1.37,
+        0.24
+      ],
+      "sha256": "8a8ad6e80f658696e5d88963f9bfffefb7cdf71d160fecc2e101d84346d665f6"
     }
   ],
   "schema_version": 1,

@@ -216,9 +216,16 @@ fn census_original_fiber(
         }
         let domain = source.face_domain(face_index, domain_bytes, work, cancel)?;
         let face = domain.native().face();
+        let before = work.consumed();
+        let mut phase = "original parameter spans";
+        let mut active_uv = domain.uv_bounds();
+        let mut active_depth = 0;
         let resolved = face.with_surface(|surface| -> Result<bool, GeometryError> {
             let spans = surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)?;
             for span in spans {
+                active_uv = span;
+                active_depth = 0;
+                phase = "whole original span regularity";
                 work.charge(1, cancel)?;
                 // Only whole-position exclusions are valid on an unqualified
                 // original C0 span. Subdivision cannot manufacture C1 authority.
@@ -234,9 +241,13 @@ fn census_original_fiber(
                             "original fiber census lost its bounded cover stack",
                         )
                     })?;
+                    active_uv = cell.uv;
+                    active_depth = cell.depth;
+                    phase = "original root trim classification";
                     if domain.classify(cell.uv, work, cancel)? == TrimClassification::Outside {
                         continue;
                     }
+                    phase = "original root position/first matrix";
                     let jet = if smooth {
                         surface_enclosure(surface, cell.uv, work, cancel)?
                     } else {
@@ -255,9 +266,12 @@ fn census_original_fiber(
                     if !smooth {
                         return Ok(false);
                     }
+                    phase = "uniform affine-family Krawczyk root";
                     match fiber_krawczyk(surface, cell.uv, &jet, fiber, work, cancel)? {
                         FiberNewton::Excluded => continue,
                         FiberNewton::Enclosure { uv, unique: true } => {
+                            phase = "strict original root ownership/crossing";
+                            active_uv = uv;
                             match qualify_fiber_root(
                                 surface,
                                 &domain,
@@ -309,7 +323,9 @@ fn census_original_fiber(
                 }
             }
             Ok(true)
-        })?;
+        }).map_err(|error| work.annotate_error(error, before, format_args!(
+            "original cylinder/fiber census face={face_index} phase={phase} uv={active_uv:?} depth={active_depth}"
+        )))?;
         if !resolved {
             return Ok(None);
         }

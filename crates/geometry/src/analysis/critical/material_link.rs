@@ -24,9 +24,12 @@ mod transport;
 mod vertex_fan;
 mod vertex_transport;
 mod wall;
-pub(super) use coverage::{ClosedRadialLinks, MAX_CORRECTION_BYTES};
+pub(super) use coverage::{
+    ClosedRadialLinks, MAX_CORRECTION_BYTES, source_f_point_is_retained,
+};
 pub(in crate::analysis) use radial_product::{
     ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+    certify_closed_radial_material_product_with_boundary_visitor,
 };
 use owned_uv_ribbon::OwnedUvRibbon;
 pub(crate) use transport::{
@@ -968,6 +971,28 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             .ok())
     }
 
+    /// Both bounds enclose the SAME coupled C3D(t)-S(gamma(t)) residual.
+    /// Independent range subtraction alone loses this whole-source coefficient
+    /// authority and can swamp a valid transverse collar as t varies.
+    fn forward_displacement(
+        &self,
+        spatial: [Interval; 3],
+        carrier: [Interval; 3],
+    ) -> Result<[Interval; 3], LocalGeometryRefusal> {
+        let displacement = std::array::from_fn(|axis| {
+            intersection(
+                exact_difference(spatial[axis], carrier[axis]),
+                Interval { lo: -self.position_error_mm, hi: self.position_error_mm },
+            )
+        });
+        let [Some(dx), Some(dy), Some(dz)] = displacement else {
+            return Err(LocalGeometryRefusal::ForwardResidual {
+                spatial, carrier, admitted_error_mm: self.position_error_mm,
+            });
+        };
+        Ok([dx, dy, dz])
+    }
+
     fn geometry_cell_proof(
         &self,
         embedding: &OwnedUvRibbon<'_, '_>,
@@ -1108,23 +1133,10 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             // Retained whole-forward error is an independent coefficient proof.
             // Intersect it with reevaluated component differences so subdivision
             // contracts derivatives without losing the original global bound.
-            let displacement = std::array::from_fn(|axis| {
-                intersection(
-                    exact_difference(curve.position[axis], boundary.position[axis]),
-                    Interval {
-                        lo: -self.position_error_mm,
-                        hi: self.position_error_mm,
-                    },
-                )
-            });
-            let [Some(dx), Some(dy), Some(dz)] = displacement else {
-                return Ok(Err(LocalGeometryRefusal::ForwardResidual {
-                    spatial: curve.position,
-                    carrier: boundary.position,
-                    admitted_error_mm: self.position_error_mm,
-                }));
+            let displacement = match self.forward_displacement(curve.position, boundary.position) {
+                Ok(displacement) => displacement,
+                Err(refusal) => return Ok(Err(refusal)),
             };
-            let displacement = [dx, dy, dz];
             let displacement_t: [Interval; 3] = std::array::from_fn(|axis| {
                 exact_difference(curve.derivative[axis], boundary_t[axis])
             });

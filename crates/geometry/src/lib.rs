@@ -5,6 +5,7 @@
 //! Native geometry admission and inspection, independent of sessions and applications.
 
 mod analysis;
+mod exact_coefficient;
 mod import;
 mod kernel;
 mod parametric;
@@ -32,14 +33,16 @@ pub use analysis::{
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
     PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
-    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedMaterialSource,
+    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedGeometrySource,
+    PreparedMaterialSource,
     ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest,
     SourceLeafRequest, analyze_height_domain, analyze_placed_height_domain,
     capture_projected_voids, certify_endpoint_ownership, certify_endpoint_stratum_ownership,
     certify_native_collar_incidence, certify_native_critical_collar,
     certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
     certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
-    material_projected_bounds, placed_bounds, placed_material_bounds, prepare_material_source,
+    material_projected_bounds, placed_bounds, placed_material_bounds, prepare_geometry_source,
+    prepare_material_source,
     projected_bounds, projected_protected_void_envelopes,
 };
 pub use kernel::Definition;
@@ -58,7 +61,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "a6ea3992eb3a6be5615741220bc64318e02e4fef";
+pub const KERNEL_REVISION: &str = "d5de658a8b589efdeb78970d79a0563c789c268a";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward

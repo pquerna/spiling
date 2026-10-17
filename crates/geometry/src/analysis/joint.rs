@@ -29,7 +29,11 @@ use std::sync::atomic::AtomicBool;
 mod planar;
 use planar::{exact_cycle_mapping, feature_clearance};
 mod radial_region;
-use radial_region::{ActualPolygonRadialRegion, certify_actual_polygon_radial_region};
+use radial_region::certify_actual_polygon_radial_region;
+mod radial_metric;
+pub(super) use radial_metric::{
+    ClosedRadialSlab, certify_closed_radial_slab, seal_closed_radial_slab_from_complete_metric,
+};
 
 const MAX_SCRATCH: usize = 64 * 1024 * 1024;
 
@@ -126,6 +130,17 @@ impl NativeUnionSourceCapture {
     }
 }
 
+/// Compact final-candidate authority; no source, matrix or contour is retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NativeRadialLeaf {
+    product_sha256: [u8; 32],
+    axis_sha256: [u8; 32],
+    kind: super::critical::RadialRegionKind,
+    center: [[f64; 2]; 2],
+    outer_kernel_radius_mm: f64,
+    inner_cover_radius_mm: f64,
+}
+
 /// An independently proved source-M material CORE contributor. With no extra
 /// outgoing endpoint strata this also covers the CLOSED slab; otherwise only
 /// the core closure is claimed. No contour coordinates are retained.
@@ -149,6 +164,7 @@ pub struct NativeSourceLeafReceipt {
     regular_boundary_tube_mm: Option<f64>,
     native_world_z_invariant: bool,
     native_convex_section_topology: bool,
+    radial_product: Option<NativeRadialLeaf>,
     sample_loops: Arc<Vec<NativeSourceLoopCapture>>,
     rectangle: Option<Arc<NativeRectangleLeafWitness>>,
 }
@@ -1532,6 +1548,7 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.regular_boundary_tube_mm == b.regular_boundary_tube_mm
         && a.native_world_z_invariant == b.native_world_z_invariant
         && a.native_convex_section_topology == b.native_convex_section_topology
+        && a.radial_product == b.radial_product
 }
 fn hash_source(hash: &mut Sha256, source: &NativeUnionSourceCapture) {
     hash.update(source.occurrence_id().get().to_le_bytes());
@@ -1577,6 +1594,40 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
     if let Some(bound) = leaf.regular_boundary_tube_mm {
         hash.update(bound.to_bits().to_le_bytes());
     }
+    hash.update([u8::from(leaf.radial_product.is_some())]);
+    if let Some(radial) = leaf.radial_product {
+        hash.update(radial.product_sha256);
+        hash.update(radial.axis_sha256);
+        hash.update([radial.kind as u8]);
+        for value in radial.center.into_iter().flatten().chain([
+            radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm,
+        ]) {
+            hash.update(value.to_bits().to_le_bytes());
+        }
+    }
+}
+
+fn radial_leaf_contact(
+    previous: &NativeSourceLeafReceipt,
+    current: &NativeSourceLeafReceipt,
+    interface: f64,
+) -> bool {
+    let (Some(a), Some(b)) = (previous.radial_product, current.radial_product) else {
+        return false;
+    };
+    previous.source.same_material_recipe(&current.source)
+        && previous.pose() == current.pose()
+        && previous.proof_kind == NativeSourceLeafProofKind::ClosedSlab
+        && current.proof_kind == NativeSourceLeafProofKind::ClosedSlab
+        && previous.world_height_interval_mm[1].to_bits() == interface.to_bits()
+        && current.world_height_interval_mm[0].to_bits() == interface.to_bits()
+        && a.axis_sha256 == b.axis_sha256
+        && a.center == b.center
+        && a.kind == b.kind
+        // Same source G and exact cut bind the physical native interface;
+        // this separate strict band proves positive ACTUAL polygon attachment.
+        && a.inner_cover_radius_mm.max(b.inner_cover_radius_mm)
+            < a.outer_kernel_radius_mm.min(b.outer_kernel_radius_mm)
 }
 
 struct NativeUnionLeafDependency {
@@ -2315,6 +2366,9 @@ impl NativeUnionBindingLedger {
                             "rounded nonorthogonal cross-height material needs an actual joint native interface proof",
                         ));
                     }
+                    if radial_leaf_contact(previous, current, interface) {
+                        continue;
+                    }
                     let convex = (previous.native_convex_section_topology
                         || current.native_convex_section_topology)
                         && previous.sample_loops.len() == 1
@@ -2344,7 +2398,21 @@ impl NativeUnionBindingLedger {
                         if !proved {
                             return Err(error(
                                 GeometryErrorCode::AnalysisIndeterminate,
-                                "cross-height critical source interface lacks the actual native coface/port ownership proof",
+                                format!(
+                                    "cross-height critical source interface lacks the actual native coface/port ownership proof; cut={interface:?}; previous={:?}/{:?}/radial={:?}; current={:?}/{:?}/radial={:?}; radial_pair={:?}",
+                                    previous.world_height_interval_mm, previous.proof_kind,
+                                    previous.radial_product.map(|p| p.kind),
+                                    current.world_height_interval_mm, current.proof_kind,
+                                    current.radial_product.map(|p| p.kind),
+                                    previous.radial_product.zip(current.radial_product).map(|(a, b)| (
+                                        previous.source.same_material_recipe(&current.source),
+                                        previous.pose() == current.pose(),
+                                        a.axis_sha256 == b.axis_sha256, a.center == b.center,
+                                        a.kind == b.kind,
+                                        a.inner_cover_radius_mm.max(b.inner_cover_radius_mm),
+                                        a.outer_kernel_radius_mm.min(b.outer_kernel_radius_mm),
+                                    )),
+                                ),
                             ));
                         }
                     } else if convex {
@@ -3096,6 +3164,10 @@ pub(super) fn native_sample_hash(
     ] {
         hash.update(value.to_bits().to_le_bytes());
     }
+    if let Some(radial) = &analysis.radial_slab {
+        hash.update(radial.product.identity_sha256());
+        hash.update(radial.bound_mm.to_bits().to_le_bytes());
+    }
     hash.update((analysis.endpoint_strata().len() as u64).to_le_bytes());
     for stratum in analysis.endpoint_strata() {
         work.charge(1, cancel)?;
@@ -3436,6 +3508,29 @@ fn certify_source_leaf(
             cancel,
         )?,
     };
+    let radial_product = if let Some(radial) = &analysis.radial_slab {
+        if !radial.product.matches_world(definition, pose, interval, z)
+            || !radial.matches_native(&analysis.section.loops, work, cancel)?
+        {
+            return Err(error(GeometryErrorCode::InvalidGeometry,
+                "closed radial product does not bind the exact native source/pose/scope/sample"));
+        }
+        let Some(region) = certify_actual_polygon_radial_region(
+            actual_used_source_loops, radial.product.coordinates(),
+            radial.product.kind(), work, cancel,
+        )? else {
+            return Err(error(GeometryErrorCode::AnalysisIndeterminate,
+                "actual used source-M polygon has no matching closed radial region"));
+        };
+        Some(NativeRadialLeaf {
+            product_sha256: radial.product.identity_sha256(),
+            axis_sha256: radial.product.coordinates().axis_sha256(),
+            kind: radial.product.kind(),
+            center: radial.product.coordinates().world_center_enclosure(),
+            outer_kernel_radius_mm: region.outer_kernel_radius_mm(),
+            inner_cover_radius_mm: region.inner_cover_radius_mm(),
+        })
+    } else { None };
     let sample_region_error_mm = Interval::point(analysis.section.achieved_chord_error_mm())
         .add(Interval::point(analysis.section.achieved_plane_error_mm()))
         .add(Interval::point(analysis.section.boolean_tolerance_mm))
@@ -3474,7 +3569,10 @@ fn certify_source_leaf(
         lo: -analysis.section.achieved_plane_error_mm(),
         hi: analysis.section.achieved_plane_error_mm(),
     });
-    if !analysis.event_neighborhoods().is_empty() {
+    // The complete CLOSED native cylinder atlas rules out world-height events
+    // on both cuts, including conservative source stationary-root overcovers.
+    // It does not discharge the separate actual-coface collar fold below.
+    if radial_product.is_none() && !analysis.event_neighborhoods().is_empty() {
         work.charge(32, cancel)?;
         let row = super::placed::rotation(pose)?[2];
         let bounds = definition.bounds_mm();
@@ -3577,6 +3675,7 @@ fn certify_source_leaf(
         native_world_z_invariant: analysis.invariance.is_some() || rectangle.is_some(),
         rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
+        radial_product,
         sample_coordinate_error_mm: exact_rectangle_bound
             .is_none()
             .then_some(policy.candidate_coordinate_error_mm),
@@ -4077,6 +4176,7 @@ pub fn certify_native_union(
                     })
                     && !leaf.native_world_z_invariant
                     && !leaf.native_convex_section_topology
+                    && !(occurrences.len() == 1 && leaf.radial_product.is_some())
                     && (leaf.is_positive() || analysis.closed_shape_error_mm().is_none())
                 {
                     return Err(original_pair_error(

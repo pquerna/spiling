@@ -10,12 +10,15 @@ use super::*;
 use crate::analysis::source_incidence::CoedgeUse;
 use monstertruck_modeling::{Curve, Point3};
 use monstertruck_topology::{EdgeId, VertexId};
+use std::sync::atomic::Ordering;
 
 mod prepared;
 mod uv_ownership;
 pub(crate) use prepared::PreparedSourceVertexPlans;
 pub(super) use prepared::SourceVertexPlan;
-use uv_ownership::{OriginalCornerComparison, UvComparisonPreparation, UvPrepareStage};
+use uv_ownership::{
+    OriginalCornerComparison, SourcePositionOvercover, UvComparisonPreparation, UvPrepareStage,
+};
 
 type Box3 = [Interval; 3];
 type Box2 = [Interval; 2];
@@ -44,6 +47,14 @@ struct ConeCell {
     parameter: [f64; 2],
 }
 
+/// Fixed-size failure context only; it grants no positional or corner proof.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CompletePositionCoverFailure {
+    pub(super) phase: &'static str,
+    pub(super) source_face: usize,
+    pub(super) position: Box3,
+}
+
 /// A complete immutable source star, with the actual finite outer boundary
 /// and a coefficient-bounded source correspondence on every cone sector.
 /// All retained cells belong to one original definition and NativeV.
@@ -56,6 +67,7 @@ pub(super) struct SourceVertexTransportPlan<'d> {
     recipes: Vec<CornerRecipe>,
     cells: Vec<ConeCell>,
     source_error_mm: f64,
+    source_geometry_qualified: AtomicBool,
 }
 
 /// Query authority is separate from the geometry-only realization choice.
@@ -489,6 +501,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         recipes,
                         cells,
                         source_error_mm,
+                        source_geometry_qualified: AtomicBool::new(false),
                     }));
                 }
                 let next = fraction * 0.5;
@@ -542,6 +555,100 @@ impl<'d> SourceVertexTransportPlan<'d> {
             )?;
         }
         Ok(())
+    }
+
+    /// Conservative complete-set exclusion, not corner ownership. Removed F
+    /// is an exact subset of each original incident face, irrespective of how
+    /// a reference star parametrizes that subset. Bound the WHOLE original
+    /// carrier domain first; if needed, restrict to the Cartesian box of the
+    /// complete literal reference boundary. Then check every added cone G cell
+    /// with its full radial parameter. Neither cover asserts corner ownership
+    /// or promotes a `cell.source` image to domain authority.
+    pub(super) fn complete_incident_positions_miss(
+        &self,
+        source: OriginalTrimSource<'_, 'd>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        failed_cover: &mut Option<CompletePositionCoverFailure>,
+        misses: &mut dyn FnMut(Box3) -> Result<bool, GeometryError>,
+    ) -> Result<bool, GeometryError> {
+        let before = work.consumed();
+        let mut phase = "immutable original definition binding";
+        let mut active_face = None;
+        *failed_cover = None;
+        let outcome = (|| {
+            work.charge(1, cancel)?;
+            if !std::ptr::eq(source.definition(), self.definition) {
+                return Err(refusal("source corner position cover lost its original definition owner"));
+            }
+            let scratch = remaining_bytes.checked_sub(CONICAL_STACK_BYTES).ok_or_else(|| {
+                GeometryError::new(GeometryErrorCode::ResourceLimit,
+                    "complete incident-face position cover exceeds scratch allowance")
+            })?;
+            for recipe in &self.recipes {
+                phase = "complete original incident carrier domain";
+                let face = recipe.outgoing.use_.face;
+                active_face = Some(face);
+                work.charge(1, cancel)?;
+                let domain = source.face_domain(face, scratch, work, cancel)?;
+                let position = domain.native().face().with_surface(|surface| {
+                    crate::parametric::surface_piecewise_enclosure(
+                        surface, domain.uv_bounds(), work, cancel,
+                    ).map(|jet| jet.position)
+                })?;
+                if misses(position)? { continue; }
+                *failed_cover = Some(CompletePositionCoverFailure {
+                    phase: "whole incident carrier overlaps",
+                    source_face: face, position,
+                });
+                phase = "complete original comparison source-position overcover";
+                let Some(comparison) = recipe.comparison.as_ref() else {
+                    *failed_cover = Some(CompletePositionCoverFailure {
+                        phase: "whole carrier overlaps; original comparison unavailable",
+                        source_face: face, position,
+                    });
+                    return Ok(false);
+                };
+                match comparison.source_position_overcover(
+                    &domain, recipe, self.vertex, work, cancel,
+                )? {
+                    SourcePositionOvercover::Unavailable(reason) => {
+                        *failed_cover = Some(CompletePositionCoverFailure {
+                            phase: reason, source_face: face, position,
+                        });
+                        return Ok(false);
+                    }
+                    SourcePositionOvercover::EmptyOriginalDomain => continue,
+                    SourcePositionOvercover::Bounded(position) => {
+                        if !misses(position)? {
+                            *failed_cover = Some(CompletePositionCoverFailure {
+                                phase: "complete original comparison source-position box overlaps",
+                                source_face: face, position,
+                            });
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            phase = "complete added cone G radial supports";
+            for cell in &self.cells {
+                work.charge(1, cancel)?;
+                if !misses(cell.realized)? {
+                    *failed_cover = Some(CompletePositionCoverFailure {
+                        phase: "complete added cone G support overlaps",
+                        source_face: self.recipes[cell.recipe].outgoing.use_.face,
+                        position: cell.realized,
+                    });
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "complete source corner position cover vertex_mm={:?} source_face={active_face:?} phase={phase}",
+            self.point
+        )))
     }
 
     pub(super) fn visit_position_supports(
@@ -618,6 +725,11 @@ impl<'d> SourceVertexTransportPlan<'d> {
         Ok(())
     }
 
+    /// Retain only a successful qualification of this immutable source star.
+    /// No slab, pose, radial field or metric participates in that theorem.
+    /// Fixed inline storage avoids retained growth. Do not hold a cache lock
+    /// across native geometry traversal; concurrent first use may recompute,
+    /// with all actual work still charged to its caller.
     fn qualify_geometry(
         &self,
         source: OriginalTrimSource<'_, 'd>,
@@ -625,6 +737,30 @@ impl<'d> SourceVertexTransportPlan<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        if !std::ptr::eq(source.definition(), self.definition) {
+            return Err(refusal("qualified source star lost its immutable definition owner"));
+        }
+        if self.source_geometry_qualified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.qualify_geometry_fresh(source, remaining_bytes, work, cancel)?;
+        self.source_geometry_qualified.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn qualify_geometry_fresh(
+        &self,
+        source: OriginalTrimSource<'_, 'd>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        let before = work.consumed();
+        let mut phase = "immutable original definition binding";
+        let mut active_recipe = None;
+        let mut active_cell = None;
+        let outcome = (|| {
         if !std::ptr::eq(source.definition(), self.definition) {
             return Err(refusal(
                 "source conical geometry lost its original definition owner",
@@ -640,6 +776,10 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 )
             })?;
         for (index, recipe) in self.recipes.iter().enumerate() {
+            active_recipe = Some((index, recipe.outgoing.use_.face,
+                [recipe.outgoing.use_.coedge, recipe.incoming.use_.coedge]));
+            active_cell = None;
+            phase = "source corner face domain";
             work.charge(1, cancel)?;
             let face = recipe.outgoing.use_.face;
             let domain = source.face_domain(face, scratch, work, cancel)?;
@@ -649,6 +789,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     "relative source UV ownership exceeds coexistent domain storage",
                 )
             })?;
+            phase = "active collar source-P graph transversality";
             if !collar_graph_transverse(&domain, recipe.outgoing, self.rows, work, cancel)?
                 || !collar_graph_transverse(&domain, recipe.incoming, self.rows, work, cancel)?
             {
@@ -657,6 +798,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     "active source vertex outside-G collar is not a proved source-P graph",
                 ));
             }
+            phase = "convex affine reference-star ownership";
             let convex_owned = convex_affine_star_inside(
                 &domain,
                 recipe.outgoing,
@@ -668,9 +810,14 @@ impl<'d> SourceVertexTransportPlan<'d> {
             let comparison_owned = if convex_owned {
                 false
             } else if let Some(comparison) = &recipe.comparison {
+                phase = match comparison {
+                    OriginalCornerComparison::NativeUv(_) => "original NativeUv comparison disk ownership",
+                    OriginalCornerComparison::SphericalPole(_) => "original SphericalPole comparison disk ownership",
+                };
                 comparison.validates(&domain, recipe, self.vertex)?;
                 comparison.disk_owned(&domain, recipe, owned_scratch, work, cancel)?
             } else {
+                phase = "original comparison ownership refusal diagnostic";
                 // Reconstruct full finite diagnostics ONLY on this refusal
                 // path; successful plans retain no large diagnostic payload.
                 match OriginalCornerComparison::prepare(
@@ -704,16 +851,20 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     "relative source UV disk did not retain complete ownership authority",
                 ));
             }
+            phase = "source sphere-chart qualification";
             let sphere_chart = domain.native().face().with_surface(|surface| {
                 source_chart::SphereChart::new(surface, &domain, work, cancel)
             })?;
             for cell in self.cells.iter().filter(|cell| cell.recipe == index) {
+                active_cell = Some((cell.parameter, cell.recipe));
+                phase = "source corner cell";
                 work.charge(1, cancel)?;
                 let t = Interval {
                     lo: cell.parameter[0],
                     hi: cell.parameter[1],
                 };
                 if !comparison_owned {
+                    phase = "exact outer source/G cutover ownership";
                     let boundary = boundary_jet(
                         &domain,
                         recipe.outgoing,
@@ -738,6 +889,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             "active source vertex outer trace lacks unchanged/paired-G collar cutover ownership"));
                     }
                 }
+                phase = "active source-P graph normal transversality";
                 let transverse = if let Some(chart) = &sphere_chart {
                     // This is a whole physical SOURCE enclosure, including the
                     // comparison carrier homotopy. Its ambient box need not lie
@@ -814,6 +966,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     hi: allowance,
                 })
             });
+        phase = "active cone whole-source nonincident separation";
         if !separate_nonincident(source, &self.recipes, support, scratch, work, cancel)? {
             return Err(self.gate_failure(
                 self.recipes[0].outgoing.use_.face,
@@ -821,6 +974,11 @@ impl<'d> SourceVertexTransportPlan<'d> {
             ));
         }
         Ok(())
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "source corner geometry vertex_mm={:?} recipe_face_coedges={active_recipe:?} cell={active_cell:?} phase={phase}",
+            self.point
+        )))
     }
 
     /// The caller reserves local plan storage before lending query scratch.
