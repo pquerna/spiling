@@ -76,6 +76,31 @@ test("Rust-owned algebraic outer/hole section returns borrowed f64 coordinates",
   );
 });
 
+test("section winding is independent of tangential plane origin", async () => {
+  const baseline = await decodeSection(golden, metadata, summary, fixture.loops, expected);
+  const bytes = golden.slice(0);
+  const data = new DataView(bytes);
+  const shifted = structuredClone(summary);
+  shifted.plane.origin_mm = [1e9, -1e9, 4];
+  shifted.frame.origin_mm = [1e9, -1e9, 4];
+  data.setFloat64(16, 1e9, true);
+  data.setFloat64(24, -1e9, true);
+  for (let index = 0; index < baseline.pointsRelativeMm.length; index += 3) {
+    const offset = baseline.pointsRelativeMm.byteOffset + index * 8;
+    data.setFloat64(offset, data.getFloat64(offset, true) - 1e9, true);
+    data.setFloat64(offset + 8, data.getFloat64(offset + 8, true) + 1e9, true);
+  }
+  const decoded = await decodeSection(
+    bytes, await rehash(bytes, metadata), shifted, fixture.loops, expected,
+  );
+  const world = (points: Float64Array, origin: number[]) =>
+    Array.from(points, (value, index) => value + origin[index % 3]!);
+  assert.deepEqual(
+    world(decoded.pointsRelativeMm, decoded.planeOriginMm),
+    world(baseline.pointsRelativeMm, baseline.planeOriginMm),
+  );
+});
+
 test("Rust-owned multichunk diagnostic preserves complete contiguous loops", async () => {
   const identity = {
     session_id: multichunk.summary.session_id,

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-use super::{LAYER_QUANTIZATION_MM, forward, rotate, rotate_inverse, surface};
+use super::{LAYER_QUANTIZATION_MM, surface};
 use crate::{CompilerInput, check_cancel, error};
 use spiling_contracts::geometry::{
-    AabbMm, FaceCarrier, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId,
+    AabbMm, GeometryErrorCode, MAX_DEFINITIONS, MAX_OCCURRENCES, OccurrenceId,
 };
 use spiling_contracts::manufacturing::*;
 use std::collections::BTreeMap;
@@ -13,50 +13,73 @@ use std::sync::atomic::AtomicBool;
 pub(super) struct Admission {
     pub bounds: Option<AabbMm>,
     pub horizontal_events: Vec<f64>,
-    pub reuse_slabs: bool,
+    pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
+    pub native_event_bands: Vec<[f64; 2]>,
+    pub material_domains: BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
-    pub schedule: Option<Vec<super::LayerElevation>>,
+    pub geometry_work: spiling_geometry::GeometryWorkBudget,
 }
 
 pub fn preflight(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<PreflightReport, ManufacturingError> {
-    Ok(admit(input, cancel)?.report)
+    Ok(admit(input, cancel)?.0.report)
 }
 
-pub(super) fn admit(
-    input: &CompilerInput<'_>,
+pub(super) fn admit<'a>(
+    input: &'a CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<Admission, ManufacturingError> {
+) -> Result<(Admission, super::PreparedGeometrySources<'a>), ManufacturingError> {
     check_cancel(cancel)?;
     let mut result = Admission {
         bounds: None,
         horizontal_events: Vec::new(),
-        reuse_slabs: true,
+        native_bounds: BTreeMap::new(),
+        native_event_bands: Vec::new(),
+        material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
-        schedule: None,
+        geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_BOOLEAN_PAIRS as u64),
         report: PreflightReport {
             input_revision: input.revision,
-            eligible: true,
+            disposition: PreflightDisposition::Admitted,
             software_only: true,
             checks: Vec::new(),
         },
     };
+    let mut truncated = false;
     let mut pending_faces = Vec::new();
     let mut add = |code: &str, message: String, occurrence_id, face_id| {
-        result.report.eligible = false;
-        // Reserve two final checks and one truncation diagnostic. Never publish
-        // an eligible report by discarding an error beyond the bounded display.
-        if result.report.checks.len() < 253 {
+        let evidence = match code {
+            "native_analysis_indeterminate"
+            | "native_conditioning_failure"
+            | "unresolved_native_event" => PreflightEvidence::Indeterminate,
+            "native_unsupported_geometry"
+            | "native_unsupported_conversion"
+            | "unsupported_surface" => PreflightEvidence::Unsupported,
+            _ => PreflightEvidence::Failed,
+        };
+        if result.report.disposition != PreflightDisposition::Refused {
+            result.report.disposition = if evidence == PreflightEvidence::Indeterminate {
+                PreflightDisposition::Unresolved
+            } else {
+                PreflightDisposition::Refused
+            };
+        }
+        // Truncating required failures never restores admission.
+        if result.report.checks.len() < 252 {
             result.report.checks.push(PreflightCheck {
                 code: code.into(),
                 severity: PreflightSeverity::Error,
+                evidence,
+                required: true,
                 message,
                 occurrence_id,
                 face_id,
             });
+        } else {
+            truncated = true;
         }
     };
     if let Err(e) = input.intent.validate() {
@@ -130,7 +153,9 @@ pub(super) fn admit(
     let mut occurrence_bounds = BTreeMap::new();
     let mut surface_samples = 0usize;
     let envelope = input.intent.printer.build_envelope;
-    for occurrence in input.occurrences.iter().take(MAX_OCCURRENCES as usize) {
+    let mut geometry_sources = BTreeMap::new();
+    let mut remaining_prepared = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
+    'occurrences: for occurrence in input.occurrences.iter().take(MAX_OCCURRENCES as usize) {
         check_cancel(cancel)?;
         if let Err(e) = occurrence.pose.validate() {
             add(
@@ -150,82 +175,89 @@ pub(super) fn admit(
             );
             continue;
         };
-        for face in definition.faces() {
-            check_cancel(cancel)?;
-            match &face.carrier {
-                FaceCarrier::Plane { origin_mm, normal } => {
-                    let n = rotate(&occurrence.pose, *normal);
-                    if n[0].hypot(n[1]) <= 1e-10 {
-                        let z = forward(&occurrence.pose, *origin_mm)[2];
-                        if let Err(position) = result
-                            .horizontal_events
-                            .binary_search_by(|event| event.total_cmp(&z))
-                        {
-                            if result.horizontal_events.len() > MAX_PRINT_LAYERS as usize {
-                                add("event_limit", "Distinct native horizontal events exceed the bounded layer schedule".into(), Some(occurrence.occurrence_id), Some(face.face_id.clone()));
-                            } else {
-                                result.horizontal_events.insert(position, z);
-                            }
-                        }
-                        result.reuse_slabs &= n[0] == 0.0 && n[1] == 0.0;
-                    } else {
-                        result.reuse_slabs &= n[2] == 0.0;
-                        if n[2] != 0.0 && pending_faces.len() < 16 {
-                            pending_faces.push((occurrence.occurrence_id, face.face_id.clone()));
-                        }
-                    }
+        if !geometry_sources.contains_key(&occurrence.definition_id) {
+            let source = match spiling_geometry::prepare_geometry_source(
+                definition, remaining_prepared, cancel, &mut result.geometry_work,
+            ) {
+                Ok(source) => source,
+                Err(e) if matches!(e.code, GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit) => {
+                    return Err(super::native_error(e, "original material geometry preparation"));
                 }
-                FaceCarrier::Cylinder { axis_direction, .. } => {
-                    let axis = rotate(&occurrence.pose, *axis_direction);
-                    result.reuse_slabs &= axis[0] == 0.0 && axis[1] == 0.0;
-                    if axis[0].hypot(axis[1]) != 0.0 && pending_faces.len() < 16 {
-                        pending_faces.push((occurrence.occurrence_id, face.face_id.clone()));
-                    }
+                Err(e) => {
+                    add(native_check_code(e.code), e.to_string(), Some(occurrence.occurrence_id), None);
+                    continue 'occurrences;
                 }
-            }
+            };
+            remaining_prepared = remaining_prepared.checked_sub(source.retained_bytes())
+                .ok_or_else(|| error(ManufacturingErrorCode::ResourceLimit,
+                    "aggregate original material geometry capacity exceeded"))?;
+            geometry_sources.insert(occurrence.definition_id.clone(), source);
         }
+        let query_bytes = super::geometry_query_limit(&geometry_sources)?;
         let mut placed = AabbMm {
             min: [0.0; 3],
             max: [0.0; 3],
         };
         for axis in 0..3 {
-            let direction = rotate_inverse(
-                &occurrence.pose,
-                std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 }),
-            );
-            let extent = spiling_geometry::projected_extent(definition, direction, cancel)
-                .map_err(|e| {
-                    error(
-                        if e.code == spiling_contracts::geometry::GeometryErrorCode::Cancelled {
-                            ManufacturingErrorCode::Cancelled
-                        } else {
-                            ManufacturingErrorCode::UnsupportedGeometry
-                        },
-                        e.to_string(),
-                    )
-                })?;
-            placed.min[axis] = extent[0] + occurrence.pose.translation_mm[axis];
-            placed.max[axis] = extent[1] + occurrence.pose.translation_mm[axis];
-        }
-        // Even tilted bodies have a real analytic first/last material event.
-        // Retain it so a floating body cannot first appear inside layer zero
-        // and be falsely assigned bed anchoring by midpoint sampling.
-        for z in [placed.min[2], placed.max[2]] {
-            if let Err(position) = result
-                .horizontal_events
-                .binary_search_by(|event| event.total_cmp(&z))
-            {
-                if result.horizontal_events.len() > MAX_PRINT_LAYERS as usize {
+            let direction = std::array::from_fn(|a| if a == axis { 1.0 } else { 0.0 });
+            let extent = match geometry_sources[&occurrence.definition_id].placed_material_bounds(
+                occurrence.pose,
+                direction,
+                spiling_geometry::BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: LAYER_QUANTIZATION_MM,
+                },
+                query_bytes,
+                &mut result.geometry_work,
+                cancel,
+            ) {
+                Ok(extent) => {
+                    if extent.definition_id() != &occurrence.definition_id
+                        || !extent.is_compatible_with_definition(definition)
+                        || extent.placed_pose() != occurrence.pose
+                        || extent.world_direction() != direction
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                            "material support lost its original source/recipe/pose/query binding",
+                        ));
+                    }
+                    extent.bounds()
+                }
+                Err(e)
+                    if matches!(
+                        e.code,
+                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                    ) =>
+                {
+                    return Err(super::native_error(e, "material projected bounds"));
+                }
+                Err(e) => {
                     add(
-                        "event_limit",
-                        "Native material extrema exceed the bounded layer schedule".into(),
+                        native_check_code(e.code),
+                        e.to_string(),
                         Some(occurrence.occurrence_id),
                         None,
                     );
-                } else {
-                    result.horizontal_events.insert(position, z);
+                    continue 'occurrences;
                 }
+            };
+            placed.min[axis] = extent.minimum[0];
+            placed.max[axis] = extent.maximum[1];
+            if axis == 2 {
+                result
+                    .material_domains
+                    .insert(occurrence.occurrence_id, [extent.minimum, extent.maximum]);
             }
+        }
+        result
+            .native_bounds
+            .insert(occurrence.occurrence_id, placed);
+        for face in definition
+            .faces()
+            .iter()
+            .take(16usize.saturating_sub(pending_faces.len()))
+        {
+            pending_faces.push((occurrence.occurrence_id, face.face_id.clone()));
         }
         if surface_valid {
             match surface::metadata(
@@ -337,82 +369,16 @@ pub(super) fn admit(
         add("floating_without_support", "Native material starts above the bed; enable breakaway supports or place it on the bed".into(), None, None);
     }
     drop(add);
-    if result.report.eligible {
-        match super::scheduled_layers(input, &result, cancel) {
-            Ok(schedule) => {
-                let bed = envelope.min[2];
-                let top = result.bounds.expect("eligible geometry has bounds").max[2];
-                let mut retained_samples = 0usize;
-                for fields in result.surface_fields.values() {
-                    for field in fields {
-                        let copies = if field.is_z_invariant(bed, top)? {
-                            1
-                        } else {
-                            schedule.len()
-                        };
-                        // D, each wall center and fill erosion are retained once
-                        // per realized span; one native carrier remains for witnesses.
-                        let owners = copies
-                            .checked_mul(input.intent.recipe.perimeter_count as usize + 2)
-                            .and_then(|n| n.checked_add(1))
-                            .ok_or_else(|| {
-                                error(
-                                    ManufacturingErrorCode::ResourceLimit,
-                                    "retained image geometry estimate overflow",
-                                )
-                            })?;
-                        retained_samples = retained_samples
-                            .checked_add(field.sample_points().checked_mul(owners).ok_or_else(
-                                || {
-                                    error(
-                                        ManufacturingErrorCode::ResourceLimit,
-                                        "retained image sample estimate overflow",
-                                    )
-                                },
-                            )?)
-                            .ok_or_else(|| {
-                                error(
-                                    ManufacturingErrorCode::ResourceLimit,
-                                    "retained image sample estimate overflow",
-                                )
-                            })?;
-                    }
-                }
-                if retained_samples > MAX_DEPOSITION_SEGMENTS as usize {
-                    result.report.eligible = false;
-                    result.report.checks.push(PreflightCheck {
-                        code: "resource_limit".into(),
-                        severity: PreflightSeverity::Error,
-                        message: "Refined surface sample estimate exceeds retained geometry budget"
-                            .into(),
-                        occurrence_id: None,
-                        face_id: None,
-                    });
-                }
-                result.schedule = Some(schedule);
-            }
-            Err(e) if e.code == ManufacturingErrorCode::Cancelled => return Err(e),
-            Err(e) => {
-                result.report.eligible = false;
-                result.report.checks.push(PreflightCheck {
-                    code: if e.code == ManufacturingErrorCode::ResourceLimit {
-                        "resource_limit"
-                    } else {
-                        "unresolved_layer_schedule"
-                    }
-                    .into(),
-                    severity: PreflightSeverity::Error,
-                    message: e.message,
-                    occurrence_id: None,
-                    face_id: None,
-                });
-            }
-        }
-    }
-    if result.report.checks.len() == 253 {
+    if truncated {
         result.report.checks.push(PreflightCheck {
             code: "additional_errors".into(),
             severity: PreflightSeverity::Error,
+            evidence: if result.report.disposition == PreflightDisposition::Unresolved {
+                PreflightEvidence::Indeterminate
+            } else {
+                PreflightEvidence::Failed
+            },
+            required: true,
             message:
                 "Additional metadata errors are omitted; correct these errors and repeat Preflight"
                     .into(),
@@ -420,43 +386,247 @@ pub(super) fn admit(
             face_id: None,
         });
     }
+    if result.report.disposition == PreflightDisposition::Admitted {
+        result.report.checks.push(PreflightCheck {
+            code: "native_metadata_admitted".into(),
+            severity: PreflightSeverity::Info,
+            evidence: PreflightEvidence::Certified,
+            required: true,
+            message: "Captured intent, source identity, pose and bounded native placement admitted. Complete physical height events, actual schedule and native metric/feature incidence remain Compile obligations".into(),
+            occurrence_id: None, face_id: None,
+        });
+    }
     for (occurrence_id, fields) in &result.surface_fields {
         for field in fields {
             if result.report.checks.len() >= 254 {
                 break;
             }
-            result.report.checks.push(PreflightCheck {
-                code: "surface_construction_pending".into(), severity: PreflightSeverity::Info,
-                message: format!("Native {} certificate and bounded feature metadata admitted; Compile must still prove native material/hole retention, realized offsets and actual deposited anchors. This is a manufacturing construction, not edited BREP or physical grip certification", field.certificate_description()),
-                occurrence_id: Some(*occurrence_id), face_id: Some(field.face_id().clone()),
-            });
+            result.report.checks.push(PreflightCheck { code: "surface_construction_pending".into(), severity: PreflightSeverity::Info, evidence: PreflightEvidence::NotEvaluated, required: false, message: format!("Native {} certificate and bounded feature metadata admitted; Compile must still prove native material/hole retention, realized offsets and actual deposited anchors. This is a manufacturing construction, not edited BREP or physical grip certification", field.certificate_description()),
+            occurrence_id: Some(*occurrence_id), face_id: Some(field.face_id().clone()), });
         }
     }
     for (occurrence_id, face_id) in pending_faces {
         if result.report.checks.len() >= 254 {
             break;
         }
-        result.report.checks.push(PreflightCheck { code: "oriented_native_gate_pending".into(), severity: PreflightSeverity::Info,
-            message: "This sloped planar or tilted cylindrical native face requires per-layer native intersection, topology and deposited-anchor analysis during Compile; metadata eligibility does not pass that gate".into(),
-            occurrence_id: Some(occurrence_id), face_id: Some(face_id) });
+        result.report.checks.push(PreflightCheck {
+            code: "oriented_native_gate_pending".into(),
+            severity: PreflightSeverity::Info,
+            evidence: PreflightEvidence::NotEvaluated,
+            required: false,
+            message: "This native face requires complete physical events, certified slab shape/feature incidence, continuous occupied envelopes and actual deposited-anchor analysis during Compile".into(),
+            occurrence_id: Some(occurrence_id), face_id: Some(face_id),
+        });
     }
     for (code, message) in [
         (
             "native_analysis_pending",
-            "Compile must still perform native section, topology, offset, support and actual deposited-anchor bridge analysis. Only the admitted planar/cylindrical STEP profile is eligible; general/freeform STEP is not admitted.",
+            "Complete physical event/branch coverage, ordered uncertainty bands and every actual closed slab are Compile-only obligations. Compile must certify metric/feature incidence and continuous occupied envelopes, then section topology, offsets, supports and actual deposited anchors. Admitted input is not authorization to manufacture.",
         ),
         (
             "physical_qualification_absent",
-            "Software-only eligibility is not physical printability or machine qualification. No physical measurements, swept-bead collision certificate or printer qualification are available.",
+            "Software-only admission is not physical printability or machine qualification. No physical measurements, swept-bead collision certificate or printer qualification are available.",
         ),
     ] {
         result.report.checks.push(PreflightCheck {
             code: code.into(),
             severity: PreflightSeverity::Info,
+            evidence: PreflightEvidence::NotEvaluated,
+            required: false,
             message: message.into(),
             occurrence_id: None,
             face_id: None,
         });
     }
-    Ok(result)
+    result.report.validate()?;
+    Ok((result, geometry_sources))
+}
+
+/// Deep Compile-only discovery. An uncertainty endpoint remains bookkeeping
+/// until every affected actual slab has metric and event-incidence evidence.
+pub(super) fn resolve_native_events(
+    input: &CompilerInput<'_>,
+    admission: &mut Admission,
+    geometry_sources: &super::PreparedGeometrySources<'_>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let bed = input.intent.printer.build_envelope.min[2];
+    let policy = spiling_geometry::AnalysisPolicy {
+        maximum_height_uncertainty_mm: LAYER_QUANTIZATION_MM,
+        maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,
+    };
+    let mut completed_bounds: Option<AabbMm> = None;
+    let query_bytes = super::geometry_query_limit(geometry_sources)?;
+    for occurrence in input.occurrences {
+        check_cancel(cancel)?;
+        let bounds = admission.native_bounds[&occurrence.occurrence_id];
+        let analysis = geometry_sources[&occurrence.definition_id].analyze_placed_height_domain(
+            occurrence.pose,
+            [bounds.min[2], bounds.max[2]],
+            policy,
+            query_bytes,
+            &mut admission.geometry_work,
+            cancel,
+        )
+        .map_err(|e| super::native_error(e, "complete native height analysis"))?;
+        if analysis.definition_id() != &occurrence.definition_id
+            || analysis.pose() != Some(occurrence.pose)
+            || analysis.height_interval_mm() != [bounds.min[2], bounds.max[2]]
+        {
+            return Err(error(
+                ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                format!(
+                    "occurrence {} has no captured complete terminal-event coverage",
+                    occurrence.occurrence_id.get()
+                ),
+            ));
+        }
+        // The realization's support receipt, not raw-source critical candidates,
+        // owns the material terminals. Covered raw candidates remain obligations
+        // of the geometry capture rather than extra mandatory slicing planes.
+        let domain = admission.material_domains[&occurrence.occurrence_id];
+        for bracket in analysis.material_plane_event_brackets_mm().chain(domain) {
+            if !bracket.iter().all(|z| z.is_finite())
+                || bracket[0] > bracket[1]
+                || bracket[1] - bracket[0] > policy.maximum_height_uncertainty_mm
+                || bracket[1] - bracket[0] > policy.maximum_shape_error_mm
+            {
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    format!(
+                        "occurrence {} has an unresolved native event band {bracket:?}",
+                        occurrence.occurrence_id.get()
+                    ),
+                ));
+            }
+            let band_position = admission.native_event_bands.binary_search_by(|old| {
+                old[0]
+                    .total_cmp(&bracket[0])
+                    .then(old[1].total_cmp(&bracket[1]))
+            });
+            if let Err(position) = band_position {
+                if admission.native_event_bands.len() >= MAX_PRINT_LAYERS as usize {
+                    return Err(error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "native event-band coverage exceeds the layer schedule budget",
+                    ));
+                }
+                admission.native_event_bands.insert(position, bracket);
+            }
+        }
+        let placed = admission
+            .surface_fields
+            .get(&occurrence.occurrence_id)
+            .map_or(bounds, |fields| surface::expanded(bounds, fields));
+        if let Some(combined) = &mut completed_bounds {
+            combined
+                .include(placed.min)
+                .and_then(|_| combined.include(placed.max))
+                .map_err(|e| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        e.to_string(),
+                    )
+                })?;
+        } else {
+            completed_bounds = Some(placed);
+        }
+    }
+    // Union overlapping scheduling covers only. Atomic source candidates and
+    // their existence/incidence obligations remain in the geometry capture.
+    // Neither root identity nor an increased uncertainty allowance is implied.
+    let maximum_cover_width = policy
+        .maximum_height_uncertainty_mm
+        .min(policy.maximum_shape_error_mm);
+    for bracket in scheduling_event_covers(&admission.native_event_bands, maximum_cover_width) {
+        let z = if bracket[0] <= bed
+            && bracket[1] >= bed
+            && (bracket[0] - bed).abs().max((bracket[1] - bed).abs())
+                <= policy.maximum_shape_error_mm
+        {
+            bed
+        } else {
+            bracket[1]
+        };
+        if let Err(position) = admission
+            .horizontal_events
+            .binary_search_by(|old| old.total_cmp(&z))
+        {
+            if admission.horizontal_events.len() >= MAX_PRINT_LAYERS as usize {
+                return Err(error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native material events exceed the layer schedule budget",
+                ));
+            }
+            admission.horizontal_events.insert(position, z);
+        }
+    }
+    admission.bounds = completed_bounds;
+    Ok(())
+}
+
+/// Sorted, validated candidate bands become bounded scheduling-set covers.
+/// A disjoint gap, however small, never supplies shared event identity.
+fn scheduling_event_covers(
+    bands: &[[f64; 2]],
+    maximum_width: f64,
+) -> impl Iterator<Item = [f64; 2]> + '_ {
+    let mut bands = bands.iter().copied();
+    let mut pending = None;
+    std::iter::from_fn(move || {
+        let mut cover = pending.take().or_else(|| bands.next())?;
+        for candidate in bands.by_ref() {
+            let upper = cover[1].max(candidate[1]);
+            // Containment adds no uncertainty. An expanding union keeps a
+            // strict margin so rounded subtraction cannot admit an overwide set.
+            if candidate[0] <= cover[1] && (upper <= cover[1] || upper - cover[0] < maximum_width) {
+                cover[1] = upper;
+            } else {
+                pending = Some(candidate);
+                break;
+            }
+        }
+        Some(cover)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scheduling_event_covers;
+
+    #[test]
+    fn scheduling_covers_merge_overlap_without_erasing_a_disjoint_ulp_gap() {
+        let next = 1.0_f64.next_up();
+        let bands = [[0.0, 0.6], [0.2, 0.4], [0.4, 1.0], [next, 1.2]];
+        let covers: Vec<_> = scheduling_event_covers(&bands, 1.1).collect();
+        assert_eq!(covers, [[0.0, 1.0], [next, 1.2]]);
+    }
+
+    #[test]
+    fn scheduling_covers_keep_the_policy_ceiling_and_every_candidate() {
+        let bands = [[0.0, 0.75], [0.5, 1.25], [1.0, 1.375]];
+        let covers: Vec<_> = scheduling_event_covers(&bands, 1.0).collect();
+        assert_eq!(covers, [[0.0, 0.75], [0.5, 1.375]]);
+        for band in bands {
+            assert!(
+                covers
+                    .iter()
+                    .any(|cover| cover[0] <= band[0] && cover[1] >= band[1])
+            );
+        }
+        assert!(covers.iter().all(|cover| cover[1] - cover[0] <= 1.0));
+    }
+}
+
+fn native_check_code(code: GeometryErrorCode) -> &'static str {
+    match code {
+        GeometryErrorCode::ConditioningFailure => "native_conditioning_failure",
+        GeometryErrorCode::AnalysisIndeterminate
+        | GeometryErrorCode::ParameterCorrespondenceUnavailable => "native_analysis_indeterminate",
+        GeometryErrorCode::UnsupportedGeometry => "native_unsupported_geometry",
+        GeometryErrorCode::UnsupportedConversion => "native_unsupported_conversion",
+        GeometryErrorCode::KernelFailure => "native_kernel_failure",
+        GeometryErrorCode::SingularGeometry => "native_singular_geometry",
+        _ => "native_invalid_geometry",
+    }
 }

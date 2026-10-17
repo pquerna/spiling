@@ -33,7 +33,7 @@ fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
 // wider work-only pad includes conversion/intersection rounding and midpoint /
 // subtraction arithmetic. Directed rounding encloses its own arithmetic too.
 // It is NOT a geometric tolerance or permission to move original coordinates.
-fn overlay_padding(min: [f64; 2], max: [f64; 2]) -> Result<f64, ManufacturingError> {
+pub(super) fn overlay_padding(min: [f64; 2], max: [f64; 2]) -> Result<f64, ManufacturingError> {
     let span = (max[0] - min[0]).max(max[1] - min[1]);
     let scale = min
         .into_iter()
@@ -49,10 +49,11 @@ fn overlay_padding(min: [f64; 2], max: [f64; 2]) -> Result<f64, ManufacturingErr
 // Explicit heapsort charges every key comparison and swap and can stop safely
 // without invoking overlay on an incompletely sorted buffer. There is no
 // panic/comparator short circuit and no assumed standard-sort comparison count.
-fn sift(
-    edges: &mut [EdgeBounds],
+fn sift<T>(
+    edges: &mut [T],
     mut root: usize,
     end: usize,
+    key: &impl Fn(&T) -> f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -66,15 +67,15 @@ fn sift(
         }
         if child + 1 < end {
             charge(work, 1)?;
-            if edges[child].min[0]
-                .total_cmp(&edges[child + 1].min[0])
+            if key(&edges[child])
+                .total_cmp(&key(&edges[child + 1]))
                 .is_lt()
             {
                 child += 1;
             }
         }
         charge(work, 1)?;
-        if !edges[root].min[0].total_cmp(&edges[child].min[0]).is_lt() {
+        if !key(&edges[root]).total_cmp(&key(&edges[child])).is_lt() {
             return Ok(());
         }
         charge(work, 1)?;
@@ -82,20 +83,21 @@ fn sift(
         root = child;
     }
 }
-fn sort(
-    edges: &mut [EdgeBounds],
+pub(super) fn sort_by<T>(
+    edges: &mut [T],
+    key: impl Fn(&T) -> f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let count = edges.len();
     for root in (0..count / 2).rev() {
-        sift(edges, root, count, work, cancel)?;
+        sift(edges, root, count, &key, work, cancel)?;
     }
     for end in (1..count).rev() {
         check_cancel(cancel)?;
         charge(work, 1)?;
         edges.swap(0, end);
-        sift(edges, 0, end, work, cancel)?;
+        sift(edges, 0, end, &key, work, cancel)?;
     }
     Ok(())
 }
@@ -135,6 +137,14 @@ pub(super) fn budget_accumulated(
         &b.0[..]
     };
     polygon_budget(a.0.iter().chain(other.iter()), work, 256, cancel)
+}
+
+pub(super) fn budget_polygon_accumulated(
+    polygon: &Polygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    polygon_budget(std::iter::once(polygon), work, 256, cancel)
 }
 
 /// Borrowed required-material pieces share the ordinary Boolean admission proof.
@@ -239,7 +249,7 @@ fn polygon_budget<'a>(
             }
         }
     }
-    sort(&mut edges, work, cancel)?;
+    sort_by(&mut edges, |edge| edge.min[0], work, cancel)?;
     let mut active = Vec::<usize>::with_capacity(count);
     for (index, edge) in edges.iter().enumerate() {
         let mut position = 0;

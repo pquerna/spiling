@@ -71,6 +71,7 @@ function descriptor(metadata: MeshChunkMetadata, expected: MeshIdentity): void {
       "face_count",
       "bounds_mm",
       "carrier_deviation_mm",
+      "trim_deviation_mm",
       "quantization_error_mm",
     ],
     fail,
@@ -99,15 +100,18 @@ function descriptor(metadata: MeshChunkMetadata, expected: MeshIdentity): void {
   hash(metadata.sha256, fail);
   bounds(metadata.bounds_mm, fail);
   const carrier = metadata.carrier_deviation_mm;
+  const trim = metadata.trim_deviation_mm;
   const quantization = metadata.quantization_error_mm;
   if (
     !Number.isFinite(carrier) ||
     carrier < 0 ||
-    carrier > MESH_CARRIER_TOLERANCE_MM ||
+    !Number.isFinite(trim) ||
+    trim < 0 ||
+    carrier + trim > MESH_CARRIER_TOLERANCE_MM ||
     !Number.isFinite(quantization) ||
     quantization < 0 ||
     quantization > MESH_QUANTIZATION_TOLERANCE_MM ||
-    carrier + quantization > MESH_SURFACE_TOLERANCE_MM
+    carrier + trim + quantization > MESH_SURFACE_TOLERANCE_MM
   )
     fail("invalid profile error budget");
 }

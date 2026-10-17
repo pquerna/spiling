@@ -266,9 +266,22 @@ pub fn native_operation_view(
                     return Err("preflight revision or output mismatch".into());
                 }
             }
+            JobResult::BedPosePrepared { preparation } => {
+                preparation.validate().map_err(|error| error.to_string())?;
+                if preparation.session_id != session_id
+                    || preparation.scene_revision.get() != meta.captured_scene_revision
+                    || preparation.project_revision.0 != meta.captured_project_revision
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("native placement capture or outputs mismatch".into());
+                }
+            }
             JobResult::Scene { summary } => {
                 if summary.session_id != session_id {
                     return Err("scene result session mismatch".into());
+                }
+                if summary.unique_mesh_bytes == 0 && !meta.outputs.is_empty() {
+                    return Err("geometry-only scene must not publish display artifacts".into());
                 }
             }
             JobResult::ManufacturingCompiled { resource, .. }
@@ -387,6 +400,9 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
             R::ManufacturingPreflight(v) => Self::ManufacturingPreflight {
                 report: required(v.report, "preflight report")?.try_into()?,
             },
+            R::BedPosePrepared(value) => Self::BedPosePrepared {
+                preparation: value.try_into()?,
+            },
             R::ManufacturingCompiled(v) => {
                 let record: ManufacturingArtifactRecord =
                     required(v.record, "manufacturing record")?.try_into()?;
@@ -434,6 +450,9 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
         let result = match v {
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
+            JobResult::BedPosePrepared { preparation } => {
+                R::BedPosePrepared(preparation.try_into()?)
+            }
             JobResult::ProjectSaved { info } => R::ProjectSaved(info.try_into()?),
             JobResult::SurfaceImageImported {
                 info,

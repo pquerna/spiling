@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod bed_pose;
 mod execution;
 mod manufacturing;
 mod placement;
@@ -113,6 +114,7 @@ enum Purpose {
         pose: RigidPoseMm,
     },
     Section,
+    PrepareBedPose,
     Open,
     Save,
     Compile,
@@ -158,6 +160,7 @@ enum PublicationKind {
         record: ManufacturingArtifactRecord,
     },
     Preflight(PreflightReport),
+    BedPosePrepared(BedPosePreparation),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -263,7 +266,10 @@ impl Runtime {
         self.definitions
             .iter()
             .filter(move |(id, _)| snapshot.sources.contains_key(*id))
-            .map(|(_, definition)| definition.record.mesh_artifact_id)
+            .filter_map(|(_, definition)| match &definition.record.display {
+                DefinitionDisplay::Mesh { artifact_id } => Some(*artifact_id),
+                DefinitionDisplay::Unavailable { .. } => None,
+            })
     }
 
     /// Publication borrows immutable retained buffers; staged output is inaccessible.
@@ -345,6 +351,7 @@ impl Runtime {
                             | Purpose::Verify
                             | Purpose::ImportSurfaceImage { .. }
                             | Purpose::GetSurfaceImage
+                            | Purpose::PrepareBedPose
                     ) && active.project_base != self.project.info().revision)
                 {
                     Err(
@@ -516,6 +523,9 @@ impl Runtime {
                         PublicationKind::Preflight(report) => {
                             Some(JobResult::ManufacturingPreflight { report })
                         }
+                        PublicationKind::BedPosePrepared(preparation) => {
+                            Some(JobResult::BedPosePrepared { preparation })
+                        }
                         PublicationKind::Verified { record, inspection } => {
                             let replay =
                                 inspection.replay.as_ref().map(|replay| replay.info.clone());
@@ -592,7 +602,7 @@ impl Runtime {
             }),
             (Purpose::Import { pose }, Product::Import(imported)) => {
                 let revision = self.revision.next()?;
-                placement::placed_bounds(*pose, imported.bounds)?;
+                placement::scene_bounds(*pose, imported.bounds)?;
                 let edit = self.project.prepare(Edit::Import {
                     source: imported.source.clone(),
                     pose: *pose,
@@ -654,7 +664,7 @@ impl Runtime {
                         .find(|d| d.record.definition_id == occurrence.definition_id)
                         .or_else(|| self.definitions.get(&occurrence.definition_id))
                         .ok_or_else(stale)?;
-                    placement::placed_bounds(occurrence.pose, definition.record.bounds_mm)?;
+                    placement::scene_bounds(occurrence.pose, definition.record.bounds_mm)?;
                 }
                 Ok(Publication {
                     kind: PublicationKind::Open {
@@ -685,6 +695,19 @@ impl Runtime {
                 report.validate()?;
                 Ok(Publication {
                     kind: PublicationKind::Preflight(report),
+                    artifact: None,
+                })
+            }
+            (Purpose::PrepareBedPose, Product::BedPosePrepared(preparation)) => {
+                preparation.validate()?;
+                if preparation.session_id != self.session_id
+                    || preparation.scene_revision != active.base
+                    || preparation.project_revision != active.project_base
+                {
+                    return Err(stale().into());
+                }
+                Ok(Publication {
+                    kind: PublicationKind::BedPosePrepared(preparation),
                     artifact: None,
                 })
             }
@@ -726,11 +749,19 @@ impl Runtime {
         staged_bytes: u32,
     ) -> Domain<(Option<DefinitionState>, Option<Artifact>)> {
         let definition_id = imported.definition_id;
-        let Some(mesh) = imported.mesh else {
-            if !self.definitions.contains_key(&definition_id) {
-                return Err(stale());
+        let (display, mesh) = match imported.display {
+            worker::ImportedDisplay::Reused => {
+                if !self.definitions.contains_key(&definition_id) {
+                    return Err(stale());
+                }
+                return Ok((None, None));
             }
-            return Ok((None, None));
+            worker::ImportedDisplay::Mesh(mesh) => {
+                (DefinitionDisplay::Mesh { artifact_id }, Some(mesh))
+            }
+            worker::ImportedDisplay::Unavailable(error) => {
+                (DefinitionDisplay::Unavailable { error }, None)
+            }
         };
         if self.definitions.contains_key(&definition_id) {
             return Err(error(
@@ -738,6 +769,24 @@ impl Runtime {
                 "duplicate native definition stage",
             ));
         }
+        let record = DefinitionRecord {
+            definition_id: definition_id.clone(),
+            provenance: imported.provenance,
+            face_count: imported.faces.len() as u32,
+            bounds_mm: imported.bounds,
+            display,
+        };
+        record.validate()?;
+        let mut definition = DefinitionState {
+            record,
+            faces: imported.faces,
+            vertices: 0,
+            triangles: 0,
+            bytes: 0,
+        };
+        let Some(mesh) = mesh else {
+            return Ok((Some(definition), None));
+        };
         let vertices: u32 = self.definitions.values().map(|d| d.vertices).sum();
         let triangles: u32 = self.definitions.values().map(|d| d.triangles).sum();
         let bytes: u32 = self.definitions.values().map(|d| d.bytes).sum();
@@ -751,21 +800,9 @@ impl Runtime {
                 "staged mesh exceeds remaining scene/artifact budget",
             ));
         }
-        let record = DefinitionRecord {
-            definition_id: definition_id.clone(),
-            provenance: imported.provenance,
-            face_count: imported.faces.len() as u32,
-            bounds_mm: imported.bounds,
-            mesh_artifact_id: artifact_id,
-        };
-        record.validate()?;
-        let definition = DefinitionState {
-            record,
-            faces: imported.faces,
-            vertices: mesh.vertex_count,
-            triangles: mesh.triangle_count,
-            bytes: mesh.total_bytes,
-        };
+        definition.vertices = mesh.vertex_count;
+        definition.triangles = mesh.triangle_count;
+        definition.bytes = mesh.total_bytes;
         let mut chunks = Vec::with_capacity(mesh.chunks.len());
         let mut bytes = Vec::with_capacity(mesh.chunks.len());
         for chunk in mesh.chunks {
@@ -829,7 +866,10 @@ impl Runtime {
             .definitions
             .iter()
             .filter(|(id, _)| !ids.contains(*id))
-            .map(|(_, definition)| definition.record.mesh_artifact_id)
+            .filter_map(|(_, definition)| match &definition.record.display {
+                DefinitionDisplay::Mesh { artifact_id } => Some(*artifact_id),
+                DefinitionDisplay::Unavailable { .. } => None,
+            })
             .collect();
         self.definitions.retain(|id, _| ids.contains(id));
         for id in removed {
@@ -845,7 +885,7 @@ impl Runtime {
         let mut bounds: Option<AabbMm> = None;
         for occurrence in snapshot.occurrences.values() {
             let definition = &self.definitions[&occurrence.definition_id];
-            let placed = placement::placed_bounds(occurrence.pose, definition.record.bounds_mm)
+            let placed = placement::scene_bounds(occurrence.pose, definition.record.bounds_mm)
                 .expect("validated placed bounds");
             if let Some(bounds) = &mut bounds {
                 bounds.include(placed.min).expect("finite bounds");
@@ -962,6 +1002,51 @@ impl Runtime {
                     },
                 )
             }
+            GeometryCommand::PrepareBedPose {
+                session_id,
+                base_revision,
+                project_revision,
+                occurrence_id,
+                expected_definition_id,
+                expected_pose,
+                envelope_mm,
+                center_xy,
+                contact_tolerance_mm,
+            } => {
+                self.base(&session_id, base_revision)?;
+                if project_revision != self.project.info().revision {
+                    return Err(stale());
+                }
+                if self.active.is_some() {
+                    return Err(busy());
+                }
+                expected_pose.validate()?;
+                envelope_mm.validate()?;
+                let snapshot = self.project.snapshot();
+                let occurrence = snapshot
+                    .occurrences
+                    .get(&occurrence_id)
+                    .ok_or_else(unknown)?;
+                if occurrence.definition_id != expected_definition_id
+                    || occurrence.pose != expected_pose
+                {
+                    return Err(stale());
+                }
+                let request = bed_pose::Request {
+                    session_id,
+                    scene_revision: base_revision,
+                    project_revision,
+                    occurrence_id,
+                    definition_id: expected_definition_id,
+                    pose: expected_pose,
+                    envelope_mm,
+                    center_xy,
+                    contact_tolerance_mm,
+                };
+                self.start(Purpose::PrepareBedPose, 0, move |_, _, _| {
+                    Work::PrepareBedPose(request)
+                })
+            }
             GeometryCommand::AddInstance {
                 session_id,
                 base_revision,
@@ -971,7 +1056,7 @@ impl Runtime {
                 self.base(&session_id, base_revision)?;
                 pose.validate()?;
                 let definition = self.definitions.get(&definition_id).ok_or_else(unknown)?;
-                placement::placed_bounds(pose, definition.record.bounds_mm).map_err(|_| {
+                placement::scene_bounds(pose, definition.record.bounds_mm).map_err(|_| {
                     error(
                         GeometryErrorCode::InvalidPose,
                         "placed bounds overflow finite scene coordinates",
@@ -985,17 +1070,21 @@ impl Runtime {
             GeometryCommand::SetInstancePose {
                 session_id,
                 base_revision,
+                project_revision,
                 occurrence_id,
                 pose,
             } => {
                 self.base(&session_id, base_revision)?;
+                if project_revision != self.project.info().revision {
+                    return Err(stale());
+                }
                 pose.validate()?;
                 let snapshot = self.project.snapshot();
                 let occurrence = snapshot
                     .occurrences
                     .get(&occurrence_id)
                     .ok_or_else(unknown)?;
-                placement::placed_bounds(
+                placement::scene_bounds(
                     pose,
                     self.definitions[&occurrence.definition_id].record.bounds_mm,
                 )
@@ -1485,6 +1574,7 @@ impl Runtime {
         let stage = match &purpose {
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
+            Purpose::PrepareBedPose => "preparing_native_bed_pose",
             Purpose::Open => "opening",
             Purpose::Save => "saving",
             Purpose::Compile => "compiling_manufacturing",

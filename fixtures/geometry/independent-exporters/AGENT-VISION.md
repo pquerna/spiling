@@ -6,6 +6,6 @@ Licensed under the Open Software License version 3.0
 
 # Independent original STEP exporter vision
 
-Test whether independently exported simple parts fit the declared planar/cylindrical lane, beyond the native kernel's own writer. Known mm dimensions isolate real representation differences from guessed source intent. Explicit rejection is useful support-envelope evidence, not permission to add general STEP support or another runtime kernel.
+Exercise independently exported mechanical parts beyond the native kernel's own writer: elementary solids, a tapered fitting, a filleted housing, its rational-spline equivalent, and a narrow blind pocket. Known mm dimensions and analytic section areas isolate representation, critical-height, trim and narrow-feature errors from guessed source intent.
 
-The corpus targets original 20×10×8 box, radius-5 height-8 cylinder and 20×20×8 radius-3 through-hole. Acceptance of imports, meshes and sections is recorded separately from generation success.
+Generation validity, native import, display, sections and manufacturing acceptance are separate obligations. The frozen manifest records independent source provenance and geometric oracles; successful export alone establishes no Spiling support or alternative runtime kernel.

@@ -11,8 +11,8 @@ use ts_rs::TS;
 mod runtime;
 pub use runtime::*;
 
-pub const IMPORT_PROFILE: &str = "step-planar-cylindrical-v1";
-pub const MESH_PROFILE: &str = "mesh-mm-0.05-v1";
+pub const IMPORT_PROFILE: &str = "step-native-trimmed-v2";
+pub const MESH_PROFILE: &str = "mesh-trimmed-mm-0.05-v2";
 pub const MAX_SOURCE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_LIVE_SOURCE_BYTES: u32 = 64 * 1024 * 1024;
 pub const MAX_STEP_ENTITIES: u32 = 100_000;
@@ -64,6 +64,14 @@ pub enum GeometryErrorCode {
     Cancelled,
     DegenerateSection,
     KernelFailure,
+    ConditioningFailure,
+    AnalysisIndeterminate,
+    SingularGeometry,
+    UnsupportedConversion,
+    UnsupportedOperation,
+    NativeIntersectionFailure,
+    ParameterCorrespondenceUnavailable,
+    ShapeErrorExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, TS, PartialEq, Eq, thiserror::Error)]
@@ -97,6 +105,12 @@ impl<'de> Deserialize<'de> for GeometryError {
     }
 }
 impl GeometryError {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        if self.message.len() > MAX_ERROR_MESSAGE_BYTES as usize {
+            return Err(invalid("geometry error message exceeds limit"));
+        }
+        Ok(())
+    }
     pub fn new(code: GeometryErrorCode, message: impl AsRef<str>) -> Self {
         Self {
             code,
@@ -196,12 +210,14 @@ impl SourceHash {
     }
 }
 impl DefinitionId {
-    pub(crate) fn allocated_bytes(&self) -> usize {
+    pub fn allocated_bytes(&self) -> usize {
         self.0.capacity()
     }
     pub fn from_source_sha256(source: &[u8; 32]) -> Self {
         let mut hash = Sha256::new();
-        hash.update(b"spiling:definition:step-planar-cylindrical-v1\0");
+        hash.update(b"spiling:definition:");
+        hash.update(IMPORT_PROFILE.as_bytes());
+        hash.update(b"\0");
         hash.update(source);
         Self(lower_hex(&hash.finalize()))
     }
@@ -228,6 +244,9 @@ impl SessionId {
     }
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.0.capacity()
     }
 }
 impl Default for SessionId {
@@ -281,7 +300,7 @@ impl FaceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    pub(crate) fn allocated_bytes(&self) -> usize {
+    pub fn allocated_bytes(&self) -> usize {
         self.0.capacity()
     }
     pub fn step_entity(&self) -> u64 {
@@ -544,6 +563,35 @@ pub struct PlaneFrameMm {
     pub z_axis: [f64; 3],
 }
 impl PlaneFrameMm {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        let axes = [self.x_axis, self.y_axis, self.z_axis];
+        if !finite3(self.origin_mm)
+            || axes
+                .iter()
+                .any(|axis| !finite3(*axis) || (norm3(*axis) - 1.0).abs() > POSE_NORM_TOLERANCE)
+        {
+            return Err(invalid("invalid surface frame"));
+        }
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = [
+            self.x_axis[1] * self.y_axis[2] - self.x_axis[2] * self.y_axis[1],
+            self.x_axis[2] * self.y_axis[0] - self.x_axis[0] * self.y_axis[2],
+            self.x_axis[0] * self.y_axis[1] - self.x_axis[1] * self.y_axis[0],
+        ];
+        if dot(self.x_axis, self.y_axis).abs() > POSE_NORM_TOLERANCE
+            || dot(self.x_axis, self.z_axis).abs() > POSE_NORM_TOLERANCE
+            || dot(self.y_axis, self.z_axis).abs() > POSE_NORM_TOLERANCE
+            || cross
+                .into_iter()
+                .zip(self.z_axis)
+                .any(|(a, b)| (a - b).abs() > POSE_NORM_TOLERANCE)
+        {
+            return Err(invalid(
+                "surface frame must be orthonormal and right-handed",
+            ));
+        }
+        Ok(())
+    }
     pub fn from_plane(plane: PlaneMm) -> Result<Self, GeometryError> {
         let plane = plane.normalized()?;
         let z = plane.normal;
@@ -641,8 +689,8 @@ impl SourceProvenance {
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub enum DisplayProfile {
-    #[serde(rename = "mesh-mm-0.05-v1")]
-    MeshMm005V1,
+    #[serde(rename = "mesh-trimmed-mm-0.05-v2")]
+    MeshTrimmedMm005V2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -682,9 +730,33 @@ impl FaceRef {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceFamily {
+    Plane,
+    Cylinder,
+    Cone,
+    Sphere,
+    Torus,
+    BSpline,
+    Nurbs,
+    LinearExtrusion,
+    Revolution,
+    TSpline,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TorusKind {
+    RegularRing,
+    Horn,
+    Spindle,
+}
+
+/// Definition-local millimetres. These descriptions never authorize an operation.
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FaceCarrier {
+pub enum AnalyticSurfaceDescription {
     Plane {
         origin_mm: [f64; 3],
         normal: [f64; 3],
@@ -694,40 +766,263 @@ pub enum FaceCarrier {
         axis_direction: [f64; 3],
         radius_mm: f64,
     },
+    /// At axial distance z, radius = reference_radius_mm + z * tan(semi_angle_radians).
+    /// The signed angle is nonzero and strictly between -pi/2 and pi/2.
+    Cone {
+        frame: PlaneFrameMm,
+        reference_radius_mm: f64,
+        semi_angle_radians: f64,
+    },
+    /// The frame origin is the center; regular chart normals do not exist at the poles.
+    Sphere { frame: PlaneFrameMm, radius_mm: f64 },
+    Torus {
+        frame: PlaneFrameMm,
+        major_radius_mm: f64,
+        minor_radius_mm: f64,
+        torus_kind: TorusKind,
+    },
 }
-impl FaceCarrier {
+#[derive(Deserialize)]
+#[serde(
+    remote = "AnalyticSurfaceDescription",
+    tag = "kind",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum RawAnalyticSurfaceDescription {
+    Plane {
+        origin_mm: [f64; 3],
+        normal: [f64; 3],
+    },
+    Cylinder {
+        axis_origin_mm: [f64; 3],
+        axis_direction: [f64; 3],
+        radius_mm: f64,
+    },
+    Cone {
+        frame: PlaneFrameMm,
+        reference_radius_mm: f64,
+        semi_angle_radians: f64,
+    },
+    Sphere {
+        frame: PlaneFrameMm,
+        radius_mm: f64,
+    },
+    Torus {
+        frame: PlaneFrameMm,
+        major_radius_mm: f64,
+        minor_radius_mm: f64,
+        torus_kind: TorusKind,
+    },
+}
+impl<'de> Deserialize<'de> for AnalyticSurfaceDescription {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawAnalyticSurfaceDescription::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl AnalyticSurfaceDescription {
+    pub fn family(&self) -> SurfaceFamily {
+        match self {
+            Self::Plane { .. } => SurfaceFamily::Plane,
+            Self::Cylinder { .. } => SurfaceFamily::Cylinder,
+            Self::Cone { .. } => SurfaceFamily::Cone,
+            Self::Sphere { .. } => SurfaceFamily::Sphere,
+            Self::Torus { .. } => SurfaceFamily::Torus,
+        }
+    }
     pub fn validate(&self) -> Result<(), GeometryError> {
-        let (origin, direction) = match self {
-            Self::Plane { origin_mm, normal } => (*origin_mm, *normal),
+        let positive = |r: f64| r.is_finite() && r > 0.0;
+        let axis = |origin: [f64; 3], direction: [f64; 3]| {
+            finite3(origin)
+                && finite3(direction)
+                && (norm3(direction) - 1.0).abs() <= POSE_NORM_TOLERANCE
+        };
+        let valid = match self {
+            Self::Plane { origin_mm, normal } => axis(*origin_mm, *normal),
             Self::Cylinder {
                 axis_origin_mm,
                 axis_direction,
                 radius_mm,
+            } => axis(*axis_origin_mm, *axis_direction) && positive(*radius_mm),
+            Self::Cone {
+                frame,
+                reference_radius_mm,
+                semi_angle_radians,
             } => {
-                if !radius_mm.is_finite() || *radius_mm <= 0.0 {
-                    return Err(invalid("invalid cylinder radius"));
-                }
-                (*axis_origin_mm, *axis_direction)
+                frame.validate().is_ok()
+                    && positive(*reference_radius_mm)
+                    && semi_angle_radians.is_finite()
+                    && *semi_angle_radians != 0.0
+                    && semi_angle_radians.abs() < std::f64::consts::FRAC_PI_2
+            }
+            Self::Sphere { frame, radius_mm } => frame.validate().is_ok() && positive(*radius_mm),
+            Self::Torus {
+                frame,
+                major_radius_mm,
+                minor_radius_mm,
+                torus_kind,
+            } => {
+                frame.validate().is_ok()
+                    && positive(*major_radius_mm)
+                    && positive(*minor_radius_mm)
+                    && match torus_kind {
+                        TorusKind::RegularRing => major_radius_mm > minor_radius_mm,
+                        TorusKind::Horn => major_radius_mm == minor_radius_mm,
+                        TorusKind::Spindle => major_radius_mm < minor_radius_mm,
+                    }
             }
         };
-        if !finite3(origin)
-            || !finite3(direction)
-            || (norm3(direction) - 1.0).abs() > POSE_NORM_TOLERANCE
-        {
-            return Err(invalid("invalid native face carrier"));
+        if !valid {
+            return Err(invalid("invalid analytic surface description"));
         }
         Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+
+/// Descriptive trim topology only, not a UV polygon or an invertibility certificate.
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FaceDomainSummary {
+    pub trim_loop_count: u32,
+    pub inner_loop_count: u32,
+    pub periodic_u: bool,
+    pub periodic_v: bool,
+    pub has_singular_boundary: bool,
+}
+#[derive(Deserialize)]
+#[serde(remote = "FaceDomainSummary", deny_unknown_fields)]
+struct RawFaceDomainSummary {
+    trim_loop_count: u32,
+    inner_loop_count: u32,
+    periodic_u: bool,
+    periodic_v: bool,
+    has_singular_boundary: bool,
+}
+impl<'de> Deserialize<'de> for FaceDomainSummary {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawFaceDomainSummary::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl FaceDomainSummary {
+    pub fn new(
+        trim_loop_count: u32,
+        inner_loop_count: u32,
+        periodic_u: bool,
+        periodic_v: bool,
+        has_singular_boundary: bool,
+    ) -> Result<Self, GeometryError> {
+        let value = Self {
+            trim_loop_count,
+            inner_loop_count,
+            periodic_u,
+            periodic_v,
+            has_singular_boundary,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        if self.trim_loop_count > 2 * MAX_STEP_ENTITIES {
+            return Err(resource("face trim loop count exceeds limit"));
+        }
+        if (self.trim_loop_count == 0 && self.inner_loop_count != 0)
+            || (self.trim_loop_count != 0 && self.inner_loop_count >= self.trim_loop_count)
+        {
+            return Err(invalid("invalid face inner trim loop count"));
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FaceGeometryInfo {
+    pub family: SurfaceFamily,
+    pub analytic: Option<AnalyticSurfaceDescription>,
+    pub domain: FaceDomainSummary,
+}
+#[derive(Deserialize)]
+#[serde(remote = "FaceGeometryInfo", deny_unknown_fields)]
+struct RawFaceGeometryInfo {
+    family: SurfaceFamily,
+    analytic: Option<AnalyticSurfaceDescription>,
+    domain: FaceDomainSummary,
+}
+impl<'de> Deserialize<'de> for FaceGeometryInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawFaceGeometryInfo::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl FaceGeometryInfo {
+    pub fn new(
+        family: SurfaceFamily,
+        analytic: Option<AnalyticSurfaceDescription>,
+        domain: FaceDomainSummary,
+    ) -> Result<Self, GeometryError> {
+        let value = Self {
+            family,
+            analytic,
+            domain,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        self.domain.validate()?;
+        if let Some(analytic) = &self.analytic {
+            analytic.validate()?;
+            // Recognized analytic metadata on a spline/sweep remains descriptive.
+            if matches!(
+                self.family,
+                SurfaceFamily::Plane
+                    | SurfaceFamily::Cylinder
+                    | SurfaceFamily::Cone
+                    | SurfaceFamily::Sphere
+                    | SurfaceFamily::Torus
+            ) && self.family != analytic.family()
+            {
+                return Err(invalid(
+                    "analytic description contradicts native surface family",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FaceInfo {
     pub face_id: FaceId,
     /// Decimal string preserves STEP entity IDs above JavaScript's exact integer range.
     pub surface_face_entity: String,
     pub source_entity_kind: String,
+    pub source_surface_entity_kind: String,
+    /// Material-side direction relative to the regular analytic/native frame.
+    /// At singular points, operations require an oriented limiting chart/fan.
     pub orientation: bool,
-    pub carrier: FaceCarrier,
+    pub geometry: FaceGeometryInfo,
+}
+#[derive(Deserialize)]
+#[serde(remote = "FaceInfo", deny_unknown_fields)]
+struct RawFaceInfo {
+    face_id: FaceId,
+    surface_face_entity: String,
+    source_entity_kind: String,
+    source_surface_entity_kind: String,
+    orientation: bool,
+    geometry: FaceGeometryInfo,
+}
+impl<'de> Deserialize<'de> for FaceInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawFaceInfo::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
 }
 impl FaceInfo {
     pub fn validate(&self) -> Result<(), GeometryError> {
@@ -735,15 +1030,22 @@ impl FaceInfo {
             .surface_face_entity
             .parse::<u64>()
             .map_err(|_| invalid("invalid surface-face source entity"))?;
+        let valid_kind = |kind: &str| {
+            !kind.is_empty()
+                && kind.len() <= MAX_DISPLAY_LABEL_BYTES as usize
+                && kind
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        };
         if entity == 0
             || self.surface_face_entity.starts_with('0')
             || !self.surface_face_entity.bytes().all(|b| b.is_ascii_digit())
-            || self.source_entity_kind.is_empty()
-            || self.source_entity_kind.len() > MAX_DISPLAY_LABEL_BYTES as usize
+            || !valid_kind(&self.source_entity_kind)
+            || !valid_kind(&self.source_surface_entity_kind)
         {
             return Err(invalid("invalid face source metadata"));
         }
-        self.carrier.validate()
+        self.geometry.validate()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -760,7 +1062,7 @@ pub struct FaceIndexRow {
     pub ordinal: u32,
     pub face_id: FaceId,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SceneSummary {
     pub session_id: SessionId,
@@ -769,6 +1071,23 @@ pub struct SceneSummary {
     pub occurrence_count: u32,
     pub bounds_mm: Option<AabbMm>,
     pub unique_mesh_bytes: u32,
+}
+#[derive(Deserialize)]
+#[serde(remote = "SceneSummary", deny_unknown_fields)]
+struct RawSceneSummary {
+    session_id: SessionId,
+    revision: SceneRevision,
+    definition_count: u32,
+    occurrence_count: u32,
+    bounds_mm: Option<AabbMm>,
+    unique_mesh_bytes: u32,
+}
+impl<'de> Deserialize<'de> for SceneSummary {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawSceneSummary::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
 }
 impl SceneSummary {
     pub fn validate(&self) -> Result<(), GeometryError> {
@@ -781,7 +1100,7 @@ impl SceneSummary {
         if self.definition_count > self.occurrence_count
             || (self.definition_count == 0) != (self.occurrence_count == 0)
             || (self.occurrence_count == 0) != self.bounds_mm.is_none()
-            || (self.occurrence_count == 0) != (self.unique_mesh_bytes == 0)
+            || (self.occurrence_count == 0 && self.unique_mesh_bytes != 0)
         {
             return Err(invalid("inconsistent live scene summary"));
         }
@@ -791,19 +1110,87 @@ impl SceneSummary {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+/// Display availability never changes source/native identity or face inspection authority.
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DefinitionDisplay {
+    Mesh { artifact_id: ArtifactId },
+    Unavailable { error: GeometryError },
+}
+#[derive(Deserialize)]
+#[serde(
+    remote = "DefinitionDisplay",
+    tag = "kind",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum RawDefinitionDisplay {
+    Mesh { artifact_id: ArtifactId },
+    Unavailable { error: GeometryError },
+}
+impl<'de> Deserialize<'de> for DefinitionDisplay {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawDefinitionDisplay::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl DefinitionDisplay {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        match self {
+            Self::Mesh { .. } => Ok(()),
+            Self::Unavailable { error } => {
+                error.validate()?;
+                if matches!(
+                    error.code,
+                    GeometryErrorCode::Cancelled
+                        | GeometryErrorCode::StaleRevision
+                        | GeometryErrorCode::Busy
+                        | GeometryErrorCode::UnknownHandle
+                        | GeometryErrorCode::SourceIo
+                        | GeometryErrorCode::SourceChanged
+                        | GeometryErrorCode::UnsupportedUnits
+                        | GeometryErrorCode::InvalidPose
+                ) {
+                    return Err(invalid(
+                        "display availability cannot mask source, revision or cancellation failures",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DefinitionRecord {
     pub definition_id: DefinitionId,
     pub provenance: SourceProvenance,
     pub face_count: u32,
     pub bounds_mm: AabbMm,
-    pub mesh_artifact_id: ArtifactId,
+    pub display: DefinitionDisplay,
+}
+#[derive(Deserialize)]
+#[serde(remote = "DefinitionRecord", deny_unknown_fields)]
+struct RawDefinitionRecord {
+    definition_id: DefinitionId,
+    provenance: SourceProvenance,
+    face_count: u32,
+    bounds_mm: AabbMm,
+    display: DefinitionDisplay,
+}
+impl<'de> Deserialize<'de> for DefinitionRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawDefinitionRecord::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
 }
 impl DefinitionRecord {
     pub fn validate(&self) -> Result<(), GeometryError> {
         self.provenance.validate()?;
         self.bounds_mm.validate()?;
+        self.display.validate()?;
         if self.face_count == 0 || self.face_count > MAX_NATIVE_FACES {
             return Err(resource("definition face count exceeds support limits"));
         }
@@ -930,7 +1317,7 @@ impl NativePath {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MeshChunkMetadata {
     pub session_id: SessionId,
@@ -945,7 +1332,64 @@ pub struct MeshChunkMetadata {
     pub face_count: u32,
     pub bounds_mm: AabbMm,
     pub carrier_deviation_mm: f64,
+    /// Whole trimmed-domain triangle-chain approximation, independent of interpolation.
+    pub trim_deviation_mm: f64,
     pub quantization_error_mm: f64,
+}
+#[derive(Deserialize)]
+#[serde(remote = "MeshChunkMetadata", deny_unknown_fields)]
+struct RawMeshChunkMetadata {
+    session_id: SessionId,
+    artifact_id: ArtifactId,
+    definition_id: DefinitionId,
+    schema_version: u16,
+    mesh_profile: DisplayProfile,
+    chunk_index: u32,
+    chunk_count: u32,
+    byte_count: u32,
+    sha256: SourceHash,
+    face_count: u32,
+    bounds_mm: AabbMm,
+    carrier_deviation_mm: f64,
+    trim_deviation_mm: f64,
+    quantization_error_mm: f64,
+}
+impl<'de> Deserialize<'de> for MeshChunkMetadata {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawMeshChunkMetadata::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl MeshChunkMetadata {
+    /// Structural/error-budget admission only; this is not a native proof or manufacturing authority.
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        self.bounds_mm.validate()?;
+        if self.schema_version != crate::display::MESH_SCHEMA_VERSION
+            || self.chunk_count == 0
+            || self.chunk_count > MAX_SCENE_MESH_BYTES / crate::display::MESH_HEADER_BYTES as u32
+            || self.chunk_index >= self.chunk_count
+            || self.face_count == 0
+            || self.face_count > MAX_NATIVE_FACES
+            || self.byte_count < crate::display::MESH_HEADER_BYTES as u32
+            || self.byte_count > MAX_GEOMETRY_CHUNK_BYTES
+        {
+            return Err(invalid("invalid mesh descriptor counts, bytes or schema"));
+        }
+        if !self.carrier_deviation_mm.is_finite()
+            || !self.trim_deviation_mm.is_finite()
+            || !self.quantization_error_mm.is_finite()
+            || self.carrier_deviation_mm < 0.0
+            || self.trim_deviation_mm < 0.0
+            || self.carrier_deviation_mm + self.trim_deviation_mm > MESH_CARRIER_TOLERANCE_MM
+            || !(0.0..=MESH_QUANTIZATION_TOLERANCE_MM).contains(&self.quantization_error_mm)
+            || self.carrier_deviation_mm + self.trim_deviation_mm + self.quantization_error_mm
+                > MESH_SURFACE_TOLERANCE_MM
+        {
+            return Err(invalid("invalid mesh error budget"));
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]

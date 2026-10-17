@@ -22,6 +22,7 @@ fn sections(materials: impl IntoIterator<Item = MultiPolygon<f64>>) -> Vec<Secti
         .into_iter()
         .enumerate()
         .map(|(i, material)| SectionSpan {
+            occupied: None,
             start: i as u32,
             end: i as u32 + 1,
             source_area_mm2: material.unsigned_area(),

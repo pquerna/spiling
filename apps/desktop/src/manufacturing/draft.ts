@@ -6,6 +6,7 @@
 import type { ManufacturingIntent, ManufacturingArtifactRecord } from "@spiling/protocol";
 export const scalarFields = [
   ["layer_height_mm", "Layer height (mm)"],
+  ["native_shape_error_mm", "Native shape error budget (mm)"],
   ["bead_width_mm", "Bead width (mm)"],
   ["perimeter_count", "Perimeters"],
   ["top_skin_thickness_mm", "Top skin thickness (mm)"],

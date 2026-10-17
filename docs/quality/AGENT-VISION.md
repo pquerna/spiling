@@ -4,6 +4,6 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Quality documentation vision
+# Quality reference purpose
 
-Make product and release claims auditable through reproducible evidence. B0 establishes runtime distribution, native process lifecycle and the protocol/viewport diagnostic path. Geometry correctness and physical manufacturing are separate later gates. Support is limited by observed acceptance, not by the number of configured CI operating systems.
+Make the current implementation and its limits quick to understand. A reader should find the Rust owner, the invariant it enforces, the failure boundary and the real workflow that exercises it without reconstructing a history of test runs. Detailed evidence remains reproducible outside the narrative; support claims stay narrower than measured acceptance.

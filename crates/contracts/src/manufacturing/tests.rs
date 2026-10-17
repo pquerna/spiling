@@ -56,6 +56,7 @@ fn intent() -> ManufacturingIntent {
             material_revision: "1".into(),
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.2,
+            native_shape_error_mm: 0.02,
             bead_width_mm: 0.45,
             perimeter_count: 2,
             infill_fraction: 1.0,
@@ -119,6 +120,227 @@ fn coverage() -> PlanarRegionCoverage {
         requested_infill_fraction: 1.0,
     }
 }
+fn native_geometry() -> NativeGeometryCoverageSummary {
+    NativeGeometryCoverageSummary {
+        requested_shape_error_mm: 0.02,
+        achieved_shape_error_mm: 0.001,
+        height_analysis_count: 1,
+        slab_count: 1,
+        certified_layer_count: 1,
+        event_count: 0,
+        geometry_work: 1,
+        evidence: PreflightEvidence::Certified,
+        source_feature_coverage: NativeFeatureCoverageSummary {
+            disjoint_source_layer_count: 1,
+            invariant_source_union_layer_count: 0,
+            native_interface_complex_layer_count: 0,
+            owned_critical_slab_count: 0,
+        },
+        skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+        support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+    }
+}
+#[test]
+fn native_geometry_coverage_requires_complete_certified_bounded_policy() {
+    let summary = native_geometry();
+    summary.validate().unwrap();
+    let value = serde_json::to_value(&summary).unwrap();
+    assert_eq!(value["skin_coverage"], "scheduled_material_distance");
+    assert_eq!(
+        value["support_clearance"],
+        "continuous_target_outer_occupancy"
+    );
+    assert_eq!(
+        value["source_feature_coverage"]["disjoint_source_layer_count"],
+        1
+    );
+    for (disjoint, invariant, interface) in [(3, 0, 0), (0, 3, 0), (0, 0, 3), (1, 1, 1)] {
+        let mut expected = summary.clone();
+        expected.certified_layer_count = 3;
+        expected.slab_count = 3;
+        expected.source_feature_coverage = NativeFeatureCoverageSummary {
+            disjoint_source_layer_count: disjoint,
+            invariant_source_union_layer_count: invariant,
+            native_interface_complex_layer_count: interface,
+            owned_critical_slab_count: 1,
+        };
+        expected.validate().unwrap();
+        let encoded = serde_json::to_value(&expected).unwrap();
+        assert_eq!(
+            serde_json::from_value::<NativeGeometryCoverageSummary>(encoded).unwrap(),
+            expected
+        );
+    }
+    for (disjoint, invariant, interface, endpoints) in [
+        (0, 0, 0, 0),
+        (1, 1, 0, 0),
+        (1, 0, 1, 0),
+        (1, 0, 0, 2),
+        (u32::MAX, 0, 1, 0),
+    ] {
+        let mut invalid = summary.clone();
+        invalid.source_feature_coverage = NativeFeatureCoverageSummary {
+            disjoint_source_layer_count: disjoint,
+            invariant_source_union_layer_count: invariant,
+            native_interface_complex_layer_count: interface,
+            owned_critical_slab_count: endpoints,
+        };
+        assert!(invalid.validate().is_err());
+    }
+    let mut omitted_occurrence_capture = summary.clone();
+    omitted_occurrence_capture.height_analysis_count = 2;
+    assert!(omitted_occurrence_capture.validate().is_err());
+    for field in [
+        "native_interface_complex_layer_count",
+        "owned_critical_slab_count",
+    ] {
+        let mut missing = value.clone();
+        missing["source_feature_coverage"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(serde_json::from_value::<NativeGeometryCoverageSummary>(missing).is_err());
+    }
+    let mut old_scope = value.clone();
+    old_scope["source_feature_coverage"] = serde_json::json!("disjoint_placed_sources");
+    assert!(serde_json::from_value::<NativeGeometryCoverageSummary>(old_scope).is_err());
+    for field in value.as_object().unwrap().keys() {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<NativeGeometryCoverageSummary>(missing).is_err(),
+            "{field}"
+        );
+    }
+    for (field, invalid) in [
+        ("requested_shape_error_mm", serde_json::json!(0.0)),
+        ("achieved_shape_error_mm", serde_json::json!(-0.001)),
+        ("achieved_shape_error_mm", serde_json::json!(0.021)),
+        ("height_analysis_count", serde_json::json!(0)),
+        (
+            "height_analysis_count",
+            serde_json::json!(MAX_OCCURRENCES + 1),
+        ),
+        ("slab_count", serde_json::json!(0)),
+        (
+            "slab_count",
+            serde_json::json!(MAX_PRINT_LAYERS * MAX_OCCURRENCES + 1),
+        ),
+        ("certified_layer_count", serde_json::json!(0)),
+        (
+            "certified_layer_count",
+            serde_json::json!(MAX_PRINT_LAYERS + 1),
+        ),
+        ("event_count", serde_json::json!(4097)),
+        ("geometry_work", serde_json::json!(0)),
+    ] {
+        let mut changed = value.clone();
+        changed[field] = invalid;
+        let invalid: NativeGeometryCoverageSummary = serde_json::from_value(changed).unwrap();
+        assert!(invalid.validate().is_err(), "{field}");
+    }
+    for evidence in [
+        PreflightEvidence::NotEvaluated,
+        PreflightEvidence::Unsupported,
+        PreflightEvidence::Indeterminate,
+        PreflightEvidence::Failed,
+    ] {
+        let mut invalid = summary.clone();
+        invalid.evidence = evidence;
+        assert!(invalid.validate().is_err());
+    }
+    for achieved in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid = summary.clone();
+        invalid.achieved_shape_error_mm = achieved;
+        assert!(invalid.validate().is_err());
+    }
+    for field in [
+        "evidence",
+        "skin_coverage",
+        "support_clearance",
+        "source_feature_coverage",
+    ] {
+        let mut unknown = value.clone();
+        unknown[field] = serde_json::json!("unspecified");
+        assert!(serde_json::from_value::<NativeGeometryCoverageSummary>(unknown).is_err());
+    }
+    let mut exact = summary;
+    exact.achieved_shape_error_mm = 0.0;
+    exact.validate().unwrap();
+}
+
+#[test]
+fn native_coverage_counts_accepted_source_slabs_not_reused_layers() {
+    let mut summary = native_geometry();
+    summary.height_analysis_count = 2;
+    summary.slab_count = 6;
+    summary.certified_layer_count = 40;
+    summary.source_feature_coverage = NativeFeatureCoverageSummary {
+        disjoint_source_layer_count: 10,
+        invariant_source_union_layer_count: 20,
+        native_interface_complex_layer_count: 10,
+        owned_critical_slab_count: 2,
+    };
+    summary.validate().unwrap();
+    let decoded: NativeGeometryCoverageSummary =
+        serde_json::from_slice(&serde_json::to_vec(&summary).unwrap()).unwrap();
+    assert_eq!(decoded, summary);
+    decoded.validate().unwrap();
+
+    let mut missing_source = summary.clone();
+    missing_source.slab_count = 1;
+    missing_source
+        .source_feature_coverage
+        .owned_critical_slab_count = 0;
+    assert!(missing_source.validate().is_err());
+
+    let mut extra_captures = summary.clone();
+    extra_captures.slab_count =
+        extra_captures.height_analysis_count * extra_captures.certified_layer_count + 1;
+    assert!(extra_captures.validate().is_err());
+
+    let mut extra_ownership = summary.clone();
+    extra_ownership
+        .source_feature_coverage
+        .owned_critical_slab_count = summary.slab_count + 1;
+    assert!(extra_ownership.validate().is_err());
+
+    let mut uncovered_layer = summary;
+    uncovered_layer.certified_layer_count += 1;
+    assert!(uncovered_layer.validate().is_err());
+}
+
+#[test]
+fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
+    let captured = bundle();
+    assert_eq!(
+        captured.summary().native_geometry,
+        captured.plan.native_geometry
+    );
+    let mut missing = serde_json::to_value(&captured.plan).unwrap();
+    missing.as_object_mut().unwrap().remove("native_geometry");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(missing).is_err());
+    let mut missing = serde_json::to_value(captured.summary()).unwrap();
+    missing.as_object_mut().unwrap().remove("native_geometry");
+    assert!(serde_json::from_value::<ManufacturingSummary>(missing).is_err());
+    let mut mismatch = captured.clone();
+    mismatch.plan.native_geometry.requested_shape_error_mm = 0.03;
+    assert!(mismatch.validate().is_err());
+    let mut mismatch = captured.clone();
+    mismatch.plan.native_geometry.height_analysis_count = 2;
+    assert!(mismatch.validate().is_err());
+    let mut mismatch = captured.clone();
+    mismatch.plan.native_geometry.certified_layer_count = 2;
+    assert!(mismatch.validate().is_err());
+    let mut summary = captured.summary();
+    summary.native_geometry.certified_layer_count = 2;
+    assert!(summary.validate().is_err());
+    let invariant = segmented_plan(&[&[1], &[1]]);
+    assert_eq!(invariant.native_geometry.slab_count, 2);
+    assert_eq!(invariant.native_geometry.certified_layer_count, 2);
+    invariant.validate(&intent()).unwrap();
+}
+
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -127,6 +349,7 @@ fn plan() -> NormalizedPrintPlan {
         offset_tolerance_mm: 0.005,
         layer_quantization_mm: 0.000001,
         surface_resolution: vec![],
+        native_geometry: native_geometry(),
         layers: vec![PrintLayer {
             index: 0,
             z_mm: 5.2,
@@ -172,7 +395,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "7".into(),
+            planner_version: "8".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -233,6 +456,59 @@ fn strict_authoring_json_requires_every_explicit_profile_and_recipe_field() {
         1,
     );
     assert!(decode_intent(duplicate.as_bytes()).is_err());
+}
+
+#[test]
+fn native_shape_error_is_required_positive_and_persisted_as_semantic_intent() {
+    let intent = intent();
+    let mut missing = serde_json::to_value(&intent).unwrap();
+    missing["recipe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("native_shape_error_mm");
+    assert!(decode_intent(&serde_json::to_vec(&missing).unwrap()).is_err());
+    for value in [0.0, -0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut invalid = intent.clone();
+        invalid.recipe.native_shape_error_mm = value;
+        assert!(invalid.validate().is_err(), "{value}");
+    }
+    let mut old = intent.clone();
+    old.printer.schema_version = 5;
+    assert!(old.validate().is_err());
+    let captured = bundle();
+    let bytes = serde_json::to_vec(&captured).unwrap();
+    let restored = decode_bundle(&bytes).unwrap();
+    assert_eq!(restored.provenance.intent, intent);
+    assert_eq!(
+        restored.provenance.intent.recipe.native_shape_error_mm,
+        0.02
+    );
+    let mut changed = restored.provenance.clone();
+    changed.intent.recipe.native_shape_error_mm = 0.01;
+    let changed_hash = input_fingerprint(
+        &changed.project_id,
+        &changed.definitions,
+        &changed.occurrences,
+        &changed.intent,
+        &changed.surface_overlays,
+    )
+    .unwrap();
+    assert_ne!(changed_hash, restored.provenance.input_hash);
+    assert!(
+        changed.validate().is_err(),
+        "captured hash must bind the native shape policy"
+    );
+    changed.input_hash = changed_hash;
+    changed.validate().unwrap();
+    let mut missing = serde_json::to_value(&captured).unwrap();
+    missing["provenance"]["intent"]["recipe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("native_shape_error_mm");
+    assert!(decode_bundle(&serde_json::to_vec(&missing).unwrap()).is_err());
+    let mut old = serde_json::to_value(&captured).unwrap();
+    old["schema_version"] = serde_json::json!(5);
+    assert!(decode_bundle(&serde_json::to_vec(&old).unwrap()).is_err());
 }
 
 #[test]
@@ -500,6 +776,40 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
 }
 
 #[test]
+fn native_failure_categories_preserve_specific_serialized_diagnostics() {
+    for (code, name) in [
+        (
+            ManufacturingErrorCode::NativeKernelFailure,
+            "native_kernel_failure",
+        ),
+        (
+            ManufacturingErrorCode::NativeConditioningFailure,
+            "native_conditioning_failure",
+        ),
+        (
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "native_analysis_indeterminate",
+        ),
+        (
+            ManufacturingErrorCode::NativeSingularGeometry,
+            "native_singular_geometry",
+        ),
+        (
+            ManufacturingErrorCode::NativeShapeErrorExceeded,
+            "native_shape_error_exceeded",
+        ),
+    ] {
+        let error = ManufacturingError::new(code, "Native geometry query diagnostic");
+        let value = serde_json::to_value(&error).unwrap();
+        assert_eq!(value["code"], name);
+        assert_eq!(
+            serde_json::from_value::<ManufacturingError>(value).unwrap(),
+            error
+        );
+    }
+}
+
+#[test]
 fn resource_and_utf8_error_boundaries_are_enforced() {
     let text = "界".repeat(MAX_MANUFACTURING_ERROR_BYTES);
     let bounded = ManufacturingError::new(ManufacturingErrorCode::Io, &text);
@@ -584,6 +894,12 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
             }
         })
         .collect();
+    result.native_geometry.certified_layer_count = result.layers.len() as u32;
+    result.native_geometry.slab_count = result.layers.len() as u32;
+    result
+        .native_geometry
+        .source_feature_coverage
+        .disjoint_source_layer_count = result.layers.len() as u32;
     result
 }
 
@@ -701,6 +1017,7 @@ fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
 fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     let expected = segmented_plan(&[&[1]]);
     let coverage = serde_json::to_string(&expected.layers[0].region_coverage).unwrap();
+    let native_geometry = serde_json::to_string(&expected.native_geometry).unwrap();
     let points = r#"[[10,10,5.2],[11,10,5.2]]"#;
     let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill"}}"#);
     let layer = format!(
@@ -708,7 +1025,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     );
     let wrap = |layer: &str| {
         format!(
-            r#"{{"surface_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
+            r#"{{"native_geometry":{native_geometry},"surface_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
         )
     };
     assert_eq!(
@@ -909,17 +1226,19 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
 }
 
 #[test]
-fn preflight_admission_is_bounded_and_eligibility_is_not_physical_authority() {
+fn preflight_admission_is_bounded_and_never_claims_physical_authority() {
     let check = PreflightCheck {
         code: "native_analysis_required".into(),
         severity: PreflightSeverity::Info,
+        evidence: PreflightEvidence::NotEvaluated,
+        required: false,
         message: "Native compile analysis required; physical qualification absent".into(),
         occurrence_id: None,
         face_id: None,
     };
     let mut report = PreflightReport {
         input_revision: ProjectRevision(9),
-        eligible: true,
+        disposition: PreflightDisposition::Admitted,
         software_only: true,
         checks: vec![check.clone()],
     };
@@ -927,13 +1246,111 @@ fn preflight_admission_is_bounded_and_eligibility_is_not_physical_authority() {
     report.software_only = false;
     assert!(report.validate().is_err());
     report.software_only = true;
-    report.checks[0].severity = PreflightSeverity::Error;
-    assert!(report.validate().is_err());
-    report.eligible = false;
-    report.validate().unwrap();
-    let mut value = serde_json::to_value(report).unwrap();
+    let mut value = serde_json::to_value(&report).unwrap();
     value["checks"] = serde_json::to_value(vec![check; 257]).unwrap();
     assert!(serde_json::from_value::<PreflightReport>(value).is_err());
+    report.checks.clear();
+    assert!(report.validate().is_err());
+}
+
+#[test]
+fn preflight_disposition_follows_required_evidence_with_known_failure_priority() {
+    use PreflightDisposition::{Admitted, Refused, Unresolved};
+    use PreflightEvidence::{Certified, Failed, Indeterminate, NotEvaluated, Unsupported};
+    let check = PreflightCheck {
+        code: "geometry".into(),
+        severity: PreflightSeverity::Info,
+        evidence: Certified,
+        required: true,
+        message: "Software geometry evidence".into(),
+        occurrence_id: None,
+        face_id: None,
+    };
+    let states = [Certified, Failed, Indeterminate, NotEvaluated, Unsupported];
+    for first in states {
+        for second in states {
+            for first_required in [false, true] {
+                for second_required in [false, true] {
+                    let mut checks = vec![check.clone(), check.clone()];
+                    checks[0].evidence = first;
+                    checks[0].required = first_required;
+                    checks[1].evidence = second;
+                    checks[1].required = second_required;
+                    let required: Vec<_> = checks.iter().filter(|check| check.required).collect();
+                    let expected = if required
+                        .iter()
+                        .any(|check| matches!(check.evidence, Failed | Unsupported))
+                    {
+                        Refused
+                    } else if required
+                        .iter()
+                        .any(|check| matches!(check.evidence, NotEvaluated | Indeterminate))
+                    {
+                        Unresolved
+                    } else {
+                        Admitted
+                    };
+                    for disposition in [Admitted, Refused, Unresolved] {
+                        let report = PreflightReport {
+                            input_revision: ProjectRevision(9),
+                            disposition,
+                            software_only: true,
+                            checks: checks.clone(),
+                        };
+                        assert_eq!(
+                            report.validate().is_ok(),
+                            disposition == expected,
+                            "{first:?}/{first_required}, {second:?}/{second_required}, {disposition:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn preflight_json_requires_explicit_evidence_policy_and_rejects_eligibility_alias() {
+    let report = PreflightReport {
+        input_revision: ProjectRevision(9),
+        disposition: PreflightDisposition::Unresolved,
+        software_only: true,
+        checks: vec![PreflightCheck {
+            code: "height_analysis".into(),
+            severity: PreflightSeverity::Warning,
+            evidence: PreflightEvidence::Indeterminate,
+            required: true,
+            message: "Height analysis has unresolved obligations".into(),
+            occurrence_id: None,
+            face_id: None,
+        }],
+    };
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(value["disposition"], "unresolved");
+    assert_eq!(value["checks"][0]["evidence"], "indeterminate");
+    assert_eq!(
+        serde_json::from_value::<PreflightReport>(value.clone()).unwrap(),
+        report
+    );
+    for field in ["evidence", "required"] {
+        let mut missing = value.clone();
+        missing["checks"][0].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<PreflightReport>(missing).is_err());
+    }
+    let mut missing = value.clone();
+    missing.as_object_mut().unwrap().remove("disposition");
+    assert!(serde_json::from_value::<PreflightReport>(missing).is_err());
+    let mut legacy = value.clone();
+    legacy["eligible"] = serde_json::json!(false);
+    assert!(serde_json::from_value::<PreflightReport>(legacy).is_err());
+    for invalid in ["unspecified", "unknown", "passed"] {
+        let mut changed = value.clone();
+        changed["checks"][0]["evidence"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<PreflightReport>(changed).is_err());
+        let mut changed = value.clone();
+        changed["disposition"] = serde_json::json!(invalid);
+        assert!(serde_json::from_value::<PreflightReport>(changed).is_err());
+    }
 }
 
 #[test]
@@ -987,6 +1404,12 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
         paths: Vec::new(),
     });
     scheduled.layers.push(object);
+    scheduled.native_geometry.certified_layer_count = scheduled.layers.len() as u32;
+    scheduled.native_geometry.slab_count = scheduled.layers.len() as u32;
+    scheduled
+        .native_geometry
+        .source_feature_coverage
+        .disjoint_source_layer_count = scheduled.layers.len() as u32;
     let bytes = serde_json::to_vec(&scheduled).unwrap();
     let admitted: NormalizedPrintPlan = serde_json::from_slice(&bytes).unwrap();
     admitted.validate(&data).unwrap();

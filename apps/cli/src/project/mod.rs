@@ -12,7 +12,7 @@ use spiling_contracts::surface::{
     SurfaceScopeKind,
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
-use spiling_engine_client::{EngineClient, prepare_bed_pose as bed_pose};
+use spiling_engine_client::EngineClient;
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
 
 /// A failed checkpoint with freshly observed engine state, not an assumed rollback.
@@ -392,10 +392,14 @@ async fn manufacturing_status(
         .await?
     {
         ManufacturingResponse::Status {
-            intent, artifact, ..
+            info,
+            intent,
+            artifact,
+            ..
         } => {
             let mut status = serde_json::json!({
-                "artifact": artifact, "software_only": true, "not_machine_ready": true
+                "artifact": artifact, "current_revision": info.revision,
+                "software_only": true, "not_machine_ready": true
             });
             // Ordered history retains artifact evidence, not 256 copies of the profile.
             if include_intent {
@@ -901,11 +905,13 @@ async fn execute(
             }
             Operation::Pose(occurrence_id, pose) => {
                 label = "pose";
+                let project_revision = info(client).await?.revision;
                 let response = geometry::control(
                     client,
                     GeometryCommand::SetInstancePose {
                         session_id: session.clone(),
                         base_revision,
+                        project_revision,
                         occurrence_id,
                         pose,
                     },
@@ -922,34 +928,34 @@ async fn execute(
                     "place_on_bed"
                 };
                 let summary = geometry::scene(client, &session).await?;
-                let (definitions, occurrences) = geometry::records(client, &summary).await?;
+                let (_, occurrences) = geometry::records(client, &summary).await?;
                 let occurrence = occurrences
                     .iter()
                     .find(|row| row.occurrence_id == occurrence_id)
                     .ok_or("bed preparation occurrence not in project")?;
-                let definition = definitions
-                    .iter()
-                    .find(|row| row.definition_id == occurrence.definition_id)
-                    .ok_or("bed preparation definition not in project")?;
-                let intent = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone() }).await? {
-                    ManufacturingResponse::Status { intent: Some(intent), .. } => intent,
+                let (intent, project_revision) = match client.manufacturing(ManufacturingCommand::Get { session_id: session.clone() }).await? {
+                    ManufacturingResponse::Status { intent: Some(intent), info, .. } => (intent, info.revision),
                     ManufacturingResponse::Status { intent: None, .. } => return Err("bed preparation requires --intent with a complete explicit printer/recipe profile first".into()),
                     ManufacturingResponse::Error { error } => return Err(spiling_engine_client::ClientError::Manufacturing(error).into()),
                     _ => return Err("unexpected manufacturing status response".into()),
                 };
-                let pose = bed_pose(
-                    definition.bounds_mm,
-                    occurrence.pose,
-                    intent.printer.build_envelope,
-                    center,
-                )?;
+                let preparation = client
+                    .prepare_bed_pose(
+                        &summary,
+                        project_revision,
+                        occurrence,
+                        intent.printer.build_envelope,
+                        center,
+                    )
+                    .await?;
                 let response = geometry::control(
                     client,
                     GeometryCommand::SetInstancePose {
                         session_id: session.clone(),
-                        base_revision: summary.revision,
+                        base_revision: preparation.scene_revision,
+                        project_revision: preparation.project_revision,
                         occurrence_id,
-                        pose,
+                        pose: preparation.pose,
                     },
                 )
                 .await?;
@@ -1020,9 +1026,12 @@ async fn execute(
         }) {
             verification = None;
         }
+        let project = info(client).await?;
         history.push(serde_json::json!({
-            "operation": label, "project": info(client).await?, "manufacturing": manufacturing,
-            "preflight": if label == "preflight" { preflight_report.as_ref() } else { None }
+            "operation": label, "project": project, "manufacturing": manufacturing,
+            "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
+            "preflight_freshness": preflight_report.as_ref().map(|report|
+                if report.input_revision == project.revision { "current" } else { "stale" })
         }));
     }
     let summary = geometry::scene(client, &session).await?;
@@ -1062,11 +1071,18 @@ async fn execute(
     }
     let mut report = geometry::inspect(client, plane, output).await?;
     report["command"] = serde_json::json!("project");
-    report["project"] = serde_json::to_value(info(client).await?)?;
+    let project = info(client).await?;
+    report["project"] = serde_json::to_value(&project)?;
     report["face_inspections"] = serde_json::to_value(inspections)?;
     report["operations"] = serde_json::json!(history);
     report["manufacturing"] = manufacturing_status(client, true).await?;
     if let Some(preflight) = preflight_report {
+        report["manufacturing"]["preflight_freshness"] =
+            serde_json::json!(if preflight.input_revision == project.revision {
+                "current"
+            } else {
+                "stale"
+            });
         report["manufacturing"]["preflight"] = serde_json::to_value(preflight)?;
     }
     if let Some(inspection) = verification {
@@ -1409,39 +1425,6 @@ mod tests {
             .is_err()
         );
         assert!(parse_args(&["edit", "project", "--replay-out", "motion.splr"]).is_err());
-    }
-    #[test]
-    fn bed_preparation_preserves_orientation_and_uses_declared_envelope() {
-        let bounds = AabbMm::new([-2.0, -4.0, -3.0], [8.0, 6.0, 7.0]).unwrap();
-        let envelope = AabbMm::new([10.0, 20.0, 5.0], [110.0, 120.0, 105.0]).unwrap();
-        let pose = RigidPoseMm {
-            translation_mm: [30.0, 40.0, 50.0],
-            ..RigidPoseMm::IDENTITY
-        };
-        let placed = bed_pose(bounds, pose, envelope, false).unwrap();
-        assert_eq!(placed.translation_mm, [30.0, 40.0, 8.0]);
-        assert_eq!(placed.rotation_xyzw, pose.rotation_xyzw);
-        let centered = bed_pose(bounds, pose, envelope, true).unwrap();
-        assert_eq!(centered.translation_mm, [57.0, 69.0, 8.0]);
-        let tilted = RigidPoseMm {
-            rotation_xyzw: [
-                0.0,
-                0.0,
-                (std::f64::consts::PI / 8.0).sin(),
-                (std::f64::consts::PI / 8.0).cos(),
-            ],
-            ..pose
-        };
-        assert!(bed_pose(bounds, tilted, envelope, true).is_err());
-        let small = AabbMm::new([0.0; 3], [1.0; 3]).unwrap();
-        assert!(bed_pose(bounds, pose, small, true).is_err());
-        let rotated = RigidPoseMm {
-            rotation_xyzw: [0.0, 0.0, 1.0, 0.0],
-            ..pose
-        };
-        let centered = bed_pose(bounds, rotated, envelope, true).unwrap();
-        assert_eq!(centered.rotation_xyzw, rotated.rotation_xyzw);
-        assert_eq!(centered.translation_mm, [63.0, 71.0, 8.0]);
     }
 
     #[test]

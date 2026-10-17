@@ -3,7 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
-use spiling_contracts::geometry::{FaceCarrier, GeometryErrorCode};
+use spiling_contracts::geometry::{AnalyticSurfaceDescription, GeometryErrorCode};
 
 fn source(name: &str) -> Vec<u8> {
     std::fs::read(
@@ -100,7 +100,12 @@ fn native_curved_sections_preserve_material_and_hole_winding() {
     let cylindrical: Vec<_> = hole
         .faces()
         .iter()
-        .filter(|face| matches!(face.carrier, FaceCarrier::Cylinder { .. }))
+        .filter(|face| {
+            matches!(
+                face.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            )
+        })
         .collect();
     assert!(!cylindrical.is_empty());
     for face in cylindrical {
@@ -121,7 +126,7 @@ fn cancelled_native_operations_never_publish_partial_geometry() {
         GeometryErrorCode::Cancelled
     );
     assert_eq!(
-        tessellate(&definition, DisplayProfile::MeshMm005V1, &cancel)
+        tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)
             .unwrap_err()
             .code,
         GeometryErrorCode::Cancelled
@@ -172,20 +177,39 @@ fn remaining_scene_capacity_rejects_without_partial_native_artifacts() {
     let bytes = source("box-mm.step");
     let cancel = AtomicBool::new(false);
     assert_eq!(
-        import_step_with_face_limit(&bytes, &cancel, 5)
-            .unwrap_err()
-            .code,
+        import_step_with_limits(
+            &bytes,
+            &cancel,
+            ImportLimits {
+                max_faces: 5,
+                ..ImportLimits::FROZEN
+            }
+        )
+        .unwrap_err()
+        .code,
         GeometryErrorCode::ResourceLimit
     );
-    let definition = import_step_with_face_limit(&bytes, &cancel, 6).unwrap();
+    let definition = import_step_with_limits(
+        &bytes,
+        &cancel,
+        ImportLimits {
+            max_faces: 6,
+            ..ImportLimits::FROZEN
+        },
+    )
+    .unwrap();
     let capacity = MeshBudget {
         vertices: 24,
         triangles: 12,
         bytes: 832,
     };
-    let encoded =
-        tessellate_with_budget(&definition, DisplayProfile::MeshMm005V1, &cancel, capacity)
-            .unwrap();
+    let encoded = tessellate_with_budget(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+        capacity,
+    )
+    .unwrap();
     assert_eq!(
         (
             encoded.vertex_count,
@@ -209,9 +233,14 @@ fn remaining_scene_capacity_rejects_without_partial_native_artifacts() {
         },
     ] {
         assert_eq!(
-            tessellate_with_budget(&definition, DisplayProfile::MeshMm005V1, &cancel, narrowed)
-                .unwrap_err()
-                .code,
+            tessellate_with_budget(
+                &definition,
+                DisplayProfile::MeshTrimmedMm005V2,
+                &cancel,
+                narrowed
+            )
+            .unwrap_err()
+            .code,
             GeometryErrorCode::ResourceLimit
         );
     }
@@ -247,7 +276,8 @@ fn native_box_wall_certificates_keep_exact_face_identity_outward_side_and_source
         let mut seen = [false; 4];
         let mut top_bottom = 0;
         for face in definition.faces() {
-            let FaceCarrier::Plane { normal, .. } = face.carrier else {
+            let Some(AnalyticSurfaceDescription::Plane { normal, .. }) = face.geometry.analytic
+            else {
                 panic!("box carrier");
             };
             if normal[2].abs() > 0.5 {
@@ -346,7 +376,7 @@ fn native_notched_extrusion() -> Definition {
             |curve| Some(curve.clone()),
             |surface| match surface {
                 Surface::SweepSurface(SweepSurface::ExtrusionSurface(extrusion)) => {
-                    let Curve3D::Line(line) = extrusion.entity_curve() else {
+                    let Curve3D::Line(line) = extrusion.entity_curve().as_ref() else {
                         return None;
                     };
                     Some(Surface::ElementarySurface(ElementarySurface::Plane(
@@ -378,8 +408,8 @@ fn native_notched_extrusion() -> Definition {
 fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certificates() {
     let definition = native_notched_extrusion();
     let recessed = definition.faces().iter().find(|face| matches!(
-        face.carrier,
-        FaceCarrier::Plane { origin_mm, normal } if (origin_mm[1] - 6.0).abs() < 1e-7 && normal[1].abs() > 0.5
+        face.geometry.analytic,
+        Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) if (origin_mm[1] - 6.0).abs() < 1e-7 && normal[1].abs() > 0.5
     )).expect("genuine full-height four-line notch back wall");
     let error = definition
         .vertical_wall_face(&recessed.face_id)
@@ -387,8 +417,8 @@ fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certif
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
     assert!(error.message.contains("supporting"));
     let coplanar: Vec<_> = definition.faces().iter().filter(|face| matches!(
-        face.carrier,
-        FaceCarrier::Plane { origin_mm, normal } if (origin_mm[1] - 10.0).abs() < 1e-7 && normal[1].abs() > 0.5
+        face.geometry.analytic,
+        Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) if (origin_mm[1] - 10.0).abs() < 1e-7 && normal[1].abs() > 0.5
     )).collect();
     assert_eq!(coplanar.len(), 2);
     for face in coplanar {
@@ -417,8 +447,10 @@ fn cylinders_hole_trims_partial_height_and_sloped_native_walls_are_explicitly_un
     }
     let hole = load("through-hole.step");
     for face in hole.faces() {
-        if matches!(face.carrier, FaceCarrier::Cylinder { .. })
-            || matches!(face.carrier, FaceCarrier::Plane { normal, .. } if normal[2].abs() > 0.5)
+        if matches!(
+            face.geometry.analytic,
+            Some(AnalyticSurfaceDescription::Cylinder { .. })
+        ) || matches!(face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[2].abs() > 0.5)
         {
             assert_eq!(
                 hole.vertical_wall_face(&face.face_id).unwrap_err().code,
@@ -428,14 +460,14 @@ fn cylinders_hole_trims_partial_height_and_sloped_native_walls_are_explicitly_un
     }
     let shelf = load("../manufacturing/native/non-grid-shelf.step");
     let partial = shelf.faces().iter().find(|face| matches!(
-        face.carrier, FaceCarrier::Plane { origin_mm, normal } if (origin_mm[0] - 20.0).abs() < 1e-7 && normal[0].abs() > 0.5
+        face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) if (origin_mm[0] - 20.0).abs() < 1e-7 && normal[0].abs() > 0.5
     )).expect("short exterior vertical shelf wall");
     let error = shelf.vertical_wall_face(&partial.face_id).unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
     assert!(error.message.contains("complete local source height"));
     let ramp = load("../manufacturing/native/inward-planar-ramp.step");
     let sloped = ramp.faces().iter().find(|face| matches!(
-        face.carrier, FaceCarrier::Plane { normal, .. } if normal[0].abs() > 0.1 && normal[2].abs() > 0.1
+        face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[0].abs() > 0.1 && normal[2].abs() > 0.1
     )).expect("genuine sloped native wall");
     assert_eq!(
         ramp.vertical_wall_face(&sloped.face_id).unwrap_err().code,
@@ -451,7 +483,7 @@ fn wall_certificate_refuses_nonfinite_native_witnesses_and_bad_oriented_source_m
         .iter()
         .position(|face| {
             matches!(
-                face.carrier, FaceCarrier::Plane { normal, .. } if normal[2].abs() < 0.5
+                face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[2].abs() < 0.5
             )
         })
         .unwrap();
@@ -474,7 +506,9 @@ fn wall_certificate_refuses_nonfinite_native_witnesses_and_bad_oriented_source_m
         definition.vertical_wall_face(&face_id).unwrap_err().code,
         GeometryErrorCode::KernelFailure
     );
-    if let FaceCarrier::Plane { normal, .. } = &mut definition.faces[index].carrier {
+    if let Some(AnalyticSurfaceDescription::Plane { normal, .. }) =
+        &mut definition.faces[index].geometry.analytic
+    {
         normal[0] = f64::NAN;
     }
     assert_eq!(
@@ -496,7 +530,12 @@ fn unchanged_occt_full_cylinder_has_source_owned_certificate_without_mutation() 
     let side = definition
         .faces()
         .iter()
-        .find(|face| matches!(face.carrier, FaceCarrier::Cylinder { .. }))
+        .find(|face| {
+            matches!(
+                face.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            )
+        })
         .unwrap();
     let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
     assert_eq!(cert.center_mm, [0.0, 0.0]);
@@ -612,7 +651,12 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
         let side = definition
             .faces()
             .iter()
-            .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+            .find(|f| {
+                matches!(
+                    f.geometry.analytic,
+                    Some(AnalyticSurfaceDescription::Cylinder { .. })
+                )
+            })
             .unwrap();
         let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
         close(cert.center_mm[0], 13.0, 1e-7);
@@ -630,7 +674,12 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
     let side = sloped
         .faces()
         .iter()
-        .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+        .find(|f| {
+            matches!(
+                f.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            )
+        })
         .unwrap();
     assert_eq!(
         sloped
@@ -647,7 +696,12 @@ fn cylinder_certificate_refuses_corrupt_positional_and_analytic_authority() {
     let index = definition
         .faces()
         .iter()
-        .position(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+        .position(|f| {
+            matches!(
+                f.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            )
+        })
         .unwrap();
     let face = definition.faces[index].face_id.clone();
     definition.face_boundaries[index].wires[0][0].witness = usize::MAX;
@@ -772,18 +826,24 @@ fn arbitrary_native_rim_subdivisions_preserve_full_face_but_short_steps_refuse()
         let side = definition
             .faces()
             .iter()
-            .find(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
+            .find(|f| {
+                matches!(
+                    f.geometry.analytic,
+                    Some(AnalyticSurfaceDescription::Cylinder { .. })
+                )
+            })
             .unwrap();
         let cert = definition.vertical_cylinder_face(&side.face_id).unwrap();
         close(cert.radius_mm, 5.0, 1e-7);
         close(cert.min_z_mm, 0.0, 1e-7);
         close(cert.max_z_mm, 8.0, 1e-7);
         let stepped = original_periodic_cylinder_source(subdivisions, true);
-        for side in stepped
-            .faces()
-            .iter()
-            .filter(|f| matches!(f.carrier, FaceCarrier::Cylinder { .. }))
-        {
+        for side in stepped.faces().iter().filter(|f| {
+            matches!(
+                f.geometry.analytic,
+                Some(AnalyticSurfaceDescription::Cylinder { .. })
+            )
+        }) {
             let error = stepped.vertical_cylinder_face(&side.face_id).unwrap_err();
             assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
         }

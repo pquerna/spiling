@@ -18,14 +18,14 @@
   "encoding": "hex",
   "loops": [
     {
-      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "definition_id": "011b000cb8c71c15bef0a62bd16a5f90fba35205d66156d9ca3fae07ea571a40",
       "is_hole": false,
       "occurrence_id": 1,
       "ordinal": 0,
       "point_count": 5
     },
     {
-      "definition_id": "546836de0ef1960c5c9a9a74191d23920f8f9d79b10098fc40f254031b28e9e8",
+      "definition_id": "011b000cb8c71c15bef0a62bd16a5f90fba35205d66156d9ca3fae07ea571a40",
       "is_hole": true,
       "occurrence_id": 1,
       "ordinal": 1,

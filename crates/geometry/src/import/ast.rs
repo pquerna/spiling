@@ -99,10 +99,39 @@ impl<'a> Entities<'a> {
                         | "AXIS2_PLACEMENT_2D"
                         | "PLANE"
                         | "CYLINDRICAL_SURFACE"
+                        | "CONICAL_SURFACE"
+                        | "SPHERICAL_SURFACE"
+                        | "TOROIDAL_SURFACE"
+                        | "B_SPLINE_SURFACE"
+                        | "B_SPLINE_SURFACE_WITH_KNOTS"
+                        | "BEZIER_SURFACE"
+                        | "QUASI_UNIFORM_SURFACE"
+                        | "UNIFORM_SURFACE"
+                        | "RATIONAL_B_SPLINE_SURFACE"
+                        | "BOUNDED_SURFACE"
+                        | "SURFACE"
+                        | "GEOMETRIC_REPRESENTATION_ITEM"
+                        | "REPRESENTATION_ITEM"
+                        | "SURFACE_OF_LINEAR_EXTRUSION"
+                        | "SURFACE_OF_REVOLUTION"
+                        | "SWEPT_SURFACE"
+                        | "AXIS1_PLACEMENT"
                         | "LINE"
                         | "CIRCLE"
+                        | "ELLIPSE"
+                        | "HYPERBOLA"
+                        | "PARABOLA"
+                        | "B_SPLINE_CURVE"
+                        | "B_SPLINE_CURVE_WITH_KNOTS"
+                        | "BEZIER_CURVE"
+                        | "QUASI_UNIFORM_CURVE"
+                        | "UNIFORM_CURVE"
+                        | "RATIONAL_B_SPLINE_CURVE"
+                        | "BOUNDED_CURVE"
+                        | "CURVE"
                         | "TRIMMED_CURVE"
                         | "SURFACE_CURVE"
+                        | "INTERSECTION_CURVE"
                         | "SEAM_CURVE"
                         | "PCURVE"
                         | "DEFINITIONAL_REPRESENTATION"
@@ -111,7 +140,7 @@ impl<'a> Entities<'a> {
                         | "PARAMETRIC_REPRESENTATION_CONTEXT"
                 ) {
                     return Err(unsupported(&format!(
-                        "reachable STEP #{id} {} is outside planar/cylindrical profile",
+                        "reachable STEP #{id} {} has no admitted exact native conversion",
                         record.name
                     )));
                 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
-//! Original native planar operator regressions; never an import repair path.
+//! Original native operator regressions; never an import repair path.
+mod parity;
 use monstertruck_io::step::{
     load::step_geometry::{Curve3D, ElementarySurface, Surface, SweepSurface, re_exports::*},
     save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
@@ -25,7 +26,7 @@ fn prism(points_xz: &[(f64, f64)], depth: f64) -> Solid<Point3, Curve3D, Surface
             |c| Some(c.clone()),
             |surface| {
                 if let Surface::SweepSurface(SweepSurface::ExtrusionSurface(extrusion)) = surface {
-                    let Curve3D::Line(line) = extrusion.entity_curve() else {
+                    let Curve3D::Line(line) = extrusion.entity_curve().as_ref() else {
                         return None;
                     };
                     Some(Surface::ElementarySurface(ElementarySurface::Plane(
@@ -45,6 +46,32 @@ fn prism(points_xz: &[(f64, f64)], depth: f64) -> Solid<Point3, Curve3D, Surface
     solid
 }
 
+fn circular_tunnel(center_x: f64, center_z: f64, radius: f64) -> Solid<Point3, Curve3D, Surface> {
+    let solid = parity::extruded(
+        vec![
+            parity::rectangle(20.0, 7.85),
+            parity::circle(center_x, center_z, radius).inverse(),
+        ],
+        10.0,
+    );
+    // Exact positive-orientation coordinate permutation: the original XY
+    // profile becomes XZ, and the analytic bore runs through +Y. No fitted
+    // carriers, Boolean subtraction or rounded rotation is involved.
+    let frame = Matrix4::from_cols(
+        Vector4::new(-1.0, 0.0, 0.0, 0.0),
+        Vector4::new(0.0, 0.0, 1.0, 0.0),
+        Vector4::new(0.0, 1.0, 0.0, 0.0),
+        Vector4::new(20.0, 0.0, 0.0, 1.0),
+    );
+    solid
+        .try_mapped(
+            |point| Some(frame.transform_point(*point)),
+            |curve| Some(curve.transformed(frame)),
+            |surface| Some(surface.transformed(frame)),
+        )
+        .expect("exact original cross-axis cylindrical tunnel")
+}
+
 fn main() -> std::result::Result<(), Box<dyn Error>> {
     let check = std::env::args().skip(1).any(|arg| arg == "--check");
     let root =
@@ -52,10 +79,11 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
     if !check {
         std::fs::create_dir_all(&root)?;
     }
-    let fixtures: [(&str, &[(f64, f64)]); 3] = [
+    let fixtures: [(&str, &[(f64, f64)], Option<[f64; 3]>); 4] = [
         (
             "nonintegral-top",
             &[(0.0, 0.0), (20.0, 0.0), (20.0, 7.85), (0.0, 7.85)],
+            None,
         ),
         (
             "non-grid-shelf",
@@ -67,16 +95,26 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
                 (12.0, 7.85),
                 (0.0, 7.85),
             ],
+            None,
         ),
         (
             "inward-planar-ramp",
             &[(0.0, 0.0), (20.0, 0.0), (16.0, 7.85), (0.0, 7.85)],
+            None,
+        ),
+        (
+            "off-grid-circular-tunnel",
+            &[(0.0, 0.0), (20.0, 0.0), (20.0, 7.85), (0.0, 7.85)],
+            Some([10.0, 1.37, 0.24]),
         ),
     ];
     let mut manifest = Vec::new();
     let notice = b"SPDX-FileCopyrightText: 2026 Spiling contributors\nSPDX-License-Identifier: OSL-3.0\nOriginal Spiling native planar operator fixture; no external CAD source.\n";
-    for (name, points) in fixtures {
-        let solid = prism(points, 10.0);
+    for (name, points, tunnel) in fixtures {
+        let solid = match tunnel {
+            Some([x, z, radius]) => circular_tunnel(x, z, radius),
+            None => prism(points, 10.0),
+        };
         let compressed = solid.compress();
         let header = StepHeaderDescriptor {
             file_name: format!("{name}.step"),
@@ -93,10 +131,19 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         .into_bytes();
         let path = root.join(format!("{name}.step"));
         output(&path, &bytes, check)?;
-        output(&root.join(format!("{name}.step.license")), notice, check)?;
+        let fixture_notice = if tunnel.is_some() {
+            b"SPDX-FileCopyrightText: 2026 Spiling contributors\nSPDX-License-Identifier: OSL-3.0\nOriginal Spiling native cylindrical-tunnel operator fixture; no external CAD source.\n".as_slice()
+        } else {
+            notice.as_slice()
+        };
+        output(&root.join(format!("{name}.step.license")), fixture_notice, check)?;
         let hash = format!("{:x}", Sha256::digest(&bytes));
         println!("{name}.step {hash}");
-        manifest.push(serde_json::json!({"file":format!("{name}.step"), "sha256":hash, "depth_mm":10.0, "native_xz_vertices_mm":points}));
+        let mut entry = serde_json::json!({"file":format!("{name}.step"), "sha256":hash, "depth_mm":10.0, "native_xz_vertices_mm":points});
+        if let Some(circle) = tunnel {
+            entry["native_y_tunnel_circle_xz_mm"] = serde_json::json!(circle);
+        }
+        manifest.push(entry);
     }
     let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version":1, "software_only":true, "SPDX-License-Identifier":"OSL-3.0",

@@ -7,6 +7,7 @@ use boolean::budget as boolean_budget;
 mod classification;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
+mod native;
 mod preflight;
 mod region;
 mod support;
@@ -17,16 +18,16 @@ mod native_tests;
 #[cfg(test)]
 mod tests;
 use crate::{CompilerInput, check_cancel, error};
-use geo::{Area, BooleanOps, Intersects, MultiPolygon, Point};
+use geo::{Area, Intersects, MultiPolygon, Point};
 use spiling_contracts::geometry::{
-    GeometryErrorCode, PlaneMm, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
+    DefinitionId, GeometryErrorCode, RigidPoseMm, SECTION_SAMPLING_TOLERANCE_MM,
 };
 use spiling_contracts::manufacturing::program_coordinates::{
     project_xyz6_bead_height_mm, project_xyz6_coordinate_mm,
 };
 use spiling_contracts::manufacturing::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::BTreeMap,
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -38,158 +39,150 @@ pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
-    let admission = preflight::admit(input, cancel)?;
-    if !admission.report.eligible {
-        let check = admission
-            .report
-            .checks
-            .iter()
-            .find(|check| check.severity == PreflightSeverity::Error)
-            .expect("ineligible metadata has an error");
-        let code = match check.code.as_str() {
-            "resource_limit" | "event_limit" => ManufacturingErrorCode::ResourceLimit,
-            "empty_project" => ManufacturingErrorCode::EmptyProject,
-            "invalid_intent"
-            | "source_identity"
-            | "invalid_pose"
-            | "missing_definition"
-            | "invalid_surface_targets" => ManufacturingErrorCode::InvalidSpecification,
-            _ => ManufacturingErrorCode::UnsupportedGeometry,
-        };
-        return Err(error(code, check.message.clone()));
+    let (mut admission, geometry_sources) = preflight::admit(input, cancel)?;
+    match admission.report.disposition {
+        PreflightDisposition::Admitted => {}
+        disposition @ (PreflightDisposition::Refused | PreflightDisposition::Unresolved) => {
+            let check = admission
+                .report
+                .checks
+                .iter()
+                .find(|check| {
+                    check.required
+                        && match disposition {
+                            PreflightDisposition::Refused => matches!(
+                                check.evidence,
+                                PreflightEvidence::Unsupported | PreflightEvidence::Failed
+                            ),
+                            PreflightDisposition::Unresolved => matches!(
+                                check.evidence,
+                                PreflightEvidence::NotEvaluated | PreflightEvidence::Indeterminate
+                            ),
+                            PreflightDisposition::Admitted => false,
+                        }
+                })
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::InvalidSpecification,
+                        "preflight disposition has no matching required evidence",
+                    )
+                })?;
+            let code = match check.code.as_str() {
+                "resource_limit" | "event_limit" => ManufacturingErrorCode::ResourceLimit,
+                "empty_project" => ManufacturingErrorCode::EmptyProject,
+                "invalid_intent"
+                | "source_identity"
+                | "invalid_pose"
+                | "missing_definition"
+                | "invalid_surface_targets" => ManufacturingErrorCode::InvalidSpecification,
+                "native_kernel_failure" => ManufacturingErrorCode::NativeKernelFailure,
+                "native_conditioning_failure" => ManufacturingErrorCode::NativeConditioningFailure,
+                "native_analysis_indeterminate"
+                | "unresolved_native_event"
+                | "unresolved_layer_schedule" => {
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate
+                }
+                "native_singular_geometry" => ManufacturingErrorCode::NativeSingularGeometry,
+                _ => ManufacturingErrorCode::UnsupportedGeometry,
+            };
+            return Err(error(code, check.message.clone()));
+        }
     }
     let recipe = &input.intent.recipe;
-    let schedule = admission
-        .schedule
-        .as_ref()
-        .expect("eligible input has an admitted schedule");
-    let count = schedule.len() as u32;
+    preflight::resolve_native_events(input, &mut admission, &geometry_sources, cancel)?;
+    let prepared_sources = prepare_sources(geometry_sources, &mut admission.geometry_work, cancel)?;
+    // This is a proposal, not authorization. The streamed source stage below
+    // commits each actual interval only after native metric/incidence and joint
+    // source-union certificates, refining this same field/support schedule.
+    let mut schedule = scheduled_layers(input, &admission, cancel)?;
+    let mut count = schedule.len() as u32;
     let mut occurrences = input.occurrences.iter().collect::<Vec<_>>();
     occurrences.sort_by_key(|o| o.occurrence_id);
-    let mut slab_boundaries = BTreeSet::new();
-    for event in &admission.horizontal_events {
-        let index =
-            schedule.partition_point(|layer| layer.z <= *event + LAYER_QUANTIZATION_MM) as u32;
-        slab_boundaries.insert(index);
-    }
-    // M is sectioned once per native invariant slab. D has its own identity and
+    // M is sectioned once per certified native material slab. D has its own identity and
     // can change at every refined layer inside that same slab.
     let mut sections: Vec<SectionSpan> = Vec::new();
+    let mut retained_section_bytes = 0usize;
     let mut retained_points = 0usize;
-    let mut prepared_sources = BTreeMap::new();
-    let mut remaining_prepared_bytes = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES;
     let mut surface_work = 0usize;
     let mut index = 0u32;
     let mut native_slab_end = 0u32;
     let mut native_slab_start = 0u32;
     let mut native_surfaces = Vec::new();
     let mut native_material = MultiPolygon(Vec::new());
+    let mut native_occupied_shared: Option<Arc<ContinuousOccupied>> = None;
     let mut native_finished = Vec::new();
     let mut native_required = BTreeMap::new();
+    let mut native_finished_bytes = 0usize;
     let mut native_source_area_mm2 = 0.0;
     let mut native_points = 0usize;
+    let mut native_stage = native::NativeStageState::new([
+        input.intent.printer.build_envelope.min[2],
+        schedule
+            .last()
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "native schedule has no actual terminal layer",
+                )
+            })?
+            .z,
+    ])?;
     while index < count {
         check_cancel(cancel)?;
-        let sample = schedule[index as usize].sample;
+        let mut sample = schedule[index as usize].sample;
         if index == native_slab_end {
-            native_slab_start = index;
-            native_slab_end = if admission.reuse_slabs {
-                slab_boundaries
-                    .range((index + 1)..)
-                    .next()
-                    .copied()
-                    .unwrap_or(count)
-                    .min(count)
-            } else {
-                index + 1
-            };
-            native_material = MultiPolygon(Vec::new());
-            native_finished.clear();
+            // The previous slab's query-local operands are obsolete. Release
+            // them before admitting the next query; published shared buffers
+            // remain owned and charged by sections/native_surfaces.
+            drop(std::mem::take(&mut native_material.0));
+            drop(std::mem::take(&mut native_finished));
             native_required.clear();
-            native_points = 0;
-            native_source_area_mm2 = 0.0;
-            for occurrence in &occurrences {
-                check_cancel(cancel)?;
-                let definition = &input.definitions[&occurrence.definition_id];
-                let plane = PlaneMm {
-                    origin_mm: inverse(&occurrence.pose, [0.0, 0.0, sample]),
-                    normal: rotate_inverse(&occurrence.pose, [0.0, 0.0, 1.0]),
-                };
-                let native_error = |e: spiling_contracts::geometry::GeometryError| {
-                    let code = match e.code {
-                        GeometryErrorCode::Cancelled => ManufacturingErrorCode::Cancelled,
-                        GeometryErrorCode::ResourceLimit => ManufacturingErrorCode::ResourceLimit,
-                        _ => ManufacturingErrorCode::UnsupportedGeometry,
-                    };
-                    error(code, format!("native section at layer {index}: {e}"))
-                };
-                let source = match prepared_sources.entry(&occurrence.definition_id) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        let source = spiling_geometry::prepare_section_source(
-                            definition,
-                            remaining_prepared_bytes,
-                            cancel,
-                        )
-                        .map_err(native_error)?;
-                        remaining_prepared_bytes = remaining_prepared_bytes
-                            .checked_sub(source.retained_bytes())
-                            .ok_or_else(|| {
-                                error(
-                                    ManufacturingErrorCode::ResourceLimit,
-                                    "aggregate prepared native section capacity exceeded",
-                                )
-                            })?;
-                        entry.insert(source)
-                    }
-                };
-                let native = source
-                    .section_with_byte_limit(plane, cancel, 4 * 1024 * 1024)
-                    .map_err(native_error)?;
-                let placed = region::from_native(native, &occurrence.pose, sample, cancel)?;
-                if placed.0.is_empty() {
-                    continue;
-                }
-                if admission
-                    .surface_fields
-                    .contains_key(&occurrence.occurrence_id)
-                {
-                    native_points = native_points
-                        .checked_add(region::point_count(&placed))
-                        .filter(|n| {
-                            retained_points
-                                .checked_add(*n)
-                                .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
-                        })
-                        .ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "retained native image-carrier footprint budget exceeded",
-                            )
-                        })?;
-                    native_source_area_mm2 += placed.unsigned_area();
-                    native_finished.push((occurrence.occurrence_id, Arc::new(placed)));
-                } else if native_material.0.is_empty() {
-                    native_material = placed;
-                } else {
-                    boolean_budget(&native_material, &placed, cancel)?;
-                    native_material = native_material.union(&placed);
-                }
-                check_cancel(cancel)?;
-                region::check_size(&native_material)?;
-            }
-            native_source_area_mm2 += native_material.unsigned_area();
-            native_points = native_points
-                .checked_add(region::point_count(&native_material))
-                .filter(|n| {
-                    retained_points
-                        .checked_add(*n)
-                        .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
-                })
+            drop(native_occupied_shared.take());
+            let retained_output_bytes =
+                native::output_bytes(&sections, &native_surfaces, retained_section_bytes)
+                    .saturating_add(
+                        schedule
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<LayerElevation>()),
+                    )
+                    .saturating_add(occurrences.capacity().saturating_mul(std::mem::size_of::<
+                        &spiling_contracts::geometry::OccurrenceRecord,
+                    >()));
+            let captured = native::collect_span(
+                &native::NativeSourceInputs {
+                    input,
+                    occurrences: &occurrences,
+                    sources: &prepared_sources,
+                },
+                &mut admission,
+                &mut schedule,
+                &native::NativeSpanRequest {
+                    index,
+                    retained_points,
+                    retained_output_bytes,
+                },
+                &mut native_stage,
+                &mut surface_work,
+                cancel,
+            )?;
+            count = schedule.len() as u32;
+            sample = schedule[index as usize].sample;
+            native_slab_start = index;
+            native_slab_end = captured.end;
+            native_material = captured.material;
+            native_finished = captured.finished;
+            native_finished_bytes = captured.finished_bytes;
+            native_required.clear();
+            native_points = captured.point_count;
+            native_source_area_mm2 = captured.source_area_mm2;
+            native_occupied_shared = Some(captured.occupied);
+            let live_retained = retained_points
+                .checked_add(native_stage.retained_point_count())
+                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "retained native slab point budget exceeded",
+                        "native lookahead plus captured scene point budget exceeded",
                     )
                 })?;
             for (occurrence_id, native) in &native_finished {
@@ -198,7 +191,7 @@ pub(crate) fn plan(
                     continue;
                 }
                 let required = if fields.iter().any(|field| !field.is_image()) {
-                    let staged = retained_points
+                    let staged = live_retained
                         .checked_add(native_points)
                         .filter(|n| {
                             n.checked_add(region::point_count(native))
@@ -210,7 +203,7 @@ pub(crate) fn plan(
                                 "mandatory carrier realization staging point budget exceeded",
                             )
                         })?;
-                    let required = surface::realize_required(
+                    let mut required = surface::realize_required(
                         native.as_ref().clone(),
                         fields,
                         sample,
@@ -221,7 +214,7 @@ pub(crate) fn plan(
                     native_points = native_points
                         .checked_add(region::point_count(&required))
                         .filter(|n| {
-                            retained_points
+                            live_retained
                                 .checked_add(*n)
                                 .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
                         })
@@ -231,6 +224,8 @@ pub(crate) fn plan(
                                 "retained mandatory carrier point budget exceeded",
                             )
                         })?;
+                    native_finished_bytes =
+                        native_finished_bytes.saturating_add(native::material_bytes(&mut required));
                     Arc::new(required)
                 } else {
                     Arc::clone(native)
@@ -238,7 +233,17 @@ pub(crate) fn plan(
                 native_required.insert(*occurrence_id, required);
             }
         }
-        let slab_start = schedule[index as usize].z - schedule[index as usize].height;
+        let lookahead_points = native_stage.retained_point_count();
+        let live_retained = retained_points
+            .checked_add(lookahead_points)
+            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native lookahead plus realized scene point budget exceeded",
+                )
+            })?;
+        let slab_start = schedule[index as usize].lower_z;
         let mut end = index + 1;
         while end < native_slab_end {
             check_cancel(cancel)?;
@@ -258,7 +263,7 @@ pub(crate) fn plan(
             native_points = 0;
             std::mem::replace(&mut native_material, MultiPolygon::new(Vec::new()))
         } else {
-            retained_points
+            live_retained
                 .checked_add(native_points)
                 .and_then(|n| n.checked_add(region::point_count(&native_material)))
                 .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -272,7 +277,7 @@ pub(crate) fn plan(
         };
         for (occurrence_id, placed) in &native_finished {
             let fields = &admission.surface_fields[occurrence_id];
-            retained_points
+            live_retained
                 .checked_add(native_points)
                 .and_then(|n| n.checked_add(region::point_count(&next)))
                 .and_then(|n| n.checked_add(region::point_count(placed)))
@@ -287,7 +292,7 @@ pub(crate) fn plan(
                 placed.as_ref().clone(),
                 fields,
                 sample,
-                retained_points + native_points + region::point_count(&next),
+                live_retained + native_points + region::point_count(&next),
                 &mut surface_work,
                 cancel,
             )?;
@@ -305,12 +310,35 @@ pub(crate) fn plan(
                 "surface construction lost source material",
             ));
         }
+        // Source occupancy is independent of M/D invariance: chord-sampled
+        // invariant contours can still under-enclose the true native carrier.
+        let mut occupied = native_occupied_shared.as_ref().map(Arc::clone);
+        // Finish construction boxes enclose the continuous requested field,
+        // including XY/chord residual even for Z-invariant finishes. Invariance
+        // alone does not turn a polygonal realization into outer containment.
+        for (occurrence_id, fields) in &admission.surface_fields {
+            let native_bounds = admission.native_bounds[occurrence_id];
+            for field in fields {
+                field.include_occupied_envelope(
+                    occupied.as_mut().expect("owned finish occupied envelope"),
+                    &surface::OccupiedHeightScope {
+                        requested: [slab_start, schedule[(end - 1) as usize].z],
+                        native: [native_bounds.min[2], native_bounds.max[2]],
+                    },
+                    live_retained + native_points + region::point_count(&next),
+                    &mut surface_work,
+                    cancel,
+                )?;
+            }
+        }
+        let occupied_points = occupied.as_ref().map_or(0, |outer| outer.point_count);
         // Empty native intervals are retained for genuine floating material.
         // Their support paths are generated after actual object-anchor analysis.
         retained_points = retained_points
-            .checked_add(region::point_count(&next))
+            .checked_add(region::point_count(&next) + occupied_points)
             .filter(|n| {
                 n.checked_add(native_points)
+                    .and_then(|n| n.checked_add(lookahead_points))
                     .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
             })
             .ok_or_else(|| {
@@ -319,18 +347,28 @@ pub(crate) fn plan(
                     "retained native footprint point budget exceeded",
                 )
             })?;
+        retained_section_bytes =
+            retained_section_bytes.saturating_add(native::material_bytes(&mut next));
         sections.push(SectionSpan {
             start: index,
             end,
             material: next,
+            occupied,
             source_area_mm2,
         });
         if end == native_slab_end && !native_finished.is_empty() {
             // Image coverage needs M for diagnostics and C for mandatory coverage.
-            native_finished.retain(|(occurrence_id, _)| {
-                admission.surface_fields[occurrence_id]
+            native_finished.retain_mut(|(occurrence_id, material)| {
+                let retain = admission.surface_fields[occurrence_id]
                     .iter()
-                    .any(|field| field.is_image())
+                    .any(|field| field.is_image());
+                if !retain {
+                    // Non-image M has no mandatory/shared published owner.
+                    let material =
+                        Arc::get_mut(material).expect("non-image source material is query-local");
+                    native_finished_bytes -= native::material_bytes(material);
+                }
+                retain
             });
             if !native_finished.is_empty() {
                 let mut image_islands = Vec::new();
@@ -382,7 +420,11 @@ pub(crate) fn plan(
                             })
                     })
                     .and_then(|points| retained_points.checked_add(points))
-                    .filter(|points| *points <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .filter(|points| {
+                        points
+                            .checked_add(lookahead_points)
+                            .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
+                    })
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,
@@ -396,15 +438,32 @@ pub(crate) fn plan(
                     occurrences: std::mem::take(&mut native_finished),
                     image_islands,
                     required: std::mem::take(&mut native_required),
+                    native_bytes: native_finished_bytes,
                 });
             }
         }
         index = end;
     }
     drop(prepared_sources);
+    let mut native_coverage = native_stage.finalize(&mut admission.geometry_work, cancel)?;
+    let accepted_native_proof_bytes = native_coverage.material_proof.retained_bytes();
+    // Preserve the compact material authority without retaining native proof
+    // geometry. Reserve its actual bytes in coordinate-sized admission units
+    // throughout classification and support, alongside the immutable operands.
+    let proof_units = accepted_native_proof_bytes.div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+    retained_points = retained_points
+        .checked_add(proof_units)
+        .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "accepted native material proof retention exceeds planner admission",
+            )
+        })?;
     drop(native_finished);
     drop(native_required);
     drop(native_material);
+    drop(native_occupied_shared);
     let mut layers = Vec::with_capacity(count as usize);
     let mut segments = 0usize;
     let mut neighborhoods = SkinNeighborhoods::new(&sections, surface_work)?;
@@ -424,9 +483,9 @@ pub(crate) fn plan(
         let sample = elevation.sample;
         let height = elevation.height;
         let current = span_at(&sections, index);
-        let below = physical_neighbor(schedule, index, recipe.bottom_skin_thickness_mm, false)
+        let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
-        let above = physical_neighbor(schedule, index, recipe.top_skin_thickness_mm, true)
+        let above = physical_neighbor(&schedule, index, recipe.top_skin_thickness_mm, true)
             .map(|i| span_at(&sections, i));
         if sections[current].material.0.is_empty() {
             layers.push(PrintLayer {
@@ -674,11 +733,15 @@ pub(crate) fn plan(
     neighborhoods.freeze_retained_capacity();
     support::realize(
         &mut layers,
-        &sections,
-        skin_retained_points(retained_points, &neighborhoods, &[])?,
-        recipe,
+        &support::SupportInput {
+            sections: &sections,
+            schedule: &schedule,
+            native_points: skin_retained_points(retained_points, &neighborhoods, &[])?,
+            recipe,
+        },
         &mut segments,
         cancel,
+        &mut admission.geometry_work,
         |index, axis, segments, retained_support_points| {
             let live_retained_points = retained_points
                 .checked_add(retained_support_points)
@@ -692,14 +755,14 @@ pub(crate) fn plan(
             let elevation = &schedule[index];
             let current = span_at(&sections, index as u32);
             let below = physical_neighbor(
-                schedule,
+                &schedule,
                 index as u32,
                 recipe.bottom_skin_thickness_mm,
                 false,
             )
             .map(|i| span_at(&sections, i));
             let above =
-                physical_neighbor(schedule, index as u32, recipe.top_skin_thickness_mm, true)
+                physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
                     .map(|i| span_at(&sections, i));
             let lower = neighborhoods.survival(current, below, live_retained_points, cancel)?;
             let upper = neighborhoods.survival(
@@ -749,9 +812,41 @@ pub(crate) fn plan(
             )?;
             Ok(support::RasterCandidate { paths, whole_rows })
         },
+        |demand_bounds, point_limit, support_work, native_work| {
+            native::project_protected_voids(
+                input,
+                &mut native_coverage.protected_voids,
+                &native::ProtectedVoidDemand {
+                    native_bounds: &admission.native_bounds,
+                    demand_bounds,
+                    point_limit,
+                    retained_material_proof_bytes: accepted_native_proof_bytes,
+                },
+                support_work,
+                native_work,
+                cancel,
+            )
+        },
     )?;
+    // No-support/no-demand paths never project or retain unused negative-space
+    // captures beyond support admission.
+    drop(native_coverage.protected_voids);
+    drop(native_coverage.material_proof);
     let result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        native_geometry: NativeGeometryCoverageSummary {
+            requested_shape_error_mm: recipe.native_shape_error_mm,
+            achieved_shape_error_mm: native_coverage.achieved_shape_error_mm,
+            height_analysis_count: input.occurrences.len() as u32,
+            slab_count: native_coverage.slab_count,
+            certified_layer_count: count,
+            event_count: admission.native_event_bands.len() as u32,
+            geometry_work: admission.geometry_work.consumed(),
+            evidence: PreflightEvidence::Certified,
+            skin_coverage: SkinCoverageScope::ScheduledMaterialDistance,
+            support_clearance: SupportClearanceScope::ContinuousTargetOuterOccupancy,
+            source_feature_coverage: native_coverage.source_features,
+        },
         layers,
         surface_resolution,
         sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
@@ -767,11 +862,176 @@ struct SectionSpan {
     start: u32,
     end: u32,
     material: MultiPolygon<f64>,
+    // None borrows exact all-Z invariant D. Otherwise this separately owned
+    // outer envelope is only corridor exclusion, never deposited-anchor evidence.
+    occupied: Option<Arc<ContinuousOccupied>>,
     source_area_mm2: f64,
+}
+
+impl SectionSpan {
+    fn occupied_pieces(&self) -> impl Iterator<Item = (&geo::Polygon<f64>, Option<[f64; 2]>)> {
+        let borrowed = if self.occupied.is_none() {
+            self.material.0.as_slice()
+        } else {
+            &[]
+        };
+        self.occupied
+            .iter()
+            .flat_map(|outer| {
+                outer
+                    .pieces
+                    .iter()
+                    .map(|piece| (&piece.polygon, Some(piece.height_mm)))
+            })
+            .chain(borrowed.iter().map(|polygon| (polygon, None)))
+    }
+}
+
+/// Independent raw conservative operands retain their own certified height
+/// scope. In particular an endpoint sheet is not extruded through an otherwise
+/// empty slab merely because its XY projection is nonempty.
+#[derive(Clone, Default)]
+struct ContinuousOccupied {
+    pieces: Vec<OccupiedPiece>,
+    point_count: usize,
+    payload_bytes: usize,
+}
+
+#[derive(Clone)]
+struct OccupiedPiece {
+    polygon: geo::Polygon<f64>,
+    height_mm: [f64; 2],
+}
+
+impl ContinuousOccupied {
+    fn push(
+        &mut self,
+        mut polygon: geo::Polygon<f64>,
+        height_mm: [f64; 2],
+    ) -> Result<(), ManufacturingError> {
+        let points = polygon.exterior().0.len()
+            + polygon
+                .interiors()
+                .iter()
+                .map(|ring| ring.0.len())
+                .sum::<usize>();
+        self.point_count = self
+            .point_count
+            .checked_add(points)
+            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "continuous occupied piece point budget exceeded",
+                )
+            })?;
+        self.pieces.try_reserve(1).map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "continuous occupied piece allocation refused",
+            )
+        })?;
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(native::polygon_bytes(&mut polygon));
+        self.pieces.push(OccupiedPiece { polygon, height_mm });
+        Ok(())
+    }
+}
+
+fn native_error(
+    e: spiling_contracts::geometry::GeometryError,
+    context: &str,
+) -> ManufacturingError {
+    let code = match e.code {
+        GeometryErrorCode::Cancelled => ManufacturingErrorCode::Cancelled,
+        GeometryErrorCode::ResourceLimit => ManufacturingErrorCode::ResourceLimit,
+        GeometryErrorCode::KernelFailure => ManufacturingErrorCode::NativeKernelFailure,
+        GeometryErrorCode::ConditioningFailure => ManufacturingErrorCode::NativeConditioningFailure,
+        GeometryErrorCode::AnalysisIndeterminate => {
+            ManufacturingErrorCode::NativeAnalysisIndeterminate
+        }
+        GeometryErrorCode::SingularGeometry => ManufacturingErrorCode::NativeSingularGeometry,
+        GeometryErrorCode::ShapeErrorExceeded => ManufacturingErrorCode::NativeShapeErrorExceeded,
+        _ => ManufacturingErrorCode::UnsupportedGeometry,
+    };
+    // Keep the native diagnostic category in the bounded downstream message.
+    error(code, format!("{context}: {e}"))
+}
+
+type PreparedGeometrySources<'a> =
+    BTreeMap<DefinitionId, spiling_geometry::PreparedGeometrySource<'a>>;
+
+fn geometry_query_limit(
+    sources: &PreparedGeometrySources<'_>,
+) -> Result<usize, ManufacturingError> {
+    sources.values().try_fold(
+        spiling_geometry::MAX_PREPARED_SECTION_BYTES,
+        |remaining, source| {
+            remaining
+                .checked_sub(source.retained_bytes())
+                .filter(|bytes| *bytes > 0)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "original material geometry exhausts shared query capacity",
+                    )
+                })
+        },
+    )
+}
+
+fn prepare_sources<'a>(
+    sources: PreparedGeometrySources<'a>,
+    work: &mut spiling_geometry::GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'a>>, ManufacturingError>
+{
+    let mut prepared = BTreeMap::new();
+    let mut remaining = sources.values().try_fold(
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        |remaining, source| {
+            remaining
+                .checked_sub(source.retained_bytes())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "aggregate original material geometry capacity exceeded",
+                    )
+                })
+        },
+    )?;
+    for (definition_id, source) in sources {
+        check_cancel(cancel)?;
+        // Replace this owner's storage; all other original/prepared owners
+        // still coexist. Promotion moves its domains/plans without rebuilding.
+        let allowance = remaining
+            .checked_add(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "material source replacement capacity overflow",
+                )
+            })?;
+        let source = source
+            .prepare_sections(allowance, cancel, work)
+            .map_err(|e| native_error(e, "native material preparation"))?;
+        remaining = allowance
+            .checked_sub(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "aggregate prepared native material capacity exceeded",
+                )
+            })?;
+        prepared.insert(definition_id, source);
+    }
+    Ok(prepared)
 }
 
 struct LayerElevation {
     z: f64,
+    lower_z: f64,
     sample: f64,
     height: f64,
 }
@@ -782,7 +1042,15 @@ fn scheduled_layers(
     cancel: &AtomicBool,
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
-    let top = admission.bounds.expect("schedule has native bounds").max[2];
+    // Upper bracket endpoints are only representable schedule bookkeeping.
+    // Every accepted actual slab, including its assigned critical neighborhood,
+    // must certify source/prism metric and incidence before any paths are built.
+    let top = *admission.horizontal_events.last().ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "actual native terminal height has not been certified",
+        )
+    })?;
     let recipe = &input.intent.recipe;
     let mut events = admission.horizontal_events.clone();
     events.sort_by(f64::total_cmp);
@@ -997,12 +1265,13 @@ fn layer_schedule(
                 return Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,
                     format!(
-                        "native event at Z {z:.9} creates unresolved layer thickness {height:.9} mm"
+                        "native event at Z {z:.17e} above {previous:.17e} creates unresolved layer thickness {height:.17e} mm"
                     ),
                 ));
             }
             schedule.push(LayerElevation {
                 z,
+                lower_z: previous,
                 sample: previous + interval_height * 0.5,
                 height,
             });
@@ -1026,12 +1295,12 @@ fn refine_surface_schedule(
     let mut refined = Vec::new();
     while let Some(layer) = pending.pop() {
         check_cancel(cancel)?;
-        let start = layer.z - layer.height;
+        let start = layer.lower_z;
         let mut split = false;
         for occurrence_fields in fields.values() {
             for field in occurrence_fields {
                 if let Some(allowed) = field.allowed_vertical_error() {
-                    split |= field.vertical_error_bound(start, layer.z)? > allowed;
+                    split |= field.vertical_error_bound(start, layer.z, layer.sample)? > allowed;
                 }
             }
         }
@@ -1062,11 +1331,13 @@ fn refine_surface_schedule(
         }
         pending.push(LayerElevation {
             z: layer.z,
+            lower_z: midpoint,
             sample: midpoint + upper_height * 0.5,
             height: upper_height,
         });
         pending.push(LayerElevation {
             z: midpoint,
+            lower_z: start,
             sample: start + lower_height * 0.5,
             height: lower_height,
         });
@@ -1088,9 +1359,9 @@ fn physical_neighbor(
             .max(i + 1);
         (j < schedule.len()).then_some(j as u32)
     } else {
-        let bottom = schedule[i].z - schedule[i].height;
+        let bottom = schedule[i].lower_z;
         let target = bottom - thickness;
-        if target < schedule[0].z - schedule[0].height - LAYER_QUANTIZATION_MM {
+        if target < schedule[0].lower_z - LAYER_QUANTIZATION_MM {
             return None;
         }
         let j = schedule.partition_point(|layer| layer.z <= target + LAYER_QUANTIZATION_MM);
@@ -1178,6 +1449,7 @@ pub(super) fn forward(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     let r = rotate(pose, p);
     std::array::from_fn(|a| r[a] + pose.translation_mm[a])
 }
+#[cfg(test)]
 fn rotate_inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     let [x, y, z, w] = pose.rotation_xyzw;
     rotate(
@@ -1188,6 +1460,7 @@ fn rotate_inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
         p,
     )
 }
+#[cfg(test)]
 fn inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     rotate_inverse(pose, std::array::from_fn(|a| p[a] - pose.translation_mm[a]))
 }
@@ -1201,6 +1474,8 @@ struct NativeSurfaceSpan {
     )>,
     image_islands: Vec<(spiling_contracts::geometry::OccurrenceId, usize)>,
     required: BTreeMap<spiling_contracts::geometry::OccurrenceId, Arc<MultiPolygon<f64>>>,
+    // Captured while M/C were owned, before sharing their immutable buffers.
+    native_bytes: usize,
 }
 
 /// Assemble the mandatory coverage operand without copying polygon geometry.

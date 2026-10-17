@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{JobError, JobId, check_cancel, error, placement, source};
+use super::{JobError, JobId, check_cancel, error, source};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
@@ -16,7 +16,10 @@ use spiling_core::{
     ManufacturingAsset, Project, SaveSnapshot, SourceAsset, SurfaceImageAsset,
     storage::{self, SaveReceipt, SaveStage, Storage},
 };
-use spiling_geometry::{Definition, MeshArtifact, NativeSection};
+use spiling_geometry::{
+    Definition, GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
+    MeshArtifact, PreparedSectionSource,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -117,6 +120,7 @@ pub enum Work {
         plane: PlaneMm,
         occurrences: Vec<OccurrenceRecord>,
     },
+    PrepareBedPose(super::bed_pose::Request),
 }
 /// The single bounded control slot keeps owned work inline, without per-job boxing.
 /// Private fields and constructors enforce that only Run carries work.
@@ -149,13 +153,18 @@ impl Command {
         }
     }
 }
+pub enum ImportedDisplay {
+    Reused,
+    Mesh(MeshArtifact),
+    Unavailable(GeometryError),
+}
 pub struct Imported {
     pub definition_id: DefinitionId,
     pub provenance: SourceProvenance,
     pub source: Arc<SourceAsset>,
     pub bounds: AabbMm,
     pub faces: Vec<FaceInfo>,
-    pub mesh: Option<MeshArtifact>,
+    pub display: ImportedDisplay,
 }
 #[expect(
     clippy::large_enum_variant,
@@ -172,6 +181,7 @@ pub enum Product {
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
     Preflight(PreflightReport),
+    BedPosePrepared(BedPosePreparation),
     Verified {
         record: ManufacturingArtifactRecord,
         inspection: spiling_manufacturing::ManufacturingInspection,
@@ -305,7 +315,7 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
                      residents,
                  }| {
                     for imported in &imports {
-                        if imported.mesh.is_none() {
+                        if matches!(imported.display, ImportedDisplay::Reused) {
                             pending_records.insert(
                                 imported.definition_id.clone(),
                                 imported.source.record.clone(),
@@ -329,6 +339,19 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
             Work::Preflight(request) => {
                 preflight(request, &definitions, &cancel).map(Product::Preflight)
             }
+            Work::PrepareBedPose(request) => definitions
+                .get(&request.definition_id)
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::StaleRevision,
+                        "native contact definition was reclaimed",
+                    )
+                })
+                .and_then(|resident| {
+                    super::bed_pose::prepare(&resident.definition, request, &cancel)
+                })
+                .map(Product::BedPosePrepared)
+                .map_err(JobError::from),
             Work::Verify { asset, output } => {
                 inspect_asset(&asset, output, &cancel).map(|inspection| Product::Verified {
                     record: asset.record.clone(),
@@ -412,6 +435,7 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
 struct Capacity {
     definitions: u32,
     source_bytes: u32,
+    query_proof_bytes: usize,
     faces: u32,
     mesh: MeshBudget,
 }
@@ -419,11 +443,14 @@ impl Capacity {
     fn new(definitions: &BTreeMap<DefinitionId, Resident>, budget: MeshBudget) -> Self {
         Self {
             definitions: MAX_DEFINITIONS - definitions.len() as u32,
-            source_bytes: MAX_LIVE_SOURCE_BYTES
-                - definitions
-                    .values()
-                    .map(|r| r.definition.source_bytes())
-                    .sum::<u32>(),
+            source_bytes: (MAX_LIVE_SOURCE_BYTES as usize).saturating_sub(
+                definitions.values().fold(0usize, |bytes, resident| {
+                    bytes
+                        .saturating_add(resident.definition.source_bytes() as usize)
+                        .saturating_add(resident.definition.retained_query_proof_bytes())
+                }),
+            ) as u32,
+            query_proof_bytes: MAX_LIVE_SOURCE_BYTES as usize,
             faces: MAX_NATIVE_FACES
                 - definitions
                     .values()
@@ -456,7 +483,36 @@ impl Capacity {
                 "live/staged native source budget exceeded",
             ));
         }
-        let definition = spiling_geometry::import_step_with_face_limit(bytes, cancel, self.faces)?;
+        let definition = spiling_geometry::import_step_with_limits(
+            bytes,
+            cancel,
+            spiling_geometry::ImportLimits {
+                max_faces: self.faces,
+                max_query_proof_bytes: self
+                    .query_proof_bytes
+                    .min(self.source_bytes as usize - bytes.len()),
+            },
+        )?;
+        let query_proof_bytes = definition.retained_query_proof_bytes();
+        let accounted_bytes = bytes
+            .len()
+            .checked_add(query_proof_bytes)
+            .filter(|bytes| *bytes <= self.source_bytes as usize)
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "live/staged native source and query-proof budget exceeded",
+                )
+            })?;
+        let remaining_proof_bytes = self
+            .query_proof_bytes
+            .checked_sub(query_proof_bytes)
+            .ok_or_else(|| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "captured source allocations leave no native query-proof capacity",
+                )
+            })?;
         let faces = definition.faces().len() as u32;
         if faces > self.faces {
             return Err(error(
@@ -465,7 +521,8 @@ impl Capacity {
             ));
         }
         self.definitions -= 1;
-        self.source_bytes -= bytes.len() as u32;
+        self.source_bytes -= accounted_bytes as u32;
+        self.query_proof_bytes = remaining_proof_bytes;
         self.faces -= faces;
         check_cancel(cancel)?;
         Ok(definition)
@@ -477,7 +534,7 @@ impl Capacity {
     ) -> Result<MeshArtifact, GeometryError> {
         let mesh = spiling_geometry::tessellate_with_budget(
             definition,
-            DisplayProfile::MeshMm005V1,
+            DisplayProfile::MeshTrimmedMm005V2,
             cancel,
             self.mesh,
         )?;
@@ -494,6 +551,22 @@ impl Capacity {
         self.mesh.triangles -= mesh.triangle_count;
         self.mesh.bytes -= mesh.total_bytes;
         Ok(mesh)
+    }
+    fn display(
+        &mut self,
+        definition: &Definition,
+        cancel: &AtomicBool,
+    ) -> Result<ImportedDisplay, GeometryError> {
+        match self.tessellate(definition, cancel) {
+            Ok(mesh) => Ok(ImportedDisplay::Mesh(mesh)),
+            Err(failure) => {
+                if failure.code == GeometryErrorCode::Cancelled {
+                    return Err(failure);
+                }
+                check_cancel(cancel)?;
+                Ok(ImportedDisplay::Unavailable(failure))
+            }
+        }
     }
 }
 fn validate_provenance(definition: &Definition, source: &SourceAsset) -> Result<(), ProjectError> {
@@ -514,7 +587,7 @@ fn validate_provenance(definition: &Definition, source: &SourceAsset) -> Result<
 fn imported(
     definition: &Definition,
     source: Arc<SourceAsset>,
-    mesh: Option<MeshArtifact>,
+    display: ImportedDisplay,
 ) -> Imported {
     Imported {
         definition_id: definition.id().clone(),
@@ -522,16 +595,23 @@ fn imported(
         source,
         bounds: definition.bounds_mm(),
         faces: definition.faces().to_vec(),
-        mesh,
+        display,
     }
 }
-fn resident(definition: Definition, source: &SourceAsset, mesh: &MeshArtifact) -> Resident {
+fn resident(definition: Definition, source: &SourceAsset, display: &ImportedDisplay) -> Resident {
+    let (vertices, triangles, mesh_bytes) = match display {
+        ImportedDisplay::Mesh(mesh) => (mesh.vertex_count, mesh.triangle_count, mesh.total_bytes),
+        ImportedDisplay::Unavailable(_) => (0, 0, 0),
+        ImportedDisplay::Reused => {
+            unreachable!("reused captures keep their existing native resident")
+        }
+    };
     Resident {
         definition: Arc::new(definition),
         record: source.record.clone(),
-        vertices: mesh.vertex_count,
-        triangles: mesh.triangle_count,
-        mesh_bytes: mesh.total_bytes,
+        vertices,
+        triangles,
+        mesh_bytes,
     }
 }
 fn import(
@@ -542,7 +622,8 @@ fn import(
     cancel: &AtomicBool,
 ) -> Result<(Imported, Option<Resident>), JobError> {
     check_cancel(cancel)?;
-    let captured = source::capture(source, MAX_SOURCE_BYTES, cancel)?;
+    let mut capacity = Capacity::new(definitions, budget);
+    let captured = source::capture(source, capacity.source_bytes.min(MAX_SOURCE_BYTES), cancel)?;
     let digest: [u8; 32] = Sha256::digest(&captured.bytes).into();
     let id = DefinitionId::from_source_sha256(&digest);
     if reuse.contains(&id)
@@ -553,9 +634,11 @@ fn import(
         let source = Arc::new(SourceAsset::new(resident.record.clone(), captured.bytes)?);
         validate_provenance(&resident.definition, &source)?;
         check_cancel(cancel)?;
-        return Ok((imported(&resident.definition, source, None), None));
+        return Ok((
+            imported(&resident.definition, source, ImportedDisplay::Reused),
+            None,
+        ));
     }
-    let mut capacity = Capacity::new(definitions, budget);
     let definition = capacity.admit(&captured.bytes, cancel)?;
     let mut provenance = definition.provenance().clone();
     provenance.source_name = captured.label;
@@ -566,9 +649,9 @@ fn import(
         },
         captured.bytes,
     )?);
-    let mesh = capacity.tessellate(&definition, cancel)?;
-    let resident = resident(definition, &source, &mesh);
-    let imported = imported(&resident.definition, source, Some(mesh));
+    let display = capacity.display(&definition, cancel)?;
+    let resident = resident(definition, &source, &display);
+    let imported = imported(&resident.definition, source, display);
     check_cancel(cancel)?;
     Ok((imported, Some(resident)))
 }
@@ -614,12 +697,16 @@ fn open(
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
     // Enforce their remaining budget before the loader allocates incoming bytes.
-    let source_budget = MAX_LIVE_SOURCE_BYTES
-        .checked_sub(retained_source_bytes)
+    let retained_query_proof_bytes = definitions.values().fold(0usize, |bytes, resident| {
+        bytes.saturating_add(resident.definition.retained_query_proof_bytes())
+    });
+    let source_budget = (MAX_LIVE_SOURCE_BYTES as usize)
+        .checked_sub(retained_source_bytes as usize)
+        .and_then(|bytes| bytes.checked_sub(retained_query_proof_bytes))
         .ok_or_else(|| {
             ProjectError::new(
                 ProjectErrorCode::ResourceLimit,
-                "retained captured source budget exceeded",
+                "retained captured source and native query-proof budget exceeded",
             )
         })?;
     let loaded = storage::open_reusing(
@@ -628,7 +715,7 @@ fn open(
         recover_previous,
         cancel,
         existing,
-        source_budget as usize,
+        source_budget,
         (MAX_MANUFACTURING_RETAINED_BYTES - retained_manufacturing_bytes) as usize,
         spiling_contracts::surface::MAX_SURFACE_IMAGE_RETAINED_BYTES
             .checked_sub(retained_surface_image_bytes)
@@ -640,6 +727,17 @@ fn open(
             })?,
     )?;
     let mut capacity = Capacity::new(definitions, budget);
+    let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {
+        bytes.saturating_add(source.bytes.len())
+    });
+    capacity.query_proof_bytes = source_budget
+        .checked_sub(incoming_source_bytes)
+        .ok_or_else(|| {
+            ProjectError::new(
+                ProjectErrorCode::ResourceLimit,
+                "captured incoming sources leave no native query-proof capacity",
+            )
+        })?;
     let mut pending = BTreeMap::new();
     let mut imports = Vec::with_capacity(loaded.sources.len());
     for (id, source) in &loaded.sources {
@@ -649,14 +747,18 @@ fn open(
         {
             validate_provenance(&resident.definition, source)?;
             validate_surface_targets(&resident.definition, &loaded.manifest.surface_overlays)?;
-            imports.push(imported(&resident.definition, source.clone(), None));
+            imports.push(imported(
+                &resident.definition,
+                source.clone(),
+                ImportedDisplay::Reused,
+            ));
         } else {
             let definition = capacity.admit(source.bytes.as_slice(), cancel)?;
             validate_provenance(&definition, source)?;
             validate_surface_targets(&definition, &loaded.manifest.surface_overlays)?;
-            let mesh = capacity.tessellate(&definition, cancel)?;
-            let resident = resident(definition, source, &mesh);
-            imports.push(imported(&resident.definition, source.clone(), Some(mesh)));
+            let display = capacity.display(&definition, cancel)?;
+            let resident = resident(definition, source, &display);
+            imports.push(imported(&resident.definition, source.clone(), display));
             pending.insert(id.clone(), resident);
         }
     }
@@ -730,10 +832,17 @@ fn section(
     cancel: &AtomicBool,
 ) -> Result<EncodedSection, GeometryError> {
     let plane = plane.normalized()?;
-    let frame = PlaneFrameMm::from_plane(plane)?;
     let mut builder = SectionChunkBuilder::new(session, artifact, revision, plane)?;
-    let mut cache = BTreeMap::<(DefinitionId, [u64; 4]), NativeSection>::new();
-    let mut cache_bytes = 0usize;
+    let mut work = GeometryWorkBudget::new(50_000_000);
+    let source_limit = MAX_PREPARED_SECTION_SOURCE_BYTES;
+    let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSectionSource<'_>>)>::new();
+    for occurrence in &occurrences {
+        sources
+            .entry(occurrence.definition_id.clone())
+            .or_insert((0, None))
+            .0 += 1;
+    }
+    let mut prepared_bytes = 0usize;
     for occurrence in occurrences {
         check_cancel(cancel)?;
         let definition = definitions.get(&occurrence.definition_id).ok_or_else(|| {
@@ -742,119 +851,104 @@ fn section(
                 "section definition was reclaimed",
             )
         })?;
-        let local = placement::inverse_plane(occurrence.pose, plane)?;
-        let (local, key) = placement::canonical_plane(local)?;
-        let key = (occurrence.definition_id.clone(), key);
-        if !cache.contains_key(&key) {
-            let native = spiling_geometry::section_with_byte_limit(
+        let (remaining_uses, source) = sources
+            .get_mut(&occurrence.definition_id)
+            .expect("section occurrence was counted");
+        if source.is_none() {
+            let prepared = spiling_geometry::prepare_section_source(
                 &definition.definition,
-                local,
-                cancel,
-                MAX_SECTION_BYTES - cache_bytes as u32,
-            )?;
-            // Account owned loop storage plus conservative complete-loop packing overhead.
-            let bytes: usize = native
-                .loops
-                .iter()
-                .map(|l| l.points_mm.len() * 24 + 72)
-                .sum::<usize>()
-                + 192;
-            cache_bytes = cache_bytes.checked_add(bytes).ok_or_else(|| {
-                error(
-                    GeometryErrorCode::ResourceLimit,
-                    "native section cache overflow",
-                )
-            })?;
-            if cache_bytes > MAX_SECTION_BYTES as usize {
-                return Err(error(
-                    GeometryErrorCode::ResourceLimit,
-                    "native section job cache exceeds budget",
-                ));
-            }
-            cache.insert(key.clone(), native);
-        }
-        let native = &cache[&key];
-        let translation_relative: [f64; 3] =
-            std::array::from_fn(|i| occurrence.pose.translation_mm[i] - frame.origin_mm[i]);
-        let mut loops: Vec<(bool, [f64; 4], Vec<[f64; 3]>)> =
-            Vec::with_capacity(native.loops.len());
-        for boundary in &native.loops {
-            check_cancel(cancel)?;
-            let mut points: Vec<_> = boundary
-                .points_mm
-                .iter()
-                .map(|p| {
-                    let p = placement::rotate(occurrence.pose, *p);
-                    std::array::from_fn(|i| p[i] + translation_relative[i])
-                })
-                .collect();
-            let projected = |p: [f64; 3]| [dot(p, frame.x_axis), dot(p, frame.y_axis)];
-            if points.len() < 4 {
-                return Err(error(
-                    GeometryErrorCode::KernelFailure,
-                    "native section returned an invalid loop",
-                ));
-            }
-            points.pop();
-            let first = (0..points.len())
-                .min_by(|a, b| compare2(projected(points[*a]), projected(points[*b])))
-                .unwrap();
-            points.rotate_left(first);
-            points.push(points[0]);
-            let mut bounds = [
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NEG_INFINITY,
-            ];
-            for point in &points {
-                let [x, y] = projected(*point);
-                bounds[0] = bounds[0].min(x);
-                bounds[1] = bounds[1].min(y);
-                bounds[2] = bounds[2].max(x);
-                bounds[3] = bounds[3].max(y);
-            }
-            loops.push((boundary.is_hole, bounds, points));
-        }
-        loops.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| {
-                    a.1.iter()
-                        .zip(b.1)
-                        .map(|(a, b)| a.total_cmp(&b))
-                        .find(|c| !c.is_eq())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    a.2.iter()
-                        .zip(&b.2)
-                        .map(|(a, b)| {
-                            compare2(
-                                [dot(*a, frame.x_axis), dot(*a, frame.y_axis)],
-                                [dot(*b, frame.x_axis), dot(*b, frame.y_axis)],
+                (source_limit - prepared_bytes).min(
+                    remaining_section_capacity(prepared_bytes, builder.retained_bytes())?
+                        .checked_sub(MAX_PREPARED_SECTION_BYTES - source_limit)
+                        .ok_or_else(|| {
+                            error(
+                                GeometryErrorCode::ResourceLimit,
+                                "native section has no query seed headroom",
                             )
-                        })
-                        .find(|c| !c.is_eq())
-                        .unwrap_or_else(|| a.2.len().cmp(&b.2.len()))
-                })
-        });
-        for (hole, _, points) in loops {
-            builder.push_loop_relative(
+                        })?,
+                ),
+                cancel,
+                &mut work,
+            )?;
+            prepared_bytes = prepared_bytes
+                .checked_add(prepared.retained_bytes())
+                .filter(|bytes| *bytes <= source_limit)
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "prepared native section sources exceed shared job capacity",
+                    )
+                })?;
+            *source = Some(prepared);
+        }
+        // Geometry owns the actual stored pose, plane pullback, metric error and
+        // canonical world loops. Only immutable source preparation is reused;
+        // sampled loops are consumed before another occurrence is queried.
+        let native = source
+            .as_ref()
+            .expect("native section source was prepared")
+            .section_placed_with_work(
+                occurrence.pose,
+                plane,
+                remaining_section_capacity(prepared_bytes, builder.retained_bytes())? as u32,
+                &mut work,
+                cancel,
+            )?;
+        let loops = native.into_loops();
+        let mut live_loop_bytes = loops
+            .capacity()
+            .saturating_mul(std::mem::size_of::<spiling_geometry::SectionLoopMm>())
+            .saturating_add(
+                loops
+                    .iter()
+                    .map(|boundary| {
+                        boundary
+                            .points_mm
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<[f64; 3]>())
+                    })
+                    .sum::<usize>(),
+            );
+        for boundary in loops {
+            check_cancel(cancel)?;
+            builder.set_retained_byte_limit(remaining_section_capacity(
+                prepared_bytes,
+                live_loop_bytes,
+            )?)?;
+            builder.push_loop(
                 occurrence.occurrence_id,
                 occurrence.definition_id.clone(),
-                hole,
-                &points,
+                boundary.is_hole,
+                &boundary.points_mm,
             )?;
+            live_loop_bytes -= boundary
+                .points_mm
+                .capacity()
+                .saturating_mul(std::mem::size_of::<[f64; 3]>());
+        }
+        *remaining_uses -= 1;
+        if *remaining_uses == 0 {
+            prepared_bytes -= source
+                .take()
+                .expect("last section use retains its source")
+                .retained_bytes();
         }
     }
     check_cancel(cancel)?;
+    builder.set_retained_byte_limit(remaining_section_capacity(prepared_bytes, 0)?)?;
     builder.finish()
 }
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a.iter().zip(b).map(|(a, b)| a * b).sum()
-}
-fn compare2(a: [f64; 2], b: [f64; 2]) -> std::cmp::Ordering {
-    a[0].total_cmp(&b[0]).then_with(|| a[1].total_cmp(&b[1]))
+
+fn remaining_section_capacity(prepared: usize, other_live: usize) -> Result<usize, GeometryError> {
+    MAX_PREPARED_SECTION_BYTES
+        .checked_sub(prepared)
+        .and_then(|bytes| bytes.checked_sub(other_live))
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "native section coexisting owned capacity exhausted",
+            )
+        })
 }
 
 fn inspect_asset(
@@ -1049,5 +1143,74 @@ mod image_import_tests {
         let admitted = import_surface_image(native, canonical.len(), &cancel).unwrap();
         assert_eq!(admitted.bytes().as_slice(), canonical);
         assert!(admitted.bytes().capacity() <= canonical.len());
+    }
+}
+
+#[cfg(test)]
+mod geometry_only_tests {
+    use super::*;
+    use spiling_geometry::{BoundsPolicy, GeometryWorkBudget};
+
+    #[test]
+    fn display_budget_refusal_preserves_native_queries_but_never_masks_cancellation() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/geometry/box-mm.step");
+        let cancel = AtomicBool::new(false);
+        let (imported, resident) = import(
+            NativePath::from_os_str(path.as_os_str()).unwrap(),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            MeshBudget {
+                vertices: 0,
+                triangles: 0,
+                bytes: 0,
+            },
+            &cancel,
+        )
+        .unwrap();
+        assert!(matches!(
+            imported.display,
+            ImportedDisplay::Unavailable(GeometryError {
+                code: GeometryErrorCode::ResourceLimit,
+                ..
+            })
+        ));
+        let resident = resident.unwrap();
+        assert_eq!(resident.definition.faces().len(), 6);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        for (axis, expected_maximum) in [20.0, 10.0, 8.0].into_iter().enumerate() {
+            let mut direction = [0.0; 3];
+            direction[axis] = 1.0;
+            let bounds = spiling_geometry::placed_bounds(
+                &resident.definition,
+                RigidPoseMm::IDENTITY,
+                direction,
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1.0e-4,
+                },
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(bounds.minimum[0] <= 0.0 && bounds.minimum[1] >= 0.0);
+            assert!(bounds.maximum[0] <= expected_maximum && bounds.maximum[1] >= expected_maximum);
+            assert!(bounds.achieved_uncertainty_mm <= 1.0e-4);
+        }
+        cancel.store(true, Ordering::Release);
+        let mut capacity = Capacity::new(
+            &BTreeMap::new(),
+            MeshBudget {
+                vertices: 0,
+                triangles: 0,
+                bytes: 0,
+            },
+        );
+        assert!(matches!(
+            capacity.display(&resident.definition, &cancel),
+            Err(GeometryError {
+                code: GeometryErrorCode::Cancelled,
+                ..
+            })
+        ));
     }
 }

@@ -3,10 +3,59 @@
 // Licensed under the Open Software License version 3.0
 
 mod cylinder;
+mod trim;
 mod wall;
+pub(crate) use trim::{
+    PreparedFaceTrimDomain, TrimClassification, certified_curve2d_is_straight_regular,
+    prepare_face_trim_domain_with_byte_limit,
+};
 
+use monstertruck_io::step::load::step_geometry::{CurveParameterMap, SurfaceParameterMap};
 use monstertruck_modeling::Solid;
 use spiling_contracts::geometry::{AabbMm, DefinitionId, FaceInfo, SourceProvenance};
+
+/// Supporting extrema for narrow finish certificates use the same native
+/// all-family proof as other consumers, with the caller's cumulative work.
+fn finish_support_extent(
+    definition: &Definition,
+    direction: [f64; 3],
+    work: &mut crate::GeometryWorkBudget,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<[f64; 2], crate::GeometryError> {
+    use crate::parametric::Interval;
+    let magnitude = direction
+        .into_iter()
+        .fold(Interval::point(0.0), |sum, value| {
+            sum.add(Interval::point(value).square())
+        })
+        .sqrt()?;
+    let proof = crate::projected_bounds(
+        definition,
+        direction,
+        crate::BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 1.0e-8 / magnitude.hi,
+        },
+        work,
+        cancel,
+    )?;
+    let minimum = Interval {
+        lo: proof.minimum[0],
+        hi: proof.minimum[1],
+    }
+    .mul(magnitude);
+    let maximum = Interval {
+        lo: proof.maximum[0],
+        hi: proof.maximum[1],
+    }
+    .mul(magnitude);
+    if minimum.width() > 2.5e-8 || maximum.width() > 2.5e-8 {
+        return Err(crate::GeometryError::new(
+            spiling_contracts::geometry::GeometryErrorCode::ConditioningFailure,
+            "native finish support cannot meet its fixed residual under coordinate conditioning",
+        ));
+    }
+    Ok([minimum.lo, maximum.hi])
+}
 
 /// Immutable native definition. Kernel representation never leaves this crate.
 pub struct Definition {
@@ -18,22 +67,184 @@ pub struct Definition {
     pub(crate) source_bytes: u32,
     pub(crate) boundary_curves: Vec<BoundaryCurveMm>,
     pub(crate) face_boundaries: Vec<FaceBoundaryRefs>,
+    /// Exact decoded-source/native maps in native edge order. Original STEP
+    /// selectors and genealogy live in source_topology; provenance owns mm scale.
+    pub(crate) boundary_parameters: Vec<Option<CurveParameterMap>>,
+    /// Original implicit source branches, shared by all oriented uses and
+    /// occurrences. These are not explicit Identity parameter maps.
+    pub(crate) boundary_continuations: Vec<Option<OriginalBoundaryContinuation>>,
+    pub(crate) original_continuations: Vec<monstertruck_modeling::PreparedValidatedCurve<'static>>,
+    pub(crate) continuation_bytes: usize,
+    pub(crate) boundary_curve_indices: std::collections::HashMap<
+        monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+        usize,
+    >,
+    pub(crate) source_topology: monstertruck_io::step::load::SourceShellProvenance,
+    pub(crate) trimmed_solid: monstertruck_topology::trimmed::TrimmedSolid<
+        monstertruck_modeling::Point3,
+        monstertruck_modeling::Curve,
+        monstertruck_modeling::Surface,
+        monstertruck_modeling::Curve2D,
+    >,
 }
 
-/// Positional coedge associations retained before analytic STEP curves become
-/// modeled NURBS. IDs borrow identity, not a second copy of native geometry.
+pub(crate) struct OriginalBoundaryContinuation {
+    pub(crate) prepared: usize,
+    pub(crate) source_range: (f64, f64),
+    pub(crate) original_range: (f64, f64),
+    pub(crate) source_edge: Option<u64>,
+    pub(crate) raw_step_gauge: monstertruck_io::step::load::step_geometry::SourceParameterGauge,
+    pub(crate) source_domain: monstertruck_io::step::load::step_geometry::CurveParameterDomain,
+    pub(crate) scale_to_mm: f64,
+    pub(crate) edge: Option<monstertruck_topology::EdgeId<monstertruck_modeling::Curve>>,
+}
+
+/// Positional trim uses borrow native geometry. Their witness indices also
+/// select the shared source/native curve maps; no second coedge index is needed.
 pub(crate) struct FaceBoundaryRefs {
     pub(crate) face: monstertruck_topology::FaceId<monstertruck_modeling::Surface>,
     pub(crate) wires: Vec<Vec<BoundaryCoedgeRef>>,
+    pub(crate) parameter: FaceParameterWitness,
+}
+
+/// Whole-source covering-chart authority. A pole graph does not prove a
+/// regular longitude inverse; its physical and UV bounds remain on the coedge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SourceChartCertificate {
+    Unproved,
+    InverseOrExact,
+    PoleMeridianGraph {
+        latitude_axis: usize,
+        pole_endpoints: [bool; 2],
+    },
+}
+
+impl SourceChartCertificate {
+    pub(crate) fn is_certified(self) -> bool {
+        !matches!(self, Self::Unproved)
+    }
+
+    pub(crate) fn has_regular_inverse(self) -> bool {
+        matches!(self, Self::InverseOrExact)
+    }
+}
+
+pub(crate) use crate::import::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
+
+/// Original/native ownership after normalized topology identity checks.
+#[derive(Clone, Copy)]
+pub(crate) struct OriginalCoedgeBinding {
+    pub(crate) face: monstertruck_topology::FaceId<monstertruck_modeling::Surface>,
+    pub(crate) edge: monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+    pub(crate) endpoints: [monstertruck_topology::VertexId<monstertruck_modeling::Point3>; 2],
+    pub(crate) owner: [usize; 3],
+    pub(crate) source_face: Option<u64>,
+    pub(crate) source_face_use: Option<u64>,
+    pub(crate) source: monstertruck_io::step::load::SourceCoedgeProvenance,
+}
+
+/// Source-relative realization recipe identity, independent of slabs, poses,
+/// adaptive proof cells and available work. This descriptor grants no collar
+/// or endpoint completion authority.
+///
+/// Version 1 uses native-span/1024 collar width and first/last 1/1024 endpoint
+/// supports, with the normalized bubble (t-a)(b-t)/(b-a)^2 on the complete
+/// retained native range [a,b]. Every consumer must prove this same recipe.
+#[derive(Clone, Copy)]
+pub(crate) struct OriginalMaterialRealization<'a> {
+    definition: &'a Definition,
+}
+
+/// The actual implemented realization variant. A future carrier-law recipe
+/// requires its complete source-only selector and shared vertex plan before it
+/// can acquire a distinct identity; an unimplemented plan is not a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterialRealizationVariant {
+    GenericGTransport,
+}
+
+/// Owned recipe descriptor carried alongside a capture's existing immutable
+/// definition ID. Exact bit equality preserves absent allowance and every
+/// source-relative recipe parameter without floating-point tolerance matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaterialRealizationIdentity {
+    version: u32,
+    variant: MaterialRealizationVariant,
+    source_allowance_bits: Option<u64>,
+    collar_parameter_fraction_bits: u64,
+    endpoint_support_fraction_bits: u64,
+}
+impl MaterialRealizationIdentity {
+    pub(crate) fn new(definition: &Definition) -> Self {
+        Self::with_allowance(definition.provenance.uncertainty_mm)
+    }
+    pub(crate) fn with_allowance(source_allowance_mm: Option<f64>) -> Self {
+        Self {
+            version: 1,
+            variant: MaterialRealizationVariant::GenericGTransport,
+            source_allowance_bits: source_allowance_mm.map(f64::to_bits),
+            collar_parameter_fraction_bits: (1.0_f64 / 1024.0).to_bits(),
+            endpoint_support_fraction_bits: (1.0_f64 / 1024.0).to_bits(),
+        }
+    }
+    /// Fixed canonical hash input, not a persisted wire representation.
+    pub(crate) fn identity_bytes(self) -> [u8; 30] {
+        let mut bytes = [0; 30];
+        bytes[..4].copy_from_slice(&self.version.to_le_bytes());
+        bytes[4] = match self.variant {
+            MaterialRealizationVariant::GenericGTransport => 0,
+        };
+        bytes[5] = u8::from(self.source_allowance_bits.is_some());
+        bytes[6..14].copy_from_slice(&self.source_allowance_bits.unwrap_or(0).to_le_bytes());
+        bytes[14..22].copy_from_slice(&self.collar_parameter_fraction_bits.to_le_bytes());
+        bytes[22..30].copy_from_slice(&self.endpoint_support_fraction_bits.to_le_bytes());
+        bytes
+    }
+}
+
+impl<'a> OriginalMaterialRealization<'a> {
+    pub(crate) fn new(definition: &'a Definition) -> Self {
+        Self { definition }
+    }
+    pub(crate) fn identity(&self) -> MaterialRealizationIdentity {
+        MaterialRealizationIdentity::new(self.definition)
+    }
+    pub(crate) fn collar_parameter_fraction(&self) -> f64 {
+        f64::from_bits(self.identity().collar_parameter_fraction_bits)
+    }
+    pub(crate) fn endpoint_support_fraction(&self) -> f64 {
+        f64::from_bits(self.identity().endpoint_support_fraction_bits)
+    }
 }
 
 pub(crate) struct BoundaryCoedgeRef {
     pub(crate) witness: usize,
     pub(crate) orientation: bool,
     pub(crate) edge: monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+    /// Inverse-only/unproved paths cannot manufacture material-link authority.
+    pub(crate) correspondence: Option<OriginalCoedgeCorrespondence>,
+    /// Whole-coedge source-chart uncertainty, not a guessed glue tolerance.
+    pub(crate) source_chart_margin_uv: [f64; 2],
+    pub(crate) source_chart_error_mm: f64,
+    /// UV trim parameters are independent of rational native edge parameters.
+    pub(crate) source_chart_parameter_range: Option<(f64, f64)>,
+    /// An unproved original declared trim remains retained without authorizing
+    /// operations that need a proved source/native covering chart.
+    pub(crate) source_chart_certificate: SourceChartCertificate,
+    /// Retained original source PCURVE/literal parameter expression. A derived
+    /// inverse or small physical residual alone never supplies this authority.
+    pub(crate) source_chart_declared: bool,
 }
 
-/// Exact line/circle arc witnesses of the admitted native boundary, in millimetres.
+pub(crate) struct FaceParameterWitness {
+    /// Source UV and native UV remain distinct even after physical mm scaling.
+    pub(crate) conversion: SurfaceParameterMap,
+    /// Original bounded spline carrier domain, transported by exact conversion.
+    /// A lowered sweep's incidental zero-to-one net is not this witness.
+    pub(crate) native_uv_domain: Option<[[f64; 2]; 2]>,
+}
+/// Exact analytic fast paths plus native endpoint witnesses for general curves.
+/// `Native` is not a line chord and never authorizes analytic extrema/finishes.
 #[derive(Debug, Clone)]
 pub(crate) enum BoundaryCurveMm {
     Line {
@@ -47,12 +258,18 @@ pub(crate) enum BoundaryCurveMm {
         start_angle: f64,
         end_angle: f64,
     },
+    Native {
+        start_mm: [f64; 3],
+        end_mm: [f64; 3],
+    },
 }
 
 impl BoundaryCurveMm {
     pub(crate) fn endpoints(&self) -> ([f64; 3], [f64; 3]) {
         match self {
-            Self::Line { start_mm, end_mm } => (*start_mm, *end_mm),
+            Self::Line { start_mm, end_mm } | Self::Native { start_mm, end_mm } => {
+                (*start_mm, *end_mm)
+            }
             Self::CircleArc {
                 center_mm,
                 u_mm,
@@ -72,6 +289,124 @@ impl BoundaryCurveMm {
 }
 
 impl Definition {
+    /// Zero transport is a coefficient theorem, not a small residual or a
+    /// source-family assertion. This narrow lane also proves every original
+    /// curve endpoint equals its actual normalized topology vertex.
+    pub(crate) fn material_transport_is_proved_zero(
+        &self,
+        work: &mut crate::GeometryWorkBudget,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, crate::GeometryError> {
+        crate::check_cancel(cancel)?;
+        if self.solid.boundaries().len() != 1
+            || self.solid.boundaries()[0].len() != self.face_boundaries.len()
+        {
+            return Ok(false);
+        }
+        for (face, retained) in self.solid.boundaries()[0].iter().zip(&self.face_boundaries) {
+            work.charge(1, cancel)?;
+            let wires = face.absolute_boundaries();
+            if face.id() != retained.face || wires.len() != retained.wires.len() {
+                return Ok(false);
+            }
+            for (wire, references) in wires.iter().zip(&retained.wires) {
+                if wire.len() != references.len() {
+                    return Ok(false);
+                }
+                for (edge, reference) in wire.iter().zip(references) {
+                    work.charge(1, cancel)?;
+                    let Some(proof) = reference.correspondence.as_ref() else {
+                        return Ok(false);
+                    };
+                    if proof.provenance() != OriginalCorrespondenceProvenance::ExactCoefficients
+                        || proof.position_error_mm() != 0.0
+                        || proof.relative_derivative_error_bound() != 0.0
+                        || proof.margin_uv() != [0.0; 2]
+                        || reference.source_chart_margin_uv != [0.0; 2]
+                        || reference.source_chart_error_mm != 0.0
+                        || !reference.source_chart_certificate.has_regular_inverse()
+                        || proof.binding().is_none_or(|binding| {
+                            binding.face != face.id()
+                                || binding.edge != edge.id()
+                                || binding.endpoints != [edge.front().id(), edge.back().id()]
+                        })
+                        || edge.id() != reference.edge
+                        || edge.orientation() != reference.orientation
+                    {
+                        return Ok(false);
+                    }
+                    let front = edge.front().point();
+                    let back = edge.back().point();
+                    let exact_endpoints =
+                        edge.with_curve(|curve| -> Result<bool, crate::GeometryError> {
+                            if let monstertruck_modeling::Curve::Line(line) = curve {
+                                let (a, b) = if reference.orientation {
+                                    (line.0, line.1)
+                                } else {
+                                    (line.1, line.0)
+                                };
+                                return Ok(a == front
+                                    && b == back
+                                    && proof.native_range() == [0.0, 1.0]);
+                            }
+                            let [a, b] = proof.native_range();
+                            let parameters = if reference.orientation {
+                                [a, b]
+                            } else {
+                                [b, a]
+                            };
+                            for (parameter, vertex) in parameters.into_iter().zip([front, back]) {
+                                // A singleton outward enclosure is an exact
+                                // coefficient/evaluation identity, not equality of
+                                // two sampled f64 points or periodic nearness.
+                                let jet = match crate::parametric::curve_enclosure(
+                                    curve,
+                                    (parameter, parameter),
+                                    work,
+                                    cancel,
+                                ) {
+                                    Ok(jet) => jet,
+                                    Err(error)
+                                        if matches!(error.code,
+                                    spiling_contracts::geometry::GeometryErrorCode::Cancelled
+                                    | spiling_contracts::geometry::GeometryErrorCode::ResourceLimit
+                                ) =>
+                                    {
+                                        return Err(error);
+                                    }
+                                    Err(_) => return Ok(false),
+                                };
+                                if (0..3).any(|axis| {
+                                    jet.position[axis].lo != vertex[axis]
+                                        || jet.position[axis].hi != vertex[axis]
+                                }) {
+                                    return Ok(false);
+                                }
+                            }
+                            Ok(true)
+                        })?;
+                    if !exact_endpoints {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+    pub(crate) fn prepare_boundary_curve<'a>(
+        &'a self,
+        edge: monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+        curve: &'a monstertruck_modeling::Curve,
+        range: (f64, f64),
+        remaining_bytes: usize,
+        work: &mut crate::GeometryWorkBudget,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::parametric::PreparedCurveEnclosure<'a>, crate::GeometryError> {
+        if let Some(prepared) = self.original_boundary_curve(edge, range, work, cancel)? {
+            return Ok(prepared);
+        }
+        crate::parametric::prepare_curve_enclosure(curve, range, remaining_bytes, work, cancel)
+    }
     pub fn id(&self) -> &DefinitionId {
         &self.id
     }
@@ -87,6 +422,12 @@ impl Definition {
     pub fn source_bytes(&self) -> u32 {
         self.source_bytes
     }
+    /// Pinned native query-proof capacities, counted once per definition.
+    /// Includes actual source/proof/positional storage and the conservative
+    /// capacity-derived native edge-index table bound, not the BREP or RSS.
+    pub fn retained_query_proof_bytes(&self) -> usize {
+        self.continuation_bytes
+    }
 }
 
 impl std::fmt::Debug for Definition {
@@ -96,5 +437,82 @@ impl std::fmt::Debug for Definition {
             .field("face_count", &self.faces.len())
             .field("bounds_mm", &self.bounds)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod material_realization_identity_tests {
+    use super::MaterialRealizationIdentity;
+
+    #[test]
+    fn recipe_identity_preserves_absence_and_exact_allowance_bits() {
+        let absent = MaterialRealizationIdentity::with_allowance(None);
+        let zero = MaterialRealizationIdentity::with_allowance(Some(0.0));
+        let negative_zero = MaterialRealizationIdentity::with_allowance(Some(-0.0));
+        assert_ne!(absent, zero);
+        assert_ne!(zero, negative_zero);
+        assert_ne!(absent.identity_bytes(), zero.identity_bytes());
+        assert_ne!(zero.identity_bytes(), negative_zero.identity_bytes());
+        let a = MaterialRealizationIdentity::with_allowance(Some(1.0e-7));
+        let b = MaterialRealizationIdentity::with_allowance(Some(f64::from_bits(
+            1.0e-7_f64.to_bits() + 1,
+        )));
+        assert_ne!(a, b);
+        assert_ne!(a.identity_bytes(), b.identity_bytes());
+        let mut changed = a;
+        changed.version += 1;
+        assert_ne!(a.identity_bytes(), changed.identity_bytes());
+        changed = a;
+        changed.collar_parameter_fraction_bits += 1;
+        assert_ne!(a.identity_bytes(), changed.identity_bytes());
+        changed = a;
+        changed.endpoint_support_fraction_bits += 1;
+        assert_ne!(a.identity_bytes(), changed.identity_bytes());
+        assert_eq!(
+            a.identity_bytes()[4],
+            0,
+            "only the actual generic G recipe is implemented"
+        );
+    }
+}
+
+#[cfg(test)]
+mod zero_material_transport_tests {
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn exact_normalized_box_endpoints_prove_zero_but_missing_receipt_cannot() {
+        let cancel = AtomicBool::new(false);
+        let mut definition = crate::import_step(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = crate::GeometryWorkBudget::new(1_000_000);
+        assert!(
+            definition
+                .material_transport_is_proved_zero(&mut work, &cancel)
+                .unwrap()
+        );
+        assert_eq!(
+            definition
+                .material_transport_is_proved_zero(&mut work, &AtomicBool::new(true),)
+                .unwrap_err()
+                .code,
+            spiling_contracts::geometry::GeometryErrorCode::Cancelled,
+        );
+        assert_eq!(
+            definition
+                .material_transport_is_proved_zero(&mut crate::GeometryWorkBudget::new(0), &cancel,)
+                .unwrap_err()
+                .code,
+            spiling_contracts::geometry::GeometryErrorCode::ResourceLimit,
+        );
+        definition.face_boundaries[0].wires[0][0].correspondence = None;
+        assert!(
+            !definition
+                .material_transport_is_proved_zero(&mut work, &cancel)
+                .unwrap()
+        );
     }
 }

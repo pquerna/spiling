@@ -22,6 +22,164 @@
       "path": "occt-through-hole-mm.step",
       "bytes": 19015,
       "sha256": "71d0276a8ba240c608597baf0a079ecb6078f1bd88ebd61bff88abdaa3c25ff0"
+    },
+    {
+      "path": "occt-tapered-fitting-mm.step",
+      "bytes": 9375,
+      "sha256": "53478f60570347159d8eba29db16ad89f6a452592684b6ff87d2f5baa6934b8c",
+      "analytic_oracle": {
+        "nominal_bounds_mm": [
+          [
+            -6.0,
+            -6.0,
+            0.0
+          ],
+          [
+            6.0,
+            6.0,
+            12.0
+          ]
+        ],
+        "sections": [
+          {
+            "z_mm": 1.0,
+            "material_area_mm2": 94.33504607029349,
+            "loop_count": 2
+          },
+          {
+            "z_mm": 6.0,
+            "material_area_mm2": 65.97344572538566,
+            "loop_count": 2
+          },
+          {
+            "z_mm": 11.0,
+            "material_area_mm2": 41.97516851046363,
+            "loop_count": 2
+          }
+        ]
+      }
+    },
+    {
+      "path": "occt-rounded-housing-mm.step",
+      "bytes": 67548,
+      "sha256": "114c2badf2c1b3742c48415debf6aa0ce25749ae2de8a35b248ab6c1421439db",
+      "analytic_oracle": {
+        "nominal_bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            24.0,
+            18.0,
+            10.0
+          ]
+        ],
+        "pocket_floor_z_mm": 4.13,
+        "sections": [
+          {
+            "z_mm": 0.5,
+            "material_area_mm2": 375.4533317199782,
+            "loop_count": 1
+          },
+          {
+            "z_mm": 4.1,
+            "material_area_mm2": 428.5663706143592,
+            "loop_count": 1
+          },
+          {
+            "z_mm": 4.16,
+            "material_area_mm2": 400.29203673205103,
+            "loop_count": 2
+          },
+          {
+            "z_mm": 9.5,
+            "material_area_mm2": 347.17899783767007,
+            "loop_count": 2
+          }
+        ]
+      }
+    },
+    {
+      "path": "occt-spline-housing-mm.step",
+      "bytes": 102154,
+      "sha256": "4ef5a33f076fe63c7a93e298108dce121e298aa769dbe40a56e47109c029d738",
+      "analytic_oracle": {
+        "nominal_bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            24.0,
+            18.0,
+            10.0
+          ]
+        ],
+        "pocket_floor_z_mm": 4.13,
+        "sections": [
+          {
+            "z_mm": 0.5,
+            "material_area_mm2": 375.4533317199782,
+            "loop_count": 1
+          },
+          {
+            "z_mm": 4.1,
+            "material_area_mm2": 428.5663706143592,
+            "loop_count": 1
+          },
+          {
+            "z_mm": 4.16,
+            "material_area_mm2": 400.29203673205103,
+            "loop_count": 2
+          },
+          {
+            "z_mm": 9.5,
+            "material_area_mm2": 347.17899783767007,
+            "loop_count": 2
+          }
+        ]
+      }
+    },
+    {
+      "path": "occt-narrow-pocket-mm.step",
+      "bytes": 29678,
+      "sha256": "60e93a6c393045d81e06e2cca63681da013ca27326110bfcbd1a57d9fdf15e5d",
+      "analytic_oracle": {
+        "nominal_bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            12.0,
+            10.0,
+            6.0
+          ]
+        ],
+        "pocket_floor_z_mm": 1.07,
+        "pocket_width_mm": 0.6,
+        "sections": [
+          {
+            "z_mm": 1.0,
+            "material_area_mm2": 120.0,
+            "loop_count": 1
+          },
+          {
+            "z_mm": 1.1,
+            "material_area_mm2": 115.2,
+            "loop_count": 2
+          },
+          {
+            "z_mm": 5.0,
+            "material_area_mm2": 115.2,
+            "loop_count": 2
+          }
+        ]
+      }
     }
   ]
 }

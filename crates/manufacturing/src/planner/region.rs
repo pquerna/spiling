@@ -36,7 +36,7 @@ impl BooleanOps for RequiredMaterial<'_> {
 }
 
 pub(super) fn from_native(
-    native: spiling_geometry::NativeSection,
+    native: &spiling_geometry::NativeSection,
     pose: &RigidPoseMm,
     sample: f64,
     cancel: &AtomicBool,
@@ -44,30 +44,13 @@ pub(super) fn from_native(
     let mut outer = Vec::<Polygon<f64>>::new();
     let mut holes = Vec::new();
     let mut points = 0usize;
-    for boundary in native.loops {
+    for boundary in native.loops() {
         check_cancel(cancel)?;
         points += boundary.points_mm.len();
         if points > MAX_DEPOSITION_SEGMENTS as usize {
             return Err(resource("native section point limit exceeded"));
         }
-        let mut coordinates = Vec::with_capacity(boundary.points_mm.len());
-        for p in boundary.points_mm {
-            check_cancel(cancel)?;
-            let world = forward(pose, p);
-            if world.iter().any(|v| !v.is_finite()) || (world[2] - sample).abs() > 0.0001 {
-                return Err(unsupported(
-                    "native placed loop does not lie in declared horizontal sample plane",
-                ));
-            }
-            coordinates.push(Coord {
-                x: zero(world[0]),
-                y: zero(world[1]),
-            });
-        }
-        if coordinates.len() < 4 || coordinates.first() != coordinates.last() {
-            return Err(unsupported("native section loop is not closed"));
-        }
-        let ring = LineString(coordinates);
+        let ring = native_ring(boundary, pose, sample, cancel)?;
         if boundary.is_hole {
             holes.push(ring);
         } else {
@@ -91,6 +74,53 @@ pub(super) fn from_native(
     Ok(result)
 }
 
+fn native_ring(
+    boundary: &spiling_geometry::SectionLoopMm,
+    pose: &RigidPoseMm,
+    sample: f64,
+    cancel: &AtomicBool,
+) -> Result<LineString<f64>, ManufacturingError> {
+    if boundary.points_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+        return Err(resource("native loop point limit exceeded"));
+    }
+    let mut coordinates = Vec::with_capacity(boundary.points_mm.len());
+    for &p in &boundary.points_mm {
+        check_cancel(cancel)?;
+        let world = forward(pose, p);
+        if world.iter().any(|v| !v.is_finite())
+            || (world[2] - sample).abs() > spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
+        {
+            return Err(unsupported(
+                "native placed loop does not lie in declared horizontal sample plane",
+            ));
+        }
+        coordinates.push(Coord {
+            x: zero(world[0]),
+            y: zero(world[1]),
+        });
+    }
+    if coordinates.len() < 4 || coordinates.first() != coordinates.last() {
+        return Err(unsupported("native section loop is not closed"));
+    }
+    Ok(LineString(coordinates))
+}
+
+/// A geometry-certified WORLD-XY outer mask, never authoritative material.
+pub(super) fn from_world_outer(
+    boundary: &spiling_geometry::SectionLoopMm,
+    cancel: &AtomicBool,
+) -> Result<Polygon<f64>, ManufacturingError> {
+    if boundary.is_hole {
+        return Err(unsupported("native outer envelope was marked as a hole"));
+    }
+    let result = Polygon::new(
+        native_ring(boundary, &RigidPoseMm::IDENTITY, 0.0, cancel)?,
+        Vec::new(),
+    );
+    check_polygons(std::slice::from_ref(&result))?;
+    Ok(result)
+}
+
 pub(super) fn point_count(region: &MultiPolygon<f64>) -> usize {
     region
         .0
@@ -99,10 +129,20 @@ pub(super) fn point_count(region: &MultiPolygon<f64>) -> usize {
         .sum()
 }
 pub(super) fn check_size(region: &MultiPolygon<f64>) -> Result<(), ManufacturingError> {
-    if point_count(region) > MAX_DEPOSITION_SEGMENTS as usize {
+    check_polygons(&region.0)
+}
+
+fn check_polygons(polygons: &[Polygon<f64>]) -> Result<(), ManufacturingError> {
+    let points: usize = polygons
+        .iter()
+        .map(|p| {
+            p.exterior().0.len() + p.interiors().iter().map(|hole| hole.0.len()).sum::<usize>()
+        })
+        .sum();
+    if points > MAX_DEPOSITION_SEGMENTS as usize {
         return Err(resource("planar region point limit exceeded"));
     }
-    if region.0.iter().any(|p| {
+    if polygons.iter().any(|p| {
         !p.unsigned_area().is_finite()
             || p.unsigned_area() <= 0.0
             || p.exterior()
@@ -122,10 +162,27 @@ pub(super) fn offset(
     distance: f64,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    offset_polygons(&region.0, distance, cancel)
+}
+
+/// Offset one certified outer operand without normalizing overlapping masks.
+pub(super) fn offset_polygon(
+    polygon: &Polygon<f64>,
+    distance: f64,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    offset_polygons(std::slice::from_ref(polygon), distance, cancel)
+}
+
+fn offset_polygons(
+    polygons: &[Polygon<f64>],
+    distance: f64,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
     check_cancel(cancel)?;
-    check_size(region)?;
-    if region.0.is_empty() || distance == 0.0 {
-        return Ok(region.clone());
+    check_polygons(polygons)?;
+    if polygons.is_empty() || distance == 0.0 {
+        return Ok(MultiPolygon(polygons.to_vec()));
     }
     if !distance.is_finite() {
         return Err(unsupported("offset distance is not finite"));
@@ -158,8 +215,8 @@ pub(super) fn offset(
         // Build that neighborhood from convex segment capsules, not independently
         // shifted finite edges whose disappearing supports can form false islands.
         // Each island retains its own Boolean coordinate range.
-        let mut polygons = Vec::with_capacity(region.0.len());
-        for polygon in &region.0 {
+        let mut eroded_polygons = Vec::with_capacity(polygons.len());
+        for polygon in polygons {
             check_cancel(cancel)?;
             let tube = boundary_tube(polygon, &disk, cancel)?;
             let source = MultiPolygon(vec![polygon.clone()]);
@@ -167,12 +224,12 @@ pub(super) fn offset(
             let mut eroded = source.difference(&tube);
             check_cancel(cancel)?;
             check_size(&eroded)?;
-            polygons.append(&mut eroded.0);
+            eroded_polygons.append(&mut eroded.0);
         }
-        MultiPolygon(polygons)
+        MultiPolygon(eroded_polygons)
     } else {
-        let mut expanded = region.clone();
-        for polygon in &region.0 {
+        let mut expanded = MultiPolygon(polygons.to_vec());
+        for polygon in polygons {
             let tube = boundary_tube(polygon, &disk, cancel)?;
             boolean_budget(&expanded, &tube, cancel)?;
             expanded = expanded.union(&tube);
@@ -262,17 +319,21 @@ fn boundary_tube(
 
 pub(super) fn canonicalize(region: &mut MultiPolygon<f64>) {
     for p in &mut region.0 {
-        p.exterior_mut(|r| canonical_ring(r, true));
-        p.interiors_mut(|rings| {
-            for r in rings.iter_mut() {
-                canonical_ring(r, false);
-            }
-            rings.sort_by(ring_compare);
-        });
+        canonicalize_polygon(p);
     }
     region
         .0
         .sort_by(|a, b| ring_compare(a.exterior(), b.exterior()));
+}
+
+pub(super) fn canonicalize_polygon(polygon: &mut Polygon<f64>) {
+    polygon.exterior_mut(|ring| canonical_ring(ring, true));
+    polygon.interiors_mut(|rings| {
+        for ring in rings.iter_mut() {
+            canonical_ring(ring, false);
+        }
+        rings.sort_by(ring_compare);
+    });
 }
 fn canonical_ring(ring: &mut LineString<f64>, ccw: bool) {
     if ring.0.len() < 4 {

@@ -11,7 +11,7 @@ const intent = {
   recipe: {
     ...solidIntent.recipe,
     id: "software-sparse-skins",
-    revision: "2",
+    revision: "3",
     infill_fraction: 0.25,
     top_skin_thickness_mm: 0.8,
     bottom_skin_thickness_mm: 0.8,

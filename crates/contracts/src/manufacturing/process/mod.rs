@@ -126,11 +126,29 @@ pub enum PreflightSeverity {
     Warning,
     Info,
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightDisposition {
+    Admitted,
+    Refused,
+    Unresolved,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreflightEvidence {
+    NotEvaluated,
+    Certified,
+    Unsupported,
+    Indeterminate,
+    Failed,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PreflightCheck {
     pub code: String,
     pub severity: PreflightSeverity,
+    pub evidence: PreflightEvidence,
+    pub required: bool,
     pub message: String,
     pub occurrence_id: Option<crate::geometry::OccurrenceId>,
     pub face_id: Option<crate::geometry::FaceId>,
@@ -139,7 +157,7 @@ pub struct PreflightCheck {
 #[serde(deny_unknown_fields)]
 pub struct PreflightReport {
     pub input_revision: crate::project::ProjectRevision,
-    pub eligible: bool,
+    pub disposition: PreflightDisposition,
     pub software_only: bool,
     #[serde(deserialize_with = "checks")]
     pub checks: Vec<PreflightCheck>,
@@ -152,16 +170,27 @@ impl PreflightReport {
         if self.checks.len() > 256 {
             return Err(super::resource("preflight check budget exceeded"));
         }
-        if !self.software_only
-            || self.checks.is_empty()
-            || self.eligible
-                == self
-                    .checks
-                    .iter()
-                    .any(|c| c.severity == PreflightSeverity::Error)
-        {
+        if !self.software_only || self.checks.is_empty() {
             return Err(invalid(
-                "invalid preflight eligibility or software qualification",
+                "invalid preflight software qualification or empty checks",
+            ));
+        }
+        let mut expected = PreflightDisposition::Admitted;
+        for check in self.checks.iter().filter(|check| check.required) {
+            match check.evidence {
+                PreflightEvidence::Unsupported | PreflightEvidence::Failed => {
+                    expected = PreflightDisposition::Refused;
+                    break;
+                }
+                PreflightEvidence::NotEvaluated | PreflightEvidence::Indeterminate => {
+                    expected = PreflightDisposition::Unresolved;
+                }
+                PreflightEvidence::Certified => {}
+            }
+        }
+        if self.disposition != expected {
+            return Err(invalid(
+                "preflight disposition does not match required evidence",
             ));
         }
         for check in &self.checks {

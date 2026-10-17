@@ -9,8 +9,9 @@ use spiling_contracts::{
     ArtifactView, MAX_CONTROL_BYTES,
     display::{validate_mesh_chunk, validate_section_chunk, validate_section_summary},
     geometry::{
-        ArtifactChunkMetadata, ArtifactSummary, GeometryCommand, GeometryError, GeometryErrorCode,
-        GeometryResponse, JobError, MAX_GEOMETRY_CHUNK_BYTES,
+        AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
+        GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
+        MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SECTION_PLANE_TOLERANCE_MM, SceneSummary,
     },
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
@@ -18,7 +19,7 @@ use spiling_contracts::{
         ManufacturingResponse, ReplayDisplayDescriptor, decode_bundle, validate_replay_display,
     },
     native::{self, GeometryCall, ManufacturingCall, NativeOperationView, ProjectCall},
-    project::{ProjectCommand, ProjectResponse},
+    project::{ProjectCommand, ProjectResponse, ProjectRevision},
     rpc,
 };
 use uuid::Uuid;
@@ -129,6 +130,17 @@ impl EngineRpc {
             GeometryCall::StartSection(request) => {
                 let operation = client
                     .start_section(self.request(bounded(request)?))
+                    .await
+                    .map_err(rpc_error)?
+                    .into_inner();
+                Ok(GeometryResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation)
+                        .map_err(ClientError::Protocol)?,
+                })
+            }
+            GeometryCall::PrepareBedPose(request) => {
+                let operation = client
+                    .prepare_bed_pose(self.request(bounded(request)?))
                     .await
                     .map_err(rpc_error)?
                     .into_inner();
@@ -319,6 +331,84 @@ impl EngineRpc {
             ));
         }
         native::native_operation_view(&operation).map_err(ClientError::Protocol)
+    }
+    /// Query native support in world axes; does not mutate or hide an Apply.
+    pub async fn prepare_bed_pose(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        occurrence: &OccurrenceRecord,
+        envelope_mm: AabbMm,
+        center_xy: bool,
+    ) -> Result<BedPosePreparation, ClientError> {
+        let response = self
+            .geometry(GeometryCommand::PrepareBedPose {
+                session_id: scene.session_id.clone(),
+                base_revision: scene.revision,
+                project_revision,
+                occurrence_id: occurrence.occurrence_id.clone(),
+                expected_definition_id: occurrence.definition_id.clone(),
+                expected_pose: occurrence.pose,
+                envelope_mm,
+                center_xy,
+                contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
+            })
+            .await?;
+        let GeometryResponse::OperationAccepted { operation } = response else {
+            return Err(ClientError::Protocol(
+                "native contact operation was not admitted".into(),
+            ));
+        };
+        let name = operation.name.clone();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(75), async {
+            let mut observed = operation;
+            if !observed.done {
+                let mut watch = self.watch_operation(name.clone()).await?;
+                loop {
+                    let operation = watch.message().await.map_err(rpc_error)?.ok_or_else(|| {
+                        ClientError::Protocol(
+                            "native contact observation ended before a terminal result".into(),
+                        )
+                    })?;
+                    if operation.name != name {
+                        return Err(ClientError::Protocol(
+                            "native contact observation name mismatch".into(),
+                        ));
+                    }
+                    observed =
+                        native::native_operation_view(&operation).map_err(ClientError::Protocol)?;
+                    if observed.done {
+                        break;
+                    }
+                }
+            }
+            Ok::<_, ClientError>(observed)
+        })
+        .await
+        .map_err(|_| ClientError::Timeout)??;
+        if let Some(error) = terminal.error {
+            return Err(domain_error(error));
+        }
+        let Some(JobResult::BedPosePrepared { preparation }) = terminal.result else {
+            return Err(ClientError::Protocol(
+                "native contact result missing".into(),
+            ));
+        };
+        if preparation.session_id != scene.session_id
+            || preparation.scene_revision != scene.revision
+            || preparation.project_revision != project_revision
+            || preparation.occurrence_id != occurrence.occurrence_id
+            || preparation.definition_id != occurrence.definition_id
+            || preparation.original_pose != occurrence.pose
+            || preparation.envelope_mm != envelope_mm
+            || preparation.center_xy != center_xy
+            || preparation.contact_tolerance_mm != SECTION_PLANE_TOLERANCE_MM
+        {
+            return Err(ClientError::Protocol(
+                "native contact capture mismatch".into(),
+            ));
+        }
+        Ok(preparation)
     }
 
     /// Immutable ByteStream retrieval followed by checked packed-layout validation.
@@ -540,6 +630,18 @@ impl EngineClient {
         command: GeometryCommand,
     ) -> Result<GeometryResponse, ClientError> {
         self.rpc.geometry(command).await
+    }
+    pub async fn prepare_bed_pose(
+        &self,
+        scene: &SceneSummary,
+        project_revision: ProjectRevision,
+        occurrence: &OccurrenceRecord,
+        envelope_mm: AabbMm,
+        center_xy: bool,
+    ) -> Result<BedPosePreparation, ClientError> {
+        self.rpc
+            .prepare_bed_pose(scene, project_revision, occurrence, envelope_mm, center_xy)
+            .await
     }
     pub async fn project(&self, command: ProjectCommand) -> Result<ProjectResponse, ClientError> {
         self.rpc.project(command).await

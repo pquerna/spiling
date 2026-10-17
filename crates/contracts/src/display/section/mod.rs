@@ -57,6 +57,8 @@ pub struct SectionChunkBuilder {
     previous_occurrence: Option<OccurrenceId>,
     previous_definition: Option<DefinitionId>,
     holes_started: bool,
+    retained_byte_limit: usize,
+    retained_child_bytes: usize,
 }
 impl SectionChunkBuilder {
     pub fn new(
@@ -96,8 +98,62 @@ impl SectionChunkBuilder {
             previous_occurrence: None,
             previous_definition: None,
             holes_started: false,
+            retained_byte_limit: usize::MAX,
+            retained_child_bytes: 0,
         })
     }
+    /// Actual owned vector/string capacities, including pending points and
+    /// encoded chunks that coexist during packing; excludes allocator overhead.
+    pub fn retained_bytes(&self) -> usize {
+        self.session
+            .allocated_bytes()
+            .saturating_add(
+                self.chunks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<EncodedSectionChunk>()),
+            )
+            .saturating_add(self.retained_child_bytes)
+            .saturating_add(
+                self.loops
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SectionLoopMetadata>()),
+            )
+            .saturating_add(
+                self.offsets
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                self.points
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[f64; 3]>()),
+            )
+            .saturating_add(
+                self.previous_definition
+                    .as_ref()
+                    .map_or(0, DefinitionId::allocated_bytes),
+            )
+    }
+
+    /// Set remaining owned packing capacity before a push or finish. The caller
+    /// subtracts all other live buffers from its shared allowance first.
+    /// This admission is independent of the unchanged packed wire-byte cap.
+    pub fn set_retained_byte_limit(&mut self, byte_limit: usize) -> Result<(), GeometryError> {
+        if self.retained_bytes() > byte_limit {
+            self.failed = true;
+            return Err(resource("section packing exceeds remaining owned capacity"));
+        }
+        self.retained_byte_limit = byte_limit;
+        Ok(())
+    }
+
+    fn remaining_bytes(&self, reserved: usize) -> Result<usize, GeometryError> {
+        self.retained_byte_limit
+            .checked_sub(self.retained_bytes())
+            .and_then(|bytes| bytes.checked_sub(reserved))
+            .ok_or_else(|| resource("section packing exceeds remaining owned capacity"))
+    }
+
     pub fn push_loop(
         &mut self,
         occurrence: OccurrenceId,
@@ -183,32 +239,34 @@ impl SectionChunkBuilder {
         if single > self.chunk_limit {
             return Err(resource("complete section loop does not fit one chunk"));
         }
+        let first = relative(points[0]);
+        let mut last = first;
+        let mut previous = [0.0; 2];
         let mut area = 0.0;
-        for point in points {
-            let point = relative(*point);
+        // Validate the coordinates actually encoded. Local anchoring avoids
+        // distant-origin cancellation, without accepting erased geometry.
+        for point in std::iter::once(first).chain(points[1..].iter().map(|point| relative(*point)))
+        {
             if !finite3(point) || dot(point, self.plane.normal).abs() > SECTION_PLANE_TOLERANCE_MM {
                 return Err(invalid(
                     "section point is nonfinite or off the native plane",
                 ));
             }
+            let local = std::array::from_fn(|axis| point[axis] - first[axis]);
+            let current = [dot(local, self.frame.x_axis), dot(local, self.frame.y_axis)];
+            area += previous[0] * current[1] - current[0] * previous[1];
+            previous = current;
+            last = point;
         }
-        let first = relative(points[0]);
-        let last = relative(points[points.len() - 1]);
         if norm3(std::array::from_fn(|axis| first[axis] - last[axis])) > SECTION_PLANE_TOLERANCE_MM
         {
             return Err(invalid("section loop is not closed"));
-        }
-        for segment in points.windows(2) {
-            let a = relative(segment[0]);
-            let b = relative(segment[1]);
-            area += dot(a, self.frame.x_axis) * dot(b, self.frame.y_axis)
-                - dot(b, self.frame.x_axis) * dot(a, self.frame.y_axis);
         }
         if !area.is_finite() || area == 0.0 || (area < 0.0) != is_hole {
             return Err(invalid("section loop area or winding is invalid"));
         }
         if section_size(self.offsets.len(), self.points.len() + points.len())? > self.chunk_limit {
-            self.flush()?;
+            self.flush(definition.allocated_bytes())?;
         }
         let pending = section_size(self.offsets.len(), self.points.len() + points.len())?;
         if self.total_bytes as usize + pending > MAX_SECTION_BYTES as usize {
@@ -216,6 +274,17 @@ impl SectionChunkBuilder {
         }
         let ordinal = u32::try_from(self.loops.len())
             .map_err(|_| resource("section loop ordinal exhausted"))?;
+        // The incoming identity and its metadata clone coexist with the
+        // previous identity until commit; reserve before vector/point growth.
+        let identities = definition
+            .allocated_bytes()
+            .saturating_add(definition.as_str().len());
+        let remaining = self.remaining_bytes(identities)?;
+        reserve_section_vec(&mut self.points, points.len(), remaining)?;
+        let remaining = self.remaining_bytes(identities)?;
+        reserve_section_vec(&mut self.offsets, 1, remaining)?;
+        let remaining = self.remaining_bytes(identities)?;
+        reserve_section_vec(&mut self.loops, 1, remaining)?;
         self.points
             .extend(points.iter().map(|point| relative(*point)));
         self.offsets.push(self.points.len() as u32);
@@ -226,12 +295,15 @@ impl SectionChunkBuilder {
             is_hole,
             point_count: points.len() as u32,
         });
+        self.retained_child_bytes = self
+            .retained_child_bytes
+            .saturating_add(self.loops.last().unwrap().definition_id.allocated_bytes());
         self.previous_occurrence = Some(occurrence);
         self.previous_definition = Some(definition);
         self.holes_started |= is_hole;
         Ok(())
     }
-    fn flush(&mut self) -> Result<(), GeometryError> {
+    fn flush(&mut self, reserved_bytes: usize) -> Result<(), GeometryError> {
         if self.offsets.len() == 1 {
             return Ok(());
         }
@@ -243,7 +315,12 @@ impl SectionChunkBuilder {
         {
             return Err(resource("section chunk or artifact exceeds budget"));
         }
-        let mut bytes = Vec::with_capacity(length);
+        // Pending f64 points remain live while the packed bytes are produced.
+        let identities = reserved_bytes.saturating_add(self.session.as_str().len() + 64);
+        let remaining = self.remaining_bytes(length.saturating_add(identities))?;
+        reserve_section_vec(&mut self.chunks, 1, remaining)?;
+        let mut bytes = Vec::new();
+        reserve_section_vec(&mut bytes, length, self.remaining_bytes(identities)?)?;
         bytes.resize(point_start, 0);
         bytes[..4].copy_from_slice(b"SPLS");
         bytes[4..6].copy_from_slice(&SECTION_SCHEMA_VERSION.to_le_bytes());
@@ -273,6 +350,11 @@ impl SectionChunkBuilder {
             first_loop_ordinal: self.first_loop,
             loop_count: loop_count as u32,
         };
+        self.retained_child_bytes = self
+            .retained_child_bytes
+            .saturating_add(bytes.capacity())
+            .saturating_add(metadata.session_id.allocated_bytes())
+            .saturating_add(metadata.sha256.allocated_bytes());
         self.chunks.push(EncodedSectionChunk { metadata, bytes });
         self.total_bytes += length as u32;
         self.first_loop += loop_count as u32;
@@ -285,7 +367,7 @@ impl SectionChunkBuilder {
         if self.failed {
             return Err(invalid("section artifact has invalid loops"));
         }
-        self.flush()?;
+        self.flush(0)?;
         let count = self.chunks.len() as u32;
         for chunk in &mut self.chunks {
             chunk.metadata.chunk_count = count;
@@ -309,6 +391,40 @@ impl SectionChunkBuilder {
             loops: self.loops,
         })
     }
+}
+
+fn reserve_section_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    remaining_bytes: usize,
+) -> Result<(), GeometryError> {
+    let needed = values
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| resource("section packing capacity overflow"))?;
+    let growth = needed.saturating_sub(values.capacity());
+    if growth.saturating_mul(std::mem::size_of::<T>()) > remaining_bytes {
+        return Err(resource("section packing exceeds remaining owned capacity"));
+    }
+    if growth > 0 {
+        let previous_capacity = values.capacity();
+        let available_elements = remaining_bytes / std::mem::size_of::<T>().max(1);
+        let target = needed
+            .max(previous_capacity.saturating_mul(2))
+            .min(previous_capacity.saturating_add(available_elements));
+        values
+            .try_reserve_exact(target - values.len())
+            .map_err(|_| resource("section packing allocation failed"))?;
+        if values
+            .capacity()
+            .saturating_sub(previous_capacity)
+            .saturating_mul(std::mem::size_of::<T>())
+            > remaining_bytes
+        {
+            return Err(resource("section packing exceeds remaining owned capacity"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -457,7 +573,7 @@ pub fn validate_section_chunk<'a>(
         {
             return Err(invalid("section loop closure invalid"));
         }
-        let mut previous = first;
+        let mut previous = [0.0; 3];
         let mut area = 0.0;
         for index in start..end {
             let point = data.get(index).unwrap();
@@ -468,11 +584,12 @@ pub fn validate_section_chunk<'a>(
             {
                 return Err(invalid("section coordinate is nonfinite or off plane"));
             }
+            let local = std::array::from_fn(|axis| point[axis] - first[axis]);
             if index > start {
-                area += dot(previous, summary.frame.x_axis) * dot(point, summary.frame.y_axis)
-                    - dot(point, summary.frame.x_axis) * dot(previous, summary.frame.y_axis);
+                area += dot(previous, summary.frame.x_axis) * dot(local, summary.frame.y_axis)
+                    - dot(local, summary.frame.x_axis) * dot(previous, summary.frame.y_axis);
             }
-            previous = point;
+            previous = local;
         }
         if !area.is_finite() || area == 0.0 {
             return Err(invalid("section loop area invalid"));
@@ -593,10 +710,13 @@ pub fn validate_section_loop_metadata(
         {
             return Err(invalid("section loop point count mismatch"));
         }
+        let anchor = chunk.points_relative_mm.get(start).unwrap();
         let mut area = 0.0;
         for point in start..end - 1 {
             let a = chunk.points_relative_mm.get(point).unwrap();
             let b = chunk.points_relative_mm.get(point + 1).unwrap();
+            let a = std::array::from_fn(|axis| a[axis] - anchor[axis]);
+            let b = std::array::from_fn(|axis| b[axis] - anchor[axis]);
             area += dot(a, summary.frame.x_axis) * dot(b, summary.frame.y_axis)
                 - dot(b, summary.frame.x_axis) * dot(a, summary.frame.y_axis);
         }

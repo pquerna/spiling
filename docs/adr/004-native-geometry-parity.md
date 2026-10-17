@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: proposed. This RFC specifies a target architecture and acceptance gates, not implemented support. Current executable contracts and recorded evidence remain authoritative until an explicit cutover. No new kernel, mesh-based slicing fallback or physical printer qualification is proposed.
+Status: interface cutover implemented; operation qualification incomplete. Generic native faces and independent display availability use `step-native-trimmed-v2`, `mesh-trimmed-mm-0.05-v2`, project5/manufacturing6/planner9. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) records exercised flows and explicit fitting/housing limits. No alternate kernel, mesh slicing fallback or physical printer qualification is introduced.
 
 ## 1. Decision and user outcome
 
@@ -25,11 +25,11 @@ Decisions:
 
 Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alternate kernels; continuous multi-axis deposition; a new printer backend; color mixing; physically certified output. Broader source geometry does not imply those capabilities.
 
-## 2. Grounded baseline and gaps
+## 2. Historical design baseline and qualification gaps
 
-Design baseline: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml) pin `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`. Earlier entries in the [geometry evidence](../quality/geometry-evidence.md) describe their own measured revisions, not automatic acceptance of this RFC.
+Current consumer pin: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), all eleven lockfile Git sources and `crates/geometry::KERNEL_REVISION` select `d5de658a8b589efdeb78970d79a0563c789c268a`. The source-inspection baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`; its restrictions describe the pre-cutover design baseline, not current generic admission. Pins are provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates measured producers and remaining numerical/manufacturing limits.
 
-| Family | Pinned kernel path, from source inspection | Current Spiling restriction | Work required here |
+| Family | Kernel path at the design baseline, from source inspection | Pre-cutover Spiling restriction | Work identified by the design |
 | --- | --- | --- | --- |
 | Plane and circular cylinder | Native plane / posed line revolution, STEP conversion | Admitted with bounded line/circle trim profile | Migrate without regression; keep exact fast paths |
 | Cone | STEP cone becomes posed line revolution | Rejected carrier/entity | Cone metadata, apex handling, bounds, intersection and approximation coverage |
@@ -46,7 +46,7 @@ Design baseline: all five workspace Monstertruck declarations in [Cargo.toml](..
 
 Known upstream exceptions include spindle/lemon tori and some degenerate toroidal cases. Horn-torus representation is not a claim that its singularity satisfies manufacturing topology. Unimplemented builder branches are not admitted operations. Track these individually; never advertise universal support from kernel enum membership.
 
-Current integration seams:
+Historical integration seams at that baseline:
 
 - [Geometry facade](../../crates/geometry/src/lib.rs): `import_step_with_face_limit`, `projected_extent`, `prepare_section_source`, `section_with_byte_limit`, `tessellate_with_budget`.
 - [Private native definition](../../crates/geometry/src/kernel/mod.rs): `Definition`, positional `FaceBoundaryRefs`, `BoundaryCoedgeRef`, line/circle `BoundaryCurveMm`.
@@ -60,7 +60,7 @@ Pinned kernel references: [surface representations](https://github.com/pquerna/m
 
 Reuse available kernel ingredients rather than rebuilding them: bounded patch evaluation/derivatives, positive-weight structural bounds, strict mesh refusal, periodic meshing and prepared Boolean budgets. Their limits matter: the current generic curve divider uses sampled interior deviation, native bounds may be loose and need a roundoff audit, and public plane-cut helpers lack the full prepared/cancellation/provenance contract of Spiling's current section adapter. None is automatically an all-domain certificate.
 
-The prior CLI investigation imported/sectioned the box and explicitly refused the rational B-spline fixture at the importer profile gate. That is evidence of current admission behavior, not a general NURBS numerical test. This RFC itself introduces no new runtime evidence.
+The baseline CLI investigation imported/sectioned the box and refused the rational B-spline fixture at the former importer profile gate. It is historical behavior, not a current support statement or a general NURBS numerical test. Current acceptance belongs in the linked evidence.
 
 ## 3. Ownership and module boundaries
 
@@ -237,6 +237,34 @@ Count all owned preparation and pinned definition proofs once in the source
 pool. A one-off section uses the same preparation rules, not a second geometry
 implementation.
 
+`PreparedGeometrySource` owns a bounded immutable inventory of original trim
+domains and selected source vertex transport plans for one definition instance,
+without native Boolean seeds. Prepare it once per distinct definition; bounds
+and complete height discovery borrow those same owners. Consuming promotion to
+`PreparedMaterialSource` moves the domains/plans and adds native section seeds,
+with all other retained sources excluded from its replacement allowance.
+Occurrences and adaptive retries do not select `G`, its frame, fraction, exits
+or physical correspondence again. Raw section APIs remain on
+`PreparedSectionSource`; they do not acquire material-admission prerequisites.
+
+Retained plan lookup checks exact definition and Native vertex ownership and
+cancellation. A fixed inline, success-only qualification may retain the complete
+immutable source-star graph, trim ownership, cutover and nonincident-separation
+theorem for that exact selected plan. It has no pose, height, radial field,
+sample or shape-policy operand. Publish success only after every source
+obligation completes; never retain errors or hold a cache lock across native
+geometry traversal. Concurrent first use may repeat fully charged work.
+Closed-slab, radial, flow, metric, candidate and posed authority remains fresh,
+including the existing inactive-support exclusion before qualification.
+Standalone material queries use identical algorithms with local plan ownership,
+not another realization convention.
+
+Count selected-plan records and owned capacities once in the existing source
+pool, before capture. Pinned plan storage is not deducted a second time from
+query scratch; locally owned plans still reserve their simultaneous storage.
+No lazy retained growth, cached error or counter reset is allowed. Drop material
+preparation at the existing compilation source-lifetime boundary.
+
 Within one section query, an opaque native `PreparedFacePlaneRoots` retains
 the complete ordered original-3D and source-chart trim-root inventories.
 `ValidatedPlaneTrimBoundaryBinding` supplies the original oriented coedge,
@@ -249,6 +277,14 @@ and optional inventory inputs without allocation; numerical policy and resource
 budgets remain separate. Candidate end association, continuation/extension,
 complete interior coverage and endpoint sealing still run under the actual
 coverage policy.
+
+For one original scalar function and parameter gauge, overlapping contracted
+root enclosures lie inside overlapping complete monotone witnesses. If both
+witnesses have the same strict derivative sign, their connected cover proves
+one root even when a fresh interval evaluation over the union loses correlation.
+Deduplicate from those certificates, retaining each stored witness with its own
+derivative enclosure. Opposite or unresolved signs remain refusals. This changes
+neither gauges nor root seeds and does not turn a tangency into a transverse cut.
 
 Reuse binds exact native plane coefficients, immutable face/carrier and
 orientation, complete chart/coedge association, original curve binding/range,
@@ -265,6 +301,14 @@ preparation, identity checks, lookups and failed attempts cumulatively. Source,
 inventory, candidate and output capacities coexist under the shared allowance.
 Native winding scratch receives the current query allowance even when its
 original trim domain was prepared earlier with more free capacity.
+
+Within that same immutable exact-plane owner, identical endpoint chart requests
+may share a bounded proposal table keyed by the complete directed original
+face/coedge identity and exact source-cut parameter bits. A table hit reuses
+only the already qualified root-chart enclosure; actual candidate association,
+endpoint sealing, uniqueness and complete original-face coverage remain fresh.
+Include table capacities in coexisting query admission, charge lookup work and
+propagate errors. No request is rounded or shared across gauges or planes.
 
 An exactly known endpoint coordinate has zero physical span; it is not an
 unresolved positive-width extension. Prove its unique original-carrier point
@@ -368,6 +412,16 @@ chord integral. The same whole-query curvature certificate owns both sampling
 and this analytic remainder. Non-C1 queries retain their existing independent
 image/integral path; no zero-curvature or sampled-area fallback is admitted.
 
+A private smooth-range receipt may carry a positive native C1 qualification
+down the sampler's DFS, bound to the same immutable prepared binding, unit
+view, active restriction and containing closed parameter interval. Validate
+identity/containment and charge cancellation/lookup work before skipping only
+the repeated native smoothness proof. Every child still evaluates its own
+curvature/position/plane bounds and retains original knots, coordinate
+transitions, endpoints and Green obligations. An unqualified parent provides
+no negative authority; children may independently qualify. Include live
+receipts in the existing fixed-stack admission, not a new cache allowance.
+
 ### 5.5 Scalar native obligations before unused spatial evaluation
 
 Trim-plane inventory needs the native scalar `n dot (S(U(t))-origin)`, not every
@@ -394,6 +448,8 @@ reconstruct their coefficient correspondence for every layer. Bind every lookup
 to the exact immutable definition and original face identity. Standalone queries
 use the same algorithms with a query-owned domain; do not introduce another
 planner, cloned domain cache or unsafe self-reference.
+Nested graph and radial-link proofs must forward that prepared source context;
+replacing it with a standalone context discards the job's admitted originals.
 
 Source retention is admitted once. A borrowed domain consumes no second retained
 allocation, but its current classification must use the current query's bounded
@@ -402,6 +458,11 @@ already-admitted metadata with checked arithmetic. Cancellation and lookup work
 remain charged. Query-dependent classifications, roots, heights, events, contact
 and material/slab certificates remain fresh; borrowing source authority does not
 authorize borrowing a different query's result.
+
+Native `with_surface` and `with_curve` callbacks hold their owner's
+non-reentrant mutex. Finish the callback before calling another helper that
+acquires that same owner; borrowed source authority does not make nested
+locking safe.
 
 ### 5.7 Reject disjoint candidate meshes before dense pair admission
 
@@ -450,6 +511,22 @@ coefficients and their uncertainty; floating axes are not assumed orthonormal.
 Whole original/native position and relative-tangent correspondence remains
 mandatory. This is a latitude graph with a world tube, not uniform zero UV
 uncertainty or an ordinary inverse receipt.
+
+A closed before-exit comparison may use a stronger scalar support instead of
+an ill-resolved two-dimensional inverse. Seal equality of the complete original
+affine polar functions, full Native-to-UV maps, literal endpoints/exits and
+normalized gauges; polar offsets and the actual middle bulge must be zero.
+Then every raw star piece has the same polar function `phi(s)` and its outer
+trace the same `phi(1)`. Fresh validated trigonometry must prove the retained
+principal branch/hemisphere, `0 < R² = sin²(phi(1)) < 1`, strictly positive
+whole-range `d sin²(phi(s))/ds`, and the matching support-row/polar-derivative
+orientation. Do not assume a floating representation of pi has zero sine.
+The raw squared covering radius is at most `R²`, strictly before `s=1`;
+the reference radius is `s² R²`. Convexity of squared norm controls the entire
+Cartesian comparison homotopy. Exact common endpoint expressions retain the
+closed zero at `s=1`; complete outer-boundary ownership still excludes every
+unauthorized zero. This sufficient lane neither changes canonical G nor
+widens an inverse proposal; unproved guards retain the original inverse path.
 
 Keep graph authority pending until both actual source-vertex joints receive
 Native whole-connection image certificates; every designated polar endpoint
@@ -637,6 +714,20 @@ actual native edge. Source IDs determine incidence; spatial bounds only reject
 nonincident contacts. The certificate proves local material degree one, not
 convexity, C1 continuity or a new source parameterization.
 
+Post-selection source-vertex separation may first enclose the complete
+original carrier position over an admitted UV knot cell. A box disjoint from
+the allowance-expanded vertex support excludes its trimmed subset without a
+winding query. Otherwise retain native trim classification and ordinary
+subdivision. Use the existing Cartesian functional-jet position enclosure
+rather than computing unused Hessians; continuous-C0 position coverage is
+sufficient here, not for normal or graph proofs. Native errors, cancellation
+and consumed work remain authoritative. This optimization cannot change the
+selected source frame, fraction, bulge, exits or canonical G recipe.
+The closed-capture raw-face census likewise checks its existing
+allowance-expanded carrier height before trim winding. Entire carriers
+outside both closed cuts need no trim query. Retain the full second jet
+there: annular meridian and independent convexity obligations consume it.
+
 Select the realization lane from immutable original coefficients and topology,
 not the success of a placement/slab query. Prefer a proved **carrier-preserving
 source law** when available: a unique common boundary `C*(t)` and vertex
@@ -688,6 +779,95 @@ parameter cells and the entire transport homotopy, not sampled normals:
 Rank collapse is permitted only by the already proved original vertex/pole
 quotient. A pole graph cannot be passed to the ordinary regular-collar lane.
 An uncertain pcurve connector does not acquire analytic-pole authority.
+
+**Range-scoped UV authority.** Separate immutable collar geometry from its
+embedding receipt. Bind the receipt to the original definition, NativeUse/edge,
+complete parameter-map operands, original normalization range, actually used
+native/across intervals, width, side and bubble law. A source-owned central
+range comes from the agreed native vertex exits, not the current slab.
+A whole-edge Cartesian monotonicity flag is neither necessary nor sufficient
+for those distinct range-scoped obligations.
+
+For a normalized across-coordinate, a normal ribbon may have the unchanged law
+`U(t,w) = gamma(t) + k beta(t) w R gamma'(t)`, where `R` is the oriented
+quarter-turn. On a proved `beta > 0` central range, `r = beta(t) w` is a
+coordinate homeomorphism. A P-matrix certificate for
+`U(t,r) = gamma(t) + k r R gamma'(t)` on a rectangular proof superset may
+establish injectivity on its curved subdomain. Account for the full coordinate
+Jacobian/shear; this does not authorize deleting `beta'` from the original G
+derivatives. Local charts alone do not prove global injectivity: unresolved
+nonlocal parameter pairs require complete image separation or a common
+injective chart. Retain original smooth-span qualifications and explicit
+endpoint quotients rather than inventing strict rank at collapsed endpoints.
+
+An embedding receipt alone does not prove face-interior ownership. Keep a
+separate sealed owned-ribbon receipt for the whole used inner strip, including
+its original UV uncertainty. Exhaustively exclude every original coedge
+**including the owning coedge's unused complement**, every native joint
+envelope and the carrier-domain boundary. Near the owning curve, a validated
+secant matrix for the unchanged normal map may bound its signed normal
+coordinate against the combined uncertainties; distant parameter pairs require
+complete image separation. Retain all original smooth-span/joint qualifications.
+Only after this boundary exclusion and connectedness proof may one strictly
+Inside, original-coefficient-evaluated point calibrate the whole strip's winding.
+Do not demand an entire curved anchor image's Cartesian box be Inside, or use
+a sampled point to replace any missing boundary/embedding obligation. Bind
+the receipt to the same source, map, width, side and complete parameter scope;
+pure embedding users and geometry selection do not acquire its authority.
+
+**Uncertain UV joints.** Two retained germs at the same original NativeV need
+not evaluate to identical UV endpoints. A comparison completion may use an
+exact source expression such as `j* = (j_a + j_b)/2` only inside the original
+validated joint envelope bound to that NativeV and **both material-oriented
+NativeUses**, with both whole forward correspondences retained. This joint
+completion authority is distinct from the selected parameter map's numerical
+UV margin, which may be exactly zero. Never enlarge or relabel that original
+map margin. A nonsingular endpoint envelope does not authorize a spherical
+pole, unstored period lift or different chart association.
+
+The native joint envelope authorizes local endpoint completions only.
+A separate comparison-transport receipt must qualify any whole-germ
+deformation: physical position and relative-derivative bounds, complete
+homotopy and nonincident separation under the same source allowance. For
+normalized endpoint traces,
+`gamma_i~(s) = gamma_i(s) + (1-s)(j* - j_i)` preserves each actual exit.
+Its derivative corrections are explicit; it inherits no unchanged tangent
+certificate. This is a comparison chart, not snapped source data or a new
+physical G boundary.
+
+A comparison may instead use the cubic Hermite correction
+`gamma_i~ = gamma_i + (1-3s^2+2s^3) delta_j_i
+                       + (s-2s^2+s^3) delta_d_i`
+to preserve both the actual exit position and derivative. Any proposed common
+comparison-apex direction and positive relative speed need fresh whole-germ
+transport bounds; their constructed opposition is not an original G1 claim.
+The endpoint derivative corrections denote the exact original directed
+operators: `delta_d_a = T - gamma_a'(0)` and
+`delta_d_b = -kappa T - gamma_b'(0)`, for finite source-only `T` and
+`kappa > 0`. Retain that common-basis expression, not two independently
+rounded vectors or points selected from derivative enclosures.
+For a proved zero-offset, zero-bulge middle piece, original C2 integral
+remainders may expose an additional radial factor in the comparison Jacobian.
+Prove the remaining coefficient and nonzero radial vector for every `s > 0`,
+retaining the existing same-NativeV quotient at `s = 0`. Never discard a small
+apex neighborhood, clamp an uncertain sign, or infer an exact cancellation
+from interval overlap.
+
+Prove the comparison star's factored Jacobian, complete boundary winding,
+same-NativeV endpoint ownership and separation from every nonowning trim and
+collar. A strict interior calibration cannot replace those whole-boundary
+obligations. Joining cutovers use the same original outer-trace operands and
+range-scoped ribbon authority, including intended shared endpoints; an
+affine-rim shortcut cannot authorize a nonlinear rim.
+
+The comparison must not change actual G, its outer trace, selected widths,
+exits or vertex recipe. Bound G against the completed carrier comparison,
+include the bidirectional physical completion-homotopy cost, and independently
+bound the original 3D curve-to-chord and NativeV residual. Their complete face,
+edge and vertex maxima must fit the **same** source allowance and propagate to
+every material-derived consumer. A UV margin or forward residual cannot be
+silently omitted, counted twice as separate authority, or spent as a larger
+manufacturing error budget.
 
 Include the entire corrected physical envelope when deciding whether a cell
 meets either **closed** cut. Charge source-realization uncertainty in both
@@ -1072,6 +1252,80 @@ Implement two cooperating certificates:
 
 For a cell Q centered at c, an enclosure's distance is generally a **lower** bound, not a proximity witness. To upper-bound Q-to-target distance, produce a certified feasible target witness b with location uncertainty e and use `radius(Q) + upper_norm(c-b) + e`, or prove the cell already lies inside the target. For boundary distance the witness must lie on the target boundary. Cover every relevant cell in A-to-B and B-to-A directions; refine if the bound is too loose or a required witness cannot be certified. Source-side witnesses require true trim membership/solid-side evidence; use analytic/polyhedral witnesses for B. This finite covering proof and validated local feature complex are substantial new algorithms, not existing capabilities. They provide auxiliary evidence only, never output slice contours.
 
+For an already certified star-shaped polygon annulus, cap witnesses use the
+actual outer and hole footprints. A hole's enclosing disk can prove a point
+outside the hole, but failure of that sufficient test does not prove the point
+inside it. Share the existing same-azimuth ray/edge functional: retain every
+interval-compatible edge, its distance bound and its ray parameter
+`intersection = lambda * point`. The point is beyond the hole only when every
+compatible inner intersection has `lambda <= 1`; unresolved denominators or
+an empty candidate inventory cannot authorize cap material. Preserve closed
+contacts, the polygon's degree proof and all sampling/plane/roundoff reserves.
+This changes witness availability, never source geometry or the error policy.
+Once a cap witness, including every reserve, meets the actual shape policy,
+there is no obligation to compute a tighter side witness.
+For a disk complex the same first-fit rule applies to any independently
+feasible side witness. The first violated outer supporting edge may propose
+the initial candidate, but every accepted distance still includes actual
+closed-cut height, sampling and roundoff reserves. Reserve the later source
+realization charge before choosing the witness target. A zero target retains
+the complete minimum-of-bounds query. Annular same-azimuth searches still
+exhaust all compatible edges and use their maximum; this rule never turns that
+required covering census into a nearest-edge minimum.
+Side witnesses must cover the whole source cell, not use one midpoint target
+for a long boundary-aligned cell. In the actual physical dual frame, set
+`delta = dual_xy * (p_xy-a)` and `D = dual_xy * (b-a)` for the actual polygon
+edge. When `|D|` is separated from zero, the point-dependent orthogonal
+projection has `tau = delta·D / |D|²`. Clamping each actual tau to `[0,1]`
+gives the uniform feasible-segment bound
+`|delta×D|/|D| + max(0,-tau.lo,tau.hi-1)*|D|`, with all terms outward
+enclosed. Add the independent closed-height and ordinary error reserves.
+This is projection onto an actual sampled candidate edge, not a fitted source
+primitive. An unresolved denominator retains the independently feasible
+fixed-point witness; it does not authorize a line extension beyond endpoints.
+
+For an independently proved **convex actual disk polygon**, the filled prism
+is convex under the same physical inverse-affine map. Distance to that filled
+set over a Cartesian source-position box is bounded by its eight extreme
+points. Outside the prism, a closest filled-set point lies on the boundary;
+inside it, the nearer height cap is at most
+`(upper-lower)/2 * |height_dual[2]|` away. Thus the maximum of the corner
+boundary bounds and this cap bound, with the **same global reserves** on both
+branches, bounds the entire box. Prove simple degree-one angular traversal and
+nonnegative turns before using convexity; local turns alone are insufficient.
+An ambiguous predicate retains the original whole-box witness. This does not
+sample a source surface, simplify the polygon, or change annular witnesses.
+
+Height-preimage contraction may remove only parameters proved unable to enter
+the allowance-expanded closed capture. Use a whole-box first derivative and a
+midpoint strip retaining the entire other parameter; continuous piecewise
+derivatives grant no C1 or curvature authority. Retained descendants inherit a
+completed contraction rather than repeating native strip queries. Optional
+whole-source convexity still covers the complete original carrier domain.
+
+Critical-patch bisection alternates parameter axes rather than comparing raw
+U/V widths: their units are unrelated, and height contraction may make only
+one range narrow. If that axis has no representable interior midpoint, try the
+other. Both closed children still cover the parent; the unchanged depth/work
+limits and full incidence/metric obligations decide acceptance.
+
+A proved negative metric witness may terminate refinement early. It must be
+inside the actual closed height scope and strictly inside the original trim,
+outside **every** removed reference-R and complete reference-K_F overcover.
+Unqualified `cell.source` boxes do not establish this membership. A convex
+candidate's support plane can then prove exterior separation beyond policy and
+the retained realization/approximation reserves. An upper bound that merely
+fails policy, an unowned midpoint or an unavailable reference cover cannot.
+
+A balanced index of actual interval polygon-edge bounds may accelerate ray
+candidate enumeration, following the existing geometry-owned segment-index
+pattern. Omit a subtree only after a conservative positive-ray/AABB exclusion;
+overflow, axis ambiguity and touching retain its leaves. Every remaining edge
+still passes the unchanged same-azimuth functional, and all compatible edges
+still contribute to its complete bounds and cap-membership test. Admit index
+capacities together with sample vertices in the existing sample/query pool.
+No nearest-edge heuristic, extra allowance or cross-query index is introduced.
+
 A source-side classifier can use validated ray/face root isolation from a point to a known exterior beyond the conservative solid bounds: prove hit completeness, trim membership, ordering and transverse material-side crossings. Choose among a finite deterministic set of rays when a direction is tangent/coincident; exhaustion is indeterminate. Classification requires a closed consistently oriented solid and the relevant non-self-intersection/incidence proofs. If import only established sampled geometric consistency, analysis must establish the additional precondition rather than treating that sample check as global validity. This classifier shares root/domain machinery; it is not a mesh parity test.
 
 If the enclosure/continuation proof cannot complete within the node/work/min-height limits, fail that candidate or the compile with its source/event witness. This RFC does not assume all freeform topology can be solved by a generic root finder.
@@ -1087,11 +1341,250 @@ Schedule flow:
 5. Use actual interior native sections M, realize final D, then ordinary wall/fill/skin/deposited-anchor/support processing.
 6. Recheck true layer heights, minimum resolvable thickness, coordinate/extrusion serialization, flow, total layers/points/segments and all geometry limits.
 
+Typed shape-error exceedance first narrows a reused multi-layer span to one
+layer, then bisects that actual layer and recomputes its strict interior
+midpoint. It does not spend another full proof on an end-biased resample of the
+same failed interval. Remove retry-bias state from staged native requests and
+frontiers; retain complete closed-source, endpoint-incidence and actual-leaf
+obligations. Refinement invalidates dependent staged leaves and joint proofs,
+never their already consumed work. Other diagnostic categories still refuse.
+
 A topological birth/death at a closed cap is not permission to erase the terminal material. Conversely, contact-only strata do not require zero-height deposition paths. If a native feature cannot survive the current bead/offset/serialization policy, diagnose process resolution instead of pretending the surface family is unsupported. A floating sphere may be importable/sliceable but still need a different pose or supported manufacturing strategy; parity does not promise every pose prints.
+
+#### Closed actual-material radial products
+
+This is a required producer design, not an existing qualified interpretation
+of `regular_flow_speed`. A distance certificate, positive local speed or
+three-dimensional radial degree cannot discharge source topology by itself.
+Keep conservative transport-support event covers; attach a separate proof
+when they contain no actual height event.
+
+For radially graph-like material, use a proper cylinder covering rather than
+requiring a general-purpose stratified-flow solver. This is a geometric
+criterion over actual source-owned M, not a cone/cylinder family dispatch or a
+fixture exception. Choose one captured invertible coordinate system `q` with
+`q_z` equal to the exact intended height, and a common angular center `c`.
+The wall projection is
+`Pi(q) = ((q_xy-c)/|q_xy-c|, q_z)`.
+Its surface Jacobian has the sign of
+`N_q · (q_x-c_x, q_y-c_y, 0)`.
+Transform normals by the cofactor/inverse-transpose law with determinant
+orientation; an approximately orthogonal pose is not an exact rotation law.
+Interval row families may enclose intended coefficients only when every
+following predicate is uniform over that family.
+
+An opaque `ClosedRadialMaterialProduct` producer must prove a filled disk
+product or a filled annular product: exactly one outer wall and respectively
+zero or one inner wall. The exhaustive actual-M census proves this kind;
+neither a surface-family label nor the candidate's hole count selects it.
+The producer must prove:
+
+1. **Complete actual atlas.** Every active carrier remainder, G strip, physical
+   seam, G/F cutover, native/chart-knot interface and interface intersection
+   belongs to the fixed realization. The clipped wall is embedded and closed
+   in the bounded realization. Its only boundary is the two requested cuts;
+   compact coordinate bounds alone do not establish properness. NativeUse
+   identity and directed coface ownership determine gluing. Initially exclude
+   every vertex/completion support and unresolved terminal stratum from the
+   **closed** scope; a support touching either cut is not excluded.
+2. **Local cylinder charts.** Radius is strictly positive and each actual
+   patch has one strict oriented cylinder-Jacobian sign for its declared
+   inner/outer wall role. At each glued interface prove exact shared trace,
+   nonzero projected tangent and opposite projected half-neighbourhoods.
+   For G/F, the recipe gives `G_lambda(t,1)=F(U(t,1))` and the same along-trace
+   derivative; its transverse derivatives generally differ. Uniform normal
+   boxes may prove both endpoint-side signs, but never imply transverse C1.
+   Include the complementary F-domain boundary orientation. Consume actual
+   geometric G1 knot laws or retain/prove the interface; do not ignore C0
+   knots or unenumerated G preimages of knot lines.
+3. **Closed endpoints.** The wall continues through both cuts with regular
+   boundary half-charts, or a separate exact physical endpoint law establishes
+   the same conclusion. Open-band regularity does not certify a closed slab.
+4. **Cylinder degree per role.** Exhaustively count one complete cylinder
+   fibre for each declared wall, including disconnected components. It must
+   have exactly one actual-M preimage with the correct orientation. Reuse
+   the source-wall affine-family census pattern and complete correction
+   exclusion, not the sphere/torus radial census under a new name. Exclude
+   both removed-source and added-realization supports before treating an
+   untouched original root as an actual-M root. Make inward/outward roles
+   explicit; an inward-root helper cannot silently certify the outer wall.
+   A single original face can contribute to both wall roles on different
+   active parameter components. Partition by qualified physical cells/root
+   roles, not by a one-face/one-wall assumption or a surface-family label.
+5. **Filled material.** These are all side walls. For an annulus, embedded
+   noncontact and a calibrated ordering establish `r_inner < r_outer`
+   everywhere; material-side orientation selects the region between them.
+   For a disk, complete material-side ownership fills the radial interval
+   from the axis to the unique outer graph. Rule out additional islands,
+   bounded voids and unaccounted components in either kind.
+
+The sufficient interval atlas may conservatively overcover the literal original
+F remainder after removing reference-ribbon and corner interiors. These boxes
+are not a disjoint active-F partition and never supply the material-root census.
+Removed corner coverage requires either a complete original incident-domain
+overcover, or the complete owned reference star (including any retained original
+comparison domain), not only a hull of realized cones and their outer traces.
+The former uses the literal set inclusion `removed F ⊆ original incident face`:
+freshly bound the entire original carrier parameter domain and every complete
+added-G cone support. If all miss the closed scope strictly, no local corner
+ownership or graph theorem is consumed there. A failed overcover grants nothing;
+the tighter reference-star route still requires its exact domain qualification.
+Exclude the complete selected support and every closed terminal cross-section
+before using an untouched original cylinder fibre.
+A tighter ordinary source-set overcover can intersect that original parameter
+domain with the Cartesian UV box of the **complete** literal reference boundary:
+both raw and completed endpoint germs, every selected outer-B piece, and the
+exact matching original native joint connector enclosure. Every bounded
+winding/Jordan interior lies in this box. Evaluate F over the entire intersected
+box, not merely the reference star image; preserve literal maps, lifts and finite
+support. Missing ordinary-UV boundary authority retains the whole-face or fresh
+exact-ownership route. Complete added-G supports must still miss independently.
+
+An existing original-pole comparison has completed germs `q(s)=s*q_exit` in
+its validated original Cartesian pole chart, **not** substitute UV germs.
+Bind the actual Native pole, ordered uses, vertex, original maps and complete
+joint connector. Cover removed original F with the entire raw boundary UV box
+intersected with its admitted original domain. Separately enclose all raw
+reference formula images, the complete raw boundary box and every outer-B
+projection in that same original pole chart; add the exact analytic pole
+`q=0`. This convex projected box contains the completed germs, all reference
+radial expressions and their straight comparison homotopies. Require the
+entire raw source box and outer B to remain strictly in the selected original
+hemisphere, and require a strictly positive graph radicand over the **whole**
+projected rectangle before evaluating the existing original hemisphere graph.
+This is an overcover of the complete source sets, not star-surjectivity or
+disk-ownership authority. No rounded-PI snapping, guessed UV lift, fitted
+surface or changed pole branch is allowed. Failure retains fresh existing
+qualification; complete realized-G supports remain an independent exclusion.
+
+For continuous locally Lipschitz carrier or C3D knots, a stricter sufficient
+local-inverse test encloses all entries of every one-sided **first derivative
+matrix**, including all convex combinations and knot intersections. Cross that
+matrix enclosure, not a hull of independently computed normals. The canonical
+normal ribbon still requires genuinely C1 literal gamma. A paired seam uses
+the identical original C3D parameter and endpoint germs, its nonzero common
+projected tangent, and opposite directed native coface halves; separate side
+signs or a matching source identifier do not establish gluing. These are proof
+obligations, not a claim that an unexecuted implementation has been qualified.
+Once that paired common FIRST column is sealed, linearity of the cylinder
+determinant in the transverse column can prove its complete convex family
+directly. Enclose all common tangent derivatives, apply the identical radial
+form to both transverse columns, and require the resulting scalar interval
+hull to have one strict sign. A Cartesian transverse box can invent a zero
+column at a perfectly regular rectangular corner; the exact convex-pair proof
+avoids that artifact without discarding any generalized first matrix.
+
+These premises give a proper local homeomorphism onto the closed cylinder.
+The image is open and closed relative to the cylinder; a nonempty calibration
+establishes surjectivity. Constant covering cardinality and degree one make
+each wall a single radial graph over angle and height. This theorem is
+separate from shape accuracy, continuous outer occupancy and deposited-anchor
+support obligations.
+
+Calibrate directly against the **actual used** polygon, not through an assumed
+horizontal native section. A second private `ActualPolygonRadialRegion`
+receipt proves the complete contributor encoding has exactly one outer and
+the matching zero/one inner simple ring, correct fill orientation, positive
+boundary radius, degree-one angular projection over entire edges, strict
+inner/outer ordering when present, and no extra region. Adjacent endpoints
+are identified by incidence, not proximity. The common angular frame is the
+actual-world frame of the source product proof.
+
+Lift that exact polygon at the literal captured `sample_world_z_mm`, strictly
+inside the closed request. For each angle and height, interpolate the ordered
+actual-M radii with the polygon radii. For a disk the inner radius is identically
+zero; for an annulus both inner radii remain positive. The positive material
+gap remains positive under convex interpolation, yielding a fibre-preserving
+topology correspondence with the candidate prism. This is not a
+bounded-displacement isotopy and supplies no shape, clearance, occupancy or
+support bound.
+
+This route needs no new `NativeSection` fields, retained raw branch graph,
+or exact native-plane-to-M topology algorithm. It does **not** assert that an
+interval sample band is an exact plane. Keep original native-section
+completeness/genealogy and the existing independent actual-candidate metric,
+native-sample mapping and coordinate-error obligations unchanged. The opaque
+combined leaf authority binds the cylinder receipt, actual polygon receipt,
+literal world lift and existing metric/native hashes. It identifies canonical
+inner/outer material roles, not individual source-face branch genealogy;
+face-specific consumers retain their separate original-owner authority.
+
+An already complete symmetric **world-space closed-material** metric may be
+sealed with this independent topology product and exact polygon calibration;
+the metric need not use the product's angular correspondence. Preserve its
+achieved bound and charges rather than recomputing a stricter same-angle metric
+or charging realization/placement twice. Directed, regular-core and collar-only
+metrics cannot be promoted this way. Keep the single owned native sample
+available until a complete sufficient proof wins; alternative proofs do not
+require another native section or a geometry copy.
+
+A completed closed cylinder rules out height events throughout its captured
+scope, including both cuts. It discharges conservative source stationary-root
+overcovers, not actual coface/collar obligations. Adjacent actual source-M
+polygons still require their independent positive-attachment proof.
+
+Keep the implementation within geometry's material-link/critical ownership:
+the atlas and census consume borrowed originals and bounded existing proof
+workspaces; retain compact completed authority, not copied kernel objects or
+an unbounded branch cache. Charge interface inventories, refinement, census,
+retained metadata and coordinate correspondence to the existing allowances.
+Failure is a typed indeterminate/unsupported/resource refusal, never a request
+to erase an event or reselect canonical G.
+
+Bind source, realization recipe, actual frame/functional, pose, closed range,
+sample plane/band, native sample hash, actual contributor hash and coordinate
+policy through `SlabAnalysis` into `NativeSourceLeafReceipt`. Constructors stay
+private; a hash identifies already-proved authority, not its substitute.
+Update leaf equality, hashing, retained-byte accounting and refinement
+invalidation together. Preserve independent metric proof kinds and original
+endpoint/collar obligations.
+
+The placed geometry facade supplies opaque intended cylinder coordinates from
+the captured caller frame and pose, including all three affine rows and
+offsets. Do not reconstruct actual-world XY from a normalized native sampling
+plane or infer exact orthogonality. A standalone source-frame proof is not
+automatically an actual-world proof. Existing source/placed capture binding
+must establish that these intended coordinates are the ones enclosed by the
+producer's coefficient families; no new RPC or manufacturing-side coordinate
+derivation is needed.
+
+Use one fixed source anchor independent of the queried sample height. Its
+intended transformed world-XY position defines the common angular center.
+Evaluate relative XY as the actual pose rows applied to `P-anchor`; retain
+actual world height with its own translation. This gives the affine-family
+fibre census the identical physical ray without approximating an inverse
+source-center point or shrinking its forward half-ray. Candidate region
+proofs must hold uniformly over the enclosed intended world center; do not
+replace it with an unrelated midpoint. Shared-axis identity across leaves
+binds the same source anchor, pose and angular rows, not independently
+height-dependent sample centers.
+
+Initially a joint request uses this authority only for its sole original
+occurrence's conservative transport bands. Preserve all cross-occurrence
+tangency/union gates. The stream also needs an explicit same-occurrence
+interface proof: exact shared cut, compatible source/recipe/frame/pose,
+identified shared fibres and the actual polygon attachment. For radial annuli,
+a sufficient attachment proof is a uniformly positive common radial interval
+at every angle:
+`max(inner_previous, inner_next) < min(outer_previous, outer_next)`.
+Prove it over complete edge-induced angular partitions or an independently
+qualified global gap, not sampled angles. Two separately valid annuli can
+occupy disjoint radial ranges and must not be accepted as a connected printed
+interface. Keep existing actual-interface gates until an explicit theorem
+replaces them. Manufacturing remains a consumer of geometry-qualified leaves;
+add no second normal/classifier path.
+
+Qualification includes nonzero-G and reversed/posed source representations,
+not just an exact column: reject an extra covering sheet, disappearing inner
+wall, folded cutover, unsupported knot intersection, completion touching a
+closed cut, wrong sample plane, stale refined leaf and cross-occurrence
+tangency. Retain full same-intent fitting/housing CLI Compile, independent
+replay, save/reopen/export and workbench gates. Numeric flow availability alone
+does not count as any of these outcomes.
 
 ### 8.3 Reuse requires proof
 
-Retain `PreparedSections` as job-local borrowed native preparation. It accelerates searches; it does not certify identical slices. Generalize invariant native slabs into an opaque certificate keyed by source/pose/height range/policy/producer. Unknown means compute actual sections. No family name, shared bounds, repeated mesh or same sampled polygon authorizes reuse.
+Retain `PreparedSections` as job-local borrowed native preparation. It accelerates searches; it does not certify identical slices. One fixed sampled M prism may serve multiple layers only under the same complete captured source/pose/height-range/policy/producer proof: exact source invariance or a sealed closed radial slab combining full world metric, native material topology and polygon calibration. The latter does not assert identical C sections, a separate clipped-layer or same-height XY error bound, or permission to extend the interval. Retain the original whole-interval authority; do not manufacture narrower per-layer certificates. Unknown means compute actual sections. No family name, shared bounds, repeated mesh or same sampled polygon authorizes reuse.
 
 M and D remain separate identities. Finish realization must independently prove invariance before D reuse. Skin neighborhoods and support regeneration consume the same final D. Optional cache hits cannot weaken work/memory accounting; eviction/recomputation remains charged. First implementation may rebuild all new-family analyses per compile rather than inventing persistent caches.
 

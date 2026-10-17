@@ -33,11 +33,11 @@ spiling-engine-client = { path = "crates/engine-client" }
 spiling-surface-fields = { path = "crates/surface-fields" }
 png = "=0.18.1"
 geo = "=0.32.0"
-monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e" }
-monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e" }
-monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e" }
-monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e", default-features = false, features = ["step"] }
-monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e" }
+monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d5de658a8b589efdeb78970d79a0563c789c268a" }
+monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d5de658a8b589efdeb78970d79a0563c789c268a" }
+monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d5de658a8b589efdeb78970d79a0563c789c268a" }
+monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d5de658a8b589efdeb78970d79a0563c789c268a", default-features = false, features = ["step"] }
+monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "d5de658a8b589efdeb78970d79a0563c789c268a" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-core = { path = "crates/core" }
@@ -46,6 +46,13 @@ spiling-manufacturing = { path = "crates/manufacturing" }
 [profile.dev]
 debug = 0
 incremental = false
+
+# Keep certified numerical work practical without optimizing the desktop stack.
+[profile.dev.package.monstertruck-modeling]
+opt-level = 2
+
+[profile.dev.package.spiling-geometry]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

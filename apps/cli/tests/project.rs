@@ -302,7 +302,7 @@ fn manufacturing_intent_fixture() -> PathBuf {
 
 #[test]
 #[ignore = "actual preflight CLI regression; requires SPILING_TEST_ENGINE"]
-fn ineligible_preflight_is_read_only_and_never_supplies_machine_permissions() {
+fn refused_preflight_is_read_only_and_never_supplies_machine_permissions() {
     let root = root();
     let project = root.join("project");
     let created = report(
@@ -355,7 +355,10 @@ fn ineligible_preflight_is_read_only_and_never_supplies_machine_permissions() {
             .output()
             .unwrap(),
     );
-    assert_eq!(inspected["manufacturing"]["preflight"]["eligible"], false);
+    assert_eq!(
+        inspected["manufacturing"]["preflight"]["disposition"],
+        "refused"
+    );
     assert_eq!(
         inspected["manufacturing"]["preflight"]["software_only"],
         true
@@ -377,6 +380,42 @@ fn ineligible_preflight_is_read_only_and_never_supplies_machine_permissions() {
     assert_eq!(inspected["project"]["read_only"], true);
     assert!(inspected["manufacturing"]["artifact"].is_null());
     assert_eq!(inspected["manufacturing"]["not_machine_ready"], true);
+    assert_eq!(inspected["manufacturing"]["preflight_freshness"], "current");
+    assert_eq!(
+        inspected["manufacturing"]["current_revision"],
+        inspected["project"]["revision"]
+    );
+    let historical = report(
+        cli("edit", &project)
+            .args([
+                "--preflight",
+                "--pose",
+                "1",
+                r#"{"translation_mm":[0,0,0],"rotation_xyzw":[0,0,0,1]}"#,
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        historical["manufacturing"]["preflight"]["disposition"], "refused",
+        "A historical refusal must not be rewritten as a fresh success after placement"
+    );
+    assert_eq!(historical["manufacturing"]["preflight_freshness"], "stale");
+    assert_eq!(
+        historical["manufacturing"]["current_revision"],
+        historical["project"]["revision"]
+    );
+    let rows = historical["operations"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|row| row["operation"] == "preflight")
+            .unwrap()["preflight_freshness"],
+        "current"
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["operation"] == "pose").unwrap()["preflight_freshness"],
+        "stale"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -414,9 +453,34 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     let artifact = created["manufacturing"]["artifact"].clone();
     assert!(artifact["hash"].as_str().is_some());
     assert_eq!(artifact["summary"]["software_only"], true);
+    let native_coverage = &artifact["summary"]["native_geometry"];
+    assert_eq!(native_coverage["evidence"], "certified");
+    let features = &native_coverage["source_feature_coverage"];
+    assert_eq!(
+        features["disjoint_source_layer_count"],
+        native_coverage["certified_layer_count"]
+    );
+    assert_eq!(features["invariant_source_union_layer_count"], 0);
+    assert_eq!(features["native_interface_complex_layer_count"], 0);
+    assert_eq!(features["owned_critical_slab_count"], 0);
+    assert!(
+        native_coverage["requested_shape_error_mm"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    assert!(
+        native_coverage["achieved_shape_error_mm"].as_f64().unwrap()
+            <= native_coverage["requested_shape_error_mm"]
+                .as_f64()
+                .unwrap()
+    );
     assert_eq!(created["manufacturing"]["not_machine_ready"], true);
     assert_eq!(created["manufacturing"]["verification"]["verified"], true);
-    assert_eq!(created["manufacturing"]["preflight"]["eligible"], true);
+    assert_eq!(
+        created["manufacturing"]["preflight"]["disposition"],
+        "admitted"
+    );
     assert_eq!(created["manufacturing"]["preflight"]["software_only"], true);
     assert!(
         !created["manufacturing"]["preflight"]["checks"]
@@ -424,6 +488,19 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
             .unwrap()
             .is_empty()
     );
+    for check in created["manufacturing"]["preflight"]["checks"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(check["required"].is_boolean());
+        assert!(matches!(
+            check["evidence"].as_str(),
+            Some("not_evaluated" | "certified" | "unsupported" | "indeterminate" | "failed")
+        ));
+        if check["required"] == true {
+            assert_eq!(check["evidence"], "certified");
+        }
+    }
     let declared_intent: Value =
         serde_json::from_slice(&std::fs::read(manufacturing_intent_fixture()).unwrap()).unwrap();
     assert_eq!(created["manufacturing"]["intent"], declared_intent);
@@ -439,6 +516,10 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert_eq!(
         preflight["project"]["revision"],
         centered["project"]["revision"]
+    );
+    assert_eq!(
+        preflight["preflight"], created["manufacturing"]["preflight"],
+        "operator JSON must retain the whole captured report, including optional analysis evidence"
     );
     assert_eq!(created["project"]["dirty"], false);
     assert_eq!(created["project"]["can_undo"], true);
@@ -461,7 +542,10 @@ fn manufacturing_fresh_process_replay_export_invalidation_and_undo() {
     assert_eq!(reopened["project"]["read_only"], true);
     assert_eq!(reopened["project"]["dirty"], false);
     assert_eq!(reopened["manufacturing"]["artifact"], artifact);
-    assert_eq!(reopened["manufacturing"]["preflight"]["eligible"], true);
+    assert_eq!(
+        reopened["manufacturing"]["preflight"]["disposition"],
+        "admitted"
+    );
     assert_eq!(
         reopened["project"]["revision"],
         created["project"]["revision"]
@@ -784,7 +868,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
         .unwrap()
         .iter()
         .find(|inspection| {
-            let carrier = &inspection["face"]["carrier"];
+            let carrier = &inspection["face"]["geometry"]["analytic"];
             if cylindrical {
                 carrier["kind"] == "cylinder"
             } else {
@@ -797,7 +881,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
         .expect("fixture must expose the actual native carrier for the requested finish");
     let face_id = face["reference"]["face_id"].as_str().unwrap();
     if cylindrical {
-        assert_eq!(face["face"]["carrier"]["radius_mm"], 5.0);
+        assert_eq!(face["face"]["geometry"]["analytic"]["radius_mm"], 5.0);
     }
     let finish = if cylindrical {
         r#"{"kind":"cylindrical_ribs","depth_mm":0.1,"rib_count":12,"phase_fraction":0.25}"#
@@ -857,7 +941,7 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
     let provenance: Value =
         serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
     assert_eq!(provenance["surface_overlays"], overlays);
-    assert_eq!(provenance["planner_version"], "7");
+    assert_eq!(provenance["planner_version"], "8");
     let baseline_provenance: Value =
         serde_json::from_slice(&std::fs::read(baseline_export.join("provenance.json")).unwrap())
             .unwrap();
@@ -1054,7 +1138,7 @@ fn cylindrical_finish_refuses_split_native_face_without_smooth_fallback() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|face| face["face"]["carrier"]["kind"] == "cylinder")
+        .filter(|face| face["face"]["geometry"]["analytic"]["kind"] == "cylinder")
         .collect();
     assert_eq!(
         faces.len(),
@@ -1182,7 +1266,7 @@ fn image_operator_workflow(source_fixture: &str, cylindrical: bool) {
         .unwrap()
         .iter()
         .find(|face| {
-            let carrier = &face["face"]["carrier"];
+            let carrier = &face["face"]["geometry"]["analytic"];
             if cylindrical {
                 carrier["kind"] == "cylinder"
             } else {

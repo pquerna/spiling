@@ -398,7 +398,8 @@ export async function createGeometryViewport(
       (summary.occurrence_count === 0) !== (summary.bounds_mm === null) ||
       !Number.isInteger(summary.unique_mesh_bytes) ||
       summary.unique_mesh_bytes < 0 ||
-      summary.unique_mesh_bytes > MAX_SCENE_MESH_BYTES
+      summary.unique_mesh_bytes > MAX_SCENE_MESH_BYTES ||
+      (summary.occurrence_count === 0 && summary.unique_mesh_bytes !== 0)
     )
       reject("Invalid scene support counts or revision.");
     if (summary.bounds_mm) {
@@ -436,7 +437,7 @@ export async function createGeometryViewport(
       min[2] + (max[2] - min[2]) / 2,
     );
   }
-  function matrixFor(occurrence: OccurrenceRecord, chunk: Chunk, origin: Vector3): Matrix4 {
+  function checkPose(occurrence: OccurrenceRecord) {
     const { translation_mm: t, rotation_xyzw: r } = occurrence.pose;
     if (
       !t.every(Number.isFinite) ||
@@ -444,6 +445,9 @@ export async function createGeometryViewport(
       Math.abs(Math.hypot(...r) - 1) > POSE_NORM_TOLERANCE
     )
       reject("Invalid rigid occurrence pose.");
+  }
+  function matrixFor(occurrence: OccurrenceRecord, chunk: Chunk, origin: Vector3): Matrix4 {
+    const { translation_mm: t, rotation_xyzw: r } = occurrence.pose;
     const q = new Quaternion(...r);
     const p = new Vector3(...chunk.mesh.localOriginMm).applyQuaternion(q);
     // Subtract the f64 scene origin BEFORE Three converts matrices to f32.
@@ -479,19 +483,29 @@ export async function createGeometryViewport(
       )
         reject("Incomplete or reordered source-face table.");
       faceCount += record.face_count;
+      const display = record.display;
+      if (display.kind === "unavailable") {
+        if (stagedChunks.has(record.definition_id))
+          reject("An unavailable definition cannot own display chunks.");
+        map.set(record.definition_id, { record, chunks: [] });
+        continue;
+      }
       const reused =
         active?.summary.session_id === summary.session_id
           ? active.definitions.get(record.definition_id)
           : undefined;
       const chunks =
         stagedChunks.get(record.definition_id) ??
-        (reused?.record.mesh_artifact_id === record.mesh_artifact_id ? reused.chunks : undefined);
+        (reused?.record.display.kind === "mesh" &&
+          reused.record.display.artifact_id === display.artifact_id
+          ? reused.chunks
+          : undefined);
       if (!chunks?.length || chunks.length !== chunks[0]!.metadata.chunk_count)
         reject("Incomplete definition chunks.");
       chunks.forEach((chunk, index) => {
         if (
           chunk.metadata.chunk_index !== index ||
-          chunk.metadata.artifact_id !== record.mesh_artifact_id ||
+          chunk.metadata.artifact_id !== display.artifact_id ||
           chunk.metadata.face_count !== record.face_count ||
           chunk.metadata.session_id !== summary.session_id
         )
@@ -525,6 +539,7 @@ export async function createGeometryViewport(
       )
         reject("Invalid occurrence identity.");
       ids.add(occurrence.occurrence_id);
+      checkPose(occurrence);
       const group = grouped.get(occurrence.definition_id) ?? [];
       group.push(occurrence);
       grouped.set(occurrence.definition_id, group);
@@ -532,7 +547,7 @@ export async function createGeometryViewport(
     let matrixBytes = 0;
     map.forEach((definition, id) => {
       const group = grouped.get(id);
-      if (!group?.length) reject("An unreferenced definition cannot own a display mesh.");
+      if (!group?.length) reject("An unreferenced definition cannot belong to the scene.");
       matrixBytes += group.length * 64 * definition.chunks.length;
     });
     reserve(matrixBytes, matrixBytes);
@@ -692,11 +707,13 @@ export async function createGeometryViewport(
         return usage();
       },
       hasDefinition(id, artifact) {
+        const display = active?.definitions.get(id)?.record.display;
         return (
           !disposed &&
           !!active &&
           (!stagedSummary || stagedSummary.session_id === active.summary.session_id) &&
-          active.definitions.get(id)?.record.mesh_artifact_id === artifact
+          display?.kind === "mesh" &&
+          display.artifact_id === artifact
         );
       },
       beginScene(summary) {
@@ -716,10 +733,11 @@ export async function createGeometryViewport(
             metadata.byte_count > MAX_GEOMETRY_CHUNK_BYTES
           )
             reject("Mesh chunk does not belong to the staged scene.");
+          const ownedDisplay = active?.definitions.get(metadata.definition_id)?.record.display;
           if (
             active?.summary.session_id === metadata.session_id &&
-            active.definitions.get(metadata.definition_id)?.record.mesh_artifact_id ===
-              metadata.artifact_id
+            ownedDisplay?.kind === "mesh" &&
+            ownedDisplay.artifact_id === metadata.artifact_id
           )
             reject("An already owned definition must be reused, not uploaded again.");
           const chunks = stagedChunks.get(metadata.definition_id) ?? [];

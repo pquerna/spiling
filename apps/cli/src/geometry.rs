@@ -306,10 +306,13 @@ pub(crate) async fn records(
         face_count = face_count
             .checked_add(definition.face_count)
             .ok_or("face count overflow")?;
-        if !definition_ids.insert(definition.definition_id.clone())
-            || !artifacts.insert(definition.mesh_artifact_id)
+        if !definition_ids.insert(definition.definition_id.clone()) {
+            return Err("duplicate definition".into());
+        }
+        if let DefinitionDisplay::Mesh { artifact_id } = &definition.display
+            && !artifacts.insert(*artifact_id)
         {
-            return Err("duplicate definition or artifact".into());
+            return Err("duplicate mesh artifact".into());
         }
     }
     if face_count > MAX_NATIVE_FACES {
@@ -482,6 +485,16 @@ struct InstanceMapping {
     occurrence_id: OccurrenceId,
 }
 
+#[derive(Serialize)]
+struct DefinitionReport<'a> {
+    record: &'a DefinitionRecord,
+    faces: Vec<FaceIndexRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunks: Option<Vec<MeshChunkMetadata>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_bytes: Option<u32>,
+}
+
 pub async fn run(
     client: &mut EngineClient,
     input: SceneInput,
@@ -619,10 +632,20 @@ pub(crate) async fn inspect(
     let mut triangles = 0_usize;
     for definition in &definitions {
         let face_index = faces(client, &session, definition).await?;
+        let DefinitionDisplay::Mesh { artifact_id } = &definition.display else {
+            definition_reports.push(DefinitionReport {
+                record: definition,
+                faces: face_index,
+                chunks: None,
+                total_bytes: None,
+            });
+            continue;
+        };
+        let artifact = *artifact_id;
         let (artifact_summary, rows, _, resources) = artifact_pages(
             client,
             &session,
-            definition.mesh_artifact_id,
+            artifact,
             ArtifactPageKind::Chunks,
             MAX_SCENE_MESH_BYTES / 64,
         )
@@ -642,7 +665,7 @@ pub(crate) async fn inspect(
                 definition_id,
                 chunk_count,
                 total_bytes,
-            } if *artifact_id == definition.mesh_artifact_id
+            } if *artifact_id == artifact
                 && definition_id == &definition.definition_id
                 && *chunk_count as usize == metadata.len()
                 && *total_bytes == artifact_bytes => {}
@@ -671,7 +694,7 @@ pub(crate) async fn inspect(
                 &payload,
                 row,
                 &session,
-                definition.mesh_artifact_id,
+                artifact,
                 &definition.definition_id,
                 row.chunk_index,
             )?;
@@ -684,11 +707,7 @@ pub(crate) async fn inspect(
             }
             if let Some(output) = output.as_deref_mut() {
                 output.write(
-                    &format!(
-                        "mesh-{:06}-{:06}.splm",
-                        definition.mesh_artifact_id.get(),
-                        row.chunk_index
-                    ),
+                    &format!("mesh-{:06}-{:06}.splm", artifact.get(), row.chunk_index),
                     &payload,
                 )?;
             }
@@ -696,8 +715,13 @@ pub(crate) async fn inspect(
         chunk_count = chunk_count
             .checked_add(metadata.len() as u32)
             .ok_or("chunk count overflow")?;
-        release(client, &session, definition.mesh_artifact_id).await?;
-        definition_reports.push(serde_json::json!({"record": definition, "faces": face_index, "chunks": metadata, "total_bytes": artifact_bytes}));
+        release(client, &session, artifact).await?;
+        definition_reports.push(DefinitionReport {
+            record: definition,
+            faces: face_index,
+            chunks: Some(metadata),
+            total_bytes: Some(artifact_bytes),
+        });
     }
     if bytes != summary.unique_mesh_bytes {
         return Err("scene mesh bytes disagree with verified transfer".into());

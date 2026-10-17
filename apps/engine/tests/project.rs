@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use sha2::{Digest, Sha256};
 use spiling_contracts::{
     NativeOperationView, display::validate_section_chunk, geometry::*, project::*,
 };
@@ -279,9 +278,11 @@ async fn pose(
     occurrence_id: OccurrenceId,
     pose: RigidPoseMm,
 ) -> SceneSummary {
+    let project_revision = info(client).await.revision;
     edit(client, |s| GeometryCommand::SetInstancePose {
         session_id: s.session_id,
         base_revision: s.revision,
+        project_revision,
         occurrence_id,
         pose,
     })
@@ -870,6 +871,7 @@ async fn writer_lock_read_only_snapshot_and_killed_writer_have_actual_process_li
         GeometryCommand::SetInstancePose {
             session_id: before.session_id.clone(),
             base_revision: before.revision,
+            project_revision: read_info.revision,
             occurrence_id: occurrence,
             pose: translated(20.0),
         },
@@ -1061,31 +1063,6 @@ async fn invalid_manifests_assets_and_native_admission_preserve_the_entire_live_
         }
         failed_open_preserves(&mut client, &path, code).await;
     }
-    let unsupported = workspace.path("native-unsupported");
-    copy_project(&valid, &unsupported);
-    let bytes = std::fs::read(fixture("unsupported-nurbs.step")).unwrap();
-    let hash: [u8; 32] = Sha256::digest(&bytes).into();
-    let mut changed = baseline.clone();
-    let definition_id = DefinitionId::from_source_sha256(&hash);
-    changed.definitions[0].definition_id = definition_id.clone();
-    changed.definitions[0].provenance.source_hash = SourceHash::from_bytes(&bytes);
-    changed.definitions[0].provenance.source_name = "unsupported-nurbs.step".into();
-    changed.occurrences[0].definition_id = definition_id;
-    std::fs::write(asset(&unsupported, &changed), bytes).unwrap();
-    write_manifest(&unsupported, &changed);
-    let before_scene = scene(&mut client).await;
-    let before_info = info(&mut client).await;
-    let before_native = native_snapshot(&mut client).await;
-    let id = start_open(&mut client, &unsupported, false, false, true).await;
-    let job = wait_job(&mut client, id).await;
-    assert_eq!(job.status, JobStatus::Failed, "{job:?}");
-    assert!(
-        matches!(&job.error, Some(JobError::Geometry { error }) if error.code == GeometryErrorCode::UnsupportedGeometry),
-        "{job:?}"
-    );
-    assert_eq!(scene(&mut client).await, before_scene);
-    assert_eq!(info(&mut client).await, before_info);
-    assert_eq!(native_snapshot(&mut client).await, before_native);
     // The original lock survived all failures, and the attached save path still works.
     let mut contender = spawn().await;
     let id = start_open(&mut contender, &valid, false, false, false).await;

@@ -5,14 +5,8 @@
 //! Deterministic original corpus recipe. Run without --check to stage bytes;
 //! --check requires exact regenerated drift equality and never modifies files.
 mod corpus;
-use monstertruck_io::step::{
-    load::step_geometry::{
-        Conic3D, Curve3D, ElementarySurface, Surface, SweepSurface, re_exports::*,
-    },
-    save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
-};
-use monstertruck_modeling::builder;
-use monstertruck_topology::{Face, Solid, Wire};
+mod parity;
+use parity::{circle, extruded, original, rectangle};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -22,105 +16,61 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-type StepSolid = Solid<Point3, Curve3D, Surface>;
-type StepWire = Wire<Point3, Curve3D>;
-fn rectangle(width: f64, depth: f64) -> StepWire {
-    let vertices = builder::vertices([
-        (0., 0., 0.),
-        (width, 0., 0.),
-        (width, depth, 0.),
-        (0., depth, 0.),
-    ]);
-    (0..4)
-        .map(|i| builder::line::<Curve3D>(&vertices[i], &vertices[(i + 1) % 4]))
-        .collect()
-}
-fn circle(x: f64, y: f64, radius: f64) -> StepWire {
-    builder::revolve(
-        &builder::vertex((x + radius, y, 0.)),
-        Point3::new(x, y, 0.),
-        Vector3::unit_z(),
-        builder::SweepAngle::Closed,
-        2,
-    )
-}
-fn analytic(surface: &Surface) -> Option<Surface> {
-    let Surface::SweepSurface(SweepSurface::ExtrusionSurface(extrusion)) = surface else {
-        return Some(surface.clone());
-    };
-    let vector = extrusion.extruding_vector();
-    match extrusion.entity_curve() {
-        Curve3D::Line(line) => Some(Surface::ElementarySurface(ElementarySurface::Plane(
-            Plane::new(line.0, line.1, line.0 + vector),
-        ))),
-        Curve3D::Conic(Conic3D::Ellipse(c)) => {
-            let center = c.transform().transform_point(Point3::origin());
-            let u = c.transform().transform_vector(Vector3::unit_x());
-            let v = c.transform().transform_vector(Vector3::unit_y());
-            if (u.magnitude() - v.magnitude()).abs() > 1e-10
-                || u.dot(v).abs() > 1e-10
-                || u.dot(vector).abs() > 1e-10
-                || v.dot(vector).abs() > 1e-10
-            {
-                return None;
-            }
-            let point = extrusion.subs(0.37, 0.73);
-            let axis = vector.normalize();
-            let delta = point - center;
-            let radial = delta - delta.dot(axis) * axis;
-            let expected_outward = extrusion.normal(0.37, 0.73).dot(radial) > 0.0;
-            let line = Line(center + u, center + u + vector);
-            let mut processor =
-                Processor::new(RevolutionSurface::by_revolution(line, center, axis));
-            let p = processor.subs(0.37, 0.73);
-            let d = p - center;
-            let outward = processor.normal(0.37, 0.73).dot(d - d.dot(axis) * axis) > 0.0;
-            if outward != expected_outward {
-                processor.invert();
-            }
-            Some(Surface::ElementarySurface(
-                ElementarySurface::CylindricalSurface(processor),
-            ))
-        }
-        _ => None,
-    }
-}
-fn extruded(wires: Vec<StepWire>, thickness: f64) -> StepSolid {
-    let face: Face<Point3, Curve3D, Surface> =
-        builder::try_attach_plane(wires).expect("original planar loops");
-    let solid: StepSolid = builder::extrude(&face, thickness * Vector3::unit_z());
-    // Deliberate source-construction normalization: exact conic extrusion is a cylinder,
-    // not a spline. This runs before writing, never as an importer repair heuristic.
-    let solid = solid
-        .try_mapped(|p| Some(*p), |c| Some(c.clone()), analytic)
-        .expect("original analytic extrusion carriers");
-    for shell in solid.boundaries() {
-        shell
-            .check_solid_boundary()
-            .expect("original closed manifold recipe");
-    }
-    solid
-}
-fn original(name: &str, solid: StepSolid) -> String {
-    let compressed = solid.compress();
-    let header = StepHeaderDescriptor {
-        file_name: name.into(),
-        time_stamp: "2026-01-01T00:00:00".into(),
-        authors: vec!["Spiling contributors".into()],
-        organization: vec!["Spiling".into()],
-        organization_system: "Spiling original analytic corpus".into(),
-        authorization: "OSL-3.0".into(),
-    };
-    format!(
-        "{}",
-        CompleteStepDisplay::new(StepModel::from(&compressed), header)
-    )
-}
+use spiling_contracts::geometry::{DisplayProfile, PlaneMm};
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn projected_bounds_report(bounds: &spiling_geometry::ProjectedBounds) -> Value {
+    json!({"minimum":bounds.minimum,"maximum":bounds.maximum,
+        "achieved_uncertainty_mm":bounds.achieved_uncertainty_mm})
+}
+fn directional_bounds_report(bounds: &[spiling_geometry::ProjectedBounds]) -> Value {
+    Value::Array(bounds.iter().map(projected_bounds_report).collect())
+}
+fn check_section_oracle(
+    section: &spiling_geometry::NativeSection,
+    expectation: &Value,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let expected = if let Some(area) = expectation["section_area_mm2"].as_f64() {
+        area
+    } else {
+        match expectation["section_area_expression"].as_str() {
+            Some("16*pi") => 16. * std::f64::consts::PI,
+            Some("25*pi") => 25. * std::f64::consts::PI,
+            Some("40*pi") => 40. * std::f64::consts::PI,
+            Some("48*pi") => 48. * std::f64::consts::PI,
+            Some("12*pi") => 12. * std::f64::consts::PI,
+            Some("221-4*pi") => 221. - 4. * std::f64::consts::PI,
+            Some("400-9*pi") => 400. - 9. * std::f64::consts::PI,
+            None => return Ok(()),
+            Some(other) => {
+                return Err(format!("unknown independent section oracle: {other}").into());
+            }
+        }
+    };
+    let mut area = 0.;
+    let mut perimeter = 0.;
+    for boundary in section.loops() {
+        for pair in boundary.points_mm.windows(2) {
+            area += 0.5 * (pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1]);
+            perimeter += (0..3)
+                .map(|axis| (pair[1][axis] - pair[0][axis]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+        }
+    }
+    let tolerance = section.sampling_tolerance_mm();
+    let error = 2. * perimeter * tolerance
+        + std::f64::consts::TAU * tolerance * tolerance * section.loops().len() as f64
+        + 1e-8;
+    if (area - expected).abs() > error {
+        return Err(format!("{name} native section area {area} disagrees with analytic oracle {expected} (bound {error})").into());
+    }
+    Ok(())
+}
 fn license() -> Value {
-    json!({"SPDX-FileCopyrightText":"2026 Spiling contributors","SPDX-License-Identifier":"OSL-3.0","origin":"Original Spiling public native builder recipe; no external CAD source"})
+    json!({"SPDX-FileCopyrightText":"2026 Spiling contributors","SPDX-License-Identifier":"OSL-3.0","origin":"Original Spiling recipes plus unchanged independent-exporter originals; per-entry source_origin identifies the actual producer"})
 }
 const ASSET_NOTICE: &[u8] = b"SPDX-FileCopyrightText: 2026 Spiling contributors\nSPDX-License-Identifier: OSL-3.0\nLicensed under the Open Software License version 3.0\n\nOriginal Spiling analytic corpus and evaluation recipes; no external CAD source.\n";
 fn write_or_check(
@@ -171,6 +121,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         }
     }
     let mut files = BTreeMap::<String, Vec<u8>>::new();
+    let mut notices = BTreeMap::<String, Vec<u8>>::new();
     let mut entries = Vec::new();
     let mm = original("box-mm.step", extruded(vec![rectangle(20., 10.)], 8.));
     let inch_exchange = corpus::inches(&mm);
@@ -194,6 +145,40 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         }
     }
     let plate = original("perforated-plate.step", extruded(wires, 20.));
+    let fitting_source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"),
+    )?;
+    let implicit_sources = [
+        (
+            "native-implicit-plane-box.step",
+            corpus::implicit_intersections(&mm, "native-implicit-plane-box.step"),
+            json!({"physical_bounds_mm":{"min":[0,0,0],"max":[20,10,8]},
+                "face_count":6,"section_z_mm":4,"section_loop_count":1,"section_area_mm2":200}),
+        ),
+        (
+            "native-implicit-plane-box-inch.step",
+            corpus::implicit_intersections(&inch, "native-implicit-plane-box-inch.step"),
+            json!({"physical_bounds_mm":{"min":[0,0,0],"max":[20,10,8]},
+                "face_count":6,"source_unit":"inch","section_z_mm":4,"section_loop_count":1,"section_area_mm2":200}),
+        ),
+        (
+            "native-implicit-plane-cylinder.step",
+            corpus::implicit_intersections(&cylinder, "native-implicit-plane-cylinder.step"),
+            json!({"physical_bounds_mm":{"min":[-5,-5,0],"max":[5,5,8]},
+                "radius_mm":5,"section_z_mm":4,"section_loop_count":1,"section_area_expression":"25*pi"}),
+        ),
+        (
+            "native-implicit-cone-cylinder-fitting.step",
+            corpus::implicit_intersections(
+                &fitting_source,
+                "native-implicit-cone-cylinder-fitting.step",
+            ),
+            json!({"physical_bounds_mm":{"min":[-6,-6,0],"max":[6,6,12]},
+                "baseline":"independent-exporters/occt-tapered-fitting-mm.step",
+                "section_z_mm":6,"section_loop_count":2,"section_area_mm2":21.*std::f64::consts::PI}),
+        ),
+    ];
     let cancel = AtomicBool::new(false);
     for (name, bytes, expectation) in [
         (
@@ -225,29 +210,418 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         // Prevent committing source bytes that the actual public adapter does not admit.
         spiling_geometry::import_step(bytes.as_bytes(), &cancel)
             .map_err(|e| format!("original {name} fails admission: {e:?}"))?;
-        entries.push(json!({"path":name,"sha256":hash(bytes.as_bytes()),"byte_count":bytes.len(),"expected":"accepted","recipe":"public analytic planar-wire extrusion","expectation":expectation}));
+        entries.push(json!({"path":name,"sha256":hash(bytes.as_bytes()),"byte_count":bytes.len(),"expected":"accepted","source_origin":"same-kernel-original-roundtrip","recipe":"public analytic planar-wire extrusion","expectation":expectation}));
         files.insert(name.into(), bytes.into_bytes());
     }
+    for (name, bytes, expectation) in implicit_sources {
+        let definition = spiling_geometry::import_step(bytes.as_bytes(), &cancel)
+            .map_err(|error| format!("original implicit {name} admission: {error:?}"))?;
+        let mesh =
+            spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
+        let mesh_triangle_count = mesh.triangle_count;
+        drop(mesh);
+        let mut work = spiling_geometry::GeometryWorkBudget::new(50_000_000);
+        let directional_bounds = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
+            .map(|direction| {
+                spiling_geometry::projected_bounds(
+                    &definition,
+                    direction,
+                    spiling_geometry::BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: 1e-6,
+                    },
+                    &mut work,
+                    &cancel,
+                )
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        for (axis, bounds) in directional_bounds.iter().enumerate() {
+            let minimum = expectation["physical_bounds_mm"]["min"][axis]
+                .as_f64()
+                .ok_or("implicit minimum oracle")?;
+            let maximum = expectation["physical_bounds_mm"]["max"][axis]
+                .as_f64()
+                .ok_or("implicit maximum oracle")?;
+            if !(bounds.minimum[0] <= minimum
+                && minimum <= bounds.minimum[1]
+                && bounds.maximum[0] <= maximum
+                && maximum <= bounds.maximum[1])
+            {
+                return Err(format!("original implicit {name} directional oracle failed").into());
+            }
+        }
+        let sample = expectation["section_z_mm"]
+            .as_f64()
+            .ok_or("implicit section height oracle")?;
+        let source = spiling_geometry::prepare_material_source(
+            &definition,
+            spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )?;
+        let bounds_bytes = directional_bounds
+            .capacity()
+            .checked_mul(std::mem::size_of::<spiling_geometry::ProjectedBounds>())
+            .ok_or("implicit retained bounds capacity overflow")?;
+        let query_bytes = spiling_geometry::MAX_PREPARED_SECTION_BYTES
+            .checked_sub(source.retained_bytes())
+            .and_then(|bytes| bytes.checked_sub(bounds_bytes))
+            .ok_or("implicit prepared source and bound results exceed native query pool")?;
+        let slab = source.analyze_slab(
+            spiling_geometry::SlabRequest {
+                frame: spiling_contracts::geometry::PlaneFrameMm {
+                    origin_mm: [0.; 3],
+                    x_axis: [1., 0., 0.],
+                    y_axis: [0., 1., 0.],
+                    z_axis: [0., 0., 1.],
+                },
+                height_interval_mm: [sample - 0.01, sample + 0.01],
+                sample_height_mm: sample,
+                native_shape_error_mm: 0.1,
+            },
+            query_bytes,
+            &mut work,
+            &cancel,
+        )?;
+        let section = slab.section();
+        if section.loops().len() as u64
+            != expectation["section_loop_count"]
+                .as_u64()
+                .ok_or("implicit loop oracle")?
+        {
+            return Err(
+                format!("original implicit {name} disagrees with analytic region count").into(),
+            );
+        }
+        check_section_oracle(section, &expectation, name)?;
+        entries.push(json!({"path":name,"sha256":hash(bytes.as_bytes()),"byte_count":bytes.len(),
+            "expected":"accepted","source_origin":if expectation["baseline"].is_string() {
+                "controlled-implicit-source-from-independent-cad-export"
+            } else {"same-kernel-controlled-implicit-source"},
+            "recipe":"original INTERSECTION_CURVE carrier arrangement; independent analytic solid oracle",
+            "expectation":expectation,"observed":{"faces":definition.faces().len(),
+                "mesh_triangles":mesh_triangle_count,"native_section_loops":section.loops().len(),
+                "directional_bounds":directional_bounds_report(&directional_bounds)}}));
+        if expectation["baseline"].is_string() {
+            notices.insert(name.into(),std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step.license"))?);
+        }
+        files.insert(name.into(), bytes.into_bytes());
+    }
+    for (name, solid, expectation) in parity::recipes() {
+        for shell in solid.boundaries() {
+            shell
+                .check_solid_boundary()
+                .map_err(|e| format!("original {name} native topology: {e:?}"))?;
+        }
+        let bytes = original(name, solid);
+        let definition = spiling_geometry::import_step(bytes.as_bytes(), &cancel)
+            .map_err(|e| format!("original {name} admission: {e:?}"))?;
+        let mesh =
+            spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)
+                .map_err(|e| format!("original {name} certified display: {e:?}"))?;
+        let mut work = spiling_geometry::GeometryWorkBudget::new(1_000_000);
+        let directional_bounds = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            .map(|direction| {
+                spiling_geometry::projected_bounds(
+                    &definition,
+                    direction,
+                    spiling_geometry::BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: 1e-6,
+                    },
+                    &mut work,
+                    &cancel,
+                )
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("original {name} certified directional bounds: {e:?}"))?;
+        let height = expectation["section_z_mm"]
+            .as_f64()
+            .ok_or("missing native section recipe height")?;
+        let native = spiling_geometry::section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0.0, 0.0, height],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+        )
+        .map_err(|e| format!("original {name} native section: {e:?}"))?;
+        if native.loops().is_empty() {
+            return Err(format!("original {name} interior native section lost material").into());
+        }
+        if let Some(count) = expectation["section_loop_count"].as_u64() {
+            if native.loops().len() as u64 != count {
+                return Err(
+                    format!("original {name} native loop count disagrees with recipe").into(),
+                );
+            }
+        }
+        check_section_oracle(&native, &expectation, name)?;
+        entries.push(json!({"path":name,"sha256":hash(bytes.as_bytes()),"byte_count":bytes.len(),
+            "expected":"accepted","source_origin":"same-kernel-original-roundtrip",
+            "recipe":"original closed native parity construction","expectation":expectation,
+            "observed":{"faces":definition.faces().len(),"mesh_triangles":mesh.triangle_count,
+                "native_section_loops":native.loops().len(),"directional_bounds":directional_bounds_report(&directional_bounds)}}));
+        files.insert(name.into(), bytes.into_bytes());
+    }
+    // These are frozen genuine OCCT bytes, never re-exported by this producer.
+    let independent_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/geometry/independent-exporters");
+    let independent_manifest: Value =
+        serde_json::from_slice(&std::fs::read(independent_root.join("manifest.json"))?)?;
+    for (name, expectation) in parity::independent_recipes() {
+        let basename = Path::new(name)
+            .file_name()
+            .ok_or("independent fixture basename missing")?;
+        let bytes = std::fs::read(independent_root.join(basename))?;
+        let record = independent_manifest["fixtures"]
+            .as_array()
+            .ok_or("independent fixture manifest missing")?
+            .iter()
+            .find(|record| record["path"].as_str() == basename.to_str())
+            .ok_or("independent fixture original hash unavailable")?;
+        if record["sha256"].as_str() != Some(hash(&bytes).as_str())
+            || record["bytes"].as_u64() != Some(bytes.len() as u64)
+        {
+            return Err(format!("frozen independent source identity changed: {name}").into());
+        }
+        let definition = spiling_geometry::import_step(&bytes, &cancel)?;
+        if expectation["face_count"]
+            .as_u64()
+            .is_some_and(|count| definition.faces().len() as u64 != count)
+        {
+            return Err(format!("independent source face oracle failed: {name}").into());
+        }
+        let mesh =
+            spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
+        let mut work = spiling_geometry::GeometryWorkBudget::new(1_000_000);
+        let directional_bounds = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
+            .map(|direction| {
+                spiling_geometry::projected_bounds(
+                    &definition,
+                    direction,
+                    spiling_geometry::BoundsPolicy {
+                        maximum_endpoint_uncertainty_mm: 1e-6,
+                    },
+                    &mut work,
+                    &cancel,
+                )
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        for (axis, bounds) in directional_bounds.iter().enumerate() {
+            let minimum = expectation["physical_bounds_mm"]["min"][axis]
+                .as_f64()
+                .ok_or("missing independent minimum")?;
+            let maximum = expectation["physical_bounds_mm"]["max"][axis]
+                .as_f64()
+                .ok_or("missing independent maximum")?;
+            if !(bounds.minimum[0] <= minimum
+                && minimum <= bounds.minimum[1]
+                && bounds.maximum[0] <= maximum
+                && maximum <= bounds.maximum[1])
+            {
+                return Err(format!("independent directional bound oracle failed: {name}").into());
+            }
+        }
+        let height = expectation["section_z_mm"]
+            .as_f64()
+            .ok_or("missing independent section height")?;
+        let section = spiling_geometry::section(
+            &definition,
+            PlaneMm {
+                origin_mm: [0., 0., height],
+                normal: [0., 0., 1.],
+            },
+            &cancel,
+        )?;
+        if section.loops().is_empty()
+            || expectation["section_loop_count"]
+                .as_u64()
+                .is_some_and(|count| section.loops().len() as u64 != count)
+        {
+            return Err(
+                format!("independent native section topology oracle failed: {name}").into(),
+            );
+        }
+        check_section_oracle(&section, &expectation, name)?;
+        entries.push(json!({"path":name,"sha256":hash(&bytes),"byte_count":bytes.len(),
+            "expected":"accepted","source_origin":"independent-cad-exporter",
+            "exporter":independent_manifest["exporter"],"expectation":expectation,
+            "analytic_oracle":record.get("analytic_oracle"),
+            "observed":{"faces":definition.faces().len(),"mesh_triangles":mesh.triangle_count,
+                "native_section_loops":section.loops().len(),"directional_bounds":directional_bounds_report(&directional_bounds)}}));
+        notices.insert(
+            name.into(),
+            std::fs::read(
+                independent_root.join(format!("{}.license", basename.to_string_lossy())),
+            )?,
+        );
+        files.insert(name.into(), bytes);
+    }
+    let wrong_master = corpus::wrong_selected_master(
+        &std::fs::read_to_string(independent_root.join("occt-tapered-fitting-mm.step"))?,
+        "native-source-wrong-selected-master.step",
+    );
+    let failure = spiling_geometry::import_step(wrong_master.as_bytes(), &cancel)
+        .err()
+        .ok_or("wrong selected master borrowed an alternate carrier receipt")?;
+    if failure.code
+        != spiling_contracts::geometry::GeometryErrorCode::ParameterCorrespondenceUnavailable
+    {
+        return Err(format!("wrong selected master returned wrong refusal: {failure:?}").into());
+    }
+    entries.push(json!({"path":"native-source-wrong-selected-master.step",
+        "sha256":hash(wrong_master.as_bytes()),"byte_count":wrong_master.len(),
+        "source_origin":"controlled-adversary-of-independent-cad-export",
+        "baseline":"independent-exporters/occt-tapered-fitting-mm.step",
+        "expected_error":"parameter_correspondence_unavailable",
+        "mutation":"preferred PCURVE on bottom plane while alternate top carrier remains valid"}));
+    notices.insert(
+        "native-source-wrong-selected-master.step".into(),
+        std::fs::read(independent_root.join("occt-tapered-fitting-mm.step.license"))?,
+    );
+    files.insert(
+        "native-source-wrong-selected-master.step".into(),
+        wrong_master.into_bytes(),
+    );
     for adversary in corpus::adversaries(&mm, &inch) {
         let result = spiling_geometry::import_step(adversary.bytes.as_bytes(), &cancel);
-        let err = result
-            .err()
-            .ok_or_else(|| format!("adversary {} was accepted", adversary.name))?;
-        let actual = serde_json::to_value(err.code)?;
-        if actual != adversary.expected {
-            return Err(format!(
-                "adversary {} expected {} but got {:?}",
-                adversary.name, adversary.expected, err
-            )
-            .into());
+        if adversary.expected == "accepted" {
+            let definition = result
+                .map_err(|e| format!("equivalent {} source import: {e:?}", adversary.name))?;
+            let mesh = spiling_geometry::tessellate(
+                &definition,
+                DisplayProfile::MeshTrimmedMm005V2,
+                &cancel,
+            )?;
+            let mut work = spiling_geometry::GeometryWorkBudget::new(1_000_000);
+            let bounds = spiling_geometry::projected_bounds(
+                &definition,
+                [0.0, 0.0, 1.0],
+                spiling_geometry::BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 1e-6,
+                },
+                &mut work,
+                &cancel,
+            )?;
+            let native = spiling_geometry::section(
+                &definition,
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, 4.0],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                &cancel,
+            )?;
+            if native.loops().len() != 1 {
+                return Err("equivalent bounded NURBS box lost native section material".into());
+            }
+            entries.push(json!({"path":adversary.name,"sha256":hash(adversary.bytes.as_bytes()),
+                "byte_count":adversary.bytes.len(),"expected":"accepted","mutation":adversary.mutation,
+                "baseline":"box-mm.step","observed":{"triangles":mesh.triangle_count,"z_bounds":projected_bounds_report(&bounds),
+                    "native_section_loops":native.loops().len()}}));
+        } else {
+            let err = result
+                .err()
+                .ok_or_else(|| format!("adversary {} was accepted", adversary.name))?;
+            let actual = serde_json::to_value(err.code)?;
+            if actual != adversary.expected {
+                return Err(format!(
+                    "adversary {} expected {} but got {:?}",
+                    adversary.name, adversary.expected, err
+                )
+                .into());
+            }
+            entries.push(json!({"path":adversary.name,"sha256":hash(adversary.bytes.as_bytes()),"byte_count":adversary.bytes.len(),"expected_error":adversary.expected,"mutation":adversary.mutation,"baseline":if adversary.name.contains("conversion") || adversary.name == "recursive-units.step" { "box-inch.step" } else { "box-mm.step" }}));
         }
-        entries.push(json!({"path":adversary.name,"sha256":hash(adversary.bytes.as_bytes()),"byte_count":adversary.bytes.len(),"expected_error":adversary.expected,"mutation":adversary.mutation,"baseline":if adversary.name.contains("conversion") || adversary.name == "recursive-units.step" { "box-inch.step" } else { "box-mm.step" }}));
         files.insert(adversary.name.into(), adversary.bytes.into_bytes());
     }
-    let manifest = json!({"schema_version":1,"profile":"step-planar-cylindrical-v1","kernel_revision":"d87b4d9ced1f3baf31aa771ac0e7c663efb1c001","license":license(),"generation":{"timestamp":"2026-01-01T00:00:00","command":"cargo run --locked -p spiling-geometry --example generate_corpus --","drift_command":"cargo run --locked -p spiling-geometry --example generate_corpus -- --check","plate_status":"32x16 source geometry frozen; measured packed workload evidence is separate from engine transfer acceptance"},"fixtures":entries});
+    let wrong_line = corpus::wrong_spatial_line(&mm, "native-source-wrong-spatial-line.step");
+    let failure = spiling_geometry::import_step(wrong_line.as_bytes(), &cancel)
+        .err()
+        .ok_or("original spatial LINE was silently replaced by its BREP vertex chord")?;
+    if failure.code != spiling_contracts::geometry::GeometryErrorCode::InvalidGeometry {
+        return Err(
+            format!("wrong original spatial LINE returned wrong refusal: {failure:?}").into(),
+        );
+    }
+    entries.push(json!({"path":"native-source-wrong-spatial-line.step",
+        "sha256":hash(wrong_line.as_bytes()),"byte_count":wrong_line.len(),
+        "source_origin":"controlled-adversary-of-original-source",
+        "baseline":"box-mm.step","expected_error":"invalid_geometry",
+        "mutation":"original spatial LINE carrier displaced 123 mm; original BREP vertices unchanged"}));
+    notices.insert(
+        "native-source-wrong-spatial-line.step".into(),
+        ASSET_NOTICE.to_vec(),
+    );
+    files.insert(
+        "native-source-wrong-spatial-line.step".into(),
+        wrong_line.into_bytes(),
+    );
+    let conditioning = parity::conditioning_source();
+    let error = spiling_geometry::import_step(conditioning.as_bytes(), &cancel)
+        .err()
+        .ok_or("denominator-zero source was admitted")?;
+    if error.code != spiling_contracts::geometry::GeometryErrorCode::ConditioningFailure {
+        return Err(format!("denominator-zero source returned wrong refusal: {error:?}").into());
+    }
+    entries.push(
+        json!({"path":"native-parity-denominator-zero.step","sha256":hash(conditioning.as_bytes()),
+        "byte_count":conditioning.len(),"expected_error":"conditioning_failure",
+        "recipe":"genuine rational surface with complete-span zero denominator"}),
+    );
+    files.insert(
+        "native-parity-denominator-zero.step".into(),
+        conditioning.into_bytes(),
+    );
+    let aliasing = parity::aliasing_source();
+    let definition = spiling_geometry::import_step(aliasing.as_bytes(), &cancel)?;
+    let mesh_outcome = match spiling_geometry::tessellate(
+        &definition,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+    ) {
+        Ok(mesh) => json!({"evidence":"certified","triangles":mesh.triangle_count}),
+        Err(error)
+            if matches!(
+                error.code,
+                spiling_contracts::geometry::GeometryErrorCode::ShapeErrorExceeded
+                    | spiling_contracts::geometry::GeometryErrorCode::ConditioningFailure
+                    | spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate
+                    | spiling_contracts::geometry::GeometryErrorCode::ResourceLimit
+            ) =>
+        {
+            json!({"evidence":"refused","diagnostic":error})
+        }
+        Err(error) => {
+            return Err(format!("aliasing source unexpected display failure: {error:?}").into());
+        }
+    };
+    entries.push(
+        json!({"path":"native-parity-aliasing-extrusion.step","sha256":hash(aliasing.as_bytes()),
+        "byte_count":aliasing.len(),"recipe":"degree-18 eighth-grid-zero polynomial extrusion",
+        "display":mesh_outcome}),
+    );
+    files.insert(
+        "native-parity-aliasing-extrusion.step".into(),
+        aliasing.into_bytes(),
+    );
+    let kernel_revision = include_str!("../../../Cargo.toml")
+        .lines()
+        .find(|line| line.starts_with("monstertruck-modeling = "))
+        .and_then(|line| line.split_once("rev = \""))
+        .and_then(|(_, suffix)| suffix.split_once('"').map(|(revision, _)| revision))
+        .ok_or("workspace native kernel revision declaration is unavailable")?;
+    let manifest = json!({"schema_version":2,"profile":spiling_contracts::geometry::IMPORT_PROFILE,"kernel_revision":kernel_revision,"license":license(),"generation":{"timestamp":"2026-01-01T00:00:00","command":"cargo run --locked -p spiling-geometry --example generate_corpus --","drift_command":"cargo run --locked -p spiling-geometry --example generate_corpus -- --check","plate_status":"32x16 source geometry frozen; measured packed workload evidence is separate from engine transfer acceptance"},"fixtures":entries});
     for (name, bytes) in &files {
         write_or_check(&root.join(name), bytes, check)?;
-        write_or_check(&root.join(format!("{name}.license")), ASSET_NOTICE, check)?;
+        write_or_check(
+            &root.join(format!("{name}.license")),
+            notices.get(name).map_or(ASSET_NOTICE, Vec::as_slice),
+            check,
+        )?;
     }
     write_or_check(&root.join("manifest.json"), &pretty(&manifest), check)?;
     for name in [
@@ -256,6 +630,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         "scenes/two-parts.scene.json",
         "scenes/repeated-128.scene.json",
         "scenes/large-origin.scene.json",
+        "scenes/realistic-native.scene.json",
     ] {
         write_or_check(&root.join(format!("{name}.license")), ASSET_NOTICE, check)?;
     }

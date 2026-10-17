@@ -11,7 +11,6 @@ mod tests;
 use sha2::{Digest, Sha256};
 use spiling_contracts::{
     Hello, MAX_ARTIFACT_BYTES, MAX_CONTROL_BYTES, StartupInfo,
-    geometry::{AabbMm, RigidPoseMm},
     google::{bytestream::*, longrunning::*},
     metadata,
     rpc::*,
@@ -28,101 +27,6 @@ use tonic::{
 };
 use uuid::Uuid;
 
-/// Only signed axis permutations can establish contact from certified definition bounds.
-pub fn prepare_bed_pose(
-    bounds: AabbMm,
-    pose: RigidPoseMm,
-    envelope: AabbMm,
-    center: bool,
-) -> Result<RigidPoseMm, ClientError> {
-    bounds.validate()?;
-    pose.validate()?;
-    envelope.validate()?;
-    let [x, y, z, w] = pose.rotation_xyzw;
-    let matrix = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - z * w),
-            2.0 * (x * z + y * w),
-        ],
-        [
-            2.0 * (x * y + z * w),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - x * w),
-        ],
-        [
-            2.0 * (x * z - y * w),
-            2.0 * (y * z + x * w),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
-    let mut used = [false; 3];
-    // Accept only right-angle representation roundoff, never a user oblique pose.
-    // Bound its displacement as well: tiny angular residuals are not tiny on
-    // arbitrarily large certified bounds. Keep the original quaternion unchanged.
-    let angular_roundoff = 32.0 * f64::EPSILON;
-    for row in matrix {
-        let axis = row.iter().position(|value| (value.abs() - 1.0).abs() <= angular_roundoff)
-            .ok_or_else(|| ClientError::InvalidRequest("bed preparation requires an axis-aligned orientation; set an axis-aligned pose first (rotated bounds do not certify native contact)".into()))?;
-        if used[axis]
-            || row
-                .iter()
-                .enumerate()
-                .any(|(i, value)| i != axis && value.abs() > angular_roundoff)
-        {
-            return Err(ClientError::InvalidRequest("bed preparation requires an axis-aligned orientation; set an axis-aligned pose first".into()));
-        }
-        let displacement_bound = row
-            .iter()
-            .enumerate()
-            .map(|(i, value)| {
-                let exact = if i == axis { value.signum() } else { 0.0 };
-                (value - exact).abs() * bounds.min[i].abs().max(bounds.max[i].abs())
-            })
-            .sum::<f64>();
-        if !displacement_bound.is_finite()
-            || displacement_bound > spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM
-        {
-            return Err(ClientError::InvalidRequest(
-                "near-axis orientation cannot certify bed contact at this native bounds extent; set an exact axis-aligned pose first".into(),
-            ));
-        }
-        used[axis] = true;
-    }
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-    for corner in 0..8 {
-        let point: [f64; 3] = std::array::from_fn(|i| {
-            if corner & (1 << i) == 0 {
-                bounds.min[i]
-            } else {
-                bounds.max[i]
-            }
-        });
-        for i in 0..3 {
-            let value =
-                pose.translation_mm[i] + (0..3).map(|j| matrix[i][j] * point[j]).sum::<f64>();
-            min[i] = min[i].min(value);
-            max[i] = max[i].max(value);
-        }
-    }
-    let mut result = pose;
-    result.translation_mm[2] += envelope.min[2] - min[2];
-    if center {
-        for i in 0..2 {
-            result.translation_mm[i] += envelope.min[i] + (envelope.max[i] - envelope.min[i]) * 0.5
-                - (min[i] + (max[i] - min[i]) * 0.5);
-        }
-    }
-    result.validate()?;
-    for i in 0..3 {
-        let delta = result.translation_mm[i] - pose.translation_mm[i];
-        if min[i] + delta < envelope.min[i] - 1e-9 || max[i] + delta > envelope.max[i] + 1e-9 {
-            return Err(ClientError::InvalidRequest("prepared occurrence exceeds the declared printer envelope; choose a fitting explicit profile or pose".into()));
-        }
-    }
-    Ok(result)
-}
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -389,6 +293,9 @@ fn prost_types_duration(value: Duration) -> prost_types::Duration {
 
 fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
     let required = [
+        (&hello.geometry_capabilities, "step_native_trimmed_v2"),
+        (&hello.geometry_capabilities, "native_geometry_queries_v2"),
+        (&hello.geometry_capabilities, "native_bed_contact_v1"),
         (
             &hello.geometry_capabilities,
             "native_vertical_rectangular_wall_v1",
@@ -397,10 +304,10 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
             &hello.geometry_capabilities,
             "native_vertical_cylinder_face_v1",
         ),
-        (&hello.project_capabilities, "recoverable_projects_v4"),
+        (&hello.project_capabilities, "recoverable_projects_v5"),
         (&hello.project_capabilities, "source_face_surface_finish_v3"),
         (&hello.project_capabilities, "surface_image_assets_v1"),
-        (&hello.manufacturing_capabilities, "manufacturing_schema5"),
+        (&hello.manufacturing_capabilities, "manufacturing_schema6"),
         (&hello.manufacturing_capabilities, "mapped_image_relief_v1"),
         (
             &hello.manufacturing_capabilities,

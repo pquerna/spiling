@@ -10,7 +10,7 @@ const intent = {
   recipe: {
     ...completeIntent.recipe,
     id: "native-deadline-tilt",
-    revision: "3",
+    revision: "4",
     layer_height_mm: 0.4,
     bead_width_mm: 0.6,
     perimeter_count: 1,

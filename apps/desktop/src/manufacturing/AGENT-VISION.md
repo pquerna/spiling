@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Manufacturing workbench vision
 
-Provide a thin complete operator workflow over the shared native manufacturing services: user-selected bounded inert full intent, recipe/process/enabled-policy scalar edits preserving declarations, certified native-bound bed placement through Core history, explicit typed input Preflight, immutable compilation, fresh independent verification, actual-program inspection and exclusive four-file export. Diagnostic body-only and full complete-Marlin identities remain visibly distinct and physically unqualified.
+Provide a thin complete operator workflow over the shared native manufacturing services: user-selected bounded inert full intent, recipe/process/enabled-policy scalar edits preserving declarations, read-only native bed-contact proposal review followed by explicit revision-owned pose Apply through Core history, typed input Preflight, immutable compilation, fresh independent verification, actual-program inspection and exclusive four-file export. Arbitrary current rigid orientation is preserved by native preparation. Diagnostic body-only and full complete-Marlin identities remain visibly distinct and physically unqualified.
 
 Reports remain inspectable as historical evidence but never regain active authority after content invalidation, reopen or session replacement. Fresh validated motion can stand alone or overlay matching native geometry; layer/event/travel controls alter display state only. Independent coverage and captured provenance remain distinct from rendering precision and physical-printability evidence.
 

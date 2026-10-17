@@ -12,7 +12,8 @@ use spiling_contracts::{
     ArtifactView, NativeOperationView,
     geometry::{
         GeometryCommand, GeometryResponse, JobResult, JobStatus, MAX_DISPLAY_LABEL_BYTES,
-        OccurrenceId, ScenePageKind, SceneRevision, SessionId, bounded_text,
+        OccurrenceId, SECTION_PLANE_TOLERANCE_MM, ScenePageKind, SceneRevision, SessionId,
+        bounded_text,
     },
     manufacturing::{
         ManufacturingArtifactRecord, ManufacturingCommand, ManufacturingIntent,
@@ -238,9 +239,8 @@ pub async fn manufacturing_prepare_bed(
         .await?
     {
         GeometryResponse::Scene { summary } => summary,
-        error @ (GeometryResponse::Error { .. } | GeometryResponse::ProjectError { .. }) => {
-            return Ok(error);
-        }
+        GeometryResponse::Error { error } => return Err(error.to_string()),
+        GeometryResponse::ProjectError { error } => return Err(error.to_string()),
         _ => return Err("Unexpected native scene response for bed preparation".into()),
     };
     if summary.revision != base_revision {
@@ -271,70 +271,63 @@ pub async fn manufacturing_prepare_bed(
     if info.read_only {
         return Err("read_only: bed preparation cannot mutate this snapshot".into());
     }
-    let mut definitions = Vec::new();
-    let mut occurrences = Vec::new();
-    for kind in [ScenePageKind::Definitions, ScenePageKind::Occurrences] {
-        let mut offset = 0;
-        loop {
-            let (defs, occs, next_offset) =
-                match supervisor
-                    .geometry(GeometryCommand::GetScenePage {
-                        session_id: session_id.clone(),
-                        revision: summary.revision,
-                        kind,
-                        offset,
-                    })
-                    .await?
-                {
-                    GeometryResponse::ScenePage {
-                        definitions,
-                        occurrences,
-                        next_offset,
-                    } => (definitions, occurrences, next_offset),
-                    error @ (GeometryResponse::Error { .. }
-                    | GeometryResponse::ProjectError { .. }) => return Ok(error),
-                    _ => return Err("Unexpected certified native placement bounds response".into()),
-                };
-            definitions.extend(defs);
-            occurrences.extend(occs);
-            if definitions.len() > summary.definition_count as usize
-                || occurrences.len() > summary.occurrence_count as usize
-            {
-                return Err("Native placement scene page exceeds its declared bounds".into());
-            }
-            match next_offset {
-                None => break,
-                Some(next) if next > offset => offset = next,
-                _ => return Err("Native placement page did not advance".into()),
+    let mut occurrence = None;
+    let mut count = 0_usize;
+    let mut offset = 0;
+    loop {
+        let (rows, next_offset) = match supervisor
+            .geometry(GeometryCommand::GetScenePage {
+                session_id: session_id.clone(),
+                revision: summary.revision,
+                kind: ScenePageKind::Occurrences,
+                offset,
+            })
+            .await?
+        {
+            GeometryResponse::ScenePage {
+                definitions,
+                occurrences,
+                next_offset,
+            } if definitions.is_empty() => (occurrences, next_offset),
+            GeometryResponse::Error { error } => return Err(error.to_string()),
+            GeometryResponse::ProjectError { error } => return Err(error.to_string()),
+            _ => return Err("Unexpected native placement occurrence page".into()),
+        };
+        count = count
+            .checked_add(rows.len())
+            .ok_or("Native occurrence count overflow")?;
+        if count > summary.occurrence_count as usize {
+            return Err("Native placement page exceeds the captured scene".into());
+        }
+        for row in rows {
+            if row.occurrence_id == occurrence_id {
+                if occurrence.replace(row).is_some() {
+                    return Err("Duplicate native placement occurrence".into());
+                }
             }
         }
+        match next_offset {
+            None => break,
+            Some(next) if next > offset => offset = next,
+            _ => return Err("Native placement occurrence page did not advance".into()),
+        }
     }
-    if definitions.len() != summary.definition_count as usize
-        || occurrences.len() != summary.occurrence_count as usize
-    {
-        return Err("Incomplete native scene pages for bed preparation".into());
+    if count != summary.occurrence_count as usize {
+        return Err("Incomplete native scene for bed preparation".into());
     }
-    let occurrence = occurrences
-        .iter()
-        .find(|row| row.occurrence_id == occurrence_id)
-        .ok_or("Selected occurrence is absent from the current native scene")?;
-    let definition = definitions
-        .iter()
-        .find(|row| row.definition_id == occurrence.definition_id)
-        .ok_or("Selected occurrence's certified native definition is absent")?;
-    let pose = spiling_engine_client::prepare_bed_pose(
-        definition.bounds_mm,
-        occurrence.pose,
-        intent.printer.build_envelope,
-        center,
-    )
-    .map_err(|error| error.to_string())?;
+    let occurrence =
+        occurrence.ok_or("Selected occurrence is absent from the current native scene")?;
     supervisor
-        .geometry(GeometryCommand::SetInstancePose {
+        .geometry(GeometryCommand::PrepareBedPose {
             session_id,
-            base_revision: summary.revision,
-            occurrence_id,
-            pose,
+            base_revision,
+            project_revision: info.revision,
+            occurrence_id: occurrence.occurrence_id,
+            expected_definition_id: occurrence.definition_id,
+            expected_pose: occurrence.pose,
+            envelope_mm: intent.printer.build_envelope,
+            center_xy: center,
+            contact_tolerance_mm: SECTION_PLANE_TOLERANCE_MM,
         })
         .await
 }

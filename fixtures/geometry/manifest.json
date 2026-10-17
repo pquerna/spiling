@@ -173,7 +173,7 @@
     {
       "baseline": "box-mm.step",
       "byte_count": 10712,
-      "expected_error": "unsupported_geometry",
+      "expected": "accepted",
       "mutation": "replace_one_plane_with_original_nurbs_carrier",
       "path": "unsupported-nurbs.step",
       "sha256": "18cb1e88a3f45bb7abe675f975d17606358d37e6d0e9f807b7e6dfb663d4b0d4"
@@ -255,6 +255,6 @@
     "SPDX-License-Identifier": "OSL-3.0",
     "origin": "Original Spiling public native builder recipe; no external CAD source"
   },
-  "profile": "step-planar-cylindrical-v1",
+  "profile": "step-native-trimmed-v2",
   "schema_version": 1
 }

@@ -577,10 +577,12 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     else {
         panic!("occurrences")
     };
+    let project_revision = status(&mut client).await.0.revision;
     client
         .geometry(GeometryCommand::SetInstancePose {
             session_id: s.session_id,
             base_revision: s.revision,
+            project_revision,
             occurrence_id: occurrences[0].occurrence_id,
             pose: RigidPoseMm {
                 translation_mm: [1.0, 0.0, 0.0],
@@ -1312,7 +1314,7 @@ async fn spatial_image_compilation_captures_self_contained_content_and_fresh_rep
         else {
             panic!("face inspection");
         };
-        if matches!(inspection.face.carrier, FaceCarrier::Plane { normal, .. } if normal[2].abs() < 1e-12)
+        if matches!(inspection.face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[2].abs() < 1e-12)
         {
             target = Some(reference);
             break;

@@ -46,6 +46,8 @@ test("Rust-owned algebraic mesh golden returns borrowed face-mapped views", asyn
   );
   const decoded = await decodeMesh(golden, metadata, expected);
   assert.equal(decoded.schema, 1);
+  assert.equal(metadata.mesh_profile, "mesh-trimmed-mm-0.05-v2");
+  assert.ok(Number.isFinite(metadata.trim_deviation_mm));
   assert.equal(decoded.byteLength, 240);
   assert.equal(decoded.positions.buffer, golden);
   assert.equal(decoded.normals.buffer, golden);
@@ -155,6 +157,12 @@ const metadataCorruptions: [string, (value: MeshChunkMetadata) => void][] = [
     },
   ],
   [
+    "removed untrimmed profile",
+    (value) => {
+      Object.assign(value, { mesh_profile: "mesh-mm-0.05-v1" });
+    },
+  ],
+  [
     "wrong index",
     (value) => {
       value.chunk_index = 1;
@@ -228,6 +236,69 @@ const metadataCorruptions: [string, (value: MeshChunkMetadata) => void][] = [
     },
   ],
   [
+    "nonfinite carrier error",
+    (value) => {
+      value.carrier_deviation_mm = Infinity;
+    },
+  ],
+  [
+    "missing trim error",
+    (value) => {
+      Reflect.deleteProperty(value, "trim_deviation_mm");
+    },
+  ],
+  [
+    "negative trim error",
+    (value) => {
+      value.trim_deviation_mm = -0.001;
+    },
+  ],
+  [
+    "NaN trim error",
+    (value) => {
+      value.trim_deviation_mm = NaN;
+    },
+  ],
+  [
+    "infinite trim error",
+    (value) => {
+      value.trim_deviation_mm = Infinity;
+    },
+  ],
+  [
+    "nonnumeric trim error",
+    (value) => {
+      Object.assign(value, { trim_deviation_mm: "0" });
+    },
+  ],
+  [
+    "excessive trim error",
+    (value) => {
+      value.carrier_deviation_mm = 0;
+      value.trim_deviation_mm = 0.025001;
+    },
+  ],
+  [
+    "combined native error exceeds allowance",
+    (value) => {
+      value.carrier_deviation_mm = 0.02;
+      value.trim_deviation_mm = 0.006;
+      value.quantization_error_mm = 0;
+    },
+  ],
+  [
+    "negative quantization",
+    (value) => {
+      value.quantization_error_mm = -0.001;
+    },
+  ],
+  [
+    "infinite quantization",
+    (value) => {
+      value.quantization_error_mm = Infinity;
+    },
+  ],
+  [
     "NaN quantization",
     (value) => {
       value.quantization_error_mm = NaN;
@@ -253,6 +324,25 @@ for (const [description, mutate] of metadataCorruptions) {
     await assert.rejects(decodeMesh(golden, changed, expected), MeshDecodeError);
   });
 }
+
+test("mesh manifest rejects missing trim and combined native allowance violations", () => {
+  const missing = structuredClone(metadata);
+  Reflect.deleteProperty(missing, "trim_deviation_mm");
+  assert.throws(() => validateMeshManifest([missing], expected), MeshDecodeError);
+  assert.throws(
+    () =>
+      validateMeshManifest(
+        [{
+          ...metadata,
+          carrier_deviation_mm: 0.02,
+          trim_deviation_mm: 0.006,
+          quantization_error_mm: 0,
+        }],
+        expected,
+      ),
+    MeshDecodeError,
+  );
+});
 
 test("mesh rejects hash corruption with otherwise valid scalar data", async () => {
   const bytes = golden.slice(0);
@@ -342,12 +432,40 @@ test("mesh enforces the frozen normal tolerance and permits profile maximum erro
   new DataView(bytes).setFloat32(144, 1.00005, true);
   const allowed = await rehash(bytes, {
     ...metadata,
-    carrier_deviation_mm: 0.025,
+    carrier_deviation_mm: 0.01,
+    trim_deviation_mm: 0.015,
     quantization_error_mm: 0.025,
   });
   await decodeMesh(bytes, allowed, expected);
   new DataView(bytes).setFloat32(144, 1.0002, true);
   await assert.rejects(decodeMesh(bytes, await rehash(bytes, allowed), expected), MeshDecodeError);
+});
+
+test("mesh permits the full native allowance for either achieved error", async () => {
+  for (const [carrier, trim] of [[0.025, 0], [0, 0.025]] as const) {
+    await decodeMesh(
+      golden,
+      {
+        ...metadata,
+        carrier_deviation_mm: carrier,
+        trim_deviation_mm: trim,
+        quantization_error_mm: 0.025,
+      },
+      expected,
+    );
+  }
+});
+
+test("mesh does not use native error allowances to expand f32 vertex bounds", async () => {
+  const bytes = golden.slice(0);
+  new DataView(bytes).setFloat32(64, -0.001, true);
+  const changed = await rehash(bytes, {
+    ...metadata,
+    carrier_deviation_mm: 0.01,
+    trim_deviation_mm: 0.015,
+    quantization_error_mm: 0,
+  });
+  await assert.rejects(decodeMesh(bytes, changed, expected), /position outside/);
 });
 
 test("mesh rejects incomplete descriptor fields and nonnumeric counts", async () => {

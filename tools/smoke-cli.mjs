@@ -116,9 +116,10 @@ try {
     geometryReport,
   );
   for (const definition of geometryReport.definitions) {
+    assert.equal(definition.record.display.kind, "mesh", "rendered fixture display");
     const identity = {
       session_id: geometryReport.hello.session_id,
-      artifact_id: definition.record.mesh_artifact_id,
+      artifact_id: definition.record.display.artifact_id,
       definition_id: definition.record.definition_id,
     };
     validateMeshManifest(definition.chunks, identity);

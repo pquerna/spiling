@@ -40,6 +40,7 @@ pub enum GeometryCommand {
     SetInstancePose {
         session_id: SessionId,
         base_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
         occurrence_id: OccurrenceId,
         pose: RigidPoseMm,
     },
@@ -69,6 +70,17 @@ pub enum GeometryCommand {
         session_id: SessionId,
         base_revision: SceneRevision,
         plane: PlaneMm,
+    },
+    PrepareBedPose {
+        session_id: SessionId,
+        base_revision: SceneRevision,
+        project_revision: crate::project::ProjectRevision,
+        occurrence_id: OccurrenceId,
+        expected_definition_id: DefinitionId,
+        expected_pose: RigidPoseMm,
+        envelope_mm: AabbMm,
+        center_xy: bool,
+        contact_tolerance_mm: f64,
     },
     GetArtifactPage {
         session_id: SessionId,
@@ -125,6 +137,9 @@ pub enum JobResult {
     },
     Section {
         artifact_id: ArtifactId,
+    },
+    BedPosePrepared {
+        preparation: BedPosePreparation,
     },
     ProjectSaved {
         info: crate::project::ProjectInfo,
@@ -246,4 +261,109 @@ pub enum GeometryResponse {
     ProjectError {
         error: crate::project::ProjectError,
     },
+}
+
+/// Read-only native contact evidence; applying the pose still requires both
+/// captured revisions. Bounds enclose the original posed source, not a mesh.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BedPosePreparation {
+    pub session_id: SessionId,
+    pub scene_revision: SceneRevision,
+    pub project_revision: crate::project::ProjectRevision,
+    pub occurrence_id: OccurrenceId,
+    pub definition_id: DefinitionId,
+    pub original_pose: RigidPoseMm,
+    pub pose: RigidPoseMm,
+    pub envelope_mm: AabbMm,
+    pub minimum_lower_mm: [f64; 3],
+    pub minimum_upper_mm: [f64; 3],
+    pub maximum_lower_mm: [f64; 3],
+    pub maximum_upper_mm: [f64; 3],
+    pub center_xy: bool,
+    pub contact_tolerance_mm: f64,
+    pub maximum_contact_gap_mm: f64,
+}
+
+impl BedPosePreparation {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        self.original_pose.validate()?;
+        self.pose.validate()?;
+        self.envelope_mm.validate()?;
+        if self.pose.rotation_xyzw != self.original_pose.rotation_xyzw
+            || !self.contact_tolerance_mm.is_finite()
+            || self.contact_tolerance_mm <= 0.0
+            || self.contact_tolerance_mm > SECTION_PLANE_TOLERANCE_MM
+            || !self.maximum_contact_gap_mm.is_finite()
+            || self.maximum_contact_gap_mm < 0.0
+            || self.maximum_contact_gap_mm > self.contact_tolerance_mm
+        {
+            return Err(invalid("invalid native bed-contact evidence"));
+        }
+        for axis in 0..3 {
+            let values = [
+                self.minimum_lower_mm[axis],
+                self.minimum_upper_mm[axis],
+                self.maximum_lower_mm[axis],
+                self.maximum_upper_mm[axis],
+            ];
+            if values.iter().any(|value| !value.is_finite())
+                || values[0] > values[1]
+                || values[2] > values[3]
+                || values[0] > values[3]
+                || self.envelope_mm.min[axis] >= self.envelope_mm.max[axis]
+            {
+                return Err(invalid("invalid native support bracket"));
+            }
+            let delta = rounded_sum_interval(
+                self.pose.translation_mm[axis],
+                -self.original_pose.translation_mm[axis],
+            );
+            let placed_min = rounded_sum_interval(values[0], delta[0])[0];
+            let placed_max = rounded_sum_interval(values[3], delta[1])[1];
+            if delta.iter().any(|value| !value.is_finite())
+                || !placed_min.is_finite()
+                || !placed_max.is_finite()
+                || placed_min < self.envelope_mm.min[axis]
+                || placed_max > self.envelope_mm.max[axis]
+                || (axis < 2
+                    && !self.center_xy
+                    && self.pose.translation_mm[axis] != self.original_pose.translation_mm[axis])
+            {
+                return Err(invalid("prepared native pose exceeds its envelope"));
+            }
+        }
+        let delta = rounded_sum_interval(
+            self.pose.translation_mm[2],
+            -self.original_pose.translation_mm[2],
+        );
+        let gap = rounded_sum_interval(
+            rounded_sum_interval(self.minimum_upper_mm[2], delta[1])[1],
+            -self.envelope_mm.min[2],
+        )[1];
+        if !gap.is_finite() || gap < 0.0 || gap > self.maximum_contact_gap_mm {
+            return Err(invalid("prepared native contact gap is not enclosed"));
+        }
+        Ok(())
+    }
+}
+
+/// Enclose the exact sum of binary64 millimetre translation operands.
+///
+/// Error-free TwoSum preserves exact contact and directs only actual roundoff
+/// outward. Callers must reject nonfinite inputs/results before publication.
+pub fn rounded_sum_interval(a: f64, b: f64) -> [f64; 2] {
+    let sum = a + b;
+    if !sum.is_finite() {
+        return [sum, sum];
+    }
+    let shifted = sum - a;
+    let residual = (a - (sum - shifted)) + (b - shifted);
+    if residual > 0.0 {
+        [sum, sum.next_up()]
+    } else if residual < 0.0 {
+        [sum.next_down(), sum]
+    } else {
+        [sum, sum]
+    }
 }

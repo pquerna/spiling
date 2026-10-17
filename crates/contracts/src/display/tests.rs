@@ -24,9 +24,13 @@ struct AttachedMesh {
 }
 fn mesh(chunk_limit: u32) -> AttachedMesh {
     let (session, artifact, definition) = ids();
-    let mut builder =
-        MeshChunkBuilder::with_chunk_limit(definition, 2, DisplayProfile::MeshMm005V1, chunk_limit)
-            .unwrap();
+    let mut builder = MeshChunkBuilder::with_chunk_limit(
+        definition,
+        2,
+        DisplayProfile::MeshTrimmedMm005V2,
+        chunk_limit,
+    )
+    .unwrap();
     let origin = 1e9;
     let positions = [
         [origin, 0.0, 0.0],
@@ -41,6 +45,7 @@ fn mesh(chunk_limit: u32) -> AttachedMesh {
             &[[0.0, 0.0, 1.0]; 4],
             &[[0, 1, 2], [1, 3, 2]],
             0.012,
+            0.0,
         )
         .unwrap();
     builder
@@ -53,6 +58,7 @@ fn mesh(chunk_limit: u32) -> AttachedMesh {
             ],
             &[[0.0, 0.0, -1.0]; 3],
             &[[0, 2, 1]],
+            0.0,
             0.0,
         )
         .unwrap();
@@ -228,7 +234,7 @@ fn mesh_rejects_every_truncation_identity_hash_and_scalar_corruption() {
 fn native_face_failures_never_publish_a_partial_mesh() {
     let make = || {
         let (_, _, d) = ids();
-        MeshChunkBuilder::new(d, 1, DisplayProfile::MeshMm005V1).unwrap()
+        MeshChunkBuilder::new(d, 1, DisplayProfile::MeshTrimmedMm005V2).unwrap()
     };
     let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
     let normals = [[0.0, 0.0, 1.0]; 3];
@@ -242,7 +248,7 @@ fn native_face_failures_never_publish_a_partial_mesh() {
         let mut builder = make();
         assert!(
             builder
-                .push_face(ordinal, &positions, &normals, &triangles, carrier)
+                .push_face(ordinal, &positions, &normals, &triangles, carrier, 0.0)
                 .is_err()
         );
         assert!(builder.finish().is_err());
@@ -251,7 +257,7 @@ fn native_face_failures_never_publish_a_partial_mesh() {
     let bad_normals = [[0.0; 3]; 3];
     assert!(
         builder
-            .push_face(0, &positions, &bad_normals, &[[0, 1, 2]], 0.0)
+            .push_face(0, &positions, &bad_normals, &[[0, 1, 2]], 0.0, 0.0)
             .is_err()
     );
     assert!(builder.finish().is_err());
@@ -259,7 +265,7 @@ fn native_face_failures_never_publish_a_partial_mesh() {
     let huge = [[0.0; 3], [1e12 + 0.1, 0.0, 0.0], [0.0, 1.0, 0.0]];
     assert!(
         builder
-            .push_face(0, &huge, &normals, &[[0, 1, 2]], 0.0)
+            .push_face(0, &huge, &normals, &[[0, 1, 2]], 0.0, 0.0)
             .is_err()
     );
     assert!(builder.finish().is_err());
@@ -268,8 +274,9 @@ fn native_face_failures_never_publish_a_partial_mesh() {
 #[test]
 fn identity_free_mesh_reports_measured_f32_displacement_and_enforces_the_profile_boundary() {
     let definition = DefinitionId::from_source_sha256(&[17; 32]);
-    let make =
-        || MeshChunkBuilder::new(definition.clone(), 1, DisplayProfile::MeshMm005V1).unwrap();
+    let make = || {
+        MeshChunkBuilder::new(definition.clone(), 1, DisplayProfile::MeshTrimmedMm005V2).unwrap()
+    };
     let source = [
         [1e9, 0.0, 0.0],
         [1e9 + 1e6 + 0.017, 0.0, 0.0],
@@ -278,7 +285,7 @@ fn identity_free_mesh_reports_measured_f32_displacement_and_enforces_the_profile
     let normals = [[0.0, 0.0, 1.0]; 3];
     let mut builder = make();
     builder
-        .push_face(0, &source, &normals, &[[0, 1, 2]], 0.024)
+        .push_face(0, &source, &normals, &[[0, 1, 2]], 0.024, 0.0)
         .unwrap();
     let mut encoded = builder.finish().unwrap();
     let chunk = encoded.chunks.pop().unwrap();
@@ -299,16 +306,176 @@ fn identity_free_mesh_reports_measured_f32_displacement_and_enforces_the_profile
         })
         .fold(0.0_f64, f64::max);
     assert_eq!(measured, metadata.quantization_error_mm);
-    assert!(metadata.carrier_deviation_mm + measured <= MESH_SURFACE_TOLERANCE_MM);
+    assert!(
+        metadata.carrier_deviation_mm + metadata.trim_deviation_mm + measured
+            <= MESH_SURFACE_TOLERANCE_MM
+    );
     let mut builder = make();
     let mut outside = source;
     outside[1][0] = 1e9 + 1e6 + 0.026;
     assert!(
         builder
-            .push_face(0, &outside, &normals, &[[0, 1, 2]], 0.0)
+            .push_face(0, &outside, &normals, &[[0, 1, 2]], 0.0, 0.0)
             .is_err()
     );
     assert!(builder.finish().is_err());
+}
+
+#[test]
+fn trimmed_mesh_metadata_requires_the_new_profile_and_explicit_trim_bound() {
+    let encoded = mesh(MAX_GEOMETRY_CHUNK_BYTES);
+    let metadata = &encoded.chunks[0].metadata;
+    let value = serde_json::to_value(metadata).unwrap();
+    assert_eq!(value["mesh_profile"], "mesh-trimmed-mm-0.05-v2");
+    assert_eq!(value["trim_deviation_mm"], 0.0);
+    let mut missing_trim = value.clone();
+    missing_trim
+        .as_object_mut()
+        .unwrap()
+        .remove("trim_deviation_mm");
+    assert!(serde_json::from_value::<MeshChunkMetadata>(missing_trim).is_err());
+    let mut old_profile = value;
+    old_profile["mesh_profile"] = serde_json::json!("mesh-mm-0.05-v1");
+    assert!(serde_json::from_value::<MeshChunkMetadata>(old_profile).is_err());
+}
+
+#[test]
+fn trimmed_mesh_error_budgets_are_checked_without_or_with_chunk_bytes() {
+    let encoded = mesh(MAX_GEOMETRY_CHUNK_BYTES);
+    let chunk = &encoded.chunks[0];
+    for (carrier, trim, quantization) in [
+        (-0.001, 0.0, 0.0),
+        (f64::NAN, 0.0, 0.0),
+        (f64::INFINITY, 0.0, 0.0),
+        (0.0, -0.001, 0.0),
+        (0.0, f64::NAN, 0.0),
+        (0.0, f64::INFINITY, 0.0),
+        (0.0, f64::NEG_INFINITY, 0.0),
+        (0.0, 0.026, 0.0),
+        (0.02, 0.006, 0.0),
+        (0.025, 0.001, 0.024),
+        (0.0, 0.0, -0.001),
+        (0.0, 0.0, f64::NAN),
+        (0.0, 0.0, f64::INFINITY),
+        (0.0, 0.0, 0.026),
+        (0.02, 0.02, 0.02),
+    ] {
+        let mut metadata = chunk.metadata.clone();
+        metadata.carrier_deviation_mm = carrier;
+        metadata.trim_deviation_mm = trim;
+        metadata.quantization_error_mm = quantization;
+        assert!(
+            metadata.validate().is_err(),
+            "accepted carrier={carrier}, trim={trim}, quantization={quantization}"
+        );
+        assert!(validate_mesh_manifest(std::slice::from_ref(&metadata)).is_err());
+        assert!(validate_mesh(&chunk.bytes, &metadata).is_err());
+    }
+    for (carrier, trim, quantization) in [
+        (0.0, 0.025, 0.025),
+        (0.025, 0.0, 0.025),
+        (0.01, 0.015, 0.025),
+    ] {
+        let mut metadata = chunk.metadata.clone();
+        metadata.carrier_deviation_mm = carrier;
+        metadata.trim_deviation_mm = trim;
+        metadata.quantization_error_mm = quantization;
+        metadata.validate().unwrap();
+        validate_mesh_manifest(std::slice::from_ref(&metadata)).unwrap();
+        validate_mesh(&chunk.bytes, &metadata).unwrap();
+    }
+}
+
+#[test]
+fn invalid_trim_or_combined_native_error_poison_an_already_staged_mesh() {
+    let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let normals = [[0.0, 0.0, 1.0]; 3];
+    let triangles = [[0, 1, 2]];
+    for (carrier, trim) in [
+        (0.0, -0.001),
+        (0.0, f64::NAN),
+        (0.0, f64::INFINITY),
+        (0.0, f64::NEG_INFINITY),
+        (0.0, 0.026),
+        (0.02, 0.006),
+        (f64::NAN, 0.0),
+        (f64::INFINITY, 0.0),
+    ] {
+        let (_, _, definition) = ids();
+        let mut builder = MeshChunkBuilder::with_chunk_limit(
+            definition,
+            3,
+            DisplayProfile::MeshTrimmedMm005V2,
+            152,
+        )
+        .unwrap();
+        // The second face forces the first chunk into the staged prefix.
+        for ordinal in 0..2 {
+            builder
+                .push_face(ordinal, &positions, &normals, &triangles, 0.0, 0.0)
+                .unwrap();
+        }
+        assert!(
+            builder
+                .push_face(2, &positions, &normals, &triangles, carrier, trim)
+                .is_err()
+        );
+        assert!(
+            builder
+                .push_face(2, &positions, &normals, &triangles, 0.0, 0.0)
+                .is_err()
+        );
+        assert!(builder.finish().is_err());
+    }
+}
+
+#[test]
+fn per_face_native_budgets_produce_valid_chunks_despite_disjoint_error_maxima() {
+    let (session, artifact, definition) = ids();
+    let mut builder =
+        MeshChunkBuilder::new(definition, 2, DisplayProfile::MeshTrimmedMm005V2).unwrap();
+    let face_errors = [(0.024, 0.001), (0.001, 0.024)];
+    for (ordinal, &(carrier, trim)) in face_errors.iter().enumerate() {
+        let z = ordinal as f64;
+        let positions = [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        builder
+            .push_face(
+                ordinal as u32,
+                &positions,
+                &[[0.0, 0.0, 1.0]; 3],
+                &[[0, 1, 2]],
+                carrier,
+                trim,
+            )
+            .unwrap();
+    }
+    let encoded = builder.finish().unwrap();
+    assert_eq!(encoded.triangle_count, 2);
+    let mut descriptors = Vec::new();
+    let mut faces = Vec::new();
+    for chunk in encoded.chunks {
+        let metadata = chunk.descriptor.into_metadata(session.clone(), artifact);
+        metadata.validate().unwrap();
+        assert!(
+            metadata.carrier_deviation_mm + metadata.trim_deviation_mm <= MESH_CARRIER_TOLERANCE_MM
+        );
+        assert!(
+            metadata.carrier_deviation_mm
+                + metadata.trim_deviation_mm
+                + metadata.quantization_error_mm
+                <= MESH_SURFACE_TOLERANCE_MM
+        );
+        let view = validate_mesh(&chunk.bytes, &metadata).unwrap();
+        for ordinal in view.face_ordinals.iter() {
+            let (carrier, trim) = face_errors[ordinal as usize];
+            assert!(metadata.carrier_deviation_mm >= carrier);
+            assert!(metadata.trim_deviation_mm >= trim);
+            faces.push(ordinal);
+        }
+        descriptors.push(metadata);
+    }
+    assert_eq!(faces, [0, 1]);
+    validate_mesh_manifest(&descriptors).unwrap();
 }
 
 // Deliberately small analytic loops test the wire layout, not native boolean accuracy.
@@ -356,6 +523,81 @@ fn section(chunk_limit: u32) -> EncodedSection {
         )
         .unwrap();
     builder.finish().unwrap()
+}
+
+#[test]
+fn section_packing_admits_live_point_and_encoded_copy_capacity_before_growth() {
+    let make = || {
+        let (session, artifact, definition) = ids();
+        let builder = SectionChunkBuilder::new(
+            session,
+            artifact,
+            SceneRevision::ZERO,
+            PlaneMm {
+                origin_mm: [0.0; 3],
+                normal: [0.0, 0.0, 1.0],
+            },
+        )
+        .unwrap();
+        (builder, definition)
+    };
+    let points = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ];
+    let (mut builder, definition) = make();
+    let initial = builder.retained_bytes();
+    builder.set_retained_byte_limit(initial).unwrap();
+    assert_eq!(
+        builder
+            .push_loop(OccurrenceId::new(1).unwrap(), definition, false, &points)
+            .unwrap_err()
+            .code,
+        GeometryErrorCode::ResourceLimit
+    );
+    assert_eq!(builder.retained_bytes(), initial);
+    assert!(
+        builder.finish().is_err(),
+        "failed growth cannot publish a partial section"
+    );
+
+    let (mut builder, definition) = make();
+    builder
+        .push_loop(OccurrenceId::new(1).unwrap(), definition, false, &points)
+        .unwrap();
+    // One five-point SPLS loop occupies 192 wire bytes. Packing still needs
+    // the pending f64 points, chunk metadata, session clone and SHA-256 string.
+    let packed_copy_growth = 192 + std::mem::size_of::<EncodedSectionChunk>() + 36 + 64;
+    builder
+        .set_retained_byte_limit(builder.retained_bytes() + packed_copy_growth - 1)
+        .unwrap();
+    assert_eq!(
+        builder.finish().unwrap_err().code,
+        GeometryErrorCode::ResourceLimit
+    );
+
+    let (mut builder, definition) = make();
+    builder
+        .push_loop(OccurrenceId::new(1).unwrap(), definition, false, &points)
+        .unwrap();
+    builder
+        .set_retained_byte_limit(builder.retained_bytes() + packed_copy_growth)
+        .unwrap();
+    let encoded = builder.finish().unwrap();
+    assert_eq!(encoded.summary.total_bytes, 192);
+    validate_section_manifest(
+        &encoded.summary,
+        &encoded
+            .chunks
+            .iter()
+            .map(|chunk| chunk.metadata.clone())
+            .collect::<Vec<_>>(),
+        &encoded.loops,
+    )
+    .unwrap();
 }
 fn validate_section<'a>(
     bytes: &'a [u8],
@@ -419,6 +661,89 @@ fn sections_pack_whole_loops_and_validate_contiguous_identity_ranges() {
     assert_eq!(encoded.chunks.len(), 1);
     // Three offsets occupy twelve bytes; padding at 76..80 is explicitly zero.
     assert_eq!(&encoded.chunks[0].bytes[76..80], &[0; 4]);
+}
+
+#[test]
+fn section_winding_is_independent_of_tangential_plane_origin() {
+    let outer = [
+        [0.0, 0.0, 4.0],
+        [1.0, 0.0, 4.0],
+        [1.0, 1.0, 4.0],
+        [0.0, 1.0, 4.0],
+        [0.0, 0.0, 4.0],
+    ];
+    let hole = [
+        [0.25, 0.25, 4.0],
+        [0.25, 0.75, 4.0],
+        [0.75, 0.75, 4.0],
+        [0.75, 0.25, 4.0],
+        [0.25, 0.25, 4.0],
+    ];
+    for origin_mm in [[0.0, 0.0, 4.0], [1e9, -1e9, 4.0]] {
+        let (session, artifact, definition) = ids();
+        let mut builder = SectionChunkBuilder::new(
+            session,
+            artifact,
+            SceneRevision::ZERO,
+            PlaneMm {
+                origin_mm,
+                normal: [0.0, 0.0, 1.0],
+            },
+        )
+        .unwrap();
+        let occurrence = OccurrenceId::new(1).unwrap();
+        builder
+            .push_loop(occurrence, definition.clone(), false, &outer)
+            .unwrap();
+        builder
+            .push_loop(occurrence, definition, true, &hole)
+            .unwrap();
+        let encoded = builder.finish().unwrap();
+        let chunk = &encoded.chunks[0];
+        let decoded = validate_section(&chunk.bytes, &chunk.metadata, &encoded.summary).unwrap();
+        validate_section_loop_metadata(&decoded, &encoded.summary, &encoded.loops).unwrap();
+        for (ordinal, expected_area) in [1.0, -0.25].into_iter().enumerate() {
+            let start = decoded.loop_offsets.get(ordinal).unwrap() as usize;
+            let end = decoded.loop_offsets.get(ordinal + 1).unwrap() as usize;
+            let mut twice_area = 0.0;
+            for index in start..end - 1 {
+                let a = decoded.points_relative_mm.get(index).unwrap();
+                let b = decoded.points_relative_mm.get(index + 1).unwrap();
+                let a = std::array::from_fn::<_, 3, _>(|axis| origin_mm[axis] + a[axis]);
+                let b = std::array::from_fn::<_, 3, _>(|axis| origin_mm[axis] + b[axis]);
+                twice_area += a[0] * b[1] - b[0] * a[1];
+            }
+            assert_eq!(twice_area * 0.5, expected_area);
+        }
+    }
+}
+
+#[test]
+fn section_encoder_rejects_an_origin_that_erases_encoded_geometry() {
+    let (session, artifact, definition) = ids();
+    let mut builder = SectionChunkBuilder::new(
+        session,
+        artifact,
+        SceneRevision::ZERO,
+        PlaneMm {
+            origin_mm: [1e100, -1e100, 4.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+    )
+    .unwrap();
+    let outer = [
+        [0.0, 0.0, 4.0],
+        [1.0, 0.0, 4.0],
+        [1.0, 1.0, 4.0],
+        [0.0, 1.0, 4.0],
+        [0.0, 0.0, 4.0],
+    ];
+    assert!(
+        builder
+            .push_loop(OccurrenceId::new(1).unwrap(), definition, false, &outer)
+            .is_err()
+    );
+    assert!(builder.finish().is_err());
 }
 
 #[test]
@@ -575,13 +900,14 @@ fn native_mesh_encoder_matches_original_algebraic_cross_language_golden() {
     let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let definition = DefinitionId::from_source_sha256(&[7; 32]);
     let mut builder =
-        MeshChunkBuilder::new(definition.clone(), 2, DisplayProfile::MeshMm005V1).unwrap();
+        MeshChunkBuilder::new(definition.clone(), 2, DisplayProfile::MeshTrimmedMm005V2).unwrap();
     builder
         .push_face(
             0,
             &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
             &[[0.0, 0.0, 1.0]; 3],
             &[[0, 1, 2]],
+            0.0,
             0.0,
         )
         .unwrap();
@@ -591,6 +917,7 @@ fn native_mesh_encoder_matches_original_algebraic_cross_language_golden() {
             &[[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
             &[[0.0, 0.0, -1.0]; 3],
             &[[0, 2, 1]],
+            0.0,
             0.0,
         )
         .unwrap();
@@ -728,17 +1055,21 @@ fn native_section_encoder_matches_original_algebraic_single_and_multichunk_golde
 #[test]
 fn a_later_failed_face_or_loop_cannot_publish_the_already_encoded_prefix() {
     let (session, artifact, definition) = ids();
-    let mut mesh =
-        MeshChunkBuilder::with_chunk_limit(definition.clone(), 2, DisplayProfile::MeshMm005V1, 152)
-            .unwrap();
+    let mut mesh = MeshChunkBuilder::with_chunk_limit(
+        definition.clone(),
+        2,
+        DisplayProfile::MeshTrimmedMm005V2,
+        152,
+    )
+    .unwrap();
     let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-    mesh.push_face(0, &positions, &[[0.0, 0.0, 1.0]; 3], &[[0, 1, 2]], 0.0)
+    mesh.push_face(0, &positions, &[[0.0, 0.0, 1.0]; 3], &[[0, 1, 2]], 0.0, 0.0)
         .unwrap();
     // Triangle one flushes the valid first chunk; a vertex of the second face then
     // exceeds the quantization profile after remapping has begun.
     let positions = [[0.0, 0.0, 0.0], [1e12 + 0.1, 0.0, 0.0], [0.0, 1.0, 0.0]];
     assert!(
-        mesh.push_face(1, &positions, &[[0.0, 0.0, 1.0]; 3], &[[0, 1, 2]], 0.0)
+        mesh.push_face(1, &positions, &[[0.0, 0.0, 1.0]; 3], &[[0, 1, 2]], 0.0, 0.0)
             .is_err()
     );
     assert!(mesh.finish().is_err());

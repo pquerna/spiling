@@ -22,7 +22,7 @@ pub use process::*;
 mod resolution;
 pub use resolution::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 5;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 6;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -38,6 +38,11 @@ pub enum ManufacturingErrorCode {
     InvalidSpecification,
     UnsupportedCapability,
     UnsupportedGeometry,
+    NativeKernelFailure,
+    NativeConditioningFailure,
+    NativeAnalysisIndeterminate,
+    NativeSingularGeometry,
+    NativeShapeErrorExceeded,
     ProgramCoordinateConditioningFailure,
     NoIntent,
     EmptyProject,
@@ -581,6 +586,7 @@ pub struct PlanarPrintRecipe {
     pub material_revision: String,
     pub filament_diameter_mm: f64,
     pub layer_height_mm: f64,
+    pub native_shape_error_mm: f64,
     pub bead_width_mm: f64,
     pub perimeter_count: u32,
     pub infill_fraction: f64,
@@ -603,6 +609,7 @@ impl PlanarPrintRecipe {
         positive(&[
             self.filament_diameter_mm,
             self.layer_height_mm,
+            self.native_shape_error_mm,
             self.bead_width_mm,
             self.print_speed_mm_s,
             self.travel_speed_mm_s,
@@ -817,6 +824,124 @@ pub struct PrintLayer {
     pub paths: Vec<DepositionPath>,
     pub region_coverage: PlanarRegionCoverage,
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkinCoverageScope {
+    ScheduledMaterialDistance,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportClearanceScope {
+    ContinuousTargetOuterOccupancy,
+}
+/// Partition of accepted scheduled layers by actual source-union evidence.
+/// Owned critical contributions count unique original-occurrence/slab captures,
+/// including endpoint strata and transition collars, never faces or attempts.
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeFeatureCoverageSummary {
+    pub disjoint_source_layer_count: u32,
+    pub invariant_source_union_layer_count: u32,
+    pub native_interface_complex_layer_count: u32,
+    pub owned_critical_slab_count: u32,
+}
+#[derive(Deserialize)]
+#[serde(remote = "NativeFeatureCoverageSummary", deny_unknown_fields)]
+struct RawNativeFeatureCoverageSummary {
+    disjoint_source_layer_count: u32,
+    invariant_source_union_layer_count: u32,
+    native_interface_complex_layer_count: u32,
+    owned_critical_slab_count: u32,
+}
+impl<'de> Deserialize<'de> for NativeFeatureCoverageSummary {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = RawNativeFeatureCoverageSummary::deserialize(deserializer)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl NativeFeatureCoverageSummary {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        let layers = self
+            .disjoint_source_layer_count
+            .checked_add(self.invariant_source_union_layer_count)
+            .and_then(|count| count.checked_add(self.native_interface_complex_layer_count))
+            .ok_or_else(|| invalid("source feature layer count overflow"))?;
+        if layers == 0
+            || layers > MAX_PRINT_LAYERS
+            || self.owned_critical_slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
+        {
+            return Err(invalid("invalid native source feature coverage counts"));
+        }
+        Ok(())
+    }
+}
+/// Actual occurrence query/slab proof and scheduled material coverage, not a
+/// generic all-Z varying-overlap or emitted physical union-boundary certificate.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGeometryCoverageSummary {
+    pub requested_shape_error_mm: f64,
+    pub achieved_shape_error_mm: f64,
+    pub height_analysis_count: u32,
+    /// Accepted original-occurrence/slab evidence captures, including endpoint ownership.
+    /// One certified invariant slab may cover several scheduled layers. Every
+    /// accepted slab captures every original occurrence, including inactive ones.
+    pub slab_count: u32,
+    pub certified_layer_count: u32,
+    pub event_count: u32,
+    pub geometry_work: u64,
+    pub evidence: PreflightEvidence,
+    pub source_feature_coverage: NativeFeatureCoverageSummary,
+    pub skin_coverage: SkinCoverageScope,
+    pub support_clearance: SupportClearanceScope,
+}
+impl NativeGeometryCoverageSummary {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        positive(&[self.requested_shape_error_mm])?;
+        if !self.achieved_shape_error_mm.is_finite()
+            || self.achieved_shape_error_mm < 0.0
+            || self.achieved_shape_error_mm > self.requested_shape_error_mm
+            || self.height_analysis_count == 0
+            || self.height_analysis_count > MAX_OCCURRENCES
+            || self.certified_layer_count == 0
+            || self.certified_layer_count > MAX_PRINT_LAYERS
+            || self.slab_count == 0
+            || self.slab_count > MAX_PRINT_LAYERS * MAX_OCCURRENCES
+            || self.event_count > 4096
+            || self.geometry_work == 0
+            || self.evidence != PreflightEvidence::Certified
+            || self.slab_count < self.height_analysis_count
+            || u64::from(self.slab_count)
+                > u64::from(self.height_analysis_count) * u64::from(self.certified_layer_count)
+        {
+            return Err(invalid("invalid native geometry coverage summary"));
+        }
+        self.source_feature_coverage.validate()?;
+        let feature_layers = self
+            .source_feature_coverage
+            .disjoint_source_layer_count
+            .checked_add(
+                self.source_feature_coverage
+                    .invariant_source_union_layer_count,
+            )
+            .and_then(|count| {
+                count.checked_add(
+                    self.source_feature_coverage
+                        .native_interface_complex_layer_count,
+                )
+            })
+            .ok_or_else(|| invalid("source feature layer count overflow"))?;
+        if feature_layers != self.certified_layer_count
+            || self.source_feature_coverage.owned_critical_slab_count > self.slab_count
+        {
+            return Err(invalid(
+                "native source feature coverage does not match accepted layers/slab captures",
+            ));
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPrintPlan {
@@ -829,6 +954,7 @@ pub struct NormalizedPrintPlan {
     pub layer_quantization_mm: f64,
     #[serde(deserialize_with = "resolution::records")]
     pub surface_resolution: Vec<SurfaceResolution>,
+    pub native_geometry: NativeGeometryCoverageSummary,
 }
 /// Conservative object XY ownership envelope, padded for command serialization.
 pub type PrimeExclusionBoundsMm = [[f64; 2]; 2]; // [minimum XY, maximum XY]
@@ -867,6 +993,12 @@ impl NormalizedPrintPlan {
         intent.validate()?;
         if self.schema_version != MANUFACTURING_SCHEMA_VERSION {
             return Err(invalid("unsupported plan schema"));
+        }
+        self.native_geometry.validate()?;
+        if self.native_geometry.requested_shape_error_mm != intent.recipe.native_shape_error_mm {
+            return Err(invalid(
+                "native geometry coverage does not bind recipe shape error",
+            ));
         }
         if self.surface_resolution.len() > MAX_SURFACE_RESOLUTION_RECORDS
             || self.surface_resolution.capacity() > MAX_SURFACE_RESOLUTION_RECORDS
@@ -915,6 +1047,11 @@ impl NormalizedPrintPlan {
         }
         if self.layers.len() > MAX_PRINT_LAYERS as usize {
             return Err(resource("print layer limit exceeded"));
+        }
+        if self.native_geometry.certified_layer_count as usize != self.layers.len() {
+            return Err(invalid(
+                "native geometry coverage does not bind scheduled layers",
+            ));
         }
         // Both current output identities use the reviewed Cartesian XYZ6
         // contract. A future dialect must choose its representation explicitly.
@@ -1288,10 +1425,17 @@ pub struct ManufacturingSummary {
     pub support_filament_length_mm: f64,
     pub software_only: bool,
     pub surface_resolution: SurfaceResolutionTotals,
+    pub native_geometry: NativeGeometryCoverageSummary,
 }
 impl ManufacturingSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.surface_resolution.validate()?;
+        self.native_geometry.validate()?;
+        if self.native_geometry.certified_layer_count != self.layers {
+            return Err(invalid(
+                "native geometry coverage does not bind summary layers",
+            ));
+        }
         if self.layers == 0
             || self.layers > MAX_PRINT_LAYERS
             || self.paths == 0
@@ -1341,6 +1485,13 @@ impl ManufacturingBundle {
         }
         self.provenance.validate()?;
         self.plan.validate(&self.provenance.intent)?;
+        if self.plan.native_geometry.height_analysis_count as usize
+            != self.provenance.occurrences.len()
+        {
+            return Err(invalid(
+                "native geometry coverage does not bind captured occurrences",
+            ));
+        }
         resolution::validate_attribution(
             &self.plan.surface_resolution,
             &self.provenance.surface_overlays,
@@ -1388,6 +1539,7 @@ impl ManufacturingBundle {
             surface_resolution: SurfaceResolutionTotals::from_records(
                 &self.plan.surface_resolution,
             ),
+            native_geometry: self.plan.native_geometry.clone(),
         }
     }
     /// Match metadata on an already validated bundle; caller checks exact byte hash/size.

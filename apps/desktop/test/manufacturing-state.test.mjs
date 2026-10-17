@@ -104,6 +104,28 @@ test("full complete intent scalar edits preserve declaration identity and unedit
   assert.equal(draft.policyValues["process.fan_first_layers"], "256", "Failed policy edit is retained");
 });
 
+test("explicit native shape policy survives scalar Apply and authoritative draft reload", () => {
+  const original = structuredClone(intent);
+  original.recipe.native_shape_error_mm = 0.075;
+  const draft = makeDraft(original, original);
+  draft.values.print_speed_mm_s = "36";
+  const applied = draftIntent(draft);
+  assert.equal(applied.recipe.native_shape_error_mm, 0.075);
+  assert.deepEqual(applied.recipe.process, original.recipe.process);
+  assert.deepEqual(applied.recipe.supports, original.recipe.supports);
+  const reloaded = makeDraft(JSON.parse(JSON.stringify(applied)), applied);
+  assert.equal(draftChanged(reloaded), false);
+  assert.equal(reloaded.values.native_shape_error_mm, "0.075");
+  reloaded.values.native_shape_error_mm = "0.05";
+  assert.equal(draftIntent(reloaded).recipe.native_shape_error_mm, 0.05);
+  for (const invalid of ["", "0", "-0.1", "NaN", "Infinity"]) {
+    reloaded.values.native_shape_error_mm = invalid;
+    assert.throws(() => draftIntent(reloaded), /Native shape error budget.*finite positive/);
+    assert.equal(reloaded.values.native_shape_error_mm, invalid);
+  }
+  assert.equal(original.recipe.native_shape_error_mm, 0.075);
+});
+
 test("enabled support edits retain explicit zero gap and disabled policies are never invented", () => {
   const supported = structuredClone(intent);
   supported.recipe.supports = { kind: "breakaway", density: 0.25, xy_clearance_mm: 0.5,

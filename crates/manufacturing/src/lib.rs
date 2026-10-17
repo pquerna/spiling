@@ -12,16 +12,17 @@ pub use planner::preflight;
 use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
+use spiling_geometry::{KERNEL_REVISION, KERNEL_VERSION};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
-pub const PLANNER_VERSION: &str = "7";
+/// Binds Native M to the original toleranced-material realization contract v1.
+pub const PLANNER_VERSION: &str = "9";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
-const KERNEL_REVISION: &str = "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,
@@ -77,7 +78,7 @@ pub fn compile(
             .collect(),
         kernel: KernelIdentity {
             name: "monstertruck".into(),
-            version: "0.4.1".into(),
+            version: KERNEL_VERSION.into(),
             revision: KERNEL_REVISION.into(),
         },
         planner_version: PLANNER_VERSION.into(),
@@ -201,7 +202,7 @@ fn validate_inspection_bundle(
         || p.emitter_version != EMITTER_VERSION
         || p.verifier_version != VERIFIER_VERSION
         || p.kernel.name != "monstertruck"
-        || p.kernel.version != "0.4.1"
+        || p.kernel.version != KERNEL_VERSION
         || p.kernel.revision != KERNEL_REVISION
     {
         return Err(error(

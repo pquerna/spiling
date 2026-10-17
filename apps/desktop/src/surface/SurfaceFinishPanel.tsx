@@ -97,6 +97,11 @@ export function SurfaceFinishPanel({
     reference.definition_id === occurrence.definition_id
       ? reference
       : null;
+  const analytic = currentFace ? state.inspection?.face.geometry.analytic : null;
+  const finishFamilySupported = kind === "smooth" ||
+    (kind === "vertical_ribs" && analytic?.kind === "plane") ||
+    (kind === "cylindrical_ribs" && analytic?.kind === "cylinder") ||
+    (kind === "image_relief" && (analytic?.kind === "plane" || analytic?.kind === "cylinder"));
   async function transact(command: SurfaceFinishEdit) {
     setWorking(true);
     setMessage("");
@@ -148,6 +153,10 @@ export function SurfaceFinishPanel({
   function apply(event: FormEvent) {
     event.preventDefault();
     if (!writable || !currentFace) return;
+    if (!finishFamilySupported) {
+      setMessage("Unsupported finish family: planar ribs require an exact plane; cylindrical ribs require an exact cylinder; image relief requires an exact plane or cylinder. Other analytic or generic surfaces are not finish-certified.");
+      return;
+    }
     if (kind === "image_relief") {
       if (!storedImage && !state.selectedImage) { setMessage("Choose a new image or an existing captured image first."); return; }
       if (imageValues.some((value) => value.trim() === "" || !Number.isFinite(Number(value)))) {
@@ -293,6 +302,13 @@ export function SurfaceFinishPanel({
         <p>
           Selected occurrence {currentFace.occurrence_id}, definition {currentFace.definition_id},
           face {currentFace.face_id}. Project revision {project?.revision}.
+        </p>
+      )}
+      {currentFace && !finishFamilySupported && (
+        <p role="alert" data-testid="surface-unsupported-family">
+          Unsupported finish dispatch for {state.inspection?.face.geometry.family}: this finish
+          requires an exact analytic plane or cylinder of the selected kind. Generic family
+          classification is descriptive only; Compile must still certify eligible carriers.
         </p>
       )}
       <form onSubmit={apply}>

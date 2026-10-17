@@ -120,7 +120,7 @@ pub fn adversaries(baseline: &str, inch: &str) -> Vec<Adversary> {
         (
             "unsupported-nurbs.step",
             "replace_one_plane_with_original_nurbs_carrier",
-            "unsupported_geometry",
+            "accepted",
         ),
         (
             "reachable-unsupported.step",

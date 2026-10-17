@@ -241,9 +241,11 @@ fn blank_rows_are_exact_native_and_bright_rows_retain_native_and_holes() {
     let blank = realize(native.clone(), &fields, 0.5, 0, &mut 0, &cancel).unwrap();
     assert_eq!(blank, native);
     assert!(fields[0].is_z_invariant(0.0, 1.0).unwrap());
-    assert_eq!(fields[0].vertical_error_bound(0.0, 1.0).unwrap(), 0.0);
+    assert_eq!(fields[0].vertical_error_bound(0.0, 1.0, 0.5).unwrap(), 0.0);
     assert!(!fields[0].is_z_invariant(1.0, 2.0).unwrap());
-    assert!(fields[0].vertical_error_bound(1.0, 2.0).unwrap() > 0.02);
+    let midpoint_bound = fields[0].vertical_error_bound(1.0, 2.0, 1.5).unwrap();
+    let biased_bound = fields[0].vertical_error_bound(1.0, 2.0, 1.9).unwrap();
+    assert!(midpoint_bound > 0.02 && biased_bound > midpoint_bound);
     let bright = realize(native.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap();
     assert!(bright.unsigned_area() > native.unsigned_area());
     assert_eq!(bright.0[0].interiors(), native.0[0].interiors());

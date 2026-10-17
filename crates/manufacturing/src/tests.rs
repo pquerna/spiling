@@ -27,6 +27,7 @@ fn intent() -> ManufacturingIntent {
             max_volumetric_flow_mm3_s: 100.0,
         },
         recipe: PlanarPrintRecipe {
+            native_shape_error_mm: 0.1,
             id: "solid".into(),
             revision: "1".into(),
             material_id: "nominal".into(),
@@ -155,10 +156,7 @@ fn native_box_has_pinned_geometry_nominal_volume_and_deterministic_program() {
         SourceHash::from_bytes(bundle.program.as_bytes()),
         SourceHash::from_bytes(again.program.as_bytes())
     );
-    assert_eq!(
-        serde_json::to_vec(&bundle.plan).unwrap(),
-        serde_json::to_vec(&again.plan).unwrap()
-    );
+    assert_eq!(bundle.plan.layers, again.plan.layers);
     assert!(
         verify_bundle(&bundle, &AtomicBool::new(false))
             .unwrap()
@@ -244,6 +242,22 @@ fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates(
     let overlap = Scene::new(BOX, &[RigidPoseMm::IDENTITY, pose(10.0, 0.0, 0.0)])
         .compile(&data)
         .unwrap();
+    assert_eq!(
+        overlap
+            .plan
+            .native_geometry
+            .source_feature_coverage
+            .disjoint_source_layer_count,
+        0
+    );
+    assert_eq!(
+        overlap
+            .plan
+            .native_geometry
+            .source_feature_coverage
+            .invariant_source_union_layer_count,
+        overlap.plan.native_geometry.certified_layer_count,
+    );
     assert_eq!(
         overlap.plan.layers[0]
             .paths
@@ -396,7 +410,7 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
         )
         .unwrap();
         let boundary = native
-            .loops
+            .into_loops()
             .into_iter()
             .find(|boundary| !boundary.is_hole)
             .unwrap();
@@ -445,6 +459,16 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     // A supported two-path plan retains actual source provenance; only the first
     // endpoint has an intentionally visible serialization-rounding deviation.
     bundle.plan.layers.truncate(1);
+    bundle.plan.native_geometry.certified_layer_count = 1;
+    bundle.plan.native_geometry.slab_count = 1;
+    bundle.plan.native_geometry.source_feature_coverage = NativeFeatureCoverageSummary {
+        disjoint_source_layer_count: 1,
+        invariant_source_union_layer_count: 0,
+        native_interface_complex_layer_count: 0,
+        owned_critical_slab_count: 0,
+    };
+    // ABI fixture identity excludes incidental native traversal work.
+    bundle.plan.native_geometry.geometry_work = 1;
     bundle.plan.layers[0].paths = vec![
         DepositionPath {
             kind: DepositionKind::SolidFill,

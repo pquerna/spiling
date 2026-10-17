@@ -89,7 +89,6 @@ pub fn project_xyz6_segment_bead_height_mm(
     let end = project_xyz6_bead_height_mm(end_z_mm, height_mm)?;
     Ok([start[0].min(end[0]), start[1].max(end[1])])
 }
-
 /// Lower bound on the gap between an already enclosed lower/upper program
 /// height pair. Error-free TwoDiff keeps exactly representable contact gaps
 /// admissible; only a negative residual requires outward rounding.

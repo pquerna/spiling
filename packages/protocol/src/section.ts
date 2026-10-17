@@ -340,13 +340,15 @@ export async function decodeSection(
         Math.abs(x * normal[0] + y * normal[1] + z * normal[2]) > SECTION_PLANE_TOLERANCE_MM
       )
         fail("nonfinite or off-plane coordinate");
-      const u = x * frameX[0] + y * frameX[1] + z * frameX[2];
-      const v = x * frameY[0] + y * frameY[1] + z * frameY[2];
       if (point === start) {
         firstX = x;
         firstY = y;
         firstZ = z;
-      } else area += previousU * v - u * previousV;
+      }
+      const dx = x - firstX, dy = y - firstY, dz = z - firstZ;
+      const u = dx * frameX[0] + dy * frameX[1] + dz * frameX[2];
+      const v = dx * frameY[0] + dy * frameY[1] + dz * frameY[2];
+      if (point > start) area += previousU * v - u * previousV;
       previousU = u;
       previousV = v;
       lastX = x;
