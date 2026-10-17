@@ -37,7 +37,8 @@ pub use joint::{
     certify_native_source_leaf, certify_native_union,
 };
 pub use material_source::{
-    PreparedGeometrySource, PreparedMaterialSource, prepare_geometry_source, prepare_material_source,
+    PreparedGeometrySource, PreparedMaterialSource, prepare_geometry_source,
+    prepare_material_source,
 };
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
@@ -564,24 +565,27 @@ pub(crate) fn section_regularity(
 ) -> Result<SectionRegularity, GeometryError> {
     check_cancel(cancel)?;
     let frame = PlaneFrameMm::from_plane(*plane)?;
-    let support = bounds::projected_bounds_with_scratch_limit(
-        source,
-        plane.normal,
-        BoundsPolicy {
-            maximum_endpoint_uncertainty_mm:
-                spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM,
-        },
-        remaining_bytes,
-        work,
-        cancel,
-    )
-    .map_err(|mut error| {
-        error.message = format!("section regularity / projected bounds: {}", error.message);
-        error
-    })?;
+    // Emptiness needs only the import-proved whole-native enclosure, not fresh
+    // endpoint extrema and feasible witnesses for every section. Crossing and
+    // critical strata still require the complete literal census below.
+    work.charge(1, cancel)?;
+    let bounds = source.definition().bounds_mm();
+    let support = (0..3).fold(crate::parametric::Interval::point(0.0), |sum, axis| {
+        sum.add(
+            crate::parametric::Interval {
+                lo: bounds.min[axis],
+                hi: bounds.max[axis],
+            }
+            .mul(crate::parametric::Interval::point(plane.normal[axis])),
+        )
+    });
     let offset = crate::parametric::dot_point(plane.origin_mm, plane.normal);
     let tolerance = spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM;
-    if support.minimum[0] > offset.hi + tolerance || support.maximum[1] < offset.lo - tolerance {
+    let target = offset.add(crate::parametric::Interval {
+        lo: -tolerance,
+        hi: tolerance,
+    });
+    if support.lo > target.hi || support.hi < target.lo {
         return Ok(SectionRegularity::Empty);
     }
     let height = slab::analyze_literal_native_height_domain(

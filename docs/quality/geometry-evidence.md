@@ -41,7 +41,7 @@ Generic `FaceInfo.geometry` may carry optional exact analytic metadata. That
 metadata describes a face; it does not authorize a finish, slab reuse or a
 family-wide operation. Current import/display profiles and wire ownership are
 specified by the [RFC](../adr/004-native-geometry-parity.md) and
-[display protocol](../protocol/display.md), not by this page's run history.
+[display protocol](../protocol/display.md).
 
 ## Prepared owners and placed inspection
 
@@ -57,6 +57,12 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 achieved chord/plane errors. A raw native intersection is not closure of
 source material. Conservative slab envelopes are explicitly distinguishable
 from intersections and cannot be promoted into manufactured layers.
+
+[`analysis::section_regularity`](../../crates/geometry/src/analysis/mod.rs) uses
+the import-certified native bounds only to exclude empty cuts; literal critical
+census and complete crossing certification remain mandatory. Native carrier
+callbacks hold a non-reentrant mutex: comparison queries that acquire the same
+carrier must finish before entering `Face::with_surface`.
 
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
 `coverage` / `boundary` modules and the display protocol own whole-triangle

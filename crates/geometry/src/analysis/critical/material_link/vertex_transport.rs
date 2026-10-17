@@ -2020,6 +2020,22 @@ fn cone_endpoint_support(
         work,
         cancel,
     )?;
+    // Comparison queries acquire this same carrier mutex internally. Complete
+    // them before borrowing the carrier for the scalar/jet evaluations below.
+    let comparison = if let Some(comparison) = recipe
+        .comparison
+        .as_ref()
+        .and_then(|map| map.native_uv())
+        .filter(|comparison| !comparison.is_identity())
+    {
+        let cost = comparison
+            .source_support_on_cell(domain, recipe, cell.piece, s, t, point, work, cancel)?;
+        let source_uv =
+            comparison.homotopy_star_image(domain, recipe, cell.piece, s, t, work, cancel)?;
+        Some((cost.displacement, source_uv))
+    } else {
+        None
+    };
     domain.native().face().with_surface(|surface| {
         let whole_jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
         let restricted_jet = surface_enclosure(surface, uv_box(restricted.uv), work, cancel)?;
@@ -2051,25 +2067,18 @@ fn cone_endpoint_support(
             cancel,
         )?
         .0;
-        if let Some(comparison) = recipe.comparison.as_ref().and_then(|map| map.native_uv()) {
-            if !comparison.is_identity() {
-                let cost = comparison.source_support_on_cell(
-                    domain, recipe, cell.piece, s, t, point, work, cancel,
-                )?;
-                displacement = hull3(displacement, cost.displacement);
-                let source_uv = comparison
-                    .homotopy_star_image(domain, recipe, cell.piece, s, t, work, cancel)?;
-                base = base.hull(
-                    super::transport::scalar_surface_jet(
-                        surface,
-                        uv_box(source_uv),
-                        direction,
-                        work,
-                        cancel,
-                    )?
-                    .0,
-                );
-            }
+        if let Some((comparison_displacement, source_uv)) = comparison {
+            displacement = hull3(displacement, comparison_displacement);
+            base = base.hull(
+                super::transport::scalar_surface_jet(
+                    surface,
+                    uv_box(source_uv),
+                    direction,
+                    work,
+                    cancel,
+                )?
+                .0,
+            );
         }
         let boundary_scalar = intersection(
             dot(direction, boundary.position),
