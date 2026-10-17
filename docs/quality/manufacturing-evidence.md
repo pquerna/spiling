@@ -129,8 +129,8 @@ Box and independent tapered-fitting operators complete Compile, fresh replay/exp
 save and source-deleted fresh reopen; the fitting also completes the hardware
 workbench flow. Cylinder/through-hole replay retains nominal material and protected
 voids. These are **not** general manufacturing or G0–G3 qualification.
-Rounded-housing compilation still exhausts cumulative native work during closed
-lower-rounding capture. Existing native/image consumers can also exhaust
+Rounded-housing compilation reaches an unresolved same-source critical-band
+incidence gate. Existing native/image consumers can still exhaust
 [`source-vertex scalar support`](../../crates/geometry/src/analysis/critical/material_link/transport.rs)
 during directional bounds, before finish evaluation. Generated-cylinder bounds,
 mixed-source contact, tilted placement/critical collars, inward-ramp conditioning

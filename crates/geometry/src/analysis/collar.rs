@@ -8,11 +8,12 @@
 //! can discharge an event.
 
 use super::joint::NativeSourceLeafReceipt;
-use super::slab::{HeightFunctional, clip_height_box};
+use super::slab::{HeightFunctional, clip_height_parameter_box};
 use super::{GeometryWorkBudget, SlabAnalysis};
 use crate::kernel::TrimClassification;
 use crate::parametric::{
-    Interval, surface_enclosure, surface_parameter_boxes, surface_piecewise_enclosure,
+    Interval, SurfaceFirstEnclosure, SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, surface_enclosure,
+    surface_parameter_boxes, surface_piecewise_enclosure, surface_piecewise_first_enclosure,
 };
 use crate::{Definition, GeometryError, SectionLoopMm};
 use sha2::{Digest, Sha256};
@@ -24,6 +25,16 @@ const MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DEPTH: u8 = 64;
 type Box2 = [[f64; 2]; 2];
 type Matrix = [[Interval; 3]; 3];
+
+// The retained first image coexists with a deferred full Hessian image and its
+// midpoint first query. Keep their adapter/native temporaries unavailable to
+// trim preparation, target images and the growing accepted-cell inventory.
+const SURFACE_COVER_SCRATCH_BYTES: usize = super::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES
+    + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    + 2 * std::mem::size_of::<SurfaceFirstEnclosure>()
+    + 2 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>()
+    + std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>()
+    + std::mem::size_of::<SurfaceAffineImage>();
 
 struct PortFaceCoverQuery<'a, 'source> {
     face: &'a monstertruck_modeling::Face,
@@ -62,7 +73,6 @@ struct FilledFaceCoverQuery<'a, 'source, 'target> {
 struct SurfaceAffineImageQuery<'a> {
     surface: &'a monstertruck_modeling::Surface,
     uv: Box2,
-    whole: &'a crate::parametric::SurfaceEnclosure,
     matrix: Matrix,
     pose: RigidPoseMm,
     chart_error_mm: f64,
@@ -739,6 +749,24 @@ fn material_distance_upper(
     Ok(best)
 }
 
+/// Retain the complete necessary CLOSED height preimage, then enclose its
+/// continuous source image and one-sided first derivatives. This grants no
+/// C1, Hessian or regularity authority to rectangle coverage or subdivision.
+fn clip_height_first_box(
+    surface: &monstertruck_modeling::Surface,
+    uv: Box2,
+    functional: HeightFunctional,
+    heights: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<(Box2, SurfaceFirstEnclosure)>, GeometryError> {
+    let Some(uv) = clip_height_parameter_box(surface, uv, functional, heights, work, cancel)? else {
+        return Ok(None);
+    };
+    let jet = surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
+    Ok(Some((uv, jet)))
+}
+
 fn split(bounds: Box2, depth: u8) -> Result<[Box2; 2], GeometryError> {
     let axis = usize::from(bounds[1][1] - bounds[1][0] > bounds[0][1] - bounds[0][0]);
     split_axis(bounds, depth, axis)
@@ -759,7 +787,7 @@ fn split_axis(bounds: Box2, depth: u8, axis: usize) -> Result<[Box2; 2], Geometr
 fn spatial_split(
     uv: Box2,
     depth: u8,
-    jet: &crate::parametric::SurfaceEnclosure,
+    jet: &SurfaceFirstEnclosure,
     matrix: Matrix,
 ) -> Result<[Box2; 2], GeometryError> {
     let motion = [jet.du, jet.dv].map(|tangent| {
@@ -1035,7 +1063,7 @@ fn certify_native_critical_collar_using(
         + target_bytes
         + port_bytes
         + stack_bytes
-        + super::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES;
+        + SURFACE_COVER_SCRATCH_BYTES;
     let capacity = Capacity {
         limit: (policy.byte_limit as usize).min(MAX_BYTES),
         fixed,
@@ -1416,7 +1444,7 @@ fn certify_native_critical_collar_using(
             })?;
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0))) {
                 work.charge(1, cancel)?;
-                let clipped = clip_height_box(
+                let clipped = clip_height_first_box(
                     surface, uv,
                     HeightFunctional { direction: matrix[2], offset: Interval::point(pose.translation_mm[2]) },
                     interval, work, cancel,
@@ -1462,7 +1490,7 @@ fn certify_native_critical_collar_using(
                     other => other,
                 };
                 if matches!(&target, Ok(None)) {
-                    let affine = try_surface_affine_image(SurfaceAffineImageQuery { surface, uv, whole: &jet, matrix, pose, chart_error_mm: domain.source_chart_error_mm(), maximum_error_mm: policy.maximum_xy_cover_error_mm }, work, cancel);
+                    let affine = try_surface_affine_image(SurfaceAffineImageQuery { surface, uv, matrix, pose, chart_error_mm: domain.source_chart_error_mm(), maximum_error_mm: policy.maximum_xy_cover_error_mm }, work, cancel);
                     match affine {
                         Ok(Some(image)) => {
                             let affine_target = choose_material_target(
@@ -1940,7 +1968,7 @@ fn try_port_face_cover(
     }
     let full_uv = super::slab::trim_parameter_box(domain)?;
     let image = face.with_surface(|surface| -> Result<_, GeometryError> {
-        let Some((uv, _)) = clip_height_box(
+        let Some(uv) = clip_height_parameter_box(
             surface, full_uv,
             HeightFunctional { direction: matrix[2], offset: Interval::point(pose.translation_mm[2]) },
             interval, work, cancel,
@@ -1951,7 +1979,7 @@ fn try_port_face_cover(
         // Continuous piecewise derivatives suffice for this Lipschitz image
         // bound. No Hessian, regularity or normal authority is obtained here.
         // Use the full box so every path to the original port remains enclosed.
-        let jet = surface_piecewise_enclosure(surface, full_uv, work, cancel)?;
+        let jet = surface_piecewise_first_enclosure(surface, full_uv, work, cancel)?;
         let world = super::placed::transformed_position(matrix, pose, jet.position)?;
         let [sx, sy] = [jet.du, jet.dv]
             .map(|d| hypot(dot(matrix[0], d).abs_upper(), dot(matrix[1], d).abs_upper()));
@@ -2143,7 +2171,7 @@ fn try_filled_face_cover(
             origin_mm: plane.origin().into(),
             normal: plane.normal().into(),
         })?;
-        let enclosure = surface_piecewise_enclosure(surface, uv, work, cancel)?;
+        let enclosure = surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
         let world = super::placed::transformed_position(matrix, pose, enclosure.position)?;
         Ok(Some((frame, world)))
     })?;
@@ -2274,7 +2302,6 @@ fn try_surface_affine_image(
     let SurfaceAffineImageQuery {
         surface,
         uv,
-        whole,
         matrix,
         pose,
         chart_error_mm,
@@ -2283,6 +2310,9 @@ fn try_surface_affine_image(
     if !crate::parametric::surface_parameter_span_smooth(surface, uv, work, cancel)? {
         return Ok(None);
     }
+    // Only a failed rectangle witness reaches this Hessian consumer. The
+    // first-order cover above is never promoted into Taylor/C1 authority.
+    let whole = surface_piecewise_enclosure(surface, uv, work, cancel)?;
     work.charge(64, cancel)?;
     let middle = uv.map(|axis| axis[0] * 0.5 + axis[1] * 0.5);
     let radius = std::array::from_fn::<_, 2, _>(|axis| {
@@ -2328,7 +2358,8 @@ fn try_surface_affine_image(
     if remainder_mm > maximum_error_mm {
         return Ok(None);
     }
-    let center = surface_enclosure(surface, middle.map(|value| [value; 2]), work, cancel)?;
+    let center =
+        surface_piecewise_first_enclosure(surface, middle.map(|value| [value; 2]), work, cancel)?;
     let position = super::placed::transformed_position(matrix, pose, center.position)?;
     let du = [dot(matrix[0], center.du), dot(matrix[1], center.du)];
     let dv = [dot(matrix[0], center.dv), dot(matrix[1], center.dv)];
@@ -2378,11 +2409,15 @@ fn affine_material_distance_upper(
                 }
             }
             if complete {
-                best = best.min(
-                    Interval::point(bound)
-                        .add(Interval::point(image.remainder_mm))
-                        .hi,
-                );
+                let complete_bound = Interval::point(bound)
+                    .add(Interval::point(image.remainder_mm))
+                    .hi;
+                best = best.min(complete_bound);
+                if complete_bound <= maximum_distance_mm {
+                    // This SAME segment encloses all four correlated corners,
+                    // and the SAME whole-patch remainder is already included.
+                    return Ok(complete_bound);
+                }
             }
         }
     }
@@ -5193,7 +5228,27 @@ mod tests {
     }
 
     #[test]
-    fn affine_image_encloses_actual_posed_independent_uv_scales_and_chart_error() {
+    fn affine_fixed_segment_cover_includes_the_whole_patch_remainder() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let material = [rectangle(-2.0, 0.0, 2.0, 2.0, false)];
+        let image = SurfaceAffineImage {
+            corners: [[-1.0, 0.02], [-1.0, 0.03], [1.0, 0.02], [1.0, 0.03]]
+                .map(|corner| corner.map(Interval::point)),
+            remainder_mm: 0.04,
+        };
+        let bound =
+            affine_material_distance_upper(&image, &material, 0.08, &mut work, &cancel).unwrap();
+        assert!(bound <= 0.08);
+        assert!(
+            affine_material_distance_upper(&image, &material, 0.06, &mut work, &cancel).unwrap()
+                > 0.06,
+            "a fixed-segment corner witness without the whole remainder cannot authorize coverage"
+        );
+    }
+
+    #[test]
+    fn affine_image_accepts_independent_uv_scales_but_retains_posed_chart_error() {
         use monstertruck_modeling::{BsplineSurface, KnotVector, Point3, Surface};
         let surface = Surface::BsplineSurface(BsplineSurface::new(
             (
@@ -5216,12 +5271,10 @@ mod tests {
         let uv = [[1e-3, 2e-3], [1e6, 2e6]];
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        let whole = surface_piecewise_enclosure(&surface, uv, &mut work, &cancel).unwrap();
         let image = try_surface_affine_image(
             SurfaceAffineImageQuery {
                 surface: &surface,
                 uv,
-                whole: &whole,
                 matrix,
                 pose,
                 chart_error_mm: 0.0,
@@ -5229,35 +5282,26 @@ mod tests {
             },
             &mut work,
             &cancel,
-        )
-        .unwrap()
-        .unwrap();
-        let material = [SectionLoopMm {
-            is_hole: false,
-            points_mm: [
-                [-3.0, -3.0, 0.0],
-                [3.0, 3.0, 0.0],
-                [2.0, 4.0, 0.0],
-                [-4.0, -2.0, 0.0],
-                [-3.0, -3.0, 0.0],
-            ]
-            .map(|point| {
-                super::super::placed::transformed_position(matrix, pose, point.map(Interval::point))
-                    .unwrap()
-                    .map(|value| value.lo * 0.5 + value.hi * 0.5)
-            })
-            .to_vec(),
-        }];
-        assert!(
-            affine_material_distance_upper(&image, &material, 0.01, &mut work, &cancel,).unwrap()
-                < 0.005
-        );
+        ).unwrap().unwrap();
+        let qz = pose.rotation_xyzw[2];
+        let qw = pose.rotation_xyzw[3];
+        let cosine = 1.0 - 2.0 * qz * qz;
+        let sine = 2.0 * qz * qw;
+        for [x, y] in [[-2.0, -2.0], [-1.999, -2.001], [2.0, 2.0], [2.001, 1.999]] {
+            let actual = [
+                pose.translation_mm[0] + cosine * x - sine * y,
+                pose.translation_mm[1] + sine * x + cosine * y,
+            ];
+            assert!(image.corners.iter().any(|corner| (0..2).all(|axis| {
+                corner[axis].lo - image.remainder_mm <= actual[axis]
+                    && actual[axis] <= corner[axis].hi + image.remainder_mm
+            })), "actual posed native corner escaped its complete affine image");
+        }
         assert!(
             try_surface_affine_image(
                 SurfaceAffineImageQuery {
                     surface: &surface,
                     uv,
-                    whole: &whole,
                     matrix,
                     pose,
                     chart_error_mm: 0.1,
@@ -5287,7 +5331,6 @@ mod tests {
         let uv = [[0.0, 1.0]; 2];
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
-        let whole = surface_piecewise_enclosure(&surface, uv, &mut work, &cancel).unwrap();
         let pose = RigidPoseMm::IDENTITY;
         let matrix = super::super::placed::rotation(pose).unwrap();
         assert!(
@@ -5295,7 +5338,6 @@ mod tests {
                 SurfaceAffineImageQuery {
                     surface: &surface,
                     uv,
-                    whole: &whole,
                     matrix,
                     pose,
                     chart_error_mm: 0.0,
@@ -5794,7 +5836,7 @@ mod tests {
             direction: matrix[2],
             offset: Interval::point(pose.translation_mm[2]),
         };
-        let (clipped, _) = clip_height_box(
+        let (clipped, _) = clip_height_first_box(
             &surface,
             uv,
             functional,
@@ -5809,7 +5851,7 @@ mod tests {
             "the entire actual constant-height face survives its true interval event band"
         );
         assert!(
-            clip_height_box(&surface, uv, functional, [0.6, 0.7], &mut work, &cancel)
+            clip_height_first_box(&surface, uv, functional, [0.6, 0.7], &mut work, &cancel)
                 .unwrap()
                 .is_none()
         );
@@ -5853,7 +5895,7 @@ mod tests {
         let mut work = GeometryWorkBudget::new(100_000);
         let continuous = surface(false);
         let uv = [[0.0, 1.0]; 2];
-        let (retained, _) = clip_height_box(
+        let (retained, first) = clip_height_first_box(
             &continuous,
             uv,
             functional,
@@ -5867,8 +5909,10 @@ mod tests {
         // necessary cover must retain every root, not only the knot itself.
         assert!(retained[0][0] <= 0.25 && retained[0][1] >= 0.625);
         assert_eq!(retained[1], uv[1]);
+        assert!(first.position[2].lo <= 0.25 && first.position[2].hi >= 0.75);
+        assert!(first.du[2].lo <= 1.0 && first.du[2].hi >= 2.0);
         assert!(
-            clip_height_box(
+            clip_height_first_box(
                 &continuous,
                 uv,
                 functional,
@@ -5880,7 +5924,7 @@ mod tests {
             .is_none()
         );
         assert_eq!(
-            clip_height_box(
+            clip_height_first_box(
                 &surface(true),
                 uv,
                 functional,

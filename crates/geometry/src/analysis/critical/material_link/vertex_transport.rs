@@ -199,6 +199,7 @@ enum Piece {
     Incoming,
 }
 
+#[derive(Clone, Copy)]
 struct BoundaryJet {
     position: Box3,
     derivative: Box3,
@@ -209,6 +210,17 @@ struct StarJet {
     uv: Box2,
     ds: Box2,
     dss: Box2,
+}
+
+/// Whole-ray chord operands depend on the sector coordinate t, not the radial
+/// restriction s. A radial split borrows the same immutable coefficient proof.
+#[derive(Clone, Copy)]
+struct EndpointRaySupport {
+    at_joint: Box3,
+    acceleration: Box3,
+    boundary: BoundaryJet,
+    boundary_scalar: Interval,
+    comparison: Option<uv_ownership::EndpointComparisonRay>,
 }
 
 impl<'d> SourceVertexTransportPlan<'d> {
@@ -766,14 +778,21 @@ impl<'d> SourceVertexTransportPlan<'d> {
         output: &mut Vec<SourceTransportSupport>,
     ) -> Result<(), GeometryError> {
         use super::transport::{output_bytes, push};
-        type Pending = [([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1];
+        type Pending =
+            [([[f64; 2]; 2], u8, Option<EndpointRaySupport>); MAX_DEPTH as usize + 1];
         let available = remaining_bytes
             .checked_sub(std::mem::size_of::<Pending>())
+            // Pending radial siblings and the active ray coexist with the
+            // original domain, native query scratch and accumulated output.
+            .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<EndpointRaySupport>()))
+            .and_then(|bytes| bytes.checked_sub(
+                crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES,
+            ))
             .ok_or_else(super::transport::resource)?;
         if output_bytes(output) > available {
             return Err(super::transport::resource());
         }
-        let mut stack: Pending = [([[0.0; 2]; 2], 0); MAX_DEPTH as usize + 1];
+        let mut stack: Pending = [([[0.0; 2]; 2], 0, None); MAX_DEPTH as usize + 1];
         for cell in &self.cells {
             work.charge(1, cancel)?;
             let coarse = SourceTransportSupport {
@@ -814,14 +833,20 @@ impl<'d> SourceVertexTransportPlan<'d> {
             let output_limit = available
                 .checked_sub(domain.owned_bytes())
                 .ok_or_else(super::transport::resource)?;
-            stack[0] = ([[0.0, 1.0], cell.parameter], 0);
+            stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
             let mut pending = 1;
             while pending != 0 {
                 pending -= 1;
-                let (parameter, depth) = stack[pending];
+                let (parameter, depth, ray) = stack[pending];
                 work.charge(1, cancel)?;
+                let ray = match ray {
+                    Some(ray) => ray,
+                    None => endpoint_ray_support(
+                        &domain, recipe, cell, self.point, parameter[1], direction, work, cancel,
+                    )?,
+                };
                 let (support, suggested_axis) = cone_endpoint_support(
-                    &domain, recipe, cell, self.point, parameter, direction, work, cancel,
+                    &domain, recipe, cell, &ray, self.point, parameter, direction, work, cancel,
                 )?;
                 if !endpoint_support_needs_refinement(&support, reference, tolerance)
                     || depth >= MAX_DEPTH
@@ -845,8 +870,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 let mut right = parameter;
                 left[axis][1] = middle;
                 right[axis][0] = middle;
-                stack[pending] = (right, depth + 1);
-                stack[pending + 1] = (left, depth + 1);
+                let child_ray = if axis == 0 { Some(ray) } else { None };
+                stack[pending] = (right, depth + 1, child_ray);
+                stack[pending + 1] = (left, depth + 1, child_ray);
                 pending += 2;
             }
         }
@@ -1962,10 +1988,65 @@ fn endpoint_support_needs_refinement(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn endpoint_ray_support(
+    domain: &PreparedFaceTrimDomain<'_>,
+    recipe: &CornerRecipe,
+    cell: &ConeCell,
+    point: [f64; 3],
+    range: [f64; 2],
+    direction: Box3,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<EndpointRaySupport, GeometryError> {
+    let t = Interval::new(range[0], range[1])?;
+    let whole = star_jet(
+        domain, recipe.outgoing, recipe.incoming, cell.piece,
+        Interval { lo: 0.0, hi: 1.0 }, t, recipe.bulge, work, cancel,
+    )?;
+    let joint = star_jet(
+        domain, recipe.outgoing, recipe.incoming, cell.piece,
+        Interval::point(0.0), t, recipe.bulge, work, cancel,
+    )?;
+    let boundary = boundary_jet(
+        domain, recipe.outgoing, recipe.incoming, cell.piece, t, recipe.bulge, work, cancel,
+    )?;
+    // Native comparison acquires the same carrier lock internally.
+    let comparison = recipe.comparison.as_ref()
+        .and_then(|map| map.native_uv())
+        .filter(|map| !map.is_identity())
+        .map(|map| map.endpoint_support_ray(
+            domain, recipe, cell.piece, t, point, boundary.displacement, work, cancel,
+        ))
+        .transpose()?;
+    domain.native().face().with_surface(|surface| {
+        let whole_jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
+        let at_joint = relative(
+            surface_enclosure(surface, uv_box(joint.uv), work, cancel)?.position,
+            point,
+        ).map(Interval::neg);
+        let acceleration = std::array::from_fn(|i| {
+            whole_jet.duu[i].mul(whole.ds[0].square())
+                .add(Interval::point(2.0).mul(whole_jet.duv[i]).mul(whole.ds[0]).mul(whole.ds[1]))
+                .add(whole_jet.dvv[i].mul(whole.ds[1].square()))
+                .add(whole_jet.du[i].mul(whole.dss[0]))
+                .add(whole_jet.dv[i].mul(whole.dss[1]))
+        });
+        let boundary_scalar = intersection(
+            dot(direction, boundary.position),
+            super::transport::scalar_surface_jet(
+                surface, uv_box(boundary.uv), direction, work, cancel,
+            )?.0.add(dot(direction, boundary.displacement)),
+        ).ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
+        Ok(EndpointRaySupport { at_joint, acceleration, boundary, boundary_scalar, comparison })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cone_endpoint_support(
     domain: &PreparedFaceTrimDomain<'_>,
     recipe: &CornerRecipe,
     cell: &ConeCell,
+    ray: &EndpointRaySupport,
     point: [f64; 3],
     parameter: [[f64; 2]; 2],
     direction: Box3,
@@ -1976,45 +2057,12 @@ fn cone_endpoint_support(
         lo: range[0],
         hi: range[1],
     });
-    let whole_s = Interval { lo: 0.0, hi: 1.0 };
-    let whole = star_jet(
-        domain,
-        recipe.outgoing,
-        recipe.incoming,
-        cell.piece,
-        whole_s,
-        t,
-        recipe.bulge,
-        work,
-        cancel,
-    )?;
     let restricted = star_jet(
         domain,
         recipe.outgoing,
         recipe.incoming,
         cell.piece,
         s,
-        t,
-        recipe.bulge,
-        work,
-        cancel,
-    )?;
-    let joint = star_jet(
-        domain,
-        recipe.outgoing,
-        recipe.incoming,
-        cell.piece,
-        Interval::point(0.0),
-        t,
-        recipe.bulge,
-        work,
-        cancel,
-    )?;
-    let boundary = boundary_jet(
-        domain,
-        recipe.outgoing,
-        recipe.incoming,
-        cell.piece,
         t,
         recipe.bulge,
         work,
@@ -2028,45 +2076,22 @@ fn cone_endpoint_support(
         .and_then(|map| map.native_uv())
         .filter(|comparison| !comparison.is_identity())
     {
-        let cost = comparison
-            .source_support_on_cell(domain, recipe, cell.piece, s, t, point, work, cancel)?;
-        let source_uv =
-            comparison.homotopy_star_image(domain, recipe, cell.piece, s, t, work, cancel)?;
-        Some((cost.displacement, source_uv))
+        let ray = ray.comparison.as_ref().ok_or_else(|| {
+            refusal("source cone endpoint lost its complete comparison ray")
+        })?;
+        Some(comparison.endpoint_support_on_cell(
+            domain, recipe, cell.piece, ray, s, t, restricted.uv, work, cancel,
+        )?)
     } else {
         None
     };
     domain.native().face().with_surface(|surface| {
-        let whole_jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
-        let restricted_jet = surface_enclosure(surface, uv_box(restricted.uv), work, cancel)?;
-        let at_joint = relative(
-            surface_enclosure(surface, uv_box(joint.uv), work, cancel)?.position,
-            point,
-        )
-        .map(Interval::neg);
-        let acceleration: Box3 = std::array::from_fn(|i| {
-            whole_jet.duu[i]
-                .mul(whole.ds[0].square())
-                .add(
-                    Interval::point(2.0)
-                        .mul(whole_jet.duv[i])
-                        .mul(whole.ds[0])
-                        .mul(whole.ds[1]),
-                )
-                .add(whole_jet.dvv[i].mul(whole.ds[1].square()))
-                .add(whole_jet.du[i].mul(whole.dss[0]))
-                .add(whole_jet.dv[i].mul(whole.dss[1]))
-        });
-        let mut displacement =
-            source_chord_displacement(at_joint, boundary.displacement, acceleration, s)?;
-        let mut base = super::transport::scalar_surface_jet(
-            surface,
-            uv_box(restricted.uv),
-            direction,
-            work,
-            cancel,
-        )?
-        .0;
+        let mut displacement = source_chord_displacement(
+            ray.at_joint, ray.boundary.displacement, ray.acceleration, s,
+        )?;
+        let (mut base, gradient) = super::transport::scalar_surface_jet(
+            surface, uv_box(restricted.uv), direction, work, cancel,
+        )?;
         if let Some((comparison_displacement, source_uv)) = comparison {
             displacement = hull3(displacement, comparison_displacement);
             base = base.hull(
@@ -2080,35 +2105,24 @@ fn cone_endpoint_support(
                 .0,
             );
         }
-        let boundary_scalar = intersection(
-            dot(direction, boundary.position),
-            super::transport::scalar_surface_jet(
-                surface,
-                uv_box(boundary.uv),
-                direction,
-                work,
-                cancel,
-            )?
-            .0
-            .add(dot(direction, boundary.displacement)),
-        )
-        .ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
         let vertex_scalar = dot(direction, point.map(Interval::point));
         let corrected = intersection(
             source_unit_complement(s)?
                 .mul(vertex_scalar)
-                .add(s.mul(boundary_scalar)),
-            vertex_scalar.hull(boundary_scalar),
+                .add(s.mul(ray.boundary_scalar)),
+            vertex_scalar.hull(ray.boundary_scalar),
         )
         .ok_or_else(|| refusal("source cone scalar interpolation enclosures disagree"))?;
         let scalar_displacement =
             intersection(dot(direction, displacement), corrected.sub(base))
                 .ok_or_else(|| refusal("source cone scalar displacement enclosures disagree"))?;
-        let radial_motion = dot(direction, compose_first(&restricted_jet.du, &restricted_jet.dv, restricted.ds))
-            .abs_upper()
-            * (s.hi - s.lo);
+        // Preserve coefficient cancellation in the scalar covector before
+        // composing with the source chart. This scheduling estimate is not a
+        // smoothness or displacement certificate.
+        let radial_motion = gradient[0].mul(restricted.ds[0])
+            .add(gradient[1].mul(restricted.ds[1])).abs_upper() * (s.hi - s.lo);
         let boundary_motion =
-            dot(direction, boundary.derivative).abs_upper() * s.hi * (t.hi - t.lo);
+            dot(direction, ray.boundary.derivative).abs_upper() * s.hi * (t.hi - t.lo);
         let split_axis = if radial_motion == 0.0 && boundary_motion == 0.0 {
             usize::from(t.hi - t.lo > s.hi - s.lo)
         } else {

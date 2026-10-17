@@ -71,6 +71,15 @@ pub(super) struct UvJointComparison {
     allowance: f64,
 }
 
+/// Fixed chord data for one complete t interval. Only s is restricted by
+/// endpoint refinement; the acceleration always covers the original whole ray.
+#[derive(Clone, Copy)]
+pub(super) struct EndpointComparisonRay {
+    at_joint: Box3,
+    acceleration: Box3,
+    boundary_displacement: Box3,
+}
+
 /// Preparation never turns missing original authority into a generic UV gate.
 pub(super) enum UvComparisonPreparation {
     Prepared(OriginalCornerComparison),
@@ -1198,6 +1207,71 @@ impl UvJointComparison {
             q,
             qt,
             factored_jacobian,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn endpoint_support_ray(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        recipe: &CornerRecipe,
+        piece: Piece,
+        t: Interval,
+        point: [f64; 3],
+        boundary_displacement: Box3,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<EndpointComparisonRay, GeometryError> {
+        work.charge(1, cancel)?;
+        let whole = self.star_jet(domain, recipe, piece, UNIT, t, work, cancel)?;
+        domain.native().face().with_surface(|surface| {
+            let jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
+            let at_joint = centered_source_point(surface, self.joint, point, work, cancel)?
+                .map(Interval::neg);
+            let acceleration = std::array::from_fn(|i| {
+                jet.duu[i].mul(whole.ds[0].square())
+                    .add(Interval::point(2.0).mul(jet.duv[i]).mul(whole.ds[0]).mul(whole.ds[1]))
+                    .add(jet.dvv[i].mul(whole.ds[1].square()))
+                    .add(jet.du[i].mul(whole.dss[0]))
+                    .add(jet.dv[i].mul(whole.dss[1]))
+            });
+            Ok(EndpointComparisonRay { at_joint, acceleration, boundary_displacement })
+        })
+    }
+
+    /// Same whole-ray chord and complete straight UV homotopy as source_cost,
+    /// without rebuilding radial-invariant data or requesting unused Hessians.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn endpoint_support_on_cell(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        recipe: &CornerRecipe,
+        piece: Piece,
+        ray: &EndpointComparisonRay,
+        s: Interval,
+        t: Interval,
+        actual_uv: Box2,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(Box3, Box2), GeometryError> {
+        work.charge(1, cancel)?;
+        let s = source_unit_parameter(s)?;
+        let completed = self.star_jet(domain, recipe, piece, s, t, work, cancel)?;
+        let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
+        let source_uv = hull2(actual_uv, completed.uv);
+        let face_displacement = source_chord_displacement(
+            ray.at_joint, ray.boundary_displacement, ray.acceleration, s,
+        )?;
+        domain.native().face().with_surface(|surface| {
+            let homotopy = crate::parametric::surface_piecewise_first_enclosure(
+                surface, uv_box(source_uv), work, cancel,
+            )?;
+            let physical_shift = compose_first(&homotopy.du, &homotopy.dv, correction.position);
+            let displacement = std::array::from_fn(|i| {
+                let cost = physical_shift[i].abs_upper();
+                face_displacement[i].add(Interval { lo: -cost, hi: cost })
+            });
+            Ok((displacement, source_uv))
         })
     }
 

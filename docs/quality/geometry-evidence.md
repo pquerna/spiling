@@ -79,6 +79,12 @@ refinement. Native scalar facet support preserves coefficient correlation;
 uses uniform affine-family root proofs after original-span C1 qualification,
 not sampled roots or smoothness manufactured by subdivision.
 
+Source-vertex endpoint bounds in `material_link/vertex_transport.rs` reuse
+whole-ray operands only across radial children of the same angular interval;
+angular subdivision invalidates them. The selected realization and full
+closed-domain remainder stay fixed, and pending/active state plus native-query
+scratch coexist within the caller's allowance.
+
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
 `coverage` / `boundary` modules and the display protocol own whole-triangle
 coverage and packed-mesh checks. Display is not a slicing representation.
@@ -117,6 +123,10 @@ must never be converted into display unavailability.
   binds nonzero collars and closed endpoints to actual neighboring material.
   A regular radial product does not discharge births/deaths, pocket floors,
   disappearing voids or cross-occurrence attachment; loop counts do not prove incidence.
+  Rectangle and port covers use closed UV contraction and honest first bounds;
+  only a smooth affine fallback requests Hessians. One actual segment may cover
+  a complete affine patch only when it covers every corner plus the full
+  remainder; corner-wise different edges cannot certify holes or nonconvex gaps.
 - **Final composition:** [`analysis/joint.rs`](../../crates/geometry/src/analysis/joint.rs)
   owns source leaves, union captures and `NativeUnionBindingLedger`. Receipts
   bind source/realization, occurrence, pose, interval/reference, policy and actual
@@ -138,10 +148,10 @@ No partial proof, stale job or failed display grants successful material authori
 The independent tapered fitting completes the unchanged complete-sparse operator
 flow: Compile, fresh emitted-byte replay/export and source-deleted read-only
 reopen, including the hardware workbench. Rounded-housing import/display/sections
-work, but manufacturing remains unqualified: closed lower-rounding capture
-exhausts cumulative native work before whole-part acceptance. Inward-ramp collar
-conditioning and broader mixed-source, tilted-placement, critical-collar and
-support constraints remain. These reference flows do not qualify general geometry.
+work, but manufacturing remains unqualified: a same-source critical-band union
+still lacks accepted original coface/root incidence. Inward-ramp conditioning
+and broader mixed-source, tilted-placement, critical-collar and support
+constraints remain. These reference flows do not qualify general geometry.
 Singular/nonmanifold geometry, unsupported STEP conversions and unproved charts
 retain explicit refusals. General AP242 document/assembly expansion and arbitrary
 freeform finishes are not implied by generic face descriptors.
