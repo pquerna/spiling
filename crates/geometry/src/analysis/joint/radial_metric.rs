@@ -9,10 +9,22 @@
 
 use super::radial_region::certify_actual_polygon_radial_region;
 use super::*;
+use crate::analysis::critical::material_link::{BoundaryCell, BoundaryVisit};
 use crate::analysis::critical::ray_index::RayEdgeIndex;
 use crate::analysis::critical::{ClosedRadialMaterialProduct, RadialRegionKind};
 use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::section::OriginalTrimSource;
+use crate::parametric::{
+    SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_scratch_bytes,
+    surface_functional_enclosures,
+};
+
+const CORRELATED_SUPPORT_SCRATCH_BYTES: usize = surface_functional_scratch_bytes::<1>()
+    + std::mem::size_of::<SurfaceFunctional>()
+    + 2 * std::mem::size_of::<SurfaceFunctionalEnclosure>()
+    + std::mem::size_of::<[[Interval; 2]; 2]>()
+    + std::mem::size_of::<[Interval; 3]>()
+    + std::mem::size_of::<BoundaryCell<'_>>();
 
 #[derive(Debug)]
 pub(in crate::analysis) struct ClosedRadialSlab {
@@ -191,6 +203,23 @@ impl RadialCandidate<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<f64>, GeometryError> {
+        self.distance_with_support(
+            point, inward, f64::INFINITY, work, cancel,
+            &mut |_, enclosure, _, _| Ok(enclosure),
+        )
+    }
+
+    fn distance_with_support(
+        &self,
+        point: [Interval; 2],
+        inward: bool,
+        sufficient_mm: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        support: &mut impl FnMut(
+            [Interval; 2], Interval, &mut GeometryWorkBudget, &AtomicBool,
+        ) -> Result<Interval, GeometryError>,
+    ) -> Result<Option<f64>, GeometryError> {
         let radius = point[0].square().add(point[1].square()).sqrt()?;
         if radius.lo <= 0.0 || !radius.hi.is_finite() {
             return Ok(None);
@@ -213,21 +242,78 @@ impl RadialCandidate<'_> {
                 return Ok(());
             }
             count += 1;
-            let direction = std::array::from_fn(|i| b[i].sub(a[i]));
-            let denominator = cross(point, direction).mul(sign);
+            let direction = std::array::from_fn(|i| b[i].sub(a[i]).mul(sign));
+            let denominator = cross(point, direction);
             let numerator = cross(a, b).mul(sign);
-            if denominator.lo <= 0.0 || numerator.lo <= 0.0 {
+            if numerator.lo <= 0.0 {
                 resolved = false;
                 return Ok(());
             }
-            let scale = numerator.div(denominator)?;
-            let distance = radius.mul(Interval::point(1.0).sub(scale)).abs_upper();
+            let coarse_distance = if denominator.lo > 0.0 {
+                radius.mul(Interval::point(1.0).sub(numerator.div(denominator)?)).abs_upper()
+            } else {
+                f64::INFINITY
+            };
+            let distance = if !coarse_distance.is_finite() || coarse_distance > sufficient_mm {
+                let denominator = support(direction, denominator, work, cancel)?;
+                if denominator.lo <= 0.0 {
+                    resolved = false;
+                    return Ok(());
+                }
+                let scale = numerator.div(denominator)?;
+                radius.mul(Interval::point(1.0).sub(scale)).abs_upper()
+            } else {
+                coarse_distance
+            };
             resolved &= distance.is_finite();
             maximum = maximum.max(distance);
             Ok(())
         })?;
         Ok((resolved && count != 0).then_some(maximum))
     }
+}
+
+/// The same-azimuth denominator is a scalar facet support, not an independent
+/// XY box. Its original source first jet preserves coefficient correlations.
+/// A centered mean-value enclosure is valid across admitted continuous C0
+/// spans; it grants neither smoothness nor a substitute topology certificate.
+fn original_face_support(
+    surface: &monstertruck_modeling::Surface,
+    uv: [[f64; 2]; 2],
+    coordinates: &ActualMaterialCoordinates<'_>,
+    direction: [Interval; 2],
+    coarse: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Interval, GeometryError> {
+    let rows = coordinates.affine_rows();
+    let functional = SurfaceFunctional {
+        direction: std::array::from_fn(|i| {
+            rows[0][i].mul(direction[1]).sub(rows[1][i].mul(direction[0]))
+        }),
+        origin: coordinates.source_anchor().map(Interval::point),
+        offset: cross(coordinates.center_offset_family(), direction),
+    };
+    let [whole] = surface_functional_enclosures(surface, uv, &[functional], work, cancel)?;
+    let center = uv.map(|range| range[0] * 0.5 + range[1] * 0.5);
+    let [at_center] = surface_functional_enclosures(
+        surface, center.map(|value| [value; 2]), &[functional], work, cancel,
+    )?;
+    let delta: [Interval; 2] = std::array::from_fn(|axis| {
+        Interval { lo: uv[axis][0], hi: uv[axis][1] }.sub(Interval::point(center[axis]))
+    });
+    let mean_value = at_center.position
+        .add(whole.du.mul(delta[0]))
+        .add(whole.dv.mul(delta[1]));
+    let lo = coarse.lo.max(whole.position.lo).max(mean_value.lo);
+    let hi = coarse.hi.min(whole.position.hi).min(mean_value.hi);
+    if lo > hi {
+        return Err(error(
+            GeometryErrorCode::ConditioningFailure,
+            "original facet support enclosures are inconsistent",
+        ));
+    }
+    Ok(Interval { lo, hi })
 }
 
 pub(in crate::analysis) fn certify_closed_radial_slab(
@@ -274,7 +360,8 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
         })?;
     let index_allowance = remaining_bytes
         .checked_sub(
-            std::mem::size_of::<RadialCandidate<'_>>() + std::mem::size_of::<ClosedRadialSlab>(),
+            std::mem::size_of::<RadialCandidate<'_>>() + std::mem::size_of::<ClosedRadialSlab>()
+                + CORRELATED_SUPPORT_SCRATCH_BYTES,
         )
         .ok_or_else(|| {
             error(
@@ -359,19 +446,32 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
     let mut maximum = 0.0_f64;
     let product = super::super::critical::material_link::certify_closed_radial_material_product_with_boundary_visitor(
         source, request, coordinates, available, work, cancel,
-        &mut |position, inward, can_refine, work, cancel| {
-            let point = coordinates.position_relative_to_center_family(position)?;
-            let Some(distance) = candidate.distance([point[0], point[1]], inward, work, cancel)?
-                else { return Ok(false); };
+        &mut |cell: BoundaryCell<'_>, inward, can_refine, work, cancel| {
+            let point = coordinates.position_relative_to_center_family(cell.position)?;
+            let distance = if let Some((surface, uv)) = cell.original_face {
+                candidate.distance_with_support(
+                    [point[0], point[1]], inward, target, work, cancel,
+                    &mut |direction, coarse, work, cancel| {
+                        original_face_support(
+                            surface, uv, coordinates, direction, coarse, work, cancel,
+                        )
+                    },
+                )?
+            } else {
+                // An actual G/link image is not an original raw carrier cell.
+                candidate.distance([point[0], point[1]], inward, work, cancel)?
+            };
+            let Some(distance) = distance
+                else { return Ok(BoundaryVisit::RefineActualXy); };
             if distance > target {
                 if !can_refine {
                     return Err(error(GeometryErrorCode::ShapeErrorExceeded,
                         "whole native boundary radial distance exceeds the actual polygon shape policy"));
                 }
-                return Ok(false);
+                return Ok(BoundaryVisit::RefineActualXy);
             }
             maximum = maximum.max(distance);
-            Ok(true)
+            Ok(BoundaryVisit::Accepted)
         },
     )?;
     let Some(product) = product else {
@@ -396,6 +496,59 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_facet_support_preserves_correlated_native_images_between_sample_points() {
+        use monstertruck_modeling::base::*;
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(
+            include_bytes!(
+                "../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+            ),
+            &cancel,
+        ).unwrap();
+        let frame = crate::PlaneFrameMm {
+            origin_mm: [0.0; 3],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        };
+        let rows = ActualMaterialCoordinates::source_rows(&frame).unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let coordinates = ActualMaterialCoordinates::source(
+            &definition, &frame, &rows, [0.6, 1.2], 0.9, &mut work, &cancel,
+        ).unwrap();
+        let face = definition.solid.face_iter().next().unwrap();
+        face.with_surface(|surface| {
+            let uv = [[-0.8, -0.6], [-1.2, -0.6]];
+            let jet = crate::parametric::surface_piecewise_enclosure(
+                surface, uv, &mut work, &cancel,
+            ).unwrap();
+            let point = coordinates.position_relative_to_center_family(jet.position).unwrap();
+            let center = surface.subs(-0.7, -0.9);
+            let center = coordinates.position_relative_to_center_family(
+                [center.x, center.y, center.z].map(Interval::point),
+            ).unwrap();
+            let direction = [center[1].neg(), center[0]];
+            let coarse = cross([point[0], point[1]], direction);
+            let support = original_face_support(
+                surface, uv, &coordinates, direction, coarse, &mut work, &cancel,
+            ).unwrap();
+            for i in 0..=8 {
+                for j in 0..=6 {
+                    let u = uv[0][0] + (uv[0][1] - uv[0][0]) * f64::from(i) / 8.0;
+                    let v = uv[1][0] + (uv[1][1] - uv[1][0]) * f64::from(j) / 6.0;
+                    let native = surface.subs(u, v);
+                    let native = coordinates.position_relative_to_center_family(
+                        [native.x, native.y, native.z].map(Interval::point),
+                    ).unwrap();
+                    let value = cross([native[0], native[1]], direction);
+                    assert!(support.lo <= value.hi && value.lo <= support.hi,
+                        "original native facet image escaped its whole-cell enclosure");
+                }
+            }
+        });
+    }
 
     #[test]
     fn inner_same_ray_maximum_detects_a_long_narrow_hole_arm() {

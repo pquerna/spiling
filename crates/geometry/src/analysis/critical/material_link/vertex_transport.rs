@@ -1907,7 +1907,7 @@ fn boundary_jet(
             let jet = surface_enclosure(surface, uv_box(uv), work, cancel)?;
             Ok(BoundaryJet {
                 position: jet.position,
-                derivative: compose_first(&jet, derivative_uv),
+                derivative: compose_first(&jet.du, &jet.dv, derivative_uv),
                 displacement: [Interval::point(0.0); 3],
                 uv,
             })
@@ -2104,7 +2104,7 @@ fn cone_endpoint_support(
         let scalar_displacement =
             intersection(dot(direction, displacement), corrected.sub(base))
                 .ok_or_else(|| refusal("source cone scalar displacement enclosures disagree"))?;
-        let radial_motion = dot(direction, compose_first(&restricted_jet, restricted.ds))
+        let radial_motion = dot(direction, compose_first(&restricted_jet.du, &restricted_jet.dv, restricted.ds))
             .abs_upper()
             * (s.hi - s.lo);
         let boundary_motion =
@@ -2969,10 +2969,10 @@ fn collar_graph_transverse(
             work,
             cancel,
         )?;
-        let boundary_t = compose_first(&boundary, uv.derivative);
+        let boundary_t = compose_first(&boundary.du, &boundary.dv, uv.derivative);
         let d_t: Box3 = std::array::from_fn(|i| end.spatial.derivative[i].sub(boundary_t[i]));
-        let f_t = compose_first(&patch, a_t);
-        let f_w = compose_first(&patch, end.offset);
+        let f_t = compose_first(&patch.du, &patch.dv, a_t);
+        let f_w = compose_first(&patch.du, &patch.dv, end.offset);
         let g_t = std::array::from_fn(|i| f_t[i].add(Interval { lo: 0.0, hi: 1.0 }.mul(d_t[i])));
         let g_w = std::array::from_fn(|i| {
             f_w[i].sub(Interval { lo: 0.0, hi: 1.0 }.mul(cross_section.boundary_displacement[i]))

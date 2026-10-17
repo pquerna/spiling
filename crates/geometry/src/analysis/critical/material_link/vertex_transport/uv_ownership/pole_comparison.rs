@@ -226,7 +226,7 @@ fn raw_boundary(
             work,
             cancel,
         )?;
-        let margin_shift = compose_first(&margin_jet, margin_box);
+        let margin_shift = compose_first(&margin_jet.du, &margin_jet.dv, margin_box);
         Ok(RawBoundary {
             source_uv: boundary.uv,
             position: jet.position,

@@ -3,6 +3,10 @@
 // Licensed under the Open Software License version 3.0
 
 use super::super::*;
+use crate::parametric::{
+    SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_enclosures,
+    surface_functional_scratch_bytes,
+};
 
 /// Optional outer-meridian restriction in the actual stored projection frame.
 #[derive(Clone, Copy, Debug)]
@@ -90,11 +94,94 @@ struct CensusRestriction<'a> {
 struct FiberCell {
     uv: [[f64; 2]; 2],
     depth: u8,
+    trim_inside: bool,
+}
+
+enum FiberSearchJet {
+    Affine([SurfaceFunctionalEnclosure; 4]),
+    Spatial(SurfaceEnclosure),
+}
+
+impl FiberSearchJet {
+    fn excluded(&self, fiber: &OriginalFiber, restriction: CensusRestriction<'_>) -> bool {
+        match self {
+            Self::Affine(jets) => {
+                jets[..2].iter().any(|jet| !jet.position.contains_zero())
+                    || jets[2].position.hi < fiber.min_forward
+                    || !overlaps(jets[3].position, restriction.request.height_interval_mm)
+            }
+            Self::Spatial(jet) => fiber_image_excluded(
+                fiber, jet.position, restriction.height, restriction.request,
+            ),
+        }
+    }
+
+    fn jacobian(&self, fiber: &OriginalFiber) -> [[Interval; 2]; 2] {
+        match self {
+            Self::Affine(jets) => std::array::from_fn(|i| [jets[i].du, jets[i].dv]),
+            Self::Spatial(jet) => fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]),
+        }
+    }
+}
+
+fn fiber_equations(fiber: &OriginalFiber) -> [SurfaceFunctional; 2] {
+    std::array::from_fn(|i| SurfaceFunctional {
+        direction: fiber.rows[i],
+        origin: fiber.center.map(Interval::point),
+        offset: fiber.offsets[i],
+    })
+}
+
+fn fiber_search_jet(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    smooth: bool,
+    fiber: &OriginalFiber,
+    height: HeightFunctional,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<FiberSearchJet, GeometryError> {
+    if fiber.core.is_some() {
+        // The nonlinear meridian restriction still needs its spatial image.
+        let jet = if smooth {
+            surface_enclosure(surface, uv, work, cancel)?
+        } else {
+            crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
+        };
+        return Ok(FiberSearchJet::Spatial(jet));
+    }
+    let [first, second] = fiber_equations(fiber);
+    let jets = surface_functional_enclosures(
+        surface,
+        uv,
+        &[
+            first,
+            second,
+            SurfaceFunctional {
+                direction: fiber.forward,
+                origin: fiber.center.map(Interval::point),
+                offset: fiber.forward_offset,
+            },
+            SurfaceFunctional {
+                direction: height.direction,
+                origin: [Interval::point(0.0); 3],
+                offset: height.offset,
+            },
+        ],
+        work,
+        cancel,
+    )?;
+    Ok(FiberSearchJet::Affine(jets))
 }
 
 const FIBER_STACK_CAPACITY: usize = MAX_DEPTH as usize + 1;
 const FIBER_STACK_BYTES: usize = std::mem::size_of::<[Option<FiberCell>; FIBER_STACK_CAPACITY]>()
-    + std::mem::size_of::<FiberRoots>();
+    + std::mem::size_of::<FiberRoots>()
+    + std::mem::size_of::<FiberSearchJet>()
+    + surface_functional_scratch_bytes::<4>()
+    + surface_functional_scratch_bytes::<2>()
+    + std::mem::size_of::<[SurfaceFunctional; 4]>()
+    + std::mem::size_of::<[SurfaceFunctionalEnclosure; 2]>();
 
 /// Census every original face and every original parameter span. Whole-image
 /// exclusions and strictly owned interval roots form a complete cover. No root
@@ -250,7 +337,7 @@ fn census_original_fiber(
                 // original C0 span. Subdivision cannot manufacture C1 authority.
                 let smooth = surface_parameter_span_smooth(surface, span, work, cancel)?;
                 let mut pending = 1_usize;
-                stack[0] = Some(FiberCell { uv: span, depth: 0 });
+                stack[0] = Some(FiberCell { uv: span, depth: 0, trim_inside: false });
                 while pending != 0 {
                     work.charge(1, cancel)?;
                     pending -= 1;
@@ -262,36 +349,61 @@ fn census_original_fiber(
                     })?;
                     active_uv = cell.uv;
                     active_depth = cell.depth;
-                    phase = "original root trim classification";
-                    if domain.classify(cell.uv, work, cancel)? == TrimClassification::Outside {
+                    phase = "original root position/first matrix";
+                    // Affine fiber equations and their native first matrix
+                    // need no full spatial/Hessian jet on every search cell.
+                    // Original C1 qualification remains mandatory below.
+                    let jet = fiber_search_jet(
+                        surface, cell.uv, smooth, fiber, restriction.height, work, cancel,
+                    );
+                    let jet = match jet {
+                        Ok(jet) => jet,
+                        Err(error) if matches!(error.code,
+                            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                        ) => return Err(error),
+                        Err(error) => {
+                            // Preserve the former trim-first behavior for a
+                            // carrier pole/interface wholly outside original F.
+                            // Resource/cancellation failures are never retried
+                            // or discarded by this optional exclusion query.
+                            phase = "failed original carrier trim exclusion";
+                            let classification = domain.classify(cell.uv, work, cancel);
+                            if classification? == TrimClassification::Outside {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    if jet.excluded(fiber, restriction) {
                         continue;
                     }
-                    phase = "original root position/first matrix";
-                    let jet = if smooth {
-                        surface_enclosure(surface, cell.uv, work, cancel)?
-                    } else {
-                        crate::parametric::surface_piecewise_enclosure(
-                            surface, cell.uv, work, cancel,
-                        )?
-                    };
-                    if fiber_image_excluded(
-                        fiber,
-                        jet.position,
-                        restriction.height,
-                        restriction.request,
-                    ) {
-                        continue;
+                    // A complete carrier image also encloses its entire
+                    // trimmed subset. Exclude it before asking winding about
+                    // curved trims which cannot contribute a physical root.
+                    // An Inside proof is inherited only by subset children.
+                    let mut trim_inside = cell.trim_inside;
+                    if !trim_inside {
+                        phase = "original root trim classification";
+                        let classification = domain.classify(cell.uv, work, cancel);
+                        match classification? {
+                            TrimClassification::Outside => continue,
+                            TrimClassification::Inside => trim_inside = true,
+                            TrimClassification::Boundary => {}
+                        }
                     }
                     if !smooth {
                         return Ok(false);
                     }
                     phase = "uniform affine-family Krawczyk root";
-                    match fiber_krawczyk(surface, cell.uv, &jet, fiber, work, cancel)? {
+                    let root = fiber_krawczyk_jacobian(
+                        surface, cell.uv, jet.jacobian(fiber), fiber, work, cancel,
+                    );
+                    match root? {
                         FiberNewton::Excluded => continue,
                         FiberNewton::Enclosure { uv, unique: true } => {
                             phase = "strict original root ownership/crossing";
                             active_uv = uv;
-                            match qualify_fiber_root(
+                            let root = qualify_fiber_root(
                                 surface,
                                 &domain,
                                 uv,
@@ -300,7 +412,8 @@ fn census_original_fiber(
                                 face.orientation(),
                                 work,
                                 cancel,
-                            )? {
+                            );
+                            match root? {
                                 QualifiedRoot::Excluded => continue,
                                 QualifiedRoot::Unresolved => return Ok(false),
                                 QualifiedRoot::Owned { inward, forward } => {
@@ -336,13 +449,15 @@ fn census_original_fiber(
                         stack[pending] = Some(FiberCell {
                             uv,
                             depth: cell.depth + 1,
+                            trim_inside,
                         });
                         pending += 1;
                     }
                 }
             }
             Ok(true)
-        }).map_err(|error| work.annotate_error(error, before, format_args!(
+        });
+        let resolved = resolved.map_err(|error| work.annotate_error(error, before, format_args!(
             "original cylinder/fiber census face={face_index} phase={phase} uv={active_uv:?} depth={active_depth}"
         )))?;
         if !resolved {
@@ -505,8 +620,21 @@ pub(super) fn fiber_krawczyk(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<FiberNewton, GeometryError> {
+    fiber_krawczyk_jacobian(
+        surface, uv, fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]),
+        fiber, work, cancel,
+    )
+}
+
+fn fiber_krawczyk_jacobian(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    jacobian: [[Interval; 2]; 2],
+    fiber: &OriginalFiber,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<FiberNewton, GeometryError> {
     work.charge(1, cancel)?;
-    let jacobian = fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]);
     let middle = jacobian.map(|row| row.map(Interval::mid));
     let determinant = middle[0][0] * middle[1][1] - middle[0][1] * middle[1][0];
     if !determinant.is_finite() || determinant == 0.0 {
@@ -528,8 +656,10 @@ pub(super) fn fiber_krawczyk(
         return Ok(FiberNewton::Unresolved);
     }
     let center = uv.map(|v| v[0] * 0.5 + v[1] * 0.5);
-    let at_center = surface_enclosure(surface, center.map(|v| [v, v]), work, cancel)?;
-    let value = fiber_value(fiber, at_center.position);
+    let at_center = surface_functional_enclosures(
+        surface, center.map(|v| [v, v]), &fiber_equations(fiber), work, cancel,
+    )?;
+    let value = at_center.map(|jet| jet.position);
     let remainder: [[Interval; 2]; 2] = std::array::from_fn(|i| {
         std::array::from_fn(|j| {
             (0..2).fold(Interval::point(if i == j { 1.0 } else { 0.0 }), |s, k| {

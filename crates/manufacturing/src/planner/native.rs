@@ -13,7 +13,7 @@ use spiling_contracts::manufacturing::program_coordinates::{
 };
 use spiling_contracts::manufacturing::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -524,13 +524,12 @@ pub(super) fn collect_span(
     } = *request;
     // The map owns one preparation per distinct definition, regardless of how
     // many occurrences borrow it. Its retained bytes already include proofs.
-    let resident_bytes = sources
-        .values()
-        .fold(retained_output_bytes, |bytes, source| {
-            bytes.saturating_add(source.retained_bytes())
-        });
+    let resident_bytes = sources.values().fold(
+        retained_output_bytes.saturating_add(admission.native_capture_proposal_bytes()),
+        |bytes, source| bytes.saturating_add(source.retained_bytes()),
+    );
     if state.ready.is_empty() {
-        let partition_end = span_end(schedule, admission, input.intent, index, cancel)?;
+        let partition_end = span_end(schedule, admission, input.intent, index, surface_work, cancel)?;
         let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
         state.sizing.begin_partition(partition_end_z_bits);
         let end = state.sizing.limit_end(index, partition_end);
@@ -617,7 +616,7 @@ pub(super) fn collect_span(
                     ));
                 }
                 let partition_end =
-                    span_end(schedule, admission, input.intent, next_index, cancel)?;
+                    span_end(schedule, admission, input.intent, next_index, surface_work, cancel)?;
                 let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
                 state.sizing.begin_partition(partition_end_z_bits);
                 let next_end = state.sizing.limit_end(next_index, partition_end);
@@ -1833,15 +1832,25 @@ fn span_end(
     admission: &preflight::Admission,
     intent: &ManufacturingIntent,
     index: u32,
+    proposal_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<u32, ManufacturingError> {
     // Event partitions propose spans, never authorize reuse. capture_base
     // requires exact invariance or a complete closed radial material product;
     // varying realized finishes retain their separate per-layer invariance gate.
-    let mut boundaries = BTreeSet::new();
+    let mut end = schedule.len() as u32;
+    let mut boundary = |candidate: usize| {
+        let candidate = candidate as u32;
+        if candidate > index {
+            end = end.min(candidate);
+        }
+    };
+    // Charge an upper bound on each binary search as well as the band scan.
+    // This is the same cumulative planner work budget used downstream.
+    let search_work = (usize::BITS - schedule.len().leading_zeros()) as usize + 1;
     for event in &admission.horizontal_events {
-        check_cancel(cancel)?;
-        boundaries.insert(schedule.partition_point(|layer| layer.z <= *event) as u32);
+        preflight::charge_capture_proposal_work(proposal_work, search_work + 1, cancel)?;
+        boundary(schedule.partition_point(|layer| layer.z <= *event));
         if let SupportPolicy::Breakaway {
             z_gap_mm,
             interface_thickness_mm,
@@ -1849,23 +1858,31 @@ fn span_end(
         } = intent.recipe.supports
         {
             for stop in [event - z_gap_mm, event - z_gap_mm - interface_thickness_mm] {
-                boundaries.insert(schedule.partition_point(|layer| layer.z <= stop) as u32);
+                preflight::charge_capture_proposal_work(proposal_work, search_work, cancel)?;
+                boundary(schedule.partition_point(|layer| layer.z <= stop));
             }
         }
     }
-    for band in &admission.native_event_bands {
-        if band[0] != band[1] {
-            // Isolate the adjacent neighborhood instead of widening an exact
-            // regular-span reuse certificate through its uncertain contacts.
-            boundaries.insert(schedule.partition_point(|layer| layer.z < band[0]) as u32);
-            boundaries.insert(schedule.partition_point(|layer| layer.lower_z <= band[1]) as u32);
+    for (band, proposal_only) in admission.native_event_bands.iter().map(|band| (band, false))
+        .chain(admission.native_capture_proposal_bands.iter().map(|band| (band, true)))
+    {
+        preflight::charge_capture_proposal_work(proposal_work, 1, cancel)?;
+        if proposal_only || band[0] != band[1] {
+            preflight::charge_capture_proposal_work(proposal_work, search_work * 2, cancel)?;
+            let first = schedule.partition_point(|layer| layer.z < band[0]);
+            let after = schedule.partition_point(|layer| layer.lower_z <= band[1]);
+            boundary(first);
+            boundary(after);
+            // Even an exact literal candidate may touch two CLOSED layers.
+            // Analyze each existing contact layer independently rather than
+            // placing a multi-layer reference on the candidate itself. This
+            // changes no physical layer, material event or proof obligation.
+            if proposal_only && first <= index as usize && (index as usize) < after {
+                boundary(index as usize + 1);
+            }
         }
     }
-    Ok(boundaries
-        .range((index + 1)..)
-        .next()
-        .copied()
-        .unwrap_or(schedule.len() as u32))
+    Ok(end)
 }
 
 fn split_layer(
@@ -2858,5 +2875,63 @@ mod allowance_tests {
             admit_bytes(usize::MAX, 1, 0).unwrap_err().code,
             ManufacturingErrorCode::ResourceLimit
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_proposal_tests {
+    use super::*;
+
+    fn admission(band: [f64; 2]) -> preflight::Admission {
+        preflight::Admission {
+            bounds: None,
+            horizontal_events: Vec::new(),
+            native_bounds: BTreeMap::new(),
+            native_event_bands: Vec::new(),
+            native_capture_proposal_bands: vec![band],
+            material_domains: BTreeMap::new(),
+            surface_fields: BTreeMap::new(),
+            report: PreflightReport {
+                input_revision: spiling_contracts::project::ProjectRevision(1),
+                disposition: PreflightDisposition::Admitted,
+                software_only: true,
+                checks: Vec::new(),
+            },
+            geometry_work: spiling_geometry::GeometryWorkBudget::new(
+                super::super::MAX_BOOLEAN_PAIRS as u64,
+            ),
+        }
+    }
+
+    fn schedule() -> Vec<LayerElevation> {
+        (0..5).map(|index| {
+            let lower_z = index as f64 * 0.5;
+            LayerElevation {
+                lower_z,
+                z: lower_z + 0.5,
+                sample: lower_z + 0.25,
+                height: 0.5,
+            }
+        }).collect()
+    }
+
+
+    #[test]
+    fn capture_proposal_search_preserves_cumulative_work_limits_and_cancellation() {
+        let admission = admission([1.0, 1.0]);
+        let schedule = schedule();
+        let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+            "../../../../fixtures/manufacturing/complete-sparse.intent.json"
+        )).unwrap();
+        let mut work = super::super::MAX_BOOLEAN_PAIRS;
+        assert_eq!(span_end(
+            &schedule, &admission, &intent, 0, &mut work, &AtomicBool::new(false),
+        ).unwrap_err().code, ManufacturingErrorCode::ResourceLimit);
+        assert_eq!(work, super::super::MAX_BOOLEAN_PAIRS);
+        let mut work = 17;
+        assert_eq!(span_end(
+            &schedule, &admission, &intent, 0, &mut work, &AtomicBool::new(true),
+        ).unwrap_err().code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(work, 17);
     }
 }

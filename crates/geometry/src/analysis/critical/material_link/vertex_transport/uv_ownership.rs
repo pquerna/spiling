@@ -1297,7 +1297,7 @@ impl UvJointComparison {
                 work,
                 cancel,
             )?;
-            let physical_shift = compose_first(&homotopy, correction.position);
+            let physical_shift = compose_first(&homotopy.du, &homotopy.dv, correction.position);
             let homotopy_mm = length(physical_shift)?.hi;
             let transport_mm = self.transport.map_or(0.0, |bounds| {
                 bounds[0].position_error_mm.max(bounds[1].position_error_mm)

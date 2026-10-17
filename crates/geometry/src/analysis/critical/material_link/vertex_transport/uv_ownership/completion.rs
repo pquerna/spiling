@@ -204,7 +204,7 @@ pub(super) fn propose(
         let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
         let cheap_enough = domain.native().face().with_surface(|surface| {
             let jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
-            let position = compose_first(&jet, correction.position);
+            let position = compose_first(&jet.du, &jet.dv, correction.position);
             // Integral Hessian identity bounds the change of the surface first
             // jet along the WHOLE UV homotopy. Include the derivative correction
             // itself, not just the endpoint positional displacement.

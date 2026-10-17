@@ -15,10 +15,20 @@ pub(super) struct Admission {
     pub horizontal_events: Vec<f64>,
     pub native_bounds: BTreeMap<OccurrenceId, AabbMm>,
     pub native_event_bands: Vec<[f64; 2]>,
+    /// Literal native candidates delimit queries only, never physical planes.
+    pub native_capture_proposal_bands: Vec<[f64; 2]>,
     pub material_domains: BTreeMap<OccurrenceId, [[f64; 2]; 2]>,
     pub surface_fields: BTreeMap<OccurrenceId, Vec<surface::PreparedFinish>>,
     pub report: PreflightReport,
     pub geometry_work: spiling_geometry::GeometryWorkBudget,
+}
+
+impl Admission {
+    pub(super) fn native_capture_proposal_bytes(&self) -> usize {
+        self.native_capture_proposal_bands
+            .capacity()
+            .saturating_mul(std::mem::size_of::<[f64; 2]>())
+    }
 }
 
 pub fn preflight(
@@ -38,6 +48,7 @@ pub(super) fn admit<'a>(
         horizontal_events: Vec::new(),
         native_bounds: BTreeMap::new(),
         native_event_bands: Vec::new(),
+        native_capture_proposal_bands: Vec::new(),
         material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
         geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_BOOLEAN_PAIRS as u64),
@@ -448,6 +459,7 @@ pub(super) fn resolve_native_events(
     input: &CompilerInput<'_>,
     admission: &mut Admission,
     geometry_sources: &super::PreparedGeometrySources<'_>,
+    proposal_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
@@ -456,10 +468,17 @@ pub(super) fn resolve_native_events(
         maximum_shape_error_mm: input.intent.recipe.native_shape_error_mm,
     };
     let mut completed_bounds: Option<AabbMm> = None;
-    let query_bytes = super::geometry_query_limit(geometry_sources)?;
+    let query_pool_bytes = super::geometry_query_limit(geometry_sources)?;
     for occurrence in input.occurrences {
         check_cancel(cancel)?;
         let bounds = admission.native_bounds[&occurrence.occurrence_id];
+        let query_bytes = query_pool_bytes
+            .checked_sub(admission.native_capture_proposal_bytes())
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposals exhaust shared query capacity",
+            ))?;
         let analysis = geometry_sources[&occurrence.definition_id].analyze_placed_height_domain(
             occurrence.pose,
             [bounds.min[2], bounds.max[2]],
@@ -481,6 +500,64 @@ pub(super) fn resolve_native_events(
                 ),
             ));
         }
+        // Covered literal F candidates remain deferred G obligations. Preserve
+        // their neighborhoods as query-sizing hints without adding slicing
+        // planes or treating a candidate as an actual material critical root.
+        let candidates = analysis.event_brackets_mm();
+        let count = admission.native_capture_proposal_bands.len()
+            .checked_add(candidates.len())
+            .filter(|count| *count <= MAX_PRINT_LAYERS as usize)
+            .ok_or_else(|| error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposal count exceeds the layer schedule budget",
+            ))?;
+        for bracket in candidates {
+            charge_capture_proposal_work(proposal_work, 1, cancel)?;
+            if !bracket.iter().all(|z| z.is_finite()) || bracket[0] > bracket[1] {
+                return Err(error(
+                    ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                    "native capture proposal has an invalid literal event bracket",
+                ));
+            }
+        }
+        let growing = count > admission.native_capture_proposal_bands.capacity();
+        let replacement_bytes = if growing {
+            count.saturating_mul(std::mem::size_of::<[f64; 2]>())
+        } else {
+            0
+        };
+        if analysis.retained_bytes()
+            .saturating_add(admission.native_capture_proposal_bytes())
+            .saturating_add(replacement_bytes) > query_pool_bytes
+        {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposals exceed coexisting height-query capacity",
+            ));
+        }
+        charge_capture_proposal_work(
+            proposal_work,
+            candidates.len().saturating_add(if growing {
+                admission.native_capture_proposal_bands.len()
+            } else { 0 }),
+            cancel,
+        )?;
+        admission.native_capture_proposal_bands
+            .try_reserve_exact(candidates.len())
+            .map_err(|_| error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposal allocation refused",
+            ))?;
+        if admission.native_capture_proposal_bands.capacity() > MAX_PRINT_LAYERS as usize
+            || analysis.retained_bytes()
+                .saturating_add(admission.native_capture_proposal_bytes()) > query_pool_bytes
+        {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposal allocator exceeds coexisting capacity",
+            ));
+        }
+        admission.native_capture_proposal_bands.extend_from_slice(candidates);
         // The realization's support receipt, not raw-source critical candidates,
         // owns the material terminals. Covered raw candidates remain obligations
         // of the geometry capture rather than extra mandatory slicing planes.
@@ -562,6 +639,21 @@ pub(super) fn resolve_native_events(
         }
     }
     admission.bounds = completed_bounds;
+    Ok(())
+}
+
+pub(super) fn charge_capture_proposal_work(
+    work: &mut usize,
+    amount: usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    *work = work.checked_add(amount)
+        .filter(|work| *work <= super::MAX_BOOLEAN_PAIRS)
+        .ok_or_else(|| error(
+            ManufacturingErrorCode::ResourceLimit,
+            "cumulative native capture proposal work exceeded",
+        ))?;
     Ok(())
 }
 

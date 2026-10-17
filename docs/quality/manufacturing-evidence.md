@@ -48,6 +48,12 @@ Multi-layer proposals shorten before a typed singleton shape-error path may spli
 a layer. Unsupported, indeterminate, conditioning, resource and cancellation
 failures propagate rather than masquerading as successful refinement.
 
+Literal source-height event bands also delimit native capture proposals without
+creating physical slice planes. A source-F event is not automatically a selected-G
+material event. Contacting physical layers use singleton captures; refinements
+recompute proposals from the same schedule. Retained proposal storage coexists
+with source promotion and later query scratch; all allowance calculations charge it.
+
 ## Source material and reuse
 
 [`PreparedGeometrySource` → `PreparedMaterialSource`](../../crates/geometry/src/analysis/material_source.rs)
@@ -118,15 +124,19 @@ Read-only inspection/export is allowed; compilation publication is not.
 ## Current support and refusal boundary
 
 Current identities are project5/manufacturing6/surface3, planner9, emitter/verifier4
-and SPLR3; executable constants and exact native pin remain authoritative. Box
-save/source-deleted reopen/replay/export and cylinder/mapped-image/replay consumers
-are exercised, **not** general manufacturing or G0–G3 qualification.
-Qualification remains open for generated-cylinder bounds, mixed-source contact,
-tilted placement/critical collars and support; the complete generated parity corpus
-is not available. Known fitting/housing blockers include cumulative native work,
-face-27 radial-sign proof and inward-ramp collar conditioning.
-Raw import/display/sections are not Compile success; specialized finishes remain
-narrow. Thin-feature/incidence/conditioning/work failures retain typed refusals.
+and SPLR3; executable constants and exact native pin remain authoritative.
+Box and independent tapered-fitting operators complete Compile, fresh replay/export,
+save and source-deleted fresh reopen; the fitting also completes the hardware
+workbench flow. Cylinder/through-hole replay retains nominal material and protected
+voids. These are **not** general manufacturing or G0–G3 qualification.
+Rounded-housing compilation still exhausts cumulative native work during closed
+lower-rounding capture. Existing native/image consumers can also exhaust
+[`source-vertex scalar support`](../../crates/geometry/src/analysis/critical/material_link/transport.rs)
+during directional bounds, before finish evaluation. Generated-cylinder bounds,
+mixed-source contact, tilted placement/critical collars, inward-ramp conditioning
+and support remain open; the complete generated parity corpus is not available.
+Raw inspection is not Compile success. Specialized finishes remain narrow, and
+thin-feature/incidence/conditioning/work failures retain typed refusals.
 Do not repin tests, relax limits or reinterpret failures as acceptance.
 
 Consumer-property entry points: [native planner tests](../../crates/manufacturing/src/planner/native_tests.rs)

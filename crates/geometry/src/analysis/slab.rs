@@ -517,37 +517,71 @@ impl HeightFunctional {
         self.height(position.map(Interval::point))
     }
 }
+pub(super) const HEIGHT_CONTRACTION_SCRATCH_BYTES: usize =
+    crate::parametric::surface_functional_scratch_bytes::<1>()
+        + std::mem::size_of::<crate::parametric::SurfaceFunctional>()
+        + 2 * std::mem::size_of::<crate::parametric::SurfaceFunctionalEnclosure>()
+        + std::mem::size_of::<crate::parametric::SurfaceEnclosure>()
+        + std::mem::size_of::<([[f64; 2]; 2], HeightFunctional, [f64; 2])>();
+
+/// Contract the necessary height preimage, then return a complete spatial jet.
+pub(super) fn clip_height_box(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    functional: HeightFunctional,
+    heights: [f64; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
+    let Some(uv) = clip_height_parameter_box(
+        surface, uv, functional, heights, work, cancel,
+    )? else {
+        return Ok(None);
+    };
+    let jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
+    Ok(Some((uv, jet)))
+}
+
 /// Interval Newton contraction in a height-monotone UV direction. Evaluation
 /// on the midpoint *strip* retains every value of the other parameter, so this
 /// is a whole-domain exclusion/contractor, not a sampled height test.
 /// Continuous-source images and one-sided first derivatives suffice; this
 /// scalar mean-value bound grants no C1, Hessian, normal or regularity authority.
-pub(super) fn clip_height_box(
+pub(super) fn clip_height_parameter_box(
     surface: &Surface,
     mut uv: [[f64; 2]; 2],
     functional: HeightFunctional,
     heights: [f64; 2],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
-    let mut jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
+) -> Result<Option<[[f64; 2]; 2]>, GeometryError> {
+    let scalar = crate::parametric::SurfaceFunctional {
+        direction: functional.direction,
+        origin: [Interval::point(0.0); 3],
+        offset: functional.offset,
+    };
+    let [mut bound] = crate::parametric::surface_functional_enclosures(
+        surface, uv, &[scalar], work, cancel,
+    )?;
     for axis in 0..2 {
-        let h = functional.height(jet.position);
+        let h = bound.position;
         if h.hi < heights[0] || h.lo > heights[1] {
             return Ok(None);
         }
         if heights[0] <= h.lo && h.hi <= heights[1] {
-            return Ok(Some((uv, jet)));
+            break;
         }
-        let derivative = functional.dot(if axis == 0 { jet.du } else { jet.dv });
+        let derivative = if axis == 0 { bound.du } else { bound.dv };
         if derivative.contains_zero() {
             continue;
         }
         let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
         let mut strip = uv;
         strip[axis] = [mid, mid];
-        let value = crate::parametric::surface_piecewise_enclosure(surface, strip, work, cancel)?;
-        let height = functional.height(value.position);
+        let [value] = crate::parametric::surface_functional_enclosures(
+            surface, strip, &[scalar], work, cancel,
+        )?;
+        let height = value.position;
         let contracted = Interval::point(mid).add(
             Interval {
                 lo: heights[0],
@@ -563,10 +597,15 @@ pub(super) fn clip_height_box(
             return Ok(None);
         }
         if uv[axis] != previous {
-            jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
+            [bound] = crate::parametric::surface_functional_enclosures(
+                surface, uv, &[scalar], work, cancel,
+            )?;
         }
     }
-    Ok(Some((uv, jet)))
+    if bound.position.hi < heights[0] || bound.position.lo > heights[1] {
+        return Ok(None);
+    }
+    Ok(Some(uv))
 }
 // Error-free transforms preserve a zero-width event only when binary64
 // operations really are exact. They are not magnitude-based snapping.
@@ -3596,7 +3635,7 @@ fn recover_critical_slab(
         ])?
         .hi
     };
-    if (sample_inside || section.loops.is_empty()) && one_sided <= request.native_shape_error_mm {
+    if sample_inside || section.loops.is_empty() {
         // Retain every already-proved original endpoint face, the immutable
         // sample, and the new complete native complex under one cumulative cap.
         let reserved = source_retained_bytes
@@ -3613,6 +3652,16 @@ fn recover_critical_slab(
             work,
             cancel,
         )? {
+            // A completed collar already supports this conservative metric.
+            // Refine an overlarge proposal instead of constructing a stronger
+            // critical cover just to seek a tighter bound. A failed collar
+            // remains indeterminate; it never authorizes refinement.
+            if one_sided > request.native_shape_error_mm {
+                return Err(error(
+                    GeometryErrorCode::ShapeErrorExceeded,
+                    "certified native collar slab shape bound exceeds policy",
+                ));
+            }
             let occupied = Some(occupied_envelope_from_definition_bounds(
                 definition,
                 section,

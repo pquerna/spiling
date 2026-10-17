@@ -64,6 +64,21 @@ census and complete crossing certification remain mandatory. Native carrier
 callbacks hold a non-reentrant mutex: comparison queries that acquire the same
 carrier must finish before entering `Face::with_surface`.
 
+[`parametric.rs`](../../crates/geometry/src/parametric.rs) separates batched
+`SurfaceFunctionalEnclosure` and spatial `SurfaceFirstEnclosure` from full
+second-order jets. Continuous one-sided first bounds are not C1 or Hessian
+authority; strict smoothness and second-order consumers retain their own queries.
+Native work is debited on refusal and cancellation as well as success.
+
+Closed-height contraction in `analysis/slab.rs` computes a necessary parameter
+cover, not occupancy or containment. Only proved whole-box height containment
+and trim `Inside` survive subset refinement. The radial atlas refines actual XY
+metrics in XY, while unresolved radius/determinant obligations retain spatial
+refinement. Native scalar facet support preserves coefficient correlation;
+[`material_link/fiber.rs`](../../crates/geometry/src/analysis/critical/material_link/fiber.rs)
+uses uniform affine-family root proofs after original-span C1 qualification,
+not sampled roots or smoothness manufactured by subdivision.
+
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
 `coverage` / `boundary` modules and the display protocol own whole-triangle
 coverage and packed-mesh checks. Display is not a slicing representation.
@@ -120,12 +135,13 @@ Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
 
-Broad raw import/mesh/section inspection includes the tapered fitting and rounded
-housing, but their manufacturing remains unqualified: fitting exhausts the
-cumulative geometry-work allowance; housing has a closed-source vertex radial-sign
-refusal on original face 27. Inward-ramp collar conditioning is also unresolved.
-Additional mixed-source, tilted-placement, critical-collar and support constraints
-remain; a working box or cylinder workflow does not generalize to those cases.
+The independent tapered fitting completes the unchanged complete-sparse operator
+flow: Compile, fresh emitted-byte replay/export and source-deleted read-only
+reopen, including the hardware workbench. Rounded-housing import/display/sections
+work, but manufacturing remains unqualified: closed lower-rounding capture
+exhausts cumulative native work before whole-part acceptance. Inward-ramp collar
+conditioning and broader mixed-source, tilted-placement, critical-collar and
+support constraints remain. These reference flows do not qualify general geometry.
 Singular/nonmanifold geometry, unsupported STEP conversions and unproved charts
 retain explicit refusals. General AP242 document/assembly expansion and arbitrary
 freeform finishes are not implied by generic face descriptors.

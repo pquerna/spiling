@@ -16,6 +16,22 @@ pub(in crate::analysis) enum RadialRegionKind {
     Annulus,
 }
 
+/// A failed boundary theorem selects only a refinement goal, never authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::analysis) enum BoundaryVisit {
+    Accepted,
+    RefineSpatial,
+    RefineActualXy,
+}
+
+/// Raw F retains its original carrier and UV box for correlated scalar bounds.
+/// Swept G/link images deliberately carry no replacement carrier.
+#[derive(Clone, Copy)]
+pub(in crate::analysis) struct BoundaryCell<'a> {
+    pub position: [Interval; 3],
+    pub original_face: Option<(&'a Surface, [[f64; 2]; 2])>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(in crate::analysis) struct ClosedRadialMaterialProduct {
     coordinates: MaterialCoordinatesCapture,
@@ -66,12 +82,12 @@ pub(in crate::analysis) fn certify_closed_radial_material_product(
 ) -> Result<Option<ClosedRadialMaterialProduct>, GeometryError> {
     certify_closed_radial_material_product_with_boundary_visitor(
         source, request, coordinates, remaining_bytes, work, cancel,
-        &mut |_, _, _, _, _| Ok(true),
+        &mut |_: BoundaryCell<'_>, _, _, _, _| Ok(BoundaryVisit::Accepted),
     )
 }
 
-/// The visitor may impose an independent stricter boundary theorem. False
-/// requests subdivision; its success never replaces any atlas/census premise.
+/// The visitor may impose an independent stricter boundary theorem. Its
+/// refinement goal schedules subdivision; success replaces no atlas/census premise.
 /// Boxes conservatively cover original F and all-lambda actual G, not an exact
 /// partition. Only cells meeting the closed scope reach the visitor.
 /// The third argument is `can_refine`: false means this exact active cell has
@@ -86,9 +102,9 @@ pub(in crate::analysis) fn certify_closed_radial_material_product_with_boundary_
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-    visitor: &mut impl FnMut(
-        [Interval; 3], bool, bool, &mut GeometryWorkBudget, &AtomicBool,
-    ) -> Result<bool, GeometryError>,
+    visitor: &mut impl for<'s> FnMut(
+        BoundaryCell<'s>, bool, bool, &mut GeometryWorkBudget, &AtomicBool,
+    ) -> Result<BoundaryVisit, GeometryError>,
 ) -> Result<Option<ClosedRadialMaterialProduct>, GeometryError> {
     work.charge(1, cancel)?;
     let available = remaining_bytes.min(MAX_SCRATCH_BYTES)

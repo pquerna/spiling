@@ -97,36 +97,18 @@ pub(super) fn scalar_surface_jet(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(Interval, [Interval; 2]), GeometryError> {
-    use monstertruck_modeling::{
-        ValidatedGeometryBudget, ValidatedInterval, ValidatedSurfaceFunctional,
-    };
-    const ZERO: ValidatedInterval = ValidatedInterval {
-        lower: 0.0,
-        upper: 0.0,
-    };
-    let mut native =
-        ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-    let result = monstertruck_modeling::validated_surface_functional_jets(
+    let [jet] = crate::parametric::surface_functional_enclosures(
         surface,
         uv,
-        [ValidatedSurfaceFunctional {
-            direction: direction.map(|value| ValidatedInterval {
-                lower: value.lo,
-                upper: value.hi,
-            }),
-            origin: [ZERO; 3],
-            offset: ZERO,
+        &[crate::parametric::SurfaceFunctional {
+            direction,
+            origin: [Interval::point(0.0); 3],
+            offset: Interval::point(0.0),
         }],
-        &mut native,
+        work,
         cancel,
-    );
-    crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
-    let [jet] = result.map_err(crate::parametric::native_error)?;
-    let interval = |value: ValidatedInterval| Interval {
-        lo: value.lower,
-        hi: value.upper,
-    };
-    Ok((interval(jet.position), [interval(jet.du), interval(jet.dv)]))
+    )?;
+    Ok((jet.position, [jet.du, jet.dv]))
 }
 
 fn collar_scalar_support(

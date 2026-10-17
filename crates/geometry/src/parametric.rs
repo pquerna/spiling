@@ -218,6 +218,15 @@ pub(crate) fn dot_point(point: [f64; 3], direction: [f64; 3]) -> Interval {
     })
 }
 
+/// Original continuous-source image and one-sided first derivatives.
+/// This carries neither Hessians nor a C1/regularity certificate.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SurfaceFirstEnclosure {
+    pub position: [Interval; 3],
+    pub du: [Interval; 3],
+    pub dv: [Interval; 3],
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SurfaceEnclosure {
     pub position: [Interval; 3],
@@ -227,6 +236,31 @@ pub(crate) struct SurfaceEnclosure {
     pub duv: [Interval; 3],
     pub dvv: [Interval; 3],
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SurfaceFunctional {
+    pub direction: [Interval; 3],
+    pub origin: [Interval; 3],
+    pub offset: Interval,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SurfaceFunctionalEnclosure {
+    pub position: Interval,
+    pub du: Interval,
+    pub dv: Interval,
+}
+
+pub(crate) const fn surface_functional_scratch_bytes<const N: usize>() -> usize {
+    std::mem::size_of::<[SurfaceFunctional; N]>()
+        + std::mem::size_of::<[monstertruck_modeling::ValidatedSurfaceFunctional; N]>()
+        + std::mem::size_of::<[monstertruck_modeling::ValidatedSurfaceFunctionalJet; N]>()
+        + std::mem::size_of::<[SurfaceFunctionalEnclosure; N]>()
+}
+
+pub(crate) const SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES: usize =
+    surface_functional_scratch_bytes::<3>()
+        + std::mem::size_of::<SurfaceFirstEnclosure>();
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CurveEnclosure {
     pub position: [Interval; 3],
@@ -360,6 +394,65 @@ pub(crate) fn surface_piecewise_enclosure(
         tighten_revolution(surface, uv, &mut enclosure, work, cancel)?;
     }
     Ok(enclosure)
+}
+
+/// Fold interval covectors, origins and offsets into original coefficients.
+/// The batch shares native source basis/denominator evaluation. Continuous
+/// piecewise first jets support mean-value bounds, not C1 authority.
+pub(crate) fn surface_functional_enclosures<const N: usize>(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    functionals: &[SurfaceFunctional; N],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[SurfaceFunctionalEnclosure; N], GeometryError> {
+    check_cancel(cancel)?;
+    let native_interval = |value: Interval| monstertruck_modeling::ValidatedInterval {
+        lower: value.lo,
+        upper: value.hi,
+    };
+    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
+        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+    );
+    let result = monstertruck_modeling::validated_surface_functional_jets::<N>(
+        surface,
+        uv,
+        std::array::from_fn(|i| monstertruck_modeling::ValidatedSurfaceFunctional {
+            direction: functionals[i].direction.map(native_interval),
+            origin: functionals[i].origin.map(native_interval),
+            offset: native_interval(functionals[i].offset),
+        }),
+        &mut native_work,
+        cancel,
+    );
+    debit_native_work(work, native_work.consumed(), cancel)?;
+    Ok(result.map_err(native_error)?.map(|jet| SurfaceFunctionalEnclosure {
+        position: adapt(jet.position),
+        du: adapt(jet.du),
+        dv: adapt(jet.dv),
+    }))
+}
+
+/// Enclose the genuine original first jet with three unit-coordinate rows.
+/// Native basis/denominator work is shared and all continuous C0 sides remain
+/// enclosed. No second derivatives or smoothness are invented for consumers.
+pub(crate) fn surface_piecewise_first_enclosure(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SurfaceFirstEnclosure, GeometryError> {
+    let functionals: [SurfaceFunctional; 3] = std::array::from_fn(|axis| SurfaceFunctional {
+        direction: std::array::from_fn(|i| Interval::point(if i == axis { 1.0 } else { 0.0 })),
+        origin: [Interval::point(0.0); 3],
+        offset: Interval::point(0.0),
+    });
+    let jets = surface_functional_enclosures(surface, uv, &functionals, work, cancel)?;
+    Ok(SurfaceFirstEnclosure {
+        position: std::array::from_fn(|i| jets[i].position),
+        du: std::array::from_fn(|i| jets[i].du),
+        dv: std::array::from_fn(|i| jets[i].dv),
+    })
 }
 
 fn adapt_surface_jet(jet: monstertruck_modeling::ValidatedSurfaceJet) -> SurfaceEnclosure {
@@ -1428,12 +1521,13 @@ impl CurveSamplingEndpoint<'_, '_> {
     }
 }
 
-/// Positive native C1 qualification on a closed range of one immutable binding.
-/// Private fields prevent a Hessian or an unqualified parent from creating proof.
+/// Positive native C1 qualification and whole-image bounds on one closed range.
+/// A subset can inherit the bounds, never extend their range or binding.
 #[derive(Clone, Copy)]
 pub(crate) struct CurveSamplingSmoothRange<'binding, 'source> {
     binding: &'binding PreparedCurveEnclosure<'source>,
     range: (f64, f64),
+    jet: CurveEnclosure,
 }
 
 /// Chord and Green queries share one certified whole-query curvature bound.
@@ -1441,7 +1535,6 @@ pub(crate) struct CurveSamplingInterval<'a, 'source> {
     binding: &'a PreparedCurveEnclosure<'source>,
     range: (f64, f64),
     enclosure: CurveIntervalEnclosure,
-    jet: Option<CurveEnclosure>,
     smooth_range: Option<CurveSamplingSmoothRange<'a, 'source>>,
 }
 impl<'binding, 'source> CurveSamplingInterval<'binding, 'source> {
@@ -1476,7 +1569,7 @@ impl<'binding, 'source> CurveSamplingInterval<'binding, 'source> {
         if self.range.0 == self.range.1 {
             return Ok([0.0; 2]);
         }
-        if let Some(jet) = &self.jet {
+        if let Some(receipt) = &self.smooth_range {
             let endpoint_bounds = endpoints.each_ref().map(|endpoint| {
                 endpoint
                     .point
@@ -1487,7 +1580,7 @@ impl<'binding, 'source> CurveSamplingInterval<'binding, 'source> {
                 frame,
                 reference_mm,
                 &endpoint_bounds,
-                &jet.second_derivative,
+                &receipt.jet.second_derivative,
                 self.range,
                 work,
                 cancel,
@@ -2184,16 +2277,27 @@ impl<'source> PreparedCurveEnclosure<'source> {
                         .hi;
                     Ok(up(remainder + reserve))
                 };
-                let coarse = self.retained_with_native_budget(range, &mut native_work, cancel)?;
-                let jet = match coarse {
-                    Some(jet) => {
-                        if chord_error(&jet)? <= SECTION_SAMPLING_TOLERANCE_MM {
-                            jet
-                        } else {
-                            self.refined_with_native_budget(range, &mut native_work, cancel)?
+                let inherited = match inherited_smooth_range {
+                    Some(receipt)
+                        if chord_error(&receipt.jet)? <= SECTION_SAMPLING_TOLERANCE_MM =>
+                    {
+                        Some(receipt.jet)
+                    }
+                    _ => None,
+                };
+                let jet = match inherited {
+                    Some(jet) => jet,
+                    None => {
+                        // Only query a tighter native bound when the parent's
+                        // qualified enclosure cannot meet this child's policy.
+                        let coarse =
+                            self.retained_with_native_budget(range, &mut native_work, cancel)?;
+                        match coarse {
+                            Some(jet)
+                                if chord_error(&jet)? <= SECTION_SAMPLING_TOLERANCE_MM => jet,
+                            _ => self.refined_with_native_budget(range, &mut native_work, cancel)?,
                         }
                     }
-                    None => self.refined_with_native_budget(range, &mut native_work, cancel)?,
                 };
                 let error = chord_error(&jet)?;
                 retained_jet = Some(jet);
@@ -2243,10 +2347,10 @@ impl<'source> PreparedCurveEnclosure<'source> {
                     chord_error_mm,
                     plane_error_mm,
                 },
-                jet: retained_jet,
-                smooth_range: smooth.then_some(CurveSamplingSmoothRange {
+                smooth_range: retained_jet.map(|jet| CurveSamplingSmoothRange {
                     binding: self,
                     range,
+                    jet,
                 }),
             })
         })();

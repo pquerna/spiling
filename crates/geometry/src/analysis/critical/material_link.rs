@@ -13,7 +13,10 @@
 
 use super::super::source_incidence::CoedgeUse;
 use super::*;
-use crate::parametric::{ChartCurveEnclosure, CurveEnclosure};
+use crate::parametric::{
+    ChartCurveEnclosure, CurveEnclosure, SurfaceFirstEnclosure,
+    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, surface_piecewise_first_enclosure,
+};
 
 mod atlas;
 mod coverage;
@@ -28,7 +31,7 @@ pub(super) use coverage::{
     ClosedRadialLinks, MAX_CORRECTION_BYTES, source_f_point_is_retained,
 };
 pub(in crate::analysis) use radial_product::{
-    ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+    BoundaryCell, BoundaryVisit, ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
     certify_closed_radial_material_product_with_boundary_visitor,
 };
 use owned_uv_ribbon::OwnedUvRibbon;
@@ -281,8 +284,12 @@ fn add_margin(position: [Interval; 2], margin: [f64; 2]) -> [Interval; 2] {
 fn uv_box(position: [Interval; 2]) -> [[f64; 2]; 2] {
     position.map(|value| [value.lo, value.hi])
 }
-fn compose_first(jet: &SurfaceEnclosure, tangent: [Interval; 2]) -> [Interval; 3] {
-    std::array::from_fn(|axis| add(mul(jet.du[axis], tangent[0]), mul(jet.dv[axis], tangent[1])))
+fn compose_first(
+    du: &[Interval; 3],
+    dv: &[Interval; 3],
+    tangent: [Interval; 2],
+) -> [Interval; 3] {
+    std::array::from_fn(|axis| add(mul(du[axis], tangent[0]), mul(dv[axis], tangent[1])))
 }
 fn source_allowance(definition: &Definition) -> Result<f64, GeometryError> {
     definition
@@ -416,7 +423,9 @@ fn contained_parameter_range(inner: [f64; 2], outer: [f64; 2]) -> bool {
 
 type UvPairCell = ([f64; 2], [f64; 2], u8);
 pub(super) const UV_EMBEDDING_STACK_BYTES: usize =
-    std::mem::size_of::<[UvPairCell; 2 * MAX_DEPTH as usize + 1]>();
+    std::mem::size_of::<[UvPairCell; 2 * MAX_DEPTH as usize + 1]>()
+        + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+        + 2 * std::mem::size_of::<SurfaceFirstEnclosure>();
 
 fn normal_uv_jet(
     jet: &ChartCurveEnclosure,
@@ -742,7 +751,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             )
         });
         self.domain.native().face().with_surface(|surface| {
-            Ok(crate::parametric::surface_piecewise_enclosure(
+            Ok(surface_piecewise_first_enclosure(
                 surface,
                 uv_box(add_margin(tube, self.margin)),
                 work,
@@ -912,7 +921,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             let position = std::array::from_fn(|axis| {
                 add(base.position[axis], mul(weight, displacement[axis]))
             });
-            let first = compose_first(&base, offset);
+            let first = compose_first(&base.du, &base.dv, offset);
             let derivative =
                 std::array::from_fn(|axis| exact_difference(first[axis], displacement[axis]));
             Ok(CollarBoundaryJet {
@@ -1117,10 +1126,19 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             }
         }
         self.domain.native().face().with_surface(|surface| {
-            let enclosure = if piecewise {
-                crate::parametric::surface_piecewise_enclosure
-            } else {
-                surface_enclosure
+            let enclosure = |surface: &Surface, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
+                if piecewise {
+                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                } else {
+                    // Keep the existing strict source/C1 qualification before
+                    // extracting only the fields this first-matrix proof uses.
+                    let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    Ok(SurfaceFirstEnclosure {
+                        position: jet.position,
+                        du: jet.du,
+                        dv: jet.dv,
+                    })
+                }
             };
             let boundary = enclosure(
                 surface,
@@ -1129,7 +1147,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 cancel,
             )?;
             let patch = enclosure(surface, uv_box(owned_tube), work, cancel)?;
-            let boundary_t = compose_first(&boundary, uv.derivative);
+            let boundary_t = compose_first(&boundary.du, &boundary.dv, uv.derivative);
             // Retained whole-forward error is an independent coefficient proof.
             // Intersect it with reevaluated component differences so subdivision
             // contracts derivatives without losing the original global bound.
@@ -1160,8 +1178,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 )
             });
             let aw = v.map(|value| mul(mul(width, beta), value));
-            let ft = compose_first(&patch, at);
-            let fw = compose_first(&patch, aw);
+            let ft = compose_first(&patch.du, &patch.dv, at);
+            let fw = compose_first(&patch.du, &patch.dv, aw);
             // lambda ranges over the ENTIRE transport homotopy; no computed
             // near-zero dihedral is replaced by equality or convexity.
             let gt = std::array::from_fn(|axis| {

@@ -89,8 +89,16 @@ pub(crate) fn plan(
         }
     }
     let recipe = &input.intent.recipe;
-    preflight::resolve_native_events(input, &mut admission, &geometry_sources, cancel)?;
-    let prepared_sources = prepare_sources(geometry_sources, &mut admission.geometry_work, cancel)?;
+    let mut surface_work = 0usize;
+    preflight::resolve_native_events(
+        input, &mut admission, &geometry_sources, &mut surface_work, cancel,
+    )?;
+    let prepared_sources = prepare_sources(
+        geometry_sources,
+        admission.native_capture_proposal_bytes(),
+        &mut admission.geometry_work,
+        cancel,
+    )?;
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
@@ -103,7 +111,6 @@ pub(crate) fn plan(
     let mut sections: Vec<SectionSpan> = Vec::new();
     let mut retained_section_bytes = 0usize;
     let mut retained_points = 0usize;
-    let mut surface_work = 0usize;
     let mut index = 0u32;
     let mut native_slab_end = 0u32;
     let mut native_slab_start = 0u32;
@@ -983,13 +990,22 @@ fn geometry_query_limit(
 
 fn prepare_sources<'a>(
     sources: PreparedGeometrySources<'a>,
+    coexisting_bytes: usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'a>>, ManufacturingError>
 {
     let mut prepared = BTreeMap::new();
+    // Source promotion may also use the fixed query headroom. Reserve the
+    // still-live proposal buffer before granting any replacement allowance.
+    let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
+        .checked_sub(coexisting_bytes)
+        .ok_or_else(|| error(
+            ManufacturingErrorCode::ResourceLimit,
+            "native capture proposals exhaust source preparation capacity",
+        ))?;
     let mut remaining = sources.values().try_fold(
-        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        available,
         |remaining, source| {
             remaining
                 .checked_sub(source.retained_bytes())

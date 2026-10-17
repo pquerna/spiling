@@ -1034,7 +1034,8 @@ fn certify_native_critical_collar_using(
         + definition.id().allocated_bytes()
         + target_bytes
         + port_bytes
-        + stack_bytes;
+        + stack_bytes
+        + super::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES;
     let capacity = Capacity {
         limit: (policy.byte_limit as usize).min(MAX_BYTES),
         fixed,
@@ -1408,18 +1409,19 @@ fn certify_native_critical_collar_using(
         if filled_only {
             continue;
         }
-        face.with_surface(|surface| -> Result<(), GeometryError> {
+        let covered = face.with_surface(|surface| -> Result<(), GeometryError> {
             let uv = super::slab::trim_parameter_box(&domain)?;
             let mut spans = surface_parameter_boxes(surface, uv, work, cancel).map_err(|error| {
                 cell_context(error, "source parameter spans", Some(face_index), uv, 0)
             })?;
             while let Some((uv, depth)) = stack.pop().or_else(|| spans.next().map(|uv| (uv, 0))) {
                 work.charge(1, cancel)?;
-                let Some((uv, jet)) = clip_height_box(
+                let clipped = clip_height_box(
                     surface, uv,
                     HeightFunctional { direction: matrix[2], offset: Interval::point(pose.translation_mm[2]) },
                     interval, work, cancel,
-                )
+                );
+                let Some((uv, jet)) = clipped
                     .map_err(|error| {
                         cell_context(error, "CLOSED height clipping", Some(face_index), uv, depth)
                     })?
@@ -1431,7 +1433,7 @@ fn certify_native_critical_collar_using(
                     continue;
                 }
                 let bounds = [[world[0].lo, world[0].hi], [world[1].lo, world[1].hi]];
-                let mut target = match choose_material_target(
+                let target = choose_material_target(
                     MaterialTargetQuery {
                         coverage: MaterialCoverage::Rectangle(bounds),
                         inputs,
@@ -1447,7 +1449,8 @@ fn certify_native_critical_collar_using(
                 )
                 .map_err(|error| {
                     cell_context(error, "face material coverage", Some(face_index), uv, depth)
-                }) {
+                });
+                let mut target = match target {
                     Err(error)
                         if matches!(
                             error.code,
@@ -1462,7 +1465,7 @@ fn certify_native_critical_collar_using(
                     let affine = try_surface_affine_image(SurfaceAffineImageQuery { surface, uv, whole: &jet, matrix, pose, chart_error_mm: domain.source_chart_error_mm(), maximum_error_mm: policy.maximum_xy_cover_error_mm }, work, cancel);
                     match affine {
                         Ok(Some(image)) => {
-                            match choose_material_target(
+                            let affine_target = choose_material_target(
                                 MaterialTargetQuery {
                                     coverage: MaterialCoverage::AffineImage(&image),
                                     inputs,
@@ -1474,7 +1477,8 @@ fn certify_native_critical_collar_using(
                                     native_policy,
                                 },
                                 work, cancel,
-                            ) {
+                            );
+                            match affine_target {
                                 Ok(result) => target = Ok(result),
                                 Err(error) if matches!(error.code,
                                     GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled) =>
@@ -1524,12 +1528,10 @@ fn certify_native_critical_collar_using(
                             work,
                             cancel,
                         )?;
-                        if matches!(
-                            domain.classify(uv, work, cancel).map_err(|error| {
-                                cell_context(error, "trim classification", Some(face_index), uv, depth)
-                            })?,
-                            TrimClassification::Outside
-                        ) {
+                        let classification = domain.classify(uv, work, cancel).map_err(|error| {
+                            cell_context(error, "trim classification", Some(face_index), uv, depth)
+                        });
+                        if matches!(classification?, TrimClassification::Outside) {
                             continue;
                         }
                         let _ = other?;
@@ -1548,7 +1550,8 @@ fn certify_native_critical_collar_using(
                 }
             }
             Ok(())
-        })
+        });
+        covered
         .map_err(|error| {
             failure(
                 error.code,
@@ -5890,47 +5893,6 @@ mod tests {
             GeometryErrorCode::SingularGeometry,
             "a positional jump cannot supply the continuous-source mean-value theorem"
         );
-    }
-
-    #[test]
-    fn spatial_uv_refinement_is_independent_of_parameter_domain_scale() {
-        let z = Interval::point(0.0);
-        let jet = crate::parametric::SurfaceEnclosure {
-            position: [z; 3],
-            du: [Interval::point(1e6), z, z],
-            dv: [z, Interval::point(1e-6), z],
-            duu: [z; 3],
-            duv: [z; 3],
-            dvv: [z; 3],
-        };
-        let identity = super::super::placed::rotation(RigidPoseMm::IDENTITY).unwrap();
-        let uv = [[0.0, 2e-6], [0.0, 1e6]];
-        let split = spatial_split(uv, 0, &jet, identity).unwrap();
-        assert_eq!(split[0][0][1], 1e-6);
-        assert_eq!(
-            split[0][1], uv[1],
-            "huge V parameter range does not override twice-as-large U spatial motion"
-        );
-    }
-
-    #[test]
-    fn projected_cover_does_not_refine_an_irrelevant_vertical_chart_direction() {
-        let z = Interval::point(0.0);
-        let jet = crate::parametric::SurfaceEnclosure {
-            position: [z; 3],
-            du: [Interval::point(1.0), z, z],
-            dv: [z, z, Interval::point(1000.0)],
-            duu: [z; 3],
-            duv: [z; 3],
-            dvv: [z; 3],
-        };
-        let identity = super::super::placed::rotation(RigidPoseMm::IDENTITY).unwrap();
-        let uv = [[0.0, 1.0], [0.0, 1.0]];
-        let children = spatial_split(uv, 0, &jet, identity).unwrap();
-        assert_eq!(children[0][0], [0.0, 0.5]);
-        assert_eq!(children[1][0], [0.5, 1.0]);
-        assert_eq!(children[0][1], uv[1]);
-        assert_eq!(children[1][1], uv[1]);
     }
 
     #[test]

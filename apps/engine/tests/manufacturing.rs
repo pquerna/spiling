@@ -51,7 +51,7 @@ fn intent() -> ManufacturingIntent {
             "workflow":{"kind":"diagnostic_body_only"},
             "nozzle_diameter_mm":0.4,"max_feed_mm_s":150.0,"max_volumetric_flow_mm3_s":20.0
         },
-        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
+        "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"native_shape_error_mm":0.1,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
             "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"}},
             "supports":{"kind":"disabled"}}
     })).unwrap()
@@ -288,7 +288,7 @@ async fn preflight_is_durable_nonmutating_and_reports_software_eligibility() {
     report.validate().unwrap();
     assert_eq!(report.input_revision, before.0.revision);
     assert!(report.software_only);
-    assert!(report.eligible);
+    assert_eq!(report.disposition, PreflightDisposition::Admitted);
     assert_eq!(status(&mut client).await, before);
     assert_eq!(scene(&mut client).await, scene_before);
     let retained = client.native_operation(result.name.clone()).await.unwrap();

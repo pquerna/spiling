@@ -9,17 +9,30 @@
 use super::radial_product::RadialRegionKind;
 use super::*;
 use crate::analysis::placed::ActualMaterialCoordinates;
+use crate::parametric::{
+    SurfaceFirstEnclosure, SurfaceFunctional, SurfaceFunctionalEnclosure,
+    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, surface_functional_enclosures,
+    surface_functional_scratch_bytes, surface_piecewise_first_enclosure,
+};
 
 type Box3 = [Interval; 3];
-pub(super) type BoundaryVisitor<'a> = dyn FnMut(Box3, bool, bool, &mut GeometryWorkBudget, &AtomicBool) -> Result<bool, GeometryError>
+pub(super) type BoundaryVisitor<'a> = dyn for<'s> FnMut(BoundaryCell<'s>, bool, bool, &mut GeometryWorkBudget, &AtomicBool) -> Result<BoundaryVisit, GeometryError>
     + 'a;
 const STACK_BYTES: usize = UV_EMBEDDING_STACK_BYTES
-    + std::mem::size_of::<[([[f64; 2]; 2], u8, bool); MAX_DEPTH as usize + 1]>()
+    + std::mem::size_of::<[([[f64; 2]; 2], u8, bool, bool, bool); MAX_DEPTH as usize + 1]>()
     + std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
     + std::mem::size_of::<RadialInventory<'_, '_>>()
     + std::mem::size_of::<Option<([f64; 2], usize, LocalGeometryRefusal)>>()
     + std::mem::size_of::<[ChartCurveEnclosure; 2]>()
-    + std::mem::size_of::<[Box3; 2]>();
+    + std::mem::size_of::<[Box3; 2]>()
+    + std::mem::size_of::<BoundaryCell<'_>>()
+    + std::mem::size_of::<[[Interval; 2]; 2]>()
+    + std::mem::size_of::<SurfaceFunctional>()
+    + std::mem::size_of::<SurfaceFunctionalEnclosure>()
+    + surface_functional_scratch_bytes::<1>()
+    + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    + std::mem::size_of::<SurfaceFirstEnclosure>()
+    + crate::analysis::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES;
 
 fn resource() -> GeometryError {
     GeometryError::new(
@@ -101,7 +114,7 @@ fn seam_transverse(
 ) -> Result<Box3, GeometryError> {
     let uv = chart_jet(collar.domain, collar.use_.coedge, range, work, cancel)?;
     collar.domain.native().face().with_surface(|surface| {
-        let jet = crate::parametric::surface_piecewise_enclosure(
+        let jet = surface_piecewise_first_enclosure(
             surface, uv_box(add_margin(uv.position, collar.margin)), work, cancel,
         )?;
         let (offset, correction) = match collar.transport {
@@ -121,7 +134,7 @@ fn seam_transverse(
                 (offset, correction)
             }
         };
-        let across = compose_first(&jet, offset);
+        let across = compose_first(&jet.du, &jet.dv, offset);
         let across: Box3 = std::array::from_fn(|i| across[i].sub(correction[i]));
         Ok(if matches!(collar.transport, CarrierTransport::Collar { .. })
             && !collar.use_.orientation
@@ -196,7 +209,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             }
         };
         self.domain.native().face().with_surface(|surface| {
-            let position = crate::parametric::surface_piecewise_enclosure(
+            let position = surface_piecewise_first_enclosure(
                 surface,
                 uv_box(add_margin(tube, self.margin)),
                 work,
@@ -396,17 +409,17 @@ impl<'v, 'f> RadialInventory<'v, 'f> {
     /// combination of one-sided matrices at native knots and intersections.
     fn include(
         &mut self,
-        position: Box3,
+        cell: BoundaryCell<'_>,
         normal: Box3,
         coordinates: &ActualMaterialCoordinates<'_>,
         can_refine: bool,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        let q = coordinates.position_relative_to_center_family(position)?;
+    ) -> Result<BoundaryVisit, GeometryError> {
+        let q = coordinates.position_relative_to_center_family(cell.position)?;
         let n = coordinates.normal(normal)?;
         let determinant = add(mul(n[0], q[0]), mul(n[1], q[1]));
-        self.include_determinant(position, q, determinant, can_refine, work, cancel)
+        self.include_determinant(cell, q, determinant, can_refine, work, cancel)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -428,36 +441,42 @@ impl<'v, 'f> RadialInventory<'v, 'f> {
             [coordinates.normal(a)?, coordinates.normal(b)?],
             [q[0], q[1], Interval::point(0.0)],
         );
-        self.include_determinant(position, q, determinant, can_refine, work, cancel)
+        Ok(self.include_determinant(
+            BoundaryCell { position, original_face: None },
+            q, determinant, can_refine, work, cancel,
+        )? == BoundaryVisit::Accepted)
     }
 
     fn include_determinant(
         &mut self,
-        position: Box3,
+        cell: BoundaryCell<'_>,
         q: Box3,
         determinant: Interval,
         can_refine: bool,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
+    ) -> Result<BoundaryVisit, GeometryError> {
         let radius = add(square(q[0]), square(q[1]));
         if radius.lo <= 0.0 {
-            return Ok(false);
+            return Ok(BoundaryVisit::RefineSpatial);
         }
-        if determinant.lo > 0.0 {
-            if !(self.visitor)(position, false, can_refine, work, cancel)? {
-                return Ok(false);
-            }
-            self.outer_minimum = Some(self.outer_minimum.map_or(radius.lo, |r| r.min(radius.lo)));
+        let inward = if determinant.lo > 0.0 {
+            false
         } else if determinant.hi < 0.0 {
-            if !(self.visitor)(position, true, can_refine, work, cancel)? {
-                return Ok(false);
-            }
+            true
+        } else {
+            return Ok(BoundaryVisit::RefineSpatial);
+        };
+        let visited = (self.visitor)(cell, inward, can_refine, work, cancel)?;
+        if visited != BoundaryVisit::Accepted {
+            return Ok(visited);
+        }
+        if inward {
             self.inner_maximum = Some(self.inner_maximum.map_or(radius.hi, |r| r.max(radius.hi)));
         } else {
-            return Ok(false);
+            self.outer_minimum = Some(self.outer_minimum.map_or(radius.lo, |r| r.min(radius.lo)));
         }
-        Ok(true)
+        Ok(BoundaryVisit::Accepted)
     }
 
     fn ordered(&self) -> bool {
@@ -502,6 +521,11 @@ fn visit_original_faces(
     }
     .sub(uncertainty);
     let target = [target.lo, target.hi];
+    let height_functional = SurfaceFunctional {
+        direction: height.direction,
+        origin: [Interval::point(0.0); 3],
+        offset: height.offset,
+    };
     for (fi, _) in source.definition().solid.face_iter().enumerate() {
         let domain = source.face_domain(fi, remaining_bytes, work, cancel)?;
         let face = domain.native().face();
@@ -513,60 +537,76 @@ fn visit_original_faces(
             // A successful piecewise evaluation admits continuity/Lipschitzness
             // on the WHOLE closed native domain. Discontinuous knots and nested
             // carrier poles are real Native errors, not silently split away.
-            crate::parametric::surface_piecewise_enclosure(surface, domain.uv_bounds(), work, cancel)?;
+            surface_piecewise_first_enclosure(surface, domain.uv_bounds(), work, cancel)?;
             for joint in domain.native().joints() {
                 phase = "native joint source image";
                 work.charge(1, cancel)?;
                 let uv = joint.enclosure.map(|v| [v.lower, v.upper]);
-                let position = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?.position;
+                let position = surface_piecewise_first_enclosure(surface, uv, work, cancel)?.position;
                 if !outside(coordinates.position(position)?[2], interval) {
                     return Ok(false);
                 }
             }
             for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
-                let mut stack = [([[0.0; 2]; 2], 0_u8, false); MAX_DEPTH as usize + 1];
-                stack[0] = (span, 0, false);
+                let mut stack = [([[0.0; 2]; 2], 0_u8, false, true, false); MAX_DEPTH as usize + 1];
+                stack[0] = (span, 0, false, true, false);
                 let mut pending = 1;
                 while pending != 0 {
                     pending -= 1;
-                    let (uv, depth, height_preconditioned) = stack[pending];
+                    let (uv, depth, height_contained, recontract_height, mut trim_inside) = stack[pending];
                     active_uv = uv;
                     active_depth = depth;
                     work.charge(1, cancel)?;
-                    let (uv, jet, height_preconditioned) = if !height_preconditioned {
+                    let (uv, jet, height_contained, strong_contraction) = if !height_contained && recontract_height {
                         phase = "raw F closed-height preimage contraction";
-                        let Some((clipped, jet)) = crate::analysis::slab::clip_height_box(
+                        let clipped = crate::analysis::slab::clip_height_parameter_box(
                             surface, uv, height, target, work, cancel,
-                        )? else { continue; };
+                        );
+                        let Some(clipped) = clipped? else { continue; };
+                        phase = "raw F contracted carrier first jet";
+                        let jet = surface_piecewise_first_enclosure(surface, clipped, work, cancel);
+                        let jet = jet?;
                         let h = height.height(jet.position);
-                        let preconditioned = clipped != uv
-                            || (target[0] <= h.lo && h.hi <= target[1]);
-                        (clipped, jet, preconditioned)
+                        let contained = target[0] <= h.lo && h.hi <= target[1];
+                        // A strong contraction can profitably repeat before
+                        // tiling a height-invariant direction. This half-width
+                        // trigger schedules work only; it proves no occupancy.
+                        let strong = (0..2).any(|axis| {
+                            let before = uv[axis][1] - uv[axis][0];
+                            let after = clipped[axis][1] - clipped[axis][0];
+                            before.is_finite() && before > 0.0 && after <= before * 0.5
+                        });
+                        (clipped, jet, contained, strong)
                     } else {
-                        // Descendants retain the necessary closed-height
-                        // preimage of their original span. Reevaluate each
-                        // child's full jet, not the same midpoint-strip cut.
-                        // Piecewise evaluation preserves nested-knot handling;
-                        // contraction itself grants no smoothness authority.
+                        // Subsets retain the necessary preimage even when
+                        // contraction is not scheduled. Only full image
+                        // containment is proof and inherited as such. Every
+                        // child still receives its fresh complete carrier jet.
                         phase = "raw F preconditioned carrier enclosure";
-                        let jet = crate::parametric::surface_piecewise_enclosure(
+                        let jet = surface_piecewise_first_enclosure(
                             surface, uv, work, cancel,
-                        )?;
-                        (uv, jet, height_preconditioned)
+                        );
+                        let jet = jet?;
+                        let h = height.height(jet.position);
+                        (uv, jet, height_contained || target[0] <= h.lo && h.hi <= target[1], false)
                     };
                     active_uv = uv;
                     if outside(coordinates.position(jet.position)?[2], interval) {
                         continue;
                     }
-                    let children = match crate::analysis::critical::split_metric(uv, depth, fi, &jet) {
-                        Ok(children) => Some(children),
-                        Err(error) if error.code == GeometryErrorCode::AnalysisIndeterminate => None,
-                        Err(error) => return Err(error),
-                    };
+                    let can_refine = depth < MAX_DEPTH && uv.iter().any(|range| {
+                        let mid = range[0] * 0.5 + range[1] * 0.5;
+                        range[0] < mid && mid < range[1]
+                    });
                     phase = "raw F cylinder determinant/boundary visitor";
-                    if inventory.include(jet.position, normal(&jet, face.orientation()), coordinates,
-                        children.is_some(), work, cancel)?
-                    {
+                    let n = cross(jet.du, jet.dv);
+                    let n = if face.orientation() { n } else { n.map(Interval::neg) };
+                    let included = inventory.include(
+                        BoundaryCell { position: jet.position, original_face: Some((surface, uv)) },
+                        n, coordinates, can_refine, work, cancel,
+                    );
+                    let included = included?;
+                    if included == BoundaryVisit::Accepted {
                         continue;
                     }
                     // Successful full-carrier determinant and boundary
@@ -578,21 +618,67 @@ fn visit_original_faces(
                     // The original joint/link inventory and signed native
                     // fibre census remain independent and mandatory.
                     phase = "raw F unresolved-cell trim exclusion";
-                    if domain.classify(uv, work, cancel)? == TrimClassification::Outside {
-                        continue;
+                    if !trim_inside {
+                        let classification = domain.classify(uv, work, cancel);
+                        match classification? {
+                            TrimClassification::Outside => continue,
+                            TrimClassification::Inside => trim_inside = true,
+                            TrimClassification::Boundary => {}
+                        }
                     }
-                    let Some(children) = children else { return Ok(false); };
+                    if !can_refine { return Ok(false); }
+                    let children = if included == BoundaryVisit::RefineActualXy {
+                        // Only the actual-coordinate metric asks for this goal.
+                        // Its XY error has no vertical box-diameter obligation.
+                        // Unresolved radius/determinant cells always retain
+                        // spatial refinement, and every child is requalified.
+                        let rows = coordinates.affine_rows();
+                        let du = [dot(rows[0], jet.du), dot(rows[1], jet.du)];
+                        let dv = [dot(rows[0], jet.dv), dot(rows[1], jet.dv)];
+                        crate::analysis::critical::split_metric_derivatives(
+                            uv, depth, fi, &du, &dv,
+                        )?
+                    } else {
+                        crate::analysis::critical::split_metric_derivatives(
+                            uv, depth, fi, &jet.du, &jet.dv,
+                        )?
+                    };
                     if pending + children.len() > stack.len() {
                         return Err(resource());
                     }
+                    let recontract_height = if height_contained {
+                        false
+                    } else if strong_contraction {
+                        true
+                    } else {
+                        let axis = usize::from(children[0][0] == uv[0]);
+                        let derivative = height.dot(if axis == 0 { jet.du } else { jet.dv });
+                        if derivative.lo == 0.0 && derivative.hi == 0.0 {
+                            false
+                        } else {
+                            // Fold the height covector into original native
+                            // coefficients before choosing work. This retains
+                            // exact axial cancellations lost by spatial boxes.
+                            phase = "raw F height-sensitive refinement scheduling";
+                            let gradient = surface_functional_enclosures(
+                                surface, uv, &[height_functional], work, cancel,
+                            );
+                            let [gradient] = gradient?;
+                            let derivative = if axis == 0 { gradient.du } else { gradient.dv };
+                            derivative.lo != 0.0 || derivative.hi != 0.0
+                        }
+                    };
                     for child in children {
-                        stack[pending] = (child, depth + 1, height_preconditioned);
+                        // Inside is a whole-box proof inherited only by subsets;
+                        // neither Boundary nor failed metric evidence is reused.
+                        stack[pending] = (child, depth + 1, height_contained, recontract_height, trim_inside);
                         pending += 1;
                     }
                 }
             }
             Ok(true)
-        }).map_err(|error| work.annotate_error(error, before, format_args!(
+        });
+        let completed = completed.map_err(|error| work.annotate_error(error, before, format_args!(
             "closed radial atlas original face={fi} phase={phase} uv={active_uv:?} depth={active_depth}"
         )))?;
         if !completed {
@@ -727,8 +813,8 @@ fn visit_original_links(
             }
             for collar in [&first, &second] {
                 phase = "complete reference ribbon ownership";
-                let Some(reference) = collar.reference_owned(central, available, work, cancel)?
-                else {
+                let reference = collar.reference_owned(central, available, work, cancel);
+                let Some(reference) = reference? else {
                     return Ok(false);
                 };
                 if !reference.covers(collar, central) {
@@ -739,13 +825,12 @@ fn visit_original_links(
                 }
             }
             phase = "actual G inner ownership";
-            let Some(first_embedding) = first.owned_embedding(central, available, work, cancel)?
-            else {
+            let first_embedding = first.owned_embedding(central, available, work, cancel);
+            let Some(first_embedding) = first_embedding? else {
                 return Ok(false);
             };
-            let Some(second_embedding) =
-                second.owned_embedding(central, available, work, cancel)?
-            else {
+            let second_embedding = second.owned_embedding(central, available, work, cancel);
+            let Some(second_embedding) = second_embedding? else {
                 return Ok(false);
             };
             phase = "complete original coedge cuts";
@@ -837,19 +922,25 @@ fn visit_original_links(
                                     )?;
                                     let face = collar.domain.native().face();
                                     let jet = face.with_surface(|surface| {
-                                        crate::parametric::surface_piecewise_enclosure(
+                                        surface_piecewise_first_enclosure(
                                             surface,
                                             uv_box(add_margin(uv.position, collar.margin)),
                                             work,
                                             cancel,
                                         )
                                     })?;
+                                    let outward = cross(jet.du, jet.dv);
+                                    let outward = if face.orientation() {
+                                        outward
+                                    } else {
+                                        outward.map(Interval::neg)
+                                    };
                                     Some(MaterialLinkCell {
                                         position: curve.position,
                                         source_error_mm: 0.0,
                                         convex_link: false,
-                                        outward: normal(&jet, face.orientation()),
-                                        second_outward: normal(&jet, face.orientation()),
+                                        outward,
+                                        second_outward: outward,
                                     })
                                 } else {
                                     match collar.geometry_cell_proof_kind(
@@ -868,14 +959,15 @@ fn visit_original_links(
                                     break;
                                 };
                                 phase = "actual G cylinder determinant/boundary visitor";
-                                if !inventory.include(
-                                    cell.position,
+                                let included = inventory.include(
+                                    BoundaryCell { position: cell.position, original_face: None },
                                     cell.outward,
                                     coordinates,
                                     can_refine,
                                     work,
                                     cancel,
-                                )? {
+                                );
+                                if included? != BoundaryVisit::Accepted {
                                     accepted = false;
                                     break;
                                 }
@@ -886,7 +978,7 @@ fn visit_original_links(
                                 phase = "paired common FIRST matrix seam";
                                 let a = seam_transverse(&first, range, &curve, work, cancel)?;
                                 let b = seam_transverse(&second, range, &curve, work, cancel)?;
-                                accepted = inventory.include_seam(
+                                let included = inventory.include_seam(
                                     &_trace,
                                     curve.position,
                                     curve.derivative,
@@ -896,7 +988,8 @@ fn visit_original_links(
                                     can_refine,
                                     work,
                                     cancel,
-                                )?;
+                                );
+                                accepted = included?;
                             }
                             if accepted {
                                 phase = "complete removed reference/G support admission";
@@ -1006,7 +1099,7 @@ pub(super) fn certify(
         };
         let mut inventory = RadialInventory::new(visitor);
         phase = "complete original F overcover";
-        if !visit_original_faces(
+        let faces = visit_original_faces(
             source,
             coordinates,
             available
@@ -1015,11 +1108,12 @@ pub(super) fn certify(
             &mut inventory,
             work,
             cancel,
-        )? {
+        );
+        if !faces? {
             return Ok(None);
         }
         phase = "paired reference/actual G atlas";
-        if !visit_original_links(
+        let links_complete = visit_original_links(
             source,
             &incidence,
             coordinates,
@@ -1028,8 +1122,8 @@ pub(super) fn certify(
             &mut inventory,
             work,
             cancel,
-        )? || !inventory.ordered()
-        {
+        );
+        if !links_complete? || !inventory.ordered() {
             return Ok(None);
         }
         let anchor = coordinates.source_anchor();
@@ -1055,7 +1149,7 @@ pub(super) fn certify(
             if !links.misses_all_supports(&fiber, work, cancel)? {
                 continue;
             }
-            if let Some(census) = fiber::original_cylinder_fiber_census(
+            let census = fiber::original_cylinder_fiber_census(
                 source,
                 &fiber,
                 &census_request,
@@ -1065,7 +1159,8 @@ pub(super) fn certify(
                     .ok_or_else(resource)?,
                 work,
                 cancel,
-            )? {
+            );
+            if let Some(census) = census? {
                 let kind = if census.inner_forward().is_some() {
                     RadialRegionKind::Annulus
                 } else {
@@ -1263,10 +1358,10 @@ mod boundary_terminal_tests {
         let cancel = AtomicBool::new(false);
         {
             let mut visitor =
-                |_: Box3, _: bool, can_refine: bool, _: &mut GeometryWorkBudget, _: &AtomicBool| {
+                |_: BoundaryCell<'_>, _: bool, can_refine: bool, _: &mut GeometryWorkBudget, _: &AtomicBool| {
                     if can_refine {
                         refinable_calls += 1;
-                        Ok(false)
+                        Ok(BoundaryVisit::RefineActualXy)
                     } else {
                         terminal_calls += 1;
                         Err(GeometryError::new(
@@ -1278,33 +1373,35 @@ mod boundary_terminal_tests {
             let mut inventory = RadialInventory::new(&mut visitor);
             // An unresolved cylinder determinant never reaches the metric:
             // even at a terminal cell it remains a topology refusal.
-            assert!(
-                !inventory
+            assert_eq!(
+                inventory
                     .include_determinant(
-                        position,
+                        BoundaryCell { position, original_face: None },
                         position,
                         Interval::point(0.0),
                         false,
                         &mut work,
                         &cancel
                     )
-                    .unwrap()
+                    .unwrap(),
+                BoundaryVisit::RefineSpatial
             );
-            assert!(
-                !inventory
+            assert_eq!(
+                inventory
                     .include_determinant(
-                        position,
+                        BoundaryCell { position, original_face: None },
                         position,
                         Interval::point(1.0),
                         true,
                         &mut work,
                         &cancel
                     )
-                    .unwrap()
+                    .unwrap(),
+                BoundaryVisit::RefineActualXy
             );
             let error = inventory
                 .include_determinant(
-                    position,
+                    BoundaryCell { position, original_face: None },
                     position,
                     Interval::point(1.0),
                     false,

@@ -1421,6 +1421,10 @@ async function inspectManufacturing() {
   await input('[data-testid="manufacturing-layer"]', "0");
   await click("manufacturing-travel");
   await input('[data-testid="manufacturing-events"]', String(state.replay.event_count));
+  if (!manufacturingDiagnostic) {
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    await screenshot(`${scenario}-actual-program-viewport`);
+  }
   await input('[data-testid="project-debug-path"]', "manufacturing-project");
   await click("project-debug-save");
   await until(

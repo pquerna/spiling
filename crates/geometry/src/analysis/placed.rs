@@ -1460,6 +1460,14 @@ pub(crate) fn analyze_placed_slab(
                 });
             }
             Ok(None) => None,
+            Err(failure)
+                if radial_first && failure.code == GeometryErrorCode::ShapeErrorExceeded =>
+            {
+                // This lane has no retained competing source proof. Its
+                // actual-coordinate metric requests a smaller fresh capture;
+                // do not exhaust work on a sufficient legacy cover first.
+                return Err(failure);
+            }
             Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => Some(failure),
             Err(failure)
                 if matches!(

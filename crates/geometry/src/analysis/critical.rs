@@ -568,18 +568,28 @@ fn split_metric(
     face: usize,
     jet: &SurfaceEnclosure,
 ) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
+    split_metric_derivatives(uv, depth, face, &jet.du, &jet.dv)
+}
+
+fn split_metric_derivatives(
+    uv: [[f64; 2]; 2],
+    depth: u8,
+    face: usize,
+    du: &[Interval],
+    dv: &[Interval],
+) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
     // Parameter widths have unrelated units. Refine the larger physical
     // variation, not a contracted straight direction merely to alternate axes.
     // This changes scheduling only; every child retains the full proof tests.
-    let variation = |derivative: &[Interval; 3], range: [f64; 2]| {
+    let variation = |derivative: &[Interval], range: [f64; 2]| {
         derivative
             .iter()
             .map(|value| value.abs_upper())
             .fold(0.0_f64, f64::max)
             * (range[1] - range[0])
     };
-    let u = variation(&jet.du, uv[0]);
-    let v = variation(&jet.dv, uv[1]);
+    let u = variation(du, uv[0]);
+    let v = variation(dv, uv[1]);
     let axis = if u.is_finite() && v.is_finite() && u != v {
         usize::from(v > u)
     } else {
@@ -2990,6 +3000,7 @@ pub(super) fn certify_critical_slab(
         + material_link::UV_EMBEDDING_STACK_BYTES
         + std::mem::size_of::<material_link::PairedMaterialLink<'_, '_>>()
         + RESERVED_STACK_BYTES
+        + super::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES
         + capture_bytes
         + std::mem::size_of::<SourceFNegativeProposal>()
         + 4 * std::mem::size_of::<[[f64; 2]; 2]>()
@@ -3158,14 +3169,13 @@ pub(super) fn certify_critical_slab(
                         continue;
                     };
                     let h = functional.height(jet.position);
-                    let preconditioned = clipped != uv
-                        || (height_target.lo <= h.lo && h.hi <= height_target.hi);
+                    let preconditioned = height_target.lo <= h.lo && h.hi <= height_target.hi;
                     (clipped, jet, preconditioned)
                 } else {
-                    // The optional whole-source theorem always keeps its full
-                    // original domain. Descendants of a contracted box already
-                    // inherit that necessary height preimage; do not solve the
-                    // same cut with fresh native strip queries at every split.
+                    // The optional whole-source theorem retains its full
+                    // domain. Otherwise only whole-image height containment
+                    // is inherited; a merely contracted necessary preimage
+                    // must be tightened again after parameter refinement.
                     let jet = if span_smooth {
                         surface_enclosure(surface, uv, work, cancel)?
                     } else {
