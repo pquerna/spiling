@@ -15,14 +15,19 @@ use super::super::source_incidence::CoedgeUse;
 use super::*;
 use crate::parametric::{ChartCurveEnclosure, CurveEnclosure};
 
+mod atlas;
 mod coverage;
 mod fiber;
 mod owned_uv_ribbon;
+mod radial_product;
 mod transport;
 mod vertex_fan;
 mod vertex_transport;
 mod wall;
 pub(super) use coverage::{ClosedRadialLinks, MAX_CORRECTION_BYTES};
+pub(in crate::analysis) use radial_product::{
+    ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+};
 use owned_uv_ribbon::OwnedUvRibbon;
 pub(crate) use transport::{
     SourceTransportOwner, SourceTransportSupport, source_transport_supports,
@@ -972,6 +977,21 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Result<MaterialLinkCell, LocalGeometryRefusal>, GeometryError> {
+        self.geometry_cell_proof_kind(embedding, range, curve, allowance, false, work, cancel)
+    }
+
+    /// Same immutable G evaluator, with complete one-sided FIRST matrix boxes.
+    /// The atlas caller must first prove carrier continuity and gamma C1.
+    fn geometry_cell_proof_kind(
+        &self,
+        embedding: &OwnedUvRibbon<'_, '_>,
+        range: [f64; 2],
+        curve: &CurveEnclosure,
+        allowance: f64,
+        piecewise: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Result<MaterialLinkCell, LocalGeometryRefusal>, GeometryError> {
         if !embedding.covers(self, range, [0.0, 1.0]) {
             return Err(failure(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -1072,13 +1092,18 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             }
         }
         self.domain.native().face().with_surface(|surface| {
-            let boundary = surface_enclosure(
+            let enclosure = if piecewise {
+                crate::parametric::surface_piecewise_enclosure
+            } else {
+                surface_enclosure
+            };
+            let boundary = enclosure(
                 surface,
                 uv_box(add_margin(uv.position, self.margin)),
                 work,
                 cancel,
             )?;
-            let patch = surface_enclosure(surface, uv_box(owned_tube), work, cancel)?;
+            let patch = enclosure(surface, uv_box(owned_tube), work, cancel)?;
             let boundary_t = compose_first(&boundary, uv.derivative);
             // Retained whole-forward error is an independent coefficient proof.
             // Intersect it with reevaluated component differences so subdivision

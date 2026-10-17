@@ -810,6 +810,7 @@ impl PoleComparison {
             rows,
             offsets,
             forward,
+            forward_offset: Interval::point(0.0),
             min_forward,
             core: None,
         };

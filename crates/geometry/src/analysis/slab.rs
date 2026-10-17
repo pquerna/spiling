@@ -3525,6 +3525,7 @@ pub(super) fn native_sample_height_band(
 struct SlabSourceQuery<'q, 's, 'd> {
     source: crate::section::OriginalTrimSource<'s, 'd>,
     request: &'q SlabRequest,
+    coordinates: &'q super::placed::ActualMaterialCoordinates<'q>,
     source_retained_bytes: usize,
 }
 
@@ -3543,6 +3544,7 @@ fn recover_critical_slab(
     let SlabSourceQuery {
         source,
         request,
+        coordinates,
         source_retained_bytes,
     } = *query;
     let definition = source.definition();
@@ -3620,6 +3622,7 @@ fn recover_critical_slab(
         super::critical::CriticalSlabQuery {
             source,
             request,
+            coordinates,
             section: &section,
             functional: HeightFunctional::from_frame(request.frame),
             actual_sample_height: sample_height,
@@ -3755,6 +3758,33 @@ pub(crate) fn analyze_slab(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SlabAnalysis, GeometryError> {
+    let rows = super::placed::ActualMaterialCoordinates::source_rows(&request.frame)?;
+    let coordinates = super::placed::ActualMaterialCoordinates::source(
+        source.definition(),
+        &request.frame,
+        &rows,
+        request.height_interval_mm,
+        request.sample_height_mm,
+        work,
+        cancel,
+    )?;
+    analyze_slab_captured(source, request, &coordinates, query_byte_limit, work, cancel)
+}
+
+pub(crate) fn analyze_slab_captured(
+    source: &crate::PreparedMaterialSource<'_>,
+    request: SlabRequest,
+    coordinates: &super::placed::ActualMaterialCoordinates<'_>,
+    query_byte_limit: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SlabAnalysis, GeometryError> {
+    // Coordinate coefficients and their cofactor remain live alongside the
+    // captured proof. Reserve their fixed stack storage in the shared pool.
+    let coordinate_bytes = super::placed::ActualMaterialCoordinates::SCRATCH_BYTES;
+    let query_byte_limit = query_byte_limit.checked_sub(coordinate_bytes).ok_or_else(|| {
+        error(GeometryErrorCode::ResourceLimit, "material coordinate input exceeds remaining query capacity")
+    })?;
     validate(
         request.frame,
         request.height_interval_mm,
@@ -3987,6 +4017,7 @@ pub(crate) fn analyze_slab(
                     &SlabSourceQuery {
                         source,
                         request: &request,
+                        coordinates,
                         source_retained_bytes,
                     },
                     section,
@@ -4143,6 +4174,7 @@ pub(crate) fn analyze_slab(
             &SlabSourceQuery {
                 source,
                 request: &request,
+                coordinates,
                 source_retained_bytes,
             },
             section,

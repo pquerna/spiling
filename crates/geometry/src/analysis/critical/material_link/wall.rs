@@ -434,6 +434,7 @@ pub(crate) fn prove_source_wall_component(
                 rows,
                 offsets: [Interval::point(0.0); 2],
                 forward: cross(rows[0], rows[1]),
+                forward_offset: Interval::point(0.0),
                 min_forward: 0.0,
                 core: None,
             };

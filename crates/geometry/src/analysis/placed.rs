@@ -10,7 +10,7 @@ use super::{
     AnalysisPolicy, BoundsPolicy, GeometryWorkBudget, HeightAnalysis, HeightCapture,
     HeightFunctional, InvariantHeightDomain, NativeEndpointStratum, NativeOwnedEndpoint,
     PlacedSlabCapture, PlacedSlabRequest, ProjectedBounds, SlabAnalysis, SlabRequest,
-    analyze_height_domain, analyze_height_domain_enclosed, analyze_slab, projected_bounds,
+    analyze_height_domain, analyze_height_domain_enclosed, analyze_slab_captured, projected_bounds,
 };
 use crate::{
     Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, PreparedSectionSource,
@@ -20,6 +20,9 @@ use spiling_contracts::geometry::{
     GeometryErrorCode, RigidPoseMm, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
 };
 use std::sync::atomic::AtomicBool;
+
+mod material_coordinates;
+pub(super) use material_coordinates::{ActualMaterialCoordinates, MaterialCoordinatesCapture};
 
 pub(super) type Matrix = [[Interval; 3]; 3];
 
@@ -515,6 +518,7 @@ pub fn placed_material_bounds(
 }
 
 struct HeightMap {
+    pose: RigidPoseMm,
     matrix: Matrix,
     frame: PlaneFrameMm,
     scale: f64,
@@ -546,13 +550,14 @@ impl HeightMap {
         });
         let residual_mm = coefficient_error(residual, [0.0; 3], source_extent(definition))?;
         Ok(Self {
+            pose,
             matrix,
             frame,
             scale,
             residual_mm,
         })
     }
-    fn source_range(&self, pose: RigidPoseMm, world: [f64; 2]) -> Result<[f64; 2], GeometryError> {
+    fn source_range(&self, world: [f64; 2]) -> Result<[f64; 2], GeometryError> {
         // Evaluate CLOSED endpoints separately so error-free point arithmetic
         // preserves an exact inverse cap identity. A single wide interval
         // subtraction would unnecessarily round even world == translation
@@ -562,7 +567,7 @@ impl HeightMap {
                 add(
                     sub(
                         Interval::point(world),
-                        Interval::point(pose.translation_mm[2]),
+                        Interval::point(self.pose.translation_mm[2]),
                     ),
                     symmetric(self.residual_mm),
                 ),
@@ -571,7 +576,7 @@ impl HeightMap {
         };
         Ok([endpoint(world[0])?.lo, endpoint(world[1])?.hi])
     }
-    fn world_value(&self, pose: RigidPoseMm, source: [f64; 2]) -> Result<[f64; 2], GeometryError> {
+    fn world_value(&self, source: [f64; 2]) -> Result<[f64; 2], GeometryError> {
         let value = finite(add(
             mul(
                 Interval::point(self.scale),
@@ -580,7 +585,7 @@ impl HeightMap {
                     hi: source[1],
                 },
             ),
-            Interval::point(pose.translation_mm[2]),
+            Interval::point(self.pose.translation_mm[2]),
         ))?;
         Ok([value.lo, value.hi])
     }
@@ -694,7 +699,7 @@ pub fn analyze_placed_height_domain(
     }
     let map = HeightMap::new(definition, pose)?;
     let mut result = if map.residual_mm == 0.0 {
-        let range = map.source_range(pose, world_height_interval_mm)?;
+        let range = map.source_range(world_height_interval_mm)?;
         let source_uncertainty = div(
             Interval::point(policy.maximum_height_uncertainty_mm),
             Interval::point(map.scale),
@@ -723,7 +728,7 @@ pub fn analyze_placed_height_domain(
             .chain(source.proved_event_brackets_mm.iter_mut())
         {
             work.charge(1, cancel)?;
-            *event = map.world_value(pose, *event)?;
+            *event = map.world_value(*event)?;
             if width(Interval {
                 lo: event[0],
                 hi: event[1],
@@ -737,8 +742,8 @@ pub fn analyze_placed_height_domain(
         }
         for support in &mut source.capture.transport_support {
             work.charge(1, cancel)?;
-            support.base_interval = map.world_value(pose, support.base_interval)?;
-            support.corrected_interval = map.world_value(pose, support.corrected_interval)?;
+            support.base_interval = map.world_value(support.base_interval)?;
+            support.corrected_interval = map.world_value(support.corrected_interval)?;
             let displacement = finite(mul(
                 Interval::point(map.scale),
                 Interval::new(
@@ -1119,7 +1124,7 @@ fn place_endpoint_stratum(
         return Ok(false);
     }
     let mut constant = if map.residual_mm == 0.0 && stratum.request.frame == map.frame {
-        let height = map.world_value(capture.pose, [stratum.height_mm; 2])?;
+        let height = map.world_value([stratum.height_mm; 2])?;
         Some(Interval {
             lo: height[0],
             hi: height[1],
@@ -1229,7 +1234,7 @@ pub(crate) fn analyze_placed_slab(
         ));
     }
     let map = HeightMap::new(source.definition(), request.pose)?;
-    let range = map.source_range(request.pose, request.world_height_interval_mm)?;
+    let range = map.source_range(request.world_height_interval_mm)?;
     let sample = div(
         sub(
             Interval::point(request.sample_world_z_mm),
@@ -1255,18 +1260,29 @@ pub(crate) fn analyze_placed_slab(
             "placed slab policy or sample cannot be resolved in the source frame",
         ));
     }
-    let mut result = analyze_slab(
-        source,
-        SlabRequest {
-            frame: map.frame,
-            height_interval_mm: range,
-            sample_height_mm: sample,
-            native_shape_error_mm: source_policy,
-        },
-        query_byte_limit,
-        work,
-        cancel,
-    )?;
+    let mut result = {
+        let coordinates = ActualMaterialCoordinates::placed(
+            source.definition(),
+            &map,
+            request.world_height_interval_mm,
+            request.sample_world_z_mm,
+            work,
+            cancel,
+        )?;
+        analyze_slab_captured(
+            source,
+            SlabRequest {
+                frame: map.frame,
+                height_interval_mm: range,
+                sample_height_mm: sample,
+                native_shape_error_mm: source_policy,
+            },
+            &coordinates,
+            query_byte_limit,
+            work,
+            cancel,
+        )?
+    };
     if !result.matches_original_material(source.definition())
         || result.endpoint_strata.iter().any(|stratum| {
             stratum.material_realization_identity() != result.material_realization_identity()
@@ -1782,20 +1798,21 @@ mod tests {
 
     #[test]
     fn source_height_band_includes_coefficient_and_translation_error() {
+        let pose = RigidPoseMm {
+            translation_mm: [0.0, 0.0, 3.0],
+            ..RigidPoseMm::IDENTITY
+        };
         let map = HeightMap {
+            pose,
             matrix: rotation(RigidPoseMm::IDENTITY).unwrap(),
             frame: world_frame(),
             scale: 2.0,
             residual_mm: 0.25,
         };
-        let pose = RigidPoseMm {
-            translation_mm: [0.0, 0.0, 3.0],
-            ..RigidPoseMm::IDENTITY
-        };
-        let source = map.source_range(pose, [7.0, 11.0]).unwrap();
+        let source = map.source_range([7.0, 11.0]).unwrap();
         assert!(source[0] <= 1.875 && source[1] >= 4.125);
         // An uncertain critical bracket remains a bracket, never its midpoint.
-        let event = map.world_value(pose, [2.0, 2.125]).unwrap();
+        let event = map.world_value([2.0, 2.125]).unwrap();
         assert!(event[0] <= 7.0 && event[1] >= 7.25 && event[0] < event[1]);
     }
 
@@ -1854,6 +1871,7 @@ mod tests {
             ..RigidPoseMm::IDENTITY
         };
         let map = HeightMap {
+            pose,
             matrix: rotation(pose).unwrap(),
             frame: world_frame(),
             scale: 1.0,
@@ -1892,6 +1910,7 @@ mod tests {
             ..RigidPoseMm::IDENTITY
         };
         let map = HeightMap {
+            pose,
             matrix: rotation(pose).unwrap(),
             frame: world_frame(),
             scale: 1.0,
@@ -1935,6 +1954,7 @@ mod tests {
         })
         .unwrap();
         let map = HeightMap {
+            pose,
             matrix,
             frame,
             scale: 1.0,
@@ -1951,6 +1971,7 @@ mod tests {
             ..RigidPoseMm::IDENTITY
         };
         let map = HeightMap {
+            pose,
             matrix: rotation(pose).unwrap(),
             frame: world_frame(),
             scale: 1.0,
@@ -1964,7 +1985,7 @@ mod tests {
             pose: None,
         };
         let range = [2.0, 6.0];
-        let source_range = map.source_range(pose, range).unwrap();
+        let source_range = map.source_range(range).unwrap();
         let placed =
             placed_invariance(Some(certificate.clone()), &map, pose, source_range, range).unwrap();
         assert_eq!(placed.height_interval_mm(), [3.0, 5.0]);
@@ -1986,6 +2007,7 @@ mod tests {
     fn world_plane_policy_failure_is_typed_without_inflating_metadata() {
         let mut section = square_section();
         let map = HeightMap {
+            pose: RigidPoseMm::IDENTITY,
             matrix: rotation(RigidPoseMm::IDENTITY).unwrap(),
             frame: world_frame(),
             scale: 1.0,

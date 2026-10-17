@@ -28,6 +28,8 @@ use std::sync::atomic::AtomicBool;
 
 mod planar;
 use planar::{exact_cycle_mapping, feature_clearance};
+mod radial_region;
+use radial_region::{ActualPolygonRadialRegion, certify_actual_polygon_radial_region};
 
 const MAX_SCRATCH: usize = 64 * 1024 * 1024;
 

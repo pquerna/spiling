@@ -11,6 +11,9 @@
 
 pub(crate) mod material_link;
 pub(crate) use material_link::PreparedSourceVertexPlans;
+pub(super) use material_link::{
+    ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+};
 mod ray_index;
 mod source_chart;
 
@@ -188,6 +191,7 @@ pub(super) struct ProvedSlabSample<'a> {
 pub(super) struct CriticalSlabQuery<'a, 'source, 'domains> {
     pub(super) source: OriginalTrimSource<'source, 'domains>,
     pub(super) request: &'a SlabRequest,
+    pub(super) coordinates: &'a super::placed::ActualMaterialCoordinates<'a>,
     pub(super) section: &'a NativeSection,
     pub(super) functional: HeightFunctional,
     pub(super) actual_sample_height: Interval,
@@ -2772,6 +2776,7 @@ pub(super) fn certify_critical_slab(
     let CriticalSlabQuery {
         source,
         request,
+        coordinates,
         section,
         functional,
         actual_sample_height,
@@ -4452,15 +4457,30 @@ mod tests {
             work,
             cancel,
         )?;
+        let rows = super::super::placed::ActualMaterialCoordinates::source_rows(&request.frame)?;
+        let coordinates = super::super::placed::ActualMaterialCoordinates::source(
+            source.definition(), &request.frame, &rows,
+            request.height_interval_mm, request.sample_height_mm, work, cancel,
+        )?;
         certify_critical_slab(
             CriticalSlabQuery {
                 source: source.trim_source(),
                 request: &request,
+                coordinates: &coordinates,
                 section: &section,
                 functional: HeightFunctional::from_frame(request.frame),
                 actual_sample_height: height,
             },
-            crate::MAX_PREPARED_SECTION_BYTES - source.retained_bytes() - section.retained_bytes(),
+            crate::MAX_PREPARED_SECTION_BYTES
+                .checked_sub(source.retained_bytes())
+                .and_then(|remaining| remaining.checked_sub(section.retained_bytes()))
+                .and_then(|remaining| remaining.checked_sub(
+                    super::super::placed::ActualMaterialCoordinates::SCRATCH_BYTES,
+                ))
+                .ok_or_else(|| GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "independent critical proof input exceeds remaining query capacity",
+                ))?,
             work,
             cancel,
         )?

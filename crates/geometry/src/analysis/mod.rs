@@ -47,7 +47,7 @@ pub use planar::{
     certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
 };
 pub use slab::analyze_height_domain;
-pub(crate) use slab::{HeightFunctional, analyze_height_domain_enclosed, analyze_slab};
+pub(crate) use slab::{HeightFunctional, analyze_height_domain_enclosed, analyze_slab, analyze_slab_captured};
 pub use voids::{
     NativeProjectedVoids, NativeProtectedVoidEnvelope, NativeVoidProjectionCapture,
     ProtectedVoidHeightScope, ProtectedVoidPolicy, capture_projected_voids,

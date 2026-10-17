@@ -95,6 +95,117 @@ impl ClosedRadialLinks {
         )
     }
 
+    /// Source-only endpoint inventory for a CLOSED cylinder atlas. Neither an
+    /// open-band exclusion nor an actual-cone-only box can discharge this:
+    /// every original vertex and every SOURCE/reference/realized star support
+    /// must miss the two cuts strictly. No vertex chart is admitted here.
+    pub(super) fn outside_closed_scope(
+        source: OriginalTrimSource<'_, '_>,
+        incidence: &SourceEdgeIncidence,
+        coordinates: &crate::analysis::placed::ActualMaterialCoordinates<'_>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        let definition = source.definition();
+        if let Some(plans) = source.vertex_plans() {
+            plans.validate_source(definition, work, cancel)?;
+        }
+        let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
+        let allowance = source_allowance(definition)?;
+        let interval = coordinates.world_interval();
+        let outside = |position| -> Result<bool, GeometryError> {
+            let z = coordinates.position(position)?[2];
+            Ok(z.hi < interval[0] || z.lo > interval[1])
+        };
+        let vertices = incidence.vertices().ok_or_else(|| {
+            failure(GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "closed cylinder atlas lacks the original vertex inventory", 0, ())
+        })?;
+        let mut result = Self {
+            supports: Vec::new(),
+            source_error_mm: 0.0,
+            exits: Vec::new(),
+            unchanged_source,
+            all_vertex_supports_outside: true,
+        };
+        if !unchanged_source {
+            let count = incidence.values().count().checked_mul(2).ok_or_else(|| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint capacity overflow", 0, ())
+            })?;
+            let bytes = count.checked_mul(std::mem::size_of::<NativeEndpointExit>()).ok_or_else(|| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint storage overflow", 0, ())
+            })?;
+            if bytes > remaining_bytes.min(MAX_CORRECTION_BYTES) {
+                return Err(failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint capacity exceeds scratch allowance", 0, count));
+            }
+            work.charge(count as u64, cancel)?;
+            result.exits.try_reserve_exact(count).map_err(|_| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint allocation refused", 0, count)
+            })?;
+            if result.allocated_bytes() > remaining_bytes.min(MAX_CORRECTION_BYTES) {
+                return Err(failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint allocator exceeded allowance", 0, count));
+            }
+        }
+        for vertex in vertices {
+            work.charge(1, cancel)?;
+            if !incidence.vertex_link_is_cycle(definition, vertex, work, cancel)? {
+                return Ok(None);
+            }
+            let Some((_, point)) = vertex_diagnostic(definition, incidence, vertex) else {
+                return Err(failure(GeometryErrorCode::KernelFailure,
+                    "original vertex inventory lost its literal point", 0, ()));
+            };
+            let original = point.map(|v| add(Interval::point(v),
+                Interval { lo: -allowance, hi: allowance }));
+            if !outside(original)? {
+                return Ok(None);
+            }
+            if unchanged_source {
+                continue;
+            }
+            let available = remaining_bytes.checked_sub(result.allocated_bytes()).ok_or_else(|| {
+                failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint inventory exceeds scratch allowance", 0, ())
+            })?;
+            let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
+                source, incidence, vertex, available, work, cancel,
+            )? else {
+                return Ok(None);
+            };
+            let plan = selection.plan();
+            let mut excluded = true;
+            plan.visit_position_supports(work, cancel, &mut |_realized, source_and_realized| {
+                excluded &= outside(source_and_realized)?;
+                Ok(())
+            })?;
+            if !excluded {
+                return Ok(None);
+            }
+            plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter| {
+                if result.exits.len() == result.exits.capacity()
+                    && !result.exits.iter().any(|previous|
+                        previous.edge == edge && previous.absolute_back == absolute_back)
+                {
+                    return Err(failure(GeometryErrorCode::KernelFailure,
+                        "source vertex exit is absent from complete original edge inventory", 0, ()));
+                }
+                result.record_exit(NativeEndpointExit { edge, absolute_back, parameter })
+            })?;
+            if result.allocated_bytes().saturating_add(selection.owned_bytes()) > remaining_bytes {
+                return Err(failure(GeometryErrorCode::ResourceLimit,
+                    "closed cylinder endpoint exits exceed live scratch allowance", 0, ()));
+            }
+            result.source_error_mm = result.source_error_mm.max(plan.source_error_mm());
+        }
+        Ok(Some(result))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         source: OriginalTrimSource<'_, '_>,
@@ -534,6 +645,7 @@ impl ClosedRadialLinks {
                     rows,
                     offsets,
                     forward,
+                    forward_offset: Interval::point(0.0),
                     min_forward: 0.0,
                     core: prism.core_radius.map(|radius| fiber::FiberCore {
                         frame: prism.frame,
@@ -591,7 +703,7 @@ impl ClosedRadialLinks {
                 if p[0].hi <= 0.0 || length([p[0], p[1], Interval::point(0.0)])?.hi <= core.radius {
                     continue;
                 }
-            } else if dot(fiber.forward, relative).hi <= fiber.min_forward {
+            } else if fiber::fiber_forward(fiber, *position).hi < fiber.min_forward {
                 continue;
             }
             return Ok(false);
