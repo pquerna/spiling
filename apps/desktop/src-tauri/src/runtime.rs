@@ -32,6 +32,13 @@ pub fn configuration() -> Result<Cef, String> {
             ("--use-webgpu-adapter", Some("swiftshader")),
             ("--enable-unsafe-webgpu", None),
         ]);
+    } else {
+        // Core WebGPU needs a native Vulkan compositor when Chromium blocks
+        // Vulkan/GL interop. Driver and adapter blocklists remain active.
+        #[cfg(target_os = "linux")]
+        {
+            cef = cef.enable_features(["Vulkan"]);
+        }
     }
     Ok(cef)
 }

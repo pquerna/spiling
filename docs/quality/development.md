@@ -24,6 +24,8 @@ The native CEF runtime is a substantial download. Cargo pins `cef`/`cef-dll-sys`
 
 Root tools use ignored `.cache/cef` for the shared build/package distribution and default to one Cargo build job; `CARGO_BUILD_JOBS` can explicitly override concurrency. Native archive integrity metadata is retained in provenance. The upstream downloader verifies the CDN archive SHA-1; this is not signature authentication. Cargo and pnpm lockfiles independently pin their package integrity. Job count is not a hard memory bound; use externally enforced limits on resource-sensitive hosts.
 
+Linux hardware startup enables CEF's native Vulkan compositor without overriding driver or adapter safety blocks. The executable directly links the shipped `libvulkan.so.1`: GTK's transitive Vulkan import does not inherit executable `$ORIGIN` RUNPATH, and mixing its system loader with Dawn's pinned loader can prevent device initialization. Keep the pinned distribution and its loader together; no `LD_LIBRARY_PATH` or replacement native library is required.
+
 ## Running the development shell
 
 After checking out the source and installing the prerequisites:
@@ -219,7 +221,11 @@ SPILING_CEF_UNSANDBOXED=1 SPILING_CEF_SOFTWARE_GPU=1 xvfb-run -a pnpm smoke:desk
 
 Do not ship those settings as defaults. `SPILING_CEF_DEBUG_PORT` opens a privileged local debugging endpoint and is off by default. `SPILING_ENGINE_PATH` is an explicit development override. Installed packages resolve the engine beside the actual executable, except CEF Debian packages: their desktop is in `share/Spiling` and their sidecar is in `bin` under the same installation prefix.
 
+Spiling runs trusted packaged desktop UI; loading arbitrary websites is not its product model. Normal CEF renderer isolation is defense in depth, not a hostile-web-content qualification project. The approved **local Linux hardware workflow** permits Chromium's existing GPU-process sandbox fallback on the pinned CEF/driver stack without global sandbox-disable flags. Keep upstream warnings visible and describe the actual GPU/renderer isolation accurately; GPU sandbox qualification does not block local manufacturing delivery. The privileged browser/host is outside the renderer sandbox by design. Imported STEP, images and projects still require malformed-data validation and resource bounds. Hardware device admission establishes neither real-dialog, packaged-platform nor physical-machine qualification.
+
 For development-native checks, build current frontend assets and stage the matching engine **before** building the desktop: `pnpm build` implements that order. A direct desktop Cargo build can copy an old staged sidecar over the engine executable; sharing a warm target does not validate sidecar identity.
+
+The viewport panel stays window-height bounded independently of long manufacturing reports. Both WebGPU canvases cap drawing-buffer pixel ratio against the actual device's texture limit and update dimensions/ratio atomically; changing pixel ratio against old dimensions can allocate an oversized intermediate texture.
 
 `--scenario manufacturing` exercises the actual production panel, native intent/history/compile/verification, motion transport, exclusive export, source-independent read-only reopen and child restart/cleanup. It requires working WebGPU by default. On a headless Linux diagnostic host, `--diagnostic-no-gpu` explicitly preserves the startup GPU rejection, then enables a startup-gated native-panel attachment:
 

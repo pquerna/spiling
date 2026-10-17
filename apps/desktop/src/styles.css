@@ -274,6 +274,8 @@ dl dd {
 .viewport-panel {
   display: flex;
   flex-direction: column;
+  align-self: start;
+  height: calc(100dvh - 122px);
   min-height: 560px;
   background: #101b22;
 }

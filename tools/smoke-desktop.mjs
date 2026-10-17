@@ -248,12 +248,16 @@ async function text(id) {
   return evaluate(`document.querySelector('[data-testid="${id}"]')?.textContent ?? ''`);
 }
 async function click(id) {
-  assert.equal(
-    await evaluate(`!!document.querySelector('[data-testid="${id}"]')`),
-    true,
-    `Missing ${id}`,
+  await until(
+    () =>
+      evaluate(`(() => {
+        const button = document.querySelector('[data-testid="${id}"]');
+        if (!button || button.disabled) return false;
+        button.click();
+        return true;
+      })()`),
+    `enabled ${id}`,
   );
-  await evaluate(`document.querySelector('[data-testid="${id}"]').click()`);
 }
 async function screenshot(name) {
   await mkdir("artifacts", { recursive: true });
@@ -1171,14 +1175,28 @@ async function inspectManufacturing() {
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.deepEqual(state.selected_artifact, record);
   const cancellationRequested = await evaluate(`(async () => {
-    document.querySelector('[data-testid="manufacturing-verify-motion"]').click();
+    const verify = document.querySelector('[data-testid="manufacturing-verify-motion"]');
     const deadline = performance.now() + 10000;
-    while (performance.now() < deadline) {
-      const button = document.querySelector('[data-testid="manufacturing-cancel"]');
-      if (button && !button.disabled) { button.click(); return true; }
-      await new Promise(requestAnimationFrame);
-    }
-    return false;
+    while (verify.disabled && performance.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    if (verify.disabled) throw new Error("Fresh verification did not become available");
+    return new Promise(resolve => {
+      const observer = new MutationObserver(cancelAccepted);
+      const timeout = setTimeout(() => { observer.disconnect(); resolve(false); }, 10000);
+      function cancelAccepted() {
+        const button = document.querySelector('[data-testid="manufacturing-cancel"]');
+        if (!button || button.disabled) return;
+        observer.disconnect();
+        clearTimeout(timeout);
+        button.click();
+        resolve(true);
+      }
+      observer.observe(document.querySelector('[data-testid="manufacturing-panel"]'), {
+        childList: true, subtree: true, attributes: true, attributeFilter: ["disabled"],
+      });
+      verify.click();
+      cancelAccepted();
+    });
   })()`);
   assert.equal(
     cancellationRequested,

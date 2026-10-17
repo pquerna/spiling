@@ -664,8 +664,16 @@ export async function createGeometryViewport(
       if (disposed || failed) return;
       const { width, height } = canvas.getBoundingClientRect();
       if (width <= 0 || height <= 0) return;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.setSize(width, height, false);
+      renderer.setDrawingBufferSize(
+        width,
+        height,
+        Math.min(
+          window.devicePixelRatio || 1,
+          2,
+          device.limits.maxTextureDimension2D / width,
+          device.limits.maxTextureDimension2D / height,
+        ),
+      );
       aspect = width / height;
       projection();
       changed();
@@ -1188,8 +1196,16 @@ export async function createDiagnosticViewport(
       if (disposed) return;
       const { width, height } = canvas.getBoundingClientRect();
       if (width <= 0 || height <= 0) return;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.setSize(width, height, false);
+      renderer.setDrawingBufferSize(
+        width,
+        height,
+        Math.min(
+          window.devicePixelRatio || 1,
+          2,
+          device.limits.maxTextureDimension2D / width,
+          device.limits.maxTextureDimension2D / height,
+        ),
+      );
       const aspect = width / height;
       camera.left = -1.3 * aspect;
       camera.right = 1.3 * aspect;

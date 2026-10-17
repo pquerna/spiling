@@ -8,11 +8,11 @@ Licensed under the Open Software License version 3.0
 
 ## Applicability of these results
 
-The historical results below describe the B0 pipe transport. The current engine/CLI/shell have moved to gRPC operations and ByteStream without cross-version compatibility. They do not inherit protocol/lifecycle acceptance solely from these old runs; see [engine operation evidence](engine-operations.md). Existing unresolved CEF presentation/hardware gates remain unresolved.
+The historical bootstrap and packaging results below describe the B0 pipe transport. The current engine/CLI/shell use gRPC operations and ByteStream without cross-version compatibility; old runs do not confer current protocol/lifecycle acceptance. See [engine operation evidence](engine-operations.md) and the independently exercised local hardware workflow below. Packaged/platform gates remain distinct.
 
 ## Gate status
 
-**B0 acceptance is not yet closed.** Native protocol/CLI, source checks, installed Linux CEF bridge lifecycle, and GPU-unavailable admission checks below are executed results. Engine-delivered WebGPU rendering and physical Windows/macOS/Linux GPU acceptance remain separate unmet gates; source implementation and CI packages are not equivalent to those checks.
+**B0 acceptance is not yet closed.** Historical native/CLI, installed Linux CEF bridge lifecycle and GPU-unavailable checks are executed results. The local Linux hardware workflow below also exercises current engine-delivered rendering and manufacturing. Full packaged Windows/macOS/Linux reference-machine acceptance remains separate; a development run or CI package does not close those gates.
 
 Implementation/evidence integration owner: automated coding assistant. Final evidence reviewer: unassigned; assignment remains a milestone acceptance prerequisite.
 
@@ -86,12 +86,31 @@ Cancelled the superseding matrix run at the user's cost-policy request. Automati
 
 Exercised the revised `pnpm package` path locally: Tauri compiled release with `--no-bundle`, notices were collected after native CEF availability, and `tauri bundle` produced the 139.81 MiB Debian artifact without another compilation. Extracted CEF license/credits hashes matched the values above. The extracted package passed the injected GPU-unavailable/native-close smoke under unsandboxed Xvfb. This diagnostic artifact records base commit `37a4ba7` with `dirty: true`; it is not a release candidate. Full `pnpm check && pnpm test` also passed locally after the cost-focused implementation.
 
+## Local Linux hardware development workflow
+
+Exercised from main base `0c402ba` with the Linux runtime, bounded-canvas and replay-ownership changes in this commit. This is a debug-development result, not a packaged release. Native identity remains Monstertruck `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`, project4/manufacturing5/surface3/planner7, emitter4/verifier4; it does not include the unfinished native-geometry parity cutover.
+
+- Ubuntu 26.04.1 LTS, Linux 7.0.0-38-generic; Rust 1.99.0, Node 24.15.0, pnpm 10.32.1 and the committed lockfiles.
+- Physical Radeon 8060S / RDNA 3, Mesa 26.0.8, Xorg/amdgpu and a 3440×1440 LG display. CEF/Chromium 152.0.7977.83 admitted a nonfallback AMD WebGPU adapter with native Vulkan compositing and normal ANGLE/OpenGL. `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json`; no software renderer, driver-block bypass, global sandbox-disable flag or loader-preload override.
+- The exact debug executable had an AppArmor user-namespace allowance; global host restrictions were retained. Renderer processes reported seccomp mode 2. Chromium reported GPU sandbox false under the approved local desktop fallback; this is not a fully GPU-sandboxed claim.
+- `fixtures/geometry/box-mm.step` SHA-256 `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98`; `fixtures/manufacturing/complete-sparse.intent.json` SHA-256 `b91e7054907216e4ea6ecaf472cadeea950fb20e642586d4be15815893918c77`.
+
+Built with `node tools/run.mjs build` using the shared `CARGO_TARGET_DIR` and matching staged engine. Ran `node tools/smoke-desktop.mjs --executable /home/pquerna/src/spiling/target/debug/spiling-desktop --scenario manufacturing --port 9222` on physical Xorg display `:90`, without `--diagnostic-no-gpu`.
+
+The production panel passed intent validation/Apply/history, native bed preparation and Preflight, Compile, fresh report-only and actual-program motion replay, a native cancellation request and terminal-result invariants, exclusive four-file export/no-overwrite rejection, source-deleted read-only reopen with fresh replay/export, and a new engine session requiring fresh verification. Native window close reaped the engine and exited successfully. The emitted bundle had 41 layers, 589 paths and 835 deposition segments; independent replay decoded 1,952 events / 93,792 packed bytes and reported `verified: true`, with GPU display admission ready. Inspected native-box and fresh-report screenshots.
+
+A separate controlled native-window smoke enlarged the actual canvas to 9,741.828125 CSS pixels high. Its drawing buffer changed from 527×439 to 443×8,191 and back to 527×439 under the device limit; the workbench remained Running, no JavaScript exceptions were captured, and the restored native box was visually inspected. Ignored local evidence includes `artifacts/main-runtime-resize.json`, `main-runtime-resize.png`, `main-runtime-gpu-security.json` and `manufacturing-production-panel.png`.
+
+Affected desktop all-target Clippy, engine-client tests (15 passed, 7 ignored), package TypeScript checks, Rust formatting, changed formatted-file checks and the canonical build passed. Full `pnpm check` did not pass: the existing Core `storage::open_reusing` eight-argument Clippy failure remains outside this patch. Repository-wide Prettier also reported 31 pre-existing files; no formatting sweep was applied.
+
+These results establish this local hardware/software workflow only, not real native-dialog interaction, physical face-picking acceptance, packaged installation, other GPU/platform coverage, physical printability or machine readiness.
+
 ## Remaining acceptance prerequisites
 
-- Full packaged engine-delivered WebGPU presentation, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and production sandbox behavior on a working driver/runtime presentation path.
+- Full packaged engine-delivered WebGPU presentation, UI interruption/restart/stop and mismatch presentation, successful GPU replacement/loss cleanup, and normal desktop isolation defaults on the declared reference machines.
 - Corrected Windows/macOS native distribution evidence, requested explicitly rather than inferred from automatic Linux checks.
 - Windows/macOS packaged installation and actual GPU/lifecycle runs on declared reference machines.
-- Physical Linux GPU/reference-machine run; software/CPU rendering is diagnostic-only.
+- Packaged physical Linux GPU/reference-machine acceptance; the local development run above is not distribution qualification. Software/CPU rendering remains diagnostic-only.
 - Fresh-machine reproduction, release signing/distribution/licensing review, source access and recipient-assent review appropriate to release channels.
 
 Use [B0-plan.md](B0-plan.md) for acceptance procedures and [development.md](development.md) for actual commands. Do not present any unchecked prerequisite as passed or silently narrow the support matrix.
