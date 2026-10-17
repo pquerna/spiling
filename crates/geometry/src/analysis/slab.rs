@@ -5196,7 +5196,9 @@ mod tests {
                 &mut work,
                 &cancel,
             )
-            .expect("regular native slab with bounded shape motion");
+            .unwrap_or_else(|error| {
+                panic!("{name}: regular native slab with bounded shape motion: {error}")
+            });
             assert_eq!(result.section.loops.len(), expected_loops);
             assert!(result.invariance.is_none());
             assert!(

@@ -60,9 +60,28 @@ This is a bounded native-kernel checkpoint, not full STEP, Spiling fitting/housi
 Compile, workbench, physical printing or packaged geometry qualification. The
 older frozen corpus below retains its actual producer and support envelope.
 
+### Same-gauge monotone root-cover checkpoint
+
+The subsequent native correction is public at
+[`a6ea3992eb3a6be5615741220bc64318e02e4fef`](https://github.com/pquerna/monstertruck/tree/a6ea3992eb3a6be5615741220bc64318e02e4fef).
+An actual equatorial spherical-belt regression failed before the correction
+with `AmbiguousBranch`. Overlapping contracted root enclosures now compose
+their independently proved same-sign monotone witnesses; no sample, source
+chart, parameter gauge or tolerance changes. Three focused native properties
+passed: independent/reversed spherical gauges at equatorial and plural cuts,
+plural roots/both crossing directions, and the expanded-witness monotonicity
+guard. These are not a rerun of the preceding full native checks.
+
+The actual CLI `geometry --source … --section 0,0,0:0,0,1` reproduced the
+refusal in 2.31 seconds, then passed in 3.03 seconds with one section loop.
+Both runs used the same generated STEP bytes (SHA-256
+`5dfc9c7b61f55cf556bc56698c93cfd8b4cf975393a4a008cec72538952e1213`)
+from the existing `native-parity-sphere-belt.step` recipe/exporter. This
+qualifies that raw section path, not closed-material manufacturing.
+
 ### Curved source ownership: bounded properties, operator gate still open
 
-The planner-9 parity work on the same native pin separately exercises original
+The planner-9 parity work on the e6ff checkpoint separately exercises original
 curved UV ownership and closed source-vertex transport. Seven focused geometry
 properties passed together in 36.88 seconds with one test thread: both UV-error
 terms in owning-complement separation, collapsed-germ rejection, the fitting's
@@ -138,17 +157,17 @@ preparation consumes 944,693 units and retains 3,260,160 bytes, compared with
 remains in force; the saving comes from retained selection, not skipped
 qualification or query proofs.
 
-The material-owner cutover's focused run passed retained-plan
+The e6ff material-owner cutover's focused run passed retained-plan
 identity/cancellation/resource rejection, finite-side projection, exhausted
-query capacity and independent raw-section exact-fit properties. The existing
-regular-family property still refused the positive generated spherical-belt
-query `[-0.01, 0.01]` sampled at zero: original plane-root preparation returned
-`AmbiguousBranch` on face 1. A no-rebuild source trace established that the
-cone-frustum positive query and its wider-closed-span/same-sample metric
-rejection completed first. The spherical failure remains a representation
-admission gap; it is not repinned to an expected failure or counted as parity.
+query capacity and independent raw-section exact-fit properties. Its existing
+regular-family property refused the positive spherical-belt root query.
+After the a6ea root correction, that same property advances beyond native
+root admission but still refuses complete closed-material source-fiber
+degree, with 18,487,575 work units remaining. The property is not repinned to
+an expected failure or counted as parity; closed-material authority remains
+an independent acceptance gate.
 
-The matched material-owner engine/CLI completes the exact historical baseline
+At Root `951830b` / Native `e6ff94e0`, the material-owner engine/CLI completes the exact historical baseline
 `fixtures/geometry/box-mm.step` (SHA-256
 `1b23042e12183748e12bc4e0195ae546c80296ce4170709eb3f836dce2f4ac98`)
 from a fresh project: certified bed placement, Compile, independent verification,

@@ -271,6 +271,14 @@ budgets remain separate. Candidate end association, continuation/extension,
 complete interior coverage and endpoint sealing still run under the actual
 coverage policy.
 
+For one original scalar function and parameter gauge, overlapping contracted
+root enclosures lie inside overlapping complete monotone witnesses. If both
+witnesses have the same strict derivative sign, their connected cover proves
+one root even when a fresh interval evaluation over the union loses correlation.
+Deduplicate from those certificates, retaining each stored witness with its own
+derivative enclosure. Opposite or unresolved signs remain refusals. This changes
+neither gauges nor root seeds and does not turn a tangency into a transverse cut.
+
 Reuse binds exact native plane coefficients, immutable face/carrier and
 orientation, complete chart/coedge association, original curve binding/range,
 units and chart error. Validate identity at consumption; a foreign or changed
