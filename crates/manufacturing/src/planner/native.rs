@@ -33,6 +33,7 @@ pub(super) struct NativeSpanRequest {
 struct SpanCaptureRequest {
     index: u32,
     end: u32,
+    partition_end_z_bits: u64,
     retained_points: usize,
     retained_bytes: usize,
 }
@@ -249,6 +250,34 @@ struct StageMetric {
     owned_critical_slabs: u32,
 }
 
+/// A scheduling hint only: every proposed prefix still needs fresh proof.
+#[derive(Default)]
+struct NativeSpanSizing {
+    partition_end_z_bits: Option<u64>,
+    max_layers: Option<u32>,
+}
+
+impl NativeSpanSizing {
+    fn begin_partition(&mut self, upper_z_bits: u64) {
+        if self.partition_end_z_bits != Some(upper_z_bits) {
+            self.partition_end_z_bits = Some(upper_z_bits);
+            self.max_layers = None;
+        }
+    }
+
+    fn limit_end(&self, index: u32, partition_end: u32) -> u32 {
+        self.max_layers.map_or(partition_end, |layers| {
+            index.saturating_add(layers.max(1)).min(partition_end)
+        })
+    }
+
+    fn tighten(&mut self, upper_z_bits: u64, layers: u32) {
+        if layers > 0 && self.partition_end_z_bits == Some(upper_z_bits) {
+            self.max_layers = Some(self.max_layers.map_or(layers, |limit| limit.min(layers)));
+        }
+    }
+}
+
 /// Lookahead retains real candidates, never a placeholder receipt or a second
 /// slicer. The geometry ledger alone resolves the accepted stream's authority.
 pub(super) struct NativeStageState {
@@ -261,6 +290,7 @@ pub(super) struct NativeStageState {
     metrics: Vec<StageMetric>,
     protected_voids: Vec<CapturedProtectedVoid>,
     void_bytes: usize,
+    sizing: NativeSpanSizing,
 }
 
 impl NativeStageState {
@@ -280,6 +310,7 @@ impl NativeStageState {
             metrics: Vec::new(),
             protected_voids: Vec::new(),
             void_bytes: 0,
+            sizing: NativeSpanSizing::default(),
         })
     }
 
@@ -290,6 +321,7 @@ impl NativeStageState {
     fn retained_proof_bytes(&self) -> usize {
         self.previous_bytes
             .saturating_add(self.void_bytes)
+            .saturating_add(std::mem::size_of::<NativeSpanSizing>())
             .saturating_add(self.ledger.retained_bytes())
             .saturating_add(
                 self.metrics
@@ -386,8 +418,9 @@ struct CapturedEvidence {
 struct DraftStage {
     index: u32,
     end: u32,
+    partition_end_z_bits: u64,
     interval: [f64; 2],
-    sample: f64,
+    native_sample: f64,
     analyses: Vec<CapturedEvidence>,
     leaves: Vec<SourceMaterial>,
     material: MultiPolygon<f64>,
@@ -430,6 +463,7 @@ impl DraftStage {
 
 struct ReadyStage {
     index: u32,
+    partition_end_z_bits: u64,
     span: NativeSpan,
     pending: spiling_geometry::PendingNativeUnionProof,
     candidate: Vec<spiling_geometry::SectionLoopMm>,
@@ -496,7 +530,10 @@ pub(super) fn collect_span(
             bytes.saturating_add(source.retained_bytes())
         });
     if state.ready.is_empty() {
-        let end = span_end(schedule, admission, input.intent, index, cancel)?;
+        let partition_end = span_end(schedule, admission, input.intent, index, cancel)?;
+        let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
+        state.sizing.begin_partition(partition_end_z_bits);
+        let end = state.sizing.limit_end(index, partition_end);
         let first = capture_base(
             source,
             admission,
@@ -504,9 +541,11 @@ pub(super) fn collect_span(
             &SpanCaptureRequest {
                 index,
                 end,
+                partition_end_z_bits,
                 retained_points,
                 retained_bytes: resident_bytes.saturating_add(state.retained_proof_bytes()),
             },
+            &mut state.sizing,
             surface_work,
             cancel,
         )?;
@@ -577,7 +616,11 @@ pub(super) fn collect_span(
                         "native endpoint dependency frontier exceeds the layer budget",
                     ));
                 }
-                let next_end = span_end(schedule, admission, input.intent, next_index, cancel)?;
+                let partition_end =
+                    span_end(schedule, admission, input.intent, next_index, cancel)?;
+                let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
+                state.sizing.begin_partition(partition_end_z_bits);
+                let next_end = state.sizing.limit_end(next_index, partition_end);
                 let next = capture_base(
                     source,
                     admission,
@@ -585,9 +628,11 @@ pub(super) fn collect_span(
                     &SpanCaptureRequest {
                         index: next_index,
                         end: next_end,
+                        partition_end_z_bits,
                         retained_points: points,
                         retained_bytes: bytes,
                     },
+                    &mut state.sizing,
                     surface_work,
                     cancel,
                 )?;
@@ -595,8 +640,12 @@ pub(super) fn collect_span(
                 continue;
             }
             let mut current = frontier.pop().expect("nonempty native dependency frontier");
-            let candidate =
-                union_loops(&current.material, &current.finished, current.sample, cancel)?;
+            let candidate = union_loops(
+                &current.material,
+                &current.finished,
+                current.native_sample,
+                cancel,
+            )?;
             let upper = settled
                 .front()
                 .filter(|stage| stage.index == current.end)
@@ -646,10 +695,14 @@ pub(super) fn collect_span(
                     settled.clear();
                     let retry_index = current.index;
                     let mut end = current.end;
+                    let partition_end_z_bits = current.partition_end_z_bits;
+                    state.sizing.begin_partition(partition_end_z_bits);
                     refine_candidate(
                         schedule,
                         retry_index,
                         &mut end,
+                        &mut state.sizing,
+                        partition_end_z_bits,
                         "composed native shape-error refinement",
                     )?;
                     drop(candidate);
@@ -682,9 +735,11 @@ pub(super) fn collect_span(
                         &SpanCaptureRequest {
                             index: retry_index,
                             end,
+                            partition_end_z_bits,
                             retained_points: points,
                             retained_bytes: bytes,
                         },
+                        &mut state.sizing,
                         surface_work,
                         cancel,
                     )?;
@@ -781,6 +836,7 @@ pub(super) fn collect_span(
                 .collect();
             let ready = ReadyStage {
                 index: current.index,
+                partition_end_z_bits: current.partition_end_z_bits,
                 pending,
                 candidate,
                 positive,
@@ -856,9 +912,10 @@ pub(super) fn collect_span(
             "accepted native frontier plus live scene/ledger exceeds retained budget",
         ));
     }
+    let (interval, native_sample) = native_span_reference(schedule, index, ready.span.end)?;
     if ready.index != index
-        || ready.pending.world_height_interval_mm()[0] != schedule[index as usize].lower_z
-        || ready.pending.sample_world_z_mm() != schedule[index as usize].sample
+        || ready.pending.world_height_interval_mm() != interval
+        || ready.pending.sample_world_z_mm() != native_sample
     {
         return Err(error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -888,6 +945,11 @@ pub(super) fn collect_span(
         .map_err(|failure| {
             super::native_error(failure, "actual native contributor/final-M binding")
         })?;
+    if metric.owned_critical_slabs == 0 {
+        state
+            .sizing
+            .tighten(ready.partition_end_z_bits, metric.layers);
+    }
     state.previous_bytes = ready
         .positive
         .capacity()
@@ -961,6 +1023,7 @@ fn capture_base(
     admission: &mut preflight::Admission,
     schedule: &mut Vec<LayerElevation>,
     request: &SpanCaptureRequest,
+    sizing: &mut NativeSpanSizing,
     surface_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<DraftStage, ManufacturingError> {
@@ -972,19 +1035,20 @@ fn capture_base(
     let SpanCaptureRequest {
         index,
         mut end,
+        partition_end_z_bits,
         retained_points,
         retained_bytes,
     } = *request;
     loop {
         check_cancel(cancel)?;
+        let (interval, sample) = native_span_reference(schedule, index, end)?;
         let layer = &schedule[index as usize];
-        let interval = [layer.lower_z, schedule[(end - 1) as usize].z];
-        let sample = layer.sample;
         let mut refine = false;
         for fields in admission.surface_fields.values() {
             for field in fields {
                 if let Some(allowed) = field.allowed_vertical_error() {
-                    refine |= field.vertical_error_bound(layer.lower_z, layer.z, sample)? > allowed;
+                    refine |=
+                        field.vertical_error_bound(layer.lower_z, layer.z, layer.sample)? > allowed;
                 }
             }
         }
@@ -1026,8 +1090,11 @@ fn capture_base(
                     &mut admission.geometry_work,
                     cancel,
                 );
-                eprintln!("PARITY_BUDGET phase=slab index={index} end={end} interval={interval:?} sample={sample} before={query_before} after={} result={:?}",
-                    admission.geometry_work.consumed(), analysis.as_ref().map(|_| ()).map_err(|error| error.code));
+                eprintln!(
+                    "PARITY_BUDGET phase=slab index={index} end={end} interval={interval:?} sample={sample} before={query_before} after={} result={:?}",
+                    admission.geometry_work.consumed(),
+                    analysis.as_ref().map(|_| ()).map_err(|error| error.code)
+                );
                 let analysis = match analysis {
                     Ok(analysis) => analysis,
                     Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
@@ -1086,17 +1153,20 @@ fn capture_base(
                 schedule,
                 index,
                 &mut end,
+                sizing,
+                partition_end_z_bits,
                 "native/field shape-error refinement",
             )?;
             continue;
         }
         if end > index + 1
-            && analyses
-                .iter()
-                .any(|evidence| evidence.analysis.invariance().is_none()
-                    && !evidence.analysis.has_closed_radial_material_product())
+            && analyses.iter().any(|evidence| {
+                evidence.analysis.invariance().is_none()
+                    && !evidence.analysis.has_closed_radial_material_product()
+            })
         {
-            end = index + 1;
+            end = index + (end - index) / 2;
+            sizing.tighten(partition_end_z_bits, end - index);
             continue;
         }
         let mut material = MultiPolygon(Vec::new());
@@ -1238,6 +1308,8 @@ fn capture_base(
                 schedule,
                 index,
                 &mut end,
+                sizing,
+                partition_end_z_bits,
                 "actual source-M leaf shape-error refinement",
             )?;
             continue;
@@ -1262,8 +1334,9 @@ fn capture_base(
         return Ok(DraftStage {
             index,
             end,
+            partition_end_z_bits,
             interval,
-            sample,
+            native_sample: sample,
             analyses,
             leaves,
             material,
@@ -1279,16 +1352,41 @@ fn capture_base(
     }
 }
 
+fn native_span_reference(
+    schedule: &[LayerElevation],
+    index: u32,
+    end: u32,
+) -> Result<([f64; 2], f64), ManufacturingError> {
+    if index >= end || end as usize > schedule.len() {
+        return Err(error(
+            ManufacturingErrorCode::NativeAnalysisIndeterminate,
+            "settled native lookahead no longer matches the actual shared schedule",
+        ));
+    }
+    let first = &schedule[index as usize];
+    let interval = [first.lower_z, schedule[(end - 1) as usize].z];
+    let sample = if end == index + 1 {
+        first.sample
+    } else {
+        interval[0] + (interval[1] - interval[0]) * 0.5
+    };
+    Ok((interval, sample))
+}
+
 fn refine_candidate(
     schedule: &mut Vec<LayerElevation>,
     index: u32,
     end: &mut u32,
+    sizing: &mut NativeSpanSizing,
+    partition_end_z_bits: u64,
     context: &str,
 ) -> Result<(), ManufacturingError> {
     if *end > index + 1 {
-        *end = index + 1;
+        *end = index + (*end - index) / 2;
+        sizing.tighten(partition_end_z_bits, *end - index);
         return Ok(());
     }
+    sizing.tighten(partition_end_z_bits, 1);
     split_layer(schedule, index, context)?;
     *end = index + 1;
     Ok(())
