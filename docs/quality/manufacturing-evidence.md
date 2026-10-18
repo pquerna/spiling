@@ -35,6 +35,11 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
   so stale Preflight after Compile does not invalidate fresh bytes. Required input
   failures stay separate from optional Compile analysis. Read-only snapshots allow
   Preflight/fresh inspection/export, never Apply or Compile.
+- Desktop [`styles.css`](../../apps/desktop/src/styles.css) bounds the accepted
+  workspace and independently scrolling control panes around one visible native
+  canvas, including narrow native windows. The existing
+  [viewport resize owner](../../packages/viewport/src/index.ts) retains device-bounded
+  drawing-buffer sizing; layout changes do not request geometry or replay again.
 
 Native interval work, deposited-stroke anchor comparisons and planar overlay work
 each have an independent cumulative 128-million-unit ceiling. These bound

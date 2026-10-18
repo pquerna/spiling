@@ -1030,6 +1030,98 @@ async function inspectSurfaceFinishAuthoring() {
   };
 }
 
+async function workspaceSnapshot() {
+  return evaluate(`new Promise(resolve => {
+    const samples = [];
+    function sample() {
+      const canvas = document.querySelector('[data-testid="viewport"]');
+      const rect = canvas.getBoundingClientRect();
+      samples.push({x:rect.x,y:rect.y,width:rect.width,height:rect.height,
+        pixels:[canvas.width,canvas.height]});
+      if (samples.length < 6) requestAnimationFrame(sample);
+      else resolve({samples, window:[innerWidth,innerHeight], documentScroll:[scrollX,scrollY],
+        panes:[...document.querySelectorAll('.workbench > aside')].map(pane => ({
+          height:pane.clientHeight, content: pane.scrollHeight, scroll:pane.scrollTop
+        }))});
+    }
+    requestAnimationFrame(sample);
+  })`);
+}
+
+function assertVisibleWorkspace(snapshot) {
+  const rect = snapshot.samples.at(-1);
+  assert.ok(rect.width > 0 && rect.height > 0, "Native viewport remains nonempty");
+  assert.ok(rect.x >= 0 && rect.y >= 0 &&
+    rect.x + rect.width <= snapshot.window[0] + 1 &&
+    rect.y + rect.height <= snapshot.window[1] + 1,
+    "The full native canvas remains inside the actual window");
+  assert.ok(rect.pixels[0] > 0 && rect.pixels[1] > 0 &&
+    rect.pixels[0] <= Math.ceil(rect.width * 2) &&
+    rect.pixels[1] <= Math.ceil(rect.height * 2),
+    "Drawing-buffer dimensions retain the existing device/pixel-ratio bound");
+  assert.deepEqual(snapshot.documentScroll, [0, 0], "Controls never scroll the whole workspace");
+  assert.ok(snapshot.samples.every(sample => JSON.stringify(sample) === JSON.stringify(rect)),
+    "Layout and drawing buffer settle without a resize feedback loop");
+}
+
+async function inspectWorkspaceContinuity() {
+  const before = await geometryState();
+  const program = await manufacturingState();
+  const original = await cdp("Browser.getWindowForTarget");
+  const sizes = [[1200, 820], [800, 600], [1600, 1000]];
+  const observations = [];
+  let picked;
+  try {
+    await cdp("Browser.setWindowBounds", {windowId:original.windowId, bounds:{windowState:"normal"}});
+    for (const [width, height] of sizes) {
+      await cdp("Browser.setWindowBounds", {windowId:original.windowId, bounds:{width,height}});
+      await until(async () => {
+        const current = await cdp("Browser.getWindowBounds", {windowId:original.windowId});
+        return current.bounds.width === width && current.bounds.height === height;
+      }, "actual native window resize");
+      await evaluate(`document.querySelectorAll('.workbench > aside').forEach(pane => {pane.scrollTop=0;})`);
+      const top = await until(async () => {
+        const snapshot = await workspaceSnapshot();
+        return snapshot.samples.every(sample =>
+          JSON.stringify(sample) === JSON.stringify(snapshot.samples.at(-1))) ? snapshot : false;
+      }, "bounded native canvas resize settles");
+      assertVisibleWorkspace(top);
+      assert.ok(top.panes.every(pane => pane.height > 0 && pane.content > pane.height),
+        "Both long operator panes have independent usable scroll areas");
+      await evaluate(`document.querySelectorAll('.workbench > aside').forEach(pane => {pane.scrollTop=pane.scrollHeight;}); window.scrollTo(0,100000);`);
+      const bottom = await workspaceSnapshot();
+      assertVisibleWorkspace(bottom);
+      assert.deepEqual(bottom.samples.at(-1), top.samples.at(-1),
+        "Reading the bottom controls does not move or resize the native canvas");
+      assert.ok(bottom.panes.every(pane => pane.scroll > 0), "Both panels reach their lower controls");
+      await screenshot(`manufacturing-workspace-${width}-lower-controls`);
+      await evaluate(`(() => {const pane=document.querySelector('.workbench > .outline'); pane.scrollTop=0; pane.focus();})()`);
+      await cdp("Input.dispatchKeyEvent", {type:"keyDown",key:"PageDown",code:"PageDown",windowsVirtualKeyCode:34});
+      await cdp("Input.dispatchKeyEvent", {type:"keyUp",key:"PageDown",code:"PageDown",windowsVirtualKeyCode:34});
+      await until(() => evaluate(`document.querySelector('.workbench > .outline').scrollTop > 0`),
+        "keyboard scrolling in the focused operator pane");
+      observations.push({size:[width,height],canvas:bottom.samples.at(-1),panes:bottom.panes});
+    }
+    const after = await geometryState();
+    const afterProgram = await manufacturingState();
+    assert.deepEqual(after.scene, before.scene, "Scrolling/resizing does not regenerate native geometry");
+    assert.deepEqual(after.occurrences, before.occurrences);
+    assert.deepEqual(after.transfer, before.transfer, "Scrolling/resizing retrieves no new geometry bytes");
+    assert.deepEqual(after.buffer_usage, before.buffer_usage, "Owned scene/replay buffers stay retained");
+    assert.equal(afterProgram.project_revision, program.project_revision);
+    assert.deepEqual(afterProgram.selected_artifact, program.selected_artifact);
+    assert.deepEqual(afterProgram.replay, program.replay, "Actual-program replay is not reloaded");
+    assert.equal(afterProgram.fresh, true);
+    picked = await inspectManufacturingSource("workspace-resized");
+  } finally {
+    const {left,top,width,height,windowState} = original.bounds;
+    await cdp("Browser.setWindowBounds", {windowId:original.windowId,bounds:{left,top,width,height}});
+    if (windowState !== "normal")
+      await cdp("Browser.setWindowBounds", {windowId:original.windowId,bounds:{windowState}});
+  }
+  return {observations,canvasPicking:picked.canvasPicking};
+}
+
 async function expectManufacturingStep(id) {
   await until(
     () => evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]')?.dataset.state === ${JSON.stringify(id)}`),
@@ -1422,6 +1514,8 @@ async function inspectManufacturing() {
   await expectManufacturingStep("ready");
   await evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]').scrollIntoView({block:'start'})`);
   await screenshot("manufacturing-guided-ready");
+  const workspace = scenario === "manufacturing" && !manufacturingDiagnostic
+    ? await inspectWorkspaceContinuity() : null;
   const cancellationRequested = await cancelAcceptedOperation("manufacturing-verify-motion");
   assert.equal(
     cancellationRequested,
@@ -1764,6 +1858,7 @@ async function inspectManufacturing() {
   return {
     sourceInspection,
     reopenedSourceInspection,
+    workspace,
     preflight,
     record,
     report: state.report,

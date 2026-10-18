@@ -249,7 +249,7 @@ function Workbench() {
           }}
         />
       )}
-      <aside className="outline panel">
+      <aside className="outline panel" aria-label="Project and manufacturing controls" tabIndex={0}>
         <div className="panel-title">
           NATIVE SCENE <span>{state.scene?.revision ?? 0}</span>
         </div>
@@ -698,7 +698,7 @@ function Workbench() {
           </div>
         )}
       </section>
-      <aside className="inspector panel">
+      <aside className="inspector panel" aria-label="Inspection and surface controls" tabIndex={0}>
         <div className="panel-title">
           INSPECTION <span>NATIVE</span>
         </div>
@@ -1080,7 +1080,7 @@ export function App() {
     [showLicense, setShowLicense] = useState(false),
     [storageNotice, setStorageNotice] = useState("");
   return (
-    <div className="app-shell">
+    <div className={`app-shell${accepted ? " workspace-open" : ""}`}>
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark">S</span>
