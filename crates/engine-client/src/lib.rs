@@ -304,10 +304,11 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
             &hello.geometry_capabilities,
             "native_vertical_cylinder_face_v1",
         ),
-        (&hello.project_capabilities, "recoverable_projects_v6"),
+        (&hello.project_capabilities, "recoverable_projects_v7"),
         (&hello.project_capabilities, "source_face_surface_finish_v3"),
         (&hello.project_capabilities, "surface_image_assets_v1"),
-        (&hello.manufacturing_capabilities, "manufacturing_schema7"),
+        (&hello.project_capabilities, "source_bound_process_v1"),
+        (&hello.manufacturing_capabilities, "manufacturing_schema8"),
         (&hello.manufacturing_capabilities, "mapped_image_relief_v1"),
         (
             &hello.manufacturing_capabilities,
@@ -328,7 +329,7 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
         })
     {
         return Err(ClientError::Protocol(
-            "engine build or source-surface format/API capabilities mismatch".into(),
+            "engine build or source-bound authoring format/API capabilities mismatch".into(),
         ));
     }
     Ok(())

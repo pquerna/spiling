@@ -484,7 +484,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         intentional_void_area_mm2: 0.0,
         protected_hole_area_mm2: 0.0,
         nominal_deposition_volume_mm3: volume,
-        requested_infill_fraction: recipe.infill_fraction,
+        process_regions: vec![],
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
     };
@@ -501,6 +501,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 &manifest.occurrences,
                 &intent,
                 &manifest.surface_overlays,
+                &manifest.process_document,
             )
             .unwrap(),
             project_id: manifest.project_id,
@@ -509,6 +510,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             occurrences: manifest.occurrences,
             intent,
             surface_overlays: manifest.surface_overlays,
+            process_document: manifest.process_document,
             surface_images: project
                 .surface_images()
                 .values()
@@ -522,7 +524,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "1".into(),
             },
-            planner_version: "11".into(),
+            planner_version: "12".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -757,6 +759,7 @@ fn manufacturing_publication_rejects_stale_foreign_and_semantic_mismatch_atomica
         &bundle.provenance.occurrences,
         &bundle.provenance.intent,
         &bundle.provenance.surface_overlays,
+        &bundle.provenance.process_document,
     )
     .unwrap();
     assert_eq!(
@@ -776,6 +779,7 @@ fn manufacturing_publication_rejects_stale_foreign_and_semantic_mismatch_atomica
         &bundle.provenance.occurrences,
         &bundle.provenance.intent,
         &bundle.provenance.surface_overlays,
+        &bundle.provenance.process_document,
     )
     .unwrap();
     assert_eq!(
@@ -1099,6 +1103,7 @@ fn surface_edits_invalidate_exact_artifact_and_undo_restores_captured_provenance
         &foreign.provenance.occurrences,
         &foreign.provenance.intent,
         &foreign.provenance.surface_overlays,
+        &foreign.provenance.process_document,
     )
     .unwrap();
     assert_eq!(
@@ -1474,6 +1479,7 @@ fn image_history_restores_asset_and_coherent_bundle_content_provenance() {
         &wrong_input.provenance.occurrences,
         &wrong_input.provenance.intent,
         &wrong_input.provenance.surface_overlays,
+        &wrong_input.provenance.process_document,
     )
     .unwrap();
     let before = project.info();
@@ -1622,4 +1628,547 @@ fn bundle_image_content_is_complete_even_for_disabled_layers_and_old_formats_fai
         .unwrap()
         .remove("surface_resolution");
     check_rejected(&old);
+}
+
+fn process_set(scope: SurfaceScope, fraction: f64) -> Edit {
+    Edit::Process {
+        edit: ProcessEdit::AddLayer {
+            scope,
+            selector: ProcessSelector::WholeOwnedVolume,
+            action: ProcessAction::Replace {
+                value: ProcessValue::SparseFraction { fraction },
+            },
+        },
+    }
+}
+fn process_fraction(project: &Project, occurrence_id: OccurrenceId) -> f64 {
+    project
+        .info()
+        .resolved_process
+        .iter()
+        .find(|row| row.occurrence_id == occurrence_id)
+        .unwrap()
+        .value
+        .fraction
+}
+#[test]
+fn process_repeated_scope_reset_inherits_once_and_undo_never_rewinds_ids() {
+    let mut project = imported();
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(manufacturing_intent()),
+        },
+    );
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    let definition = SurfaceScope::Definition {
+        definition_id: definition_id.clone(),
+    };
+    let occurrence = SurfaceScope::Occurrence {
+        occurrence_id,
+        expected_definition_id: definition_id,
+    };
+    edit(&mut project, process_set(definition.clone(), 0.3));
+    edit(&mut project, process_set(occurrence.clone(), 0.4));
+    edit(&mut project, process_set(occurrence.clone(), 0.6));
+    assert_eq!(process_fraction(&project, occurrence_id), 0.6);
+    assert_eq!(project.info().resolved_process[0].inherited.fraction, 0.3);
+    edit(&mut project, process_set(definition, 0.35));
+    assert_eq!(process_fraction(&project, occurrence_id), 0.6);
+    assert_eq!(project.info().resolved_process[0].inherited.fraction, 0.35);
+    let captured = project.snapshot().process_document.clone();
+    let high_water = project.capture().manifest;
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::Reset {
+                scope: occurrence.clone(),
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.35);
+    assert!(
+        project
+            .info()
+            .process_document
+            .layers
+            .iter()
+            .all(|layer| layer.scope != occurrence)
+    );
+    project.undo().unwrap();
+    assert_eq!(process_fraction(&project, occurrence_id), 0.6);
+    assert!(Arc::ptr_eq(&captured, &project.snapshot().process_document));
+    assert_eq!(
+        project.capture().manifest.next_process_layer,
+        high_water.next_process_layer
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_operation,
+        high_water.next_process_operation
+    );
+    project.redo().unwrap();
+    edit(&mut project, process_set(occurrence, 0.7));
+    let layer = project
+        .info()
+        .process_document
+        .layers
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(layer.layer_id.get(), high_water.next_process_layer);
+    assert_eq!(
+        layer.operations[0].operation_id.get(),
+        high_water.next_process_operation
+    );
+}
+#[test]
+fn process_ordered_operations_erase_disable_reorder_and_update_are_real_transactions() {
+    let mut project = imported();
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(manufacturing_intent()),
+        },
+    );
+    let definition = definition_scope(&project);
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    edit(&mut project, process_set(definition.clone(), 0.3));
+    edit(&mut project, process_set(definition.clone(), 0.5));
+    let second = project.info().process_document.layers[1].clone();
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::AddOperation {
+                layer_id: second.layer_id,
+                selector: ProcessSelector::WholeOwnedVolume,
+                action: ProcessAction::Erase,
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.3);
+    let erased = project.info().process_document.layers[1].operations[1].operation_id;
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::MoveOperation {
+                operation_id: erased,
+                index: 0,
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.5);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::UpdateOperation {
+                operation_id: second.operations[0].operation_id,
+                selector: ProcessSelector::WholeOwnedVolume,
+                action: ProcessAction::Replace {
+                    value: ProcessValue::SparseFraction { fraction: 0.65 },
+                },
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.65);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetLayerEnabled {
+                layer_id: second.layer_id,
+                enabled: false,
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.3);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetLayerEnabled {
+                layer_id: second.layer_id,
+                enabled: true,
+            },
+        },
+    );
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::MoveLayer {
+                layer_id: second.layer_id,
+                index: 0,
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.3);
+    let first_layer_id = project.info().process_document.layers[1].layer_id;
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::RemoveLayer {
+                layer_id: first_layer_id,
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.65);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::RemoveOperation {
+                operation_id: second.operations[0].operation_id,
+            },
+        },
+    );
+    assert_eq!(
+        process_fraction(&project, occurrence_id),
+        manufacturing_intent().recipe.infill_fraction
+    );
+    project.undo().unwrap();
+    assert_eq!(process_fraction(&project, occurrence_id), 0.65);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::Reset { scope: definition },
+        },
+    );
+    assert_eq!(
+        process_fraction(&project, occurrence_id),
+        manufacturing_intent().recipe.infill_fraction
+    );
+}
+#[test]
+fn process_edits_invalidate_artifacts_and_reject_stale_prepare_and_publication() {
+    let mut project = manufactured();
+    let artifact = project.snapshot().manufacturing_artifact.clone().unwrap();
+    let original_doc = project.snapshot().process_document.clone();
+    let original_bundle = manufacturing_bundle(&project);
+    let scope = definition_scope(&project);
+    let stale_edit = project.prepare(process_set(scope.clone(), 0.4)).unwrap();
+    let stale_publication = project
+        .prepare(Edit::PublishManufacturing {
+            asset: bundle_asset(&original_bundle),
+        })
+        .unwrap();
+    edit(&mut project, process_set(scope, 0.6));
+    assert!(project.snapshot().manufacturing_artifact.is_none());
+    let current = project.info();
+    assert_eq!(
+        project.commit(stale_edit).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
+    assert_eq!(
+        project.commit(stale_publication).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
+    assert_eq!(
+        project
+            .prepare(Edit::PublishManufacturing {
+                asset: bundle_asset(&original_bundle)
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::StaleRevision
+    );
+    let mut wrong = original_bundle;
+    wrong.provenance.input_revision = project.info().revision;
+    assert_eq!(
+        project
+            .prepare(Edit::PublishManufacturing {
+                asset: bundle_asset(&wrong)
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::CorruptAsset
+    );
+    assert_eq!(project.info(), current);
+    project.undo().unwrap();
+    assert!(Arc::ptr_eq(
+        project.snapshot().manufacturing_artifact.as_ref().unwrap(),
+        &artifact
+    ));
+    assert!(Arc::ptr_eq(
+        &project.snapshot().process_document,
+        &original_doc
+    ));
+}
+#[test]
+fn process_scope_validation_and_occurrence_deletion_cascade_preserve_other_sources() {
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    let scope = SurfaceScope::Occurrence {
+        occurrence_id,
+        expected_definition_id: definition_id.clone(),
+    };
+    edit(
+        &mut project,
+        process_set(
+            SurfaceScope::Definition {
+                definition_id: definition_id.clone(),
+            },
+            0.3,
+        ),
+    );
+    edit(&mut project, process_set(scope.clone(), 0.6));
+    let layer_id = project.info().process_document.layers[1].layer_id;
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetLayerEnabled {
+                layer_id,
+                enabled: false,
+            },
+        },
+    );
+    edit(
+        &mut project,
+        Edit::Add {
+            definition_id: definition_id.clone(),
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    edit(&mut project, Edit::Remove { occurrence_id });
+    assert_eq!(project.info().process_document.layers.len(), 1);
+    assert!(
+        matches!(&project.info().process_document.layers[0].scope, SurfaceScope::Definition { definition_id: id } if id == &definition_id)
+    );
+    edit(
+        &mut project,
+        Edit::Remove {
+            occurrence_id: OccurrenceId::new(2).unwrap(),
+        },
+    );
+    assert!(project.info().process_document.layers.is_empty());
+    assert!(project.snapshot().sources.is_empty());
+    project.undo().unwrap();
+    let before = project.info();
+    for invalid_scope in [
+        scope,
+        SurfaceScope::Definition {
+            definition_id: DefinitionId::from_source_sha256(&[0; 32]),
+        },
+        SurfaceScope::Occurrence {
+            occurrence_id: OccurrenceId::new(2).unwrap(),
+            expected_definition_id: DefinitionId::from_source_sha256(&[0; 32]),
+        },
+    ] {
+        assert!(
+            project
+                .prepare(process_set(invalid_scope.clone(), 0.4))
+                .is_err()
+        );
+        assert!(
+            project
+                .prepare(Edit::Process {
+                    edit: ProcessEdit::Reset {
+                        scope: invalid_scope
+                    }
+                })
+                .is_err()
+        );
+    }
+    assert_eq!(project.info(), before);
+}
+
+#[test]
+fn process_bounds_and_rejected_edits_leave_document_and_allocators_unchanged() {
+    let mut project = imported();
+    let scope = definition_scope(&project);
+    edit(&mut project, process_set(scope.clone(), 0.5));
+    let layer_id = project.info().process_document.layers[0].layer_id;
+    for _ in 1..MAX_PROCESS_OPERATIONS {
+        edit(
+            &mut project,
+            Edit::Process {
+                edit: ProcessEdit::AddOperation {
+                    layer_id,
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Erase,
+                },
+            },
+        );
+    }
+    let before = project.capture().manifest;
+    assert_eq!(
+        project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::AddOperation {
+                    layer_id,
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Erase
+                }
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(
+        project.prepare(process_set(scope, 0.7)).unwrap_err().code,
+        ProjectErrorCode::ResourceLimit
+    );
+    assert_eq!(project.capture().manifest, before);
+    let mut project = imported();
+    let scope = definition_scope(&project);
+    for _ in 0..MAX_PROCESS_LAYERS {
+        edit(&mut project, process_set(scope.clone(), 0.5));
+    }
+    let before = project.capture().manifest;
+    assert_eq!(
+        project.prepare(process_set(scope, 0.7)).unwrap_err().code,
+        ProjectErrorCode::ResourceLimit
+    );
+    let operation_id = project.info().process_document.layers[0].operations[0].operation_id;
+    assert!(
+        project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::UpdateOperation {
+                    operation_id,
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Replace {
+                        value: ProcessValue::SparseFraction { fraction: f64::NAN }
+                    }
+                }
+            })
+            .is_err()
+    );
+    assert!(
+        project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::RemoveOperation {
+                    operation_id: ProcessOperationId::new(u32::MAX).unwrap()
+                }
+            })
+            .is_err()
+    );
+    assert!(
+        project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::MoveLayer {
+                    layer_id: project.info().process_document.layers[0].layer_id,
+                    index: u32::MAX
+                }
+            })
+            .is_err()
+    );
+    assert_eq!(project.capture().manifest, before);
+}
+
+#[test]
+fn normal_process_adjustments_reuse_winning_ids_before_intent_and_reset_inherits() {
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    let definition = SurfaceScope::Definition {
+        definition_id: definition_id.clone(),
+    };
+    let occurrence = SurfaceScope::Occurrence {
+        occurrence_id,
+        expected_definition_id: definition_id.clone(),
+    };
+    let adjust = |project: &mut Project, scope: SurfaceScope, fraction| {
+        edit(
+            project,
+            Edit::Process {
+                edit: ProcessEdit::SetSparseFraction { scope, fraction },
+            },
+        );
+    };
+    adjust(&mut project, definition.clone(), 0.3);
+    let first = project.info().process_document.layers[0].clone();
+    let first_counters = project.capture().manifest;
+    // Normal adjustments are not layer authoring and must not exhaust the layer cap.
+    for index in 0..128 {
+        adjust(
+            &mut project,
+            definition.clone(),
+            0.2 + index as f64 / 1000.0,
+        );
+    }
+    let document = project.info().process_document;
+    assert_eq!(document.layers.len(), 1);
+    assert_eq!(document.layers[0].layer_id, first.layer_id);
+    assert_eq!(document.layers[0].operations.len(), 1);
+    assert_eq!(
+        document.layers[0].operations[0].operation_id,
+        first.operations[0].operation_id
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_layer,
+        first_counters.next_process_layer
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_operation,
+        first_counters.next_process_operation
+    );
+    assert!(project.snapshot().manufacturing_intent.is_none());
+    adjust(&mut project, definition.clone(), 0.3);
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(manufacturing_intent()),
+        },
+    );
+    edit(
+        &mut project,
+        Edit::Add {
+            definition_id,
+            pose: RigidPoseMm::IDENTITY,
+        },
+    );
+    adjust(&mut project, occurrence.clone(), 0.4);
+    let occurrence_layer = project.info().process_document.layers[1].clone();
+    let counters = project.capture().manifest;
+    for index in 0..128 {
+        adjust(
+            &mut project,
+            occurrence.clone(),
+            0.4 + index as f64 / 1000.0,
+        );
+    }
+    adjust(&mut project, occurrence.clone(), 0.6);
+    adjust(&mut project, definition, 0.4);
+    let document = project.info().process_document;
+    assert_eq!(document.layers.len(), 2);
+    assert_eq!(document.layers[1].layer_id, occurrence_layer.layer_id);
+    assert_eq!(document.layers[1].operations.len(), 1);
+    assert_eq!(
+        document.layers[1].operations[0].operation_id,
+        occurrence_layer.operations[0].operation_id
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_layer,
+        counters.next_process_layer
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_operation,
+        counters.next_process_operation
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.6);
+    assert_eq!(project.info().resolved_process[0].inherited.fraction, 0.4);
+    assert_eq!(
+        process_fraction(&project, OccurrenceId::new(2).unwrap()),
+        0.4
+    );
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::Reset {
+                scope: occurrence.clone(),
+            },
+        },
+    );
+    assert_eq!(process_fraction(&project, occurrence_id), 0.4);
+    project.undo().unwrap();
+    assert_eq!(process_fraction(&project, occurrence_id), 0.6);
+    assert_eq!(
+        project.info().process_document.layers[1].layer_id,
+        occurrence_layer.layer_id
+    );
+    project.redo().unwrap();
+    adjust(&mut project, occurrence, 0.7);
+    let new_layer = project.info().process_document.layers[1].clone();
+    assert_eq!(new_layer.layer_id.get(), counters.next_process_layer);
+    assert_eq!(
+        new_layer.operations[0].operation_id.get(),
+        counters.next_process_operation
+    );
 }

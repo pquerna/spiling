@@ -761,6 +761,7 @@ export function ManufacturingPanel({
                       event.target.value === "" ? null : Number(event.target.value),
                       manufacturing.eventCount,
                       manufacturing.showTravel,
+                      manufacturing.showSource,
                     );
                   }}
                 />
@@ -778,6 +779,7 @@ export function ManufacturingPanel({
                       manufacturing.layer,
                       Number(event.target.value),
                       manufacturing.showTravel,
+                      manufacturing.showSource,
                     );
                   }}
                 />
@@ -795,10 +797,28 @@ export function ManufacturingPanel({
                       manufacturing.layer,
                       manufacturing.eventCount,
                       event.target.checked,
+                      manufacturing.showSource,
                     );
                   }}
                 />
                 Show travel / unknown-start endpoint
+              </label>
+              <label>
+                <input
+                  data-testid="manufacturing-source-bodies"
+                  type="checkbox"
+                  checked={manufacturing.showSource}
+                  disabled={!inspection?.displayReady}
+                  onChange={(event) => {
+                    void manufacturing.updateView(
+                      manufacturing.layer,
+                      manufacturing.eventCount,
+                      manufacturing.showTravel,
+                      event.target.checked,
+                    );
+                  }}
+                />
+                Show source bodies (hide to inspect interior deposition)
               </label>
               {event !== null && (
                 <pre data-testid="manufacturing-event">

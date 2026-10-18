@@ -7,8 +7,9 @@ use crate::{
     output::{OutputDirectory, OutputFile},
     set_once,
 };
+use spiling_contracts::process::{MAX_PROCESS_DOCUMENT_BYTES, ProcessEdit, ProcessValue};
 use spiling_contracts::surface::{
-    ImageReliefParameters, MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId,
+    ImageReliefParameters, MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId, SurfaceScope,
     SurfaceScopeKind,
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
@@ -73,6 +74,10 @@ enum Operation {
     ExportSurfaceImage(SourceHash),
     RemoveSurfaceFinish(SurfaceLayerId),
     SurfaceFinishEnabled(SurfaceLayerId, bool),
+    ProcessSet(OccurrenceId, SurfaceScopeKind, ProcessValue),
+    ProcessReset(OccurrenceId, SurfaceScopeKind),
+    ProcessEdit(ProcessEdit),
+    ProcessResolve(OccurrenceId),
     Intent(Arc<ManufacturingIntent>),
     Preflight,
     Compile,
@@ -107,6 +112,16 @@ fn intent(args: &mut impl Iterator<Item = OsString>) -> Result<ManufacturingInte
     }
     // The service owns specification validation; this is only bounded inert decoding.
     Ok(serde_json::from_slice(&bytes)?)
+}
+fn process_scope_kind(
+    args: &mut impl Iterator<Item = OsString>,
+    name: &str,
+) -> Result<SurfaceScopeKind, Error> {
+    match text(args, name)?.as_str() {
+        "definition" => Ok(SurfaceScopeKind::Definition),
+        "occurrence" => Ok(SurfaceScopeKind::Occurrence),
+        _ => Err(format!("{name} must be definition or occurrence").into()),
+    }
 }
 pub fn parse(
     mut args: impl Iterator<Item = OsString>,
@@ -233,6 +248,32 @@ pub fn parse(
                 };
                 operations.push(Operation::SurfaceFinishEnabled(layer, enabled));
             }
+            Some("--process-set") => {
+                let occurrence =
+                    OccurrenceId::new(text(&mut args, "--process-set occurrence")?.parse()?)?;
+                let scope = process_scope_kind(&mut args, "--process-set scope")?;
+                let value = ProcessValue::SparseFraction {
+                    fraction: text(&mut args, "--process-set fraction")?.parse()?,
+                };
+                value.validate()?;
+                operations.push(Operation::ProcessSet(occurrence, scope, value));
+            }
+            Some("--process-reset") => {
+                let occurrence =
+                    OccurrenceId::new(text(&mut args, "--process-reset occurrence")?.parse()?)?;
+                let scope = process_scope_kind(&mut args, "--process-reset scope")?;
+                operations.push(Operation::ProcessReset(occurrence, scope));
+            }
+            Some("--process-edit") => {
+                let json = text(&mut args, "--process-edit JSON")?;
+                if json.len() > MAX_PROCESS_DOCUMENT_BYTES {
+                    return Err("process edit JSON exceeds the document byte limit".into());
+                }
+                operations.push(Operation::ProcessEdit(serde_json::from_str(&json)?));
+            }
+            Some("--process-resolve") => operations.push(Operation::ProcessResolve(
+                OccurrenceId::new(text(&mut args, "--process-resolve occurrence")?.parse()?)?,
+            )),
             Some("--intent") => operations.push(Operation::Intent(intent(&mut args)?.into())),
             Some("--preflight") => operations.push(Operation::Preflight),
             Some("--place-on-bed" | "--center-on-bed") => {
@@ -302,6 +343,7 @@ pub fn parse(
                         | Operation::ExportManufacturing
                         | Operation::ExportReplay
                         | Operation::ExportSurfaceImage(_)
+                        | Operation::ProcessResolve(_)
                 )
             }))
     {
@@ -380,6 +422,28 @@ async fn complete(client: &mut EngineClient, response: ProjectResponse) -> Resul
             Err(spiling_engine_client::ClientError::Project(error).into())
         }
     }
+}
+async fn process_scope(
+    client: &mut EngineClient,
+    occurrence_id: OccurrenceId,
+    kind: SurfaceScopeKind,
+) -> Result<SurfaceScope, Error> {
+    let session = client.hello().session_id.clone();
+    let summary = geometry::scene(client, &session).await?;
+    let (_, occurrences) = geometry::records(client, &summary).await?;
+    let occurrence = occurrences
+        .into_iter()
+        .find(|row| row.occurrence_id == occurrence_id)
+        .ok_or("process target occurrence is not in the current project")?;
+    Ok(match kind {
+        SurfaceScopeKind::Definition => SurfaceScope::Definition {
+            definition_id: occurrence.definition_id,
+        },
+        SurfaceScopeKind::Occurrence => SurfaceScope::Occurrence {
+            occurrence_id,
+            expected_definition_id: occurrence.definition_id,
+        },
+    })
 }
 async fn manufacturing_status(
     client: &mut EngineClient,
@@ -577,10 +641,12 @@ async fn execute(
     let mut export_evidence = None;
     let mut replay_evidence = None;
     let mut image_evidence = None;
+    let mut process_inspections = Vec::new();
     let mut preflight_report = None;
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
+        let mut process_resolution = None;
         match operation {
             Operation::SurfaceImage(occurrence_id, face_id, scope, source, parameters) => {
                 label = "surface_image";
@@ -753,6 +819,53 @@ async fn execute(
                     })
                     .await?;
                 complete(client, response).await?;
+            }
+            Operation::ProcessSet(..) | Operation::ProcessReset(..) | Operation::ProcessEdit(_) => {
+                let edit = match operation {
+                    Operation::ProcessSet(occurrence_id, kind, value) => {
+                        label = "process_set";
+                        let ProcessValue::SparseFraction { fraction } = value;
+                        ProcessEdit::SetSparseFraction {
+                            scope: process_scope(client, occurrence_id, kind).await?,
+                            fraction,
+                        }
+                    }
+                    Operation::ProcessReset(occurrence_id, kind) => {
+                        label = "process_reset";
+                        ProcessEdit::Reset {
+                            scope: process_scope(client, occurrence_id, kind).await?,
+                        }
+                    }
+                    Operation::ProcessEdit(edit) => {
+                        label = "process_edit";
+                        edit
+                    }
+                    _ => unreachable!(),
+                };
+                let base_revision = info(client).await?.revision;
+                let response = client
+                    .project(ProjectCommand::EditProcess {
+                        session_id: session.clone(),
+                        base_revision,
+                        edit,
+                    })
+                    .await?;
+                complete(client, response).await?;
+            }
+            Operation::ProcessResolve(occurrence_id) => {
+                label = "process_resolve";
+                let project = info(client).await?;
+                let resolved = project
+                    .resolved_process
+                    .iter()
+                    .find(|resolved| resolved.occurrence_id == occurrence_id)
+                    .ok_or("process resolution requires an explicit manufacturing intent and a current occurrence")?;
+                let evidence = serde_json::json!({
+                    "project_revision": project.revision,
+                    "resolved": resolved,
+                });
+                process_inspections.push(evidence.clone());
+                process_resolution = Some(evidence);
             }
             Operation::Intent(intent) => {
                 label = "intent";
@@ -1030,6 +1143,7 @@ async fn execute(
         history.push(serde_json::json!({
             "operation": label, "project": project, "manufacturing": manufacturing,
             "preflight": if label == "preflight" { preflight_report.as_ref() } else { None },
+            "process_resolution": process_resolution,
             "preflight_freshness": preflight_report.as_ref().map(|report|
                 if report.input_revision == project.revision { "current" } else { "stale" })
         }));
@@ -1075,6 +1189,7 @@ async fn execute(
     report["project"] = serde_json::to_value(&project)?;
     report["face_inspections"] = serde_json::to_value(inspections)?;
     report["operations"] = serde_json::json!(history);
+    report["process_inspections"] = serde_json::json!(process_inspections);
     report["manufacturing"] = manufacturing_status(client, true).await?;
     if let Some(preflight) = preflight_report {
         report["manufacturing"]["preflight_freshness"] =
@@ -1110,6 +1225,58 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn process_arguments_reject_invalid_authoring_and_allow_readonly_resolution() {
+        for flags in [
+            vec!["--process-set", "1", "definition", "0"],
+            vec!["--process-set", "1", "occurrence", "1.01"],
+            vec!["--process-set", "1", "occurrence", "NaN"],
+            vec!["--process-set", "1", "occurrence", "inf"],
+            vec!["--process-set", "0", "occurrence", "0.2"],
+            vec!["--process-set", "1", "face", "0.2"],
+            vec!["--process-reset", "1", "face"],
+            vec![
+                "--process-edit",
+                r#"{"op":"add_layer","scope":{"kind":"definition","definition_id":"invalid"},"selector":{"kind":"face"},"action":{"kind":"erase"}}"#,
+            ],
+            vec!["--process-edit", r#"{"op":"remove_layer","layer_id":0}"#],
+            vec!["--process-resolve", "0"],
+        ] {
+            let mut args = vec!["open", "project"];
+            args.extend(flags);
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
+        for flags in [
+            vec!["--process-set", "1", "definition", "0.2"],
+            vec!["--process-reset", "1", "occurrence"],
+            vec!["--process-edit", r#"{"op":"remove_layer","layer_id":1}"#],
+        ] {
+            for mode in ["inspect", "open"] {
+                let mut args = vec![mode, "project"];
+                args.extend(flags.iter().copied());
+                if mode == "open" {
+                    args.push("--read-only");
+                }
+                assert!(
+                    parse_args(&args)
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("read-only")
+                );
+            }
+        }
+        assert!(
+            parse_args(&["inspect", "project", "--process-resolve", "1"])
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            parse_args(&["open", "project", "--process-set", "1", "definition", "1"])
+                .unwrap()
+                .is_some()
+        );
     }
     #[test]
     fn image_flags_validate_before_spawn_and_export_is_readonly_safe() {

@@ -13,6 +13,7 @@ struct NativeScene {
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
+    process_document: spiling_contracts::process::ProcessDocument,
     surface_images:
         BTreeMap<spiling_contracts::geometry::SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
@@ -24,6 +25,7 @@ impl NativeScene {
         Self {
             project: ProjectId::default(),
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+            process_document: spiling_contracts::process::ProcessDocument::empty(),
             surface_images: BTreeMap::new(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
@@ -69,6 +71,7 @@ impl NativeScene {
             occurrences: &self.occurrences,
             intent,
             surface_overlays: &self.surface_overlays,
+            process_document: &self.process_document,
             surface_images: &self.surface_images,
         }
     }
@@ -3096,14 +3099,27 @@ fn independent_mechanical_sources_preserve_native_pocket_events_and_replay() {
             // A literal source-F floor need not be a selected-G slice plane.
             // Probe ordinary material on each side; closed critical ownership
             // remains a separate geometry obligation.
-            let below = bundle.plan.layers.iter().rev()
+            let below = bundle
+                .plan
+                .layers
+                .iter()
+                .rev()
                 .find(|layer| layer.section_z_mm <= floor * 0.5)
                 .expect("material below the pocket");
-            let above = bundle.plan.layers.iter()
+            let above = bundle
+                .plan
+                .layers
+                .iter()
                 .find(|layer| layer.section_z_mm >= (floor + top) * 0.5)
                 .expect("material above the pocket");
-            assert!(below.region_coverage.protected_hole_area_mm2 < 1e-5, "{name}");
-            assert!(above.region_coverage.protected_hole_area_mm2 > 0.1, "{name}");
+            assert!(
+                below.region_coverage.protected_hole_area_mm2 < 1e-5,
+                "{name}"
+            );
+            assert!(
+                above.region_coverage.protected_hole_area_mm2 > 0.1,
+                "{name}"
+            );
         }
         let reopened = decode_bundle(&serde_json::to_vec(&bundle).unwrap()).unwrap();
         assert!(

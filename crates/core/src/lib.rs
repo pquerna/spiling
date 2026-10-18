@@ -3,9 +3,11 @@
 // Licensed under the Open Software License version 3.0
 
 //! Runtime-independent authoring authority. Native caches are engine-owned.
+mod process;
 pub mod storage;
+use process::apply_process_edit;
 use sha2::{Digest, Sha256};
-use spiling_contracts::{geometry::*, manufacturing::*, project::*, surface::*};
+use spiling_contracts::{geometry::*, manufacturing::*, process::*, project::*, surface::*};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, Weak},
@@ -148,10 +150,14 @@ pub struct Snapshot {
     pub manufacturing_intent: Option<Arc<ManufacturingIntent>>,
     pub manufacturing_artifact: Option<Arc<ManufacturingAsset>>,
     pub surface_overlays: Arc<SurfaceOverlays>,
+    pub process_document: Arc<ProcessDocument>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    Process {
+        edit: ProcessEdit,
+    },
     Import {
         source: Arc<SourceAsset>,
         pose: RigidPoseMm,
@@ -199,6 +205,8 @@ pub struct PreparedEdit {
     snapshot: Arc<Snapshot>,
     next_occurrence: u32,
     next_surface_layer: u32,
+    next_process_layer: u32,
+    next_process_operation: u32,
 }
 impl PreparedEdit {
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -224,12 +232,14 @@ struct Content {
     manufacturing_intent: Option<Arc<ManufacturingIntent>>,
     manufacturing_artifact: Option<ManufacturingArtifactRecord>,
     surface_overlays: Arc<SurfaceOverlays>,
+    process_document: Arc<ProcessDocument>,
 }
 impl Content {
     fn matches(&self, snapshot: &Snapshot) -> bool {
         self.occurrences == snapshot.occurrences
             && self.manufacturing_intent == snapshot.manufacturing_intent
             && self.surface_overlays == snapshot.surface_overlays
+            && self.process_document == snapshot.process_document
             && self.manufacturing_artifact.as_ref()
                 == snapshot
                     .manufacturing_artifact
@@ -258,6 +268,7 @@ impl Content {
             manufacturing_intent: manifest.manufacturing_intent.clone(),
             manufacturing_artifact: manifest.manufacturing_artifact.clone(),
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
+            process_document: Arc::new(manifest.process_document.clone()),
         }
     }
 }
@@ -268,10 +279,13 @@ pub struct Project {
     revision: ProjectRevision,
     next_occurrence: u32,
     next_surface_layer: u32,
+    next_process_layer: u32,
+    next_process_operation: u32,
     current: Arc<Snapshot>,
     undo: VecDeque<Arc<Snapshot>>,
     redo: Vec<Arc<Snapshot>>,
     staged_images: Mutex<Vec<Weak<Vec<u8>>>>,
+    staged_process: Mutex<Vec<Weak<ProcessDocument>>>,
     saved: Option<(ProjectRevision, Content)>,
     storage: Option<Arc<Storage>>,
     recovered_previous: bool,
@@ -290,10 +304,13 @@ impl Project {
             revision: ProjectRevision::ZERO,
             next_occurrence: 1,
             next_surface_layer: 1,
+            next_process_layer: 1,
+            next_process_operation: 1,
             current: Arc::new(Snapshot::default()),
             undo: VecDeque::new(),
             redo: Vec::new(),
             staged_images: Mutex::new(Vec::new()),
+            staged_process: Mutex::new(Vec::new()),
             saved: None,
             storage: None,
             recovered_previous: false,
@@ -313,6 +330,7 @@ impl Project {
             manufacturing_intent: loaded.manifest.manufacturing_intent.clone(),
             manufacturing_artifact: loaded.manufacturing_artifact,
             surface_overlays: Arc::new(loaded.manifest.surface_overlays.clone()),
+            process_document: Arc::new(loaded.manifest.process_document.clone()),
             surface_images: loaded.surface_images,
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
@@ -321,6 +339,8 @@ impl Project {
         project.revision = loaded.manifest.revision;
         project.next_occurrence = loaded.manifest.next_occurrence;
         project.next_surface_layer = loaded.manifest.next_surface_layer;
+        project.next_process_layer = loaded.manifest.next_process_layer;
+        project.next_process_operation = loaded.manifest.next_process_operation;
         project.saved = Some((
             loaded.saved_revision,
             Content::from_manifest(&loaded.manifest),
@@ -337,7 +357,8 @@ impl Project {
             || self.saved.as_ref().map_or(
                 !self.current.occurrences.is_empty()
                     || self.current.manufacturing_intent.is_some()
-                    || !self.current.surface_overlays.layers.is_empty(),
+                    || !self.current.surface_overlays.layers.is_empty()
+                    || !self.current.process_document.layers.is_empty(),
                 |(_, content)| !content.matches(&self.current),
             );
         ProjectInfo {
@@ -355,6 +376,33 @@ impl Project {
             can_undo: !read_only && !self.undo.is_empty(),
             can_redo: !read_only && !self.redo.is_empty(),
             surface_overlays: (*self.current.surface_overlays).clone(),
+            process_document: (*self.current.process_document).clone(),
+            resolved_process: self.current.manufacturing_intent.as_ref().map_or_else(
+                Vec::new,
+                |intent| {
+                    self.current
+                        .occurrences
+                        .values()
+                        .map(|occurrence| {
+                            let global_fraction = intent.recipe.infill_fraction;
+                            ResolvedOccurrenceProcess {
+                                occurrence_id: occurrence.occurrence_id,
+                                definition_id: occurrence.definition_id.clone(),
+                                global_fraction,
+                                inherited: self
+                                    .current
+                                    .process_document
+                                    .resolve_definition(&occurrence.definition_id, global_fraction),
+                                value: self.current.process_document.resolve(
+                                    &occurrence.definition_id,
+                                    occurrence.occurrence_id,
+                                    global_fraction,
+                                ),
+                            }
+                        })
+                        .collect()
+                },
+            ),
         }
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -429,6 +477,10 @@ impl Project {
         if self.project_id == previous.project_id {
             self.next_occurrence = self.next_occurrence.max(previous.next_occurrence);
             self.next_surface_layer = self.next_surface_layer.max(previous.next_surface_layer);
+            self.next_process_layer = self.next_process_layer.max(previous.next_process_layer);
+            self.next_process_operation = self
+                .next_process_operation
+                .max(previous.next_process_operation);
             self.revision = self.revision.max(previous.revision);
             if previous.save_uncertain
                 && self
@@ -458,6 +510,8 @@ impl Project {
         let mut snapshot = (*self.current).clone();
         let mut next_occurrence = self.next_occurrence;
         let mut next_surface_layer = self.next_surface_layer;
+        let mut next_process_layer = self.next_process_layer;
+        let mut next_process_operation = self.next_process_operation;
         let incoming_image = match &edit {
             Edit::AddImageSurfaceFinish { asset, .. } => Some(asset.bytes().clone()),
             _ => None,
@@ -467,6 +521,34 @@ impl Project {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
+            Edit::Process { edit } => {
+                if let ProcessEdit::AddLayer { scope, .. }
+                | ProcessEdit::SetSparseFraction { scope, .. }
+                | ProcessEdit::Reset { scope } = &edit
+                {
+                    let valid = match scope {
+                        SurfaceScope::Definition { definition_id } => {
+                            snapshot.sources.contains_key(definition_id)
+                        }
+                        SurfaceScope::Occurrence {
+                            occurrence_id,
+                            expected_definition_id,
+                        } => snapshot
+                            .occurrences
+                            .get(occurrence_id)
+                            .is_some_and(|record| &record.definition_id == expected_definition_id),
+                    };
+                    if !valid {
+                        return Err(invalid("unknown or inconsistent process source scope"));
+                    }
+                }
+                apply_process_edit(
+                    Arc::make_mut(&mut snapshot.process_document),
+                    edit,
+                    &mut next_process_layer,
+                    &mut next_process_operation,
+                )?;
+            }
             Edit::Import { mut source, pose } => {
                 source.validate()?;
                 if let Some(retained) = std::iter::once(&self.current)
@@ -541,6 +623,30 @@ impl Project {
                     Arc::make_mut(&mut snapshot.surface_overlays)
                         .layers
                         .retain(keep);
+                }
+                if snapshot
+                    .process_document
+                    .layers
+                    .iter()
+                    .any(|layer| match &layer.scope {
+                        SurfaceScope::Occurrence {
+                            occurrence_id: id, ..
+                        } => *id == occurrence_id,
+                        SurfaceScope::Definition { definition_id } => {
+                            !snapshot.sources.contains_key(definition_id)
+                        }
+                    })
+                {
+                    Arc::make_mut(&mut snapshot.process_document).layers.retain(
+                        |layer| match &layer.scope {
+                            SurfaceScope::Occurrence {
+                                occurrence_id: id, ..
+                            } => *id != occurrence_id,
+                            SurfaceScope::Definition { definition_id } => {
+                                snapshot.sources.contains_key(definition_id)
+                            }
+                        },
+                    );
                 }
             }
             Edit::SetManufacturingIntent { intent } => {
@@ -669,6 +775,32 @@ impl Project {
                 return Err(invalid("unknown surface target or invalid layer allocator"));
             }
         }
+        snapshot.process_document.validate()?;
+        for layer in &snapshot.process_document.layers {
+            let valid = match &layer.scope {
+                SurfaceScope::Definition { definition_id } => {
+                    snapshot.sources.contains_key(definition_id)
+                }
+                SurfaceScope::Occurrence {
+                    occurrence_id,
+                    expected_definition_id,
+                } => snapshot
+                    .occurrences
+                    .get(occurrence_id)
+                    .is_some_and(|record| &record.definition_id == expected_definition_id),
+            };
+            if !valid
+                || layer.layer_id.get() >= next_process_layer
+                || layer
+                    .operations
+                    .iter()
+                    .any(|operation| operation.operation_id.get() >= next_process_operation)
+            {
+                return Err(invalid(
+                    "unknown process target or invalid process allocator",
+                ));
+            }
+        }
         let skip = usize::from(self.undo.len() == MAX_PROJECT_HISTORY);
         validate_pins(
             std::iter::once(&snapshot)
@@ -676,6 +808,37 @@ impl Project {
                 .chain(self.undo.iter().skip(skip).map(Arc::as_ref))
                 .chain(self.redo.iter().map(Arc::as_ref)),
         )?;
+        let mut staged_process = self
+            .staged_process
+            .lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "process staging lock poisoned"))?;
+        staged_process.retain(|doc| doc.strong_count() != 0);
+        let mut process_allocations = BTreeMap::new();
+        for state in std::iter::once(&snapshot)
+            .chain(std::iter::once(self.current.as_ref()))
+            .chain(self.undo.iter().map(Arc::as_ref))
+            .chain(self.redo.iter().map(Arc::as_ref))
+        {
+            process_allocations.insert(
+                Arc::as_ptr(&state.process_document),
+                state.process_document.allocated_bytes(),
+            );
+        }
+        for doc in staged_process.iter().filter_map(Weak::upgrade) {
+            process_allocations.insert(Arc::as_ptr(&doc), doc.allocated_bytes());
+        }
+        if process_allocations.values().sum::<usize>() > MAX_PROCESS_RETAINED_BYTES {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "retained/staged process allocation budget exceeded",
+            ));
+        }
+        if !staged_process
+            .iter()
+            .any(|doc| doc.as_ptr() == Arc::as_ptr(&snapshot.process_document))
+        {
+            staged_process.push(Arc::downgrade(&snapshot.process_document));
+        }
         let mut staged = self
             .staged_images
             .lock()
@@ -723,6 +886,8 @@ impl Project {
             snapshot: Arc::new(snapshot),
             next_occurrence,
             next_surface_layer,
+            next_process_layer,
+            next_process_operation,
         })
     }
     pub fn commit(&mut self, edit: PreparedEdit) -> Result<(), ProjectError> {
@@ -742,6 +907,8 @@ impl Project {
         self.current = edit.snapshot;
         self.next_occurrence = edit.next_occurrence;
         self.next_surface_layer = edit.next_surface_layer;
+        self.next_process_layer = edit.next_process_layer;
+        self.next_process_operation = edit.next_process_operation;
         self.revision = revision;
         Ok(())
     }
@@ -778,6 +945,9 @@ impl Project {
                 next_occurrence: self.next_occurrence,
                 next_surface_layer: self.next_surface_layer,
                 surface_overlays: (*self.current.surface_overlays).clone(),
+                process_document: (*self.current.process_document).clone(),
+                next_process_layer: self.next_process_layer,
+                next_process_operation: self.next_process_operation,
                 definitions: self
                     .current
                     .sources
@@ -809,6 +979,8 @@ impl Project {
             || receipt.manifest.revision > self.revision
             || receipt.manifest.next_occurrence > self.next_occurrence
             || receipt.manifest.next_surface_layer > self.next_surface_layer
+            || receipt.manifest.next_process_layer > self.next_process_layer
+            || receipt.manifest.next_process_operation > self.next_process_operation
         {
             return Err(error(
                 ProjectErrorCode::StaleRevision,
@@ -972,9 +1144,13 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
     let mut manufacturing: BTreeMap<&SourceHash, &Arc<ManufacturingAsset>> = BTreeMap::new();
     let mut surface = BTreeMap::new();
     let mut images = BTreeMap::new();
+    let mut process = BTreeMap::new();
     let mut image_allocations = BTreeMap::new();
     for snapshot in snapshots {
         validate_surface_images(snapshot)?;
+        process
+            .entry(Arc::as_ptr(&snapshot.process_document))
+            .or_insert(snapshot.process_document.as_ref());
         for (hash, asset) in &snapshot.surface_images {
             if let Some(old) = images.insert(hash, asset)
                 && old.record() != asset.record()
@@ -1046,6 +1222,17 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
             "retained surface document budget exceeded",
         ));
     }
+    if process
+        .values()
+        .map(|doc| doc.allocated_bytes())
+        .sum::<usize>()
+        > MAX_PROCESS_RETAINED_BYTES
+    {
+        return Err(error(
+            ProjectErrorCode::ResourceLimit,
+            "retained process document budget exceeded",
+        ));
+    }
     Ok(())
 }
 pub(crate) fn validate_snapshot(
@@ -1094,6 +1281,7 @@ fn validate_manufacturing_input(
         &occurrences,
         intent,
         &snapshot.surface_overlays,
+        &snapshot.process_document,
     )
     .map_err(manufacturing_error)?;
     if &provenance.project_id != project_id
@@ -1101,6 +1289,7 @@ fn validate_manufacturing_input(
         || provenance.input_hash != input_hash
         || &provenance.intent != intent
         || provenance.surface_overlays != *snapshot.surface_overlays
+        || provenance.process_document != *snapshot.process_document
         || provenance.definitions.len() != definitions.len()
         || provenance.occurrences.len() != occurrences.len()
         || provenance.surface_images.len() != snapshot.surface_images.len()

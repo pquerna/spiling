@@ -14,6 +14,7 @@ import {
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
 import { ManufacturingPanel } from "./manufacturing/ManufacturingPanel.tsx";
 import { SurfaceFinishPanel } from "./surface/SurfaceFinishPanel.tsx";
+import { ProcessPanel } from "./ProcessPanel.tsx";
 
 const assentKey = "spiling:license-assent:OSL-3.0:b0-1";
 const phaseDescriptions: Record<Phase, string> = {
@@ -475,7 +476,9 @@ function Workbench() {
                 <small>
                   {part.face_count} native faces · {part.provenance.source_unit}
                 </small>
-                <small data-testid="definition-display">{definitionDisplayLabel(part.display)}</small>
+                <small data-testid="definition-display">
+                  {definitionDisplayLabel(part.display)}
+                </small>
                 <ul>
                   {state.occurrences
                     .filter((row) => row.definition_id === part.definition_id)
@@ -497,6 +500,7 @@ function Workbench() {
               </li>
             ))}
           </ul>
+          <ProcessPanel state={state} selected={selected} edit={workbench.editProcess} />
           {selected && (
             <>
               <div className="geometry-buttons">
@@ -583,7 +587,9 @@ function Workbench() {
           </button>
           <small>
             Drag to orbit · pan/zoom ·{" "}
-            {noDisplayMeshes ? "inspect faces from the native list" : "click displayed faces to inspect"}
+            {noDisplayMeshes
+              ? "inspect faces from the native list"
+              : "click displayed faces to inspect"}
           </small>
         </div>
         <div className={`canvas-stage ${!running ? "inactive" : ""}`}>
@@ -806,8 +812,9 @@ function Workbench() {
                 {state.inspection.face.geometry.family}
               </p>
               <p>
-                Material-side orientation: {state.inspection.face.orientation ? "forward" : "reversed"}{" "}
-                relative to the regular native frame; singular normals require limiting charts.
+                Material-side orientation:{" "}
+                {state.inspection.face.orientation ? "forward" : "reversed"} relative to the regular
+                native frame; singular normals require limiting charts.
               </p>
               <pre>{JSON.stringify(state.inspection.face.geometry, null, 2)}</pre>
               <p>

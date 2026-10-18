@@ -12,6 +12,7 @@ pub mod display;
 pub mod geometry;
 pub mod manufacturing;
 pub mod native;
+pub mod process;
 pub mod project;
 pub mod surface;
 pub use native::{
@@ -44,7 +45,7 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project6;manufacturing7;surface3;planner11"
+    ";project7;manufacturing8;surface3;planner12"
 );
 pub const MAX_CONTROL_BYTES: u32 = 65_536;
 pub const MAX_BINARY_BYTES: u32 = 4_194_304;

@@ -26,7 +26,8 @@ fn sections(materials: impl IntoIterator<Item = MultiPolygon<f64>>) -> Vec<Secti
             start: i as u32,
             end: i as u32 + 1,
             source_area_mm2: material.unsigned_area(),
-            material,
+            material: Arc::new(material),
+            process_domains: Vec::new(),
         })
         .collect()
 }
@@ -184,7 +185,7 @@ fn leaves_borrow_aligned_ranges_reuse_and_lower_lives_across_upper_query() {
     let leaf = index
         .survival(3, Some(3), source_points(&spans), &cancel)
         .unwrap();
-    assert!(std::ptr::eq(&*leaf, &spans[3].material));
+    assert!(std::ptr::eq(&*leaf, &*spans[3].material));
     assert_eq!(leaf.temporary_points(), 0);
     assert_eq!(index.retained_points(), 0);
     let aligned = index
@@ -250,7 +251,7 @@ fn empty_identity_absent_and_non_power_of_two_ranges_are_safe() {
     let last = index
         .survival(2, Some(2), source_points(&spans), &cancel)
         .unwrap();
-    assert!(std::ptr::eq(&*last, &spans[2].material));
+    assert!(std::ptr::eq(&*last, &*spans[2].material));
     assert!(
         index
             .survival(usize::MAX, None, 0, &cancel)
@@ -568,7 +569,7 @@ fn derived_leaves_share_reclaimable_range_pool_and_survive_pinned_eviction() {
     let leaf = index
         .survival(0, Some(0), source_points(&spans), &cancel)
         .unwrap();
-    assert!(!std::ptr::eq(&*leaf, &spans[0].material));
+    assert!(!std::ptr::eq(&*leaf, &*spans[0].material));
     assert_eq!(leaf.temporary_points(), 0);
     assert_eq!(index.retained_points(), region::point_count(&leaf));
     let again = index
@@ -654,7 +655,8 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
     );
     assert_eq!(warm.retained_points(), region::point_count(&leaf));
     let mut invalid = sections([rectangle(0.0, 12.0)]);
-    invalid[0].material.0[0].exterior_mut(|ring| ring.0[0].x = f64::NAN);
+    Arc::get_mut(&mut invalid[0].material).unwrap().0[0]
+        .exterior_mut(|ring| ring.0[0].x = f64::NAN);
     let mut refused = SkinNeighborhoods::new(&invalid, 0.6, 0).unwrap();
     assert_eq!(
         refused

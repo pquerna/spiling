@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds authored build-frame policies and height-scoped image occupancy to deposition.
-pub const PLANNER_VERSION: &str = "11";
+/// Binds source-owned regional process intent to actual interior deposition.
+pub const PLANNER_VERSION: &str = "12";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 
@@ -32,6 +32,7 @@ pub struct CompilerInput<'a> {
     pub occurrences: &'a [OccurrenceRecord],
     pub intent: &'a ManufacturingIntent,
     pub surface_overlays: &'a spiling_contracts::surface::SurfaceOverlays,
+    pub process_document: &'a spiling_contracts::process::ProcessDocument,
     pub surface_images: &'a BTreeMap<
         spiling_contracts::geometry::SourceHash,
         Arc<spiling_surface_fields::HeightImage>,
@@ -57,6 +58,7 @@ pub fn compile(
         input.occurrences,
         input.intent,
         input.surface_overlays,
+        input.process_document,
     )?;
     let provenance = ManufacturingProvenance {
         project_id: input.project_id.clone(),
@@ -66,6 +68,7 @@ pub fn compile(
         occurrences,
         intent: input.intent.clone(),
         surface_overlays: input.surface_overlays.clone(),
+        process_document: input.process_document.clone(),
         surface_images: input
             .surface_images
             .iter()
@@ -219,6 +222,15 @@ pub(crate) fn validate_surface_images(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    input
+        .process_document
+        .validate_targets(
+            input.stored_definitions,
+            input.occurrences,
+            u32::MAX,
+            u32::MAX,
+        )
+        .map_err(|e| error(ManufacturingErrorCode::InvalidSpecification, e.to_string()))?;
     use spiling_contracts::surface::{
         MAX_SURFACE_IMAGE_BYTES, MAX_SURFACE_IMAGE_TOTAL_BYTES, MAX_SURFACE_IMAGES,
     };

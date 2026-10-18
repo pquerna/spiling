@@ -32,6 +32,7 @@ import {
   type ProjectCommand,
   type ProjectResponse,
   type ProjectInfo,
+  type ProcessEdit,
   type SelectedProjectPath,
   type Hello,
   type MeshChunkMetadata,
@@ -127,6 +128,7 @@ export interface ManufacturingHost {
     layer: number | null;
     eventCount: number;
     showTravel: boolean;
+    showSource: boolean;
   }): Promise<void>;
 }
 class DomainError extends Error {
@@ -512,12 +514,7 @@ export function useWorkbench(
         const artifact = definition.display.artifact_id;
         if (view.hasDefinition(definition.definition_id, artifact)) continue;
         try {
-          const page = await artifactPages(
-            summary.session_id,
-            artifact,
-            "chunks",
-            token,
-          );
+          const page = await artifactPages(summary.session_id, artifact, "chunks", token);
           if (
             page.summary.kind !== "mesh" ||
             page.summary.definition_id !== definition.definition_id ||
@@ -945,6 +942,51 @@ export function useWorkbench(
         "Surface finish edit was not admitted; native session is busy or unavailable.",
       );
   };
+  const editProcess = async (edit: ProcessEdit) => {
+    let applied = false;
+    let rejection: unknown;
+    await run(async (token) => {
+      try {
+        const snapshot = stateRef.current;
+        const project = snapshot.project;
+        const scene = sceneRef.current;
+        if (!project || !scene || snapshot.stale)
+          throw new DomainError(
+            "stale_revision",
+            "Resume the current native project before editing local sparse process.",
+          );
+        if (project.read_only)
+          throw new DomainError(
+            "read_only",
+            "Read-only snapshots cannot edit local sparse process.",
+          );
+        await applyProjectResponse(
+          await exchange(
+            () =>
+              native.project({
+                op: "edit_process",
+                session_id: scene.session_id,
+                base_revision: project.revision,
+                edit,
+              }),
+            token,
+          ),
+          token,
+        );
+        // A process edit invalidates manufacturing, not the source scene or face selection.
+        await viewport.current?.clearReplay();
+        ensure(token);
+        patch({ replayDisplayed: false });
+        applied = true;
+      } catch (error) {
+        rejection = error;
+        throw error;
+      }
+    });
+    if (rejection) throw rejection;
+    if (!applied)
+      throw new Error("Local sparse edit was not admitted; native session is busy or unavailable.");
+  };
   const selectSurfaceImage = async (relativePath?: string) => {
     let admitted = false;
     let rejection: unknown;
@@ -952,48 +994,85 @@ export function useWorkbench(
       try {
         const snapshot = stateRef.current;
         if (!snapshot.project || snapshot.stale)
-          throw new DomainError("stale_revision", "Resume the current project before choosing an image.");
+          throw new DomainError(
+            "stale_revision",
+            "Resume the current project before choosing an image.",
+          );
         if (snapshot.project.read_only)
-          throw new DomainError("read_only", "Read-only snapshots cannot choose an image for import.");
+          throw new DomainError(
+            "read_only",
+            "Read-only snapshots cannot choose an image for import.",
+          );
         const selection = await exchange(
-          () => relativePath === undefined ? native.selectSurfaceImage()
-            : native.debugSelectSurfaceImage(relativePath),
+          () =>
+            relativePath === undefined
+              ? native.selectSurfaceImage()
+              : native.debugSelectSurfaceImage(relativePath),
           token,
         );
         if (selection) {
           if (selection.session_id !== helloRef.current?.session_id)
             throw new DomainError("stale_revision", "Image selection belongs to another session.");
-          patch({ selectedImage: selection, message: "Image selected. Import image and apply captures the normalized height image atomically." });
+          patch({
+            selectedImage: selection,
+            message:
+              "Image selected. Import image and apply captures the normalized height image atomically.",
+          });
         }
         admitted = true; // Dialog cancellation deliberately leaves the old selection intact.
-      } catch (error) { rejection = error; throw error; }
+      } catch (error) {
+        rejection = error;
+        throw error;
+      }
     });
     if (rejection) throw rejection;
-    if (!admitted) throw new Error("Image selection was not admitted; session is busy or unavailable.");
+    if (!admitted)
+      throw new Error("Image selection was not admitted; session is busy or unavailable.");
   };
   async function prepareSurfaceImage(imageHash: string, token: number) {
     const captured = await getProject(token);
-    const expected = captured.surface_overlays.images.find((record) => record.image_hash === imageHash);
-    if (!expected) throw new DomainError("invalid_project", "Image is not referenced by the current project.");
-    const result = await waitJob(await exchange(() => native.project({
-      op: "get_surface_image",
-      session_id: helloRef.current!.session_id,
-      base_revision: captured.revision,
-      image_hash: imageHash,
-    }), token), token);
+    const expected = captured.surface_overlays.images.find(
+      (record) => record.image_hash === imageHash,
+    );
+    if (!expected)
+      throw new DomainError("invalid_project", "Image is not referenced by the current project.");
+    const result = await waitJob(
+      await exchange(
+        () =>
+          native.project({
+            op: "get_surface_image",
+            session_id: helloRef.current!.session_id,
+            base_revision: captured.revision,
+            image_hash: imageHash,
+          }),
+        token,
+      ),
+      token,
+    );
     if (
-      result.kind !== "surface_image_prepared" || result.project_id !== captured.project_id ||
+      result.kind !== "surface_image_prepared" ||
+      result.project_id !== captured.project_id ||
       result.captured_revision !== captured.revision ||
-      result.record.image_hash !== expected.image_hash || result.record.width !== expected.width ||
-      result.record.height !== expected.height || result.record.byte_count !== expected.byte_count ||
-      result.record.source_hash !== expected.source_hash || result.record.source_name !== expected.source_name
-    ) throw new DomainError("stale_revision", "Image preview receipt does not match the captured project.");
+      result.record.image_hash !== expected.image_hash ||
+      result.record.width !== expected.width ||
+      result.record.height !== expected.height ||
+      result.record.byte_count !== expected.byte_count ||
+      result.record.source_hash !== expected.source_hash ||
+      result.record.source_name !== expected.source_name
+    )
+      throw new DomainError(
+        "stale_revision",
+        "Image preview receipt does not match the captured project.",
+      );
     const bytes = await native.surfaceImageBytes(result.record, result.resource);
     ensure(token);
     const image = await decodeSurfaceImage(bytes, result.record, result.resource);
     ensure(token);
     const currentProject = await getProject(token);
-    if (currentProject.project_id !== captured.project_id || currentProject.revision !== captured.revision)
+    if (
+      currentProject.project_id !== captured.project_id ||
+      currentProject.revision !== captured.revision
+    )
       throw new DomainError("stale_revision", "Project changed while retrieving its height image.");
     patch({ imagePreview: { record: result.record, image } });
   }
@@ -1003,16 +1082,25 @@ export function useWorkbench(
     await run(async (token) => {
       try {
         if (stateRef.current.stale)
-          throw new DomainError("stale_revision", "Resume the current project before loading an image.");
+          throw new DomainError(
+            "stale_revision",
+            "Resume the current project before loading an image.",
+          );
         await prepareSurfaceImage(imageHash, token);
         prepared = true;
-      } catch (error) { rejection = error; throw error; }
+      } catch (error) {
+        rejection = error;
+        throw error;
+      }
     });
     if (rejection) throw rejection;
-    if (!prepared) throw new Error("Image preview was not admitted; session is busy or unavailable.");
+    if (!prepared)
+      throw new Error("Image preview was not admitted; session is busy or unavailable.");
   };
   const importSurfaceImage = async (
-    reference: FaceRef, scope: SurfaceScopeKind, parameters: ImageReliefParameters,
+    reference: FaceRef,
+    scope: SurfaceScopeKind,
+    parameters: ImageReliefParameters,
   ): Promise<SurfaceImageRecord> => {
     let imported: SurfaceImageRecord | null = null;
     let rejection: unknown;
@@ -1022,30 +1110,54 @@ export function useWorkbench(
         const project = snapshot.project;
         const scene = sceneRef.current;
         const selection = snapshot.selectedImage;
-        if (!project || !scene || snapshot.stale || !selection ||
-          reference.session_id !== scene.session_id || reference.scene_revision !== scene.revision ||
-          selection.session_id !== scene.session_id)
-          throw new DomainError("stale_revision", "Select an image and a face from the current native project.");
+        if (
+          !project ||
+          !scene ||
+          snapshot.stale ||
+          !selection ||
+          reference.session_id !== scene.session_id ||
+          reference.scene_revision !== scene.revision ||
+          selection.session_id !== scene.session_id
+        )
+          throw new DomainError(
+            "stale_revision",
+            "Select an image and a face from the current native project.",
+          );
         if (project.read_only)
           throw new DomainError("read_only", "Read-only snapshots cannot import images.");
-        const response = await exchange(() => native.importSurfaceImage(
-          selection, project.revision, reference, scope, parameters,
-        ), token);
+        const response = await exchange(
+          () =>
+            native.importSurfaceImage(selection, project.revision, reference, scope, parameters),
+          token,
+        );
         if (response.type === "operation_accepted") patch({ selectedImage: null });
         const result = await waitJob(response, token);
         if (result.kind !== "surface_image_imported")
           throw new Error("Image import did not return an authoritative image layer receipt.");
-        if (result.info.project_id !== project.project_id ||
-          !result.info.surface_overlays.layers.some((layer) => layer.layer_id === result.layer_id &&
-            layer.finish.kind === "image_relief" && layer.finish.image_hash === result.image.image_hash))
+        if (
+          result.info.project_id !== project.project_id ||
+          !result.info.surface_overlays.layers.some(
+            (layer) =>
+              layer.layer_id === result.layer_id &&
+              layer.finish.kind === "image_relief" &&
+              layer.finish.image_hash === result.image.image_hash,
+          )
+        )
           throw new Error("Image import receipt is not bound to its authoritative layer.");
         // Metadata only: retain native scene leases, face selection and section buffers.
-        patch({ project: result.info, message: `Imported ${result.image.source_name}; layer ${result.layer_id}. Compile to inspect manufactured paths.` });
+        patch({
+          project: result.info,
+          message: `Imported ${result.image.source_name}; layer ${result.layer_id}. Compile to inspect manufactured paths.`,
+        });
         imported = result.image;
-      } catch (error) { rejection = error; throw error; }
+      } catch (error) {
+        rejection = error;
+        throw error;
+      }
     });
     if (rejection) throw rejection;
-    if (!imported) throw new Error("Image import was not admitted; session is busy or unavailable.");
+    if (!imported)
+      throw new Error("Image import was not admitted; session is busy or unavailable.");
     return imported;
   };
   const projectControl = (op: "new" | "undo" | "redo", discardChanges = false) =>
@@ -1503,9 +1615,13 @@ export function useWorkbench(
     patch({ selectedImage: null, imagePreview: null });
   }, [state.hello?.session_id, state.projectEpoch, state.phase]);
   useEffect(() => {
-    if (state.imagePreview && !state.project?.surface_overlays.images.some(
-      (record) => record.image_hash === state.imagePreview!.record.image_hash,
-    )) patch({ imagePreview: null });
+    if (
+      state.imagePreview &&
+      !state.project?.surface_overlays.images.some(
+        (record) => record.image_hash === state.imagePreview!.record.image_hash,
+      )
+    )
+      patch({ imagePreview: null });
   }, [state.project, state.imagePreview]);
 
   return {
@@ -1517,6 +1633,7 @@ export function useWorkbench(
     debugImport,
     projectControl,
     editSurfaceFinish,
+    editProcess,
     selectSurfaceImage,
     importSurfaceImage,
     previewSurfaceImage,
@@ -1550,12 +1667,26 @@ export function useWorkbench(
             if (snapshot.project?.read_only)
               throw new DomainError("read_only", "Read-only projects cannot prepare instances.");
             if (snapshot.stale || !summary || !snapshot.project)
-              throw new DomainError("stale_revision", "Resume the native scene before preparing the bed.");
-            const occurrence = snapshot.occurrences.find(row => row.occurrence_id === occurrenceId);
+              throw new DomainError(
+                "stale_revision",
+                "Resume the native scene before preparing the bed.",
+              );
+            const occurrence = snapshot.occurrences.find(
+              (row) => row.occurrence_id === occurrenceId,
+            );
             if (!occurrence)
-              throw new DomainError("stale_revision", "Occurrence is absent from the captured scene.");
+              throw new DomainError(
+                "stale_revision",
+                "Occurrence is absent from the captured scene.",
+              );
             const accepted = await exchange(
-              () => native.prepareManufacturingBed(summary.session_id, summary.revision, occurrenceId, center),
+              () =>
+                native.prepareManufacturingBed(
+                  summary.session_id,
+                  summary.revision,
+                  occurrenceId,
+                  center,
+                ),
               token,
             );
             const completed = await waitJob(accepted, token);
@@ -1563,19 +1694,25 @@ export function useWorkbench(
               throw new Error("Unexpected native bed preparation result.");
             const result = completed.preparation;
             const current = stateRef.current;
-            if (result.session_id !== summary.session_id ||
-                result.scene_revision !== summary.revision ||
-                result.project_revision !== snapshot.project.revision ||
-                current.hello?.session_id !== result.session_id ||
-                sceneRef.current?.revision !== result.scene_revision ||
-                current.project?.revision !== result.project_revision ||
-                current.project?.project_id !== snapshot.project.project_id ||
-                current.projectEpoch !== snapshot.projectEpoch ||
-                result.occurrence_id !== occurrenceId ||
-                result.definition_id !== occurrence.definition_id ||
-                result.center_xy !== center ||
-                !result.original_pose.translation_mm.every((value, axis) => value === occurrence.pose.translation_mm[axis]) ||
-                !result.original_pose.rotation_xyzw.every((value, axis) => value === occurrence.pose.rotation_xyzw[axis]))
+            if (
+              result.session_id !== summary.session_id ||
+              result.scene_revision !== summary.revision ||
+              result.project_revision !== snapshot.project.revision ||
+              current.hello?.session_id !== result.session_id ||
+              sceneRef.current?.revision !== result.scene_revision ||
+              current.project?.revision !== result.project_revision ||
+              current.project?.project_id !== snapshot.project.project_id ||
+              current.projectEpoch !== snapshot.projectEpoch ||
+              result.occurrence_id !== occurrenceId ||
+              result.definition_id !== occurrence.definition_id ||
+              result.center_xy !== center ||
+              !result.original_pose.translation_mm.every(
+                (value, axis) => value === occurrence.pose.translation_mm[axis],
+              ) ||
+              !result.original_pose.rotation_xyzw.every(
+                (value, axis) => value === occurrence.pose.rotation_xyzw[axis],
+              )
+            )
               throw new DomainError("stale_revision", "Bed proposal superseded; prepare again.");
             preparation = result;
           } catch (error) {
@@ -1593,24 +1730,40 @@ export function useWorkbench(
         await run(async (token) => {
           try {
             const snapshot = stateRef.current;
-            const occurrence = snapshot.occurrences.find(row => row.occurrence_id === preparation.occurrence_id);
+            const occurrence = snapshot.occurrences.find(
+              (row) => row.occurrence_id === preparation.occurrence_id,
+            );
             if (snapshot.project?.read_only)
               throw new DomainError("read_only", "Read-only projects cannot apply bed proposals.");
-            if (snapshot.stale || snapshot.hello?.session_id !== preparation.session_id ||
-                sceneRef.current?.revision !== preparation.scene_revision ||
-                snapshot.project?.revision !== preparation.project_revision ||
-                occurrence?.definition_id !== preparation.definition_id ||
-                !occurrence.pose.translation_mm.every((value, axis) => value === preparation.original_pose.translation_mm[axis]) ||
-                !occurrence.pose.rotation_xyzw.every((value, axis) => value === preparation.original_pose.rotation_xyzw[axis]))
-              throw new DomainError("stale_revision", "Bed proposal no longer owns this occurrence; prepare again.");
-            const response = await exchange(() => native.geometry({
-              op: "set_instance_pose",
-              session_id: preparation.session_id,
-              base_revision: preparation.scene_revision,
-              project_revision: preparation.project_revision,
-              occurrence_id: preparation.occurrence_id,
-              pose: preparation.pose,
-            }), token);
+            if (
+              snapshot.stale ||
+              snapshot.hello?.session_id !== preparation.session_id ||
+              sceneRef.current?.revision !== preparation.scene_revision ||
+              snapshot.project?.revision !== preparation.project_revision ||
+              occurrence?.definition_id !== preparation.definition_id ||
+              !occurrence.pose.translation_mm.every(
+                (value, axis) => value === preparation.original_pose.translation_mm[axis],
+              ) ||
+              !occurrence.pose.rotation_xyzw.every(
+                (value, axis) => value === preparation.original_pose.rotation_xyzw[axis],
+              )
+            )
+              throw new DomainError(
+                "stale_revision",
+                "Bed proposal no longer owns this occurrence; prepare again.",
+              );
+            const response = await exchange(
+              () =>
+                native.geometry({
+                  op: "set_instance_pose",
+                  session_id: preparation.session_id,
+                  base_revision: preparation.scene_revision,
+                  project_revision: preparation.project_revision,
+                  occurrence_id: preparation.occurrence_id,
+                  pose: preparation.pose,
+                }),
+              token,
+            );
             if (response.type === "error" || response.type === "project_error")
               throw new DomainError(response.error.code, response.error.message);
             if (response.type !== "scene_changed")
@@ -1646,6 +1799,7 @@ export function useWorkbench(
         layer: number | null;
         eventCount: number;
         showTravel: boolean;
+        showSource: boolean;
       }) => {
         if (!viewport.current)
           throw new Error("WebGPU replay controls unavailable in native diagnostics.");

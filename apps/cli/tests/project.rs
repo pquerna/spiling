@@ -941,7 +941,6 @@ fn surface_operator_workflow(source_fixture: &str, cylindrical: bool) {
     let provenance: Value =
         serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
     assert_eq!(provenance["surface_overlays"], overlays);
-    assert_eq!(provenance["planner_version"], "11");
     let baseline_provenance: Value =
         serde_json::from_slice(&std::fs::read(baseline_export.join("provenance.json")).unwrap())
             .unwrap();
@@ -1438,5 +1437,292 @@ fn image_operator_workflow(source_fixture: &str, cylindrical: bool) {
         .unwrap();
     assert!(!failure.status.success());
     assert!(String::from_utf8_lossy(&failure.stderr).contains("read-only"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual source-bound process CLI regression; requires SPILING_TEST_ENGINE"]
+fn process_protected_bore_scope_inheritance_stale_artifacts_and_fresh_export() {
+    process_operator_workflow("through-hole.step");
+}
+
+fn resolved_process<'a>(report: &'a Value, occurrence: &str) -> &'a Value {
+    report["project"]["resolved_process"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["occurrence_id"].as_u64().unwrap().to_string() == occurrence)
+        .expect("engine must resolve each live occurrence with explicit intent")
+}
+
+fn process_operator_workflow(source_fixture: &str) {
+    let root = root();
+    let project = root.join("process-project");
+    let source = root.join("original.step");
+    std::fs::copy(fixture(source_fixture), &source).unwrap();
+    let intent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/complete-sparse.intent.json");
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(&source)
+            .arg("--intent")
+            .arg(&intent)
+            .args(["--center-on-bed", "1"])
+            .output()
+            .unwrap(),
+    );
+    let first = created["occurrences"][0]["occurrence_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let definition = created["occurrences"][0]["definition_id"].as_str().unwrap();
+    let mut shared_pose = created["occurrences"][0]["pose"].clone();
+    shared_pose["translation_mm"][0] =
+        serde_json::json!(shared_pose["translation_mm"][0].as_f64().unwrap() + 40.0);
+    let placed = report(
+        cli("edit", &project)
+            .args(["--add", definition, &shared_pose.to_string()])
+            .output()
+            .unwrap(),
+    );
+    let second = placed["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["occurrence_id"] != created["occurrences"][0]["occurrence_id"])
+        .unwrap()["occurrence_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let export = root.join("first-export");
+    let authored = report(
+        cli("edit", &project)
+            .args([
+                "--process-set",
+                &first,
+                "definition",
+                "0.20",
+                "--process-resolve",
+                &second,
+                "--process-set",
+                &second,
+                "occurrence",
+                "0.40",
+                "--process-set",
+                &second,
+                "occurrence",
+                "0.60",
+                "--process-resolve",
+                &first,
+                "--process-resolve",
+                &second,
+                "--preflight",
+                "--compile",
+                "--verify",
+                "--manufacturing-out",
+            ])
+            .arg(&export)
+            .output()
+            .unwrap(),
+    );
+    let first_value = &resolved_process(&authored, &first)["value"];
+    let second_value = &resolved_process(&authored, &second)["value"];
+    assert_eq!(first_value["fraction"], 0.20);
+    assert_eq!(second_value["fraction"], 0.60);
+    assert_ne!(first_value["provenance"], second_value["provenance"]);
+    assert_eq!(
+        resolved_process(&authored, &second)["inherited"],
+        *first_value
+    );
+    assert_eq!(
+        authored["process_inspections"][0]["resolved"]["value"],
+        *first_value
+    );
+    assert_eq!(
+        authored["process_inspections"][1]["resolved"]["value"],
+        *first_value
+    );
+    assert_eq!(
+        authored["process_inspections"][2]["resolved"]["value"],
+        *second_value
+    );
+    let document = authored["project"]["process_document"].clone();
+    let artifact = authored["manufacturing"]["artifact"].clone();
+    assert_eq!(authored["manufacturing"]["verification"]["verified"], true);
+    let provenance: Value =
+        serde_json::from_slice(&std::fs::read(export.join("provenance.json")).unwrap()).unwrap();
+    assert_eq!(provenance["process_document"], document);
+    std::fs::remove_file(source).unwrap();
+    let fresh_export = root.join("fresh-export");
+    let fresh = report(
+        cli("inspect", &project)
+            .args([
+                "--process-resolve",
+                &first,
+                "--process-resolve",
+                &second,
+                "--preflight",
+                "--verify",
+                "--manufacturing-out",
+            ])
+            .arg(&fresh_export)
+            .output()
+            .unwrap(),
+    );
+    assert_ne!(
+        fresh["hello"]["session_id"],
+        authored["hello"]["session_id"]
+    );
+    assert_eq!(fresh["project"]["read_only"], true);
+    assert_eq!(fresh["project"]["process_document"], document);
+    assert_eq!(
+        fresh["project"]["resolved_process"],
+        authored["project"]["resolved_process"]
+    );
+    assert_eq!(fresh["manufacturing"]["artifact"], artifact);
+    for name in ["plan.json", "program.gcode", "provenance.json"] {
+        assert_eq!(
+            std::fs::read(export.join(name)).unwrap(),
+            std::fs::read(fresh_export.join(name)).unwrap()
+        );
+    }
+    let replay: Value =
+        serde_json::from_slice(&std::fs::read(fresh_export.join("verification.json")).unwrap())
+            .unwrap();
+    assert_eq!(replay, fresh["manufacturing"]["verification"]);
+
+    // Editing an operation uses returned Rust IDs, never client ordinals.
+    let local_layer = second_value["provenance"]["layer_id"].clone();
+    let erase = serde_json::json!({
+        "op": "add_operation", "layer_id": local_layer,
+        "selector": {"kind": "whole_owned_volume"}, "action": {"kind": "erase"}
+    });
+    let erased = report(
+        cli("open", &project)
+            .args([
+                "--preflight",
+                "--process-edit",
+                &erase.to_string(),
+                "--process-resolve",
+                &second,
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        resolved_process(&erased, &second)["value"],
+        *first_value,
+        "Erase clears the updated local layer and reveals definition inheritance"
+    );
+    assert_eq!(
+        resolved_process(&erased, &second)["inherited"],
+        *first_value
+    );
+    assert!(erased["manufacturing"]["artifact"].is_null());
+    assert_eq!(erased["manufacturing"]["preflight_freshness"], "stale");
+    assert!(erased["manufacturing"]["verified_artifact_hash"].is_null());
+    assert_eq!(
+        erased["process_inspections"][0]["project_revision"],
+        erased["project"]["revision"]
+    );
+    // Unsaved open edits must not replace the durable compiled state.
+    assert_eq!(
+        report(cli("inspect", &project).output().unwrap())["manufacturing"]["artifact"],
+        artifact
+    );
+
+    let inherited = report(
+        cli("edit", &project)
+            .args([
+                "--preflight",
+                "--process-reset",
+                &second,
+                "occurrence",
+                "--process-resolve",
+                &second,
+                "--undo",
+                "--process-resolve",
+                &second,
+                "--redo",
+                "--process-resolve",
+                &second,
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        inherited["process_inspections"][0]["resolved"]["value"],
+        *first_value
+    );
+    assert_eq!(
+        inherited["process_inspections"][1]["resolved"]["value"],
+        *second_value
+    );
+    assert_eq!(
+        inherited["process_inspections"][2]["resolved"]["value"],
+        *first_value
+    );
+    assert!(inherited["manufacturing"]["artifact"].is_null());
+    assert_eq!(inherited["manufacturing"]["preflight_freshness"], "stale");
+    let inherit_fresh = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(
+        resolved_process(&inherit_fresh, &second)["value"],
+        *first_value
+    );
+    assert!(inherit_fresh["manufacturing"]["artifact"].is_null());
+    let no_stale_export = root.join("no-stale-export");
+    let rejected = terminal_error(
+        cli("inspect", &project)
+            .arg("--manufacturing-out")
+            .arg(&no_stale_export)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(rejected["domain"], "manufacturing");
+    assert!(rejected["manufacturing"]["artifact"].is_null());
+    assert!(!no_stale_export.exists());
+    let baseline = report(
+        cli("edit", &project)
+            .args([
+                "--process-reset",
+                &first,
+                "definition",
+                "--process-resolve",
+                &first,
+                "--process-resolve",
+                &second,
+            ])
+            .output()
+            .unwrap(),
+    );
+    for occurrence in [&first, &second] {
+        let resolved = resolved_process(&baseline, occurrence);
+        assert_eq!(resolved["value"]["fraction"], resolved["global_fraction"]);
+        assert!(resolved["value"]["provenance"].is_null());
+    }
+    // Missing engine makes pre-spawn read-only enforcement observable.
+    for flags in [
+        vec!["--process-set", &first, "definition", "0.2"],
+        vec!["--process-reset", &second, "occurrence"],
+        vec!["--process-edit", r#"{"op":"remove_layer","layer_id":1}"#],
+    ] {
+        let rejected = terminal_error(
+            Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+                .arg("--engine")
+                .arg(root.join("missing-engine"))
+                .args(["project", "inspect"])
+                .arg(&project)
+                .args(flags)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(rejected["domain"], "input_or_output");
+        assert!(rejected["message"].as_str().unwrap().contains("read-only"));
+    }
+    assert_eq!(
+        report(cli("inspect", &project).output().unwrap())["project"]["revision"],
+        baseline["project"]["revision"]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

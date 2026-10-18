@@ -1398,3 +1398,421 @@ async fn spatial_image_compilation_captures_self_contained_content_and_fresh_rep
     assert_eq!(fetch_bundle(&mut reader, &compiled).await.unwrap(), bundle);
     reader.shutdown().await.unwrap();
 }
+
+async fn edit_process(
+    client: &mut EngineClient,
+    edit: spiling_contracts::process::ProcessEdit,
+) -> ProjectInfo {
+    let input = status(client).await.0;
+    let ProjectResponse::Status { info } = client
+        .project(ProjectCommand::EditProcess {
+            session_id: client.hello().session_id.clone(),
+            base_revision: input.revision,
+            edit,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("process edit must return authoritative project status")
+    };
+    info
+}
+
+fn sparse_layer(
+    scope: spiling_contracts::surface::SurfaceScope,
+    fraction: f64,
+) -> spiling_contracts::process::ProcessEdit {
+    use spiling_contracts::process::{ProcessAction, ProcessEdit, ProcessSelector, ProcessValue};
+    ProcessEdit::AddLayer {
+        scope,
+        selector: ProcessSelector::WholeOwnedVolume,
+        action: ProcessAction::Replace {
+            value: ProcessValue::SparseFraction { fraction },
+        },
+    }
+}
+
+fn effective_process(
+    info: &ProjectInfo,
+    occurrence_id: OccurrenceId,
+) -> &spiling_contracts::process::ResolvedProcessValue {
+    &info
+        .resolved_process
+        .iter()
+        .find(|resolved| resolved.occurrence_id == occurrence_id)
+        .expect("current occurrence has an authoritative effective process")
+        .value
+}
+
+#[tokio::test]
+async fn process_overrides_resolve_inherit_reset_and_survive_history_and_read_only_reopen() {
+    use spiling_contracts::{
+        process::{ProcessAction, ProcessEdit, ProcessSelector},
+        surface::SurfaceScope,
+    };
+    let workspace = Workspace::new();
+    let source = workspace.source("box-mm.step");
+    let checkpoint = workspace.0.join("process-project");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    set_intent(&mut client, intent()).await;
+    let original_scene = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: original_scene.session_id.clone(),
+            revision: original_scene.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("source occurrences")
+    };
+    let first = occurrences[0].clone();
+    let GeometryResponse::SceneChanged { .. } = client
+        .geometry(GeometryCommand::AddInstance {
+            session_id: original_scene.session_id,
+            base_revision: original_scene.revision,
+            definition_id: first.definition_id.clone(),
+            pose: RigidPoseMm {
+                translation_mm: [40.0, 0.0, 0.0],
+                ..RigidPoseMm::IDENTITY
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("repeated source occurrence")
+    };
+    let before_scene = scene(&mut client).await;
+    let original = compile(&mut client).await;
+    let original_bundle = fetch_bundle(&mut client, &original).await.unwrap();
+    let definition_scope = SurfaceScope::Definition {
+        definition_id: first.definition_id.clone(),
+    };
+    let occurrence_scope = SurfaceScope::Occurrence {
+        occurrence_id: first.occurrence_id,
+        expected_definition_id: first.definition_id.clone(),
+    };
+    let before = status(&mut client).await.0;
+    let inherited = edit_process(&mut client, sparse_layer(definition_scope.clone(), 0.35)).await;
+    let definition_layer = &inherited.process_document.layers[0];
+    let definition_operation = &definition_layer.operations[0];
+    for resolved in &inherited.resolved_process {
+        assert_eq!(resolved.value.fraction, 0.35);
+        let provenance = resolved.value.provenance.as_ref().unwrap();
+        assert_eq!(provenance.layer_id, definition_layer.layer_id);
+        assert_eq!(provenance.operation_id, definition_operation.operation_id);
+    }
+    assert!(status(&mut client).await.1.is_none());
+    assert_eq!(scene(&mut client).await, before_scene);
+    history(&mut client, true).await;
+    assert_eq!(status(&mut client).await.1, Some(original));
+    assert_eq!(
+        effective_process(&status(&mut client).await.0, first.occurrence_id).fraction,
+        1.0
+    );
+    history(&mut client, false).await;
+    assert_eq!(
+        status(&mut client).await.0.resolved_process,
+        inherited.resolved_process
+    );
+    assert!(status(&mut client).await.1.is_none());
+
+    // Every mutation binds the persistent input revision and exact source identity.
+    let result = client
+        .project(ProjectCommand::EditProcess {
+            session_id: before_scene.session_id.clone(),
+            base_revision: before.revision,
+            edit: sparse_layer(occurrence_scope.clone(), 0.6),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(ClientError::Project(error)) if error.code == ProjectErrorCode::StaleRevision)
+    );
+    let current = status(&mut client).await.0;
+    let result = client
+        .project(ProjectCommand::EditProcess {
+            session_id: before_scene.session_id.clone(),
+            base_revision: current.revision,
+            edit: sparse_layer(
+                SurfaceScope::Occurrence {
+                    occurrence_id: first.occurrence_id,
+                    expected_definition_id: DefinitionId::parse("0".repeat(64)).unwrap(),
+                },
+                0.6,
+            ),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(ClientError::Project(error)) if error.code == ProjectErrorCode::InvalidProject)
+    );
+    assert_eq!(status(&mut client).await.0, current);
+
+    let local = edit_process(&mut client, sparse_layer(occurrence_scope.clone(), 0.6)).await;
+    let local_value = effective_process(&local, first.occurrence_id);
+    assert_eq!(local_value.fraction, 0.6);
+    assert_ne!(
+        local_value.provenance,
+        effective_process(&inherited, first.occurrence_id).provenance
+    );
+    for sibling in &local.resolved_process {
+        assert_eq!(sibling.global_fraction, 1.0);
+        assert_eq!(
+            sibling.inherited,
+            *effective_process(&inherited, sibling.occurrence_id)
+        );
+        if sibling.occurrence_id != first.occurrence_id {
+            assert_eq!(sibling.value.fraction, 0.35);
+            assert_eq!(
+                sibling.value.provenance,
+                effective_process(&inherited, sibling.occurrence_id).provenance
+            );
+        }
+    }
+    let local_layer = local_value.provenance.as_ref().unwrap().layer_id;
+    let erased = edit_process(
+        &mut client,
+        ProcessEdit::AddOperation {
+            layer_id: local_layer,
+            selector: ProcessSelector::WholeOwnedVolume,
+            action: ProcessAction::Erase,
+        },
+    )
+    .await;
+    assert_eq!(erased.resolved_process, inherited.resolved_process);
+    history(&mut client, true).await;
+    assert_eq!(
+        status(&mut client).await.0.resolved_process,
+        local.resolved_process
+    );
+    let latest = edit_process(&mut client, sparse_layer(occurrence_scope.clone(), 0.7)).await;
+    let latest_layer = effective_process(&latest, first.occurrence_id)
+        .provenance
+        .as_ref()
+        .unwrap()
+        .layer_id;
+    let disabled = edit_process(
+        &mut client,
+        ProcessEdit::SetLayerEnabled {
+            layer_id: latest_layer,
+            enabled: false,
+        },
+    )
+    .await;
+    assert_eq!(disabled.resolved_process, local.resolved_process);
+    let reset = edit_process(
+        &mut client,
+        ProcessEdit::Reset {
+            scope: occurrence_scope.clone(),
+        },
+    )
+    .await;
+    assert_eq!(reset.resolved_process, inherited.resolved_process);
+    history(&mut client, true).await;
+    assert_eq!(
+        status(&mut client).await.0.resolved_process,
+        disabled.resolved_process
+    );
+    history(&mut client, false).await;
+    assert_eq!(
+        status(&mut client).await.0.resolved_process,
+        reset.resolved_process
+    );
+    assert_eq!(scene(&mut client).await, before_scene);
+    let preflight_input = status(&mut client).await;
+    let eligibility = preflight(&mut client).await;
+    assert_eq!(eligibility.status, JobStatus::Completed, "{eligibility:?}");
+    assert_eq!(status(&mut client).await, preflight_input);
+    let compiled = compile(&mut client).await;
+    assert_ne!(compiled.input_hash, original_bundle.provenance.input_hash);
+    let bundle = fetch_bundle(&mut client, &compiled).await.unwrap();
+    assert_eq!(bundle.provenance.process_document, reset.process_document);
+    assert!(bundle.verification.verified);
+    assert!(
+        bundle.verification.deposited_volume_mm3
+            < original_bundle.verification.deposited_volume_mm3,
+        "effective local density must change actual deposited output"
+    );
+    assert_ne!(bundle.program, original_bundle.program);
+    save(&mut client, &checkpoint).await;
+    let saved = status(&mut client).await.0;
+    client.shutdown().await.unwrap();
+    std::fs::remove_file(source).unwrap();
+
+    let mut reader = spawn().await;
+    let opened = open(&mut reader, &checkpoint, true).await;
+    assert_eq!(opened.status, JobStatus::Completed, "{opened:?}");
+    let reopened = status(&mut reader).await.0;
+    assert!(reopened.read_only);
+    assert_eq!(reopened.process_document, saved.process_document);
+    assert_eq!(reopened.resolved_process, saved.resolved_process);
+    assert_eq!(inspect(&mut reader).await.0, compiled);
+    assert_eq!(fetch_bundle(&mut reader, &compiled).await.unwrap(), bundle);
+    for edit in [
+        sparse_layer(definition_scope, 0.5),
+        ProcessEdit::Reset {
+            scope: occurrence_scope,
+        },
+        ProcessEdit::SetLayerEnabled {
+            layer_id: definition_layer.layer_id,
+            enabled: false,
+        },
+    ] {
+        let result = reader
+            .project(ProjectCommand::EditProcess {
+                session_id: reader.hello().session_id.clone(),
+                base_revision: reopened.revision,
+                edit,
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ClientError::Project(error)) if error.code == ProjectErrorCode::ReadOnly)
+        );
+        assert_eq!(status(&mut reader).await.0, reopened);
+    }
+    reader.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_process_pose_and_source_changes_reject_stale_compile_and_preflight() {
+    use spiling_contracts::{
+        metadata,
+        rpc::{DiagnosticState, RunDiagnosticRequest},
+        surface::SurfaceScope,
+    };
+    let workspace = Workspace::new();
+    let mut client = spawn().await;
+    import(&mut client, &workspace.source("box-mm.step")).await;
+    set_intent(&mut client, intent()).await;
+    let initial_scene = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: initial_scene.session_id,
+            revision: initial_scene.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("source occurrence")
+    };
+    let occurrence = occurrences[0].clone();
+    for preflight_only in [false, true] {
+        for mutation in ["process", "pose", "source"] {
+            let diagnostic = client
+                .rpc()
+                .run_diagnostic(RunDiagnosticRequest {
+                    parent: "diagnostics/queued-process-input".into(),
+                    request_id: String::new(),
+                    chunk_count: 4,
+                    delay_ms: 1000,
+                    chunk_bytes: 64,
+                    input_revision: "occupying-shared-permit".into(),
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let current = client.rpc().get_operation(&diagnostic.name).await.unwrap();
+                    if metadata(&current).unwrap().state == DiagnosticState::Running as i32 {
+                        break;
+                    }
+                    assert!(!current.done);
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let input = status(&mut client).await.0;
+            let session_id = client.hello().session_id.clone();
+            let command = if preflight_only {
+                ManufacturingCommand::Preflight {
+                    session_id,
+                    base_revision: input.revision,
+                }
+            } else {
+                ManufacturingCommand::Compile {
+                    session_id,
+                    base_revision: input.revision,
+                }
+            };
+            let ManufacturingResponse::OperationAccepted { operation } =
+                client.manufacturing(command).await.unwrap()
+            else {
+                panic!("queued manufacturing operation")
+            };
+            match mutation {
+                "process" => {
+                    edit_process(
+                        &mut client,
+                        sparse_layer(
+                            SurfaceScope::Definition {
+                                definition_id: occurrence.definition_id.clone(),
+                            },
+                            0.35,
+                        ),
+                    )
+                    .await;
+                }
+                "pose" => {
+                    let scene = scene(&mut client).await;
+                    client
+                        .geometry(GeometryCommand::SetInstancePose {
+                            session_id: scene.session_id,
+                            base_revision: scene.revision,
+                            project_revision: input.revision,
+                            occurrence_id: occurrence.occurrence_id,
+                            pose: RigidPoseMm {
+                                translation_mm: [if preflight_only { 2.0 } else { 1.0 }, 0.0, 0.0],
+                                ..RigidPoseMm::IDENTITY
+                            },
+                        })
+                        .await
+                        .unwrap();
+                }
+                "source" => {
+                    let scene = scene(&mut client).await;
+                    client
+                        .geometry(GeometryCommand::RemoveInstance {
+                            session_id: scene.session_id,
+                            base_revision: scene.revision,
+                            occurrence_id: occurrence.occurrence_id,
+                        })
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            client
+                .rpc()
+                .cancel_operation(&diagnostic.name)
+                .await
+                .unwrap();
+            let stale = wait(&mut client, operation.name).await;
+            assert_eq!(stale.status, JobStatus::Failed, "{stale:?}");
+            assert!(
+                matches!(&stale.error, Some(JobError::Manufacturing { error }) if error.code == ManufacturingErrorCode::StaleRevision),
+                "{stale:?}"
+            );
+            assert!(stale.outputs.is_empty());
+            assert!(status(&mut client).await.1.is_none());
+            if mutation == "source" {
+                let scene = scene(&mut client).await;
+                assert!(matches!(
+                    client
+                        .project(ProjectCommand::Undo {
+                            session_id: scene.session_id,
+                            base_revision: scene.revision,
+                        })
+                        .await
+                        .unwrap(),
+                    ProjectResponse::SceneChanged { .. }
+                ));
+            }
+        }
+    }
+    client.shutdown().await.unwrap();
+}

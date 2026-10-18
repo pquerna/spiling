@@ -299,14 +299,16 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         SectionSpan {
             start: 0,
             end: 6,
-            material: rectangle(20.0, 10.0),
+            material: Arc::new(rectangle(20.0, 10.0)),
+            process_domains: Vec::new(),
             occupied: None,
             source_area_mm2: 200.0,
         },
         SectionSpan {
             start: 6,
             end: 12,
-            material: rectangle(10.0, 10.0),
+            material: Arc::new(rectangle(10.0, 10.0)),
+            process_domains: Vec::new(),
             occupied: None,
             source_area_mm2: 100.0,
         },
@@ -1223,7 +1225,8 @@ fn skin_horizon_intersects_varying_local_boundaries_under_cumulative_work_cap() 
                 start: index,
                 end: index + 1,
                 source_area_mm2: material.unsigned_area(),
-                material,
+                material: Arc::new(material),
+                process_domains: Vec::new(),
             }
         })
         .collect();
@@ -1283,7 +1286,8 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
                 start: index as u32,
                 end: index as u32 + 1,
                 source_area_mm2: material.unsigned_area(),
-                material,
+                material: Arc::new(material),
+                process_domains: Vec::new(),
             }
         })
         .collect();
@@ -1493,7 +1497,8 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
             occupied: None,
             start: index,
             end: index + 1,
-            material: section.clone(),
+            material: Arc::new(section.clone()),
+            process_domains: Vec::new(),
             source_area_mm2: 200.0,
         })
         .collect();

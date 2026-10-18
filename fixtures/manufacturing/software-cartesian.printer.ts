@@ -5,9 +5,9 @@
 import type { PrinterSpecification } from "../../packages/protocol/src/generated.ts";
 
 const printer = {
-  schema_version: 7,
+  schema_version: 8,
   id: "software-cartesian-reference",
-  revision: "7",
+  revision: "8",
   name: "Software Cartesian reference — not machine-ready",
   coordinate_frame: "right_handed_millimetres",
   build_envelope: { min: [0, 0, 0], max: [220, 220, 220] },

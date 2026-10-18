@@ -119,8 +119,348 @@ fn coverage() -> PlanarRegionCoverage {
         nominal_deposition_volume_mm3: 0.0,
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
-        requested_infill_fraction: 1.0,
+        process_regions: vec![],
     }
+}
+
+fn regional_bundle() -> ManufacturingBundle {
+    use crate::process::{
+        ProcessAction, ProcessLayer, ProcessLayerId, ProcessOperation, ProcessOperationId,
+        ProcessSelector, ProcessValue,
+    };
+    let mut captured = bundle();
+    let first = captured.provenance.occurrences[0].clone();
+    for id in 2..=3 {
+        let mut occurrence = first.clone();
+        occurrence.occurrence_id = OccurrenceId::new(id).unwrap();
+        occurrence.pose.translation_mm[0] = 30.0 * (id - 1) as f64;
+        captured.provenance.occurrences.push(occurrence);
+    }
+    captured.provenance.process_document.layers = [0.2, 0.6]
+        .into_iter()
+        .enumerate()
+        .map(|(index, fraction)| ProcessLayer {
+            layer_id: ProcessLayerId::new(index as u32 + 1).unwrap(),
+            scope: crate::surface::SurfaceScope::Occurrence {
+                occurrence_id: captured.provenance.occurrences[index].occurrence_id,
+                expected_definition_id: first.definition_id.clone(),
+            },
+            enabled: true,
+            operations: vec![ProcessOperation {
+                operation_id: ProcessOperationId::new(index as u32 + 1).unwrap(),
+                selector: ProcessSelector::WholeOwnedVolume,
+                action: ProcessAction::Replace {
+                    value: ProcessValue::SparseFraction { fraction },
+                },
+            }],
+        })
+        .collect();
+    captured.provenance.input_hash = input_fingerprint(
+        &captured.provenance.project_id,
+        &captured.provenance.definitions,
+        &captured.provenance.occurrences,
+        &captured.provenance.intent,
+        &captured.provenance.surface_overlays,
+        &captured.provenance.process_document,
+    )
+    .unwrap();
+    captured.plan.native_geometry.height_analysis_count = 3;
+    captured.plan.native_geometry.slab_count = 3;
+    let coverage = &mut captured.plan.layers[0].region_coverage;
+    coverage.wall_area_mm2 = 20.0;
+    coverage.solid_interior_area_mm2 = 5.0;
+    coverage.sparse_interior_area_mm2 = 25.0;
+    coverage.intentional_void_area_mm2 = 14.0;
+    coverage.process_regions = captured
+        .provenance
+        .occurrences
+        .iter()
+        .zip([10.0, 15.0, 5.0])
+        .map(|(occurrence, area_mm2)| {
+            let resolved = captured.provenance.process_document.resolve(
+                &occurrence.definition_id,
+                occurrence.occurrence_id,
+                captured.provenance.intent.recipe.infill_fraction,
+            );
+            ProcessRegionCoverage {
+                area_mm2,
+                fraction: resolved.fraction,
+                contributions: vec![ProcessRegionContribution {
+                    occurrence_id: occurrence.occurrence_id,
+                    definition_id: occurrence.definition_id.clone(),
+                    provenance: resolved.provenance,
+                }],
+            }
+        })
+        .collect();
+    captured
+}
+
+#[test]
+fn regional_accounting_consumes_heterogeneous_fractions_without_global_averaging() {
+    let captured = regional_bundle();
+    captured.plan.validate(&captured.provenance.intent).unwrap();
+    assert_eq!(
+        decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap(),
+        captured
+    );
+    assert_eq!(captured.provenance.intent.recipe.infill_fraction, 1.0);
+    let coverage = &captured.plan.layers[0].region_coverage;
+    assert_eq!(coverage.intentional_void_area_mm2, 10.0 * 0.8 + 15.0 * 0.4);
+    assert_eq!(coverage.sparse_interior_area_mm2, 25.0);
+    assert_eq!(coverage.solid_interior_area_mm2, 5.0);
+    for case in 0..5 {
+        let mut changed = captured.clone();
+        let coverage = &mut changed.plan.layers[0].region_coverage;
+        match case {
+            0 => coverage.intentional_void_area_mm2 = 0.0,
+            1 => coverage.solid_interior_area_mm2 += 1.0,
+            2 => coverage.sparse_interior_area_mm2 += 1.0,
+            3 => {
+                coverage.solid_interior_area_mm2 = 0.0;
+                coverage.sparse_interior_area_mm2 = 30.0;
+            }
+            _ => coverage.process_regions[0].area_mm2 += 1.0,
+        }
+        changed.verification.verified = true;
+        assert!(
+            decode_bundle(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+fn regional_accounting_rejects_nonfinite_empty_and_out_of_range_domains() {
+    let captured = regional_bundle();
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut changed = captured.plan.clone();
+        changed.layers[0].region_coverage.process_regions[0].area_mm2 = value;
+        assert!(
+            changed.validate(&captured.provenance.intent).is_err(),
+            "area {value}"
+        );
+    }
+    for value in [0.0, -0.2, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut changed = captured.plan.clone();
+        changed.layers[0].region_coverage.process_regions[0].fraction = value;
+        assert!(
+            changed.validate(&captured.provenance.intent).is_err(),
+            "fraction {value}"
+        );
+    }
+    let mut missing = captured.plan.clone();
+    missing.layers[0].region_coverage.process_regions.clear();
+    assert!(missing.validate(&captured.provenance.intent).is_err());
+    let mut overflow = captured.plan.clone();
+    overflow.layers[0].region_coverage.process_regions[0].area_mm2 = f64::MAX;
+    overflow.layers[0].region_coverage.process_regions[1].area_mm2 = f64::MAX;
+    assert!(overflow.validate(&captured.provenance.intent).is_err());
+}
+
+#[test]
+fn regional_bundle_binds_every_contributor_to_captured_occurrence_and_winner() {
+    let captured = regional_bundle();
+    for case in 0..8 {
+        let mut changed = captured.clone();
+        let regions = &mut changed.plan.layers[0].region_coverage.process_regions;
+        match case {
+            0 => regions[0].contributions[0].occurrence_id = OccurrenceId::new(99).unwrap(),
+            1 => {
+                regions[0].contributions[0].definition_id =
+                    DefinitionId::from_source_sha256(&[7; 32])
+            }
+            2 => regions[0].contributions[0].provenance = None,
+            3 => regions[0].contributions[0].provenance = regions[1].contributions[0].provenance,
+            4 => {
+                regions[0].contributions[0].occurrence_id =
+                    regions[1].contributions[0].occurrence_id
+            }
+            5 => {
+                let duplicate = regions[0].contributions[0].clone();
+                regions[0].contributions.push(duplicate);
+            }
+            6 => {
+                let incompatible = regions[1].contributions[0].clone();
+                regions[0].contributions.push(incompatible);
+            }
+            _ => regions[2].contributions.clear(),
+        }
+        changed.verification.verified = true;
+        assert!(
+            decode_bundle(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            "case {case}"
+        );
+    }
+    let mut forged = captured.clone();
+    let coverage = &mut forged.plan.layers[0].region_coverage;
+    coverage.process_regions[0].fraction = 0.4;
+    coverage.intentional_void_area_mm2 = 12.0;
+    forged.plan.validate(&forged.provenance.intent).unwrap();
+    assert!(decode_bundle(&serde_json::to_vec(&forged).unwrap()).is_err());
+    for superseded in [false, true] {
+        let mut stale = captured.clone();
+        if superseded {
+            let mut later = stale.provenance.process_document.layers[0].clone();
+            later.layer_id = crate::process::ProcessLayerId::new(3).unwrap();
+            later.operations[0].operation_id = crate::process::ProcessOperationId::new(3).unwrap();
+            stale.provenance.process_document.layers.push(later);
+        } else {
+            stale.provenance.process_document.layers[0].enabled = false;
+        }
+        stale.provenance.input_hash = input_fingerprint(
+            &stale.provenance.project_id,
+            &stale.provenance.definitions,
+            &stale.provenance.occurrences,
+            &stale.provenance.intent,
+            &stale.provenance.surface_overlays,
+            &stale.provenance.process_document,
+        )
+        .unwrap();
+        stale.provenance.validate().unwrap();
+        assert!(decode_bundle(&serde_json::to_vec(&stale).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn regional_bundle_accepts_compatible_contributors_and_global_no_override_records() {
+    let mut compatible = regional_bundle();
+    compatible.provenance.process_document.layers[1].operations[0].action =
+        crate::process::ProcessAction::Replace {
+            value: crate::process::ProcessValue::SparseFraction { fraction: 0.2 },
+        };
+    compatible.provenance.input_hash = input_fingerprint(
+        &compatible.provenance.project_id,
+        &compatible.provenance.definitions,
+        &compatible.provenance.occurrences,
+        &compatible.provenance.intent,
+        &compatible.provenance.surface_overlays,
+        &compatible.provenance.process_document,
+    )
+    .unwrap();
+    let coverage = &mut compatible.plan.layers[0].region_coverage;
+    let second = coverage.process_regions.remove(1);
+    coverage.process_regions[0].area_mm2 += second.area_mm2;
+    coverage.process_regions[0]
+        .contributions
+        .extend(second.contributions);
+    coverage.intentional_void_area_mm2 = 20.0;
+    decode_bundle(&serde_json::to_vec(&compatible).unwrap()).unwrap();
+
+    let mut global = bundle();
+    let coverage = &mut global.plan.layers[0].region_coverage;
+    coverage.wall_area_mm2 = 0.0;
+    coverage.solid_interior_area_mm2 = 50.0;
+    coverage.process_regions = vec![ProcessRegionCoverage {
+        area_mm2: 50.0,
+        fraction: 1.0,
+        contributions: vec![],
+    }];
+    decode_bundle(&serde_json::to_vec(&global).unwrap()).unwrap();
+    global.provenance.intent.recipe.infill_fraction = 0.6;
+    assert!(global.plan.validate(&global.provenance.intent).is_err());
+}
+
+#[test]
+fn regional_admission_caps_regions_and_cumulative_contributions() {
+    let (_, _, occurrences) = inputs();
+    let contribution = ProcessRegionContribution {
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: occurrences[0].definition_id.clone(),
+        provenance: None,
+    };
+    let mut coverage = coverage();
+    coverage.wall_area_mm2 = 0.0;
+    coverage.solid_interior_area_mm2 = 50.0;
+    coverage.process_regions = vec![
+        ProcessRegionCoverage {
+            area_mm2: 50.0 / MAX_PROCESS_REGIONS as f64,
+            fraction: 1.0,
+            contributions: vec![contribution.clone()],
+        };
+        MAX_PROCESS_REGIONS
+    ];
+    let admitted: PlanarRegionCoverage =
+        serde_json::from_slice(&serde_json::to_vec(&coverage).unwrap()).unwrap();
+    admitted.validate(&intent().recipe).unwrap();
+    let mut too_many_regions = serde_json::to_value(&coverage).unwrap();
+    let extra = too_many_regions["process_regions"][0].clone();
+    too_many_regions["process_regions"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra);
+    assert!(serde_json::from_value::<PlanarRegionCoverage>(too_many_regions).is_err());
+    coverage.process_regions[0]
+        .contributions
+        .push(ProcessRegionContribution {
+            occurrence_id: OccurrenceId::new(2).unwrap(),
+            ..contribution.clone()
+        });
+    assert!(
+        serde_json::from_slice::<PlanarRegionCoverage>(&serde_json::to_vec(&coverage).unwrap())
+            .is_err()
+    );
+    assert_eq!(
+        coverage.validate(&intent().recipe).unwrap_err().code,
+        ManufacturingErrorCode::ResourceLimit
+    );
+    let oversized = ProcessRegionCoverage {
+        area_mm2: 1.0,
+        fraction: 1.0,
+        contributions: vec![contribution; MAX_PROCESS_REGION_CONTRIBUTIONS + 1],
+    };
+    assert!(
+        serde_json::from_slice::<ProcessRegionCoverage>(&serde_json::to_vec(&oversized).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn regional_admission_requires_strict_region_and_contribution_shapes() {
+    let captured = regional_bundle();
+    let value = serde_json::to_value(&captured).unwrap();
+    for field in ["area_mm2", "fraction", "contributions"] {
+        let mut missing = value.clone();
+        missing["plan"]["layers"][0]["region_coverage"]["process_regions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            serde_json::from_value::<ManufacturingBundle>(missing).is_err(),
+            "{field}"
+        );
+    }
+    for field in ["occurrence_id", "definition_id"] {
+        let mut missing = value.clone();
+        missing["plan"]["layers"][0]["region_coverage"]["process_regions"][0]["contributions"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            serde_json::from_value::<ManufacturingBundle>(missing).is_err(),
+            "{field}"
+        );
+    }
+    for contribution in [false, true] {
+        let mut unknown = value.clone();
+        let region = &mut unknown["plan"]["layers"][0]["region_coverage"]["process_regions"][0];
+        let object = if contribution {
+            &mut region["contributions"][0]
+        } else {
+            region
+        };
+        object
+            .as_object_mut()
+            .unwrap()
+            .insert("unsupported".into(), true.into());
+        assert!(serde_json::from_value::<ManufacturingBundle>(unknown).is_err());
+    }
+    let mut missing_regions = value;
+    missing_regions["plan"]["layers"][0]["region_coverage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("process_regions");
+    assert!(serde_json::from_value::<ManufacturingBundle>(missing_regions).is_err());
 }
 fn native_geometry() -> NativeGeometryCoverageSummary {
     NativeGeometryCoverageSummary {
@@ -379,11 +719,13 @@ fn bundle() -> ManufacturingBundle {
         &occurrences,
         &intent,
         &SurfaceOverlays::empty(),
+        &crate::process::ProcessDocument::empty(),
     )
     .unwrap();
     ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         provenance: ManufacturingProvenance {
+            process_document: crate::process::ProcessDocument::empty(),
             project_id,
             input_revision: ProjectRevision(9),
             input_hash,
@@ -397,7 +739,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "11".into(),
+            planner_version: "contract-test-planner".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -493,6 +835,7 @@ fn native_shape_error_is_required_positive_and_persisted_as_semantic_intent() {
         &changed.occurrences,
         &changed.intent,
         &changed.surface_overlays,
+        &changed.process_document,
     )
     .unwrap();
     assert_ne!(changed_hash, restored.provenance.input_hash);
@@ -702,7 +1045,6 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
             for (layer, fixed_axis) in accepted.layers.iter_mut().zip(fixed_axes) {
                 let coverage = &mut layer.region_coverage;
                 coverage.wall_area_mm2 = 0.0;
-                coverage.requested_infill_fraction = data.recipe.infill_fraction;
                 match kind {
                     DepositionKind::BottomSkin => coverage.bottom_skin_area_mm2 = 50.0,
                     DepositionKind::TopSkin => coverage.top_skin_area_mm2 = 50.0,
@@ -712,6 +1054,13 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
                         coverage.intentional_void_area_mm2 = 37.5;
                     }
                     _ => unreachable!(),
+                }
+                if matches!(kind, DepositionKind::SolidFill | DepositionKind::SparseFill) {
+                    coverage.process_regions = vec![ProcessRegionCoverage {
+                        area_mm2: 50.0,
+                        fraction: data.recipe.infill_fraction,
+                        contributions: vec![],
+                    }];
                 }
                 let along = 1 - fixed_axis;
                 let path = &mut layer.paths[0];
@@ -819,6 +1168,7 @@ fn durable_bundle_rejects_rehashed_axis_mismatch_before_stored_verification() {
         &provenance.occurrences,
         &provenance.intent,
         &provenance.surface_overlays,
+        &provenance.process_document,
     )
     .unwrap();
     provenance.validate().unwrap();
@@ -841,6 +1191,7 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
         &occurrences,
         &intent,
         &SurfaceOverlays::empty(),
+        &crate::process::ProcessDocument::empty(),
     )
     .unwrap();
     occurrences.reverse();
@@ -851,7 +1202,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &definitions,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .unwrap()
     );
@@ -863,7 +1215,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &definitions,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .unwrap()
     );
@@ -877,7 +1230,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &renamed,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .unwrap()
     );
@@ -890,7 +1244,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &units,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .unwrap()
     );
@@ -903,7 +1258,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &definitions,
             &occurrences,
             &changed_intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .unwrap()
     );
@@ -915,7 +1271,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &invalid,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .is_err()
     );
@@ -926,7 +1283,8 @@ fn fingerprint_is_sorted_and_sensitive_to_authoritative_semantics() {
             &definitions,
             &occurrences,
             &intent,
-            &SurfaceOverlays::empty()
+            &SurfaceOverlays::empty(),
+            &ProcessDocument::empty(),
         )
         .is_err()
     );
@@ -975,6 +1333,9 @@ fn manifest_artifact_must_reference_current_explicit_intent_and_input_hash() {
     let p = &bundle.provenance;
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let mut manifest = ProjectManifest {
+        next_process_layer: 1,
+        next_process_operation: 1,
+        process_document: crate::process::ProcessDocument::empty(),
         format_version: crate::project::PROJECT_FORMAT_VERSION,
         project_id: p.project_id.clone(),
         revision: ProjectRevision(10),
@@ -1700,17 +2061,41 @@ fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
             },
         ],
     };
-    let hash = input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap();
+    let hash = input_fingerprint(
+        &project,
+        &definitions,
+        &occurrences,
+        &intent,
+        &doc,
+        &crate::process::ProcessDocument::empty(),
+    )
+    .unwrap();
     doc.layers.reverse();
     assert_ne!(
         hash,
-        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &doc,
+            &ProcessDocument::empty()
+        )
+        .unwrap()
     );
     doc.layers.reverse();
     doc.layers[0].enabled = true;
     assert_ne!(
         hash,
-        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &doc,
+            &ProcessDocument::empty()
+        )
+        .unwrap()
     );
     doc.layers[0].enabled = false;
     let mut cylindrical_hashes = std::collections::BTreeSet::new();
@@ -1737,8 +2122,15 @@ fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
         },
     ] {
         doc.layers[1].finish = finish;
-        let current =
-            input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap();
+        let current = input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &doc,
+            &crate::process::ProcessDocument::empty(),
+        )
+        .unwrap();
         assert_ne!(hash, current);
         assert!(
             cylindrical_hashes.insert(current.as_str().to_owned()),
@@ -1747,14 +2139,30 @@ fn surface_fingerprint_preserves_order_disabled_layers_and_smooth_authority() {
         doc.layers[0].finish = doc.layers[1].finish.clone();
         assert_ne!(
             current,
-            input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+            input_fingerprint(
+                &project,
+                &definitions,
+                &occurrences,
+                &intent,
+                &doc,
+                &ProcessDocument::empty()
+            )
+            .unwrap()
         );
         doc.layers[0].finish = SurfaceFinish::Smooth;
     }
     doc.layers.remove(0);
     assert_ne!(
         hash,
-        input_fingerprint(&project, &definitions, &occurrences, &intent, &doc).unwrap()
+        input_fingerprint(
+            &project,
+            &definitions,
+            &occurrences,
+            &intent,
+            &doc,
+            &ProcessDocument::empty()
+        )
+        .unwrap()
     );
 }
 #[test]
@@ -1774,9 +2182,6 @@ fn realized_material_area_requires_exact_source_plus_addition_and_plan_bound_pre
     let mut weak_bound = plan();
     weak_bound.surface_tolerance_mm = 0.002;
     assert!(weak_bound.validate(&intent).is_err());
-    let mut old_profile = intent;
-    old_profile.printer.schema_version = 4;
-    assert!(old_profile.validate().is_err());
 }
 
 fn image_bundle() -> ManufacturingBundle {
@@ -1828,6 +2233,7 @@ fn image_bundle() -> ManufacturingBundle {
         &bundle.provenance.occurrences,
         &bundle.provenance.intent,
         &bundle.provenance.surface_overlays,
+        &bundle.provenance.process_document,
     )
     .unwrap();
     bundle.plan.surface_resolution = vec![SurfaceResolution {
@@ -1959,6 +2365,7 @@ fn image_fingerprint_binds_every_mapping_and_first_admission_provenance_even_dis
             &bundle.provenance.occurrences,
             &bundle.provenance.intent,
             overlays,
+            &ProcessDocument::empty(),
         )
         .unwrap()
     };

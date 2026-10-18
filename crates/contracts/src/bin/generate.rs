@@ -6,7 +6,9 @@ use spiling_contracts::{
     ArtifactView, Hello, MAX_BINARY_BYTES, MAX_CONTROL_BYTES, NativeOperationView, OperationView,
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
-use spiling_contracts::{display::*, geometry::*, manufacturing::*, project::*, surface::*};
+use spiling_contracts::{
+    display::*, geometry::*, manufacturing::*, process::*, project::*, surface::*,
+};
 use std::{env, fs, path::Path};
 use ts_rs::TS;
 
@@ -85,6 +87,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SurfaceFinish::decl(&config),
         SurfaceLayer::decl(&config),
         SurfaceOverlays::decl(&config),
+        ProcessLayerId::decl(&config),
+        ProcessOperationId::decl(&config),
+        ProcessSelector::decl(&config),
+        ProcessValue::decl(&config),
+        ProcessAction::decl(&config),
+        ProcessOperation::decl(&config),
+        ProcessLayer::decl(&config),
+        ProcessDocument::decl(&config),
+        ProcessProvenance::decl(&config),
+        ResolvedProcessValue::decl(&config),
+        ResolvedOccurrenceProcess::decl(&config),
+        ProcessEdit::decl(&config),
+        ProcessRegionContribution::decl(&config),
+        ProcessRegionCoverage::decl(&config),
         ProjectManifest::decl(&config),
         ProjectInfo::decl(&config),
         ProjectCommand::decl(&config),
@@ -149,6 +165,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (name, value) in [
         ("MAX_CONTROL_BYTES", u64::from(MAX_CONTROL_BYTES)),
+        ("PROCESS_SCHEMA_VERSION", u64::from(PROCESS_SCHEMA_VERSION)),
+        ("MAX_PROCESS_LAYERS", MAX_PROCESS_LAYERS as u64),
+        ("MAX_PROCESS_OPERATIONS", MAX_PROCESS_OPERATIONS as u64),
+        (
+            "MAX_PROCESS_DOCUMENT_BYTES",
+            MAX_PROCESS_DOCUMENT_BYTES as u64,
+        ),
         ("MAX_BINARY_BYTES", u64::from(MAX_BINARY_BYTES)),
         (
             "TRIANGLE_SCHEMA_VERSION",

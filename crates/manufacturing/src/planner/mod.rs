@@ -121,7 +121,9 @@ pub(crate) fn plan(
     let mut native_slab_end = 0u32;
     let mut native_slab_start = 0u32;
     let mut native_surfaces = Vec::new();
-    let mut native_material = MultiPolygon(Vec::new());
+    let mut native_material = None;
+    let mut native_material_bytes = 0usize;
+    let mut native_contributions = Vec::new();
     let mut native_occupied_shared: Option<Arc<ContinuousOccupied>> = None;
     let mut native_finished = Vec::new();
     let mut native_required = BTreeMap::new();
@@ -147,7 +149,8 @@ pub(crate) fn plan(
             // The previous slab's query-local operands are obsolete. Release
             // them before admitting the next query; published shared buffers
             // remain owned and charged by sections/native_surfaces.
-            drop(std::mem::take(&mut native_material.0));
+            drop(native_material.take());
+            native_contributions.clear();
             drop(std::mem::take(&mut native_finished));
             native_required.clear();
             drop(native_occupied_shared.take());
@@ -182,7 +185,9 @@ pub(crate) fn plan(
             sample = schedule[index as usize].sample;
             native_slab_start = index;
             native_slab_end = captured.end;
-            native_material = captured.material;
+            native_material = Some(captured.material);
+            native_material_bytes = captured.material_bytes;
+            native_contributions = captured.contributions;
             native_finished = captured.finished;
             native_finished_bytes = captured.finished_bytes;
             native_required.clear();
@@ -237,8 +242,9 @@ pub(crate) fn plan(
                                 "retained mandatory carrier point budget exceeded",
                             )
                         })?;
-                    native_finished_bytes =
-                        native_finished_bytes.saturating_add(native::material_bytes(&mut required));
+                    native_finished_bytes = native_finished_bytes
+                        .saturating_add(native::material_bytes(&mut required))
+                        .saturating_add(native::MATERIAL_ARC_BYTES);
                     Arc::new(required)
                 } else {
                     Arc::clone(native)
@@ -272,22 +278,32 @@ pub(crate) fn plan(
             }
             end += 1;
         }
-        let mut next = if native_finished.is_empty() && end == native_slab_end {
-            native_points = 0;
-            std::mem::replace(&mut native_material, MultiPolygon::new(Vec::new()))
-        } else {
-            live_retained
-                .checked_add(native_points)
-                .and_then(|n| n.checked_add(region::point_count(&native_material)))
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-                .ok_or_else(|| {
+        let mut next = Arc::clone(native_material.as_ref().expect("captured native material"));
+        let mut process_domains = Vec::new();
+        if input
+            .process_document
+            .layers
+            .iter()
+            .any(|layer| layer.enabled)
+        {
+            process_domains
+                .try_reserve_exact(native_contributions.len() + native_finished.len())
+                .map_err(|_| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "native plus realized staging point budget exceeded",
+                        "process contribution allocation refused",
                     )
                 })?;
-            native_material.clone()
-        };
+            for (occurrence_id, material, bytes) in &native_contributions {
+                process_domains.push(process_domain(
+                    input,
+                    *occurrence_id,
+                    Arc::clone(material),
+                    *bytes,
+                )?);
+            }
+        }
+        let mut next_bytes = native_material_bytes;
         for (occurrence_id, placed) in &native_finished {
             let fields = &admission.surface_fields[occurrence_id];
             live_retained
@@ -301,7 +317,7 @@ pub(crate) fn plan(
                         "native carrier realization staging point budget exceeded",
                     )
                 })?;
-            let finished = surface::realize(
+            let mut finished = surface::realize(
                 placed.as_ref().clone(),
                 fields,
                 sample,
@@ -309,13 +325,45 @@ pub(crate) fn plan(
                 &mut surface_work,
                 cancel,
             )?;
+            let finished_bytes = native::material_bytes(&mut finished);
+            let finished = Arc::new(finished);
+            if input
+                .process_document
+                .layers
+                .iter()
+                .any(|layer| layer.enabled)
+            {
+                process_domains.push(process_domain(
+                    input,
+                    *occurrence_id,
+                    Arc::clone(&finished),
+                    finished_bytes,
+                )?);
+            }
             // Expanded occurrence separation is certified in preflight. Preserve
             // exact source vertices rather than resnapping them through a union.
-            next.0.extend(finished.0);
+            if next.0.is_empty() {
+                next = Arc::clone(&finished);
+                next_bytes = finished_bytes;
+            } else {
+                Arc::make_mut(&mut next)
+                    .0
+                    .extend(finished.0.iter().cloned());
+                next_bytes =
+                    native::material_bytes(Arc::get_mut(&mut next).expect("owned composed D"));
+            }
         }
+        validate_process_overlap(
+            &process_domains,
+            [slab_start, schedule[(end - 1) as usize].z],
+            &mut surface_work,
+            cancel,
+        )?;
         let source_area_mm2 = native_source_area_mm2;
         region::check_size(&next)?;
-        region::canonicalize(&mut next);
+        if let Some(next) = Arc::get_mut(&mut next) {
+            region::canonicalize(next);
+        }
         let realized_area_mm2 = next.unsigned_area();
         if realized_area_mm2 < source_area_mm2 {
             return Err(error(
@@ -349,7 +397,11 @@ pub(crate) fn plan(
         // Empty native intervals are retained for genuine floating material.
         // Their support paths are generated after actual object-anchor analysis.
         retained_points = retained_points
-            .checked_add(region::point_count(&next) + occupied_points)
+            .checked_add(
+                region::point_count(&next)
+                    + occupied_points
+                    + process_extra_points(&process_domains, &next, &sections),
+            )
             .filter(|n| {
                 n.checked_add(native_points)
                     .and_then(|n| n.checked_add(lookahead_points))
@@ -361,12 +413,17 @@ pub(crate) fn plan(
                     "retained native footprint point budget exceeded",
                 )
             })?;
-        retained_section_bytes =
-            retained_section_bytes.saturating_add(native::material_bytes(&mut next));
+        if !sections
+            .iter()
+            .any(|section| Arc::ptr_eq(&section.material, &next))
+        {
+            retained_section_bytes = retained_section_bytes.saturating_add(next_bytes);
+        }
         sections.push(SectionSpan {
             start: index,
             end,
             material: next,
+            process_domains,
             occupied,
             source_area_mm2,
         });
@@ -380,7 +437,8 @@ pub(crate) fn plan(
                     // Non-image M has no mandatory/shared published owner.
                     let material =
                         Arc::get_mut(material).expect("non-image source material is query-local");
-                    native_finished_bytes -= native::material_bytes(material);
+                    native_finished_bytes -=
+                        native::material_bytes(material) + native::MATERIAL_ARC_BYTES;
                 }
                 retain
             });
@@ -581,26 +639,38 @@ pub(crate) fn plan(
                 skin_query_retained_points(retained_points, &[&lower])?,
                 cancel,
             )?;
-            classified = Some(classification::ClassifiedRegions::new(
-                Arc::clone(
-                    wall_layout
-                        .as_ref()
-                        .expect("current wall layout initialized"),
-                ),
-                &lower,
-                &upper,
-                |scratch| {
-                    admit_skin_scratch(
+            classified = Some(
+                classification::ClassifiedRegions::new(
+                    Arc::clone(
+                        wall_layout
+                            .as_ref()
+                            .expect("current wall layout initialized"),
+                    ),
+                    &lower,
+                    &upper,
+                    |scratch| {
+                        admit_skin_scratch(
+                            retained_points,
+                            &mut neighborhoods,
+                            &[&lower, &upper],
+                            scratch,
+                            cancel,
+                        )
+                    },
+                    recipe,
+                    cancel,
+                )?
+                .with_process(
+                    &sections[current].process_domains,
+                    classification::fixed_point_budget(skin_retained_points(
                         retained_points,
-                        &mut neighborhoods,
+                        &neighborhoods,
                         &[&lower, &upper],
-                        scratch,
-                        cancel,
-                    )
-                },
-                recipe,
-                cancel,
-            )?);
+                    )?),
+                    neighborhoods.work_mut(),
+                    cancel,
+                )?,
+            );
             key = Some(next_key);
         }
         if !admission.surface_fields.is_empty() {
@@ -812,6 +882,16 @@ pub(crate) fn plan(
                 },
                 recipe,
                 cancel,
+            )?
+            .with_process(
+                &sections[current].process_domains,
+                classification::fixed_point_budget(skin_retained_points(
+                    live_retained_points,
+                    &neighborhoods,
+                    &[&lower, &upper],
+                )?),
+                neighborhoods.work_mut(),
+                cancel,
             )?;
             let hatch_layer = region::HatchLayer {
                 z: elevation.z,
@@ -920,11 +1000,119 @@ pub(crate) fn plan(
 struct SectionSpan {
     start: u32,
     end: u32,
-    material: MultiPolygon<f64>,
+    material: Arc<MultiPolygon<f64>>,
+    process_domains: Vec<ProcessDomain>,
     // None borrows exact all-Z invariant D. Otherwise this separately owned
     // outer envelope is only corridor exclusion, never deposited-anchor evidence.
     occupied: Option<Arc<ContinuousOccupied>>,
     source_area_mm2: f64,
+}
+
+struct ProcessDomain {
+    material: Arc<MultiPolygon<f64>>,
+    coverage: ProcessRegionCoverage,
+    bytes: usize,
+}
+
+fn process_domain(
+    input: &CompilerInput<'_>,
+    occurrence_id: spiling_contracts::geometry::OccurrenceId,
+    material: Arc<MultiPolygon<f64>>,
+    bytes: usize,
+) -> Result<ProcessDomain, ManufacturingError> {
+    let occurrence = input
+        .occurrences
+        .iter()
+        .find(|o| o.occurrence_id == occurrence_id)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "process contribution lost captured occurrence",
+            )
+        })?;
+    let value = input.process_document.resolve(
+        &occurrence.definition_id,
+        occurrence_id,
+        input.intent.recipe.infill_fraction,
+    );
+    Ok(ProcessDomain {
+        material,
+        coverage: ProcessRegionCoverage {
+            area_mm2: 0.0,
+            fraction: value.fraction,
+            contributions: vec![ProcessRegionContribution {
+                occurrence_id,
+                definition_id: occurrence.definition_id.clone(),
+                provenance: value.provenance,
+            }],
+        },
+        bytes,
+    })
+}
+
+fn process_extra_points(
+    domains: &[ProcessDomain],
+    material: &Arc<MultiPolygon<f64>>,
+    prior: &[SectionSpan],
+) -> usize {
+    domains
+        .iter()
+        .enumerate()
+        .filter(|(index, domain)| {
+            !Arc::ptr_eq(&domain.material, material)
+                && !domains[..*index]
+                    .iter()
+                    .any(|other| Arc::ptr_eq(&domain.material, &other.material))
+                && !prior.iter().any(|span| {
+                    Arc::ptr_eq(&domain.material, &span.material)
+                        || span
+                            .process_domains
+                            .iter()
+                            .any(|other| Arc::ptr_eq(&domain.material, &other.material))
+                })
+        })
+        .map(|(_, domain)| region::point_count(&domain.material))
+        .sum()
+}
+
+fn validate_process_overlap(
+    domains: &[ProcessDomain],
+    interval: [f64; 2],
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    use geo::{BoundingRect, Intersects};
+    for (index, a) in domains.iter().enumerate() {
+        for b in &domains[..index] {
+            check_cancel(cancel)?;
+            if a.coverage.fraction == b.coverage.fraction {
+                continue;
+            }
+            let (Some(a_bounds), Some(b_bounds)) =
+                (a.material.bounding_rect(), b.material.bounding_rect())
+            else {
+                continue;
+            };
+            if !a_bounds.intersects(&b_bounds) {
+                continue;
+            }
+            let overlap =
+                classification::intersection_accumulated(&a.material, &b.material, work, cancel)?;
+            if overlap.unsigned_area() > 0.0 {
+                return Err(error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    format!(
+                        "incompatible whole-volume sparse fractions for occurrences {} and {} in final-D interval [{},{}] mm",
+                        a.coverage.contributions[0].occurrence_id.get(),
+                        b.coverage.contributions[0].occurrence_id.get(),
+                        interval[0],
+                        interval[1],
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl SectionSpan {
@@ -1436,7 +1624,7 @@ fn physical_neighbor(
     }
 }
 
-fn empty_coverage(fraction: f64) -> PlanarRegionCoverage {
+fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
     PlanarRegionCoverage {
         section_area_mm2: 0.0,
         source_section_area_mm2: 0.0,
@@ -1449,7 +1637,7 @@ fn empty_coverage(fraction: f64) -> PlanarRegionCoverage {
         intentional_void_area_mm2: 0.0,
         protected_hole_area_mm2: 0.0,
         nominal_deposition_volume_mm3: 0.0,
-        requested_infill_fraction: fraction,
+        process_regions: Vec::new(),
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
     }

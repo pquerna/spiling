@@ -5,4 +5,4 @@
 
 Make first-layer, cooling, bridge and travel/recovery behavior explicit inert operator intent rather than emitter defaults. Keep support material separate from object ownership and preserve one authoritative bridge bound. Give inexpensive preflight checks captured revision, explicit evidence and unresolved/refused/admitted disposition with actionable bounded diagnostics, without claiming native analysis or physical printer support.
 
-Required schema7 fields are shared by planning, realization, independent actual-byte verification, protobuf and generated clients. Declared machine capability is a software contract, not measured hardware truth.
+Required current-schema fields are shared by planning, realization, independent actual-byte verification, protobuf and generated clients. Source-bound regional sparse intent remains separately typed. Declared machine capability is a software contract, not measured hardware truth.

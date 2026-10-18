@@ -16,7 +16,7 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 
 - [`CompilerInput`, `compile`, `inspect_bundle`](../../crates/manufacturing/src/lib.rs)
   borrow captured project identity/revision, native definitions, stored provenance,
-  occurrence poses, intent, overlays and canonical images. Compilation performs no
+  occurrence poses, intent, ordered process/finish documents and canonical images. Compilation performs no
   uncaptured file reads. Semantic fingerprint and producer identity are separate bindings.
 - Engine [`Runtime` manufacturing commands](../../apps/engine/src/geometry/manufacturing/mod.rs)
   capture that snapshot; the [native worker](../../apps/engine/src/geometry/worker.rs)
@@ -99,6 +99,35 @@ radial cores are not complete closed-material certificates.
   must prove the effective finish independently. Downstream consumers use final D,
   not a source-only substitute. Here C denotes required reachable material, not a
   replacement for the geometry service's continuous-source occupancy proof.
+
+[`process`](../../crates/contracts/src/process.rs) is a separate Core-owned channel,
+not a face finish. Whole-owned-volume SparseFraction resolves recipe → ordered
+definition layers → ordered occurrence layers, with per-layer replace/erase.
+Normal Apply reuses the responsible scoped operation. One exact-scope Reset clears
+all contributions, including disabled and erased layers, revealing current inheritance.
+The workbench displays server-resolved effective, definition and recipe values.
+Source/pose/finish/process edits invalidate the complete artifact and pending jobs.
+
+Native capture retains the original admitted per-occurrence operands before union,
+sharing unchanged singleton geometry. Finish realization produces per-occurrence
+final D before global `WallLayout` and skin classification. The eligible interior
+intersects those retained operands; it never recovers owners by labeling a final
+mesh/union. Same-valued contributions may coalesce only under existing geometry
+authority. Different fractions with actual positive material overlap diagnose;
+overlapping bounding boxes alone are not that proof. Uniform/no-op intent retains
+the ordinary hatch lattice. Partition sets cannot discard nonempty slivers or use
+scalar area tolerance as ownership authority.
+
+`process_regions` records area, fraction and all source/winner contributions.
+Solid/sparse areas and nominal void sum those regions; no averaged/global density
+authorizes heterogeneous output. Actual volume remains actual stroke/bead volume.
+Support and bridge recovery consume the same regional domains/fractions and changed
+actual deposition, with auxiliary row ownership confined to its process region.
+
+Playback's **Show source bodies** control hides opaque native meshes and highlights
+so an interior layer can be inspected directly in actual emitted-program motion.
+Layer/event/travel controls filter that decoded motion, not normalized planned paths.
+Hidden bodies are not pickable; clearing or replacing replay restores source visibility.
 
 ## Walls, skins, bridges and supports
 
@@ -201,7 +230,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project6/manufacturing7/surface3, planner11, emitter/verifier4
+Current identities are project7/manufacturing8/surface3, planner12, emitter/verifier4
 and SPLR3; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both
@@ -225,6 +254,22 @@ and [engine tests](../../apps/engine/tests/manufacturing.rs) (fresh source-indep
 reopen; stale/cancelled/resource nonpublication). [Development](development.md) owns
 build, unchanged real-operator and hardware-runner commands. Preserve owned temporary
 inputs, exclusive outputs and source-deleted fresh reopen in those user flows.
+
+For a local-process operator, create a project with the complete sparse intent and
+an admitted source, add a separated second occurrence of its stored definition,
+then use `--process-set 1 definition 0.20 --process-set 2 occurrence 0.60`.
+`--process-resolve` reports authoritative inherited/effective values and winners.
+Compile/fresh Verify/export, remove only the owned original source copy, and
+`project inspect --verify --manufacturing-out NEW_DIRECTORY --replay-out NEW_SPLR`
+in a fresh read-only inspection process. Reset occurrence2 once, verify inheritance, then Undo.
+In the workbench use the visible Local sparse process panel below Instances.
+The hardware smoke runner's `--process-overrides --manufacturing-source RELATIVE_STEP`
+performs those controls with repeated Apply/reset/history and source-independent
+read-only reopen; `--evidence-directory NEW_DIRECTORY` retains exported byte evidence.
+Measure adjacent actual sparse rows in a known source-relative interior window:
+spacing is `((width-height)*height + pi*(height/2)^2)/(height*fraction)`.
+Do not infer it from path counts or window height divided by rows. Compare exterior
+closed edges and protected voids independently from seam starts and bridge roles.
 
 ## Physical qualification remains separate
 

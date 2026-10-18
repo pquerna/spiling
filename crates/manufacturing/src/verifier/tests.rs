@@ -43,7 +43,7 @@ fn coverage() -> PlanarRegionCoverage {
         nominal_deposition_volume_mm3: 0.0,
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
-        requested_infill_fraction: 1.0,
+        process_regions: vec![],
     }
 }
 fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {

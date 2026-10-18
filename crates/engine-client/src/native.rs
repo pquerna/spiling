@@ -167,6 +167,9 @@ impl EngineRpc {
         if let ProjectCommand::ImportSurfaceImageFinish { parameters, .. } = &command {
             parameters.validate()?;
         }
+        if let ProjectCommand::EditProcess { edit, .. } = &command {
+            edit.validate()?;
+        }
         match &command {
             ProjectCommand::Open { path, .. } => path.validate(),
             ProjectCommand::ImportSurfaceImageFinish { source, .. } => source.validate(),
@@ -178,6 +181,7 @@ impl EngineRpc {
             | ProjectCommand::Save { target: None, .. }
             | ProjectCommand::Undo { .. }
             | ProjectCommand::Redo { .. }
+            | ProjectCommand::EditProcess { .. }
             | ProjectCommand::AddSurfaceFinish { .. }
             | ProjectCommand::GetSurfaceImage { .. }
             | ProjectCommand::RemoveSurfaceFinish { .. }

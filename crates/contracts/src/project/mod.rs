@@ -5,12 +5,13 @@
 //! Persistent source-backed project contracts, independent of storage and BREP.
 use crate::geometry::*;
 use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
+use crate::process::*;
 use crate::surface::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 use ts_rs::TS;
 
-pub const PROJECT_FORMAT_VERSION: u32 = 6;
+pub const PROJECT_FORMAT_VERSION: u32 = 7;
 pub const MAX_PROJECT_MANIFEST_BYTES: u32 = 1_048_576;
 pub const MAX_PROJECT_HISTORY: usize = 64;
 pub const MAX_PROJECT_STORED_SOURCE_BYTES: u64 = 268_435_456;
@@ -161,6 +162,9 @@ pub struct ProjectManifest {
     pub next_occurrence: u32,
     pub next_surface_layer: u32,
     pub surface_overlays: SurfaceOverlays,
+    pub next_process_layer: u32,
+    pub next_process_operation: u32,
+    pub process_document: ProcessDocument,
     pub definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
@@ -236,6 +240,12 @@ impl ProjectManifest {
             &self.occurrences,
             self.next_surface_layer,
         )?;
+        self.process_document.validate_targets(
+            &self.definitions,
+            &self.occurrences,
+            self.next_process_layer,
+            self.next_process_operation,
+        )?;
         if let Some(intent) = &self.manufacturing_intent {
             intent.validate().map_err(|e| invalid(&e.message))?;
         }
@@ -256,6 +266,7 @@ impl ProjectManifest {
                 &self.occurrences,
                 intent,
                 &self.surface_overlays,
+                &self.process_document,
             )
             .map_err(|e| invalid(&e.message))?;
             if hash != record.input_hash {
@@ -279,10 +290,17 @@ pub struct ProjectInfo {
     pub can_undo: bool,
     pub can_redo: bool,
     pub surface_overlays: SurfaceOverlays,
+    pub process_document: ProcessDocument,
+    pub resolved_process: Vec<ResolvedOccurrenceProcess>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    EditProcess {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        edit: ProcessEdit,
+    },
     Get {
         session_id: SessionId,
     },

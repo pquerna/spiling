@@ -150,6 +150,7 @@ impl Runtime {
                     occurrences: snapshot.occurrences.values().cloned().collect(),
                     intent,
                     surface_overlays: snapshot.surface_overlays.clone(),
+                    process_document: snapshot.process_document.clone(),
                     byte_budget: 0,
                     surface_images,
                 };
@@ -197,6 +198,7 @@ impl Runtime {
                     .collect();
                 let occurrences = snapshot.occurrences.values().cloned().collect();
                 let surface_overlays = snapshot.surface_overlays.clone();
+                let process_document = snapshot.process_document.clone();
                 let surface_images = self.capture_surface_images()?;
                 let byte_budget = MAX_MANUFACTURING_RETAINED_BYTES
                     .checked_sub(self.manufacturing_bytes())
@@ -217,6 +219,7 @@ impl Runtime {
                             occurrences,
                             intent,
                             surface_overlays,
+                            process_document,
                             surface_images,
                             byte_budget: byte_budget.min(MAX_MANUFACTURING_BUNDLE_BYTES as u64)
                                 as u32,

@@ -83,6 +83,7 @@ pub struct CompileRequest {
     pub occurrences: Vec<OccurrenceRecord>,
     pub intent: Arc<ManufacturingIntent>,
     pub surface_overlays: Arc<SurfaceOverlays>,
+    pub process_document: Arc<spiling_contracts::process::ProcessDocument>,
     pub byte_budget: u32,
     pub surface_images: BTreeMap<SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
@@ -1020,6 +1021,7 @@ fn preflight(
             occurrences: &request.occurrences,
             intent: &request.intent,
             surface_overlays: &request.surface_overlays,
+            process_document: &request.process_document,
             surface_images: &request.surface_images,
         },
         cancel,
@@ -1039,6 +1041,7 @@ fn compile(
         occurrences,
         intent,
         surface_overlays,
+        process_document,
         surface_images,
         byte_budget,
     } = request;
@@ -1065,6 +1068,7 @@ fn compile(
             occurrences: &occurrences,
             intent: &intent,
             surface_overlays: &surface_overlays,
+            process_document: &process_document,
             surface_images: &surface_images,
         },
         cancel,

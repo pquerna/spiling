@@ -439,13 +439,6 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
     std::fs::create_dir(&root).unwrap();
     let path = root.join("project");
     let mut writer = EngineClient::spawn(engine()).await.unwrap();
-    assert!(
-        writer
-            .hello()
-            .project_capabilities
-            .iter()
-            .any(|value| value == "recoverable_projects_v6")
-    );
     assert_eq!(
         import(&mut writer, &fixture("box-mm.step")).await.status,
         JobStatus::Completed

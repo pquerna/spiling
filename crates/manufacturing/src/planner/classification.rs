@@ -4,7 +4,9 @@
 
 use super::{boolean_budget, region};
 use crate::{check_cancel, error};
-use geo::{Area, BooleanOps, BoundingRect, MultiPolygon, Polygon};
+use geo::{
+    Area, BooleanOps, BoundingRect, Contains, Intersects, Line, MultiPolygon, Point, Polygon,
+};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -91,8 +93,13 @@ pub(super) struct ClassifiedRegions {
     layout: Arc<WallLayout>,
     bottom: MultiPolygon<f64>,
     top: MultiPolygon<f64>,
-    interior: MultiPolygon<f64>,
+    interiors: Vec<InteriorRegion>,
     coverage: PlanarRegionCoverage,
+}
+
+struct InteriorRegion {
+    domain: MultiPolygon<f64>,
+    coverage: ProcessRegionCoverage,
 }
 
 pub(super) struct ComponentAnchorAdmission {
@@ -173,7 +180,15 @@ impl ClassifiedRegions {
             intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
             protected_hole_area_mm2: layout.protected_hole_area_mm2,
             nominal_deposition_volume_mm3: 0.0,
-            requested_infill_fraction: recipe.infill_fraction,
+            process_regions: if interior_area > 0.0 {
+                vec![ProcessRegionCoverage {
+                    area_mm2: interior_area,
+                    fraction: recipe.infill_fraction,
+                    contributions: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            },
             support_area_mm2: 0.0,
             support_nominal_deposition_volume_mm3: 0.0,
         };
@@ -181,9 +196,206 @@ impl ClassifiedRegions {
             layout,
             bottom,
             top,
-            interior,
+            interiors: if interior_area > 0.0 {
+                vec![InteriorRegion {
+                    domain: interior,
+                    coverage: coverage.process_regions[0].clone(),
+                }]
+            } else {
+                Vec::new()
+            },
             coverage,
         })
+    }
+
+    /// Resolve only the eligible interior. Global walls, physical skins and
+    /// protected holes keep the single final-D classification above.
+    pub(super) fn with_process(
+        mut self,
+        domains: &[super::ProcessDomain],
+        admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<Self, ManufacturingError> {
+        if domains.is_empty() || self.interiors.is_empty() {
+            return Ok(self);
+        }
+        if domains
+            .iter()
+            .all(|domain| domain.coverage.fraction == domains[0].coverage.fraction)
+        {
+            let fraction = domains[0].coverage.fraction;
+            let interior = &mut self.interiors[0];
+            interior.coverage.fraction = fraction;
+            interior.coverage.contributions = domains
+                .iter()
+                .flat_map(|domain| domain.coverage.contributions.iter().cloned())
+                .collect();
+            let area = interior.coverage.area_mm2;
+            self.coverage.process_regions = vec![interior.coverage.clone()];
+            self.coverage.solid_interior_area_mm2 = if fraction == 1.0 { area } else { 0.0 };
+            self.coverage.sparse_interior_area_mm2 = if fraction < 1.0 { area } else { 0.0 };
+            self.coverage.intentional_void_area_mm2 = area * (1.0 - fraction);
+            return Ok(self);
+        }
+        let original = self
+            .interiors
+            .pop()
+            .expect("initial global interior")
+            .domain;
+        let skin_points = scratch_points(&[&self.bottom, &self.top])?;
+        let mut outer_admit = admit;
+        let mut admit = |scratch| outer_admit(point_sum(skin_points, scratch)?);
+        admit(scratch_points(&[&original, &original])?)?;
+        let mut remaining = original.clone();
+        let mut completed: Vec<InteriorRegion> = Vec::new();
+        let mut partial_cut = false;
+        for (domain_index, domain) in domains.iter().enumerate() {
+            let fraction = domain.coverage.fraction;
+            if domains[..domain_index]
+                .iter()
+                .any(|prior| prior.coverage.fraction == fraction)
+            {
+                continue;
+            }
+            check_cancel(cancel)?;
+            let mut material = Arc::clone(&domain.material);
+            let mut contributors = Vec::new();
+            for (index, source) in domains
+                .iter()
+                .filter(|source| source.coverage.fraction == fraction)
+                .enumerate()
+            {
+                contributors.extend(source.coverage.contributions.iter().cloned());
+                if index > 0 {
+                    admit(process_scratch(
+                        &original,
+                        &remaining,
+                        &completed,
+                        &[&material, &source.material, &material, &source.material],
+                    )?)?;
+                    let merged = union_accumulated(&material, &source.material, work, cancel)?;
+                    admit(process_scratch(
+                        &original,
+                        &remaining,
+                        &completed,
+                        &[&material, &merged],
+                    )?)?;
+                    material = Arc::new(merged);
+                }
+            }
+            let (owned, next, partial) = split_process_region(remaining, &material, work, cancel)?;
+            partial_cut |= partial;
+            admit(process_scratch(
+                &original,
+                &next,
+                &completed,
+                &[&material, &owned],
+            )?)?;
+            remaining = next;
+            let area = owned.unsigned_area();
+            if !owned.0.is_empty() {
+                completed.push(InteriorRegion {
+                    domain: owned,
+                    coverage: ProcessRegionCoverage {
+                        area_mm2: area,
+                        fraction,
+                        contributions: contributors,
+                    },
+                });
+            }
+        }
+        if !remaining.0.is_empty() {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "retained occurrence final-D contributions do not cover eligible process interior",
+            ));
+        }
+        // Moving each original admitted island exactly once is itself an exact
+        // disjoint/complete partition. Only actual partial Boolean cuts need
+        // the extra output-set checks; area sums never establish ownership.
+        for (index, owned) in completed.iter().enumerate().filter(|_| partial_cut) {
+            let excess = operation(&owned.domain, &original, false, Some(work), cancel)?;
+            admit(process_scratch(
+                &original,
+                &remaining,
+                &completed,
+                &[&excess],
+            )?)?;
+            if !excess.0.is_empty() {
+                return Err(error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "resolved process region escapes eligible interior",
+                ));
+            }
+            for other in &completed[..index] {
+                let overlap = intersection_accumulated(&owned.domain, &other.domain, work, cancel)?;
+                admit(process_scratch(
+                    &original,
+                    &remaining,
+                    &completed,
+                    &[&overlap],
+                )?)?;
+                if !overlap.0.is_empty() {
+                    return Err(error(
+                        ManufacturingErrorCode::InvalidSpecification,
+                        "resolved process interior ownership overlaps",
+                    ));
+                }
+            }
+        }
+        if partial_cut {
+            let mut covered = MultiPolygon(Vec::new());
+            for region in &completed {
+                admit(process_scratch(
+                    &original,
+                    &remaining,
+                    &completed,
+                    &[&covered, &region.domain, &covered, &region.domain],
+                )?)?;
+                let union = union_accumulated(&covered, &region.domain, work, cancel)?;
+                admit(process_scratch(
+                    &original,
+                    &remaining,
+                    &completed,
+                    &[&covered, &union],
+                )?)?;
+                covered = union;
+            }
+            let missing = operation(&original, &covered, false, Some(work), cancel)?;
+            admit(process_scratch(
+                &original,
+                &remaining,
+                &completed,
+                &[&covered, &missing],
+            )?)?;
+            if !missing.0.is_empty() {
+                return Err(error(
+                    ManufacturingErrorCode::InvalidSpecification,
+                    "partial process partition leaves eligible interior uncovered",
+                ));
+            }
+        }
+        self.coverage.process_regions = completed
+            .iter()
+            .map(|region| region.coverage.clone())
+            .collect();
+        self.coverage.solid_interior_area_mm2 = completed
+            .iter()
+            .filter(|region| region.coverage.fraction == 1.0)
+            .map(|region| region.coverage.area_mm2)
+            .sum();
+        self.coverage.sparse_interior_area_mm2 = completed
+            .iter()
+            .filter(|region| region.coverage.fraction < 1.0)
+            .map(|region| region.coverage.area_mm2)
+            .sum();
+        self.coverage.intentional_void_area_mm2 = completed
+            .iter()
+            .map(|region| region.coverage.area_mm2 * (1.0 - region.coverage.fraction))
+            .sum();
+        self.interiors = completed;
+        Ok(self)
     }
 
     pub(super) fn paths(
@@ -223,20 +435,22 @@ impl ClassifiedRegions {
             segments,
             cancel,
         )?;
-        let kind = if recipe.infill_fraction == 1.0 {
-            DepositionKind::SolidFill
-        } else {
-            DepositionKind::SparseFill
-        };
-        region::hatch(
-            &self.interior,
-            kind,
-            recipe.infill_fraction,
-            &layer,
-            &mut paths,
-            segments,
-            cancel,
-        )?;
+        for interior in &self.interiors {
+            let fraction = interior.coverage.fraction;
+            region::hatch(
+                &interior.domain,
+                if fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                },
+                fraction,
+                &layer,
+                &mut paths,
+                segments,
+                cancel,
+            )?;
+        }
         if paths.is_empty() {
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
@@ -281,7 +495,12 @@ impl ClassifiedRegions {
         }
         let wall_count = normal.paths.len();
         let mut normal_points = path_points(&normal.paths);
-        let class_points = scratch_points(&[&self.bottom, &self.top, &self.interior])?;
+        let class_points = scratch_points(&[&self.bottom, &self.top])?
+            + self
+                .interiors
+                .iter()
+                .map(|region| region::point_count(&region.domain))
+                .sum::<usize>();
         let mut bridge = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
@@ -289,7 +508,13 @@ impl ClassifiedRegions {
         let mut bridge_points = 0;
         let mut patches: Vec<BridgePatch<'_>> = Vec::new();
         let mut owners = Vec::new();
-        let owner_count = self.bottom.0.len() + self.top.0.len() + self.interior.0.len();
+        let owner_count = self.bottom.0.len()
+            + self.top.0.len()
+            + self
+                .interiors
+                .iter()
+                .map(|region| region.domain.0.len())
+                .sum::<usize>();
         let mut probe = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
@@ -303,11 +528,6 @@ impl ClassifiedRegions {
                 "role owner allocation refused",
             )
         })?;
-        let interior_kind = if layer.recipe.infill_fraction == 1.0 {
-            DepositionKind::SolidFill
-        } else {
-            DepositionKind::SparseFill
-        };
         let alternate_layer = region::HatchLayer {
             axis: layer.axis.orthogonal(),
             ..*layer
@@ -317,8 +537,20 @@ impl ClassifiedRegions {
         for (domain, kind, fraction) in [
             (&self.bottom, DepositionKind::BottomSkin, 1.0),
             (&self.top, DepositionKind::TopSkin, 1.0),
-            (&self.interior, interior_kind, layer.recipe.infill_fraction),
-        ] {
+        ]
+        .into_iter()
+        .chain(self.interiors.iter().map(|interior| {
+            let fraction = interior.coverage.fraction;
+            (
+                &interior.domain,
+                if fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                },
+                fraction,
+            )
+        })) {
             for polygon in &domain.0 {
                 check_cancel(cancel)?;
                 let base = recovery_points(
@@ -727,8 +959,201 @@ impl ClassifiedRegions {
         segments: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
-        region::bridge_rows(&self.layout.fill, required, layer, segments, cancel)
+        if self.interiors.len() <= 1 {
+            return region::bridge_rows(&self.layout.fill, required, layer, segments, cancel);
+        }
+        let mut rows = Vec::new();
+        for (domain, kind) in [
+            (&self.bottom, DepositionKind::BottomSkin),
+            (&self.top, DepositionKind::TopSkin),
+        ]
+        .into_iter()
+        .chain(self.interiors.iter().map(|interior| {
+            (
+                &interior.domain,
+                if interior.coverage.fraction == 1.0 {
+                    DepositionKind::SolidFill
+                } else {
+                    DepositionKind::SparseFill
+                },
+            )
+        })) {
+            let owned = region::bridge_rows(
+                domain,
+                required
+                    .iter()
+                    .filter(|path| path.kind == kind || path.kind == DepositionKind::Bridge),
+                layer,
+                segments,
+                cancel,
+            )?;
+            rows.extend(owned);
+        }
+        Ok(rows)
     }
+}
+
+/// A conditioned exact set relation avoids re-quantizing already-contained
+/// eligible islands. Partial cuts use complementary operations on the same
+/// original operands; any unresolved residual remains an error, never an epsilon.
+fn split_process_region(
+    remaining: MultiPolygon<f64>,
+    material: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(MultiPolygon<f64>, MultiPolygon<f64>, bool), ManufacturingError> {
+    let mut owned = MultiPolygon(Vec::new());
+    let mut next = MultiPolygon(Vec::new());
+    let mut partial = false;
+    for polygon in remaining.0 {
+        check_cancel(cancel)?;
+        let points = polygon.exterior().0.len()
+            + polygon
+                .interiors()
+                .iter()
+                .map(|ring| ring.0.len())
+                .sum::<usize>();
+        let material_points = region::point_count(material);
+        super::boolean::charge(work, point_sum(points, material_points)?)?;
+        if let (Some(a), Some(b)) = (polygon.bounding_rect(), material.bounding_rect())
+            && !a.intersects(&b)
+        {
+            next.0.push(polygon);
+            continue;
+        }
+        let conditioned = std::iter::once(&polygon)
+            .chain(&material.0)
+            .flat_map(|polygon| std::iter::once(polygon.exterior()).chain(polygon.interiors()))
+            .flat_map(|ring| &ring.0)
+            .all(|point| {
+                super::native::merge_predicate_coordinate(point.x)
+                    && super::native::merge_predicate_coordinate(point.y)
+            });
+        if conditioned {
+            if strictly_contained_process_polygon(&polygon, material, work, cancel)? {
+                owned.0.push(polygon);
+                continue;
+            }
+            super::boolean::charge(
+                work,
+                points
+                    .checked_add(4)
+                    .and_then(|a| {
+                        material_points
+                            .checked_add(4)
+                            .and_then(|b| a.checked_mul(b))
+                    })
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "process set relation work overflow",
+                        )
+                    })?,
+            )?;
+            if !polygon.intersects(material) {
+                next.0.push(polygon);
+                continue;
+            }
+        }
+        partial = true;
+        let original = MultiPolygon(vec![polygon]);
+        owned
+            .0
+            .extend(intersection_accumulated(&original, material, work, cancel)?.0);
+        next.0
+            .extend(operation(&original, material, false, Some(work), cancel)?.0);
+        region::check_size(&owned)?;
+        region::check_size(&next)?;
+    }
+    Ok((owned, next, partial))
+}
+
+fn strictly_contained_process_polygon(
+    polygon: &Polygon<f64>,
+    material: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
+    // A connected eligible exterior starts strictly in D and cannot leave it
+    // without a boundary intersection. Every wholly enclosed D hole is checked
+    // independently, including holes not crossed by the eligible boundary.
+    super::boolean::charge(work, region::point_count(material))?;
+    if !material.contains(&Point(polygon.exterior().0[0])) {
+        return Ok(false);
+    }
+    for a in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+        for b in material
+            .0
+            .iter()
+            .flat_map(|p| std::iter::once(p.exterior()).chain(p.interiors()))
+        {
+            for a in a.0.windows(2) {
+                check_cancel(cancel)?;
+                let a = Line::new(a[0], a[1]);
+                for b in b.0.windows(2) {
+                    super::boolean::charge(work, 1)?;
+                    if a.intersects(&Line::new(b[0], b[1])) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    let points = polygon.exterior().0.len()
+        + polygon
+            .interiors()
+            .iter()
+            .map(|ring| ring.0.len())
+            .sum::<usize>();
+    for hole in material.0.iter().flat_map(|p| p.interiors()) {
+        check_cancel(cancel)?;
+        super::boolean::charge(work, points)?;
+        if polygon.contains(&Point(hole.0[0])) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn process_scratch(
+    original: &MultiPolygon<f64>,
+    remaining: &MultiPolygon<f64>,
+    completed: &[InteriorRegion],
+    extra: &[&MultiPolygon<f64>],
+) -> Result<usize, ManufacturingError> {
+    let base = scratch_points(&[original, remaining])?;
+    let completed = completed.iter().try_fold(base, |points, region| {
+        point_sum(points, region::point_count(&region.domain))
+    })?;
+    point_sum(completed, scratch_points(extra)?)
+}
+
+pub(super) fn union_accumulated(
+    a: &MultiPolygon<f64>,
+    b: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    check_cancel(cancel)?;
+    if a.0.is_empty() {
+        return Ok(b.clone());
+    }
+    if b.0.is_empty() {
+        return Ok(a.clone());
+    }
+    super::boolean::budget_accumulated(a, b, work, cancel)?;
+    let mut result = if !a
+        .bounding_rect()
+        .expect("nonempty")
+        .intersects(&b.bounding_rect().expect("nonempty"))
+    {
+        MultiPolygon(a.0.iter().chain(&b.0).cloned().collect())
+    } else {
+        a.union(b)
+    };
+    region::check_size(&result)?;
+    region::canonicalize(&mut result);
+    Ok(result)
 }
 
 fn path_points(paths: &[DepositionPath]) -> usize {

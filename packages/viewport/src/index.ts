@@ -88,7 +88,7 @@ export interface GeometryViewport {
   discardSection(): Promise<void>;
   showReplay(descriptor: ReplayDisplayDescriptor, replay: DecodedReplayDisplay): Promise<void>;
   clearReplay(): Promise<void>;
-  setReplayView(options: ReplayView): Promise<void>;
+  setReplayView(options: ReplayView & { showSource: boolean }): Promise<void>;
   fitToScene(): Promise<void>;
   setView(view: "front" | "isometric"): Promise<void>;
   dispose(): Promise<void>;
@@ -831,6 +831,7 @@ export async function createGeometryViewport(
         if (
           !synchronized ||
           !active ||
+          !active.root.visible ||
           disposed ||
           failed ||
           !Number.isFinite(ndcX) ||
@@ -1039,6 +1040,8 @@ export async function createGeometryViewport(
             await upload(next.root);
             previous?.root.removeFromParent();
             scene.add(next.root);
+            if (active) active.root.visible = true;
+            highlights.visible = true;
             if (!active || active.summary.occurrence_count === 0)
               fit({ bounds_mm: replay.boundsMm });
             await redraw();
@@ -1059,6 +1062,8 @@ export async function createGeometryViewport(
           await rendering;
           motion?.dispose();
           motion = null;
+          if (active) active.root.visible = true;
+          highlights.visible = true;
           await redraw();
         });
       },
@@ -1067,6 +1072,8 @@ export async function createGeometryViewport(
           await rendering;
           if (!motion) reject("No replay display is installed.");
           motion.setView(options);
+          if (active) active.root.visible = options.showSource;
+          highlights.visible = options.showSource;
           await redraw();
         });
       },

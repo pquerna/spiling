@@ -705,9 +705,9 @@ pub(super) fn hatch_polygon(
 /// Clip the positive perimeter-owned fill at actual classified hatch rows.
 /// Classification islands and densities may have different centered lattices;
 /// bridge ownership must follow emitted rows, not invent a second lattice.
-pub(super) fn bridge_rows(
+pub(super) fn bridge_rows<'a>(
     fill: &MultiPolygon<f64>,
-    required: &[DepositionPath],
+    required: impl IntoIterator<Item = &'a DepositionPath>,
     layer: &HatchLayer<'_>,
     segments: &mut usize,
     cancel: &AtomicBool,

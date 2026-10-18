@@ -1184,6 +1184,8 @@ mod tests {
             can_undo: true,
             can_redo: false,
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+            process_document: spiling_contracts::process::ProcessDocument::empty(),
+            resolved_process: Vec::new(),
         }
     }
 
@@ -1286,13 +1288,31 @@ mod tests {
                 surface_resolution:
                     spiling_contracts::manufacturing::SurfaceResolutionTotals::empty(),
                 software_only: true,
+                native_geometry: spiling_contracts::manufacturing::NativeGeometryCoverageSummary {
+                    requested_shape_error_mm: 0.1,
+                    achieved_shape_error_mm: 0.0,
+                    height_analysis_count: 1,
+                    slab_count: 1,
+                    certified_layer_count: 1,
+                    event_count: 0,
+                    geometry_work: 1,
+                    evidence: spiling_contracts::manufacturing::PreflightEvidence::Certified,
+                    source_feature_coverage: spiling_contracts::manufacturing::NativeFeatureCoverageSummary {
+                        disjoint_source_layer_count: 1,
+                        invariant_source_union_layer_count: 0,
+                        native_interface_complex_layer_count: 0,
+                        owned_critical_slab_count: 0,
+                    },
+                    skin_coverage: spiling_contracts::manufacturing::SkinCoverageScope::ScheduledMaterialDistance,
+                    support_clearance: spiling_contracts::manufacturing::SupportClearanceScope::ContinuousTargetOuterOccupancy,
+                },
             },
         };
         let results = [
             JobResult::ManufacturingPreflight {
                 report: spiling_contracts::manufacturing::PreflightReport {
                     input_revision: spiling_contracts::project::ProjectRevision::ZERO,
-                    eligible: true,
+                    disposition: spiling_contracts::manufacturing::PreflightDisposition::Admitted,
                     software_only: true,
                     checks: vec![],
                 },
@@ -1308,6 +1328,7 @@ mod tests {
                     input_revision: spiling_contracts::project::ProjectRevision::ZERO,
                     input_hash: record.input_hash.clone(),
                     surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+                    process_document: spiling_contracts::process::ProcessDocument::empty(),
                     kernel: spiling_contracts::geometry::KernelIdentity {
                         name: "native".into(),
                         version: "1".into(),

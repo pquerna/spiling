@@ -9,6 +9,9 @@ fn manifest() -> ProjectManifest {
     let digest: [u8; 32] = Sha256::digest(b"original immutable source").into();
     let definition_id = DefinitionId::from_source_sha256(&digest);
     ProjectManifest {
+        next_process_layer: 1,
+        next_process_operation: 1,
+        process_document: crate::process::ProcessDocument::empty(),
         format_version: PROJECT_FORMAT_VERSION,
         project_id: ProjectId::new(),
         revision: ProjectRevision(7),
@@ -108,6 +111,9 @@ fn manifest_requires_explicit_current_format_manufacturing_fields() {
         "manufacturing_artifact",
         "surface_overlays",
         "next_surface_layer",
+        "next_process_layer",
+        "next_process_operation",
+        "process_document",
     ] {
         let mut changed = valid.clone();
         changed.as_object_mut().unwrap().remove(field);

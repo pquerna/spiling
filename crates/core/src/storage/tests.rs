@@ -2129,3 +2129,271 @@ fn removing_current_image_cannot_publish_over_a_corrupt_recovery_dependency() {
         image.record()
     );
 }
+
+#[test]
+fn process_durable_source_deleted_readonly_reopen_preserves_inheritance_reset_and_high_water() {
+    use spiling_contracts::{process::*, surface::SurfaceScope};
+    let sandbox = Sandbox::new();
+    let original_path = sandbox.0.join("original.step");
+    fs::write(&original_path, b"captured process source").unwrap();
+    let mut project = Project::new();
+    let prepared = project
+        .prepare(Edit::Import {
+            source: asset(fs::read(&original_path).unwrap(), "original.step"),
+            pose: RigidPoseMm::IDENTITY,
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    let prepared = project
+        .prepare(Edit::SetManufacturingIntent {
+            intent: Arc::new(crate::tests::manufacturing_intent()),
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let definition = SurfaceScope::Definition {
+        definition_id: definition_id.clone(),
+    };
+    let occurrence = SurfaceScope::Occurrence {
+        occurrence_id: OccurrenceId::new(1).unwrap(),
+        expected_definition_id: definition_id,
+    };
+    let set = |project: &mut Project, scope: SurfaceScope, fraction| {
+        let prepared = project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::AddLayer {
+                    scope,
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Replace {
+                        value: ProcessValue::SparseFraction { fraction },
+                    },
+                },
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+    };
+    set(&mut project, definition, 0.3);
+    set(&mut project, occurrence.clone(), 0.4);
+    set(&mut project, occurrence.clone(), 0.6);
+    save_project(&mut project, Some(sandbox.target()));
+    assert!(!project.info().dirty);
+    let prepared = project
+        .prepare(Edit::Process {
+            edit: ProcessEdit::Reset {
+                scope: occurrence.clone(),
+            },
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    assert!(project.info().dirty);
+    assert_eq!(project.info().resolved_process[0].value.fraction, 0.3);
+    project.undo().unwrap();
+    assert!(!project.info().dirty);
+    assert_eq!(project.info().resolved_process[0].value.fraction, 0.6);
+    project.redo().unwrap();
+    save_project(&mut project, None);
+    let saved = project.capture().manifest;
+    let authoritative = project.info().resolved_process;
+    fs::remove_file(original_path).unwrap();
+    drop(project);
+    let mut reopened =
+        Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reopened.capture().manifest, saved);
+    assert_eq!(reopened.info().resolved_process, authoritative);
+    assert_eq!(reopened.info().resolved_process[0].inherited.fraction, 0.3);
+    assert_eq!(
+        reopened
+            .snapshot()
+            .sources
+            .values()
+            .next()
+            .unwrap()
+            .bytes
+            .as_slice(),
+        b"captured process source"
+    );
+    assert!(!reopened.info().dirty);
+    assert_eq!(
+        reopened
+            .prepare(Edit::Process {
+                edit: ProcessEdit::Reset {
+                    scope: occurrence.clone()
+                }
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ReadOnly
+    );
+    assert_eq!(
+        reopened.undo().unwrap_err().code,
+        ProjectErrorCode::ReadOnly
+    );
+    assert_eq!(
+        save(
+            reopened.capture(),
+            reopened.storage(),
+            None,
+            &flag(),
+            |_| {}
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::ReadOnly
+    );
+    drop(reopened);
+    let mut writer =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    set(&mut writer, occurrence, 0.7);
+    let layer = writer
+        .info()
+        .process_document
+        .layers
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(layer.layer_id.get(), saved.next_process_layer);
+    assert_eq!(
+        layer.operations[0].operation_id.get(),
+        saved.next_process_operation
+    );
+}
+
+#[test]
+fn process_disabled_targets_and_required_counters_are_strict_on_fresh_reopen() {
+    use spiling_contracts::{process::*, surface::SurfaceScope};
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let prepared = project
+        .prepare(Edit::Process {
+            edit: ProcessEdit::AddLayer {
+                scope: SurfaceScope::Occurrence {
+                    occurrence_id: OccurrenceId::new(1).unwrap(),
+                    expected_definition_id: definition_id,
+                },
+                selector: ProcessSelector::WholeOwnedVolume,
+                action: ProcessAction::Replace {
+                    value: ProcessValue::SparseFraction { fraction: 0.5 },
+                },
+            },
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    let layer_id = project.info().process_document.layers[0].layer_id;
+    let prepared = project
+        .prepare(Edit::Process {
+            edit: ProcessEdit::SetLayerEnabled {
+                layer_id,
+                enabled: false,
+            },
+        })
+        .unwrap();
+    project.commit(prepared).unwrap();
+    save_project(&mut project, Some(sandbox.target()));
+    let valid = serde_json::to_value(project.capture().manifest).unwrap();
+    drop(project);
+    for (pointer, replacement) in [
+        (
+            "/process_document/layers/0/scope/occurrence_id",
+            serde_json::json!(99),
+        ),
+        (
+            "/process_document/layers/0/scope/expected_definition_id",
+            serde_json::json!(
+                spiling_contracts::geometry::DefinitionId::from_source_sha256(&[1; 32])
+            ),
+        ),
+        (
+            "/process_document/layers/0/operations/0/action/value/fraction",
+            serde_json::json!(0),
+        ),
+        ("/next_process_layer", serde_json::json!(1)),
+        ("/next_process_operation", serde_json::json!(1)),
+        (
+            "/format_version",
+            serde_json::json!(spiling_contracts::project::PROJECT_FORMAT_VERSION - 1),
+        ),
+        ("/process_document/schema_version", serde_json::json!(0)),
+    ] {
+        let mut corrupt = valid.clone();
+        *corrupt.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(
+            sandbox.target().join(CURRENT),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    }
+    for field in [
+        "process_document",
+        "next_process_layer",
+        "next_process_operation",
+    ] {
+        let mut corrupt = valid.clone();
+        corrupt.as_object_mut().unwrap().remove(field);
+        fs::write(
+            sandbox.target().join(CURRENT),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(open(&sandbox.target(), true, false, &flag()).is_err());
+    }
+}
+
+#[test]
+fn process_recovery_preserves_newer_layer_and_operation_allocator_high_water() {
+    use spiling_contracts::{process::*, surface::SurfaceScope};
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let scope = SurfaceScope::Definition { definition_id };
+    let add = |project: &mut Project, fraction| {
+        let prepared = project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::AddLayer {
+                    scope: scope.clone(),
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Replace {
+                        value: ProcessValue::SparseFraction { fraction },
+                    },
+                },
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+    };
+    add(&mut project, 0.3);
+    save_project(&mut project, Some(sandbox.target()));
+    let previous = project.capture().manifest;
+    add(&mut project, 0.4);
+    add(&mut project, 0.6);
+    save_project(&mut project, None);
+    let current = project.capture().manifest;
+    drop(project);
+    fs::write(sandbox.target().join(CURRENT), b"interrupted manifest").unwrap();
+    let mut recovered =
+        Project::from_loaded(open(&sandbox.target(), false, true, &flag()).unwrap()).unwrap();
+    assert_eq!(recovered.info().process_document, previous.process_document);
+    assert_eq!(
+        recovered.capture().manifest.next_process_layer,
+        current.next_process_layer
+    );
+    assert_eq!(
+        recovered.capture().manifest.next_process_operation,
+        current.next_process_operation
+    );
+    add(&mut recovered, 0.7);
+    let latest = recovered
+        .info()
+        .process_document
+        .layers
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(latest.layer_id.get(), current.next_process_layer);
+    assert_eq!(
+        latest.operations[0].operation_id.get(),
+        current.next_process_operation
+    );
+    save_project(&mut recovered, None);
+    assert!(!recovered.info().dirty);
+}

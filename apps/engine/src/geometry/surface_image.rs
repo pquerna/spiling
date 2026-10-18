@@ -16,7 +16,7 @@ impl Runtime {
                 source,
                 ..
             }) => {
-                self.surface_base(session_id, *base_revision)?;
+                self.metadata_base(session_id, *base_revision)?;
                 self.live_surface_target(reference)?;
                 parameters.validate()?;
                 source.validate().map_err(project_geometry_error)
@@ -84,7 +84,7 @@ impl Runtime {
         source: NativePath,
         parameters: ImageReliefParameters,
     ) -> Result<Reply, ProjectError> {
-        self.surface_base(session, base)?;
+        self.metadata_base(session, base)?;
         self.live_surface_target(&reference)?;
         parameters.validate()?;
         source.validate().map_err(project_geometry_error)?;

@@ -31,6 +31,7 @@ message ProjectRequest {
   AddSurfaceFinishRequest add_surface_finish = 6;
   RemoveSurfaceFinishRequest remove_surface_finish = 7;
   SetSurfaceFinishEnabledRequest set_surface_finish_enabled = 8;
+  EditProcessRequest edit_process = 9;
  }
 }
 message GetProjectRequest {}
@@ -54,12 +55,49 @@ message SurfaceOverlays { uint32 schema_version = 1; repeated SurfaceLayer layer
 message AddSurfaceFinishRequest { uint32 base_revision = 1; FaceRef face_ref = 2; SurfaceScopeKind scope = 3; SurfaceFinish finish = 4; }
 message RemoveSurfaceFinishRequest { uint32 base_revision = 1; uint32 layer_id = 2; }
 message SetSurfaceFinishEnabledRequest { uint32 base_revision = 1; uint32 layer_id = 2; bool enabled = 3; }
+message WholeOwnedVolume {}
+message ProcessSelector { oneof kind { WholeOwnedVolume whole_owned_volume = 1; } }
+message SparseFraction { double fraction = 1; }
+message ProcessValue { oneof kind { SparseFraction sparse_fraction = 1; } }
+message ProcessErase {}
+message ProcessAction { oneof kind { ProcessValue replace = 1; ProcessErase erase = 2; } }
+message ProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message ProcessLayer { uint32 layer_id = 1; SurfaceScope scope = 2; bool enabled = 3; repeated ProcessOperation operations = 4; }
+message ProcessDocument { uint32 schema_version = 1; repeated ProcessLayer layers = 2; }
+message ProcessProvenance { uint32 layer_id = 1; uint32 operation_id = 2; }
+message ResolvedProcessValue { double fraction = 1; ProcessProvenance provenance = 2; }
+message ResolvedOccurrenceProcess { uint32 occurrence_id = 1; string definition_id = 2; double global_fraction = 3; ResolvedProcessValue value = 4; ResolvedProcessValue inherited = 5; }
+message AddProcessLayer { SurfaceScope scope = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message RemoveProcessLayer { uint32 layer_id = 1; }
+message SetProcessLayerEnabled { uint32 layer_id = 1; bool enabled = 2; }
+message MoveProcessLayer { uint32 layer_id = 1; uint32 index = 2; }
+message AddProcessOperation { uint32 layer_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message UpdateProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message RemoveProcessOperation { uint32 operation_id = 1; }
+message MoveProcessOperation { uint32 operation_id = 1; uint32 index = 2; }
+message ResetProcessScope { SurfaceScope scope = 1; }
+message SetProcessSparseFraction { SurfaceScope scope = 1; double fraction = 2; }
+message ProcessEdit {
+ oneof op {
+  AddProcessLayer add_layer = 1;
+  RemoveProcessLayer remove_layer = 2;
+  SetProcessLayerEnabled set_layer_enabled = 3;
+  MoveProcessLayer move_layer = 4;
+  AddProcessOperation add_operation = 5;
+  UpdateProcessOperation update_operation = 6;
+  RemoveProcessOperation remove_operation = 7;
+  MoveProcessOperation move_operation = 8;
+  ResetProcessScope reset = 9;
+  SetProcessSparseFraction set_sparse_fraction = 10;
+ }
+}
+message EditProcessRequest { uint32 base_revision = 1; ProcessEdit edit = 2; }
 message OpenProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath path = 4; bool read_only = 5; bool recover_previous = 6; bool discard_changes = 7;}
 message SaveProjectRequest {string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath target = 4;}
 message ImportSurfaceImageFinishRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; FaceRef reference = 4; SurfaceScopeKind scope = 5; NativePath source = 6; ImageReliefParameters parameters = 7; }
 message GetSurfaceImageRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string image_hash = 4; }
 message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord image = 2; uint32 layer_id = 3; }
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
-message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11;}
+message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
 message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2;}}

@@ -134,6 +134,7 @@ message ManufacturingInspectionProvenance {
   string emitter_version = 6;
   string verifier_version = 7;
   SurfaceOverlays surface_overlays = 8;
+  ProcessDocument process_document = 9;
 }
 message ReplayDisplayInfo {
   uint32 schema_version = 1;

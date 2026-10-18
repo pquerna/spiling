@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 //! Bounded software-only manufacturing data. Profile declarations certify no machine.
+use crate::process::ProcessDocument;
 use crate::surface::{
     SurfaceImageContent, SurfaceOverlays, bounded_image_contents, validate_image_contents,
 };
@@ -22,7 +23,7 @@ pub use process::*;
 mod resolution;
 pub use resolution::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 7;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 8;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -796,6 +797,153 @@ pub struct DepositionPath {
     #[serde(deserialize_with = "points")]
     pub points_mm: Vec<[f64; 3]>,
 }
+pub const MAX_PROCESS_REGIONS: usize = 256;
+pub const MAX_PROCESS_REGION_CONTRIBUTIONS: usize = 256;
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRegionContribution {
+    pub occurrence_id: OccurrenceId,
+    pub definition_id: DefinitionId,
+    pub provenance: Option<crate::process::ProcessProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRegionCoverage {
+    pub area_mm2: f64,
+    pub fraction: f64,
+    #[serde(deserialize_with = "process_contributions")]
+    pub contributions: Vec<ProcessRegionContribution>,
+}
+
+struct ProcessContributionsSeed<'a>(&'a mut usize);
+impl<'de> serde::de::DeserializeSeed<'de> for ProcessContributionsSeed<'_> {
+    type Value = Vec<ProcessRegionContribution>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ProcessContributionsSeed<'_> {
+    type Value = Vec<ProcessRegionContribution>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("process contributions within the cumulative coverage budget")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut contributions = Vec::new();
+        while *self.0 > 0 {
+            match seq.next_element()? {
+                Some(contribution) => {
+                    *self.0 -= 1;
+                    contributions.reserve_exact(1);
+                    contributions.push(contribution);
+                }
+                None => return Ok(contributions),
+            }
+        }
+        if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(
+                "process contribution limit exceeded",
+            ));
+        }
+        Ok(contributions)
+    }
+}
+fn process_contributions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ProcessRegionContribution>, D::Error> {
+    let mut remaining = MAX_PROCESS_REGION_CONTRIBUTIONS;
+    serde::de::DeserializeSeed::deserialize(ProcessContributionsSeed(&mut remaining), d)
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum ProcessRegionField {
+    AreaMm2,
+    Fraction,
+    Contributions,
+}
+struct ProcessRegionSeed<'a>(&'a mut usize);
+impl<'de> serde::de::DeserializeSeed<'de> for ProcessRegionSeed<'_> {
+    type Value = ProcessRegionCoverage;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_struct(
+            "ProcessRegionCoverage",
+            &["area_mm2", "fraction", "contributions"],
+            self,
+        )
+    }
+}
+impl<'de> serde::de::Visitor<'de> for ProcessRegionSeed<'_> {
+    type Value = ProcessRegionCoverage;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a process region with bounded contributions")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut area_mm2 = None;
+        let mut fraction = None;
+        let mut contributions = None;
+        while let Some(field) = map.next_key::<ProcessRegionField>()? {
+            match field {
+                ProcessRegionField::AreaMm2 => {
+                    if area_mm2.is_some() {
+                        return Err(serde::de::Error::duplicate_field("area_mm2"));
+                    }
+                    area_mm2 = Some(map.next_value()?);
+                }
+                ProcessRegionField::Fraction => {
+                    if fraction.is_some() {
+                        return Err(serde::de::Error::duplicate_field("fraction"));
+                    }
+                    fraction = Some(map.next_value()?);
+                }
+                ProcessRegionField::Contributions => {
+                    if contributions.is_some() {
+                        return Err(serde::de::Error::duplicate_field("contributions"));
+                    }
+                    contributions =
+                        Some(map.next_value_seed(ProcessContributionsSeed(&mut *self.0))?);
+                }
+            }
+        }
+        Ok(ProcessRegionCoverage {
+            area_mm2: area_mm2.ok_or_else(|| serde::de::Error::missing_field("area_mm2"))?,
+            fraction: fraction.ok_or_else(|| serde::de::Error::missing_field("fraction"))?,
+            contributions: contributions
+                .ok_or_else(|| serde::de::Error::missing_field("contributions"))?,
+        })
+    }
+}
+fn process_regions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ProcessRegionCoverage>, D::Error> {
+    struct Regions;
+    impl<'de> serde::de::Visitor<'de> for Regions {
+        type Value = Vec<ProcessRegionCoverage>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 256 process regions and 256 total contributions")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut regions = Vec::new();
+            let mut remaining = MAX_PROCESS_REGION_CONTRIBUTIONS;
+            while regions.len() < MAX_PROCESS_REGIONS {
+                match seq.next_element_seed(ProcessRegionSeed(&mut remaining))? {
+                    Some(region) => regions.push(region),
+                    None => return Ok(regions),
+                }
+            }
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom("process region limit exceeded"));
+            }
+            Ok(regions)
+        }
+    }
+    d.deserialize_seq(Regions)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlanarRegionCoverage {
@@ -812,10 +960,49 @@ pub struct PlanarRegionCoverage {
     pub nominal_deposition_volume_mm3: f64,
     pub support_area_mm2: f64,
     pub support_nominal_deposition_volume_mm3: f64,
-    pub requested_infill_fraction: f64,
+    #[serde(deserialize_with = "process_regions")]
+    pub process_regions: Vec<ProcessRegionCoverage>,
 }
 impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
+        if self.process_regions.len() > MAX_PROCESS_REGIONS
+            || self.process_regions.capacity() > MAX_PROCESS_REGIONS
+        {
+            return Err(resource("process region allocation limit exceeded"));
+        }
+        let mut contribution_capacity = 0usize;
+        let mut solid = 0.0;
+        let mut sparse = 0.0;
+        let mut void = 0.0;
+        for region in &self.process_regions {
+            contribution_capacity = contribution_capacity
+                .checked_add(region.contributions.capacity())
+                .ok_or_else(|| resource("process contribution allocation overflow"))?;
+            if contribution_capacity > MAX_PROCESS_REGION_CONTRIBUTIONS {
+                return Err(resource("process contribution allocation limit exceeded"));
+            }
+            if !region.area_mm2.is_finite()
+                || region.area_mm2 <= 0.0
+                || !region.fraction.is_finite()
+                || region.fraction <= 0.0
+                || region.fraction > 1.0
+                || (region.contributions.is_empty() && region.fraction != recipe.infill_fraction)
+            {
+                return Err(invalid("invalid process region domain or fraction"));
+            }
+            let mut contributors = BTreeSet::new();
+            for contribution in &region.contributions {
+                if !contributors.insert(contribution.occurrence_id) {
+                    return Err(invalid("duplicate process region occurrence contribution"));
+                }
+            }
+            if region.fraction == 1.0 {
+                solid += region.area_mm2;
+            } else {
+                sparse += region.area_mm2;
+            }
+            void += region.area_mm2 * (1.0 - region.fraction);
+        }
         let values = [
             self.section_area_mm2,
             self.source_section_area_mm2,
@@ -845,6 +1032,7 @@ impl PlanarRegionCoverage {
                 && (self.nominal_deposition_volume_mm3 != 0.0
                     || self.source_section_area_mm2 != 0.0
                     || self.surface_added_area_mm2 != 0.0
+                    || !self.process_regions.is_empty()
                     || partition != 0.0
                     || self.protected_hole_area_mm2 != 0.0
                     || self.intentional_void_area_mm2 != 0.0))
@@ -852,15 +1040,17 @@ impl PlanarRegionCoverage {
             || (matches!(recipe.supports, SupportPolicy::Disabled)
                 && (self.support_area_mm2 != 0.0
                     || self.support_nominal_deposition_volume_mm3 != 0.0))
-            || self.requested_infill_fraction != recipe.infill_fraction
+            || !solid.is_finite()
+            || !sparse.is_finite()
+            || !void.is_finite()
             || !partition.is_finite()
+            || (solid == 0.0) != (self.solid_interior_area_mm2 == 0.0)
+            || (sparse == 0.0) != (self.sparse_interior_area_mm2 == 0.0)
+            || (void == 0.0) != (self.intentional_void_area_mm2 == 0.0)
             || (partition - self.section_area_mm2).abs() > tolerance
-            || (self.intentional_void_area_mm2
-                - self.sparse_interior_area_mm2 * (1.0 - recipe.infill_fraction))
-                .abs()
-                > tolerance
-            || (recipe.infill_fraction == 1.0 && self.sparse_interior_area_mm2 != 0.0)
-            || (recipe.infill_fraction < 1.0 && self.solid_interior_area_mm2 != 0.0)
+            || (self.solid_interior_area_mm2 - solid).abs() > tolerance
+            || (self.sparse_interior_area_mm2 - sparse).abs() > tolerance
+            || (self.intentional_void_area_mm2 - void).abs() > tolerance
         {
             return Err(invalid("invalid planar region ownership accounting"));
         }
@@ -1378,6 +1568,7 @@ pub struct ManufacturingProvenance {
     pub occurrences: Vec<OccurrenceRecord>,
     pub intent: ManufacturingIntent,
     pub surface_overlays: SurfaceOverlays,
+    pub process_document: ProcessDocument,
     #[serde(deserialize_with = "bounded_image_contents")]
     pub surface_images: Vec<SurfaceImageContent>,
     pub kernel: KernelIdentity,
@@ -1423,6 +1614,7 @@ impl ManufacturingProvenance {
             &self.occurrences,
             &self.intent,
             &self.surface_overlays,
+            &self.process_document,
         )?;
         if hash != self.input_hash {
             return Err(ManufacturingError::new(
@@ -1586,6 +1778,52 @@ impl ManufacturingBundle {
                 "native geometry coverage does not bind captured occurrences",
             ));
         }
+        let recipe = &self.provenance.intent.recipe;
+        let process = &self.provenance.process_document;
+        let has_overrides = self.provenance.occurrences.iter().any(|occurrence| {
+            process
+                .resolve(
+                    &occurrence.definition_id,
+                    occurrence.occurrence_id,
+                    recipe.infill_fraction,
+                )
+                .provenance
+                .is_some()
+        });
+        for region in self
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.region_coverage.process_regions)
+        {
+            if region.contributions.is_empty() && has_overrides {
+                return Err(invalid(
+                    "process region omits captured override attribution",
+                ));
+            }
+            for contribution in &region.contributions {
+                if !self.provenance.occurrences.iter().any(|occurrence| {
+                    occurrence.occurrence_id == contribution.occurrence_id
+                        && occurrence.definition_id == contribution.definition_id
+                }) {
+                    return Err(invalid(
+                        "process region references an unknown or inconsistent occurrence",
+                    ));
+                }
+                let resolved = process.resolve(
+                    &contribution.definition_id,
+                    contribution.occurrence_id,
+                    recipe.infill_fraction,
+                );
+                if resolved.provenance != contribution.provenance
+                    || resolved.fraction != region.fraction
+                {
+                    return Err(invalid(
+                        "process region disagrees with captured process winner",
+                    ));
+                }
+            }
+        }
         resolution::validate_attribution(
             &self.plan.surface_resolution,
             &self.provenance.surface_overlays,
@@ -1707,10 +1945,20 @@ pub fn input_fingerprint(
     occurrences: &[OccurrenceRecord],
     intent: &ManufacturingIntent,
     surface_overlays: &SurfaceOverlays,
+    process_document: &ProcessDocument,
 ) -> Result<SourceHash, ManufacturingError> {
     intent.validate()?;
     surface_overlays
         .validate_targets(definitions, occurrences, u32::MAX)
+        .map_err(|e| {
+            if e.code == crate::project::ProjectErrorCode::ResourceLimit {
+                resource(&e.message)
+            } else {
+                invalid(&e.message)
+            }
+        })?;
+    process_document
+        .validate_targets(definitions, occurrences, u32::MAX, u32::MAX)
         .map_err(|e| {
             if e.code == crate::project::ProjectErrorCode::ResourceLimit {
                 resource(&e.message)
@@ -1765,6 +2013,7 @@ pub fn input_fingerprint(
         occurrences: Vec<&'a OccurrenceRecord>,
         intent: &'a ManufacturingIntent,
         surface_overlays: &'a SurfaceOverlays,
+        process_document: &'a ProcessDocument,
     }
     struct HashWriter(Sha256);
     impl std::io::Write for HashWriter {
@@ -1785,6 +2034,7 @@ pub fn input_fingerprint(
         occurrences: occs,
         intent,
         surface_overlays,
+        process_document,
     };
     let mut writer = HashWriter(Sha256::new());
     serde_json::to_writer(&mut writer, &semantic).map_err(|e| invalid(&e.to_string()))?;

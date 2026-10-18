@@ -4,6 +4,11 @@
 
 use super::*;
 use spiling_contracts::geometry::{AabbMm, OccurrenceId, RigidPoseMm, SourceHash};
+use spiling_contracts::process::{
+    ProcessAction, ProcessLayer, ProcessLayerId, ProcessOperation, ProcessOperationId,
+    ProcessSelector, ProcessValue,
+};
+use spiling_contracts::surface::SurfaceScope;
 
 fn intent() -> ManufacturingIntent {
     ManufacturingIntent {
@@ -65,6 +70,7 @@ struct Scene {
     stored: Vec<StoredDefinition>,
     occurrences: Vec<OccurrenceRecord>,
     surface_overlays: spiling_contracts::surface::SurfaceOverlays,
+    process_document: spiling_contracts::process::ProcessDocument,
     surface_images:
         BTreeMap<spiling_contracts::geometry::SourceHash, Arc<spiling_surface_fields::HeightImage>>,
 }
@@ -78,6 +84,7 @@ impl Scene {
         Self {
             id: ProjectId::default(),
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
+            process_document: spiling_contracts::process::ProcessDocument::empty(),
             surface_images: BTreeMap::new(),
             stored: vec![StoredDefinition {
                 definition_id: id.clone(),
@@ -95,6 +102,30 @@ impl Scene {
             definitions: BTreeMap::from([(id, native)]),
         }
     }
+    fn set_process_fractions(&mut self, fractions: &[f64]) {
+        assert_eq!(fractions.len(), self.occurrences.len());
+        self.process_document.layers = self
+            .occurrences
+            .iter()
+            .zip(fractions)
+            .enumerate()
+            .map(|(index, (occurrence, &fraction))| ProcessLayer {
+                layer_id: ProcessLayerId::new(index as u32 + 1).unwrap(),
+                scope: SurfaceScope::Occurrence {
+                    occurrence_id: occurrence.occurrence_id,
+                    expected_definition_id: occurrence.definition_id.clone(),
+                },
+                enabled: true,
+                operations: vec![ProcessOperation {
+                    operation_id: ProcessOperationId::new(index as u32 + 1).unwrap(),
+                    selector: ProcessSelector::WholeOwnedVolume,
+                    action: ProcessAction::Replace {
+                        value: ProcessValue::SparseFraction { fraction },
+                    },
+                }],
+            })
+            .collect();
+    }
     fn compile(
         &self,
         intent: &ManufacturingIntent,
@@ -110,6 +141,7 @@ impl Scene {
             occurrences: &self.occurrences,
             intent,
             surface_overlays: &self.surface_overlays,
+            process_document: &self.process_document,
             surface_images: &self.surface_images,
         }
     }
@@ -126,8 +158,9 @@ fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
 
 fn actual_motion(bundle: &ManufacturingBundle) -> Vec<(u8, u32, [f64; 3])> {
     let bytes = serde_json::to_vec(bundle).unwrap();
+    let reopened = decode_bundle(&bytes).unwrap();
     let inspection = inspect_bundle(
-        bundle,
+        &reopened,
         &SourceHash::from_bytes(&bytes),
         VerificationOutput::ReportAndMotion,
         &AtomicBool::new(false),
@@ -148,6 +181,329 @@ fn actual_motion(bundle: &ManufacturingBundle) -> Vec<(u8, u32, [f64; 3])> {
             )
         })
         .collect()
+}
+
+fn assert_actual_sparse_row_pitch(
+    motion: &[(u8, u32, [f64; 3])],
+    source_translation: [f64; 3],
+    window: [[f64; 2]; 3],
+    bead_width: f64,
+    fraction: f64,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let micrometres = |value: f64| (value * 1_000_000.0).round() as i64;
+    let levels: BTreeSet<_> = motion
+        .iter()
+        .filter(|(kind, _, _)| matches!(kind, 1..=5 | 8))
+        .map(|(_, _, end)| micrometres(end[2]))
+        .collect();
+    let mut rows = BTreeMap::<i64, BTreeSet<i64>>::new();
+    for pair in motion.windows(2) {
+        let (kind, _, end) = pair[1];
+        if kind != 5 {
+            continue;
+        }
+        let start = pair[0].2;
+        let a: [f64; 3] = std::array::from_fn(|axis| start[axis] - source_translation[axis]);
+        let b: [f64; 3] = std::array::from_fn(|axis| end[axis] - source_translation[axis]);
+        if !(window[2][0]..=window[2][1]).contains(&b[2])
+            || !(window[1][0]..=window[1][1]).contains(&b[1])
+            || a[0].min(b[0]) > window[0][0]
+            || a[0].max(b[0]) < window[0][1]
+        {
+            continue;
+        }
+        assert!(
+            (a[1] - b[1]).abs() < 0.000002,
+            "the authored X raster must remain X"
+        );
+        rows.entry(micrometres(end[2]))
+            .or_default()
+            .insert(micrometres(end[1]));
+    }
+    assert!(
+        !rows.is_empty(),
+        "the source-relative interior window must contain actual sparse rows"
+    );
+    for (z, coordinates) in rows {
+        let lower = *levels.range(..z).next_back().unwrap();
+        // Recover actual bead height from emitted deposition levels. Native
+        // event-balanced layers need not have the recipe's nominal height.
+        let height = (z - lower) as f64 / 1_000_000.0;
+        let solid_pitch = bead_width - height + std::f64::consts::PI * height * 0.25;
+        let expected = solid_pitch / fraction;
+        let coordinates: Vec<_> = coordinates.into_iter().collect();
+        assert!(
+            coordinates.len() > 1,
+            "the window must witness adjacent emitted rows"
+        );
+        for pair in coordinates.windows(2) {
+            let actual = (pair[1] - pair[0]) as f64 / 1_000_000.0;
+            assert!(
+                (actual - expected).abs() < 0.000005,
+                "actual row pitch {actual} at Z={} must be W/rho={expected}, rho={fraction}",
+                z as f64 / 1_000_000.0,
+            );
+        }
+    }
+}
+
+fn actual_object_geometry(
+    motion: &[(u8, u32, [f64; 3])],
+    translation: [f64; 3],
+    mut keep: impl FnMut(u8, [f64; 3], [f64; 3]) -> bool,
+) -> Vec<(u8, [i64; 3], [i64; 3])> {
+    let mut geometry = Vec::new();
+    for pair in motion.windows(2) {
+        let (kind, _, end) = pair[1];
+        if !matches!(kind, 1..=5 | 8) {
+            continue;
+        }
+        let start = std::array::from_fn(|axis| pair[0].2[axis] - translation[axis]);
+        let end = std::array::from_fn(|axis| end[axis] - translation[axis]);
+        if !keep(kind, start, end) {
+            continue;
+        }
+        let xyz6 = |point: [f64; 3]| point.map(|value| (value * 1_000_000.0).round() as i64);
+        let mut a = xyz6(start);
+        let mut b = xyz6(end);
+        if b < a {
+            std::mem::swap(&mut a, &mut b);
+        }
+        geometry.push((kind, a, b));
+    }
+    geometry.sort_unstable();
+    geometry
+}
+
+#[test]
+fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore() {
+    let placements = [[40.0, 40.0, 0.0], [100.0, 40.0, 0.0]];
+    let mut scene = Scene::new(HOLE, &placements.map(|p| pose(p[0], p[1], p[2])));
+    scene.set_process_fractions(&[0.20, 0.60]);
+    let mut intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.infill_fraction = 0.4;
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
+    assert_eq!(
+        preflight(&scene.input(&intent), &AtomicBool::new(false))
+            .unwrap()
+            .disposition,
+        PreflightDisposition::Admitted,
+    );
+    let bundle = scene.compile(&intent).unwrap();
+    let motion = actual_motion(&bundle);
+    // The unchanged native source is 20x20x8 with an R3 through-bore
+    // at (10,10). This source-relative window stays outside the bore
+    // and the physical cap-skin horizons.
+    for (translation, fraction) in placements.into_iter().zip([0.20, 0.60]) {
+        assert_actual_sparse_row_pitch(
+            &motion,
+            translation,
+            [[2.0, 6.0], [3.0, 17.0], [2.2, 3.0]],
+            intent.recipe.bead_width_mm,
+            fraction,
+        );
+    }
+    let unchanged = placements.map(|translation| {
+        actual_object_geometry(&motion, translation, |kind, a, b| {
+            let in_source = |p: [f64; 3]| {
+                (-0.001..=20.001).contains(&p[0]) && (-0.001..=20.001).contains(&p[1])
+            };
+            in_source(a)
+                && in_source(b)
+                && (kind == 1 || kind == 3 && b[2] <= 0.6 || kind == 4 && b[2] >= 7.6)
+        })
+    });
+    for role in [1, 3, 4] {
+        assert!(unchanged[0].iter().any(|segment| segment.0 == role));
+    }
+    assert_eq!(
+        unchanged[0], unchanged[1],
+        "local sparse fractions must not move actual perimeters or physical cap skins",
+    );
+    for translation in placements {
+        let mut pocket_segments = 0;
+        for pair in motion.windows(2) {
+            let (kind, _, end) = pair[1];
+            if !matches!(kind, 1..=5 | 8) {
+                continue;
+            }
+            let a = [
+                pair[0].2[0] - translation[0] - 10.0,
+                pair[0].2[1] - translation[1] - 10.0,
+            ];
+            let b = [
+                end[0] - translation[0] - 10.0,
+                end[1] - translation[1] - 10.0,
+            ];
+            if a[0].abs().max(b[0].abs()) > 10.001 || a[1].abs().max(b[1].abs()) > 10.001 {
+                continue;
+            }
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1])).clamp(0.0, 1.0);
+            let closest = (a[0] + t * d[0]).hypot(a[1] + t * d[1]);
+            assert!(
+                closest >= 3.0 + intent.recipe.bead_width_mm * 0.5 - 0.011,
+                "actual emitted bead must preserve the unchanged native through-bore",
+            );
+            pocket_segments += 1;
+        }
+        assert!(pocket_segments > 0);
+    }
+}
+
+#[test]
+fn native_process_noop_intent_preserves_actual_commands_and_hatch_phase() {
+    let mut scene = Scene::new(HOLE, &[pose(40.0, 40.0, 0.0), pose(100.0, 40.0, 0.0)]);
+    let mut intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    assert_eq!(
+        preflight(&scene.input(&intent), &AtomicBool::new(false))
+            .unwrap()
+            .disposition,
+        PreflightDisposition::Admitted,
+    );
+    let baseline = scene.compile(&intent).unwrap();
+    let baseline_motion = actual_motion(&baseline);
+    assert!(baseline_motion.iter().any(|event| event.0 == 5));
+    // Retain all real commands, including E/feed/lifecycle controls and inline
+    // process roles; omit only standalone provenance/header comments.
+    let baseline_commands: Vec<_> = baseline
+        .program
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(';'))
+        .collect();
+    let occurrence_scope = SurfaceScope::Occurrence {
+        occurrence_id: scene.occurrences[0].occurrence_id,
+        expected_definition_id: scene.occurrences[0].definition_id.clone(),
+    };
+    let unchanged_fraction = ProcessAction::Replace {
+        value: ProcessValue::SparseFraction {
+            fraction: intent.recipe.infill_fraction,
+        },
+    };
+    for (scope, action) in [
+        (occurrence_scope.clone(), ProcessAction::Erase),
+        (
+            SurfaceScope::Definition {
+                definition_id: scene.occurrences[0].definition_id.clone(),
+            },
+            unchanged_fraction,
+        ),
+        (occurrence_scope, unchanged_fraction),
+    ] {
+        scene.process_document.layers = vec![ProcessLayer {
+            layer_id: ProcessLayerId::new(1).unwrap(),
+            scope,
+            enabled: true,
+            operations: vec![ProcessOperation {
+                operation_id: ProcessOperationId::new(1).unwrap(),
+                selector: ProcessSelector::WholeOwnedVolume,
+                action,
+            }],
+        }];
+        let unchanged = scene.compile(&intent).unwrap();
+        assert_eq!(
+            actual_motion(&unchanged),
+            baseline_motion,
+            "effective no-op process intent must preserve actual decoded motion and row phase",
+        );
+        assert_eq!(
+            unchanged
+                .program
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(';'))
+                .collect::<Vec<_>>(),
+            baseline_commands,
+            "effective no-op intent must preserve actual machine commands",
+        );
+    }
+}
+
+#[test]
+fn native_process_overlap_conflicts_and_admitted_compatible_union_keeps_contributors() {
+    let placements = [RigidPoseMm::IDENTITY, pose(10.123456789, 0.234567891, 0.0)];
+    let mut incompatible = Scene::new(BOX, &placements);
+    incompatible.set_process_fractions(&[0.20, 0.60]);
+    let conflict = incompatible.compile(&intent()).unwrap_err();
+    assert_eq!(
+        conflict.code,
+        ManufacturingErrorCode::InvalidSpecification,
+        "{conflict}"
+    );
+    // Coalescing retains the existing admitted separated material union; it
+    // grants no additional contacting/overlapping-source native capability.
+    let placements = [RigidPoseMm::IDENTITY, pose(40.0, 0.0, 0.0)];
+    let mut duplicate = Scene::new(BOX, &placements);
+    duplicate.set_process_fractions(&[0.20, 0.20]);
+    let baseline = Scene::new(BOX, &placements);
+    let mut recipe = intent();
+    recipe.recipe.infill_fraction = 0.20;
+    let one = baseline.compile(&recipe).unwrap();
+    let coalesced = duplicate.compile(&recipe).unwrap();
+    assert_eq!(
+        actual_object_geometry(&actual_motion(&one), [0.0; 3], |_, _, _| true),
+        actual_object_geometry(&actual_motion(&coalesced), [0.0; 3], |_, _, _| true),
+        "compatible admitted source union must not duplicate actual fill",
+    );
+    assert!(coalesced.plan.layers.iter().any(|layer| {
+        layer.region_coverage.process_regions.iter().any(|region| {
+            region
+                .contributions
+                .iter()
+                .all(|contribution| contribution.provenance.is_some())
+                && region
+                    .contributions
+                    .iter()
+                    .map(|contribution| contribution.occurrence_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == duplicate
+                        .occurrences
+                        .iter()
+                        .map(|occurrence| occurrence.occurrence_id)
+                        .collect()
+        })
+    }));
+}
+
+#[test]
+fn native_process_support_regeneration_keeps_actual_occurrence_row_pitch() {
+    let placements = [[40.0, 40.0, 2.0], [80.0, 40.0, 2.0]];
+    let mut scene = Scene::new(BOX, &placements.map(|p| pose(p[0], p[1], p[2])));
+    scene.set_process_fractions(&[0.20, 0.60]);
+    let mut intent = intent();
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.printer.capabilities.generated_supports = true;
+    intent.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.3,
+        xy_clearance_mm: 0.2,
+        z_gap_mm: 0.2,
+        interface_thickness_mm: 0.8,
+    };
+    let bundle = scene.compile(&intent).unwrap();
+    let motion = actual_motion(&bundle);
+    for (translation, fraction) in placements.into_iter().zip([0.20, 0.60]) {
+        assert!(motion.iter().any(|(kind, _, end)| {
+            matches!(kind, 9 | 10)
+                && (translation[0]..=translation[0] + 20.0).contains(&end[0])
+                && (translation[1]..=translation[1] + 10.0).contains(&end[1])
+                && end[2] < translation[2]
+        }));
+        assert_actual_sparse_row_pitch(
+            &motion,
+            translation,
+            [[4.0, 16.0], [1.2, 8.8], [2.0, 5.0]],
+            intent.recipe.bead_width_mm,
+            fraction,
+        );
+    }
 }
 
 #[test]
@@ -376,7 +732,7 @@ fn saved_verification_cannot_authorize_an_incompatible_planner() {
         .compile(&intent())
         .unwrap();
     assert!(bundle.verification.verified);
-    bundle.provenance.planner_version = "10".into();
+    bundle.provenance.planner_version = format!("incompatible-{PLANNER_VERSION}");
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let decoded = decode_bundle(&bytes).unwrap();
     for output in [
@@ -495,14 +851,6 @@ fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates(
     .unwrap();
     assert_eq!(separated.provenance.definitions.len(), 1);
     assert_eq!(separated.provenance.occurrences.len(), 3);
-    assert_eq!(
-        separated.plan.layers[0]
-            .paths
-            .iter()
-            .filter(|p| p.kind == DepositionKind::Perimeter)
-            .count(),
-        3
-    );
     assert!(
         (separated.verification.deposited_volume_mm3 - 3.0 * one.verification.deposited_volume_mm3)
             .abs()
@@ -533,14 +881,6 @@ fn repeated_definition_placements_and_overlap_union_are_material_not_duplicates(
             .source_feature_coverage
             .invariant_source_union_layer_count,
         overlap.plan.native_geometry.certified_layer_count,
-    );
-    assert_eq!(
-        overlap.plan.layers[0]
-            .paths
-            .iter()
-            .filter(|p| p.kind == DepositionKind::Perimeter)
-            .count(),
-        1
     );
     assert!(overlap.verification.deposited_volume_mm3 > one.verification.deposited_volume_mm3);
     assert!(

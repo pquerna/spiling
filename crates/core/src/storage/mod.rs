@@ -47,6 +47,8 @@ struct RecoveryRecord {
     revision_high_water: ProjectRevision,
     next_occurrence_high_water: u32,
     next_surface_layer_high_water: u32,
+    next_process_layer_high_water: u32,
+    next_process_operation_high_water: u32,
 }
 #[derive(Debug)]
 pub struct Storage {
@@ -237,6 +239,8 @@ fn parse_recovery(bytes: &[u8]) -> Result<RecoveryRecord, ProjectError> {
     if record.next_occurrence_high_water < record.manifest.next_occurrence
         || record.revision_high_water < record.manifest.revision
         || record.next_surface_layer_high_water < record.manifest.next_surface_layer
+        || record.next_process_layer_high_water < record.manifest.next_process_layer
+        || record.next_process_operation_high_water < record.manifest.next_process_operation
     {
         return Err(invalid(
             "recovery high-water is below checkpoint identity counters",
@@ -407,6 +411,7 @@ fn validate_stored_manufacturing(
                     .as_deref()
                     .ok_or_else(|| invalid("artifact has no intent"))?
             || provenance.surface_overlays != manifest.surface_overlays
+            || provenance.process_document != manifest.process_document
             || provenance.definitions.len() != manifest.definitions.len()
             || provenance.occurrences.len() != manifest.occurrences.len()
             || provenance
@@ -700,6 +705,12 @@ pub fn open_reusing(
         manifest.next_surface_layer = manifest
             .next_surface_layer
             .max(record.next_surface_layer_high_water);
+        manifest.next_process_layer = manifest
+            .next_process_layer
+            .max(record.next_process_layer_high_water);
+        manifest.next_process_operation = manifest
+            .next_process_operation
+            .max(record.next_process_operation_high_water);
         (manifest, saved_revision)
     } else {
         let manifest = parse_manifest(&bytes)?;
@@ -724,6 +735,7 @@ pub fn open_reusing(
         manufacturing_intent: manifest.manufacturing_intent.clone(),
         manufacturing_artifact: manufacturing_artifact.clone(),
         surface_overlays: Arc::new(manifest.surface_overlays.clone()),
+        process_document: Arc::new(manifest.process_document.clone()),
         surface_images: surface_images.clone(),
     };
     validate_snapshot(&snapshot, &manifest)?;
@@ -914,6 +926,14 @@ pub fn save(
                 .manifest
                 .next_surface_layer
                 .max(old_manifest.next_surface_layer),
+            next_process_layer_high_water: snapshot
+                .manifest
+                .next_process_layer
+                .max(old_manifest.next_process_layer),
+            next_process_operation_high_water: snapshot
+                .manifest
+                .next_process_operation
+                .max(old_manifest.next_process_operation),
             manifest: old_manifest,
         };
         let previous = serde_json::to_vec_pretty(&recovery).map_err(|e| invalid(e.to_string()))?;

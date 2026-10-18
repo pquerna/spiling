@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 use super::{request_id, required, session_parent};
-use crate::{geometry::*, project::*, rpc, surface::*};
+use crate::{geometry::*, process::*, project::*, rpc, surface::*};
 
 pub enum ProjectCall {
     Execute(rpc::ProjectRequest),
@@ -15,6 +15,17 @@ pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, St
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::EditProcess {
+            session_id,
+            base_revision,
+            edit,
+        } => (
+            session_id,
+            C::EditProcess(rpc::EditProcessRequest {
+                base_revision: base_revision.0,
+                edit: Some(edit.try_into()?),
+            }),
+        ),
         ProjectCommand::Open {
             session_id,
             base_revision,
@@ -168,6 +179,11 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::EditProcess(v) => Self::EditProcess {
+                session_id,
+                base_revision: ProjectRevision(v.base_revision),
+                edit: required(v.edit, "process edit")?.try_into()?,
+            },
             C::Get(_) => Self::Get { session_id },
             C::New(v) => Self::New {
                 session_id,
@@ -274,6 +290,32 @@ impl TryFrom<rpc::GetSurfaceImageRequest> for ProjectCommand {
 }
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
+    v.process_document.validate().map_err(|e| e.to_string())?;
+    if v.resolved_process.len() > MAX_OCCURRENCES as usize {
+        return Err("resolved process occurrence budget exceeded".into());
+    }
+    let mut previous = None;
+    for row in &v.resolved_process {
+        ProcessValue::SparseFraction {
+            fraction: row.global_fraction,
+        }
+        .validate()
+        .map_err(|e| e.to_string())?;
+        if previous.is_some_and(|id| id >= row.occurrence_id)
+            || row.value
+                != v.process_document.resolve(
+                    &row.definition_id,
+                    row.occurrence_id,
+                    row.global_fraction,
+                )
+            || row.inherited
+                != v.process_document
+                    .resolve_definition(&row.definition_id, row.global_fraction)
+        {
+            return Err("inconsistent authoritative process resolution".into());
+        }
+        previous = Some(row.occurrence_id);
+    }
     if v.saved_revision.is_some_and(|r| r.0 > v.revision.0)
         || v.path_label.as_ref().is_some_and(|s| {
             s.is_empty() || s.len() > MAX_NATIVE_PATH_UNITS as usize * 4 || s.contains('\0')
@@ -288,6 +330,9 @@ pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
 impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
     type Error = String;
     fn try_from(v: rpc::ProjectInfo) -> Result<Self, String> {
+        if v.resolved_process.len() > MAX_OCCURRENCES as usize {
+            return Err("resolved process occurrence budget exceeded".into());
+        }
         let info = Self {
             project_id: ProjectId::parse(v.project_id).map_err(|e| e.to_string())?,
             revision: ProjectRevision(v.revision),
@@ -301,6 +346,13 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
             can_redo: v.can_redo,
             surface_overlays: required(v.surface_overlays, "project surface overlays")?
                 .try_into()?,
+            process_document: required(v.process_document, "project process document")?
+                .try_into()?,
+            resolved_process: v
+                .resolved_process
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         };
         validate_project_info(&info)?;
         Ok(info)
@@ -322,6 +374,12 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             can_undo: v.can_undo,
             can_redo: v.can_redo,
             surface_overlays: Some(v.surface_overlays.try_into()?),
+            process_document: Some(v.process_document.try_into()?),
+            resolved_process: v
+                .resolved_process
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
         })
     }
 }

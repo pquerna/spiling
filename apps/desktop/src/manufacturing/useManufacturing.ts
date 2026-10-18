@@ -90,6 +90,7 @@ export function useManufacturing(host: ManufacturingHost) {
   const [layer, setLayer] = useState<number | null>(null);
   const [eventCount, setEventCount] = useState(0);
   const [showTravel, setShowTravel] = useState(true);
+  const [showSource, setShowSource] = useState(true);
   const request = useRef(0),
     refreshSequence = useRef(0),
     mounted = useRef(true);
@@ -524,6 +525,7 @@ export function useManufacturing(host: ManufacturingHost) {
         setLayer(null);
         setEventCount(replay?.eventCount ?? 0);
         setShowTravel(true);
+        setShowSource(true);
         setMessage(
           diagnostic && replay
             ? "Fresh actual-program report and validated replay bytes ready. Native diagnostic only: no GPU display, picking or hardware claim."
@@ -555,7 +557,12 @@ export function useManufacturing(host: ManufacturingHost) {
     if (mounted.current && request.current === id) setWorking(false);
     if (mounted.current) setAdmittingReplay(false);
   }
-  async function updateView(nextLayer: number | null, nextCount: number, nextTravel: boolean) {
+  async function updateView(
+    nextLayer: number | null,
+    nextCount: number,
+    nextTravel: boolean,
+    nextSource: boolean,
+  ) {
     if (!fresh || !inspection?.replay) return;
     const replay = inspection.replay;
     if (
@@ -571,12 +578,14 @@ export function useManufacturing(host: ManufacturingHost) {
     setLayer(nextLayer);
     setEventCount(nextCount);
     setShowTravel(nextTravel);
+    setShowSource(nextSource);
     if (!inspection.displayReady) return;
     try {
       await hostRef.current.setReplayView({
         layer: nextLayer,
         eventCount: nextCount,
         showTravel: nextTravel,
+        showSource: nextSource,
       });
     } catch (error) {
       if (mounted.current) setMessage(String(error));
@@ -657,6 +666,7 @@ export function useManufacturing(host: ManufacturingHost) {
     layer,
     eventCount,
     showTravel,
+    showSource,
     selectSoftwareIntent,
     editScalar,
     editPolicyScalar,

@@ -17,6 +17,9 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+pub(super) const MATERIAL_ARC_BYTES: usize =
+    std::mem::size_of::<MultiPolygon<f64>>() + 2 * std::mem::size_of::<usize>();
+
 /// Original compiler sources shared by capture and final native certification.
 pub(super) struct NativeSourceInputs<'a, 'model> {
     pub input: &'a CompilerInput<'model>,
@@ -71,12 +74,14 @@ struct ActualDepositionScope<'a> {
 
 pub(super) struct NativeSpan {
     pub end: u32,
-    pub material: MultiPolygon<f64>,
+    pub material: Arc<MultiPolygon<f64>>,
     pub finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)>,
+    pub contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>,
+    contribution_bytes: usize,
     pub occupied: Arc<super::ContinuousOccupied>,
     pub source_area_mm2: f64,
     pub point_count: usize,
-    material_bytes: usize,
+    pub material_bytes: usize,
     pub finished_bytes: usize,
 }
 
@@ -204,6 +209,46 @@ pub(super) fn output_bytes(
                 .saturating_mul(std::mem::size_of::<super::NativeSurfaceSpan>()),
         );
     for (index, section) in sections.iter().enumerate() {
+        if !sections[..index]
+            .iter()
+            .any(|prior| Arc::ptr_eq(&prior.material, &section.material))
+        {
+            bytes = bytes.saturating_add(MATERIAL_ARC_BYTES);
+        }
+        bytes = bytes.saturating_add(
+            section.process_domains.capacity() * std::mem::size_of::<super::ProcessDomain>(),
+        );
+        for (domain_index, domain) in section.process_domains.iter().enumerate() {
+            bytes = bytes
+                .saturating_add(
+                    domain.coverage.contributions.capacity()
+                        * std::mem::size_of::<ProcessRegionContribution>(),
+                )
+                .saturating_add(
+                    domain
+                        .coverage
+                        .contributions
+                        .iter()
+                        .map(|source| source.definition_id.allocated_bytes())
+                        .sum::<usize>(),
+                );
+            let shared = Arc::ptr_eq(&domain.material, &section.material)
+                || section.process_domains[..domain_index]
+                    .iter()
+                    .any(|other| Arc::ptr_eq(&domain.material, &other.material))
+                || sections[..index].iter().any(|prior| {
+                    Arc::ptr_eq(&domain.material, &prior.material)
+                        || prior
+                            .process_domains
+                            .iter()
+                            .any(|other| Arc::ptr_eq(&domain.material, &other.material))
+                });
+            if !shared {
+                bytes = bytes
+                    .saturating_add(domain.bytes)
+                    .saturating_add(MATERIAL_ARC_BYTES);
+            }
+        }
         if let Some(occupied) = &section.occupied
             && !sections[..index].iter().any(|prior| {
                 prior
@@ -423,8 +468,10 @@ struct DraftStage {
     native_sample: f64,
     analyses: Vec<CapturedEvidence>,
     leaves: Vec<SourceMaterial>,
-    material: MultiPolygon<f64>,
+    material: Arc<MultiPolygon<f64>>,
     finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)>,
+    contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>,
+    contribution_bytes: usize,
     occupied: super::ContinuousOccupied,
     source_area_mm2: f64,
     coordinate_error_request_mm: f64,
@@ -450,7 +497,17 @@ impl DraftStage {
 
     fn retained_bytes(&self) -> usize {
         self.native_bytes
-            .saturating_add(self.material_bytes)
+            .saturating_add(
+                if self
+                    .contributions
+                    .iter()
+                    .any(|(_, material, _)| Arc::ptr_eq(material, &self.material))
+                {
+                    0
+                } else {
+                    self.material_bytes.saturating_add(MATERIAL_ARC_BYTES)
+                },
+            )
             .saturating_add(occupied_bytes(&self.occupied))
             .saturating_add(
                 self.finished
@@ -458,6 +515,11 @@ impl DraftStage {
                     .saturating_mul(std::mem::size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>)>()),
             )
             .saturating_add(self.finished_bytes)
+            .saturating_add(self.contribution_bytes)
+            .saturating_add(
+                self.contributions.capacity()
+                    * std::mem::size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>(),
+            )
     }
 }
 
@@ -488,7 +550,18 @@ impl ReadyStage {
                     .capacity()
                     .saturating_mul(std::mem::size_of::<SourceMaterial>()),
             )
-            .saturating_add(self.span.material_bytes)
+            .saturating_add(
+                if self
+                    .span
+                    .contributions
+                    .iter()
+                    .any(|(_, material, _)| Arc::ptr_eq(material, &self.span.material))
+                {
+                    0
+                } else {
+                    self.span.material_bytes.saturating_add(MATERIAL_ARC_BYTES)
+                },
+            )
             .saturating_add(occupied_bytes(&self.span.occupied))
             .saturating_add(
                 self.span
@@ -497,6 +570,11 @@ impl ReadyStage {
                     .saturating_mul(std::mem::size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>)>()),
             )
             .saturating_add(self.span.finished_bytes)
+            .saturating_add(self.span.contribution_bytes)
+            .saturating_add(
+                self.span.contributions.capacity()
+                    * std::mem::size_of::<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>(),
+            )
     }
 }
 
@@ -869,6 +947,8 @@ pub(super) fn collect_span(
                     end: current.end,
                     material: current.material,
                     finished: current.finished,
+                    contributions: current.contributions,
+                    contribution_bytes: current.contribution_bytes,
                     occupied: Arc::new(current.occupied),
                     source_area_mm2: current.source_area_mm2,
                     point_count: current.point_count,
@@ -1187,9 +1267,12 @@ fn capture_base(
             sizing.tighten(partition_end_z_bits, end - index);
             continue;
         }
-        let mut material = MultiPolygon(Vec::new());
-        let mut finished = Vec::new();
+        let mut material = Arc::new(MultiPolygon(Vec::new()));
+        let mut composed_bytes = 0usize;
+        let mut finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)> = Vec::new();
         let mut finished_bytes = 0usize;
+        let mut contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)> = Vec::new();
+        let mut contribution_bytes = 0usize;
         let mut occupied = super::ContinuousOccupied::default();
         let mut coordinate_error_request_mm = 0.0;
         let mut native_points = 0usize;
@@ -1289,6 +1372,75 @@ fn capture_base(
             if placed.0.is_empty() {
                 continue;
             }
+            if input
+                .process_document
+                .layers
+                .iter()
+                .any(|layer| layer.enabled)
+            {
+                let fraction = input
+                    .process_document
+                    .resolve(
+                        &occurrence.definition_id,
+                        occurrence.occurrence_id,
+                        input.intent.recipe.infill_fraction,
+                    )
+                    .fraction;
+                for (prior_id, prior) in contributions
+                    .iter()
+                    .map(|(id, material, _)| (*id, material))
+                    .chain(finished.iter().map(|(id, material)| (*id, material)))
+                {
+                    let prior_occurrence = input
+                        .occurrences
+                        .iter()
+                        .find(|o| o.occurrence_id == prior_id)
+                        .expect("captured occurrence");
+                    let prior_fraction = input
+                        .process_document
+                        .resolve(
+                            &prior_occurrence.definition_id,
+                            prior_id,
+                            input.intent.recipe.infill_fraction,
+                        )
+                        .fraction;
+                    if fraction == prior_fraction {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (placed.bounding_rect(), prior.bounding_rect()) else {
+                        continue;
+                    };
+                    if !a.intersects(&b) {
+                        continue;
+                    }
+                    let overlap = super::classification::intersection_accumulated(
+                        &placed,
+                        prior,
+                        surface_work,
+                        cancel,
+                    )?;
+                    admit_points(
+                        retained_points,
+                        native_points,
+                        occupied.point_count,
+                        &overlap,
+                    )?;
+                    if overlap.unsigned_area() > 0.0 {
+                        // Additive finishes preserve M, so positive original-M
+                        // overlap already proves incompatible final-D overlap.
+                        return Err(error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            format!(
+                                "incompatible whole-volume sparse fractions overlap for occurrences {} and {} in [{},{}] mm",
+                                prior_id.get(),
+                                occurrence.occurrence_id.get(),
+                                interval[0],
+                                interval[1],
+                            ),
+                        ));
+                    }
+                }
+            }
             if admission
                 .surface_fields
                 .contains_key(&occurrence.occurrence_id)
@@ -1302,17 +1454,74 @@ fn capture_base(
                         )
                     })?;
                 source_area_mm2 += placed.unsigned_area();
-                finished_bytes = finished_bytes.saturating_add(material_bytes(&mut placed));
+                finished_bytes = finished_bytes
+                    .saturating_add(material_bytes(&mut placed))
+                    .saturating_add(MATERIAL_ARC_BYTES);
                 finished.push((occurrence.occurrence_id, Arc::new(placed)));
             } else {
-                merge(
-                    &mut material,
-                    placed,
-                    &mut coordinate_error_request_mm,
-                    retained_bytes.saturating_add(native_bytes),
-                    surface_work,
-                    cancel,
-                )?;
+                let process_enabled = input
+                    .process_document
+                    .layers
+                    .iter()
+                    .any(|layer| layer.enabled);
+                if process_enabled {
+                    let bytes = material_bytes(&mut placed);
+                    contribution_bytes = contribution_bytes
+                        .saturating_add(bytes)
+                        .saturating_add(MATERIAL_ARC_BYTES);
+                    admit_bytes(
+                        retained_bytes.saturating_add(native_bytes),
+                        contribution_bytes,
+                        composed_bytes,
+                    )?;
+                    let placed = Arc::new(placed);
+                    native_points = native_points
+                        .checked_add(region::point_count(&placed))
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "process contribution point count overflow",
+                            )
+                        })?;
+                    let live_bytes = retained_bytes
+                        .saturating_add(native_bytes)
+                        .saturating_add(contribution_bytes)
+                        .saturating_add(
+                            if contributions
+                                .iter()
+                                .any(|(_, source, _)| Arc::ptr_eq(source, &material))
+                            {
+                                0
+                            } else {
+                                composed_bytes.saturating_add(MATERIAL_ARC_BYTES)
+                            },
+                        );
+                    merge_shared(
+                        &mut material,
+                        &placed,
+                        &mut coordinate_error_request_mm,
+                        live_bytes,
+                        composed_bytes,
+                        bytes,
+                        surface_work,
+                        cancel,
+                    )?;
+                    composed_bytes = if let Some(output) = Arc::get_mut(&mut material) {
+                        material_bytes(output)
+                    } else {
+                        bytes
+                    };
+                    contributions.push((occurrence.occurrence_id, placed, bytes));
+                } else {
+                    merge(
+                        Arc::get_mut(&mut material).expect("unshared ordinary native material"),
+                        placed,
+                        &mut coordinate_error_request_mm,
+                        retained_bytes.saturating_add(native_bytes),
+                        surface_work,
+                        cancel,
+                    )?;
+                }
             }
             admit_points(
                 retained_points,
@@ -1332,10 +1541,21 @@ fn capture_base(
             )?;
             continue;
         }
-        region::canonicalize(&mut material);
+        if let Some(material) = Arc::get_mut(&mut material) {
+            region::canonicalize(material);
+        }
         source_area_mm2 += material.unsigned_area();
         let point_count = native_points
-            .checked_add(region::point_count(&material))
+            .checked_add(
+                if contributions
+                    .iter()
+                    .any(|(_, source, _)| Arc::ptr_eq(source, &material))
+                {
+                    0
+                } else {
+                    region::point_count(&material)
+                },
+            )
             .and_then(|n| n.checked_add(occupied.point_count))
             .filter(|n| {
                 retained_points
@@ -1348,7 +1568,15 @@ fn capture_base(
                     "retained native material/occupancy frontier point budget exceeded",
                 )
             })?;
-        let material_bytes = material_bytes(&mut material);
+        let material_bytes = if let Some(material) = Arc::get_mut(&mut material) {
+            material_bytes(material)
+        } else {
+            contributions
+                .iter()
+                .find(|(_, contribution, _)| Arc::ptr_eq(contribution, &material))
+                .map(|(_, _, bytes)| *bytes)
+                .expect("shared native material is an original contribution")
+        };
         return Ok(DraftStage {
             index,
             end,
@@ -1359,6 +1587,8 @@ fn capture_base(
             leaves,
             material,
             finished,
+            contributions,
+            contribution_bytes,
             occupied,
             source_area_mm2,
             coordinate_error_request_mm,
@@ -1447,7 +1677,7 @@ struct MergeNode {
 // every exact orientation term a multiple of 2^-360; splitter intermediates,
 // nonzero products/error bounds stay normal/finite. This is predicate conditioning,
 // not a geometric tolerance. Outside it the pair stays connected, not disjoint.
-fn merge_predicate_coordinate(value: f64) -> bool {
+pub(super) fn merge_predicate_coordinate(value: f64) -> bool {
     const LOWER: f64 = f64::from_bits((1023 - 128) << 52);
     const UPPER: f64 = f64::from_bits((1023 + 128) << 52);
     value == 0.0 || (LOWER..=UPPER).contains(&value.abs())
@@ -1457,6 +1687,7 @@ fn merge_predicate_coordinate(value: f64) -> bool {
 // geometry representation. In particular, no native coordinates are cloned.
 struct MergeOperand<'a> {
     polygons: &'a [geo::Polygon<f64>],
+    incoming: &'a [geo::Polygon<f64>],
     nodes: &'a [MergeNode],
     first: usize,
     split: usize,
@@ -1471,7 +1702,12 @@ impl BooleanOps for MergeOperand<'_> {
         })
         .filter(move |&index| (self.nodes[index].polygon < self.split) == self.subject)
         .flat_map(move |index| {
-            let polygon = &self.polygons[self.nodes[index].polygon];
+            let index = self.nodes[index].polygon;
+            let polygon = if index < self.split {
+                &self.polygons[index]
+            } else {
+                &self.incoming[index - self.split]
+            };
             std::iter::once(polygon.exterior()).chain(polygon.interiors())
         })
     }
@@ -1512,7 +1748,67 @@ fn merge_root(
 
 fn merge(
     target: &mut MultiPolygon<f64>,
-    mut incoming: MultiPolygon<f64>,
+    incoming: MultiPolygon<f64>,
+    coordinate_error_request: &mut f64,
+    live_bytes: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    merge_operand(
+        target,
+        std::borrow::Cow::Owned(incoming),
+        coordinate_error_request,
+        live_bytes,
+        work,
+        cancel,
+    )
+}
+
+fn merge_shared(
+    target: &mut Arc<MultiPolygon<f64>>,
+    incoming: &Arc<MultiPolygon<f64>>,
+    coordinate_error_request: &mut f64,
+    live_bytes: usize,
+    target_bytes: usize,
+    incoming_bytes: usize,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    if incoming.0.is_empty() {
+        return Ok(());
+    }
+    if target.0.is_empty() {
+        *target = Arc::clone(incoming);
+        return Ok(());
+    }
+    // Only the composed output is mutable. Original admitted occurrence
+    // operands remain shared and borrowed by the ordinary component union.
+    let cloned_target_bytes = if Arc::strong_count(target) > 1 {
+        target_bytes.saturating_add(MATERIAL_ARC_BYTES)
+    } else {
+        0
+    };
+    // The borrowed operand can become a required output singleton or exact
+    // disjoint append. Reserve that coordinate/header clone before into_owned
+    // or any Vec growth, along with a shared target's new output allocation.
+    admit_bytes(live_bytes, cloned_target_bytes, incoming_bytes)?;
+    let live_bytes = live_bytes
+        .saturating_add(cloned_target_bytes)
+        .saturating_add(incoming_bytes);
+    let output = Arc::make_mut(target);
+    merge_operand(
+        output,
+        std::borrow::Cow::Borrowed(incoming.as_ref()),
+        coordinate_error_request,
+        live_bytes,
+        work,
+        cancel,
+    )
+}
+
+fn merge_operand(
+    target: &mut MultiPolygon<f64>,
+    mut incoming: std::borrow::Cow<'_, MultiPolygon<f64>>,
     coordinate_error_request: &mut f64,
     live_bytes: usize,
     work: &mut usize,
@@ -1522,14 +1818,42 @@ fn merge(
         return Ok(());
     }
     if target.0.is_empty() {
-        *target = incoming;
+        *target = incoming.into_owned();
         return Ok(());
     }
     let a = target.bounding_rect().expect("nonempty admitted region");
     let b = incoming.bounding_rect().expect("nonempty admitted region");
     if !a.intersects(&b) {
         // No Boolean conversion: preserve all actual native source vertices.
-        target.0.extend(incoming.0);
+        if matches!(&incoming, std::borrow::Cow::Borrowed(_)) {
+            let count = target
+                .0
+                .len()
+                .checked_add(incoming.0.len())
+                .filter(|count| *count <= MAX_DEPOSITION_SEGMENTS as usize)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "shared native M output record limit exceeded",
+                    )
+                })?;
+            let headers = count
+                .checked_mul(std::mem::size_of::<geo::Polygon<f64>>())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "shared native M output record bytes overflow",
+                    )
+                })?;
+            admit_bytes(live_bytes, headers, 0)?;
+            target.0.try_reserve_exact(incoming.0.len()).map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "shared native M output record allocation refused",
+                )
+            })?;
+        }
+        target.0.extend(incoming.into_owned().0);
         return region::check_size(target);
     }
     // This admission covers the ordinary overlays of disjoint components as
@@ -1622,14 +1946,6 @@ fn merge(
         node.parent = index;
         node.tail = index;
     }
-    target.0.try_reserve_exact(incoming.0.len()).map_err(|_| {
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            "native M record allocation refused",
-        )
-    })?;
-    target.0.append(&mut incoming.0);
-    drop(incoming);
     for i in 0..count {
         for j in i + 1..count {
             merge_work(work, 1, cancel)?;
@@ -1665,7 +1981,8 @@ fn merge(
             merge_work(work, cost, cancel)?;
             if nodes[i].predicate_conditioned
                 && nodes[j].predicate_conditioned
-                && !target.0[nodes[i].polygon].intersects(&target.0[nodes[j].polygon])
+                && !merge_polygon(target, &incoming, split, nodes[i].polygon)
+                    .intersects(merge_polygon(target, &incoming, split, nodes[j].polygon))
             {
                 continue;
             }
@@ -1698,10 +2015,21 @@ fn merge(
             continue;
         }
         if nodes[first].size == 1 {
-            merged.0.push(std::mem::replace(
-                &mut target.0[nodes[first].polygon],
-                geo::Polygon::new(geo::LineString(Vec::new()), Vec::new()),
-            ));
+            let index = nodes[first].polygon;
+            let polygon = if index < split {
+                std::mem::replace(
+                    &mut target.0[index],
+                    geo::Polygon::new(geo::LineString(Vec::new()), Vec::new()),
+                )
+            } else if let std::borrow::Cow::Owned(incoming) = &mut incoming {
+                std::mem::replace(
+                    &mut incoming.0[index - split],
+                    geo::Polygon::new(geo::LineString(Vec::new()), Vec::new()),
+                )
+            } else {
+                incoming.0[index - split].clone()
+            };
+            merged.0.push(polygon);
             continue;
         }
         let mut min = [f64::INFINITY; 2];
@@ -1721,6 +2049,7 @@ fn merge(
         }
         let subject = MergeOperand {
             polygons: &target.0,
+            incoming: &incoming.0,
             nodes: &nodes,
             first,
             split,
@@ -1772,6 +2101,19 @@ fn merge(
     }
     *target = merged;
     region::check_size(target)
+}
+
+fn merge_polygon<'a>(
+    target: &'a MultiPolygon<f64>,
+    incoming: &'a MultiPolygon<f64>,
+    split: usize,
+    index: usize,
+) -> &'a geo::Polygon<f64> {
+    if index < split {
+        &target.0[index]
+    } else {
+        &incoming.0[index - split]
+    }
 }
 
 fn union_loops(
@@ -2835,7 +3177,15 @@ mod actual_deposition_tests {
                         nominal_deposition_volume_mm3: object_area * volume,
                         support_area_mm2: support_area,
                         support_nominal_deposition_volume_mm3: support_area * volume,
-                        requested_infill_fraction: 1.0,
+                        process_regions: if object_area > 0.0 {
+                            vec![ProcessRegionCoverage {
+                                area_mm2: object_area,
+                                fraction: 1.0,
+                                contributions: Vec::new(),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
                     },
                     paths: vec![DepositionPath {
                         kind,

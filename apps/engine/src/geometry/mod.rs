@@ -1286,7 +1286,11 @@ impl Runtime {
         }
         Ok(())
     }
-    fn surface_base(&self, session: &SessionId, base: ProjectRevision) -> Result<(), ProjectError> {
+    fn metadata_base(
+        &self,
+        session: &SessionId,
+        base: ProjectRevision,
+    ) -> Result<(), ProjectError> {
         if session != &self.session_id || base != self.project.info().revision {
             return Err(project_error(
                 ProjectErrorCode::StaleRevision,
@@ -1309,7 +1313,7 @@ impl Runtime {
         }
         Ok(())
     }
-    fn commit_surface_edit(&mut self, edit: Edit) -> Result<Reply, ProjectError> {
+    fn commit_metadata_edit(&mut self, edit: Edit) -> Result<Reply, ProjectError> {
         let edit = self.project.prepare(edit)?;
         self.project.commit(edit)?;
         self.synchronize_native_pins();
@@ -1345,6 +1349,14 @@ impl Runtime {
                     info: self.project.info(),
                 }))
             }
+            ProjectCommand::EditProcess {
+                session_id,
+                base_revision,
+                edit,
+            } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::Process { edit })
+            }
             ProjectCommand::ImportSurfaceImageFinish {
                 session_id,
                 base_revision,
@@ -1372,7 +1384,7 @@ impl Runtime {
                 scope,
                 finish,
             } => {
-                self.surface_base(&session_id, base_revision)?;
+                self.metadata_base(&session_id, base_revision)?;
                 self.live_surface_target(&face_ref)?;
                 let scope = match scope {
                     SurfaceScopeKind::Definition => SurfaceScope::Definition {
@@ -1383,7 +1395,7 @@ impl Runtime {
                         expected_definition_id: face_ref.definition_id,
                     },
                 };
-                self.commit_surface_edit(Edit::AddSurfaceFinish {
+                self.commit_metadata_edit(Edit::AddSurfaceFinish {
                     scope,
                     face_id: face_ref.face_id,
                     finish,
@@ -1394,8 +1406,8 @@ impl Runtime {
                 base_revision,
                 layer_id,
             } => {
-                self.surface_base(&session_id, base_revision)?;
-                self.commit_surface_edit(Edit::RemoveSurfaceFinish { layer_id })
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::RemoveSurfaceFinish { layer_id })
             }
             ProjectCommand::SetSurfaceFinishEnabled {
                 session_id,
@@ -1403,8 +1415,8 @@ impl Runtime {
                 layer_id,
                 enabled,
             } => {
-                self.surface_base(&session_id, base_revision)?;
-                self.commit_surface_edit(Edit::SetSurfaceFinishEnabled { layer_id, enabled })
+                self.metadata_base(&session_id, base_revision)?;
+                self.commit_metadata_edit(Edit::SetSurfaceFinishEnabled { layer_id, enabled })
             }
             ProjectCommand::New {
                 session_id,
