@@ -40,6 +40,15 @@ pub(crate) struct SourceTransportSupport {
     pub(crate) base_interval: [f64; 2],
     pub(crate) corrected_interval: [f64; 2],
     pub(crate) displacement_interval: [f64; 2],
+    /// Encloses a proved feasible scalar of the complete selected realized G,
+    /// not necessarily this refined support cell. This is geometric authority:
+    /// diagnostic owner coordinates and arbitrary edge samples cannot supply it.
+    /// Only the normative closed cone currently proves its retained apex.
+    pub(crate) realized_witness_interval: Option<[f64; 2]>,
+    /// Independently feasible extrema of actual G: an upper bound on a
+    /// feasible minimum and a lower bound on a feasible maximum. These need
+    /// not be ordered as an interval enclosing one point.
+    pub(crate) realized_endpoint_witnesses: Option<[f64; 2]>,
     /// Physical three-dimensional error, independent of the scalar covector.
     pub(crate) source_error_mm: f64,
 }
@@ -304,8 +313,16 @@ pub(crate) fn source_transport_supports(
                         ),
                     )
                 })?;
+            let working = face_limit
+                .checked_sub(domain.owned_bytes())
+                .ok_or_else(resource)?;
+            let classifier_bytes = working
+                .checked_add(domain.retained_bytes())
+                .ok_or_else(resource)?;
             let before = work.consumed();
-            let Some(collar) = OriginalCollar::for_enclosure(&domain, use_, work, cancel)
+            let Some(collar) = OriginalCollar::for_enclosure_with_byte_limit(
+                &domain, use_, classifier_bytes, work, cancel,
+            )
                 .map_err(|error| work.annotate_error(error, before,
                     format_args!("source support central-coedge owner preparation; face={}, coedge={}, native_range={:?}",
                         use_.face, use_.coedge, domain.original_coedge_correspondence(use_.coedge).ok().map(|proof| proof.native_range()))))? else {
@@ -319,9 +336,6 @@ pub(crate) fn source_transport_supports(
             if matches!(collar.transport, CarrierTransport::Exact) {
                 continue;
             }
-            let working = face_limit
-                .checked_sub(domain.owned_bytes())
-                .ok_or_else(resource)?;
             let face = domain.native().face();
             let edge = &face.absolute_boundaries()[use_.wire][use_.index];
             let before = work.consumed();
@@ -366,6 +380,8 @@ pub(crate) fn source_transport_supports(
                             base_interval: [scalar_base.lo, scalar_base.hi],
                             corrected_interval: [scalar_corrected.lo, scalar_corrected.hi],
                             displacement_interval: [scalar_delta.lo, scalar_delta.hi],
+                            realized_witness_interval: None,
+                            realized_endpoint_witnesses: None,
                             source_error_mm: error,
                         };
                         let output_limit = available.checked_sub(domain.owned_bytes())
@@ -442,4 +458,316 @@ pub(crate) fn source_transport_supports(
         })?;
     }
     Ok(output)
+}
+
+/// Query-local C0 enclosure only. The seed covers retained original F; added
+/// cells are evaluated on the literal selected G, never on a source proxy.
+pub(super) struct SourceProjectionCover<'a> {
+    rows: &'a [[Interval; 3]; 3],
+    translation: [f64; 3],
+    interval: [f64; 2],
+    xy: [[f64; 2]; 2],
+    tolerance: f64,
+}
+
+impl SourceProjectionCover<'_> {
+    pub(super) fn include(&mut self, position: [Interval; 3]) -> Result<bool, GeometryError> {
+        let world: [Interval; 3] = std::array::from_fn(|axis| {
+            add(
+                dot(self.rows[axis], position),
+                Interval::point(self.translation[axis]),
+            )
+        });
+        for value in world {
+            Interval::new(value.lo, value.hi)?;
+        }
+        if world[2].hi < self.interval[0] || world[2].lo > self.interval[1] {
+            return Ok(true);
+        }
+        if (0..2)
+            .all(|axis| self.xy[axis][0] <= world[axis].lo && world[axis].hi <= self.xy[axis][1])
+        {
+            return Ok(true);
+        }
+        if (0..2).any(|axis| world[axis].sub(Interval::point(world[axis].lo)).hi > self.tolerance) {
+            return Ok(false);
+        }
+        for axis in 0..2 {
+            self.xy[axis][0] = self.xy[axis][0].min(world[axis].lo);
+            self.xy[axis][1] = self.xy[axis][1].max(world[axis].hi);
+        }
+        Ok(true)
+    }
+
+    pub(super) fn split(
+        &self,
+        parameter: [[f64; 2]; 2],
+        depth: u8,
+        face: usize,
+        first: [Interval; 3],
+        second: [Interval; 3],
+    ) -> Result<[[[f64; 2]; 2]; 2], GeometryError> {
+        let first: [Interval; 3] = std::array::from_fn(|axis| dot(self.rows[axis], first));
+        let second: [Interval; 3] = std::array::from_fn(|axis| dot(self.rows[axis], second));
+        // Include world height in the motion metric: an excluded cut-crosser
+        // must refine in its actual native direction, not a source-F proxy.
+        crate::analysis::critical::split_metric_derivatives(parameter, depth, face, &first, &second)
+    }
+}
+
+struct ClosedSourceExit {
+    edge: monstertruck_topology::EdgeId<Curve>,
+    absolute_back: bool,
+    parameter: f64,
+}
+
+/// Overcover the added actual-G pieces intersecting the CLOSED world slab.
+/// No physical Original-F/G error, material membership or void is asserted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_transport_projection_cover(
+    source: OriginalTrimSource<'_, '_>,
+    matrix: [[Interval; 3]; 3],
+    pose: spiling_contracts::geometry::RigidPoseMm,
+    interval: [f64; 2],
+    original_xy: [[f64; 2]; 2],
+    tolerance: f64,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[f64; 2]; 2], GeometryError> {
+    type Pending = [([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1];
+    const FIXED_BYTES: usize = SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+        + std::mem::size_of::<Pending>()
+        + std::mem::size_of::<SourceProjectionCover<'static>>()
+        + std::mem::size_of::<OriginalCollar<'static, 'static>>()
+        + 2 * std::mem::size_of::<SurfaceFirstEnclosure>()
+        + std::mem::size_of::<ChartCurveEnclosure>()
+        + std::mem::size_of::<CurveEnclosure>()
+        + std::mem::size_of::<Vec<ClosedSourceExit>>();
+    work.charge(1, cancel)?;
+    let definition = source.definition();
+    if let Some(plans) = source.vertex_plans() {
+        plans.validate_source(definition, work, cancel)?;
+    }
+    if definition.material_transport_is_proved_zero(work, cancel)? {
+        return Ok(original_xy);
+    }
+    let mut cover = SourceProjectionCover {
+        rows: &matrix,
+        translation: pose.translation_mm,
+        interval,
+        xy: original_xy,
+        tolerance,
+    };
+    let available = remaining_bytes
+        .checked_sub(FIXED_BYTES)
+        .ok_or_else(resource)?;
+    let originals = source.prepare_domains_if_missing(available, work, cancel)?;
+    let source = source.borrowing_domains(originals.as_ref());
+    let available = available
+        .checked_sub(originals.as_ref().map_or(0, |owner| owner.retained_bytes()))
+        .ok_or_else(resource)?;
+    let mut incidence = SourceEdgeIncidence::new(definition, available, work, cancel)?;
+    incidence.prepare_vertices(available, work, cancel)?;
+    let available = available
+        .checked_sub(incidence.owned_bytes())
+        .ok_or_else(resource)?;
+    let mut exit_count = 0usize;
+    for _ in incidence.values() {
+        work.charge(1, cancel)?;
+        exit_count = exit_count.checked_add(2).ok_or_else(resource)?;
+    }
+    let requested = exit_count
+        .checked_mul(std::mem::size_of::<ClosedSourceExit>())
+        .filter(|bytes| *bytes <= available)
+        .ok_or_else(resource)?;
+    let mut exits: Vec<ClosedSourceExit> = Vec::new();
+    exits
+        .try_reserve_exact(exit_count)
+        .map_err(|_| resource())?;
+    let exit_bytes = exits
+        .capacity()
+        .checked_mul(std::mem::size_of::<ClosedSourceExit>())
+        .filter(|bytes| requested <= *bytes && *bytes <= available)
+        .ok_or_else(resource)?;
+    let available = available.checked_sub(exit_bytes).ok_or_else(resource)?;
+    work.charge(exit_bytes as u64, cancel)?;
+    let vertices = incidence.vertices().ok_or_else(|| {
+        unavailable("actual-G cover lacks the complete original vertex inventory")
+    })?;
+    for (ordinal, vertex) in vertices.enumerate() {
+        work.charge(1, cancel)?;
+        let before = work.consumed();
+        let outcome = (|| {
+            let selection =
+                SourceVertexPlan::prepare(source, &incidence, vertex, available, work, cancel)?
+                    .ok_or_else(|| {
+                        unavailable("actual-G cover lacks a selected original corner")
+                    })?;
+            let scratch = available
+                .checked_sub(selection.owned_bytes())
+                .ok_or_else(resource)?;
+            let plan = selection.plan();
+            plan.visit_projected_position_supports(source, &mut cover, scratch, work, cancel)?;
+            plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter, work| {
+                if !parameter.is_finite() || incidence.get(edge).is_none() {
+                    return Err(unavailable(
+                        "actual-G corner has a foreign or nonfinite native exit",
+                    ));
+                }
+                for previous in &exits {
+                    work.charge(1, cancel)?;
+                    if previous.edge == edge && previous.absolute_back == absolute_back {
+                        return if previous.parameter == parameter {
+                            Ok(())
+                        } else {
+                            Err(unavailable(
+                                "actual-G corners disagree on their literal native exit",
+                            ))
+                        };
+                    }
+                }
+                if exits.len() >= exit_count {
+                    return Err(unavailable(
+                        "actual-G corners exceed the original endpoint inventory",
+                    ));
+                }
+                exits.push(ClosedSourceExit {
+                    edge,
+                    absolute_back,
+                    parameter,
+                });
+                Ok(())
+            })
+        })();
+        outcome.map_err(|error| {
+            work.annotate_error(
+                error,
+                before,
+                format_args!("actual-G C0 corner cover; source_vertex_ordinal={ordinal}"),
+            )
+        })?;
+    }
+    if exits.len() != exit_count {
+        return Err(unavailable(
+            "actual-G cover lacks complete literal native endpoint exits",
+        ));
+    }
+    let mut stack: Pending = [([[0.0; 2]; 2], 0); MAX_DEPTH as usize + 1];
+    for uses in incidence.values() {
+        let second = uses.second.ok_or_else(|| {
+            unavailable("actual-G cover requires two opposed original coedge uses")
+        })?;
+        for use_ in [uses.first, second] {
+            work.charge(1, cancel)?;
+            let before = work.consumed();
+            let outcome = (|| {
+                let domain = source.face_domain(use_.face, available, work, cancel)?;
+                let scratch = available
+                    .checked_sub(domain.owned_bytes())
+                    .ok_or_else(resource)?;
+                let classifier_bytes = scratch
+                    .checked_add(domain.retained_bytes())
+                    .ok_or_else(resource)?;
+                let collar = OriginalCollar::for_enclosure_with_byte_limit(
+                    &domain,
+                    use_,
+                    classifier_bytes,
+                    work,
+                    cancel,
+                )?
+                .ok_or_else(|| unavailable("actual-G ribbon has no complete original recipe"))?;
+                if matches!(collar.transport, CarrierTransport::Exact) {
+                    // No added ribbon: its original F is already in the seed.
+                    return Ok(());
+                }
+                let face = domain.native().face();
+                let edge = &face.absolute_boundaries()[use_.wire][use_.index];
+                let mut central = [None; 2];
+                for exit in &exits {
+                    work.charge(1, cancel)?;
+                    if exit.edge == edge.id() {
+                        central[usize::from(exit.absolute_back)] = Some(exit.parameter);
+                    }
+                }
+                let [Some(front), Some(back)] = central else {
+                    return Err(unavailable(
+                        "actual-G ribbon lacks both literal native endpoint exits",
+                    ));
+                };
+                if collar.range[0] >= front || front >= back || back >= collar.range[1] {
+                    return Err(unavailable(
+                        "actual-G exits do not partition the original native ribbon",
+                    ));
+                }
+                edge.with_curve(|curve| -> Result<(), GeometryError> {
+                    let prepared = definition.prepare_boundary_curve(
+                        edge.id(),
+                        curve,
+                        (front, back),
+                        scratch,
+                        work,
+                        cancel,
+                    )?;
+                    scratch
+                        .checked_sub(prepared.retained_bytes())
+                        .ok_or_else(resource)?;
+                    let mut covered = front;
+                    for span in prepared.parameter_intervals() {
+                        work.charge(1, cancel)?;
+                        let range = [span.0.max(front), span.1.min(back)];
+                        if range[0] > range[1] {
+                            continue;
+                        }
+                        if range[0] > covered {
+                            return Err(unavailable(
+                                "actual-G coefficient spans leave an uncovered native interval",
+                            ));
+                        }
+                        covered = covered.max(range[1]);
+                        stack[0] = ([range, [0.0, 1.0]], 0);
+                        let mut pending = 1;
+                        while pending != 0 {
+                            pending -= 1;
+                            let (parameter, depth) = stack[pending];
+                            work.charge(1, cancel)?;
+                            let spatial =
+                                prepared.jet((parameter[0][0], parameter[0][1]), work, cancel)?;
+                            let jet =
+                                collar.position_first_jet(parameter, &spatial, work, cancel)?;
+                            if cover.include(jet.0)? {
+                                continue;
+                            }
+                            let children =
+                                cover.split(parameter, depth, use_.face, jet.1, jet.2)?;
+                            if pending + children.len() > stack.len() {
+                                return Err(resource());
+                            }
+                            for child in children.into_iter().rev() {
+                                stack[pending] = (child, depth + 1);
+                                pending += 1;
+                            }
+                        }
+                    }
+                    if covered < back {
+                        return Err(unavailable(
+                            "actual-G coefficient spans omit its closed native endpoint",
+                        ));
+                    }
+                    Ok(())
+                })
+            })();
+            outcome.map_err(|error| {
+                work.annotate_error(
+                    error,
+                    before,
+                    format_args!(
+                        "actual-G C0 central ribbon cover; face={}, coedge={}",
+                        use_.face, use_.coedge,
+                    ),
+                )
+            })?;
+        }
+    }
+    Ok(cover.xy)
 }

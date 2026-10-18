@@ -10,18 +10,27 @@ use super::radial_product::RadialRegionKind;
 use super::*;
 use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::parametric::{
-    SurfaceFirstEnclosure, SurfaceFunctional, SurfaceFunctionalEnclosure,
-    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, surface_functional_enclosures,
-    surface_functional_scratch_bytes, surface_piecewise_first_enclosure,
+    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, SurfaceFirstEnclosure, SurfaceFunctional,
+    SurfaceFunctionalEnclosure, surface_functional_enclosures, surface_functional_scratch_bytes,
+    surface_piecewise_first_enclosure,
 };
 
 type Box3 = [Interval; 3];
-pub(super) type BoundaryVisitor<'a> = dyn for<'s> FnMut(BoundaryCell<'s>, bool, bool, &mut GeometryWorkBudget, &AtomicBool) -> Result<BoundaryVisit, GeometryError>
+pub(super) type BoundaryVisitor<'a> = dyn for<'s> FnMut(
+        BoundaryCell<'s>,
+        bool,
+        bool,
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+    ) -> Result<BoundaryVisit, GeometryError>
     + 'a;
 const STACK_BYTES: usize = UV_EMBEDDING_STACK_BYTES
     + std::mem::size_of::<[([[f64; 2]; 2], u8, bool, bool, bool); MAX_DEPTH as usize + 1]>()
     + std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
     + std::mem::size_of::<RadialInventory<'_, '_>>()
+    + std::mem::size_of::<ClosedRadialLinks<'_>>()
+    + std::mem::size_of::<vertex_transport::SourceVertexPlan<'_, '_>>()
+    + std::mem::size_of::<Option<vertex_transport::CompletePositionCoverFailure>>()
     + std::mem::size_of::<Option<([f64; 2], usize, LocalGeometryRefusal)>>()
     + std::mem::size_of::<[ChartCurveEnclosure; 2]>()
     + std::mem::size_of::<[Box3; 2]>()
@@ -32,6 +41,7 @@ const STACK_BYTES: usize = UV_EMBEDDING_STACK_BYTES
     + surface_functional_scratch_bytes::<1>()
     + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
     + std::mem::size_of::<SurfaceFirstEnclosure>()
+    + std::mem::size_of::<Option<source_chart::SphereChart>>()
     + crate::analysis::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES;
 
 fn resource() -> GeometryError {
@@ -442,8 +452,15 @@ impl<'v, 'f> RadialInventory<'v, 'f> {
             [q[0], q[1], Interval::point(0.0)],
         );
         Ok(self.include_determinant(
-            BoundaryCell { position, original_face: None },
-            q, determinant, can_refine, work, cancel,
+            BoundaryCell {
+                position,
+                original_face: None,
+            },
+            q,
+            determinant,
+            can_refine,
+            work,
+            cancel,
         )? == BoundaryVisit::Accepted)
     }
 
@@ -490,6 +507,8 @@ impl<'v, 'f> RadialInventory<'v, 'f> {
 
 fn visit_original_faces(
     source: OriginalTrimSource<'_, '_>,
+    incidence: &SourceEdgeIncidence,
+    links: &ClosedRadialLinks<'_>,
     coordinates: &ActualMaterialCoordinates<'_>,
     remaining_bytes: usize,
     inventory: &mut RadialInventory<'_, '_>,
@@ -533,151 +552,220 @@ fn visit_original_faces(
         let mut phase = "carrier continuity";
         let mut active_uv = domain.uv_bounds();
         let mut active_depth = 0;
-        let completed = face.with_surface(|surface| -> Result<bool, GeometryError> {
-            // A successful piecewise evaluation admits continuity/Lipschitzness
-            // on the WHOLE closed native domain. Discontinuous knots and nested
-            // carrier poles are real Native errors, not silently split away.
-            surface_piecewise_first_enclosure(surface, domain.uv_bounds(), work, cancel)?;
-            for joint in domain.native().joints() {
+        let completed = (|| -> Result<bool, GeometryError> {
+            for (joint_index, joint) in domain.native().joints().iter().enumerate() {
                 phase = "native joint source image";
                 work.charge(1, cancel)?;
                 let uv = joint.enclosure.map(|v| [v.lower, v.upper]);
-                let position = surface_piecewise_first_enclosure(surface, uv, work, cancel)?.position;
-                if !outside(coordinates.position(position)?[2], interval) {
+                active_uv = uv;
+                let position = face.with_surface(|surface| {
+                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                        .map(|jet| jet.position)
+                })?;
+                if outside(coordinates.position(position)?[2], interval) {
+                    continue;
+                }
+                phase = "bound closed source/reference/G and whole native joint image";
+                if !links.qualified_original_joint(
+                    source,
+                    incidence,
+                    &domain,
+                    joint_index,
+                    remaining_bytes
+                        .checked_sub(domain.owned_bytes())
+                        .ok_or_else(resource)?,
+                    work,
+                    cancel,
+                )? {
                     return Ok(false);
                 }
             }
-            for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
-                let mut stack = [([[0.0; 2]; 2], 0_u8, false, true, false); MAX_DEPTH as usize + 1];
-                stack[0] = (span, 0, false, true, false);
-                let mut pending = 1;
-                while pending != 0 {
-                    pending -= 1;
-                    let (uv, depth, height_contained, recontract_height, mut trim_inside) = stack[pending];
-                    active_uv = uv;
-                    active_depth = depth;
-                    work.charge(1, cancel)?;
-                    let (uv, jet, height_contained, strong_contraction) = if !height_contained && recontract_height {
-                        phase = "raw F closed-height preimage contraction";
-                        let clipped = crate::analysis::slab::clip_height_parameter_box(
-                            surface, uv, height, target, work, cancel,
-                        );
-                        let Some(clipped) = clipped? else { continue; };
-                        phase = "raw F contracted carrier first jet";
-                        let jet = surface_piecewise_first_enclosure(surface, clipped, work, cancel);
-                        let jet = jet?;
-                        let h = height.height(jet.position);
-                        let contained = target[0] <= h.lo && h.hi <= target[1];
-                        // A strong contraction can profitably repeat before
-                        // tiling a height-invariant direction. This half-width
-                        // trigger schedules work only; it proves no occupancy.
-                        let strong = (0..2).any(|axis| {
-                            let before = uv[axis][1] - uv[axis][0];
-                            let after = clipped[axis][1] - clipped[axis][0];
-                            before.is_finite() && before > 0.0 && after <= before * 0.5
-                        });
-                        (clipped, jet, contained, strong)
-                    } else {
-                        // Subsets retain the necessary preimage even when
-                        // contraction is not scheduled. Only full image
-                        // containment is proof and inherited as such. Every
-                        // child still receives its fresh complete carrier jet.
-                        phase = "raw F preconditioned carrier enclosure";
-                        let jet = surface_piecewise_first_enclosure(
-                            surface, uv, work, cancel,
-                        );
-                        let jet = jet?;
-                        let h = height.height(jet.position);
-                        (uv, jet, height_contained || target[0] <= h.lo && h.hi <= target[1], false)
-                    };
-                    active_uv = uv;
-                    if outside(coordinates.position(jet.position)?[2], interval) {
-                        continue;
-                    }
-                    let can_refine = depth < MAX_DEPTH && uv.iter().any(|range| {
-                        let mid = range[0] * 0.5 + range[1] * 0.5;
-                        range[0] < mid && mid < range[1]
-                    });
-                    phase = "raw F cylinder determinant/boundary visitor";
-                    let n = cross(jet.du, jet.dv);
-                    let n = if face.orientation() { n } else { n.map(Interval::neg) };
-                    let included = inventory.include(
-                        BoundaryCell { position: jet.position, original_face: Some((surface, uv)) },
-                        n, coordinates, can_refine, work, cancel,
-                    );
-                    let included = included?;
-                    if included == BoundaryVisit::Accepted {
-                        continue;
-                    }
-                    // Successful full-carrier determinant and boundary
-                    // witnesses cover every original trimmed point in this
-                    // box. Keep winding as an exclusion for failed cells:
-                    // a box intersecting a curved trim can otherwise spend
-                    // the entire winding subdivision budget to return only
-                    // Boundary, even though all F obligations already hold.
-                    // The original joint/link inventory and signed native
-                    // fibre census remain independent and mandatory.
-                    phase = "raw F unresolved-cell trim exclusion";
-                    if !trim_inside {
-                        let classification = domain.classify(uv, work, cancel);
-                        match classification? {
-                            TrimClassification::Outside => continue,
-                            TrimClassification::Inside => trim_inside = true,
-                            TrimClassification::Boundary => {}
-                        }
-                    }
-                    if !can_refine { return Ok(false); }
-                    let children = if included == BoundaryVisit::RefineActualXy {
-                        // Only the actual-coordinate metric asks for this goal.
-                        // Its XY error has no vertical box-diameter obligation.
-                        // Unresolved radius/determinant cells always retain
-                        // spatial refinement, and every child is requalified.
-                        let rows = coordinates.affine_rows();
-                        let du = [dot(rows[0], jet.du), dot(rows[1], jet.du)];
-                        let dv = [dot(rows[0], jet.dv), dot(rows[1], jet.dv)];
-                        crate::analysis::critical::split_metric_derivatives(
-                            uv, depth, fi, &du, &dv,
-                        )?
-                    } else {
-                        crate::analysis::critical::split_metric_derivatives(
-                            uv, depth, fi, &jet.du, &jet.dv,
-                        )?
-                    };
-                    if pending + children.len() > stack.len() {
-                        return Err(resource());
-                    }
-                    let recontract_height = if height_contained {
-                        false
-                    } else if strong_contraction {
-                        true
-                    } else {
-                        let axis = usize::from(children[0][0] == uv[0]);
-                        let derivative = height.dot(if axis == 0 { jet.du } else { jet.dv });
-                        if derivative.lo == 0.0 && derivative.hi == 0.0 {
-                            false
-                        } else {
-                            // Fold the height covector into original native
-                            // coefficients before choosing work. This retains
-                            // exact axial cancellations lost by spatial boxes.
-                            phase = "raw F height-sensitive refinement scheduling";
-                            let gradient = surface_functional_enclosures(
-                                surface, uv, &[height_functional], work, cancel,
+            phase = "carrier continuity";
+            // Admit continuity/Lipschitzness on the WHOLE closed native domain
+            // before excluding any carrier by height. Discontinuous knots and
+            // nested poles remain real Native errors. Only this immutable
+            // coefficient proof is reusable; every partial jet below is fresh.
+            let whole = source.whole_face_first_enclosure(fi, &domain, work, cancel)?;
+            // Native joint enclosures need not be subsets of that domain, so
+            // their independent closed-image gates above must run first.
+            if outside(height.height(whole.position), target) {
+                return Ok(true);
+            }
+            face.with_surface(|surface| -> Result<bool, GeometryError> {
+                let sphere_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
+                for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
+                    let mut stack =
+                        [([[0.0; 2]; 2], 0_u8, false, true, false); MAX_DEPTH as usize + 1];
+                    stack[0] = (span, 0, false, true, false);
+                    let mut pending = 1;
+                    while pending != 0 {
+                        pending -= 1;
+                        let (uv, depth, height_contained, recontract_height, mut trim_inside) =
+                            stack[pending];
+                        active_uv = uv;
+                        active_depth = depth;
+                        work.charge(1, cancel)?;
+                        let (uv, jet, height_contained, strong_contraction) = if !height_contained
+                            && recontract_height
+                        {
+                            phase = "raw F closed-height preimage contraction";
+                            let clipped = crate::analysis::slab::clip_height_parameter_box(
+                                surface, uv, height, target, work, cancel,
                             );
-                            let [gradient] = gradient?;
-                            let derivative = if axis == 0 { gradient.du } else { gradient.dv };
-                            derivative.lo != 0.0 || derivative.hi != 0.0
+                            let Some(clipped) = clipped? else {
+                                continue;
+                            };
+                            phase = "raw F contracted carrier first jet";
+                            let jet =
+                                surface_piecewise_first_enclosure(surface, clipped, work, cancel);
+                            let jet = jet?;
+                            let h = height.height(jet.position);
+                            let contained = target[0] <= h.lo && h.hi <= target[1];
+                            // A strong contraction can profitably repeat before
+                            // tiling a height-invariant direction. This half-width
+                            // trigger schedules work only; it proves no occupancy.
+                            let strong = (0..2).any(|axis| {
+                                let before = uv[axis][1] - uv[axis][0];
+                                let after = clipped[axis][1] - clipped[axis][0];
+                                before.is_finite() && before > 0.0 && after <= before * 0.5
+                            });
+                            (clipped, jet, contained, strong)
+                        } else {
+                            // Subsets retain the necessary preimage even when
+                            // contraction is not scheduled. Only full image
+                            // containment is proof and inherited as such. Every
+                            // child still receives its fresh complete carrier jet.
+                            phase = "raw F preconditioned carrier enclosure";
+                            let jet = surface_piecewise_first_enclosure(surface, uv, work, cancel);
+                            let jet = jet?;
+                            let h = height.height(jet.position);
+                            (
+                                uv,
+                                jet,
+                                height_contained || target[0] <= h.lo && h.hi <= target[1],
+                                false,
+                            )
+                        };
+                        active_uv = uv;
+                        if outside(coordinates.position(jet.position)?[2], interval) {
+                            continue;
                         }
-                    };
-                    for child in children {
-                        // Inside is a whole-box proof inherited only by subsets;
-                        // neither Boundary nor failed metric evidence is reused.
-                        stack[pending] = (child, depth + 1, height_contained, recontract_height, trim_inside);
-                        pending += 1;
+                        let can_refine = depth < MAX_DEPTH
+                            && uv.iter().any(|range| {
+                                let mid = range[0] * 0.5 + range[1] * 0.5;
+                                range[0] < mid && mid < range[1]
+                            });
+                        phase = "raw F cylinder determinant/boundary visitor";
+                        let n = if let Some(chart) = &sphere_chart {
+                            // This independently qualified source chart retains
+                            // its geometric normal at collapsed UV poles and
+                            // already includes processor and face orientation.
+                            chart.normal(jet.position)?
+                        } else {
+                            let n = cross(jet.du, jet.dv);
+                            if face.orientation() {
+                                n
+                            } else {
+                                n.map(Interval::neg)
+                            }
+                        };
+                        let included = inventory.include(
+                            BoundaryCell {
+                                position: jet.position,
+                                original_face: Some((surface, uv)),
+                            },
+                            n,
+                            coordinates,
+                            can_refine,
+                            work,
+                            cancel,
+                        );
+                        let included = included?;
+                        if included == BoundaryVisit::Accepted {
+                            continue;
+                        }
+                        // Successful full-carrier determinant and boundary
+                        // witnesses cover every original trimmed point in this
+                        // box. Keep winding as an exclusion for failed cells:
+                        // a box intersecting a curved trim can otherwise spend
+                        // the entire winding subdivision budget to return only
+                        // Boundary, even though all F obligations already hold.
+                        // The original joint/link inventory and signed native
+                        // fibre census remain independent and mandatory.
+                        phase = "raw F unresolved-cell trim exclusion";
+                        if !trim_inside {
+                            let classification = domain.classify(uv, work, cancel);
+                            match classification? {
+                                TrimClassification::Outside => continue,
+                                TrimClassification::Inside => trim_inside = true,
+                                TrimClassification::Boundary => {}
+                            }
+                        }
+                        if !can_refine {
+                            return Ok(false);
+                        }
+                        let children = if included == BoundaryVisit::RefineActualXy {
+                            // Only the actual-coordinate metric asks for this goal.
+                            // Its XY error has no vertical box-diameter obligation.
+                            // Unresolved radius/determinant cells always retain
+                            // spatial refinement, and every child is requalified.
+                            let rows = coordinates.affine_rows();
+                            let du = [dot(rows[0], jet.du), dot(rows[1], jet.du)];
+                            let dv = [dot(rows[0], jet.dv), dot(rows[1], jet.dv)];
+                            crate::analysis::critical::split_metric_derivatives(
+                                uv, depth, fi, &du, &dv,
+                            )?
+                        } else {
+                            crate::analysis::critical::split_metric_derivatives(
+                                uv, depth, fi, &jet.du, &jet.dv,
+                            )?
+                        };
+                        if pending + children.len() > stack.len() {
+                            return Err(resource());
+                        }
+                        let recontract_height = if height_contained {
+                            false
+                        } else if strong_contraction {
+                            true
+                        } else {
+                            let axis = usize::from(children[0][0] == uv[0]);
+                            let derivative = height.dot(if axis == 0 { jet.du } else { jet.dv });
+                            if derivative.lo == 0.0 && derivative.hi == 0.0 {
+                                false
+                            } else {
+                                // Fold the height covector into original native
+                                // coefficients before choosing work. This retains
+                                // exact axial cancellations lost by spatial boxes.
+                                phase = "raw F height-sensitive refinement scheduling";
+                                let gradient = surface_functional_enclosures(
+                                    surface,
+                                    uv,
+                                    &[height_functional],
+                                    work,
+                                    cancel,
+                                );
+                                let [gradient] = gradient?;
+                                let derivative = if axis == 0 { gradient.du } else { gradient.dv };
+                                derivative.lo != 0.0 || derivative.hi != 0.0
+                            }
+                        };
+                        for child in children {
+                            // Inside is a whole-box proof inherited only by subsets;
+                            // neither Boundary nor failed metric evidence is reused.
+                            stack[pending] = (
+                                child,
+                                depth + 1,
+                                height_contained,
+                                recontract_height,
+                                trim_inside,
+                            );
+                            pending += 1;
+                        }
                     }
                 }
-            }
-            Ok(true)
-        });
+                Ok(true)
+            })
+        })();
         let completed = completed.map_err(|error| work.annotate_error(error, before, format_args!(
             "closed radial atlas original face={fi} phase={phase} uv={active_uv:?} depth={active_depth}"
         )))?;
@@ -693,7 +781,7 @@ fn visit_original_links(
     source: OriginalTrimSource<'_, '_>,
     incidence: &SourceEdgeIncidence,
     coordinates: &ActualMaterialCoordinates<'_>,
-    links: &mut ClosedRadialLinks,
+    links: &mut ClosedRadialLinks<'_>,
     remaining_bytes: usize,
     inventory: &mut RadialInventory<'_, '_>,
     work: &mut GeometryWorkBudget,
@@ -858,13 +946,24 @@ fn visit_original_links(
                     // ONE retained literal curve supplies both trace derivatives.
                     // Native includes both one-sided closed derivatives at every knot.
                     prepared.jet((central[0], central[1]), work, cancel)?;
-                    // Central-strip ends are terminal strata, not ordinary open seam
-                    // charts. The complete source/reference/G support must be outside
-                    // the CLOSED scope; the canonical corner owns the terminal chart.
-                    for endpoint in central {
-                        phase = "closed terminal source/reference/G exclusion";
+                    // A crossing terminal needs the EXACT qualified original
+                    // NativeV/edge/absolute-germ/exit, not vertex activity. Its
+                    // cone outer boundary is literally boundary_jet(exit,w)
+                    // of this same collar; source qualification owns the full
+                    // removed disk and its unchanged/paired-G cutover, with
+                    // opposed uses sharing the exit. Closed cone G has already
+                    // passed rank/radius/metric; the central closed cells and
+                    // common-FIRST seam below must still all pass.
+                    for (germ, endpoint) in central.into_iter().enumerate() {
+                        phase = "closed terminal exclusion or qualified literal cutover";
                         active_native = Some(([endpoint; 2], 0));
                         let curve = prepared.jet((endpoint, endpoint), work, cancel)?;
+                        let qualified = links.qualified_closed_cutover(
+                            uses.vertices[germ],
+                            binding.edge,
+                            germ == 1,
+                            endpoint,
+                        );
                         for collar in [&first, &second] {
                             let support = collar.swept_enclosure(
                                 [endpoint; 2],
@@ -873,7 +972,7 @@ fn visit_original_links(
                                 work,
                                 cancel,
                             )?;
-                            if !outside(coordinates.position(support)?[2], interval) {
+                            if !outside(coordinates.position(support)?[2], interval) && !qualified {
                                 return Ok(false);
                             }
                         }
@@ -960,7 +1059,10 @@ fn visit_original_links(
                                 };
                                 phase = "actual G cylinder determinant/boundary visitor";
                                 let included = inventory.include(
-                                    BoundaryCell { position: cell.position, original_face: None },
+                                    BoundaryCell {
+                                        position: cell.position,
+                                        original_face: None,
+                                    },
                                     cell.outward,
                                     coordinates,
                                     can_refine,
@@ -1085,22 +1187,37 @@ pub(super) fn certify(
         let available = available
             .checked_sub(incidence.owned_bytes())
             .ok_or_else(resource)?;
-        phase = "closed vertex/reference-corner/completion support exclusion";
-        let Some(mut links) = ClosedRadialLinks::outside_closed_scope(
+        let mut inventory = RadialInventory::new(visitor);
+        phase = "complete closed source-vertex atlas and changed support inventory";
+        let Some(mut links) = ClosedRadialLinks::for_closed_atlas(
             source,
             &incidence,
             coordinates,
             available,
             work,
             cancel,
+            &mut |_face, position, normal, can_refine, work, cancel| {
+                inventory.include(
+                    BoundaryCell {
+                        position,
+                        original_face: None,
+                    },
+                    normal,
+                    coordinates,
+                    can_refine,
+                    work,
+                    cancel,
+                )
+            },
         )?
         else {
             return Ok(None);
         };
-        let mut inventory = RadialInventory::new(visitor);
         phase = "complete original F overcover";
         let faces = visit_original_faces(
             source,
+            &incidence,
+            &links,
             coordinates,
             available
                 .checked_sub(links.allocated_bytes())
@@ -1357,26 +1474,32 @@ mod boundary_terminal_tests {
         let mut work = GeometryWorkBudget::new(100);
         let cancel = AtomicBool::new(false);
         {
-            let mut visitor =
-                |_: BoundaryCell<'_>, _: bool, can_refine: bool, _: &mut GeometryWorkBudget, _: &AtomicBool| {
-                    if can_refine {
-                        refinable_calls += 1;
-                        Ok(BoundaryVisit::RefineActualXy)
-                    } else {
-                        terminal_calls += 1;
-                        Err(GeometryError::new(
-                            GeometryErrorCode::ShapeErrorExceeded,
-                            "qualified terminal boundary metric exceeds requested bound",
-                        ))
-                    }
-                };
+            let mut visitor = |_: BoundaryCell<'_>,
+                               _: bool,
+                               can_refine: bool,
+                               _: &mut GeometryWorkBudget,
+                               _: &AtomicBool| {
+                if can_refine {
+                    refinable_calls += 1;
+                    Ok(BoundaryVisit::RefineActualXy)
+                } else {
+                    terminal_calls += 1;
+                    Err(GeometryError::new(
+                        GeometryErrorCode::ShapeErrorExceeded,
+                        "qualified terminal boundary metric exceeds requested bound",
+                    ))
+                }
+            };
             let mut inventory = RadialInventory::new(&mut visitor);
             // An unresolved cylinder determinant never reaches the metric:
             // even at a terminal cell it remains a topology refusal.
             assert_eq!(
                 inventory
                     .include_determinant(
-                        BoundaryCell { position, original_face: None },
+                        BoundaryCell {
+                            position,
+                            original_face: None
+                        },
                         position,
                         Interval::point(0.0),
                         false,
@@ -1389,7 +1512,10 @@ mod boundary_terminal_tests {
             assert_eq!(
                 inventory
                     .include_determinant(
-                        BoundaryCell { position, original_face: None },
+                        BoundaryCell {
+                            position,
+                            original_face: None
+                        },
                         position,
                         Interval::point(1.0),
                         true,
@@ -1401,7 +1527,10 @@ mod boundary_terminal_tests {
             );
             let error = inventory
                 .include_determinant(
-                    BoundaryCell { position, original_face: None },
+                    BoundaryCell {
+                        position,
+                        original_face: None,
+                    },
                     position,
                     Interval::point(1.0),
                     false,

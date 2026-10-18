@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{PreparedCurveEnclosure, debit_native_work, native_error};
+use super::{
+    PreparedCurveEnclosure, SurfaceFirstEnclosure, debit_native_work, native_error,
+    surface_piecewise_first_enclosure,
+};
 use crate::kernel::PreparedFaceTrimDomain;
 use crate::section::endpoint_genealogy::SectionPlaneEndpointOrigin;
 use crate::{Definition, GeometryError, GeometryWorkBudget};
@@ -19,7 +22,7 @@ use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     mem::size_of,
-    sync::atomic::AtomicBool,
+    sync::{OnceLock, atomic::AtomicBool},
 };
 
 #[derive(Debug)]
@@ -72,6 +75,7 @@ struct OriginalUse {
 struct OriginalFace<'a> {
     domain: PreparedFaceTrimDomain<'a>,
     uses: Vec<OriginalUse>,
+    whole_native_first: OnceLock<SurfaceFirstEnclosure>,
 }
 
 /// Stable immutable owners; query inventories borrow these, never each other.
@@ -115,6 +119,7 @@ impl<'a> PreparedSectionOriginals<'a> {
             faces.push(OriginalFace {
                 domain,
                 uses: Vec::new(),
+                whole_native_first: OnceLock::new(),
             });
         }
         Ok(Self {
@@ -152,6 +157,45 @@ impl<'a> PreparedSectionOriginals<'a> {
             ));
         }
         Ok(&face.domain)
+    }
+
+    /// Successful complete coefficient evaluation on this immutable face's
+    /// exact closed native domain. The inline cell is precharged with faces;
+    /// no pose, height, material selection or query metric is retained.
+    pub(crate) fn whole_face_first_enclosure(
+        &self,
+        definition: &Definition,
+        face_index: usize,
+        domain: &PreparedFaceTrimDomain<'_>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SurfaceFirstEnclosure, GeometryError> {
+        let original = self.face_domain(definition, face_index, work, cancel)?;
+        // This exact domain object owns the immutable native face and closed
+        // UV box (including any certified-domain restriction). A different UV
+        // view/preparation cannot borrow this cell even on the same carrier.
+        if !std::ptr::eq(original, domain) {
+            return Err(unresolved(
+                "whole-native first enclosure lost its exact original domain owner",
+            ));
+        }
+        let cached = &self.faces[face_index].whole_native_first;
+        if let Some(jet) = cached.get() {
+            return Ok(*jet);
+        }
+        // The existing carrier lock serializes native evaluation. Recheck
+        // after acquiring it so concurrent first use does not duplicate work.
+        original.native().face().with_surface(|surface| {
+            crate::check_cancel(cancel)?;
+            if let Some(jet) = cached.get() {
+                return Ok(*jet);
+            }
+            let jet =
+                surface_piecewise_first_enclosure(surface, original.uv_bounds(), work, cancel)?;
+            crate::check_cancel(cancel)?;
+            let _ = cached.set(jet);
+            Ok(jet)
+        })
     }
 
     fn original_use(
@@ -332,8 +376,11 @@ pub(crate) fn prepare_section_originals<'a>(
             }
         }
     }
-    let originals = PreparedSectionOriginals::prepare_trim_domains(definition, byte_limit, work, cancel)?;
-    originals.prepare_boundaries(byte_limit, work, cancel).map(Some)
+    let originals =
+        PreparedSectionOriginals::prepare_trim_domains(definition, byte_limit, work, cancel)?;
+    originals
+        .prepare_boundaries(byte_limit, work, cancel)
+        .map(Some)
 }
 
 impl<'a> PreparedSectionOriginals<'a> {
@@ -343,68 +390,75 @@ impl<'a> PreparedSectionOriginals<'a> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
-    let definition = self.definition;
-    for face in &definition.face_boundaries {
-        for wire in &face.wires {
-            for use_ in wire {
-                work.charge(1, cancel)?;
-                if !use_.source_chart_certificate.is_certified() {
-                    return Err(unresolved("native section original boundary has no certified source chart"));
+        let definition = self.definition;
+        for face in &definition.face_boundaries {
+            for wire in &face.wires {
+                for use_ in wire {
+                    work.charge(1, cancel)?;
+                    if !use_.source_chart_certificate.is_certified() {
+                        return Err(unresolved(
+                            "native section original boundary has no certified source chart",
+                        ));
+                    }
                 }
             }
         }
-    }
-    let mut remaining = byte_limit.checked_sub(self.retained_bytes)
-        .ok_or_else(|| resource("native section originals exceed source capacity"))?;
-    let coedge_count = definition
-        .face_boundaries
-        .iter()
-        .try_fold(0usize, |count, face| {
-            face.wires
-                .iter()
-                .try_fold(count, |count, wire| count.checked_add(wire.len()))
-        })
-        .ok_or_else(|| resource("native section original coedge count overflow"))?;
-    let mut boundaries = Vec::new();
-    reserve(&mut boundaries, coedge_count, &mut remaining, work, cancel)?;
-    let mut registry = HashMap::new();
-    reserve_registry(&mut registry, coedge_count, &mut remaining, work, cancel)?;
-    let registry_bytes =
-        registry.capacity() * 2 * (size_of::<((EdgeId<Curve>, u64, u64), usize)>() + 32);
-    for (face_index, original_face) in self.faces.iter_mut().enumerate() {
-        let domain = &original_face.domain;
-        let face = domain.native().face();
-        let mut uses = Vec::new();
-        reserve(
-            &mut uses,
-            domain.native().coedges().len(),
-            &mut remaining,
-            work,
-            cancel,
-        )?;
-        for coedge in domain.native().coedges() {
-            work.charge(1, cancel)?;
-            let identity = coedge.identity;
-            let edge = face
-                .absolute_boundaries()
-                .get(identity.wire_index)
-                .and_then(|wire| wire.get(identity.coedge_index))
-                .filter(|edge| edge.id() == identity.edge_id)
-                .ok_or_else(|| unresolved("native section original boundary identity changed"))?;
-            let range = edge.with_curve(BoundedCurve::range_tuple);
-            let key = (identity.edge_id, range.0.to_bits(), range.1.to_bits());
-            let boundary = if let Some(&index) = registry.get(&key) {
-                index
-            } else {
-                let (curve, scale) = if let Some(prepared) =
-                    definition.original_boundary_curve(identity.edge_id, range, work, cancel)?
-                {
-                    let receipt = prepared.original_receipt().ok_or_else(|| {
-                        unresolved("native section original boundary lost its immutable receipt")
+        let mut remaining = byte_limit
+            .checked_sub(self.retained_bytes)
+            .ok_or_else(|| resource("native section originals exceed source capacity"))?;
+        let coedge_count = definition
+            .face_boundaries
+            .iter()
+            .try_fold(0usize, |count, face| {
+                face.wires
+                    .iter()
+                    .try_fold(count, |count, wire| count.checked_add(wire.len()))
+            })
+            .ok_or_else(|| resource("native section original coedge count overflow"))?;
+        let mut boundaries = Vec::new();
+        reserve(&mut boundaries, coedge_count, &mut remaining, work, cancel)?;
+        let mut registry = HashMap::new();
+        reserve_registry(&mut registry, coedge_count, &mut remaining, work, cancel)?;
+        let registry_bytes =
+            registry.capacity() * 2 * (size_of::<((EdgeId<Curve>, u64, u64), usize)>() + 32);
+        for (face_index, original_face) in self.faces.iter_mut().enumerate() {
+            let domain = &original_face.domain;
+            let face = domain.native().face();
+            let mut uses = Vec::new();
+            reserve(
+                &mut uses,
+                domain.native().coedges().len(),
+                &mut remaining,
+                work,
+                cancel,
+            )?;
+            for coedge in domain.native().coedges() {
+                work.charge(1, cancel)?;
+                let identity = coedge.identity;
+                let edge = face
+                    .absolute_boundaries()
+                    .get(identity.wire_index)
+                    .and_then(|wire| wire.get(identity.coedge_index))
+                    .filter(|edge| edge.id() == identity.edge_id)
+                    .ok_or_else(|| {
+                        unresolved("native section original boundary identity changed")
                     })?;
-                    (OriginalCurve::Borrowed(receipt), prepared.scale_to_mm())
+                let range = edge.with_curve(BoundedCurve::range_tuple);
+                let key = (identity.edge_id, range.0.to_bits(), range.1.to_bits());
+                let boundary = if let Some(&index) = registry.get(&key) {
+                    index
                 } else {
-                    let prepared = edge.with_curve(|curve| {
+                    let (curve, scale) = if let Some(prepared) =
+                        definition.original_boundary_curve(identity.edge_id, range, work, cancel)?
+                    {
+                        let receipt = prepared.original_receipt().ok_or_else(|| {
+                            unresolved(
+                                "native section original boundary lost its immutable receipt",
+                            )
+                        })?;
+                        (OriginalCurve::Borrowed(receipt), prepared.scale_to_mm())
+                    } else {
+                        let prepared = edge.with_curve(|curve| {
                         if !explicit_source(curve, work, cancel)? {
                             return Err(unresolved("native section implicit original boundary has no retained source receipt"));
                         }
@@ -421,56 +475,56 @@ impl<'a> PreparedSectionOriginals<'a> {
                         debit_native_work(work, native_work.consumed(), cancel)?;
                         result.map_err(native_error)
                     })?;
-                    let heap = prepared
-                        .retained_bytes()
-                        .checked_sub(size_of::<PreparedValidatedCurve<'static>>())
-                        .ok_or_else(|| {
-                            unresolved("native section original curve omitted inline storage")
+                        let heap = prepared
+                            .retained_bytes()
+                            .checked_sub(size_of::<PreparedValidatedCurve<'static>>())
+                            .ok_or_else(|| {
+                                unresolved("native section original curve omitted inline storage")
+                            })?;
+                        remaining = remaining.checked_sub(heap).ok_or_else(|| {
+                            resource("native section original curves exceed source capacity")
                         })?;
-                    remaining = remaining.checked_sub(heap).ok_or_else(|| {
-                        resource("native section original curves exceed source capacity")
-                    })?;
-                    (OriginalCurve::Owned(prepared), 1.0)
+                        (OriginalCurve::Owned(prepared), 1.0)
+                    };
+                    let index = boundaries.len();
+                    boundaries.push(OriginalBoundary {
+                        edge: identity.edge_id,
+                        range: [range.0, range.1],
+                        scale,
+                        curve,
+                    });
+                    registry.insert(key, index);
+                    index
                 };
-                let index = boundaries.len();
-                boundaries.push(OriginalBoundary {
-                    edge: identity.edge_id,
-                    range: [range.0, range.1],
-                    scale,
-                    curve,
+                let source_use = definition
+                    .face_boundaries
+                    .get(face_index)
+                    .filter(|source| source.face == identity.face_id)
+                    .and_then(|source| source.wires.get(identity.wire_index))
+                    .and_then(|wire| wire.get(identity.coedge_index))
+                    .filter(|source| {
+                        source.edge == identity.edge_id
+                            && (source.orientation == face.orientation()) == identity.orientation
+                    })
+                    .ok_or_else(|| {
+                        unresolved(
+                            "native section original boundary lost its source/chart correspondence",
+                        )
+                    })?;
+                uses.push(OriginalUse {
+                    boundary,
+                    chart_error_mm: source_use.source_chart_error_mm,
                 });
-                registry.insert(key, index);
-                index
-            };
-            let source_use = definition
-                .face_boundaries
-                .get(face_index)
-                .filter(|source| source.face == identity.face_id)
-                .and_then(|source| source.wires.get(identity.wire_index))
-                .and_then(|wire| wire.get(identity.coedge_index))
-                .filter(|source| {
-                    source.edge == identity.edge_id
-                        && (source.orientation == face.orientation()) == identity.orientation
-                })
-                .ok_or_else(|| {
-                    unresolved(
-                        "native section original boundary lost its source/chart correspondence",
-                    )
-                })?;
-            uses.push(OriginalUse {
-                boundary,
-                chart_error_mm: source_use.source_chart_error_mm,
-            });
+            }
+            original_face.uses = uses;
         }
-        original_face.uses = uses;
-    }
-    drop(registry);
-    remaining = remaining
-        .checked_add(registry_bytes)
-        .ok_or_else(|| resource("native section original registry byte overflow"))?;
-    self.boundaries = boundaries;
-    self.retained_bytes = byte_limit - remaining;
-    Ok(self)
+        drop(registry);
+        remaining = remaining
+            .checked_add(registry_bytes)
+            .ok_or_else(|| resource("native section original registry byte overflow"))?;
+        self.boundaries = boundaries;
+        self.retained_bytes = byte_limit - remaining;
+        Ok(self)
     }
 }
 
@@ -854,25 +908,34 @@ pub(crate) fn certify_section_plane_coverage(
         debit_native_work(work, native_work.consumed(), cancel)?;
         let result = result.map_err(|cause| {
             let mut error = native_error(cause);
-            if let ValidatedGeometryError::PlaneCoverageUnresolved {
-                witness: Some(ValidatedPlaneCoverageWitness::Endpoint(witness)), ..
-            } = cause
-                && let Ok(candidate_index) = usize::try_from(witness.candidate_index)
+            let endpoint = match cause {
+                ValidatedGeometryError::PlaneCoverageUnresolved {
+                    witness: Some(ValidatedPlaneCoverageWitness::Endpoint(witness)), ..
+                } => Some((witness.candidate_index, witness.coedge_index,
+                    witness.source_index, witness.endpoint_is_back)),
+                ValidatedGeometryError::PlaneCoverageUnresolved {
+                    witness: Some(ValidatedPlaneCoverageWitness::EndpointOrientation(witness)), ..
+                } => Some((witness.candidate_index, witness.coedge_index,
+                    witness.source_index, witness.endpoint_is_back)),
+                _ => None,
+            };
+            if let Some((candidate_index, coedge_index, source_index, endpoint_is_back)) = endpoint
+                && let Ok(candidate_index) = usize::try_from(candidate_index)
                 && let Some(candidate) = candidates.get(candidate_index)
             {
                 // Failure context reads retained records, never proposes another root.
-                let source_index = usize::from(witness.source_index);
+                let source_index = usize::from(source_index);
                 let end_tubes = [candidate.pieces().first(), candidate.pieces().last()].map(|piece| {
                     piece.and_then(|piece| {
                         let uv = piece.source_parameters?.get(source_index).copied()?;
                         Some((piece.parameter, uv.map(|value| [value.lower, value.upper])))
                     })
                 });
-                let failed_coedge = usize::try_from(witness.coedge_index).ok();
+                let failed_coedge = usize::try_from(coedge_index).ok();
                 let end_bindings = [false, true].map(|back| {
                     bindings.iter().find(|binding| binding.candidate_index == candidate_index
                         && binding.endpoint_is_back == back
-                        && (back != witness.endpoint_is_back
+                        && (back != endpoint_is_back
                             || Some(binding.coedge_index) == failed_coedge)).map(|binding| {
                         let use_ = face.domain.native().coedges().get(binding.coedge_index).map(|coedge| {
                             let linear_uv = match coedge.curve {
@@ -890,12 +953,12 @@ pub(crate) fn certify_section_plane_coverage(
                 });
                 let original_ends_present = [end_bindings[0].is_some(), end_bindings[1].is_some()];
                 error.message = format!(
-                    "plane coverage face {face_index} / endpoint context: domain={:?}, face_orientation={}, \
+                    "source={} plane coverage face {face_index} / endpoint context: domain={:?}, face_orientation={}, \
                      original_origin_present(front/back)={original_ends_present:?}, \
                      front/back(parameter,sourceUV)={end_tubes:?}, \
                      front/back(coedge,source_cut,source_range,chart_error,\
                      use(wire,coedge,material_orientation,oriented_range,linearUV))={end_bindings:?}; native: {}",
-                    face.domain.native().closed_parameter_box(),
+                    definition.id().as_str(), face.domain.native().closed_parameter_box(),
                     face.domain.native().face().orientation(), error.message,
                 );
             } else {
@@ -942,6 +1005,66 @@ mod tests {
     use super::*;
     use monstertruck_modeling::{ParametricCurve, Point3};
     use std::path::Path;
+
+    #[test]
+    fn whole_native_first_proof_rejects_foreign_domains_and_cancelled_reuse() {
+        let cancel = AtomicBool::new(false);
+        let bytes = include_bytes!("../../../../fixtures/geometry/box-mm.step");
+        let definition = crate::import_step(bytes, &cancel).unwrap();
+        let foreign = crate::import_step(bytes, &cancel).unwrap();
+        let byte_limit = 32 * 1024 * 1024;
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let originals = PreparedSectionOriginals::prepare_trim_domains(
+            &definition,
+            byte_limit,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = crate::section::OriginalTrimSource::standalone(&definition)
+            .borrowing_domains(Some(&originals));
+        let domain = source
+            .face_domain(0, byte_limit, &mut work, &cancel)
+            .unwrap();
+        // A failed access must not prevent a later complete coefficient proof.
+        assert_eq!(
+            source
+                .whole_face_first_enclosure(0, &domain, &mut GeometryWorkBudget::new(0), &cancel,)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        source
+            .whole_face_first_enclosure(0, &domain, &mut work, &cancel)
+            .unwrap();
+        // Identical source bytes and positional indices are not ownership.
+        let foreign_source = crate::section::OriginalTrimSource::standalone(&foreign)
+            .borrowing_domains(Some(&originals));
+        assert_eq!(
+            foreign_source
+                .whole_face_first_enclosure(0, &domain, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+        let other_domain = source
+            .face_domain(1, byte_limit, &mut work, &cancel)
+            .unwrap();
+        assert_eq!(
+            source
+                .whole_face_first_enclosure(0, &other_domain, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+        assert_eq!(
+            source
+                .whole_face_first_enclosure(0, &domain, &mut work, &AtomicBool::new(true),)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled,
+        );
+    }
 
     #[test]
     fn endpoint_proposals_preserve_original_occurrence_range_and_plane() {

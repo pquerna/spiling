@@ -10,6 +10,7 @@
 //! Whole-source convexity is separate, strictly stronger evidence.
 
 pub(crate) mod material_link;
+pub(super) use material_link::OriginalFaceCornerAttachments;
 pub(crate) use material_link::PreparedSourceVertexPlans;
 pub(super) use material_link::{ClosedRadialMaterialProduct, RadialRegionKind};
 pub(super) mod ray_index;
@@ -1718,6 +1719,58 @@ fn project(position: [Interval; 3], frame: PlaneFrameMm) -> [Interval; 2] {
         dot(relative, frame.y_axis.map(Interval::point)),
     ]
 }
+
+fn projected_displacement(a: [f64; 3], b: [f64; 3], frame: PlaneFrameMm) -> [Interval; 2] {
+    // Cancel the shared origin before projection. Subtracting separately
+    // projected boxes loses the sign of valid one-ulp boundary segments.
+    let delta = std::array::from_fn(|axis| Interval::point(b[axis]).sub(Interval::point(a[axis])));
+    [
+        dot(delta, frame.x_axis.map(Interval::point)),
+        dot(delta, frame.y_axis.map(Interval::point)),
+    ]
+}
+
+fn reference_centroid(
+    points: &[[f64; 3]],
+    frame: PlaneFrameMm,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[f64; 3], GeometryError> {
+    // A coordinate proposal, not material authority. Area weighting avoids
+    // moving the radial origin when one native arc is sampled more densely.
+    let origin = points[0];
+    let mut previous = [0.0; 3];
+    let mut previous_uv = [0.0; 2];
+    let mut area = 0.0;
+    let mut moment = [0.0; 3];
+    for point in &points[1..] {
+        work.charge(1, cancel)?;
+        let current: [f64; 3] = std::array::from_fn(|axis| point[axis] - origin[axis]);
+        let uv = [frame.x_axis, frame.y_axis]
+            .map(|row| (0..3).map(|axis| current[axis] * row[axis]).sum::<f64>());
+        let weight = previous_uv[0] * uv[1] - previous_uv[1] * uv[0];
+        area += weight;
+        for axis in 0..3 {
+            moment[axis] += (previous[axis] + current[axis]) * weight;
+        }
+        previous = current;
+        previous_uv = uv;
+    }
+    let denominator = 3.0 * area;
+    let center = std::array::from_fn(|axis| origin[axis] + moment[axis] / denominator);
+    if denominator == 0.0
+        || !denominator.is_finite()
+        || center.iter().any(|value| !value.is_finite())
+    {
+        return Err(failure(
+            GeometryErrorCode::ConditioningFailure,
+            "sampled reference centroid has no finite nonzero area",
+            0,
+            area,
+        ));
+    }
+    Ok(center)
+}
 fn orient(a: [Interval; 2], b: [Interval; 2], p: [Interval; 2]) -> Interval {
     add(
         mul(b[0].sub(a[0]), p[1].sub(a[1])),
@@ -1889,12 +1942,14 @@ impl SamplePrism {
             ));
         }
         work.charge(count as u64, cancel)?;
-        let center: [f64; 3] = std::array::from_fn(|axis| {
-            section.loops[outer].points_mm[..outer_count]
-                .iter()
-                .map(|point| point[axis] / outer_count as f64)
-                .sum()
-        });
+        // An annular chart needs its origin inside the hole, not merely inside
+        // the outer polygon. Every acceptance predicate still checks this proposal.
+        let center = reference_centroid(
+            &section.loops[hole.unwrap_or(outer)].points_mm,
+            section.frame,
+            work,
+            cancel,
+        )?;
         let frame = PlaneFrameMm {
             origin_mm: center,
             ..section.frame
@@ -1990,14 +2045,21 @@ impl SamplePrism {
             let begin = if inner { outer_count } else { 0 };
             let next = if edge + 1 == end { begin } else { edge + 1 };
             let a = vertices[edge];
-            let b = vertices[next];
-            let side = orient(a, b, [Interval::point(0.0); 2]);
+            let boundary = &section.loops[if inner {
+                hole.expect("admitted inner loop")
+            } else {
+                outer
+            }];
+            let raw_a = boundary.points_mm[edge - begin];
+            let raw_b = boundary.points_mm[next - begin];
+            let delta = projected_displacement(raw_a, raw_b, frame);
+            let side = a[0].mul(delta[1]).sub(a[1].mul(delta[0]));
             let signed = if inner { side.neg() } else { side };
-            let edge_length = length([b[0].sub(a[0]), b[1].sub(a[1]), Interval::point(0.0)])?;
+            let edge_length = length([delta[0], delta[1], Interval::point(0.0)])?;
             if signed.lo <= 0.0 || edge_length.hi <= 0.0 {
                 return Err(failure(
                     GeometryErrorCode::AnalysisIndeterminate,
-                    "actual native loop has no separated radial degree",
+                    "sampled native reference loop has no separated radial degree",
                     0,
                     edge,
                 ));
@@ -3785,6 +3847,57 @@ fn occupied_projection(
 mod tests {
     use super::*;
     use monstertruck_modeling::{Plane, Point3};
+
+    #[test]
+    fn reference_centroid_is_invariant_to_native_boundary_sampling_density() {
+        let frame = PlaneFrameMm {
+            origin_mm: [0.0; 3],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        };
+        let sparse = [
+            [-4.0, -3.0, 2.0],
+            [4.0, -3.0, 2.0],
+            [4.0, 3.0, 2.0],
+            [-4.0, 3.0, 2.0],
+            [-4.0, -3.0, 2.0],
+        ];
+        let mut dense = sparse[..3].to_vec();
+        dense.extend((-4..4).rev().map(|x| [f64::from(x), 3.0, 2.0]));
+        dense.push(sparse[0]);
+        let mut work = GeometryWorkBudget::new(1000);
+        for points in [sparse.as_slice(), dense.as_slice()] {
+            let center =
+                reference_centroid(points, frame, &mut work, &AtomicBool::new(false)).unwrap();
+            assert!(center[0].abs() < 1.0e-12 && center[1].abs() < 1.0e-12);
+            assert!((center[2] - 2.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn shared_projection_origin_preserves_one_ulp_boundary_orientation() {
+        let frame = PlaneFrameMm {
+            origin_mm: [12.0, 9.0, 8.1],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        };
+        let start = [2.0, 18.0, 8.1];
+        let end = [f64::from_bits(2.0_f64.to_bits() - 1), 18.0, 8.1];
+        let a = project(start.map(Interval::point), frame);
+        let delta = projected_displacement(start, end, frame);
+        let signed = a[0].mul(delta[1]).sub(a[1].mul(delta[0]));
+        let edge_length = length([delta[0], delta[1], Interval::point(0.0)]).unwrap();
+        assert!(signed.lo > 0.0);
+        assert!(
+            Interval::point(signed.lo)
+                .div(Interval::point(edge_length.hi))
+                .unwrap()
+                .lo
+                > 8.0
+        );
+    }
 
     #[test]
     fn material_height_flow_uses_the_actual_oblique_dual_and_strict_submersion() {

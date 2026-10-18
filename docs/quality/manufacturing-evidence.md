@@ -28,6 +28,13 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
   report without artifact/history mutation. `Admitted` is not native layer, wall,
   bridge or support success; required Compile evidence remains not evaluated.
 
+Native interval work, deposited-stroke anchor comparisons and planar overlay work
+each have an independent cumulative 128-million-unit ceiling. These bound
+computation, not geometric error. Prepared sources, live query scratch and retained
+outputs still share their existing byte allowances; host-process memory limits
+remain separate. The engine allows five minutes per accepted native job, with a
+separate ten-second cancellation acknowledgement grace.
+
 ## One schedule, two references
 
 [`planner::plan`, `scheduled_layers`, `LayerElevation`](../../crates/manufacturing/src/planner/mod.rs)
@@ -86,9 +93,15 @@ radial cores are not complete closed-material certificates.
 centers/fill from D and checks required coverage; neither a nominal bead nor a
 surface-resolution advisory repairs unresolved mandatory geometry.
 [`SkinNeighborhoods`](../../crates/manufacturing/src/planner/neighborhood/mod.rs)
-intersects final D over physical-distance horizons. Its bounded job-local range
-cache borrows immutable leaves and charges retention, eviction and recomputation;
-native M/C identity cannot authorize a cached D neighborhood.
+fixes the innermost-wall-center inset once per Compile and lazily derives masks
+from immutable final-D leaves. Erosion distributes over intersection: the same
+bounded range cache intersects these masks over physical-distance horizons,
+rather than repeatedly offsetting complex horizon aggregates. Bit-exact returning
+D leaves share one canonical cache entry without erasing their physical ranges.
+Derived leaves, pinned operands, eviction and recomputation share retention/work
+accounting; native M/C identity cannot authorize D reuse.
+Classification clips to current fill. Skin reaches beneath upcoming pocket walls
+with half-bead wall overlap; unchanged vertical sections gain no extra skin.
 
 [`support::realize`](../../crates/manufacturing/src/planner/support/mod.rs) and
 [`AnchorWorkspace`](../../crates/manufacturing/src/planner/support/anchors.rs) derive
@@ -100,6 +113,15 @@ capsules must clear continuous target and actual object/bridge capsules under th
 shared [XYZ6 coordinate contract](../../crates/contracts/src/manufacturing/program_coordinates.rs),
 including full bead height and minimum Z/XY gaps. Candidate corridor offsets alone
 do not certify clearance. Editing a lower finish can invalidate an upper route.
+Auxiliary bridge rows clip positive fill at actual required hatch coordinates.
+Required groups use strict physical XYZ6 bead-footprint overlap, not rounded
+endpoint equality; tangency and genuine sparse gaps stay separate. Each group
+may extend only to a direct previous-stroke capsule anchor inside its positive
+row and neighboring required bounds. Internal extensions must retain a positive
+physical footprint gap to both required and already accepted neighboring groups.
+This adds accounted Bridge deposition, not material-derived anchor evidence or
+a dense-fill fallback. Protected holes stay excluded; curved unsupported strokes
+do not inherit straight-bridge authority.
 
 ## Program, fresh replay and publication
 
@@ -125,19 +147,20 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 Current identities are project5/manufacturing6/surface3, planner9, emitter/verifier4
 and SPLR3; executable constants and exact native pin remain authoritative.
-Box and independent tapered-fitting operators complete Compile, fresh replay/export,
-save and source-deleted fresh reopen; the fitting also completes the hardware
-workbench flow. Cylinder/through-hole replay retains nominal material and protected
-voids. These are **not** general manufacturing or G0–G3 qualification.
-Rounded-housing compilation reaches an unresolved same-source critical-band
-incidence gate. Existing native/image consumers can still exhaust
-[`source-vertex scalar support`](../../crates/geometry/src/analysis/critical/material_link/transport.rs)
-during directional bounds, before finish evaluation. Generated-cylinder bounds,
-mixed-source contact, tilted placement/critical collars, inward-ramp conditioning
-and support remain open; the complete generated parity corpus is not available.
-Raw inspection is not Compile success. Specialized finishes remain narrow, and
-thin-feature/incidence/conditioning/work failures retain typed refusals.
-Do not repin tests, relax limits or reinterpret failures as acceptance.
+Box, independent tapered-fitting and rounded-housing operators complete Compile,
+fresh replay/export, save and source-deleted fresh read-only reopen. Both
+independent parts also complete the hardware workbench flow with native picking.
+Cylinder/through-hole replay retains nominal material and protected voids;
+mapped image consumers exercise final-D walls, fill, skin and actual programs.
+These are **not** general manufacturing or G0–G3 qualification.
+
+Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
+contact, tilted-placement/critical collars, inward-ramp conditioning and broader
+support remain outside the exercised operator envelope; the complete generated
+parity corpus is not available. Raw inspection is not Compile success.
+Specialized finishes remain narrow, and thin-feature/incidence/conditioning/work
+failures retain typed refusals. Do not repin tests, relax numerical limits or
+reinterpret failures as acceptance.
 
 Consumer-property entry points: [native planner tests](../../crates/manufacturing/src/planner/native_tests.rs)
 (material/void preservation, image-dependent D and actual anchors),

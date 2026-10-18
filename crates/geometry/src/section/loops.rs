@@ -895,6 +895,7 @@ pub(crate) fn sample_original_face(
                         front,
                         back,
                         frame,
+                        maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
                         maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
                         reference_mm: reference,
                         budget: &budget,
@@ -935,6 +936,7 @@ pub(crate) fn sample_original_face(
 
 pub(super) struct WireSampling<'a, 'source> {
     pub(super) frame: &'a PlaneFrameMm,
+    pub(super) maximum_chord_error_mm: f64,
     pub(super) maximum_plane_error_mm: f64,
     pub(super) face_sign: f64,
     pub(super) budget: &'a SectionBudget,
@@ -951,6 +953,7 @@ pub(super) fn sample_wire(
 ) -> Result<CanonicalLoop, GeometryError> {
     let &WireSampling {
         frame,
+        maximum_chord_error_mm,
         maximum_plane_error_mm,
         face_sign,
         budget,
@@ -1002,7 +1005,7 @@ pub(super) fn sample_wire(
         let range = curve.range_tuple();
         let front: [f64; 3] = edge.front().point().into();
         let back: [f64; 3] = edge.back().point().into();
-        let area = sample_curve(&CurveSamplingQuery { prepared: proof, range, endpoint_strata, front, back, frame, maximum_plane_error_mm, reference_mm, budget, new_curve: false }, work, &mut points, cancel)
+        let area = sample_curve(&CurveSamplingQuery { prepared: proof, range, endpoint_strata, front, back, frame, maximum_chord_error_mm, maximum_plane_error_mm, reference_mm, budget, new_curve: false }, work, &mut points, cancel)
         .map_err(|mut error| {
             error.message = format!(
                 "native cap curve {index} / sample range {range:?}: {}; sampling nodes={}, scratch remaining={} B, geometry work consumed={}, remaining={}",
@@ -1056,6 +1059,7 @@ struct CurveSamplingQuery<'a, 'source> {
     front: [f64; 3],
     back: [f64; 3],
     frame: &'a PlaneFrameMm,
+    maximum_chord_error_mm: f64,
     maximum_plane_error_mm: f64,
     reference_mm: [f64; 3],
     budget: &'a SectionBudget,
@@ -1075,6 +1079,7 @@ fn sample_curve(
         front,
         back,
         frame,
+        maximum_chord_error_mm,
         maximum_plane_error_mm,
         reference_mm,
         budget,
@@ -1118,7 +1123,7 @@ fn sample_curve(
         let end = usize::from(native.endpoint_is_back());
         endpoint_extension[end] = endpoint_extension[end].max(native.maximum_extension_mm());
         endpoint_plane_error = endpoint_plane_error.max(native.maximum_plane_error_mm());
-        if endpoint_extension[end] > SECTION_SAMPLING_TOLERANCE_MM
+        if endpoint_extension[end] > maximum_chord_error_mm
             || endpoint_plane_error > maximum_plane_error_mm
         {
             return Err(GeometryError::new(
@@ -1231,9 +1236,7 @@ fn sample_curve(
                     .max(endpoint_plane_error)
                     .max(plane_residual_upper(output_start, frame)?)
                     .max(plane_residual_upper(output_end, frame)?);
-                if chord_error <= SECTION_SAMPLING_TOLERANCE_MM
-                    && plane_error <= maximum_plane_error_mm
-                {
+                if chord_error <= maximum_chord_error_mm && plane_error <= maximum_plane_error_mm {
                     budget.check_loop(points.len() + 1)?;
                     let part_area = interval.signed_area(
                         &endpoints,
@@ -1748,6 +1751,7 @@ mod tests {
                 back: [1.0, 0.0, 0.0],
                 frame: &frame,
                 maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
                 reference_mm: [0.0; 3],
                 budget: &SectionBudget::default(),
                 new_curve: false,
@@ -1798,6 +1802,7 @@ mod tests {
                 back: [1.0, 0.0, 0.0],
                 frame: &frame,
                 maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
                 reference_mm: [0.0; 3],
                 budget: &SectionBudget::default(),
                 new_curve: false,
@@ -1843,6 +1848,7 @@ mod tests {
                     back: [1.0, 0.0, 0.0],
                     frame: &frame,
                     maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+                    maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
                     reference_mm: [0.0; 3],
                     budget: &SectionBudget::default(),
                     new_curve: false,

@@ -277,6 +277,7 @@ pub struct SlabAnalysis {
     critical: Option<critical::CriticalSlabCertificate>,
     collar_complex: Option<collar::NativeCollarComplex>,
     radial_slab: Option<joint::ClosedRadialSlab>,
+    endpoint_radial_products: [Option<critical::ClosedRadialMaterialProduct>; 2],
     capture: SlabCapture,
 }
 
@@ -486,6 +487,7 @@ impl SlabAnalysis {
         if let Some(radial) = &self.radial_slab {
             bytes = bytes.saturating_add(std::mem::size_of_val(radial));
         }
+        bytes = bytes.saturating_add(std::mem::size_of_val(&self.endpoint_radial_products));
         bytes = bytes.saturating_add(
             self.endpoint_strata
                 .capacity()

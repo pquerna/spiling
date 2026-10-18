@@ -14,8 +14,8 @@
 use super::super::source_incidence::CoedgeUse;
 use super::*;
 use crate::parametric::{
-    ChartCurveEnclosure, CurveEnclosure, SurfaceFirstEnclosure,
-    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, surface_piecewise_first_enclosure,
+    ChartCurveEnclosure, CurveEnclosure, SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES,
+    SurfaceFirstEnclosure, surface_piecewise_first_enclosure,
 };
 
 mod atlas;
@@ -27,17 +27,18 @@ mod transport;
 mod vertex_fan;
 mod vertex_transport;
 mod wall;
-pub(super) use coverage::{
-    ClosedRadialLinks, MAX_CORRECTION_BYTES, source_f_point_is_retained,
-};
+pub(super) use coverage::{ClosedRadialLinks, MAX_CORRECTION_BYTES, source_f_point_is_retained};
+use owned_uv_ribbon::OwnedUvRibbon;
 pub(in crate::analysis) use radial_product::{
-    BoundaryCell, BoundaryVisit, ClosedRadialMaterialProduct, RadialRegionKind, certify_closed_radial_material_product,
+    BoundaryCell, BoundaryVisit, ClosedRadialMaterialProduct, RadialRegionKind,
+    certify_closed_radial_material_product,
     certify_closed_radial_material_product_with_boundary_visitor,
 };
-use owned_uv_ribbon::OwnedUvRibbon;
 pub(crate) use transport::{
-    SourceTransportOwner, SourceTransportSupport, source_transport_supports,
+    SourceTransportOwner, SourceTransportSupport, source_transport_projection_cover,
+    source_transport_supports,
 };
+pub(in crate::analysis) use vertex_transport::OriginalFaceCornerAttachments;
 pub(crate) use vertex_transport::PreparedSourceVertexPlans;
 pub(crate) use wall::prove_source_wall_component;
 
@@ -284,11 +285,7 @@ fn add_margin(position: [Interval; 2], margin: [f64; 2]) -> [Interval; 2] {
 fn uv_box(position: [Interval; 2]) -> [[f64; 2]; 2] {
     position.map(|value| [value.lo, value.hi])
 }
-fn compose_first(
-    du: &[Interval; 3],
-    dv: &[Interval; 3],
-    tangent: [Interval; 2],
-) -> [Interval; 3] {
+fn compose_first(du: &[Interval; 3], dv: &[Interval; 3], tangent: [Interval; 2]) -> [Interval; 3] {
     std::array::from_fn(|axis| add(mul(du[axis], tangent[0]), mul(dv[axis], tangent[1])))
 }
 fn source_allowance(definition: &Definition) -> Result<f64, GeometryError> {
@@ -422,10 +419,10 @@ fn contained_parameter_range(inner: [f64; 2], outer: [f64; 2]) -> bool {
 }
 
 type UvPairCell = ([f64; 2], [f64; 2], u8);
-pub(super) const UV_EMBEDDING_STACK_BYTES: usize =
-    std::mem::size_of::<[UvPairCell; 2 * MAX_DEPTH as usize + 1]>()
-        + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-        + 2 * std::mem::size_of::<SurfaceFirstEnclosure>();
+pub(super) const UV_EMBEDDING_STACK_BYTES: usize = std::mem::size_of::<
+    [UvPairCell; 2 * MAX_DEPTH as usize + 1],
+>() + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    + 2 * std::mem::size_of::<SurfaceFirstEnclosure>();
 
 fn normal_uv_jet(
     jet: &ChartCurveEnclosure,
@@ -467,6 +464,19 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
     fn for_enclosure(
         domain: &'a PreparedFaceTrimDomain<'d>,
         use_: CoedgeUse,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        Self::for_enclosure_with_byte_limit(domain, use_, usize::MAX, work, cancel)
+    }
+
+    /// The native winding limit includes this domain's retained metadata.
+    /// Query-local consumers must supply their CURRENT coexistent allowance,
+    /// not the larger allowance captured when a borrowed domain was prepared.
+    fn for_enclosure_with_byte_limit(
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        use_: CoedgeUse,
+        metadata_inclusive_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
@@ -520,8 +530,12 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     mul(offset[axis], Interval::point(sign)),
                 )
             });
-            if domain.classify(uv_box(add_margin(probe, margin)), work, cancel)?
-                == TrimClassification::Inside
+            if domain.classify_with_byte_limit(
+                uv_box(add_margin(probe, margin)),
+                metadata_inclusive_bytes,
+                work,
+                cancel,
+            )? == TrimClassification::Inside
             {
                 if inside.is_some() {
                     return Ok(None);
@@ -564,6 +578,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         ))
     }
 
+    /// `range` uses the original C3D curve's native parameters, not the
+    /// original PCurve parameter inventory returned by the trim domain.
     fn normal_image(
         &self,
         range: [f64; 2],
@@ -777,20 +793,31 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<[Interval; 2], GeometryError> {
-        let position = self
-            .domain
+        Self::other_collar_overcover(self.domain, coedge, range, work, cancel)
+    }
+
+    /// UV-only exclusion overcover of the immutable recipe, for both inward
+    /// signs. This does not select a material side or construct a collar.
+    fn other_collar_overcover(
+        domain: &PreparedFaceTrimDomain<'_>,
+        coedge: usize,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 2], GeometryError> {
+        let position = domain
             .boundary_position_enclosure(coedge, range, work, cancel)?
             .map(|value| Interval {
                 lo: value[0],
                 hi: value[1],
             });
-        let proof = self.domain.original_coedge_correspondence(coedge)?;
+        let proof = domain.original_coedge_correspondence(coedge)?;
         if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(position);
         }
-        let original = &self.domain.native().coedges()[coedge];
+        let original = &domain.native().coedges()[coedge];
         let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
             usize::try_from(work.remaining()).unwrap_or(usize::MAX),
         );
@@ -814,10 +841,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let v = rotate(derivative, 1.0);
         let native_range = proof.native_range();
         let width = (native_range[1] - native_range[0])
-            * self
-                .domain
-                .material_realization()
-                .collar_parameter_fraction();
+            * domain.material_realization().collar_parameter_fraction();
         let beta = match proof.affine_native_parameter_preimage(range)? {
             Some(parameter) => native_endpoint_bubble(native_range, parameter)?,
             // This correspondence kind does not grant affine preimage
@@ -837,6 +861,133 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         Ok(std::array::from_fn(|axis| {
             add(position[axis], mul(offset, v[axis]))
         }))
+    }
+
+    /// The same two-sign exclusion overcover in the sealed native parameter.
+    /// Exact correspondences retain their literal zero-offset realization.
+    fn native_collar_overcover(
+        domain: &PreparedFaceTrimDomain<'_>,
+        coedge: usize,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 2], GeometryError> {
+        let jet = chart_jet(domain, coedge, range, work, cancel)?;
+        let proof = domain.original_coedge_correspondence(coedge)?;
+        if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::ExactCoefficients
+            && proof.position_error_mm() == 0.0
+        {
+            return Ok(jet.position);
+        }
+        let native_range = proof.native_range();
+        let width = (native_range[1] - native_range[0])
+            * domain.material_realization().collar_parameter_fraction();
+        let beta = native_endpoint_bubble(native_range, Interval::new(range[0], range[1])?)?;
+        let offset = mul(
+            Interval::point(width),
+            Interval {
+                lo: -beta.hi,
+                hi: beta.hi,
+            },
+        );
+        let transverse = rotate(jet.derivative, 1.0);
+        Ok(std::array::from_fn(|axis| {
+            add(jet.position[axis], mul(offset, transverse[axis]))
+        }))
+    }
+
+    /// Literal central G(t,w), including both CLOSED across limits. First
+    /// derivatives schedule C0 range refinement only; this proves neither
+    /// original-F ownership nor a physical distance to an original face.
+    fn position_first_jet(
+        &self,
+        parameter: [[f64; 2]; 2],
+        curve: &CurveEnclosure,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<([Interval; 3], [Interval; 3], [Interval; 3]), GeometryError> {
+        work.charge(1, cancel)?;
+        let [range, across] = parameter;
+        if !contained_parameter_range(range, self.range)
+            || !contained_parameter_range(across, [0.0, 1.0])
+        {
+            return Err(failure(
+                GeometryErrorCode::InvalidGeometry,
+                "actual-G central cell leaves its fixed native/across recipe",
+                self.use_.face,
+                parameter,
+            ));
+        }
+        let CarrierTransport::Collar { width, inward } = self.transport else {
+            return Ok((curve.position, curve.derivative, [Interval::point(0.0); 3]));
+        };
+        let uv = chart_jet(self.domain, self.use_.coedge, range, work, cancel)?;
+        let (beta, beta_t) = self.bubble(range)?;
+        let across = Interval::new(across[0], across[1])?;
+        let transverse = rotate(uv.derivative, inward);
+        let transverse_t = rotate(uv.second_derivative, inward);
+        let offset = transverse.map(|value| mul(mul(Interval::point(width), beta), value));
+        let offset_t: [Interval; 2] = std::array::from_fn(|axis| {
+            mul(
+                Interval::point(width),
+                add(mul(beta_t, transverse[axis]), mul(beta, transverse_t[axis])),
+            )
+        });
+        let at = std::array::from_fn(|axis| add(uv.position[axis], mul(across, offset[axis])));
+        let along =
+            std::array::from_fn(|axis| add(uv.derivative[axis], mul(across, offset_t[axis])));
+        let weight = intersection(
+            Interval::point(1.0).sub(across),
+            Interval { lo: 0.0, hi: 1.0 },
+        )
+        .ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ConditioningFailure,
+                "actual-G central across weight has no unit image",
+            )
+        })?;
+        self.domain.native().face().with_surface(|surface| {
+            let boundary = surface_piecewise_first_enclosure(
+                surface,
+                uv_box(add_margin(uv.position, self.margin)),
+                work,
+                cancel,
+            )?;
+            let base = surface_piecewise_first_enclosure(
+                surface,
+                uv_box(add_margin(at, self.margin)),
+                work,
+                cancel,
+            )?;
+            // This is the retained coupled C3D(t)-S(gamma(t)) defining
+            // residual, not a claimed correspondence to trimmed Original F.
+            let displacement = self
+                .forward_displacement(curve.position, boundary.position)
+                .map_err(|_| {
+                    GeometryError::new(
+                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                        "actual-G central formula contradicts its retained coupled residual",
+                    )
+                })?;
+            let boundary_t = compose_first(&boundary.du, &boundary.dv, uv.derivative);
+            let base_t = compose_first(&base.du, &base.dv, along);
+            let base_w = compose_first(&base.du, &base.dv, offset);
+            Ok((
+                std::array::from_fn(|axis| {
+                    add(base.position[axis], mul(weight, displacement[axis]))
+                }),
+                std::array::from_fn(|axis| {
+                    add(
+                        base_t[axis],
+                        mul(
+                            weight,
+                            exact_difference(curve.derivative[axis], boundary_t[axis]),
+                        ),
+                    )
+                }),
+                std::array::from_fn(|axis| exact_difference(base_w[axis], displacement[axis])),
+            ))
+        })
     }
 
     fn boundary_jet(
@@ -991,12 +1142,17 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let displacement = std::array::from_fn(|axis| {
             intersection(
                 exact_difference(spatial[axis], carrier[axis]),
-                Interval { lo: -self.position_error_mm, hi: self.position_error_mm },
+                Interval {
+                    lo: -self.position_error_mm,
+                    hi: self.position_error_mm,
+                },
             )
         });
         let [Some(dx), Some(dy), Some(dz)] = displacement else {
             return Err(LocalGeometryRefusal::ForwardResidual {
-                spatial, carrier, admitted_error_mm: self.position_error_mm,
+                spatial,
+                carrier,
+                admitted_error_mm: self.position_error_mm,
             });
         };
         Ok([dx, dy, dz])
@@ -1126,20 +1282,21 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             }
         }
         self.domain.native().face().with_surface(|surface| {
-            let enclosure = |surface: &Surface, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
-                if piecewise {
-                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
-                } else {
-                    // Keep the existing strict source/C1 qualification before
-                    // extracting only the fields this first-matrix proof uses.
-                    let jet = surface_enclosure(surface, uv, work, cancel)?;
-                    Ok(SurfaceFirstEnclosure {
-                        position: jet.position,
-                        du: jet.du,
-                        dv: jet.dv,
-                    })
-                }
-            };
+            let enclosure =
+                |surface: &Surface, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
+                    if piecewise {
+                        surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                    } else {
+                        // Keep the existing strict source/C1 qualification before
+                        // extracting only the fields this first-matrix proof uses.
+                        let jet = surface_enclosure(surface, uv, work, cancel)?;
+                        Ok(SurfaceFirstEnclosure {
+                            position: jet.position,
+                            du: jet.du,
+                            dv: jet.dv,
+                        })
+                    }
+                };
             let boundary = enclosure(
                 surface,
                 uv_box(add_margin(uv.position, self.margin)),
@@ -1425,7 +1582,7 @@ mod scalar_law_tests {
             )
             .unwrap()
             .expect("the unchanged canonical source-only NativeV plan");
-            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter| {
+            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter, _work| {
                 if let Some(&(_, _, previous)) = exits
                     .iter()
                     .find(|&&(candidate, end, _)| candidate == edge && end == back)
@@ -1656,7 +1813,7 @@ mod scalar_law_tests {
             )
             .unwrap()
             .expect("actual rim NativeV has its unchanged source-only geometry plan");
-            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter| {
+            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter, _work| {
                 if let Some(&(_, _, previous)) = exits
                     .iter()
                     .find(|&&(candidate, end, _)| candidate == edge && end == back)

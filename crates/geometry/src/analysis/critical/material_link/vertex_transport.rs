@@ -70,6 +70,127 @@ pub(super) struct SourceVertexTransportPlan<'d> {
     source_geometry_qualified: AtomicBool,
 }
 
+/// Opaque successful geometry authority includes a source-complement cut for
+/// EVERY immutable recipe. Cached acquisition reuses only that source theorem,
+/// never a slab, projection, signed census, metric or degree conclusion.
+struct QualifiedSourceGeometry<'a, 'd> {
+    plan: &'a SourceVertexTransportPlan<'d>,
+}
+
+impl QualifiedSourceGeometry<'_, '_> {
+    fn owns_source_cut(&self, recipe: &CornerRecipe) -> bool {
+        self.plan
+            .recipes
+            .iter()
+            .any(|owned| std::ptr::eq(owned, recipe))
+    }
+}
+
+/// Original relative-cut authority only. Issued before borrowing a carrier.
+/// Its connection check evaluates UV laws but never a native surface or a
+/// realization's geometry qualification. It grants no root or posed authority.
+pub(in crate::analysis) struct OriginalFaceCornerAttachments<'a, 'd> {
+    definition: &'d Definition,
+    domain: &'a PreparedFaceTrimDomain<'d>,
+    plans: &'a PreparedSourceVertexPlans<'d>,
+}
+
+impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
+    pub(in crate::analysis) const CONNECTION_SCRATCH_BYTES: usize =
+        uv_ownership::OWNERSHIP_STACK_BYTES;
+
+    pub(in crate::analysis) fn prepare(
+        source: OriginalTrimSource<'a, 'd>,
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        work.charge(1, cancel)?;
+        let Some(plans) = source.vertex_plans() else {
+            return Ok(None);
+        };
+        plans.validate_source(source.definition(), work, cancel)?;
+        if source
+            .definition()
+            .material_transport_is_proved_zero(work, cancel)?
+        {
+            return Ok(None);
+        }
+        let scratch = remaining_bytes
+            .checked_sub(std::mem::size_of::<Self>())
+            .ok_or_else(super::transport::resource)?;
+        for (joint_index, joint) in domain.native().joints().iter().enumerate() {
+            work.charge(1, cancel)?;
+            if !matches!(
+                joint.kind,
+                monstertruck_modeling::TrimJointKind::EndpointUncertainty
+            ) {
+                continue;
+            }
+            let plan = plans.plan(source.definition(), joint.vertex_id, work, cancel)?;
+            let Some(recipe) = plan.original_joint_recipe(domain, joint_index)? else {
+                continue;
+            };
+            let geometry = plan.qualify_geometry(source, scratch, work, cancel)?;
+            if !geometry.owns_source_cut(recipe) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Self {
+            definition: source.definition(),
+            domain,
+            plans,
+        }))
+    }
+
+    pub(in crate::analysis) fn qualifies_original_connection(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        joint_index: usize,
+        vertex: VertexId<Point3>,
+        connection: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        if !std::ptr::eq(self.domain, domain) {
+            return Ok(false);
+        }
+        let Some(joint) = domain.native().joints().get(joint_index) else {
+            return Ok(false);
+        };
+        if joint.vertex_id != vertex
+            || !matches!(
+                joint.kind,
+                monstertruck_modeling::TrimJointKind::EndpointUncertainty
+            )
+        {
+            return Ok(false);
+        }
+        let plan = self.plans.plan(self.definition, vertex, work, cancel)?;
+        if !plan.source_geometry_qualified.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let Some(recipe) = plan.original_joint_recipe(domain, joint_index)? else {
+            return Ok(false);
+        };
+        // The successful all-recipe cache is immutable and source-only. Do
+        // not call qualify_geometry here: the caller holds a carrier lock.
+        if !(QualifiedSourceGeometry { plan }).owns_source_cut(recipe) {
+            return Ok(false);
+        }
+        let Some(OriginalCornerComparison::NativeUv(comparison)) = &recipe.comparison else {
+            return Ok(false);
+        };
+        let connection = [
+            Interval::new(connection[0][0], connection[0][1])?,
+            Interval::new(connection[1][0], connection[1][1])?,
+        ];
+        comparison.connection_stays_on_replaced_side(domain, recipe, connection, work, cancel)
+    }
+}
+
 /// Query authority is separate from the geometry-only realization choice.
 pub(super) struct SourceVertexRadialProof<'a, 'd> {
     plan: &'a SourceVertexTransportPlan<'d>,
@@ -206,21 +327,46 @@ struct BoundaryJet {
     displacement: Box3,
     uv: Box2,
 }
+
+struct ClosedConeJet {
+    position: Box3,
+    ds: Box3,
+    dt: Box3,
+    normal: Box3,
+}
+
+/// The very same cone selected by cover_piece: G(s,t)=V+s(B(t)-V).
+/// Factor the nonnegative s out of its area normal BEFORE normalization. This
+/// encloses all one-sided normalized limits at s=0 for the complete t interval;
+/// the zero derivative of the collapsed parametrization is not its normal.
+fn closed_cone_jet(
+    point: [f64; 3],
+    boundary: BoundaryJet,
+    radial_range: [f64; 2],
+) -> Result<ClosedConeJet, GeometryError> {
+    let s = source_unit_parameter(Interval::new(radial_range[0], radial_range[1])?)?;
+    let origin = point.map(Interval::point);
+    let ds = relative(boundary.position, point);
+    let mut position = mix(origin, boundary.position, s);
+    let convex = hull3(origin, boundary.position);
+    for i in 0..3 {
+        position[i] = intersection(position[i], convex[i])
+            .ok_or_else(|| refusal("selected closed cone interpolation enclosures disagree"))?;
+    }
+    Ok(ClosedConeJet {
+        position,
+        ds,
+        dt: boundary.derivative.map(|value| s.mul(value)),
+        // cover_piece proves this orientation agrees with the complete
+        // original outward graph. Never flip it from a sampled/reference normal.
+        normal: cross(ds, boundary.derivative),
+    })
+}
+
 struct StarJet {
     uv: Box2,
     ds: Box2,
     dss: Box2,
-}
-
-/// Whole-ray chord operands depend on the sector coordinate t, not the radial
-/// restriction s. A radial split borrows the same immutable coefficient proof.
-#[derive(Clone, Copy)]
-struct EndpointRaySupport {
-    at_joint: Box3,
-    acceleration: Box3,
-    boundary: BoundaryJet,
-    boundary_scalar: Interval,
-    comparison: Option<uv_ownership::EndpointComparisonRay>,
 }
 
 impl<'d> SourceVertexTransportPlan<'d> {
@@ -565,6 +711,133 @@ impl<'d> SourceVertexTransportPlan<'d> {
     pub(super) fn source_error_mm(&self) -> f64 {
         self.source_error_mm
     }
+
+    /// C0 cover of the literal selected CLOSED cones. No correspondence to
+    /// an auxiliary carrier star or removed original-F disk is asserted.
+    /// Material admission remains the separate source-cut/embedding theorem.
+    pub(super) fn visit_projected_position_supports(
+        &self,
+        source: OriginalTrimSource<'_, 'd>,
+        cover: &mut super::transport::SourceProjectionCover<'_>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        type Pending = [([[f64; 2]; 2], u8, Option<BoundaryJet>); MAX_DEPTH as usize + 1];
+        let scratch = remaining_bytes
+            .checked_sub(std::mem::size_of::<Pending>())
+            .and_then(|bytes| {
+                bytes.checked_sub(
+                    2 * std::mem::size_of::<BoundaryJet>()
+                        + std::mem::size_of::<ClosedConeJet>()
+                        + std::mem::size_of::<OriginalCollar<'_, '_>>()
+                        + std::mem::size_of::<CollarBoundaryJet>()
+                        + 3 * std::mem::size_of::<ChartCurveEnclosure>()
+                        + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+                        + std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>()
+                        + 3 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>(),
+                )
+            })
+            .ok_or_else(super::transport::resource)?;
+        let mut stack: Pending = [([[0.0; 2]; 2], 0, None); MAX_DEPTH as usize + 1];
+        for cell in &self.cells {
+            work.charge(1, cancel)?;
+            if cover.include(cell.realized)? {
+                continue;
+            }
+            let recipe = &self.recipes[cell.recipe];
+            let face = recipe.outgoing.use_.face;
+            let domain = source.face_domain(face, scratch, work, cancel)?;
+            let classifier_bytes = scratch
+                .checked_sub(domain.owned_bytes())
+                .and_then(|bytes| bytes.checked_add(domain.retained_bytes()))
+                .ok_or_else(super::transport::resource)?;
+            stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
+            let mut pending = 1;
+            while pending != 0 {
+                pending -= 1;
+                let (parameter, depth, boundary) = stack[pending];
+                work.charge(1, cancel)?;
+                let boundary = match boundary {
+                    Some(boundary) => boundary,
+                    None => boundary_jet_with_byte_limit(
+                        &domain,
+                        recipe.outgoing,
+                        recipe.incoming,
+                        cell.piece,
+                        Interval::new(parameter[1][0], parameter[1][1])?,
+                        recipe.bulge,
+                        classifier_bytes,
+                        work,
+                        cancel,
+                    )?,
+                };
+                let jet = closed_cone_jet(self.point, boundary, parameter[0])?;
+                if cover.include(jet.position)? {
+                    continue;
+                }
+                let children = cover.split(parameter, depth, face, jet.ds, jet.dt)?;
+                if pending + children.len() > stack.len() {
+                    return Err(super::transport::resource());
+                }
+                let boundary = if children[0][1] == parameter[1] {
+                    Some(boundary)
+                } else {
+                    None
+                };
+                for child in children.into_iter().rev() {
+                    stack[pending] = (child, depth + 1, boundary);
+                    pending += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn original_joint_recipe(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        joint_index: usize,
+    ) -> Result<Option<&CornerRecipe>, GeometryError> {
+        let Some(joint) = domain.native().joints().get(joint_index) else {
+            return Ok(None);
+        };
+        if joint.vertex_id != self.vertex
+            || [
+                joint.vertex_point.x,
+                joint.vertex_point.y,
+                joint.vertex_point.z,
+            ] != self.point
+        {
+            return Ok(None);
+        }
+        let face = domain.native().face();
+        let matches_use =
+            |native: monstertruck_topology::trimmed::ChartCoedgeIdentity<Curve, Surface>,
+             end: End| {
+                native.face_id == face.id()
+                    && native.wire_index == end.use_.wire
+                    && native.coedge_index == end.use_.index
+                    && native.edge_id == end.edge
+                    && native.orientation == end.use_.orientation
+            };
+        let mut recipes = self.recipes.iter().filter(|recipe| {
+            matches_use(joint.incoming, recipe.incoming)
+                && matches_use(joint.outgoing, recipe.outgoing)
+        });
+        let Some(recipe) = recipes.next() else {
+            return Ok(None);
+        };
+        if recipes.next().is_some() {
+            return Ok(None);
+        }
+        let Some(comparison) = &recipe.comparison else {
+            return Ok(None);
+        };
+        Ok(comparison
+            .validates_original_joint(domain, recipe, self.vertex, joint_index)?
+            .then_some(recipe))
+    }
     pub(super) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(
@@ -586,7 +859,12 @@ impl<'d> SourceVertexTransportPlan<'d> {
         &self,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-        visitor: &mut dyn FnMut(EdgeId<Curve>, bool, f64) -> Result<(), GeometryError>,
+        visitor: &mut dyn FnMut(
+            EdgeId<Curve>,
+            bool,
+            f64,
+            &mut GeometryWorkBudget,
+        ) -> Result<(), GeometryError>,
     ) -> Result<(), GeometryError> {
         for recipe in &self.recipes {
             work.charge(1, cancel)?;
@@ -594,9 +872,125 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 recipe.outgoing.edge,
                 recipe.outgoing.absolute_back,
                 recipe.outgoing.exit,
+                work,
             )?;
         }
         Ok(())
+    }
+
+    /// Bind one original closure envelope to the already completed CLOSED
+    /// atlas, not merely to an incident cycle or a nearby selected cone.
+    /// The whole joint image is independently bounded against NativeV and the
+    /// SAME source projection. It is never asserted to lie in the comparison
+    /// disk: the caller must still enclose the entire original F carrier.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn qualified_original_joint_image(
+        &self,
+        source: OriginalTrimSource<'_, 'd>,
+        domain: &PreparedFaceTrimDomain<'_>,
+        joint_index: usize,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        has_cutover: &dyn Fn(EdgeId<Curve>, bool, f64) -> bool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        if !std::ptr::eq(source.definition(), self.definition) {
+            return Ok(false);
+        }
+        let Some(joint) = domain.native().joints().get(joint_index) else {
+            return Ok(false);
+        };
+        let Some(recipe) = self.original_joint_recipe(domain, joint_index)? else {
+            return Ok(false);
+        };
+        if !has_cutover(
+            recipe.incoming.edge,
+            recipe.incoming.absolute_back,
+            recipe.incoming.exit,
+        ) || !has_cutover(
+            recipe.outgoing.edge,
+            recipe.outgoing.absolute_back,
+            recipe.outgoing.exit,
+        ) {
+            return Ok(false);
+        }
+        let geometry = self.qualify_geometry(source, remaining_bytes, work, cancel)?;
+        // The opaque all-recipe authority contains this exact source cut,
+        // even if cell qualification used the convex-affine lane. It was
+        // issued only after the matching relative-complement or genuine pole
+        // quotient proof. No native connector is chosen.
+        if !geometry.owns_source_cut(recipe) {
+            return Ok(false);
+        }
+        let scratch = crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+            .saturating_add(crate::parametric::surface_functional_scratch_bytes::<3>())
+            .saturating_add(std::mem::size_of::<crate::parametric::SurfaceFirstEnclosure>())
+            .saturating_add(4 * std::mem::size_of::<Box3>());
+        let pole_scratch = if matches!(
+            joint.kind,
+            monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+        ) {
+            // SphereChart admission calls the native whole-pole strip proof.
+            // Its chart, native jets/operands and returned receipt coexist
+            // with the outer image/functional evaluation storage.
+            (2 * std::mem::size_of::<source_chart::SphereChart>())
+                .saturating_add(std::mem::size_of::<Option<source_chart::SphereChart>>())
+                .saturating_add(std::mem::size_of::<monstertruck_modeling::Curve2D>())
+                .saturating_add(std::mem::size_of::<
+                    monstertruck_modeling::ValidatedCurveJet2D,
+                >())
+                .saturating_add(std::mem::size_of::<
+                    monstertruck_modeling::ValidatedSurfaceJet,
+                >())
+                .saturating_add(2 * std::mem::size_of::<monstertruck_modeling::TrimJointKind>())
+                .saturating_add(std::mem::size_of::<
+                    monstertruck_modeling::ValidatedGeometryBudget,
+                >())
+                .saturating_add(8 * std::mem::size_of::<Box3>())
+        } else {
+            0
+        };
+        if scratch.saturating_add(pole_scratch) > remaining_bytes {
+            return Err(super::transport::resource());
+        }
+        let allowance = source_allowance(self.definition)?.min(domain.source_chart_error_mm());
+        if !allowance.is_finite() || allowance <= 0.0 {
+            return Ok(false);
+        }
+        let uv = joint.enclosure.map(|v| Interval {
+            lo: v.lower,
+            hi: v.upper,
+        });
+        let face = domain.native().face();
+        face.with_surface(|surface| {
+            // Qualification above must stay outside this native carrier lock.
+            // This independent chart uses the SAME borrowed carrier/domain,
+            // never a family label or the rank-zero covering-chart normal.
+            let sphere_chart = if matches!(
+                joint.kind,
+                monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+            ) {
+                let Some(chart) = source_chart::SphereChart::new(surface, domain, work, cancel)?
+                else {
+                    return Ok(false);
+                };
+                Some(chart)
+            } else {
+                None
+            };
+            whole_original_joint_image_fits(
+                surface,
+                uv,
+                self.point,
+                cross(self.rows[0], self.rows[1]),
+                face.orientation(),
+                sphere_chart.as_ref(),
+                allowance,
+                work,
+                cancel,
+            )
+        })
     }
 
     /// Conservative complete-set exclusion, not corner ownership. Removed F
@@ -727,13 +1121,10 @@ impl<'d> SourceVertexTransportPlan<'d> {
         Ok(())
     }
 
-    pub(super) fn visit_supports(
-        &self,
-        direction: [Interval; 3],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-        visitor: &mut dyn FnMut(SourceTransportSupport) -> Result<(), GeometryError>,
-    ) -> Result<(), GeometryError> {
+    /// The normative selected cone is G(s,t)=V+s(B(t)-V), including s=0.
+    /// Thus its literal V is an actual point of the complete G even when an
+    /// individual refined support cell excludes s=0. Owner labels play no role.
+    fn apex_scalar_witness(&self, direction: Box3) -> Result<Interval, GeometryError> {
         if direction
             .into_iter()
             .any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
@@ -743,6 +1134,19 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 "source conical support direction is nonfinite",
             ));
         }
+        let value = dot(direction, self.point.map(Interval::point));
+        Interval::new(value.lo, value.hi)
+    }
+
+    pub(super) fn visit_supports(
+        &self,
+        direction: [Interval; 3],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visitor: &mut dyn FnMut(SourceTransportSupport) -> Result<(), GeometryError>,
+    ) -> Result<(), GeometryError> {
+        work.charge(1, cancel)?;
+        let witness = self.apex_scalar_witness(direction)?;
         let row = direction;
         for cell in &self.cells {
             work.charge(1, cancel)?;
@@ -756,15 +1160,18 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 base_interval: [base.lo, base.hi],
                 corrected_interval: [corrected.lo, corrected.hi],
                 displacement_interval: [displacement.lo, displacement.hi],
+                realized_witness_interval: Some([witness.lo, witness.hi]),
+                realized_endpoint_witnesses: None,
                 source_error_mm: cell.error_mm,
             })?;
         }
         Ok(())
     }
 
-    /// Refine RANGE proof cells of the already selected source cone only where
-    /// they can own a directional endpoint. In particular a full-ray curvature
-    /// cost is not the displacement of its unchanged native apex witness.
+    /// G(s,t)=V+s(B(t)-V) is affine in s. Its complete scalar extrema are
+    /// exactly the extrema of V and B, without a radial subdivision or a
+    /// query-dependent OriginalF/G correspondence. Keep the immutable BASE,
+    /// comparison and displacement inventory while refining actual G only.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn visit_endpoint_supports(
         &self,
@@ -778,21 +1185,22 @@ impl<'d> SourceVertexTransportPlan<'d> {
         output: &mut Vec<SourceTransportSupport>,
     ) -> Result<(), GeometryError> {
         use super::transport::{output_bytes, push};
-        type Pending =
-            [([[f64; 2]; 2], u8, Option<EndpointRaySupport>); MAX_DEPTH as usize + 1];
+        let fixed_bytes = 2 * std::mem::size_of::<BoundaryJet>()
+            + std::mem::size_of::<OriginalCollar<'_, '_>>()
+            + std::mem::size_of::<CollarBoundaryJet>()
+            + 3 * std::mem::size_of::<ChartCurveEnclosure>()
+            + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+            + std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>();
         let available = remaining_bytes
-            .checked_sub(std::mem::size_of::<Pending>())
-            // Pending radial siblings and the active ray coexist with the
-            // original domain, native query scratch and accumulated output.
-            .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<EndpointRaySupport>()))
-            .and_then(|bytes| bytes.checked_sub(
-                crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES,
-            ))
+            .checked_sub(fixed_bytes)
             .ok_or_else(super::transport::resource)?;
         if output_bytes(output) > available {
             return Err(super::transport::resource());
         }
-        let mut stack: Pending = [([[0.0; 2]; 2], 0, None); MAX_DEPTH as usize + 1];
+        work.charge(1, cancel)?;
+        let witness = self.apex_scalar_witness(direction)?;
+        // Boundary scratch and the adaptive scalar queue share this cap with
+        // the retained domain and all previously produced support records.
         for cell in &self.cells {
             work.charge(1, cancel)?;
             let coarse = SourceTransportSupport {
@@ -811,20 +1219,15 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     let value = dot(direction, cell.displacement);
                     [value.lo, value.hi]
                 },
+                realized_witness_interval: Some([witness.lo, witness.hi]),
+                realized_endpoint_witnesses: None,
                 source_error_mm: cell.error_mm,
             };
-            let recipe = &self.recipes[cell.recipe];
-            // Other sealed reference maps retain their complete original
-            // inventory; no unproved local restriction of them is substituted.
-            if !endpoint_support_needs_refinement(&coarse, reference, tolerance)
-                || recipe
-                    .comparison
-                    .as_ref()
-                    .is_some_and(|map| map.native_uv().is_none())
-            {
+            if !endpoint_support_needs_refinement(&coarse, reference, tolerance) {
                 push(output, coarse, available)?;
                 continue;
             }
+            let recipe = &self.recipes[cell.recipe];
             let domain_limit = available
                 .checked_sub(output_bytes(output))
                 .ok_or_else(super::transport::resource)?;
@@ -833,48 +1236,65 @@ impl<'d> SourceVertexTransportPlan<'d> {
             let output_limit = available
                 .checked_sub(domain.owned_bytes())
                 .ok_or_else(super::transport::resource)?;
-            stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
-            let mut pending = 1;
-            while pending != 0 {
-                pending -= 1;
-                let (parameter, depth, ray) = stack[pending];
-                work.charge(1, cancel)?;
-                let ray = match ray {
-                    Some(ray) => ray,
-                    None => endpoint_ray_support(
-                        &domain, recipe, cell, self.point, parameter[1], direction, work, cancel,
-                    )?,
-                };
-                let (support, suggested_axis) = cone_endpoint_support(
-                    &domain, recipe, cell, &ray, self.point, parameter, direction, work, cancel,
-                )?;
-                if !endpoint_support_needs_refinement(&support, reference, tolerance)
-                    || depth >= MAX_DEPTH
-                {
-                    push(output, support, output_limit)?;
-                    continue;
-                }
-                let mut axis = suggested_axis;
-                let middle = |axis: usize| parameter[axis][0] * 0.5 + parameter[axis][1] * 0.5;
-                if middle(axis) <= parameter[axis][0] || middle(axis) >= parameter[axis][1] {
-                    axis = 1 - axis;
-                }
-                let middle = middle(axis);
-                if middle <= parameter[axis][0] || middle >= parameter[axis][1] {
-                    // The complete enclosure remains authoritative; only the
-                    // unchanged final endpoint policy may accept this leaf.
-                    push(output, support, output_limit)?;
-                    continue;
-                }
-                let mut left = parameter;
-                let mut right = parameter;
-                left[axis][1] = middle;
-                right[axis][0] = middle;
-                let child_ray = if axis == 0 { Some(ray) } else { None };
-                stack[pending] = (right, depth + 1, child_ray);
-                stack[pending + 1] = (left, depth + 1, child_ray);
-                pending += 2;
-            }
+            let query_bytes = output_limit
+                .checked_sub(output_bytes(output))
+                .ok_or_else(super::transport::resource)?;
+            let boundary = crate::analysis::bounds::source_recipe_curve_bounds(
+                cell.parameter,
+                tolerance,
+                query_bytes,
+                work,
+                cancel,
+                |range, work, cancel, remaining_bytes| {
+                    let (height, derivative) = cone_boundary_scalar(
+                        &domain,
+                        recipe,
+                        cell.piece,
+                        range,
+                        direction,
+                        remaining_bytes,
+                        work,
+                        cancel,
+                    )?;
+                    let middle = range[0] * 0.5 + range[1] * 0.5;
+                    let (point, _) = cone_boundary_scalar(
+                        &domain,
+                        recipe,
+                        cell.piece,
+                        [middle; 2],
+                        direction,
+                        remaining_bytes,
+                        work,
+                        cancel,
+                    )?;
+                    let centered = point.add(
+                        derivative
+                            .mul(Interval::new(range[0], range[1])?.sub(Interval::point(middle))),
+                    );
+                    let height = intersection(height, centered).ok_or_else(|| {
+                        refusal("source cone boundary scalar and mean-value enclosures disagree")
+                    })?;
+                    Ok((height, point))
+                },
+            )?;
+            let corrected = witness.hull(Interval::new(boundary.minimum[0], boundary.maximum[1])?);
+            let corrected = intersection(
+                corrected,
+                Interval::new(coarse.corrected_interval[0], coarse.corrected_interval[1])?,
+            )
+            .ok_or_else(|| refusal("source cone complete scalar enclosures disagree"))?;
+            push(
+                output,
+                SourceTransportSupport {
+                    corrected_interval: [corrected.lo, corrected.hi],
+                    realized_endpoint_witnesses: Some([
+                        witness.hi.min(boundary.minimum[1]),
+                        witness.lo.max(boundary.maximum[0]),
+                    ]),
+                    ..coarse
+                },
+                output_limit,
+            )?;
         }
         Ok(())
     }
@@ -905,6 +1325,178 @@ impl<'d> SourceVertexTransportPlan<'d> {
         Ok(())
     }
 
+    /// Query-only cover of the immutable selected G, after the complete source
+    /// disk, graph, cutover and embedding theorem. The radial coordinate is
+    /// CLOSED, including the collapsed apex and the complete outer cutover.
+    /// Neither subdivision nor the visitor can change the selected recipe.
+    /// Callback positions and normals are SOURCE-coordinate selected G, as
+    /// required by BoundaryCell. Actual coordinates bind activity/scheduling.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn visit_closed_atlas_geometry(
+        &self,
+        source: OriginalTrimSource<'_, 'd>,
+        coordinates: &crate::analysis::placed::ActualMaterialCoordinates<'_>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visitor: &mut dyn FnMut(
+            usize,
+            Box3,
+            Box3,
+            bool,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        )
+            -> Result<super::radial_product::BoundaryVisit, GeometryError>,
+    ) -> Result<bool, GeometryError> {
+        use super::radial_product::BoundaryVisit;
+        type Pending = [([[f64; 2]; 2], u8, Option<BoundaryJet>); MAX_DEPTH as usize + 1];
+        self.qualify_geometry(source, remaining_bytes, work, cancel)?;
+        // Pending radial siblings, the live boundary jet, the original domain,
+        // and both first/full native evaluation scratch coexist. In particular
+        // the Middle boundary uses the full carrier jet, not a fabricated Hessian.
+        let scratch = remaining_bytes
+            .checked_sub(std::mem::size_of::<Pending>())
+            .and_then(|bytes| {
+                bytes.checked_sub(
+                    2 * std::mem::size_of::<BoundaryJet>()
+                        + std::mem::size_of::<ClosedConeJet>()
+                        + std::mem::size_of::<OriginalCollar<'_, '_>>()
+                        + std::mem::size_of::<CollarBoundaryJet>()
+                        + 3 * std::mem::size_of::<crate::parametric::ChartCurveEnclosure>(),
+                )
+            })
+            .and_then(|bytes| {
+                bytes.checked_sub(crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES)
+            })
+            .and_then(|bytes| {
+                bytes.checked_sub(
+                    std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>()
+                        + 3 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>(),
+                )
+            })
+            .ok_or_else(super::transport::resource)?;
+        let before = work.consumed();
+        let mut active = None;
+        let outcome = (|| {
+            let mut stack: Pending = [([[0.0; 2]; 2], 0, None); MAX_DEPTH as usize + 1];
+            for cell in &self.cells {
+                work.charge(1, cancel)?;
+                let recipe = &self.recipes[cell.recipe];
+                let face = recipe.outgoing.use_.face;
+                active = Some((face, cell.recipe, [[0.0, 1.0], cell.parameter]));
+                let interval = coordinates.world_interval();
+                let height = coordinates.position(cell.realized)?[2];
+                if height.hi < interval[0] || height.lo > interval[1] {
+                    continue;
+                }
+                // The retained source-only cell already encloses the SAME
+                // complete closed cone. Do not repeat native carrier queries
+                // when its existing range proves every query obligation.
+                // Area normals with the nonnegative s factor removed match the
+                // F/G inventory. Unit normalization would destroy correlation
+                // between a component and its own magnitude enclosure.
+                if visitor(face, cell.realized, cell.normal, true, work, cancel)?
+                    == BoundaryVisit::Accepted
+                {
+                    continue;
+                }
+                let domain = source.face_domain(face, scratch, work, cancel)?;
+                // face_domain's allowance includes its owned storage. No
+                // native carrier lock is retained by this domain handle.
+                if domain.owned_bytes() > scratch {
+                    return Err(super::transport::resource());
+                }
+                stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
+                let mut pending = 1;
+                while pending != 0 {
+                    pending -= 1;
+                    let (parameter, depth, boundary) = stack[pending];
+                    active = Some((face, cell.recipe, parameter));
+                    work.charge(1, cancel)?;
+                    let boundary = match boundary {
+                        Some(boundary) => boundary,
+                        None => boundary_jet(
+                            &domain,
+                            recipe.outgoing,
+                            recipe.incoming,
+                            cell.piece,
+                            Interval::new(parameter[1][0], parameter[1][1])?,
+                            recipe.bulge,
+                            work,
+                            cancel,
+                        )?,
+                    };
+                    let jet = closed_cone_jet(self.point, boundary, parameter[0])?;
+                    let position = coordinates.position_relative_to_center_family(jet.position)?;
+                    let interval = coordinates.world_interval();
+                    // Strict exclusion only: equality with either cut remains
+                    // an active closed-cell obligation, including s=0 and s=1.
+                    if position[2].hi < interval[0] || position[2].lo > interval[1] {
+                        continue;
+                    }
+                    let can_refine = depth < MAX_DEPTH
+                        && parameter.iter().any(|range| {
+                            let mid = range[0] * 0.5 + range[1] * 0.5;
+                            range[0] < mid && mid < range[1]
+                        });
+                    // boundary_jet has released all native carrier locks.
+                    let included =
+                        visitor(face, jet.position, jet.normal, can_refine, work, cancel)?;
+                    if included == BoundaryVisit::Accepted {
+                        continue;
+                    }
+                    if !can_refine {
+                        return Ok(false);
+                    }
+                    let children = if included == BoundaryVisit::RefineActualXy {
+                        let rows = coordinates.affine_rows();
+                        let ds = [dot(rows[0], jet.ds), dot(rows[1], jet.ds)];
+                        let dt = [dot(rows[0], jet.dt), dot(rows[1], jet.dt)];
+                        crate::analysis::critical::split_metric_derivatives(
+                            parameter, depth, face, &ds, &dt,
+                        )?
+                    } else {
+                        // The limiting normal fan varies with t even at s=0;
+                        // use unattenuated angular motion for spatial/rank work.
+                        crate::analysis::critical::split_metric_derivatives(
+                            parameter,
+                            depth,
+                            face,
+                            &jet.ds,
+                            &boundary.derivative,
+                        )?
+                    };
+                    if pending + children.len() > stack.len() {
+                        return Err(super::transport::resource());
+                    }
+                    // Only a radial split may reuse B(t). A t split always
+                    // reevaluates the identical authoritative boundary recipe.
+                    let boundary = if children[0][1] == parameter[1] {
+                        Some(boundary)
+                    } else {
+                        None
+                    };
+                    for child in children.into_iter().rev() {
+                        stack[pending] = (child, depth + 1, boundary);
+                        pending += 1;
+                    }
+                }
+            }
+            Ok(true)
+        })();
+        outcome.map_err(|error| {
+            work.annotate_error(
+                error,
+                before,
+                format_args!(
+                    "closed source cone atlas vertex_mm={:?} face_recipe_parameter={active:?}",
+                    self.point,
+                ),
+            )
+        })
+    }
+
     /// Retain only a successful qualification of this immutable source star.
     /// No slab, pose, radial field or metric participates in that theorem.
     /// Fixed inline storage avoids retained growth. Do not hold a cache lock
@@ -916,7 +1508,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<QualifiedSourceGeometry<'_, 'd>, GeometryError> {
         work.charge(1, cancel)?;
         if !std::ptr::eq(source.definition(), self.definition) {
             return Err(refusal(
@@ -924,12 +1516,12 @@ impl<'d> SourceVertexTransportPlan<'d> {
             ));
         }
         if self.source_geometry_qualified.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(QualifiedSourceGeometry { plan: self });
         }
         self.qualify_geometry_fresh(source, remaining_bytes, work, cancel)?;
         self.source_geometry_qualified
             .store(true, Ordering::Release);
-        Ok(())
+        Ok(QualifiedSourceGeometry { plan: self })
     }
 
     fn qualify_geometry_fresh(
@@ -993,19 +1585,33 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     work,
                     cancel,
                 )?;
-                let comparison_owned = if convex_owned {
-                    false
-                } else if let Some(comparison) = &recipe.comparison {
+                // Even the convex-affine lane must qualify the actual native
+                // source complement; being Inside proves no boundary surgery.
+                let comparison_owned = if let Some(comparison) = &recipe.comparison {
                     phase = match comparison {
                         OriginalCornerComparison::NativeUv(_) => {
-                            "original NativeUv comparison disk ownership"
+                            "original NativeUv source-face relative crosscut"
                         }
                         OriginalCornerComparison::SphericalPole(_) => {
-                            "original SphericalPole comparison disk ownership"
+                            "original SphericalPole source-face quotient cut"
                         }
                     };
                     comparison.validates(&domain, recipe, self.vertex)?;
-                    comparison.disk_owned(&domain, recipe, owned_scratch, work, cancel)?
+                    let Some(cut) =
+                        comparison.source_cut(&domain, recipe, owned_scratch, work, cancel)?
+                    else {
+                        return Err(self.gate_failure(
+                            face,
+                            "original source-face complement has no qualified cut",
+                        ));
+                    };
+                    if !cut.binds(&domain, recipe) {
+                        return Err(self.gate_failure(
+                            face,
+                            "original source-face cut belongs to different immutable operands",
+                        ));
+                    }
+                    !convex_owned
                 } else {
                     phase = "original comparison ownership refusal diagnostic";
                     // Reconstruct full finite diagnostics ONLY on this refusal
@@ -1627,6 +2233,43 @@ fn centered_source_point(
     }))
 }
 
+/// This is an image proof, not an endpoint/center test or reference-domain
+/// ownership. Every possible original closure remains within the physical
+/// chart error and retains the already selected source projection direction.
+#[allow(clippy::too_many_arguments)]
+fn whole_original_joint_image_fits(
+    surface: &Surface,
+    uv: Box2,
+    point: [f64; 3],
+    projection_normal: Box3,
+    orientation: bool,
+    sphere_chart: Option<&source_chart::SphereChart>,
+    allowance: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let jet =
+        crate::parametric::surface_piecewise_first_enclosure(surface, uv_box(uv), work, cancel)?;
+    let normal = if let Some(chart) = sphere_chart {
+        // Already includes face and processor orientation. This geometric
+        // area/gradient field stays nonzero at a collapsed original UV pole;
+        // it is not Euclidean-normalized and must not be flipped again.
+        chart.normal(jet.position)?
+    } else {
+        let normal = cross(jet.du, jet.dv);
+        if orientation {
+            normal
+        } else {
+            normal.map(Interval::neg)
+        }
+    };
+    if dot(normal, projection_normal).lo <= 0.0 {
+        return Ok(false);
+    }
+    let residual = centered_source_point(surface, uv, point, work, cancel)?;
+    Ok(length(residual)?.hi <= allowance)
+}
+
 /// Actual G(1/2) - S(H(1/2)) for a fixed source generator. Even a tight
 /// enclosure can only refute an allowance: it proves nothing about the rest
 /// of the cone, its source domain, determinant, or winding.
@@ -1913,6 +2556,21 @@ fn boundary_jet(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<BoundaryJet, GeometryError> {
+    boundary_jet_with_byte_limit(domain, a, b, piece, t, bulge, usize::MAX, work, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn boundary_jet_with_byte_limit(
+    domain: &PreparedFaceTrimDomain<'_>,
+    a: End,
+    b: End,
+    piece: Piece,
+    t: Interval,
+    bulge: Box2,
+    metadata_inclusive_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<BoundaryJet, GeometryError> {
     let t = source_unit_parameter(t)?;
     if matches!(piece, Piece::Middle) {
         let p0 = chart_jet(domain, a.use_.coedge, [a.exit; 2], work, cancel)?.position;
@@ -1949,7 +2607,14 @@ fn boundary_jet(
     } else {
         source_unit_complement(t)?
     };
-    let Some(collar) = OriginalCollar::for_enclosure(domain, end.use_, work, cancel)? else {
+    let Some(collar) = OriginalCollar::for_enclosure_with_byte_limit(
+        domain,
+        end.use_,
+        metadata_inclusive_bytes,
+        work,
+        cancel,
+    )?
+    else {
         return Err(refusal(
             "source conical boundary lost its retained collar recipe",
         ));
@@ -1981,165 +2646,61 @@ fn endpoint_support_needs_refinement(
     if up(base[1] - base[0]) <= tolerance && up(corrected[1] - corrected[0]) <= tolerance {
         return false;
     }
-    (base[0] <= reference[0] && displacement[1] > tolerance)
-        || (base[1] >= reference[1] && displacement[0] < -tolerance)
+    // A complete-G witness may discharge only inward loss of a raw feasible
+    // endpoint. It does not shrink BASE/G or excuse actual outward movement.
+    let minimum_retained = support
+        .realized_witness_interval
+        .is_some_and(|witness| up(witness[1] - reference[0]) <= tolerance);
+    let maximum_retained = support
+        .realized_witness_interval
+        .is_some_and(|witness| up(reference[1] - witness[0]) <= tolerance);
+    (base[0] <= reference[0] && displacement[1] > tolerance && !minimum_retained)
+        || (base[1] >= reference[1] && displacement[0] < -tolerance && !maximum_retained)
         || (corrected[0] < reference[0] - tolerance * 2.0 && displacement[0] < -tolerance)
         || (corrected[1] > reference[1] + tolerance * 2.0 && displacement[1] > tolerance)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn endpoint_ray_support(
+fn cone_boundary_scalar(
     domain: &PreparedFaceTrimDomain<'_>,
     recipe: &CornerRecipe,
-    cell: &ConeCell,
-    point: [f64; 3],
+    piece: Piece,
     range: [f64; 2],
     direction: Box3,
+    remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<EndpointRaySupport, GeometryError> {
-    let t = Interval::new(range[0], range[1])?;
-    let whole = star_jet(
-        domain, recipe.outgoing, recipe.incoming, cell.piece,
-        Interval { lo: 0.0, hi: 1.0 }, t, recipe.bulge, work, cancel,
-    )?;
-    let joint = star_jet(
-        domain, recipe.outgoing, recipe.incoming, cell.piece,
-        Interval::point(0.0), t, recipe.bulge, work, cancel,
-    )?;
-    let boundary = boundary_jet(
-        domain, recipe.outgoing, recipe.incoming, cell.piece, t, recipe.bulge, work, cancel,
-    )?;
-    // Native comparison acquires the same carrier lock internally.
-    let comparison = recipe.comparison.as_ref()
-        .and_then(|map| map.native_uv())
-        .filter(|map| !map.is_identity())
-        .map(|map| map.endpoint_support_ray(
-            domain, recipe, cell.piece, t, point, boundary.displacement, work, cancel,
-        ))
-        .transpose()?;
-    domain.native().face().with_surface(|surface| {
-        let whole_jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
-        let at_joint = relative(
-            surface_enclosure(surface, uv_box(joint.uv), work, cancel)?.position,
-            point,
-        ).map(Interval::neg);
-        let acceleration = std::array::from_fn(|i| {
-            whole_jet.duu[i].mul(whole.ds[0].square())
-                .add(Interval::point(2.0).mul(whole_jet.duv[i]).mul(whole.ds[0]).mul(whole.ds[1]))
-                .add(whole_jet.dvv[i].mul(whole.ds[1].square()))
-                .add(whole_jet.du[i].mul(whole.dss[0]))
-                .add(whole_jet.dv[i].mul(whole.dss[1]))
-        });
-        let boundary_scalar = intersection(
-            dot(direction, boundary.position),
-            super::transport::scalar_surface_jet(
-                surface, uv_box(boundary.uv), direction, work, cancel,
-            )?.0.add(dot(direction, boundary.displacement)),
-        ).ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
-        Ok(EndpointRaySupport { at_joint, acceleration, boundary, boundary_scalar, comparison })
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cone_endpoint_support(
-    domain: &PreparedFaceTrimDomain<'_>,
-    recipe: &CornerRecipe,
-    cell: &ConeCell,
-    ray: &EndpointRaySupport,
-    point: [f64; 3],
-    parameter: [[f64; 2]; 2],
-    direction: Box3,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(SourceTransportSupport, usize), GeometryError> {
-    let [s, t] = parameter.map(|range| Interval {
-        lo: range[0],
-        hi: range[1],
-    });
-    let restricted = star_jet(
+) -> Result<(Interval, Interval), GeometryError> {
+    let classifier_bytes = remaining_bytes
+        .checked_add(domain.retained_bytes())
+        .ok_or_else(super::transport::resource)?;
+    let boundary = boundary_jet_with_byte_limit(
         domain,
         recipe.outgoing,
         recipe.incoming,
-        cell.piece,
-        s,
-        t,
+        piece,
+        Interval::new(range[0], range[1])?,
         recipe.bulge,
+        classifier_bytes,
         work,
         cancel,
     )?;
-    // Comparison queries acquire this same carrier mutex internally. Complete
-    // them before borrowing the carrier for the scalar/jet evaluations below.
-    let comparison = if let Some(comparison) = recipe
-        .comparison
-        .as_ref()
-        .and_then(|map| map.native_uv())
-        .filter(|comparison| !comparison.is_identity())
-    {
-        let ray = ray.comparison.as_ref().ok_or_else(|| {
-            refusal("source cone endpoint lost its complete comparison ray")
-        })?;
-        Some(comparison.endpoint_support_on_cell(
-            domain, recipe, cell.piece, ray, s, t, restricted.uv, work, cancel,
-        )?)
-    } else {
-        None
-    };
     domain.native().face().with_surface(|surface| {
-        let mut displacement = source_chord_displacement(
-            ray.at_joint, ray.boundary.displacement, ray.acceleration, s,
-        )?;
-        let (mut base, gradient) = super::transport::scalar_surface_jet(
-            surface, uv_box(restricted.uv), direction, work, cancel,
-        )?;
-        if let Some((comparison_displacement, source_uv)) = comparison {
-            displacement = hull3(displacement, comparison_displacement);
-            base = base.hull(
-                super::transport::scalar_surface_jet(
-                    surface,
-                    uv_box(source_uv),
-                    direction,
-                    work,
-                    cancel,
-                )?
-                .0,
-            );
-        }
-        let vertex_scalar = dot(direction, point.map(Interval::point));
-        let corrected = intersection(
-            source_unit_complement(s)?
-                .mul(vertex_scalar)
-                .add(s.mul(ray.boundary_scalar)),
-            vertex_scalar.hull(ray.boundary_scalar),
-        )
-        .ok_or_else(|| refusal("source cone scalar interpolation enclosures disagree"))?;
-        let scalar_displacement =
-            intersection(dot(direction, displacement), corrected.sub(base))
-                .ok_or_else(|| refusal("source cone scalar displacement enclosures disagree"))?;
-        // Preserve coefficient cancellation in the scalar covector before
-        // composing with the source chart. This scheduling estimate is not a
-        // smoothness or displacement certificate.
-        let radial_motion = gradient[0].mul(restricted.ds[0])
-            .add(gradient[1].mul(restricted.ds[1])).abs_upper() * (s.hi - s.lo);
-        let boundary_motion =
-            dot(direction, ray.boundary.derivative).abs_upper() * s.hi * (t.hi - t.lo);
-        let split_axis = if radial_motion == 0.0 && boundary_motion == 0.0 {
-            usize::from(t.hi - t.lo > s.hi - s.lo)
-        } else {
-            usize::from(boundary_motion > radial_motion)
-        };
-        Ok((
-            SourceTransportSupport {
-                owner: SourceTransportOwner::OriginalVertex { point_mm: point },
-                base_interval: [base.lo, base.hi],
-                corrected_interval: [corrected.lo, corrected.hi],
-                displacement_interval: [scalar_displacement.lo, scalar_displacement.hi],
-                // Refinement improves the scalar endpoint proof, not the frozen
-                // recipe's charged three-dimensional realization allowance.
-                source_error_mm: cell.error_mm,
-            },
-            split_axis,
-        ))
+        // Fold the covector into native coefficients before evaluating the
+        // scalar carrier. The displacement is the literal boundary recipe,
+        // not a global physical OriginalF/G error or a padding allowance.
+        let scalar = super::transport::scalar_surface_jet(
+            surface,
+            uv_box(boundary.uv),
+            direction,
+            work,
+            cancel,
+        )?
+        .0
+        .add(dot(direction, boundary.displacement));
+        let height = intersection(dot(direction, boundary.position), scalar)
+            .ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
+        Ok((height, dot(direction, boundary.derivative)))
     })
 }
 
@@ -3073,6 +3634,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_cone_apex_avoids_only_inward_endpoint_refinement() {
+        let tolerance = 1.0e-6;
+        for (range, apex, outward) in [
+            ([0.0, 1.0], 0.0, [-0.01, 1.0]),
+            ([9.0, 10.0], 10.0, [9.0, 10.01]),
+        ] {
+            let mut support = SourceTransportSupport {
+                owner: SourceTransportOwner::OriginalVertex {
+                    point_mm: [0.0, 0.0, apex],
+                },
+                base_interval: range,
+                corrected_interval: range,
+                displacement_interval: [-0.1, 0.1],
+                realized_witness_interval: None,
+                realized_endpoint_witnesses: None,
+                source_error_mm: 0.1,
+            };
+            assert!(endpoint_support_needs_refinement(
+                &support,
+                [0.0, 10.0],
+                tolerance
+            ));
+            support.realized_witness_interval = Some([apex, apex]);
+            assert!(!endpoint_support_needs_refinement(
+                &support,
+                [0.0, 10.0],
+                tolerance
+            ));
+            support.corrected_interval = outward;
+            assert!(endpoint_support_needs_refinement(
+                &support,
+                [0.0, 10.0],
+                tolerance
+            ));
+
+            // An actual but nonextremal G point cannot retain the raw endpoint.
+            support.corrected_interval = range;
+            support.realized_witness_interval = Some([5.0, 5.0]);
+            assert!(endpoint_support_needs_refinement(
+                &support,
+                [0.0, 10.0],
+                tolerance
+            ));
+        }
+    }
+
+    #[test]
+    fn closed_cone_atlas_covers_apex_fan_and_both_closed_radial_ends() {
+        // B(t)=(1,t,t^2), t in [0,1]. All limiting normals at the
+        // collapsed apex must survive, not merely the t-midpoint normal.
+        let boundary = BoundaryJet {
+            position: [
+                Interval::point(1.0),
+                Interval { lo: 0.0, hi: 1.0 },
+                Interval { lo: 0.0, hi: 1.0 },
+            ],
+            derivative: [
+                Interval::point(0.0),
+                Interval::point(1.0),
+                Interval { lo: 0.0, hi: 2.0 },
+            ],
+            displacement: [Interval::point(0.0); 3],
+            uv: [Interval::point(0.0); 2],
+        };
+        let apex = closed_cone_jet([0.0; 3], boundary, [0.0, 0.0]).unwrap();
+        let outer = closed_cone_jet([0.0; 3], boundary, [1.0, 1.0]).unwrap();
+        let closed = closed_cone_jet([0.0; 3], boundary, [0.0, 1.0]).unwrap();
+        let normal = apex.normal;
+        assert!(
+            normal[2].lo > 0.0,
+            "apex has a strict oriented limiting fan"
+        );
+        assert!(apex.position.iter().all(|value| value.contains_zero()));
+        assert!(apex.dt.iter().all(|value| value.contains_zero()));
+        for t in [0.0_f64, 0.25, 0.5, 0.75, 1.0] {
+            let raw = [t * t, -2.0 * t, 1.0];
+            for i in 0..3 {
+                assert!(normal[i].lo <= raw[i] && raw[i] <= normal[i].hi);
+            }
+            for s in [0.0, 0.5, 1.0] {
+                let point = [s, s * t, s * t * t].map(Interval::point);
+                assert!(contains(closed.position, point));
+                if s == 1.0 {
+                    assert!(contains(outer.position, point));
+                }
+            }
+        }
+        let reversed = BoundaryJet {
+            derivative: boundary.derivative.map(Interval::neg),
+            ..boundary
+        };
+        let reversed = closed_cone_jet([0.0; 3], reversed, [0.0, 1.0]).unwrap();
+        assert!(reversed.normal[2].hi < 0.0);
+    }
+
+    #[test]
+    fn closed_cone_atlas_refuses_unproved_radial_domains() {
+        let boundary = BoundaryJet {
+            position: [1.0, 0.0, 0.0].map(Interval::point),
+            derivative: [1.0, 0.0, 0.0].map(Interval::point),
+            displacement: [Interval::point(0.0); 3],
+            uv: [Interval::point(0.0); 2],
+        };
+        assert!(closed_cone_jet([0.0; 3], boundary, [down(0.0), 1.0]).is_err());
+        assert!(closed_cone_jet([0.0; 3], boundary, [0.0, up(1.0)]).is_err());
+    }
+
+    #[test]
     fn nonincident_carrier_exclusion_preserves_trimmed_holes_and_actual_caps() {
         let cancel = AtomicBool::new(false);
         let definition = crate::import_step(
@@ -3341,6 +4010,67 @@ mod tests {
         assert!(work.consumed() > 0);
     }
 
+    #[test]
+    fn original_joint_image_needs_whole_envelope_and_same_oriented_projection() {
+        let surface = Surface::Plane(monstertruck_modeling::Plane::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let projection = [0.0, 0.0, 1.0].map(Interval::point);
+        let small = [Interval {
+            lo: -1.0e-8,
+            hi: 1.0e-8,
+        }; 2];
+        assert!(
+            whole_original_joint_image_fits(
+                &surface, small, [0.0; 3], projection, true, None, 1.0e-6, &mut work, &cancel,
+            )
+            .unwrap()
+        );
+        // The midpoint is still exactly NativeV and the carrier still regular,
+        // but the complete original closure image is not a bounded endpoint.
+        let wide = [small[0], Interval { lo: -0.5, hi: 0.5 }];
+        assert!(
+            !whole_original_joint_image_fits(
+                &surface, wide, [0.0; 3], projection, true, None, 1.0e-6, &mut work, &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            !whole_original_joint_image_fits(
+                &surface,
+                small,
+                [0.0; 3],
+                projection.map(Interval::neg),
+                true,
+                None,
+                1.0e-6,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        // A foreign original vertex is not interchangeable with the matching
+        // source image even when the same UV box/projection is retained.
+        assert!(
+            !whole_original_joint_image_fits(
+                &surface,
+                small,
+                [1.0, 0.0, 0.0],
+                projection,
+                true,
+                None,
+                1.0e-6,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+    }
+
     fn housing() -> Definition {
         crate::import_step(include_bytes!(
             "../../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
@@ -3546,22 +4276,6 @@ mod tests {
         );
         assert!(supports.iter().all(|support| matches!(support.owner,
             SourceTransportOwner::OriginalVertex { point_mm } if point_mm == plan.point)));
-        let mut exits = Vec::new();
-        plan.visit_native_exits(&mut work, &cancel, &mut |edge, high, parameter| {
-            exits.push((edge, high, parameter));
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(exits.len(), plan.recipes.len());
-        for (edge, high, parameter) in exits {
-            assert!(
-                plan.recipes
-                    .iter()
-                    .any(|recipe| recipe.outgoing.edge == edge
-                        && recipe.outgoing.absolute_back == high
-                        && recipe.outgoing.exit == parameter)
-            );
-        }
         let invalid = [
             Interval { lo: 2.0, hi: 1.0 },
             Interval::point(0.0),
@@ -3622,6 +4336,61 @@ mod tests {
                 .code,
             GeometryErrorCode::AnalysisIndeterminate,
         );
+        let frame = PlaneFrameMm {
+            origin_mm: [0.0; 3],
+            x_axis: [1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, 1.0],
+        };
+        let rows = crate::analysis::placed::ActualMaterialCoordinates::source_rows(&frame).unwrap();
+        let z = selected.plan().point[2];
+        let coordinates = crate::analysis::placed::ActualMaterialCoordinates::source(
+            &definition,
+            &frame,
+            &rows,
+            [z - 1.0, z + 1.0],
+            z,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cancelled_atlas = AtomicBool::new(true);
+        let mut atlas_visited = false;
+        for (owner, bytes, cancellation, expected) in [
+            (
+                OriginalTrimSource::standalone(&foreign),
+                MAX_SCRATCH_BYTES,
+                &cancel,
+                GeometryErrorCode::AnalysisIndeterminate,
+            ),
+            (source, 0, &cancel, GeometryErrorCode::ResourceLimit),
+            (
+                source,
+                MAX_SCRATCH_BYTES,
+                &cancelled_atlas,
+                GeometryErrorCode::Cancelled,
+            ),
+        ] {
+            let error = selected
+                .plan()
+                .visit_closed_atlas_geometry(
+                    owner,
+                    &coordinates,
+                    bytes,
+                    &mut work,
+                    cancellation,
+                    &mut |_, _, _, _, _, _| {
+                        atlas_visited = true;
+                        Ok(super::super::radial_product::BoundaryVisit::Accepted)
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, expected);
+        }
+        assert!(
+            !atlas_visited,
+            "unqualified atlas access must not invoke a query visitor"
+        );
 
         let direction = [0.0, 0.0, 1.0].map(Interval::point);
         let local = source_transport_supports(
@@ -3656,7 +4425,7 @@ mod tests {
                 }
                 error = error.max(support.source_error_mm);
             }
-            (supports.len(), bounds, error)
+            (bounds, error)
         };
         assert_eq!(summary(&local), summary(&retained));
         let foreign_source =

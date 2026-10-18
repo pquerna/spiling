@@ -20,10 +20,15 @@ fn resource(message: &str) -> ManufacturingError {
     error(ManufacturingErrorCode::ResourceLimit, message)
 }
 fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
-    *work = work
+    let before = *work;
+    *work = before
         .checked_add(amount)
         .filter(|n| *n <= MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| resource("planar Boolean work budget exceeded"))?;
+        .ok_or_else(|| {
+            resource(&format!(
+                "planar Boolean work budget exceeded; consumed {before}, requested {amount}, limit {MAX_BOOLEAN_PAIRS}"
+            ))
+        })?;
     Ok(())
 }
 

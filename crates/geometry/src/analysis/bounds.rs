@@ -261,10 +261,12 @@ fn aggregate_material_supports(
     let mut minimum_witness_displacement = 0.0_f64;
     let mut maximum_witness_displacement = 0.0_f64;
     let mut source_error_mm = 0.0_f64;
+    let mut realized_minimum_witness = f64::INFINITY;
+    let mut realized_maximum_witness = f64::NEG_INFINITY;
     let mut scalar_transport_is_identically_zero = true;
     // Independent winners: corrected outer endpoints, BASE-overlapping witness
-    // displacements, and maximum physical realization error. None means raw/zero.
-    let mut winners = [None; 5];
+    // displacements, physical error, and actual G witnesses. None means raw/zero.
+    let mut winners = [None; 7];
     for (index, support) in supports.iter().enumerate() {
         work.charge(1, cancel)?;
         let base = Interval::new(support.base_interval[0], support.base_interval[1])?;
@@ -308,13 +310,44 @@ fn aggregate_material_supports(
             }
             maximum_witness_displacement = maximum_witness_displacement.min(displacement.lo);
         }
+        if let Some(witness) = support.realized_witness_interval {
+            let witness = Interval::new(witness[0], witness[1])?;
+            if witness.hi < realized_minimum_witness {
+                winners[5] = Some(index);
+                realized_minimum_witness = witness.hi;
+            }
+            if witness.lo > realized_maximum_witness {
+                winners[6] = Some(index);
+                realized_maximum_witness = witness.lo;
+            }
+        }
+        if let Some([minimum, maximum]) = support.realized_endpoint_witnesses {
+            if !minimum.is_finite() || !maximum.is_finite() {
+                return Err(error(
+                    GeometryErrorCode::ConditioningFailure,
+                    "material directional endpoint witnesses must be finite",
+                ));
+            }
+            if minimum < realized_minimum_witness {
+                winners[5] = Some(index);
+                realized_minimum_witness = minimum;
+            }
+            if maximum > realized_maximum_witness {
+                winners[6] = Some(index);
+                realized_maximum_witness = maximum;
+            }
+        }
     }
+    // Transported raw witnesses remain valid alternatives. Independently proved
+    // points of actual G can tighten only the feasible ends, never outer bounds.
     bounds.minimum[1] = Interval::point(raw.minimum[1])
         .add(Interval::point(minimum_witness_displacement))
-        .hi;
+        .hi
+        .min(realized_minimum_witness);
     bounds.maximum[0] = Interval::point(raw.maximum[0])
         .add(Interval::point(maximum_witness_displacement))
-        .lo;
+        .lo
+        .max(realized_maximum_witness);
     bounds.achieved_uncertainty_mm = uncertainty(&bounds);
     if bounds
         .minimum
@@ -326,7 +359,7 @@ fn aggregate_material_supports(
         || bounds.achieved_uncertainty_mm > tolerance
     {
         use std::fmt::Write as _;
-        // Only the five tracked winners are formatted; no support dump, clone,
+        // Only the tracked winners are formatted; no support dump, clone,
         // or second support traversal is needed, even for very large recipes.
         let mut message = format!(
             "material directional endpoint brackets do not meet the requested uncertainty; \
@@ -341,20 +374,30 @@ fn aggregate_material_supports(
             bounds.maximum,
             bounds.achieved_uncertainty_mm,
         );
-        for (label, winner) in ["minLo", "minHi", "maxLo", "maxHi", "physicalError"]
-            .into_iter()
-            .zip(winners)
+        for (label, winner) in [
+            "minLo",
+            "minHi",
+            "maxLo",
+            "maxHi",
+            "physicalError",
+            "minHi_actual_G",
+            "maxLo_actual_G",
+        ]
+        .into_iter()
+        .zip(winners)
         {
             if let Some(index) = winner {
                 let support = &supports[index];
                 let _ = write!(
                     message,
-                    "; {label}_winner=index:{index},owner:({}),BASE:{:?},G:{:?},D:{:?},physical_error_mm:{:?}",
+                    "; {label}_winner=index:{index},owner:({}),BASE:{:?},G:{:?},D:{:?},physical_error_mm:{:?},actual_G_witness:{:?},actual_G_endpoint_witnesses:{:?}",
                     support.owner,
                     support.base_interval,
                     support.corrected_interval,
                     support.displacement_interval,
                     support.source_error_mm,
+                    support.realized_witness_interval,
+                    support.realized_endpoint_witnesses,
                 );
             } else {
                 let _ = write!(message, "; {label}_winner=raw_or_zero");
@@ -902,6 +945,44 @@ impl Scratch {
     }
 }
 
+/// Complete directed extrema of a selected one-parameter source recipe.
+/// Unlike raw endpoint references, supplied point enclosures are feasible
+/// points of that very recipe and can resolve either endpoint independently.
+pub(super) fn source_recipe_curve_bounds(
+    range: [f64; 2],
+    tolerance: f64,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+    mut evaluate: impl FnMut(
+        [f64; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+        usize,
+    ) -> Result<(Interval, Interval), GeometryError>,
+) -> Result<ProjectedBounds, GeometryError> {
+    let mut scratch = Scratch {
+        byte_limit: remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES),
+        ..Scratch::default()
+    };
+    search_domains_with_query_scratch(
+        std::iter::once([range, [0.0, 0.0]]),
+        1,
+        tolerance,
+        &mut scratch,
+        work,
+        cancel,
+        |cell, work, cancel, remaining_bytes| {
+            let (height, witness) = evaluate(cell[0], work, cancel, remaining_bytes)?;
+            Ok(Some(Evaluation {
+                height,
+                witness: Some(witness),
+                split_axis: 0,
+            }))
+        },
+    )
+}
+
 /// Bound the actual source recipe's parameter rectangle, not its coarse UV
 /// image. Raw feasible endpoint references select sufficient RANGE proofs;
 /// they never clip BASE and are never asserted to be recipe witnesses.
@@ -1071,6 +1152,31 @@ fn search_domains(
         &AtomicBool,
     ) -> Result<Option<Evaluation>, GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
+    search_domains_with_query_scratch(
+        domains,
+        dimensions,
+        tolerance,
+        scratch,
+        work,
+        cancel,
+        |cell, work, cancel, _| evaluate(cell, work, cancel),
+    )
+}
+
+fn search_domains_with_query_scratch(
+    domains: impl Iterator<Item = [[f64; 2]; 2]>,
+    dimensions: usize,
+    tolerance: f64,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+    mut evaluate: impl FnMut(
+        [[f64; 2]; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+        usize,
+    ) -> Result<Option<Evaluation>, GeometryError>,
+) -> Result<ProjectedBounds, GeometryError> {
     scratch.cells.clear();
     // All smooth source spans share feasible extrema. A span that only touches
     // a trim seam need not independently contain an interior witness.
@@ -1097,7 +1203,12 @@ fn search_domains(
     while let Some(cell) = scratch.cells.pop() {
         work.charge(1, cancel)?;
         let mut conditioning = false;
-        let evaluation = match evaluate(cell.uv, work, cancel) {
+        let evaluation = match evaluate(
+            cell.uv,
+            work,
+            cancel,
+            scratch.byte_limit - scratch.allocated_bytes,
+        ) {
             Ok(None) => continue,
             Ok(Some(mut value)) => {
                 value.height = intersect(value.height, cell.ancestor)?;
@@ -1277,6 +1388,8 @@ mod tests {
             base_interval,
             corrected_interval,
             displacement_interval,
+            realized_witness_interval: None,
+            realized_endpoint_witnesses: None,
             source_error_mm,
         }
     }
@@ -1372,6 +1485,60 @@ mod tests {
         assert!(bounds.maximum[0] <= 9.7 && bounds.maximum[0] > 9.69);
         assert_eq!(bounds.maximum[1], 10.0);
         assert!(bounds.achieved_uncertainty_mm > 0.29);
+    }
+
+    #[test]
+    fn retained_realized_points_resolve_endpoints_despite_conservative_displacement() {
+        let raw = exact_scalar_bounds();
+        let mut supports = [
+            scalar_transport([0.0, 2.0], [0.0, 2.0], [-0.25, 0.25], 0.25),
+            scalar_transport([8.0, 10.0], [8.0, 10.0], [-0.25, 0.25], 0.25),
+        ];
+        // Original vertex labels alone are not feasible-point authority.
+        for (support, z) in supports.iter_mut().zip([0.0, 10.0]) {
+            support.owner =
+                super::super::critical::material_link::SourceTransportOwner::OriginalVertex {
+                    point_mm: [0.0, 0.0, z],
+                };
+        }
+        let failure = scalar_material_bounds(raw, &supports, 1.0e-6).unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+
+        // Closed selected cones retain their literal apexes despite a loose
+        // displacement enclosure elsewhere on their rays. Include covector
+        // evaluation uncertainty in these independently feasible G points.
+        supports[0].realized_witness_interval = Some([0.0, 2.0e-8]);
+        supports[1].realized_witness_interval = Some([10.0 - 2.0e-8, 10.0]);
+        let (bounds, source_error) = scalar_material_bounds(raw, &supports, 1.0e-6).unwrap();
+        assert_eq!(bounds.minimum[0], raw.minimum[0]);
+        assert_eq!(bounds.maximum[1], raw.maximum[1]);
+        assert!(0.0 <= bounds.minimum[1] && bounds.minimum[1] <= 2.0e-8);
+        assert!(10.0 - 2.0e-8 <= bounds.maximum[0] && bounds.maximum[0] <= 10.0);
+        assert!(bounds.achieved_uncertainty_mm <= 1.0e-6);
+        assert_eq!(source_error, 0.25);
+
+        // Feasible points cannot erase a conservative outward RANGE.
+        supports[0].corrected_interval[0] = -2.0e-5;
+        supports[1].corrected_interval[1] = 10.0 + 2.0e-5;
+        let failure = scalar_material_bounds(raw, &supports, 1.0e-6).unwrap_err();
+        assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
+    }
+
+    #[test]
+    fn material_feasible_witness_intervals_must_be_finite_and_ordered() {
+        for witness in [
+            [f64::NAN, 0.0],
+            [0.0, f64::NAN],
+            [f64::NEG_INFINITY, 0.0],
+            [0.0, f64::INFINITY],
+            [1.0, 0.0],
+        ] {
+            let mut support = scalar_transport([4.0, 6.0], [4.0, 6.0], [0.0, 0.0], 0.0);
+            support.realized_witness_interval = Some(witness);
+            let failure =
+                scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6).unwrap_err();
+            assert_eq!(failure.code, GeometryErrorCode::ConditioningFailure);
+        }
     }
 
     #[test]
@@ -1546,6 +1713,54 @@ mod tests {
             assert_eq!(
                 material.material_realization_identity(),
                 crate::kernel::MaterialRealizationIdentity::new(&definition)
+            );
+        }
+    }
+
+    #[test]
+    fn original_cylinder_material_extrema_meet_native_placement_uncertainty() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+            ),
+            &cancel,
+        )
+        .unwrap();
+        let policy = BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: 2.5e-7,
+        };
+        for (direction, expected) in [
+            ([1.0, 0.0, 0.0], [-5.0, 5.0]),
+            ([0.0, 1.0, 0.0], [-5.0, 5.0]),
+            ([0.0, 0.0, 1.0], [0.0, 8.0]),
+            ([1.0, 1.0, 0.0], [-5.0, 5.0]),
+        ] {
+            let mut work = GeometryWorkBudget::new(20_000_000);
+            let material =
+                material_projected_bounds(&definition, direction, policy, &mut work, &cancel)
+                    .unwrap_or_else(|error| panic!("direction={direction:?}: {error}"));
+            let bounds = material.bounds();
+            assert!(
+                bounds.achieved_uncertainty_mm <= policy.maximum_endpoint_uncertainty_mm,
+                "direction={direction:?}: {bounds:?}"
+            );
+            for (bracket, expected) in [bounds.minimum, bounds.maximum].into_iter().zip(expected) {
+                assert!(
+                    bracket[0] <= expected && expected <= bracket[1],
+                    "direction={direction:?}: {bounds:?}"
+                );
+                assert!(
+                    bracket
+                        .into_iter()
+                        .all(|value| (value - expected).abs()
+                            <= policy.maximum_endpoint_uncertainty_mm),
+                    "direction={direction:?}: {bounds:?}"
+                );
+            }
+            assert!(
+                material.source_realization_error_mm()
+                    <= definition.provenance.uncertainty_mm.unwrap()
             );
         }
     }

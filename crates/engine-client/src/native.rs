@@ -10,8 +10,9 @@ use spiling_contracts::{
     display::{validate_mesh_chunk, validate_section_chunk, validate_section_summary},
     geometry::{
         AabbMm, ArtifactChunkMetadata, ArtifactSummary, BedPosePreparation, GeometryCommand,
-        GeometryError, GeometryErrorCode, GeometryResponse, JobError, JobResult,
-        MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord, SECTION_PLANE_TOLERANCE_MM, SceneSummary,
+        GeometryError, GeometryErrorCode, GeometryResponse, JOB_CANCEL_AFTER_MS,
+        JOB_CANCEL_GRACE_MS, JobError, JobResult, MAX_GEOMETRY_CHUNK_BYTES, OccurrenceRecord,
+        SECTION_PLANE_TOLERANCE_MM, SceneSummary,
     },
     manufacturing::{
         MAX_MANUFACTURING_BUNDLE_BYTES, MAX_REPLAY_DISPLAY_BYTES, ManufacturingArtifactRecord,
@@ -360,7 +361,10 @@ impl EngineRpc {
             ));
         };
         let name = operation.name.clone();
-        let terminal = tokio::time::timeout(std::time::Duration::from_secs(75), async {
+        let observation_limit = std::time::Duration::from_millis(
+            u64::from(JOB_CANCEL_AFTER_MS) + u64::from(JOB_CANCEL_GRACE_MS) + 5_000,
+        );
+        let terminal = tokio::time::timeout(observation_limit, async {
             let mut observed = operation;
             if !observed.done {
                 let mut watch = self.watch_operation(name.clone()).await?;

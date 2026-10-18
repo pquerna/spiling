@@ -58,6 +58,25 @@ achieved chord/plane errors. A raw native intersection is not closure of
 source material. Conservative slab envelopes are explicitly distinguishable
 from intersections and cannot be promoted into manufactured layers.
 
+Native Boolean guide construction in the pinned kernel restricts paired polygon
+and projected guides to both original trim-contact parameters **before** binding
+their exact vertices. Every interior raw-index control is retained; snapping an
+unrestricted guide end can preserve an outside-trim tail and reverse its tangent.
+Contact inversion constructs the candidate; fresh original-root inventories,
+coverage and oriented material-side checks remain independent authority.
+
+[`section/reference.rs`](../../crates/geometry/src/section/reference.rs) can erase
+sampled crossing cycles only with complete bidirectional 3D Hausdorff bounds,
+cumulatively inside the original chord allowance and without changing the plane
+bound or swallowing another boundary. This is geometric correspondence, not
+Jordan or material authority. Common slab preparation passes the same reference
+to source analysis, world-candidate proof and planner conversion.
+
+Material queries reserve half the frozen chord allowance for independent Boolean,
+source-realization and world-placement error. Raw inspection retains the full
+proposal. Sampling and reference normalization use the same narrowed cap; no
+downstream consumer substitutes a differently sampled Hole.
+
 [`analysis::section_regularity`](../../crates/geometry/src/analysis/mod.rs) uses
 the import-certified native bounds only to exclude empty cuts; literal critical
 census and complete crossing certification remain mandatory. Native carrier
@@ -79,11 +98,14 @@ refinement. Native scalar facet support preserves coefficient correlation;
 uses uniform affine-family root proofs after original-span C1 qualification,
 not sampled roots or smoothness manufactured by subdivision.
 
-Source-vertex endpoint bounds in `material_link/vertex_transport.rs` reuse
-whole-ray operands only across radial children of the same angular interval;
-angular subdivision invalidates them. The selected realization and full
-closed-domain remainder stay fixed, and pending/active state plus native-query
-scratch coexist within the caller's allowance.
+Source-vertex scalar bounds in `material_link/vertex_transport.rs` use the exact
+closed-cone law `G(s,t)=V+s(B(t)-V)`: extrema come from the apex and complete
+boundary, so only `t` needs adaptive search. Feasible boundary/apex witnesses
+tighten achieved endpoints without clipping the complete original comparison
+inventory or changing the selected G. They assert no global Original-F/G distance.
+`parametric/section_coverage.rs` caches successful whole-original first enclosures
+only for the same immutable definition, face and domain. Neither cache carries
+C1, posed metric, incidence or signed-census authority.
 
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
 `coverage` / `boundary` modules and the display protocol own whole-triangle
@@ -117,6 +139,12 @@ must never be converted into display unavailability.
   pair closed topology with a complete filled-material metric and calibrate the
   actual used polygon in matching physical coordinates. Boundary nearness,
   directed/core-only metrics and separately isotopic annuli are insufficient.
+- **Original corner cuts:** [`vertex_transport/uv_ownership/source_cut.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/source_cut.rs)
+  proves fixed-exit relative surgery against the actual original germs,
+  retained central continuations and foreign sources. An uncertainty connector
+  need not be Jordan; a completed reference disk cannot simply be subtracted
+  from native UV. The closed atlas covers original F and actual G, including
+  literal NativeV apices. Genuine poles require independent quotient authority.
 - **Critical sets and collars:** [`analysis/critical.rs`](../../crates/geometry/src/analysis/critical.rs)
   covers original face/coedge complexes; [`source_incidence.rs`](../../crates/geometry/src/analysis/source_incidence.rs)
   owns actual edge/vertex use incidence. [`analysis/collar.rs`](../../crates/geometry/src/analysis/collar.rs)
@@ -127,10 +155,23 @@ must never be converted into display unavailability.
   only a smooth affine fallback requests Hessians. One actual segment may cover
   a complete affine patch only when it covers every corner plus the full
   remainder; corner-wise different edges cannot certify holes or nonconvex gaps.
+  Isolated definite vertices additionally require whole-cell Hessian/orientation
+  bounds, an all-roots cover and a physical NativeV connection on the proved
+  original relative-cut side. The native joint is not padded. Strict outward
+  world normals can bound one material-facing crossing shadow, not regular
+  boundary speed; target selection and retained cells use that same shadow.
 - **Final composition:** [`analysis/joint.rs`](../../crates/geometry/src/analysis/joint.rs)
   owns source leaves, union captures and `NativeUnionBindingLedger`. Receipts
   bind source/realization, occurrence, pose, interval/reference, policy and actual
   candidate geometry. Changed polygons or stale captures cannot inherit proof.
+  Endpoint-local radial products can prove regular-side confinement beside a
+  critical cap. Their own source/world domains and actual polygon calibration
+  do not upgrade the whole leaf or fabricate a boundary-motion tube.
+  Critical support-exclusion capture combines a complete raw-F slab overcover of
+  retained F with direct world-height/XY C0 covers of all closed G cones and
+  complete central ribbons. Its rectangle conservatively excludes support from
+  the complement; it is not a no-void receipt, Original-F correspondence,
+  source-material anchor or precise Hole origin.
   Native material reuse does not establish realized finish or deposited support;
   those remain independent [manufacturing obligations](../protocol/manufacturing.md).
 
@@ -145,16 +186,16 @@ Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
 
-The independent tapered fitting completes the unchanged complete-sparse operator
-flow: Compile, fresh emitted-byte replay/export and source-deleted read-only
-reopen, including the hardware workbench. Rounded-housing import/display/sections
-work, but manufacturing remains unqualified: a same-source critical-band union
-still lacks accepted original coface/root incidence. Inward-ramp conditioning
-and broader mixed-source, tilted-placement, critical-collar and support
-constraints remain. These reference flows do not qualify general geometry.
-Singular/nonmanifold geometry, unsupported STEP conversions and unproved charts
-retain explicit refusals. General AP242 document/assembly expansion and arbitrary
-freeform finishes are not implied by generic face descriptors.
+The independent tapered fitting and rounded housing complete the unchanged
+complete-sparse operator through CLI and the hardware workbench: native face
+picking, placement, Compile, fresh emitted-byte replay/export, save and
+source-deleted fresh read-only reopen. These representative flows do not qualify
+general geometry or full G0–G3 parity. Inward-ramp conditioning, broader
+mixed-source/tilted-placement critical interfaces and support constraints remain
+outside the exercised envelope. Singular/nonmanifold geometry, unsupported STEP
+conversions and unproved charts retain explicit refusals. General AP242
+document/assembly expansion and arbitrary freeform finishes are not implied by
+generic face descriptors.
 
 ## Minimal user flows
 

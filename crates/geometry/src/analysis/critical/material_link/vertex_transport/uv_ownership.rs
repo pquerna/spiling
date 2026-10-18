@@ -12,6 +12,8 @@ mod comparison_transport;
 use comparison_transport::GermTransport;
 mod pole_comparison;
 use pole_comparison::PoleComparison;
+mod source_cut;
+use source_cut::SourceFaceCut;
 
 /// Distinct coordinate charts are never reinterpreted as original native UV.
 #[derive(Clone, Copy)]
@@ -69,15 +71,6 @@ pub(super) struct UvJointComparison {
     authority: EndpointAuthority,
     transport: Option<[GermTransport; 2]>,
     allowance: f64,
-}
-
-/// Fixed chord data for one complete t interval. Only s is restricted by
-/// endpoint refinement; the acceleration always covers the original whole ray.
-#[derive(Clone, Copy)]
-pub(super) struct EndpointComparisonRay {
-    at_joint: Box3,
-    acceleration: Box3,
-    boundary_displacement: Box3,
 }
 
 /// Preparation never turns missing original authority into a generic UV gate.
@@ -760,6 +753,40 @@ impl OriginalCornerComparison {
         }
     }
 
+    /// A joint image may consume only the receipt for this exact native
+    /// stratum/index. In particular an ordinary UV completion cannot borrow a
+    /// pole quotient, nor can an exact adjacency stand in for a native joint.
+    pub(super) fn validates_original_joint(
+        &self,
+        domain: &PreparedFaceTrimDomain<'_>,
+        recipe: &CornerRecipe,
+        vertex: VertexId<Point3>,
+        joint_index: usize,
+    ) -> Result<bool, GeometryError> {
+        let Some(joint) = domain.native().joints().get(joint_index) else {
+            return Ok(false);
+        };
+        let matches = match (self, joint.kind) {
+            (
+                Self::NativeUv(comparison),
+                monstertruck_modeling::TrimJointKind::EndpointUncertainty,
+            ) => {
+                matches!(comparison.authority,
+                    EndpointAuthority::EndpointUncertaintyJoint { index, .. } if index == joint_index)
+            }
+            (
+                Self::SphericalPole(comparison),
+                monstertruck_modeling::TrimJointKind::SphericalPole { .. },
+            ) => comparison.joint_index_matches(joint_index),
+            _ => false,
+        };
+        if !matches {
+            return Ok(false);
+        }
+        self.validates(domain, recipe, vertex)?;
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn source_cost(
         &self,
@@ -781,20 +808,20 @@ impl OriginalCornerComparison {
         }
     }
 
-    pub(super) fn disk_owned(
+    pub(super) fn source_cut<'a, 'd>(
         &self,
-        domain: &PreparedFaceTrimDomain<'_>,
-        recipe: &CornerRecipe,
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        recipe: &'a CornerRecipe,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
+    ) -> Result<Option<SourceFaceCut<'a, 'd>>, GeometryError> {
         match self {
             Self::NativeUv(comparison) => {
-                comparison.disk_owned(domain, recipe, remaining_bytes, work, cancel)
+                comparison.source_cut(domain, recipe, remaining_bytes, work, cancel)
             }
             Self::SphericalPole(comparison) => {
-                comparison.disk_owned(domain, recipe, remaining_bytes, work, cancel)
+                SourceFaceCut::for_pole(comparison, domain, recipe, remaining_bytes, work, cancel)
             }
         }
     }
@@ -1210,71 +1237,6 @@ impl UvJointComparison {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn endpoint_support_ray(
-        &self,
-        domain: &PreparedFaceTrimDomain<'_>,
-        recipe: &CornerRecipe,
-        piece: Piece,
-        t: Interval,
-        point: [f64; 3],
-        boundary_displacement: Box3,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<EndpointComparisonRay, GeometryError> {
-        work.charge(1, cancel)?;
-        let whole = self.star_jet(domain, recipe, piece, UNIT, t, work, cancel)?;
-        domain.native().face().with_surface(|surface| {
-            let jet = surface_enclosure(surface, uv_box(whole.uv), work, cancel)?;
-            let at_joint = centered_source_point(surface, self.joint, point, work, cancel)?
-                .map(Interval::neg);
-            let acceleration = std::array::from_fn(|i| {
-                jet.duu[i].mul(whole.ds[0].square())
-                    .add(Interval::point(2.0).mul(jet.duv[i]).mul(whole.ds[0]).mul(whole.ds[1]))
-                    .add(jet.dvv[i].mul(whole.ds[1].square()))
-                    .add(jet.du[i].mul(whole.dss[0]))
-                    .add(jet.dv[i].mul(whole.dss[1]))
-            });
-            Ok(EndpointComparisonRay { at_joint, acceleration, boundary_displacement })
-        })
-    }
-
-    /// Same whole-ray chord and complete straight UV homotopy as source_cost,
-    /// without rebuilding radial-invariant data or requesting unused Hessians.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn endpoint_support_on_cell(
-        &self,
-        domain: &PreparedFaceTrimDomain<'_>,
-        recipe: &CornerRecipe,
-        piece: Piece,
-        ray: &EndpointComparisonRay,
-        s: Interval,
-        t: Interval,
-        actual_uv: Box2,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<(Box3, Box2), GeometryError> {
-        work.charge(1, cancel)?;
-        let s = source_unit_parameter(s)?;
-        let completed = self.star_jet(domain, recipe, piece, s, t, work, cancel)?;
-        let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
-        let source_uv = hull2(actual_uv, completed.uv);
-        let face_displacement = source_chord_displacement(
-            ray.at_joint, ray.boundary_displacement, ray.acceleration, s,
-        )?;
-        domain.native().face().with_surface(|surface| {
-            let homotopy = crate::parametric::surface_piecewise_first_enclosure(
-                surface, uv_box(source_uv), work, cancel,
-            )?;
-            let physical_shift = compose_first(&homotopy.du, &homotopy.dv, correction.position);
-            let displacement = std::array::from_fn(|i| {
-                let cost = physical_shift[i].abs_upper();
-                face_displacement[i].add(Interval { lo: -cost, hi: cost })
-            });
-            Ok((displacement, source_uv))
-        })
-    }
-
     /// Recompute at the fixed, already chosen M/B/exits. The returned cost
     /// includes BOTH directions of the straight UV comparison homotopy, whose
     /// common image and derivative bound are identical under reversal.
@@ -1412,7 +1374,8 @@ pub(super) const OWNERSHIP_STACK_BYTES: usize =
         + comparison_transport::STACK_BYTES
         + completion::STACK_BYTES
         + apex_factor::STACK_BYTES
-        + pole_comparison::STACK_BYTES;
+        + pole_comparison::STACK_BYTES
+        + source_cut::STACK_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ComparisonBoundary {
@@ -2303,6 +2266,26 @@ mod properties {
                         continue;
                     }
                 };
+                if let EndpointAuthority::EndpointUncertaintyJoint { index, .. } =
+                    comparison.authority
+                {
+                    assert!(
+                        OriginalCornerComparison::NativeUv(comparison)
+                            .validates_original_joint(&domain, &recipe, vertex, index)
+                            .unwrap()
+                    );
+                    let mut foreign_joint = comparison;
+                    foreign_joint.authority = EndpointAuthority::EndpointUncertaintyJoint {
+                        index: domain.native().joints().len(),
+                        enclosure: comparison.joint,
+                    };
+                    assert!(
+                        !OriginalCornerComparison::NativeUv(foreign_joint)
+                            .validates_original_joint(&domain, &recipe, vertex, index)
+                            .unwrap(),
+                        "ordinary lane must retain its exact native joint index"
+                    );
+                }
                 for (i, end) in [outgoing, incoming].into_iter().enumerate() {
                     assert_eq!(
                         domain
@@ -2349,22 +2332,22 @@ mod properties {
                     recipe.comparison.is_some(),
                     "the actual fixed recipe consumes its original comparison"
                 );
-                match comparison.disk_owned(
+                match comparison.source_cut(
                     &domain,
                     &recipe,
                     comparison_scratch,
                     &mut work,
                     &cancel,
                 ) {
-                    Ok(true) => {}
-                    Ok(false) => {
+                    Ok(Some(cut)) => assert!(cut.binds(&domain, &recipe)),
+                    Ok(None) => {
                         failures.push(format!(
-                            "complete disk ownership refused face={face_index} vertex_mm={point:?}"
+                            "original source complement refused face={face_index} vertex_mm={point:?}"
                         ));
                         continue;
                     }
                     Err(error) => {
-                        failures.push(format!("complete disk ownership face={face_index} vertex_mm={point:?}: {error:?}"));
+                        failures.push(format!("original source complement face={face_index} vertex_mm={point:?}: {error:?}"));
                         continue;
                     }
                 }

@@ -252,10 +252,17 @@ pub(crate) fn prove_source_wall_component(
                 .and_then(|bytes| bytes.checked_sub(UV_EMBEDDING_STACK_BYTES))
                 .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<OwnedUvRibbon<'_, '_>>()))
                 .ok_or_else(resource)?;
-            let collar =
-                OriginalCollar::for_enclosure(&domain, use_, work, cancel)?.ok_or_else(|| {
-                    refusal("source wall constructor has no original collar geometry")
-                })?;
+            let classifier_bytes = scratch
+                .checked_add(domain.retained_bytes())
+                .ok_or_else(resource)?;
+            let collar = OriginalCollar::for_enclosure_with_byte_limit(
+                &domain,
+                use_,
+                classifier_bytes,
+                work,
+                cancel,
+            )?
+            .ok_or_else(|| refusal("source wall constructor has no original collar geometry"))?;
             let face = domain.native().face();
             let edge = &face.absolute_boundaries()[use_.wire][use_.index];
             let correspondence = domain.original_coedge_correspondence(use_.coedge)?;

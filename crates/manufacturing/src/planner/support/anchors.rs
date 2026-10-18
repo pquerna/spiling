@@ -7,6 +7,8 @@ use spiling_contracts::manufacturing::{
 };
 use std::sync::atomic::AtomicBool;
 
+pub(super) const MAX_ANCHOR_PAIR_WORK: usize = 128_000_000;
+
 /// Exact centerline intersection with previous nominal deposited capsules plus
 /// separately certified positive-area overlap of actual candidate endpoint disks.
 /// No source-material anchor, polygonized circle or overlay tolerance expansion.
@@ -38,6 +40,78 @@ struct SegmentCapsule {
 pub(in crate::planner) struct AnchorCandidate {
     pub(in crate::planner) endpoints_mm: [[f64; 3]; 2],
     pub(in crate::planner) bead_width_mm: f64,
+}
+
+impl AnchorCandidate {
+    /// Connectivity on one rectilinear current emitted row only. Identical
+    /// projected fixed coordinates name the same physical decimal coordinate.
+    /// This supplies no previous/contact anchor or unsupported-span authority.
+    pub(in crate::planner) fn emitted_endpoint_footprint_overlaps(
+        &self,
+        endpoint_mm: [f64; 3],
+        endpoint_bead_width_mm: f64,
+    ) -> Result<bool, ManufacturingError> {
+        let radius = self.bead_width_mm * 0.5;
+        let endpoint_radius = endpoint_bead_width_mm * 0.5;
+        if !radius.is_finite()
+            || radius <= 0.0
+            || !endpoint_radius.is_finite()
+            || endpoint_radius <= 0.0
+        {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "invalid current nominal row footprint width",
+            ));
+        }
+        use spiling_contracts::manufacturing::program_coordinates::{
+            enclosed_vertical_gap_mm, project_xyz6_point_mm,
+        };
+        let a = project_xyz6_point_mm(self.endpoints_mm[0])?;
+        let b = project_xyz6_point_mm(self.endpoints_mm[1])?;
+        let endpoint = project_xyz6_point_mm(endpoint_mm)?;
+        let along = if a[1] == b[1] && a[0] != b[0] {
+            0
+        } else if a[0] == b[0] && a[1] != b[1] {
+            1
+        } else {
+            return Ok(false);
+        };
+        if endpoint[1 - along] != a[1 - along] {
+            return Ok(false);
+        }
+        let lo = a[along].min(b[along]);
+        let hi = a[along].max(b[along]);
+        let (above, below) = if endpoint[along] < lo {
+            (lo, endpoint[along])
+        } else if endpoint[along] > hi {
+            (endpoint[along], hi)
+        } else {
+            // XYZ6 ordering is unique: this physical decimal point is inside
+            // the actual row segment, so positive-radius footprints overlap.
+            return Ok(true);
+        };
+        let separation_upper = -emitted_coordinate_separation_lower_mm(below, above)?;
+        let reach_lower = enclosed_vertical_gap_mm(radius, -endpoint_radius)?;
+        Ok(separation_upper < reach_lower)
+    }
+}
+
+/// Physical-decimal separation lower bound for already projected XYZ6
+/// coordinates. Negating the reversed bound gives the corresponding upper
+/// bound. This is representation/difference enclosure, not policy slack.
+pub(super) fn emitted_coordinate_separation_lower_mm(
+    above: f64,
+    below: f64,
+) -> Result<f64, ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::{
+        enclosed_vertical_gap_mm, xyz6_coordinate_error_mm,
+    };
+    let mut lower = enclosed_vertical_gap_mm(above, below)?;
+    for coordinate in [above, below] {
+        let error = xyz6_coordinate_error_mm(coordinate)?;
+        lower = enclosed_vertical_gap_mm(lower, error)?;
+    }
+    Ok(lower)
 }
 
 pub(in crate::planner) struct AnchorWorkspace {
@@ -103,7 +177,7 @@ impl AnchorWorkspace {
                 check_cancel(cancel)?;
                 *work = work
                     .checked_add(1)
-                    .filter(|n| *n <= 20_000_000)
+                    .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
                     .ok_or_else(|| {
                         error(
                             ManufacturingErrorCode::ResourceLimit,

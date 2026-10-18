@@ -256,6 +256,63 @@ fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material(
 }
 
 #[test]
+fn unchanged_housing_near_floor_preserves_trimmed_material_under_plane_reversal() {
+    let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
+    let cancel = AtomicBool::new(false);
+    let mut preparation_work = GeometryWorkBudget::new(20_000_000);
+    let prepared = prepare_section_source(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut preparation_work,
+    )
+    .unwrap();
+    let query_bytes =
+        u32::try_from(MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()).unwrap();
+    for height in [0.0125_f64, 0.4249999535616466] {
+        // The original radius-two lower fillets offset the 20-by-14 core rectangle.
+        // This source-derived area oracle is independent of the native guide order.
+        let radius = (4.0 - (2.0 - height).powi(2)).sqrt();
+        let expected = 20.0 * 14.0 + 2.0 * radius * (20.0 + 14.0) + PI * radius * radius;
+        let perimeter = 2.0 * (20.0 + 14.0) + 2.0 * PI * radius;
+        let error = perimeter * SECTION_SAMPLING_TOLERANCE_MM
+            + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2)
+            + 1e-7;
+        for normal_z in [1.0, -1.0] {
+            for origin_xy in [[0.0, 0.0], [-110.0, -110.0]] {
+                let mut work = GeometryWorkBudget::new(20_000_000);
+                let result = prepared
+                    .section_with_byte_limit(
+                        PlaneMm {
+                            origin_mm: [origin_xy[0], origin_xy[1], height],
+                            normal: [0.0, 0.0, normal_z],
+                        },
+                        &cancel,
+                        query_bytes,
+                        &mut work,
+                    )
+                    .expect(
+                        "actual original trim contacts bound the fresh native intersection guide",
+                    );
+                assert_canonical(&result);
+                assert_eq!(result.loops.len(), 1);
+                assert!(!result.loops[0].is_hole);
+                let area = signed_area(&result.loops[0], &result.frame);
+                assert!(
+                    (area - expected).abs() <= error,
+                    "height={height}, normal_z={normal_z}, origin_xy={origin_xy:?}, area={area}, expected={expected}"
+                );
+                assert!(
+                    result
+                        .loop_source_face_ordinals(0)
+                        .is_some_and(|owners| !owners.is_empty())
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn native_curved_interior_sections_retain_material_and_torus_holes() {
     let cancel = AtomicBool::new(false);
     for (name, plane, expected_area, expected_loops) in [

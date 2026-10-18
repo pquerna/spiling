@@ -35,6 +35,7 @@ pub(in crate::analysis) struct BoundaryCell<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(in crate::analysis) struct ClosedRadialMaterialProduct {
     coordinates: MaterialCoordinatesCapture,
+    source_request: SlabRequest,
     kind: RadialRegionKind,
     source_sha256: [u8; 32],
     identity_sha256: [u8; 32],
@@ -54,11 +55,38 @@ impl ClosedRadialMaterialProduct {
         &self.coordinates
     }
 
-    pub(in crate::analysis) fn kind(&self) -> RadialRegionKind { self.kind }
+    pub(in crate::analysis) fn source_request(&self) -> &SlabRequest {
+        &self.source_request
+    }
 
-    pub(in crate::analysis) fn identity_sha256(&self) -> [u8; 32] { self.identity_sha256 }
+    pub(in crate::analysis) fn matches_source_world(
+        &self,
+        definition: &Definition,
+        pose: RigidPoseMm,
+        request: &SlabRequest,
+        interval: [f64; 2],
+        sample: f64,
+    ) -> bool {
+        let captured = &self.source_request;
+        self.matches_world(definition, pose, interval, sample)
+            && captured.frame == request.frame
+            && captured.height_interval_mm.map(f64::to_bits)
+                == request.height_interval_mm.map(f64::to_bits)
+            && captured.sample_height_mm.to_bits() == request.sample_height_mm.to_bits()
+            && captured.native_shape_error_mm.to_bits() == request.native_shape_error_mm.to_bits()
+    }
 
-    pub(in crate::analysis) fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() }
+    pub(in crate::analysis) fn kind(&self) -> RadialRegionKind {
+        self.kind
+    }
+
+    pub(in crate::analysis) fn identity_sha256(&self) -> [u8; 32] {
+        self.identity_sha256
+    }
+
+    pub(in crate::analysis) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 
     pub(in crate::analysis) fn matches_world(
         &self,
@@ -68,7 +96,9 @@ impl ClosedRadialMaterialProduct {
         sample: f64,
     ) -> bool {
         self.source_sha256 == source_identity(definition)
-            && self.coordinates.matches_world(definition, pose, interval, sample)
+            && self
+                .coordinates
+                .matches_world(definition, pose, interval, sample)
     }
 }
 
@@ -81,7 +111,12 @@ pub(in crate::analysis) fn certify_closed_radial_material_product(
     cancel: &AtomicBool,
 ) -> Result<Option<ClosedRadialMaterialProduct>, GeometryError> {
     certify_closed_radial_material_product_with_boundary_visitor(
-        source, request, coordinates, remaining_bytes, work, cancel,
+        source,
+        request,
+        coordinates,
+        remaining_bytes,
+        work,
+        cancel,
         &mut |_: BoundaryCell<'_>, _, _, _, _| Ok(BoundaryVisit::Accepted),
     )
 }
@@ -103,16 +138,35 @@ pub(in crate::analysis) fn certify_closed_radial_material_product_with_boundary_
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     visitor: &mut impl for<'s> FnMut(
-        BoundaryCell<'s>, bool, bool, &mut GeometryWorkBudget, &AtomicBool,
+        BoundaryCell<'s>,
+        bool,
+        bool,
+        &mut GeometryWorkBudget,
+        &AtomicBool,
     ) -> Result<BoundaryVisit, GeometryError>,
 ) -> Result<Option<ClosedRadialMaterialProduct>, GeometryError> {
     work.charge(1, cancel)?;
-    let available = remaining_bytes.min(MAX_SCRATCH_BYTES)
+    let available = remaining_bytes
+        .min(MAX_SCRATCH_BYTES)
         .checked_sub(std::mem::size_of::<ClosedRadialMaterialProduct>())
-        .ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit,
-            "closed radial product metadata exceeds remaining byte allowance"))?;
-    let Some(kind) = atlas::certify(source, request, coordinates, available, work, cancel, visitor)?
-        else { return Ok(None); };
+        .ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ResourceLimit,
+                "closed radial product metadata exceeds remaining byte allowance",
+            )
+        })?;
+    let Some(kind) = atlas::certify(
+        source,
+        request,
+        coordinates,
+        available,
+        work,
+        cancel,
+        visitor,
+    )?
+    else {
+        return Ok(None);
+    };
     // No constructor runs until every closed-atlas and calibrated material
     // premise holds. The hash identifies that authority; it cannot create it.
     let capture = coordinates.capture();
@@ -121,14 +175,38 @@ pub(in crate::analysis) fn certify_closed_radial_material_product_with_boundary_
     hash.update(b"spiling-closed-radial-material-product-1\0");
     hash.update(source_sha256);
     hash.update(capture.axis_sha256());
-    hash.update([match kind { RadialRegionKind::Disk => 0, RadialRegionKind::Annulus => 1 }]);
-    for value in capture.world_center_enclosure().into_iter().flatten()
-        .chain(capture.world_interval()).chain(std::iter::once(capture.sample_world_z()))
+    hash.update([match kind {
+        RadialRegionKind::Disk => 0,
+        RadialRegionKind::Annulus => 1,
+    }]);
+    for value in [
+        request.frame.origin_mm,
+        request.frame.x_axis,
+        request.frame.y_axis,
+        request.frame.z_axis,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(request.height_interval_mm)
+    .chain([request.sample_height_mm, request.native_shape_error_mm])
+    {
+        hash.update(value.to_bits().to_le_bytes());
+    }
+    for value in capture
+        .world_center_enclosure()
+        .into_iter()
+        .flatten()
+        .chain(capture.world_interval())
+        .chain(std::iter::once(capture.sample_world_z()))
     {
         hash.update(value.to_bits().to_le_bytes());
     }
     Ok(Some(ClosedRadialMaterialProduct {
-        coordinates: capture, kind, source_sha256, identity_sha256: hash.finalize().into(),
+        coordinates: capture,
+        source_request: *request,
+        kind,
+        source_sha256,
+        identity_sha256: hash.finalize().into(),
     }))
 }
 
@@ -137,8 +215,11 @@ mod tests {
     use super::*;
 
     fn original_box() -> Definition {
-        let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/geometry/box-mm.step")).unwrap();
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/box-mm.step"),
+        )
+        .unwrap();
         crate::import_step(&bytes, &AtomicBool::new(false)).unwrap()
     }
 
@@ -165,19 +246,45 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let coordinates = ActualMaterialCoordinates::source(&definition, &request.frame, &rows,
-            request.height_interval_mm, request.sample_height_mm, &mut work, &cancel).unwrap();
+        let coordinates = ActualMaterialCoordinates::source(
+            &definition,
+            &request.frame,
+            &rows,
+            request.height_interval_mm,
+            request.sample_height_mm,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let product = certify_closed_radial_material_product(
-            OriginalTrimSource::standalone(&definition), &request, &coordinates,
-            MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap().expect("complete central box walls form a closed disk product");
+            OriginalTrimSource::standalone(&definition),
+            &request,
+            &coordinates,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap()
+        .expect("complete central box walls form a closed disk product");
         assert_eq!(product.kind(), RadialRegionKind::Disk);
-        assert!(product.coordinates().matches_source(&definition, &request.frame,
-            request.height_interval_mm, request.sample_height_mm));
-        assert!(!product.matches_world(&definition, RigidPoseMm::IDENTITY,
-            request.height_interval_mm, request.sample_height_mm));
-        assert!(!product.coordinates().matches_source(&definition, &request.frame,
-            request.height_interval_mm, up(request.sample_height_mm)));
+        assert!(product.coordinates().matches_source(
+            &definition,
+            &request.frame,
+            request.height_interval_mm,
+            request.sample_height_mm
+        ));
+        assert!(!product.matches_world(
+            &definition,
+            RigidPoseMm::IDENTITY,
+            request.height_interval_mm,
+            request.sample_height_mm
+        ));
+        assert!(!product.coordinates().matches_source(
+            &definition,
+            &request.frame,
+            request.height_interval_mm,
+            up(request.sample_height_mm)
+        ));
     }
 
     #[test]
@@ -188,16 +295,48 @@ mod tests {
         let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let coordinates = ActualMaterialCoordinates::source(&definition, &request.frame, &rows,
-            request.height_interval_mm, request.sample_height_mm, &mut work, &cancel).unwrap();
+        let coordinates = ActualMaterialCoordinates::source(
+            &definition,
+            &request.frame,
+            &rows,
+            request.height_interval_mm,
+            request.sample_height_mm,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = OriginalTrimSource::standalone(&definition);
-        assert!(certify_closed_radial_material_product(source, &request, &coordinates,
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap().is_none());
-        let error = certify_closed_radial_material_product(source, &request, &coordinates,
-            0, &mut work, &cancel).unwrap_err();
+        assert!(
+            certify_closed_radial_material_product(
+                source,
+                &request,
+                &coordinates,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        let error = certify_closed_radial_material_product(
+            source,
+            &request,
+            &coordinates,
+            0,
+            &mut work,
+            &cancel,
+        )
+        .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
-        let error = certify_closed_radial_material_product(source, &request, &coordinates,
-            MAX_SCRATCH_BYTES, &mut work, &AtomicBool::new(true)).unwrap_err();
+        let error = certify_closed_radial_material_product(
+            source,
+            &request,
+            &coordinates,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::Cancelled);
     }
 }

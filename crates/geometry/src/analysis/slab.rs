@@ -533,9 +533,8 @@ pub(super) fn clip_height_box(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<([[f64; 2]; 2], crate::parametric::SurfaceEnclosure)>, GeometryError> {
-    let Some(uv) = clip_height_parameter_box(
-        surface, uv, functional, heights, work, cancel,
-    )? else {
+    let Some(uv) = clip_height_parameter_box(surface, uv, functional, heights, work, cancel)?
+    else {
         return Ok(None);
     };
     let jet = crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?;
@@ -560,9 +559,8 @@ pub(super) fn clip_height_parameter_box(
         origin: [Interval::point(0.0); 3],
         offset: functional.offset,
     };
-    let [mut bound] = crate::parametric::surface_functional_enclosures(
-        surface, uv, &[scalar], work, cancel,
-    )?;
+    let [mut bound] =
+        crate::parametric::surface_functional_enclosures(surface, uv, &[scalar], work, cancel)?;
     for axis in 0..2 {
         let h = bound.position;
         if h.hi < heights[0] || h.lo > heights[1] {
@@ -579,7 +577,11 @@ pub(super) fn clip_height_parameter_box(
         let mut strip = uv;
         strip[axis] = [mid, mid];
         let [value] = crate::parametric::surface_functional_enclosures(
-            surface, strip, &[scalar], work, cancel,
+            surface,
+            strip,
+            &[scalar],
+            work,
+            cancel,
         )?;
         let height = value.position;
         let contracted = Interval::point(mid).add(
@@ -598,7 +600,11 @@ pub(super) fn clip_height_parameter_box(
         }
         if uv[axis] != previous {
             [bound] = crate::parametric::surface_functional_enclosures(
-                surface, uv, &[scalar], work, cancel,
+                surface,
+                uv,
+                &[scalar],
+                work,
+                cancel,
             )?;
         }
     }
@@ -3880,6 +3886,7 @@ impl SourceSlabProof {
             critical,
             collar_complex,
             radial_slab: None,
+            endpoint_radial_products: [None; 2],
             capture,
         }
     }
@@ -3986,14 +3993,30 @@ pub(super) fn prepare_slab_sample(
             })?,
     );
     let source_retained_bytes = crate::MAX_PREPARED_SECTION_BYTES - section_bytes;
+    // Reserve geometric headroom for independent native Boolean, physical G
+    // and actual world-affine arithmetic errors. This is a proposal, not an
+    // aggregate-error certificate: all downstream metric gates remain intact.
+    // Narrow the FIRST query uniformly, never switch precision by sampled
+    // topology or replace an already accepted Hole branch afterward.
+    let maximum_chord_error_mm = spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
     let section = source.section_for_query(
         &crate::section::SectionQuery {
             plane,
+            maximum_chord_error_mm,
             maximum_plane_error_mm,
         },
         cancel,
         section_bytes as u32,
         work,
+    )?;
+    // The same bounded reference must reach source proof, world placement and
+    // returned planner material; simplifying only a proof polygon would diverge.
+    let section = crate::section::simplify_section_reference(
+        section,
+        maximum_chord_error_mm,
+        section_bytes as u32,
+        work,
+        cancel,
     )?;
     Ok(PreparedSlabSample {
         section,

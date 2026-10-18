@@ -1679,6 +1679,17 @@ mandatory. An actual sealed filled-polygon correspondence may cover the native
 sample directly without rasterizing its enclosing rectangle. Its bbox remains
 an envelope, never occupancy across holes or disconnected components.
 
+An original constant coedge can lie strictly outside a closed request even when
+its original event coface or NativeV lies exactly on the occupied endpoint.
+Exclude only its complete coefficient-proved height image, with strict
+separation; never clip an overlapping coedge or infer event ownership from its
+endpoint, sample or proximity to the coface. Compare ambiguous constant heights
+with endpoint-relative affine functionals before adding world translation, so
+rounding a large translated coordinate cannot erase a literal source offset.
+Keep the original paired ports and NativeV incidence intact. Such raw-coedge
+exclusion does not exclude its actual-G ribbons or closed vertex cones: their
+whole closed-world-height/XY coverage and material admission remain separate.
+
 An optional whole-original-face image proof may replace UV rasterization when
 the actual carrier coefficients prove an injective affine XY projection.
 Sample complete original coedge cycles with the existing whole-span

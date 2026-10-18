@@ -288,21 +288,25 @@ struct NativeEndpointExit {
     edge: monstertruck_topology::EdgeId<Curve>,
     absolute_back: bool,
     parameter: f64,
+    // Present only after exact source-star qualification AND complete closed
+    // actual-coordinate G rank/metric coverage for this literal NativeV.
+    closed_atlas_vertex: Option<monstertruck_topology::VertexId<monstertruck_modeling::Point3>>,
 }
 
 /// Query-local proof storage, never an alternative source representation.
 /// Every nonzero source transport support is retained until a COMPLETE regular
 /// fiber census has calibrated the closed boundary's total covering degree.
-pub(in crate::analysis::critical) struct ClosedRadialLinks {
+pub(in crate::analysis::critical) struct ClosedRadialLinks<'d> {
+    definition: &'d Definition,
     supports: Vec<[Interval; 3]>,
     pub source_error_mm: f64,
     exits: Vec<NativeEndpointExit>,
     unchanged_source: bool,
     all_vertex_supports_outside: bool,
 }
-impl ClosedRadialLinks {
+impl<'d> ClosedRadialLinks<'d> {
     pub fn new(
-        source: OriginalTrimSource<'_, '_>,
+        source: OriginalTrimSource<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         prism: &SamplePrism,
         request: &SlabRequest,
@@ -324,7 +328,7 @@ impl ClosedRadialLinks {
     /// The SAME complete source vertex inventory and literal native exits as
     /// radial coverage, qualified independently of a physical witness field.
     pub(super) fn geometry(
-        source: OriginalTrimSource<'_, '_>,
+        source: OriginalTrimSource<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -342,17 +346,26 @@ impl ClosedRadialLinks {
         )
     }
 
-    /// Source-only endpoint inventory for a CLOSED cylinder atlas. Neither an
-    /// open-band exclusion nor an actual-cone-only box can discharge this:
-    /// every original vertex and every SOURCE/reference/realized star support
-    /// must miss the two cuts strictly. No vertex chart is admitted here.
-    pub(super) fn outside_closed_scope(
-        source: OriginalTrimSource<'_, '_>,
+    /// Complete endpoint inventory for the CLOSED actual-coordinate atlas.
+    /// A complete original-F/added-G outside cover needs no chart authority.
+    /// Otherwise exact removed-domain qualification precedes both the closed
+    /// G visitor and retention of the full source/reference/G homotopy support.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn for_closed_atlas(
+        source: OriginalTrimSource<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         coordinates: &crate::analysis::placed::ActualMaterialCoordinates<'_>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
+        visitor: &mut dyn FnMut(
+            usize,
+            [Interval; 3],
+            [Interval; 3],
+            bool,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        ) -> Result<BoundaryVisit, GeometryError>,
     ) -> Result<Option<Self>, GeometryError> {
         let mut active_before = work.consumed();
         let mut phase = "immutable source vertex plan validation";
@@ -365,8 +378,8 @@ impl ClosedRadialLinks {
             let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
             let allowance = source_allowance(definition)?;
             let interval = coordinates.world_interval();
-            let outside = |position: [Interval; 3]| -> Result<bool, GeometryError> {
-                let expanded = position.map(|value| {
+            let expand = |position: [Interval; 3]| {
+                position.map(|value| {
                     add(
                         value,
                         Interval {
@@ -374,8 +387,10 @@ impl ClosedRadialLinks {
                             hi: allowance,
                         },
                     )
-                });
-                let z = coordinates.position(expanded)?[2];
+                })
+            };
+            let outside = |position: [Interval; 3]| -> Result<bool, GeometryError> {
+                let z = coordinates.position(position)?[2];
                 Ok(z.hi < interval[0] || z.lo > interval[1])
             };
             let vertices = incidence.vertices().ok_or_else(|| {
@@ -387,6 +402,7 @@ impl ClosedRadialLinks {
                 )
             })?;
             let mut result = Self {
+                definition,
                 supports: Vec::new(),
                 source_error_mm: 0.0,
                 exits: Vec::new(),
@@ -455,12 +471,12 @@ impl ClosedRadialLinks {
                     ));
                 };
                 active_vertex = Some((owner, point));
-                phase = "closed original vertex position exclusion";
-                let original = point.map(Interval::point);
-                if !outside(original)? {
-                    return Ok(None);
-                }
                 if unchanged_source {
+                    // A native cycle alone is not a complete projected-star
+                    // theorem. Unchanged active vertices remain unavailable.
+                    if !outside(expand(point.map(Interval::point)))? {
+                        return Ok(None);
+                    }
                     continue;
                 }
                 let available = remaining_bytes
@@ -493,52 +509,89 @@ impl ClosedRadialLinks {
                     })?;
                 phase = "complete original incident-face/added-G position cover";
                 let mut failed_cover = None;
-                if !plan.complete_incident_positions_miss(
+                let excluded = plan.complete_incident_positions_miss(
                     source,
                     scratch,
                     work,
                     cancel,
                     &mut failed_cover,
-                    &mut |position| outside(position),
-                )? {
-                    // A failed conservative cover grants nothing. Preserve the
-                    // complete exact removed-domain qualification before using
-                    // the tighter reference-star/comparison source support.
-                    phase = "complete removed-corner domain/active-cone qualification";
-                    let qualification_before = work.consumed();
-                    plan.visit_qualified_geometry(source, scratch, work, cancel, &mut |_, _, _| {
-                        Ok(())
-                    })
-                    .map_err(|error| {
-                        work.annotate_error(
-                            error,
-                            qualification_before,
-                            format_args!(
-                                "failed complete corner cover phase_face_source_box={:?}",
-                                failed_cover.map(|cover| (
-                                    cover.phase,
-                                    cover.source_face,
-                                    cover.position
-                                ))
-                            ),
+                    &mut |position| outside(expand(position)),
+                )?;
+                let support_limit = remaining_bytes
+                    .checked_sub(selection.owned_bytes())
+                    .ok_or_else(|| {
+                        failure(
+                            GeometryErrorCode::ResourceLimit,
+                            "closed cylinder corner/support coexistence exceeds allowance",
+                            0,
+                            (),
                         )
                     })?;
-                    phase = "complete source/reference/G support exclusion";
-                    let mut excluded = true;
+                let closed_atlas_vertex = if excluded {
+                    None
+                } else {
+                    // This method completes immutable source graph/trim/
+                    // comparison-disk/cutover/separation qualification FIRST.
+                    // Only its query-local subdivision proves the actual
+                    // closed G field and caller's independent boundary metric.
+                    phase = "exact removed-domain and closed actual G atlas";
+                    let qualification_before = work.consumed();
+                    let complete = plan
+                        .visit_closed_atlas_geometry(
+                            source,
+                            coordinates,
+                            scratch,
+                            work,
+                            cancel,
+                            visitor,
+                        )
+                        .map_err(|error| {
+                            work.annotate_error(
+                                error,
+                                qualification_before,
+                                format_args!(
+                                    "failed complete corner cover phase_face_source_box={:?}",
+                                    failed_cover.map(|cover| (
+                                        cover.phase,
+                                        cover.source_face,
+                                        cover.position
+                                    ))
+                                ),
+                            )
+                        })?;
+                    if !complete {
+                        return Ok(None);
+                    }
+                    phase = "qualified complete source/reference/G support retention";
                     plan.visit_position_supports(
                         work,
                         cancel,
                         &mut |_realized, source_and_realized| {
-                            excluded &= outside(source_and_realized)?;
-                            Ok(())
+                            let support = expand(source_and_realized);
+                            result.all_vertex_supports_outside &= outside(support)?;
+                            result.record_support_with_byte_limit(support, support_limit)
                         },
                     )?;
-                    if !excluded {
-                        return Ok(None);
+                    Some(vertex)
+                };
+                phase = "literal original vertex/native-edge/germ central exits";
+                plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter, _work| {
+                    let Some(uses) = incidence.get(edge) else {
+                        return Err(failure(
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                            "source vertex exit lost its original native edge",
+                            owner[0],
+                            (owner[1], owner[2]),
+                        ));
+                    };
+                    if uses.vertices[usize::from(absolute_back)] != vertex {
+                        return Err(failure(
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                            "source vertex exit belongs to another original endpoint germ",
+                            owner[0],
+                            (owner[1], owner[2], absolute_back, parameter),
+                        ));
                     }
-                }
-                phase = "literal native central exits";
-                plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter| {
                     if result.exits.len() == result.exits.capacity()
                         && !result.exits.iter().any(|previous| {
                             previous.edge == edge && previous.absolute_back == absolute_back
@@ -551,24 +604,13 @@ impl ClosedRadialLinks {
                             (),
                         ));
                     }
-                    result.record_exit(NativeEndpointExit {
+                    result.record_exit_with_byte_limit(NativeEndpointExit {
                         edge,
                         absolute_back,
                         parameter,
-                    })
+                        closed_atlas_vertex,
+                    }, support_limit)
                 })?;
-                if result
-                    .allocated_bytes()
-                    .saturating_add(selection.owned_bytes())
-                    > remaining_bytes
-                {
-                    return Err(failure(
-                        GeometryErrorCode::ResourceLimit,
-                        "closed cylinder endpoint exits exceed live scratch allowance",
-                        0,
-                        (),
-                    ));
-                }
                 result.source_error_mm = result.source_error_mm.max(plan.source_error_mm());
             }
             Ok(Some(result))
@@ -586,7 +628,7 @@ impl ClosedRadialLinks {
 
     #[allow(clippy::too_many_arguments)]
     fn prepare(
-        source: OriginalTrimSource<'_, '_>,
+        source: OriginalTrimSource<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         field: Option<(&SamplePrism, &SlabRequest)>,
         remaining_bytes: usize,
@@ -609,6 +651,7 @@ impl ClosedRadialLinks {
         })?;
         let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
         let mut result = Self {
+            definition,
             supports: Vec::new(),
             source_error_mm: 0.0,
             exits: Vec::new(),
@@ -644,13 +687,18 @@ impl ClosedRadialLinks {
                     matches!(proof, vertex_fan::OriginalVertexFanProof::OutsideClosedSlab);
                 continue;
             }
+            let available = remaining_bytes
+                .checked_sub(result.allocated_bytes())
+                .ok_or_else(|| {
+                    failure(
+                        GeometryErrorCode::ResourceLimit,
+                        "source vertex inventory exceeds remaining scratch allowance",
+                        0,
+                        (),
+                    )
+                })?;
             let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
-                source,
-                incidence,
-                vertex,
-                remaining_bytes,
-                work,
-                cancel,
+                source, incidence, vertex, available, work, cancel,
             )?
             else {
                 return Err(failure(
@@ -661,7 +709,7 @@ impl ClosedRadialLinks {
                 ));
             };
             let plan = selection.plan();
-            let scratch = remaining_bytes
+            let scratch = available
                 .checked_sub(selection.owned_bytes())
                 .ok_or_else(|| {
                     failure(
@@ -704,16 +752,34 @@ impl ClosedRadialLinks {
                 plan.visit_qualified_geometry(source, scratch, work, cancel, visitor)?;
                 result.source_error_mm = result.source_error_mm.max(plan.source_error_mm());
             }
+            let support_limit = remaining_bytes
+                .checked_sub(selection.owned_bytes())
+                .ok_or_else(|| {
+                    failure(
+                        GeometryErrorCode::ResourceLimit,
+                        "source vertex plan/support coexistence exceeds scratch allowance",
+                        0,
+                        (),
+                    )
+                })?;
             plan.visit_position_supports(work, cancel, &mut |_realized, homotopy| {
-                result.record_support(homotopy)
+                result.record_support_with_byte_limit(homotopy, support_limit)
             })?;
-            plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter| {
-                result.record_exit(NativeEndpointExit {
-                    edge,
-                    absolute_back,
-                    parameter,
-                })
-            })?;
+            plan.visit_native_exits(
+                work,
+                cancel,
+                &mut |edge, absolute_back, parameter, _work| {
+                    result.record_exit_with_byte_limit(
+                        NativeEndpointExit {
+                            edge,
+                            absolute_back,
+                            parameter,
+                            closed_atlas_vertex: None,
+                        },
+                        support_limit,
+                    )
+                },
+            )?;
         }
         Ok(result)
     }
@@ -739,7 +805,20 @@ impl ClosedRadialLinks {
             )
     }
 
-    fn record_exit(&mut self, exit: NativeEndpointExit) -> Result<(), GeometryError> {
+    fn record_exit_with_byte_limit(
+        &mut self,
+        exit: NativeEndpointExit,
+        remaining_bytes: usize,
+    ) -> Result<(), GeometryError> {
+        let limit = remaining_bytes.min(MAX_CORRECTION_BYTES);
+        if self.allocated_bytes() > limit {
+            return Err(failure(
+                GeometryErrorCode::ResourceLimit,
+                "source endpoint exits exceed live scratch allowance",
+                0,
+                (),
+            ));
+        }
         if !exit.parameter.is_finite() {
             return Err(failure(
                 GeometryErrorCode::InvalidGeometry,
@@ -751,7 +830,9 @@ impl ClosedRadialLinks {
         if let Some(previous) = self.exits.iter().find(|previous| {
             previous.edge == exit.edge && previous.absolute_back == exit.absolute_back
         }) {
-            if previous.parameter != exit.parameter {
+            if previous.parameter != exit.parameter
+                || previous.closed_atlas_vertex != exit.closed_atlas_vertex
+            {
                 return Err(failure(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
                     "opposed original uses disagree on immutable native endpoint exit",
@@ -768,7 +849,7 @@ impl ClosedRadialLinks {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<[Interval; 3]>())
                 .saturating_add(next.saturating_mul(std::mem::size_of::<NativeEndpointExit>()));
-            if bytes > MAX_CORRECTION_BYTES {
+            if bytes > limit {
                 return Err(failure(
                     GeometryErrorCode::ResourceLimit,
                     "source endpoint exits exhaust correction proof storage",
@@ -786,7 +867,7 @@ impl ClosedRadialLinks {
                         next,
                     )
                 })?;
-            if self.allocated_bytes() > MAX_CORRECTION_BYTES {
+            if self.allocated_bytes() > limit {
                 return Err(failure(
                     GeometryErrorCode::ResourceLimit,
                     "source endpoint exit allocator exceeds correction proof cap",
@@ -797,6 +878,118 @@ impl ClosedRadialLinks {
         }
         self.exits.push(exit);
         Ok(())
+    }
+
+    /// This exact vertex/native-edge/absolute-germ/exit tuple was emitted by
+    /// the same immutable source plan AFTER source ownership and closed G
+    /// qualification. It grants only the terminal gluing premise: the central
+    /// ribbon must still complete its closed reference/G and seam proofs.
+    pub(super) fn qualified_closed_cutover(
+        &self,
+        vertex: monstertruck_topology::VertexId<monstertruck_modeling::Point3>,
+        edge: monstertruck_topology::EdgeId<Curve>,
+        absolute_back: bool,
+        parameter: f64,
+    ) -> bool {
+        self.exits.iter().any(|exit| {
+            exit.edge == edge
+                && exit.absolute_back == absolute_back
+                && exit.parameter == parameter
+                && exit.closed_atlas_vertex == Some(vertex)
+        })
+    }
+
+    /// Active original closure admission borrows completed source/reference/G
+    /// authority only through both exact native endpoint cutovers. It also
+    /// requires the independent WHOLE original joint image proof; an exit by
+    /// itself never discharges this obligation.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn qualified_original_joint(
+        &self,
+        source: OriginalTrimSource<'_, '_>,
+        incidence: &SourceEdgeIncidence,
+        domain: &PreparedFaceTrimDomain<'_>,
+        joint_index: usize,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        let Some(joint) = domain.native().joints().get(joint_index) else {
+            return Ok(false);
+        };
+        if !std::ptr::eq(self.definition, source.definition())
+            || self.unchanged_source
+            || !matches!(
+                joint.kind,
+                monstertruck_modeling::TrimJointKind::EndpointUncertainty
+                    | monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+            )
+            || !self
+                .exits
+                .iter()
+                .any(|exit| exit.closed_atlas_vertex == Some(joint.vertex_id))
+        {
+            return Ok(false);
+        }
+        // The closed G apex is the literal NativeV in every selected cone
+        // cell. Its expanded retained homotopy support must cover the entire
+        // allowance cube. The independent joint proof below puts S(joint UV)
+        // inside this cube, so no admitted closure can escape the original
+        // fiber census's retained-support exclusion. This is not Jordan
+        // ownership for arbitrary completions.
+        let allowance = source_allowance(self.definition)?;
+        let vertex_cube = [
+            joint.vertex_point.x,
+            joint.vertex_point.y,
+            joint.vertex_point.z,
+        ]
+        .map(|value| {
+            add(
+                Interval::point(value),
+                Interval {
+                    lo: -allowance,
+                    hi: allowance,
+                },
+            )
+        });
+        if !self.supports.iter().any(|support| {
+            (0..3).all(|i| support[i].lo <= vertex_cube[i].lo && vertex_cube[i].hi <= support[i].hi)
+        }) {
+            return Ok(false);
+        }
+        let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
+            source,
+            incidence,
+            joint.vertex_id,
+            remaining_bytes,
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(false);
+        };
+        let scratch = remaining_bytes
+            .checked_sub(selection.owned_bytes())
+            .ok_or_else(|| {
+                failure(
+                    GeometryErrorCode::ResourceLimit,
+                    "original joint/source star coexistence exceeds scratch allowance",
+                    0,
+                    joint_index,
+                )
+            })?;
+        selection.plan().qualified_original_joint_image(
+            source,
+            domain,
+            joint_index,
+            scratch,
+            work,
+            cancel,
+            &|edge, absolute_back, parameter| {
+                self.qualified_closed_cutover(joint.vertex_id, edge, absolute_back, parameter)
+            },
+        )
     }
 
     /// Both literal limits come from the same source-only corner recipes used
@@ -1108,7 +1301,13 @@ mod closed_support_tests {
 
     #[test]
     fn support_growth_is_refused_before_a_smaller_caller_budget_allocates() {
+        let definition = crate::import_step(
+            include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         let mut links = ClosedRadialLinks {
+            definition: &definition,
             supports: Vec::new(),
             exits: Vec::new(),
             source_error_mm: 0.0,

@@ -105,6 +105,9 @@ impl ClassifiedRegions {
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
         check_cancel(cancel)?;
+        // Operands already intersect final-D leaf insets at the innermost wall
+        // center. The remaining half-bead overlaps the neighboring deposition;
+        // never erode this aggregate again or round a complementary skin mask.
         let bottom = difference(&layout.fill, survives_below, cancel)?;
         admit_scratch(scratch_points(&[&bottom])?)?;
         let remaining = if bottom.0.is_empty() {
@@ -237,33 +240,16 @@ impl ClassifiedRegions {
         Ok((paths, coverage))
     }
 
-    /// Whole rows remain clipped by realized perimeter-owned fill. They are only
-    /// candidates for joining already-required hatch pieces, never extra fill.
+    /// Positive-fill row bounds at the actual classified hatch coordinates.
+    /// These permit bounded anchor extensions, never unrequested sparse rows.
     pub(super) fn whole_rows(
         &self,
-        z: f64,
-        height: f64,
-        axis: region::HatchAxis,
-        recipe: &PlanarPrintRecipe,
+        required: &[DepositionPath],
+        layer: &region::HatchLayer<'_>,
         segments: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
-        let mut rows = Vec::new();
-        region::hatch(
-            &self.layout.fill,
-            DepositionKind::Bridge,
-            1.0,
-            &region::HatchLayer {
-                z,
-                height,
-                axis,
-                recipe,
-            },
-            &mut rows,
-            segments,
-            cancel,
-        )?;
-        Ok(rows)
+        region::bridge_rows(&self.layout.fill, required, layer, segments, cancel)
     }
 }
 

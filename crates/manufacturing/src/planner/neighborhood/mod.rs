@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! Exact, job-local intersections of aligned immutable realized-D span ranges.
-use super::{MAX_BOOLEAN_PAIRS, SectionSpan, classification};
+//! Job-local intersections of aligned immutable final-D wall-center insets.
+use super::{MAX_BOOLEAN_PAIRS, SectionSpan, classification, region};
 use crate::{check_cancel, error};
 use geo::{Coord, MultiPolygon};
 use spiling_contracts::manufacturing::{
     MAX_DEPOSITION_SEGMENTS, MAX_PRINT_LAYERS, ManufacturingError, ManufacturingErrorCode,
 };
 use std::{
+    cmp::Ordering,
     ops::Deref,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -18,6 +19,7 @@ mod tests;
 
 enum Cached {
     Missing,
+    Alias(usize),
     Leaf(usize),
     Empty,
     Geometry(Arc<MultiPolygon<f64>>, usize, usize),
@@ -61,10 +63,13 @@ impl Deref for Material<'_> {
 
 pub(super) struct SkinNeighborhoods<'a> {
     sections: &'a [SectionSpan],
-    // Complete-tree positions identify exact aligned half-open D span ranges.
-    // Leaves retain only validated counts, never copied material coordinates.
+    // Fixed for the entire compile, independent of native M/C reuse identity.
+    inset_mm: f64,
+    // Complete-tree positions identify aligned half-open final-D span ranges.
+    // Nonzero-inset leaves share the same owned/reclaimable pool as ranges.
     nodes: Vec<Cached>,
     base: usize,
+    leaf_identities_ready: bool,
     retained: usize,
     retained_capacity: usize,
     work: usize,
@@ -72,8 +77,15 @@ pub(super) struct SkinNeighborhoods<'a> {
 impl<'a> SkinNeighborhoods<'a> {
     pub(super) fn new(
         sections: &'a [SectionSpan],
+        inset_mm: f64,
         initial_work: usize,
     ) -> Result<Self, ManufacturingError> {
+        if !inset_mm.is_finite() || inset_mm < 0.0 {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "skin neighborhood inset must be finite and nonnegative",
+            ));
+        }
         if sections.len() > MAX_PRINT_LAYERS as usize {
             return Err(resource("skin neighborhood span limit exceeded"));
         }
@@ -97,8 +109,10 @@ impl<'a> SkinNeighborhoods<'a> {
         nodes.resize_with(count, || Cached::Missing);
         Ok(Self {
             sections,
+            inset_mm,
             nodes,
             base,
+            leaf_identities_ready: false,
             retained: 0,
             retained_capacity: MAX_DEPOSITION_SEGMENTS as usize,
             work,
@@ -137,6 +151,7 @@ impl<'a> SkinNeighborhoods<'a> {
         if current >= self.sections.len() || neighbor >= self.sections.len() {
             return Err(resource("skin neighborhood span index out of range"));
         }
+        self.intern_leaves(cancel)?;
         let end = current
             .max(neighbor)
             .checked_add(1)
@@ -249,6 +264,102 @@ impl<'a> SkinNeighborhoods<'a> {
             .ok_or_else(|| resource("skin neighborhood child index overflow"))?;
         Ok((left, right, mid))
     }
+    /// Only exact ordered final-D contents share a derived leaf. Heights and
+    /// physical range positions remain distinct; this grants no M/C reuse.
+    /// A fallible merge sort bounds even adversarial identities by O(n log n)
+    /// comparisons, with every inspected coordinate charged and cancellable.
+    fn intern_leaves(&mut self, cancel: &AtomicBool) -> Result<(), ManufacturingError> {
+        if self.leaf_identities_ready || self.inset_mm == 0.0 {
+            return Ok(());
+        }
+        let count = self.sections.len();
+        let slots = count
+            .checked_mul(2)
+            .ok_or_else(|| resource("skin leaf identity count overflow"))?;
+        let identity_bytes = slots
+            .checked_mul(std::mem::size_of::<usize>())
+            .ok_or_else(|| resource("skin leaf identity byte overflow"))?;
+        self.nodes
+            .len()
+            .checked_mul(std::mem::size_of::<Cached>())
+            .and_then(|bytes| bytes.checked_add(identity_bytes))
+            .ok_or_else(|| resource("skin neighborhood index staging byte overflow"))?;
+        charge(&mut self.work, slots)?;
+        let mut order = Vec::new();
+        let mut scratch = Vec::new();
+        order
+            .try_reserve_exact(count)
+            .map_err(|_| resource("skin leaf identity allocation refused"))?;
+        scratch
+            .try_reserve_exact(count)
+            .map_err(|_| resource("skin leaf identity scratch allocation refused"))?;
+        for index in 0..count {
+            check_cancel(cancel)?;
+            // Validate even a unique input, which sorting need not inspect.
+            checked_points(&self.sections[index].material, &mut self.work, cancel)?;
+            order.push(index);
+            scratch.push(0);
+        }
+        let mut width = 1;
+        while width < count {
+            for start in (0..count).step_by(width * 2) {
+                let mid = (start + width).min(count);
+                let end = (mid + width).min(count);
+                let (mut left, mut right) = (start, mid);
+                for target in &mut scratch[start..end] {
+                    check_cancel(cancel)?;
+                    charge(&mut self.work, 1)?;
+                    let take_left = right == end
+                        || (left < mid
+                            && compare_material(
+                                &self.sections[order[left]].material,
+                                &self.sections[order[right]].material,
+                                &mut self.work,
+                                cancel,
+                            )? != Ordering::Greater);
+                    *target = if take_left {
+                        let index = order[left];
+                        left += 1;
+                        index
+                    } else {
+                        let index = order[right];
+                        right += 1;
+                        index
+                    };
+                }
+            }
+            std::mem::swap(&mut order, &mut scratch);
+            width *= 2;
+        }
+        // Finish all fallible comparisons before publishing any aliases, so a
+        // cancelled/refused identity pass cannot leave half-interned leaves.
+        let mut canonical: Option<usize> = None;
+        for (position, index) in order.iter().copied().enumerate() {
+            let equal = if let Some(previous) = canonical {
+                compare_material(
+                    &self.sections[previous].material,
+                    &self.sections[index].material,
+                    &mut self.work,
+                    cancel,
+                )? == Ordering::Equal
+            } else {
+                false
+            };
+            if !equal {
+                canonical = Some(index);
+            }
+            scratch[position] = canonical.unwrap_or(index);
+        }
+        check_cancel(cancel)?;
+        charge(&mut self.work, count)?;
+        for (index, canonical) in order.into_iter().zip(scratch) {
+            if index != canonical {
+                self.nodes[self.base + index] = Cached::Alias(self.base + canonical);
+            }
+        }
+        self.leaf_identities_ready = true;
+        Ok(())
+    }
     fn build(
         &mut self,
         node: usize,
@@ -261,6 +372,16 @@ impl<'a> SkinNeighborhoods<'a> {
         check_cancel(cancel)?;
         charge(&mut self.work, 1)?;
         self.admit(external, temporary, cancel)?;
+        let (node, start, end) = match self.nodes.get(node) {
+            Some(Cached::Alias(canonical)) => {
+                let start = canonical
+                    .checked_sub(self.base)
+                    .filter(|index| *index < self.sections.len())
+                    .ok_or_else(|| resource("skin canonical leaf index out of range"))?;
+                (*canonical, start, start + 1)
+            }
+            _ => (node, start, end),
+        };
         let used = self.work;
         let slot = self
             .nodes
@@ -282,19 +403,45 @@ impl<'a> SkinNeighborhoods<'a> {
                 });
             }
             Cached::Missing => {}
+            Cached::Alias(_) => return Err(resource("skin canonical leaf alias chain")),
         }
         if end.checked_sub(start) == Some(1) {
-            let material = &self
-                .sections
+            let sections = self.sections;
+            let material = &sections
                 .get(start)
                 .ok_or_else(|| resource("skin neighborhood leaf index out of range"))?
                 .material;
             let points = checked_points(material, &mut self.work, cancel)?;
-            self.nodes[node] = Cached::Leaf(points);
-            return Ok(Material {
-                storage: Storage::Borrowed(material),
-                points,
-            });
+            if self.inset_mm == 0.0 {
+                // The exact identity needs no owned geometry, including tests
+                // and legitimate zero-distance range queries.
+                self.nodes[node] = Cached::Leaf(points);
+                return Ok(Material {
+                    storage: Storage::Borrowed(material),
+                    points,
+                });
+            }
+            let material = region::offset_admitted(
+                material,
+                -self.inset_mm,
+                |scratch, overlay| {
+                    let staging = temporary
+                        .checked_add(scratch)
+                        .ok_or_else(|| resource("skin inset staging overflow"))?;
+                    self.admit(external, staging, cancel)?;
+                    if let Some((a, b)) = overlay {
+                        super::boolean::budget_accumulated(a, b, &mut self.work, cancel)?;
+                    }
+                    Ok(())
+                },
+                cancel,
+            )?;
+            let points = checked_points(&material, &mut self.work, cancel)?;
+            let staged = temporary
+                .checked_add(points)
+                .ok_or_else(|| resource("skin inset staging overflow"))?;
+            self.admit(external, staged, cancel)?;
+            return self.cache_material(node, material, points, cancel);
         }
         let (left, right, mid) = Self::children(node, start, end)?;
         let lower = self.build(left, start, mid, external, temporary, cancel)?;
@@ -330,6 +477,20 @@ impl<'a> SkinNeighborhoods<'a> {
         }
         drop(lower);
         drop(upper);
+        self.cache_material(node, material, points, cancel)
+    }
+    fn cache_material(
+        &mut self,
+        node: usize,
+        material: MultiPolygon<f64>,
+        points: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Material<'a>, ManufacturingError> {
+        check_cancel(cancel)?;
+        if material.0.is_empty() {
+            self.nodes[node] = Cached::Empty;
+            return Ok(Material::empty());
+        }
         if !self.reserve_cache(points, cancel)? {
             return Ok(Material {
                 storage: Storage::Temporary(material),
@@ -408,6 +569,49 @@ impl<'a> SkinNeighborhoods<'a> {
         }
         Ok(())
     }
+}
+/// Structural, bit-exact ordering in the existing final-D coordinate frame.
+/// Polygon/ring order, holes and signed coordinate bits are never normalized.
+fn compare_material(
+    a: &MultiPolygon<f64>,
+    b: &MultiPolygon<f64>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Ordering, ManufacturingError> {
+    check_cancel(cancel)?;
+    charge(work, 1)?;
+    let order = a.0.len().cmp(&b.0.len());
+    if order != Ordering::Equal {
+        return Ok(order);
+    }
+    for (a, b) in a.0.iter().zip(&b.0) {
+        check_cancel(cancel)?;
+        charge(work, 1)?;
+        let order = a.interiors().len().cmp(&b.interiors().len());
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+        for (a, b) in std::iter::once(a.exterior())
+            .chain(a.interiors())
+            .zip(std::iter::once(b.exterior()).chain(b.interiors()))
+        {
+            check_cancel(cancel)?;
+            charge(work, 1)?;
+            let order = a.0.len().cmp(&b.0.len());
+            if order != Ordering::Equal {
+                return Ok(order);
+            }
+            for (a, b) in a.0.iter().zip(&b.0) {
+                check_cancel(cancel)?;
+                charge(work, 1)?;
+                let order = (a.x.to_bits(), a.y.to_bits()).cmp(&(b.x.to_bits(), b.y.to_bits()));
+                if order != Ordering::Equal {
+                    return Ok(order);
+                }
+            }
+        }
+    }
+    Ok(Ordering::Equal)
 }
 fn checked_points(
     material: &MultiPolygon<f64>,

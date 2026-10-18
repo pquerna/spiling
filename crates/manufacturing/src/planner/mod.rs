@@ -33,7 +33,9 @@ use std::{
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
-const MAX_BOOLEAN_PAIRS: usize = 20_000_000;
+const MAX_BOOLEAN_PAIRS: usize = 128_000_000;
+// Native interval operations and polygon Boolean pairs are independent resources.
+const MAX_NATIVE_WORK_UNITS: u64 = 128_000_000;
 
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
@@ -91,7 +93,11 @@ pub(crate) fn plan(
     let recipe = &input.intent.recipe;
     let mut surface_work = 0usize;
     preflight::resolve_native_events(
-        input, &mut admission, &geometry_sources, &mut surface_work, cancel,
+        input,
+        &mut admission,
+        &geometry_sources,
+        &mut surface_work,
+        cancel,
     )?;
     let prepared_sources = prepare_sources(
         geometry_sources,
@@ -451,13 +457,25 @@ pub(crate) fn plan(
         }
         index = end;
     }
-    drop(prepared_sources);
     let mut native_coverage = native_stage.finalize(&mut admission.geometry_work, cancel)?;
-    let accepted_native_proof_bytes = native_coverage.material_proof.retained_bytes();
-    // Preserve the compact material authority without retaining native proof
-    // geometry. Reserve its actual bytes in coordinate-sized admission units
-    // throughout classification and support, alongside the immutable operands.
-    let proof_units = accepted_native_proof_bytes.div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+    // Deferred void projection borrows these immutable domains and recipes.
+    // Keep source owners in the native byte pool, not the deposition-point pool.
+    let retained_support_native_bytes = prepared_sources
+        .values()
+        .try_fold(
+            native_coverage.material_proof.retained_bytes(),
+            |bytes, source| bytes.checked_add(source.retained_bytes()),
+        )
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "deferred native source retention capacity overflow",
+            )
+        })?;
+    let proof_units = native_coverage
+        .material_proof
+        .retained_bytes()
+        .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
     retained_points = retained_points
         .checked_add(proof_units)
         .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -473,7 +491,8 @@ pub(crate) fn plan(
     drop(native_occupied_shared);
     let mut layers = Vec::with_capacity(count as usize);
     let mut segments = 0usize;
-    let mut neighborhoods = SkinNeighborhoods::new(&sections, surface_work)?;
+    let skin_inset_mm = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
+    let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset_mm, surface_work)?;
     let mut key = None;
     let mut classified = None;
     let mut layout_span = None;
@@ -810,10 +829,13 @@ pub(crate) fn plan(
                 )?
                 .0;
             let whole_rows = classified.whole_rows(
-                elevation.z,
-                elevation.height,
-                axis,
-                recipe,
+                &paths,
+                &region::HatchLayer {
+                    z: elevation.z,
+                    height: elevation.height,
+                    axis,
+                    recipe,
+                },
                 segments,
                 cancel,
             )?;
@@ -822,12 +844,13 @@ pub(crate) fn plan(
         |demand_bounds, point_limit, support_work, native_work| {
             native::project_protected_voids(
                 input,
+                &prepared_sources,
                 &mut native_coverage.protected_voids,
                 &native::ProtectedVoidDemand {
                     native_bounds: &admission.native_bounds,
                     demand_bounds,
                     point_limit,
-                    retained_material_proof_bytes: accepted_native_proof_bytes,
+                    retained_native_owner_bytes: retained_support_native_bytes,
                 },
                 support_work,
                 native_work,
@@ -839,6 +862,7 @@ pub(crate) fn plan(
     // captures beyond support admission.
     drop(native_coverage.protected_voids);
     drop(native_coverage.material_proof);
+    drop(prepared_sources);
     let result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
         native_geometry: NativeGeometryCoverageSummary {
@@ -1000,23 +1024,22 @@ fn prepare_sources<'a>(
     // still-live proposal buffer before granting any replacement allowance.
     let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
         .checked_sub(coexisting_bytes)
-        .ok_or_else(|| error(
-            ManufacturingErrorCode::ResourceLimit,
-            "native capture proposals exhaust source preparation capacity",
-        ))?;
-    let mut remaining = sources.values().try_fold(
-        available,
-        |remaining, source| {
-            remaining
-                .checked_sub(source.retained_bytes())
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "aggregate original material geometry capacity exceeded",
-                    )
-                })
-        },
-    )?;
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "native capture proposals exhaust source preparation capacity",
+            )
+        })?;
+    let mut remaining = sources.values().try_fold(available, |remaining, source| {
+        remaining
+            .checked_sub(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "aggregate original material geometry capacity exceeded",
+                )
+            })
+    })?;
     for (definition_id, source) in sources {
         check_cancel(cancel)?;
         // Replace this owner's storage; all other original/prepared owners

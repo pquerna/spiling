@@ -47,7 +47,7 @@ pub(super) struct ProtectedVoidDemand<'a> {
     pub native_bounds: &'a BTreeMap<OccurrenceId, spiling_contracts::geometry::AabbMm>,
     pub demand_bounds: &'a [[[f64; 2]; 2]],
     pub point_limit: usize,
-    pub retained_material_proof_bytes: usize,
+    pub retained_native_owner_bytes: usize,
 }
 
 pub(super) struct SupportClearanceGeometry<'a> {
@@ -529,7 +529,14 @@ pub(super) fn collect_span(
         |bytes, source| bytes.saturating_add(source.retained_bytes()),
     );
     if state.ready.is_empty() {
-        let partition_end = span_end(schedule, admission, input.intent, index, surface_work, cancel)?;
+        let partition_end = span_end(
+            schedule,
+            admission,
+            input.intent,
+            index,
+            surface_work,
+            cancel,
+        )?;
         let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
         state.sizing.begin_partition(partition_end_z_bits);
         let end = state.sizing.limit_end(index, partition_end);
@@ -615,8 +622,14 @@ pub(super) fn collect_span(
                         "native endpoint dependency frontier exceeds the layer budget",
                     ));
                 }
-                let partition_end =
-                    span_end(schedule, admission, input.intent, next_index, surface_work, cancel)?;
+                let partition_end = span_end(
+                    schedule,
+                    admission,
+                    input.intent,
+                    next_index,
+                    surface_work,
+                    cancel,
+                )?;
                 let partition_end_z_bits = schedule[(partition_end - 1) as usize].z.to_bits();
                 state.sizing.begin_partition(partition_end_z_bits);
                 let next_end = state.sizing.limit_end(next_index, partition_end);
@@ -785,12 +798,24 @@ pub(super) fn collect_span(
                                 "deferred native void has no retained-byte allowance",
                             )
                         })?;
-                    let capture = spiling_geometry::capture_projected_voids(
-                        evidence.analysis,
-                        available as u32,
-                        &mut admission.geometry_work,
-                        cancel,
-                    )
+                    let capture = if let Some(collar) =
+                        pending.critical_collars().iter().find(|collar| {
+                            collar.current_leaf().occurrence_id() == occurrence.occurrence_id
+                        }) {
+                        collar.capture_projected_voids(
+                            evidence.analysis,
+                            available as u32,
+                            &mut admission.geometry_work,
+                            cancel,
+                        )
+                    } else {
+                        spiling_geometry::capture_projected_voids(
+                            evidence.analysis,
+                            available as u32,
+                            &mut admission.geometry_work,
+                            cancel,
+                        )
+                    }
                     .map_err(|failure| {
                         super::native_error(failure, "deferred native void capture")
                     })?;
@@ -1863,8 +1888,16 @@ fn span_end(
             }
         }
     }
-    for (band, proposal_only) in admission.native_event_bands.iter().map(|band| (band, false))
-        .chain(admission.native_capture_proposal_bands.iter().map(|band| (band, true)))
+    for (band, proposal_only) in admission
+        .native_event_bands
+        .iter()
+        .map(|band| (band, false))
+        .chain(
+            admission
+                .native_capture_proposal_bands
+                .iter()
+                .map(|band| (band, true)),
+        )
     {
         preflight::charge_capture_proposal_work(proposal_work, 1, cancel)?;
         if proposal_only || band[0] != band[1] {
@@ -1952,6 +1985,7 @@ fn admit_bytes(
 /// never material, anchor or approximate all-domain source certificates.
 pub(super) fn project_protected_voids(
     input: &CompilerInput<'_>,
+    sources: &BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'_>>,
     captures: &mut Vec<CapturedProtectedVoid>,
     demand: &ProtectedVoidDemand<'_>,
     support_work: &mut usize,
@@ -1962,10 +1996,10 @@ pub(super) fn project_protected_voids(
         native_bounds,
         demand_bounds,
         point_limit,
-        retained_material_proof_bytes,
+        retained_native_owner_bytes,
     } = *demand;
-    // The accepted material proof coexists with every projection and converted
-    // mask. Keep it in the shared live total, including conversion-time checks.
+    // Accepted material proof and immutable source owners coexist with every
+    // projection and converted mask, including conversion-time admission.
     let mut retained_native = captures
         .capacity()
         .saturating_mul(std::mem::size_of::<CapturedProtectedVoid>())
@@ -1975,7 +2009,7 @@ pub(super) fn project_protected_voids(
                 .map(|value| value.capture.retained_bytes())
                 .sum::<usize>(),
         )
-        .saturating_add(retained_material_proof_bytes);
+        .saturating_add(retained_native_owner_bytes);
     let mut regions = Vec::new();
     let mut scopes = Vec::new();
     let mut points = 0usize;
@@ -2043,25 +2077,34 @@ pub(super) fn project_protected_voids(
                         "native void projection has no retained-byte allowance",
                     )
                 })?;
-            let projected = spiling_geometry::projected_protected_void_envelopes(
-                definition,
-                &captured.capture,
-                spiling_geometry::ProtectedVoidPolicy {
-                    maximum_xy_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
-                    byte_limit: available as u32,
-                },
-                work,
-                cancel,
-            )
-            .map_err(|failure| {
-                super::native_error(
-                    failure,
-                    &format!(
-                        "native protected void projection occurrence {}",
-                        captured.occurrence_id.get()
-                    ),
+            let source = sources
+                .get(captured.capture.definition_id())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::NativeAnalysisIndeterminate,
+                        "native void capture lost its retained original material owner",
+                    )
+                })?;
+            let projected = source
+                .projected_protected_void_envelopes(
+                    &captured.capture,
+                    spiling_geometry::ProtectedVoidPolicy {
+                        maximum_xy_error_mm:
+                            spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                        byte_limit: available as u32,
+                    },
+                    work,
+                    cancel,
                 )
-            })?;
+                .map_err(|failure| {
+                    super::native_error(
+                        failure,
+                        &format!(
+                            "native protected void projection occurrence {}",
+                            captured.occurrence_id.get()
+                        ),
+                    )
+                })?;
             if projected.definition_id() != captured.capture.definition_id()
                 || !projected.is_compatible_with_definition(definition)
                 || projected.placed_pose() != captured.capture.placed_pose()
@@ -2898,23 +2941,24 @@ mod capture_proposal_tests {
                 checks: Vec::new(),
             },
             geometry_work: spiling_geometry::GeometryWorkBudget::new(
-                super::super::MAX_BOOLEAN_PAIRS as u64,
+                super::super::MAX_NATIVE_WORK_UNITS,
             ),
         }
     }
 
     fn schedule() -> Vec<LayerElevation> {
-        (0..5).map(|index| {
-            let lower_z = index as f64 * 0.5;
-            LayerElevation {
-                lower_z,
-                z: lower_z + 0.5,
-                sample: lower_z + 0.25,
-                height: 0.5,
-            }
-        }).collect()
+        (0..5)
+            .map(|index| {
+                let lower_z = index as f64 * 0.5;
+                LayerElevation {
+                    lower_z,
+                    z: lower_z + 0.5,
+                    sample: lower_z + 0.25,
+                    height: 0.5,
+                }
+            })
+            .collect()
     }
-
 
     #[test]
     fn capture_proposal_search_preserves_cumulative_work_limits_and_cancellation() {
@@ -2922,16 +2966,37 @@ mod capture_proposal_tests {
         let schedule = schedule();
         let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
             "../../../../fixtures/manufacturing/complete-sparse.intent.json"
-        )).unwrap();
+        ))
+        .unwrap();
         let mut work = super::super::MAX_BOOLEAN_PAIRS;
-        assert_eq!(span_end(
-            &schedule, &admission, &intent, 0, &mut work, &AtomicBool::new(false),
-        ).unwrap_err().code, ManufacturingErrorCode::ResourceLimit);
+        assert_eq!(
+            span_end(
+                &schedule,
+                &admission,
+                &intent,
+                0,
+                &mut work,
+                &AtomicBool::new(false),
+            )
+            .unwrap_err()
+            .code,
+            ManufacturingErrorCode::ResourceLimit
+        );
         assert_eq!(work, super::super::MAX_BOOLEAN_PAIRS);
         let mut work = 17;
-        assert_eq!(span_end(
-            &schedule, &admission, &intent, 0, &mut work, &AtomicBool::new(true),
-        ).unwrap_err().code, ManufacturingErrorCode::Cancelled);
+        assert_eq!(
+            span_end(
+                &schedule,
+                &admission,
+                &intent,
+                0,
+                &mut work,
+                &AtomicBool::new(true),
+            )
+            .unwrap_err()
+            .code,
+            ManufacturingErrorCode::Cancelled
+        );
         assert_eq!(work, 17);
     }
 }

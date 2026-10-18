@@ -4,7 +4,10 @@
 
 pub(crate) mod endpoint_genealogy;
 mod loops;
+mod reference;
+mod reference_distance;
 pub(crate) use loops::{canonicalize_section_in_place, sample_original_face};
+pub(crate) use reference::simplify_section_reference;
 #[cfg(test)]
 mod tests;
 
@@ -46,9 +49,10 @@ pub struct PreparedSectionSource<'a> {
     originals: Option<crate::parametric::PreparedSectionOriginals<'a>>,
 }
 
-/// A query may request stricter normal accuracy, never relax the frozen policy.
+/// Queries may narrow chord and normal accuracy, never relax the frozen policy.
 pub(crate) struct SectionQuery {
     pub(crate) plane: PlaneMm,
+    pub(crate) maximum_chord_error_mm: f64,
     pub(crate) maximum_plane_error_mm: f64,
 }
 
@@ -56,6 +60,7 @@ impl SectionQuery {
     fn standard(plane: PlaneMm) -> Self {
         Self {
             plane,
+            maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
             maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
         }
     }
@@ -162,6 +167,46 @@ impl<'s, 'd> OriginalTrimSource<'s, 'd> {
         };
         query.restrict_retained_byte_limit(remaining_bytes, work, cancel)?;
         Ok(query)
+    }
+
+    /// Whole-native C0/first-jet proof only; query-specific subsets and actual
+    /// coordinates always receive fresh evaluations. The caller has admitted
+    /// native FIRST scratch independently of the retained source owner.
+    pub(crate) fn whole_face_first_enclosure(
+        self,
+        index: usize,
+        domain: &FaceTrimQuery<'_, 'd>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::parametric::SurfaceFirstEnclosure, GeometryError> {
+        match self.originals {
+            Some(originals) => {
+                originals.whole_face_first_enclosure(self.definition, index, domain, work, cancel)
+            }
+            None => {
+                work.charge(1, cancel)?;
+                if self
+                    .definition
+                    .face_boundaries
+                    .get(index)
+                    .map(|face| face.face)
+                    != Some(domain.native().face().id())
+                {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::AnalysisIndeterminate,
+                        "whole-native first enclosure lost its original source face",
+                    ));
+                }
+                domain.native().face().with_surface(|surface| {
+                    crate::parametric::surface_piecewise_first_enclosure(
+                        surface,
+                        domain.uv_bounds(),
+                        work,
+                        cancel,
+                    )
+                })
+            }
+        }
     }
 }
 
@@ -334,7 +379,9 @@ pub(crate) fn prepare_section_source_from_originals<'a>(
     work.charge(1, cancel)?;
     let pinned_bytes = definition.retained_query_proof_bytes();
     let source_allowance = remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES);
-    let original_bytes = originals.as_ref().map_or(0, |source| source.retained_bytes());
+    let original_bytes = originals
+        .as_ref()
+        .map_or(0, |source| source.retained_bytes());
     let header_bytes = source_header_bytes(originals.is_some());
     let native_source_bytes = source_allowance
         .checked_sub(pinned_bytes)
@@ -417,6 +464,15 @@ fn section_using(
 ) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
     let plane = query.plane;
+    if !query.maximum_chord_error_mm.is_finite()
+        || query.maximum_chord_error_mm <= 0.0
+        || query.maximum_chord_error_mm > SECTION_SAMPLING_TOLERANCE_MM
+    {
+        return Err(GeometryError::new(
+            GeometryErrorCode::InvalidGeometry,
+            "section chord error must narrow the frozen sampling allowance",
+        ));
+    }
     if !query.maximum_plane_error_mm.is_finite()
         || query.maximum_plane_error_mm <= 0.0
         || query.maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
@@ -560,7 +616,15 @@ fn section_using(
         native_query_remaining,
     );
     crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
-    let cut = cut.map_err(native_error)?;
+    let cut = cut.map_err(|cause| {
+        let mut error = native_error(cause);
+        error.message = format!(
+            "native section source={} plane={plane:?}: {}",
+            definition.id().as_str(),
+            error.message,
+        );
+        error
+    })?;
     check_cancel(cancel)?;
     for shell in cut.solid.boundaries() {
         check_cancel(cancel)?;
@@ -628,8 +692,10 @@ fn section_using(
     )
     .map_err(|mut error| {
         error.message = format!(
-            "native section / complete original plane coverage: {}",
-            error.message
+            "native section / complete original plane coverage: source={}, requested_plane={plane:?}, \
+             clip_plane(origin={:?},u={:?},v={:?}): {}",
+            definition.id().as_str(), clip_plane.origin(), clip_plane.axis_u(),
+            clip_plane.axis_v(), error.message
         );
         error
     })?;
@@ -679,6 +745,7 @@ fn section_using(
                 wire,
                 &loops::WireSampling {
                     frame: &frame,
+                    maximum_chord_error_mm: query.maximum_chord_error_mm,
                     maximum_plane_error_mm: query.maximum_plane_error_mm,
                     face_sign,
                     budget: &budget,

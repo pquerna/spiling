@@ -51,7 +51,7 @@ pub(super) fn admit<'a>(
         native_capture_proposal_bands: Vec::new(),
         material_domains: BTreeMap::new(),
         surface_fields: BTreeMap::new(),
-        geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_BOOLEAN_PAIRS as u64),
+        geometry_work: spiling_geometry::GeometryWorkBudget::new(super::MAX_NATIVE_WORK_UNITS),
         report: PreflightReport {
             input_revision: input.revision,
             disposition: PreflightDisposition::Admitted,
@@ -188,20 +188,41 @@ pub(super) fn admit<'a>(
         };
         if !geometry_sources.contains_key(&occurrence.definition_id) {
             let source = match spiling_geometry::prepare_geometry_source(
-                definition, remaining_prepared, cancel, &mut result.geometry_work,
+                definition,
+                remaining_prepared,
+                cancel,
+                &mut result.geometry_work,
             ) {
                 Ok(source) => source,
-                Err(e) if matches!(e.code, GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit) => {
-                    return Err(super::native_error(e, "original material geometry preparation"));
+                Err(e)
+                    if matches!(
+                        e.code,
+                        GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                    ) =>
+                {
+                    return Err(super::native_error(
+                        e,
+                        "original material geometry preparation",
+                    ));
                 }
                 Err(e) => {
-                    add(native_check_code(e.code), e.to_string(), Some(occurrence.occurrence_id), None);
+                    add(
+                        native_check_code(e.code),
+                        e.to_string(),
+                        Some(occurrence.occurrence_id),
+                        None,
+                    );
                     continue 'occurrences;
                 }
             };
-            remaining_prepared = remaining_prepared.checked_sub(source.retained_bytes())
-                .ok_or_else(|| error(ManufacturingErrorCode::ResourceLimit,
-                    "aggregate original material geometry capacity exceeded"))?;
+            remaining_prepared = remaining_prepared
+                .checked_sub(source.retained_bytes())
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "aggregate original material geometry capacity exceeded",
+                    )
+                })?;
             geometry_sources.insert(occurrence.definition_id.clone(), source);
         }
         let query_bytes = super::geometry_query_limit(&geometry_sources)?;
@@ -475,19 +496,22 @@ pub(super) fn resolve_native_events(
         let query_bytes = query_pool_bytes
             .checked_sub(admission.native_capture_proposal_bytes())
             .filter(|bytes| *bytes > 0)
-            .ok_or_else(|| error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposals exhaust shared query capacity",
-            ))?;
-        let analysis = geometry_sources[&occurrence.definition_id].analyze_placed_height_domain(
-            occurrence.pose,
-            [bounds.min[2], bounds.max[2]],
-            policy,
-            query_bytes,
-            &mut admission.geometry_work,
-            cancel,
-        )
-        .map_err(|e| super::native_error(e, "complete native height analysis"))?;
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native capture proposals exhaust shared query capacity",
+                )
+            })?;
+        let analysis = geometry_sources[&occurrence.definition_id]
+            .analyze_placed_height_domain(
+                occurrence.pose,
+                [bounds.min[2], bounds.max[2]],
+                policy,
+                query_bytes,
+                &mut admission.geometry_work,
+                cancel,
+            )
+            .map_err(|e| super::native_error(e, "complete native height analysis"))?;
         if analysis.definition_id() != &occurrence.definition_id
             || analysis.pose() != Some(occurrence.pose)
             || analysis.height_interval_mm() != [bounds.min[2], bounds.max[2]]
@@ -504,13 +528,17 @@ pub(super) fn resolve_native_events(
         // their neighborhoods as query-sizing hints without adding slicing
         // planes or treating a candidate as an actual material critical root.
         let candidates = analysis.event_brackets_mm();
-        let count = admission.native_capture_proposal_bands.len()
+        let count = admission
+            .native_capture_proposal_bands
+            .len()
             .checked_add(candidates.len())
             .filter(|count| *count <= MAX_PRINT_LAYERS as usize)
-            .ok_or_else(|| error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposal count exceeds the layer schedule budget",
-            ))?;
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native capture proposal count exceeds the layer schedule budget",
+                )
+            })?;
         for bracket in candidates {
             charge_capture_proposal_work(proposal_work, 1, cancel)?;
             if !bracket.iter().all(|z| z.is_finite()) || bracket[0] > bracket[1] {
@@ -526,9 +554,11 @@ pub(super) fn resolve_native_events(
         } else {
             0
         };
-        if analysis.retained_bytes()
+        if analysis
+            .retained_bytes()
             .saturating_add(admission.native_capture_proposal_bytes())
-            .saturating_add(replacement_bytes) > query_pool_bytes
+            .saturating_add(replacement_bytes)
+            > query_pool_bytes
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -539,25 +569,34 @@ pub(super) fn resolve_native_events(
             proposal_work,
             candidates.len().saturating_add(if growing {
                 admission.native_capture_proposal_bands.len()
-            } else { 0 }),
+            } else {
+                0
+            }),
             cancel,
         )?;
-        admission.native_capture_proposal_bands
+        admission
+            .native_capture_proposal_bands
             .try_reserve_exact(candidates.len())
-            .map_err(|_| error(
-                ManufacturingErrorCode::ResourceLimit,
-                "native capture proposal allocation refused",
-            ))?;
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "native capture proposal allocation refused",
+                )
+            })?;
         if admission.native_capture_proposal_bands.capacity() > MAX_PRINT_LAYERS as usize
-            || analysis.retained_bytes()
-                .saturating_add(admission.native_capture_proposal_bytes()) > query_pool_bytes
+            || analysis
+                .retained_bytes()
+                .saturating_add(admission.native_capture_proposal_bytes())
+                > query_pool_bytes
         {
             return Err(error(
                 ManufacturingErrorCode::ResourceLimit,
                 "native capture proposal allocator exceeds coexisting capacity",
             ));
         }
-        admission.native_capture_proposal_bands.extend_from_slice(candidates);
+        admission
+            .native_capture_proposal_bands
+            .extend_from_slice(candidates);
         // The realization's support receipt, not raw-source critical candidates,
         // owns the material terminals. Covered raw candidates remain obligations
         // of the geometry capture rather than extra mandatory slicing planes.
@@ -648,12 +687,15 @@ pub(super) fn charge_capture_proposal_work(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
-    *work = work.checked_add(amount)
+    *work = work
+        .checked_add(amount)
         .filter(|work| *work <= super::MAX_BOOLEAN_PAIRS)
-        .ok_or_else(|| error(
-            ManufacturingErrorCode::ResourceLimit,
-            "cumulative native capture proposal work exceeded",
-        ))?;
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "cumulative native capture proposal work exceeded",
+            )
+        })?;
     Ok(())
 }
 

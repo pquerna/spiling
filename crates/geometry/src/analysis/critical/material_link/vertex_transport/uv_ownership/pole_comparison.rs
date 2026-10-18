@@ -385,6 +385,10 @@ impl PoleComparison {
         Ok(Some(comparison))
     }
 
+    pub(super) fn joint_index_matches(&self, index: usize) -> bool {
+        self.joint_index == index
+    }
+
     pub(super) fn validate(
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
@@ -463,7 +467,8 @@ impl PoleComparison {
             let chart = self.chart(domain)?;
             let joint = &domain.native().joints()[self.joint_index];
             let mut boundary_uv = joint.enclosure.map(|v| Interval {
-                lo: v.lower, hi: v.upper,
+                lo: v.lower,
+                hi: v.upper,
             });
             let mut raw_uv = boundary_uv;
             // ZERO2 is the validated analytic pole in this original chart,
@@ -472,8 +477,10 @@ impl PoleComparison {
             phase = "whole literal original endpoint germs";
             for end in [recipe.outgoing, recipe.incoming] {
                 work.charge(1, cancel)?;
-                boundary_uv = hull2(boundary_uv,
-                    end_curve(domain, end, UNIT, work, cancel)?.position);
+                boundary_uv = hull2(
+                    boundary_uv,
+                    end_curve(domain, end, UNIT, work, cancel)?.position,
+                );
             }
             phase = "all selected outer-B and raw-reference pieces";
             for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
@@ -481,7 +488,8 @@ impl PoleComparison {
                 let boundary = raw_boundary(domain, recipe, piece, UNIT, work, cancel)?;
                 if !chart.same_hemisphere(boundary.position) {
                     return Ok(SourcePositionOvercover::Unavailable(
-                        "SphericalPole whole outer-B source hemisphere unresolved"));
+                        "SphericalPole whole outer-B source hemisphere unresolved",
+                    ));
                 }
                 boundary_uv = hull2(boundary_uv, boundary.source_uv);
                 let (q, _, _) =
@@ -489,31 +497,49 @@ impl PoleComparison {
                 q_cover = hull2(q_cover, q);
                 // This formula image is used ONLY to cover the auxiliary
                 // homotopy operands. It is not removed-domain authority.
-                raw_uv = hull2(raw_uv, super::super::star_jet(
-                    domain, recipe.outgoing, recipe.incoming, piece, UNIT, UNIT,
-                    recipe.bulge, work, cancel,
-                )?.uv);
+                raw_uv = hull2(
+                    raw_uv,
+                    super::super::star_jet(
+                        domain,
+                        recipe.outgoing,
+                        recipe.incoming,
+                        piece,
+                        UNIT,
+                        UNIT,
+                        recipe.bulge,
+                        work,
+                        cancel,
+                    )?
+                    .uv,
+                );
             }
             raw_uv = hull2(raw_uv, boundary_uv);
             phase = "whole raw boundary/reference box source hemisphere";
             let raw_position = domain.native().face().with_surface(|surface| {
                 crate::parametric::surface_piecewise_enclosure(
-                    surface, uv_box(raw_uv), work, cancel,
-                ).map(|jet| jet.position)
+                    surface,
+                    uv_box(raw_uv),
+                    work,
+                    cancel,
+                )
+                .map(|jet| jet.position)
             })?;
             if !chart.same_hemisphere(raw_position) {
                 return Ok(SourcePositionOvercover::Unavailable(
-                    "SphericalPole full raw source box hemisphere unresolved"));
+                    "SphericalPole full raw source box hemisphere unresolved",
+                ));
             }
             let (raw_q, _, _) = chart.covering_jet(raw_uv, ZERO2, ZERO2, work, cancel)?;
             q_cover = hull2(q_cover, raw_q);
             // Every raw/completed germ and every straight q homotopy stays in
             // this convex box. Check the ENTIRE rectangle, not only its rays.
             let radicand = Interval::point(1.0)
-                .sub(q_cover[0].square()).sub(q_cover[1].square());
+                .sub(q_cover[0].square())
+                .sub(q_cover[1].square());
             if radicand.lo <= 0.0 {
                 return Ok(SourcePositionOvercover::Unavailable(
-                    "SphericalPole complete projected box leaves strict graph hemisphere"));
+                    "SphericalPole complete projected box leaves strict graph hemisphere",
+                ));
             }
             phase = "complete original hemisphere graph box";
             let (mut position, _, _) = chart.graph_jet(q_cover, ZERO2)?;
@@ -521,24 +547,32 @@ impl PoleComparison {
                 phase = "complete removed original-F boundary-box intersection";
                 // Bound all original-domain points in the filled UV box,
                 // independently of any radial-star surjectivity or ownership.
-                let same_raw_box = (0..2).all(|i|
-                    clipped[i].lo == raw_uv[i].lo && clipped[i].hi == raw_uv[i].hi);
-                let source = if same_raw_box { raw_position } else {
+                let same_raw_box =
+                    (0..2).all(|i| clipped[i].lo == raw_uv[i].lo && clipped[i].hi == raw_uv[i].hi);
+                let source = if same_raw_box {
+                    raw_position
+                } else {
                     domain.native().face().with_surface(|surface| {
                         crate::parametric::surface_piecewise_enclosure(
-                            surface, uv_box(clipped), work, cancel,
-                        ).map(|jet| jet.position)
+                            surface,
+                            uv_box(clipped),
+                            work,
+                            cancel,
+                        )
+                        .map(|jet| jet.position)
                     })?
                 };
                 position = hull3(position, source);
             }
             Ok(SourcePositionOvercover::Bounded(position))
         })();
-        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+        outcome.map_err(|error| {
+            work.annotate_error(error, before, format_args!(
             "SphericalPole complete source-position overcover face={} coedges={:?} phase={phase}",
             recipe.outgoing.use_.face,
             [recipe.outgoing.use_.coedge, recipe.incoming.use_.coedge]
-        )))
+        ))
+        })
     }
 
     fn chart(&self, domain: &PreparedFaceTrimDomain<'_>) -> Result<PoleChart, GeometryError> {
@@ -1029,92 +1063,96 @@ impl PoleComparison {
         let mut phase = "original pole middle factored orientation";
         let mut active_piece_range = None;
         let outcome = (|| {
-        let middle = self.factored_jet(
-            domain,
-            recipe,
-            Piece::Middle,
-            Interval::point(0.5),
-            Interval::point(0.5),
-            work,
-            cancel,
-        )?;
-        let sign = if middle.factored_jacobian.lo > 0.0 {
-            1.0
-        } else if middle.factored_jacobian.hi < 0.0 {
-            -1.0
-        } else {
-            return Ok(false);
-        };
-        let row = middle.q.map(|v| Interval::point(v.mid()));
-        phase = "literal original first/last source rays";
-        let first = raw_boundary(
-            domain,
-            recipe,
-            Piece::Outgoing,
-            Interval::point(0.0),
-            work,
-            cancel,
-        )?;
-        let last = raw_boundary(
-            domain,
-            recipe,
-            Piece::Incoming,
-            Interval::point(1.0),
-            work,
-            cancel,
-        )?;
-        let chart = self.chart(domain)?;
-        let (first, _, _) = chart.covering_jet(first.source_uv, ZERO2, ZERO2, work, cancel)?;
-        let (last, _, _) = chart.covering_jet(last.source_uv, ZERO2, ZERO2, work, cancel)?;
-        if determinant(first, last).mul(Interval::point(sign)).lo <= 0.0 {
-            return Ok(false);
-        }
-        for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
-            if !active(recipe, piece) {
-                continue;
+            let middle = self.factored_jet(
+                domain,
+                recipe,
+                Piece::Middle,
+                Interval::point(0.5),
+                Interval::point(0.5),
+                work,
+                cancel,
+            )?;
+            let sign = if middle.factored_jacobian.lo > 0.0 {
+                1.0
+            } else if middle.factored_jacobian.hi < 0.0 {
+                -1.0
+            } else {
+                return Ok(false);
+            };
+            let row = middle.q.map(|v| Interval::point(v.mid()));
+            phase = "literal original first/last source rays";
+            let first = raw_boundary(
+                domain,
+                recipe,
+                Piece::Outgoing,
+                Interval::point(0.0),
+                work,
+                cancel,
+            )?;
+            let last = raw_boundary(
+                domain,
+                recipe,
+                Piece::Incoming,
+                Interval::point(1.0),
+                work,
+                cancel,
+            )?;
+            let chart = self.chart(domain)?;
+            let (first, _, _) = chart.covering_jet(first.source_uv, ZERO2, ZERO2, work, cancel)?;
+            let (last, _, _) = chart.covering_jet(last.source_uv, ZERO2, ZERO2, work, cancel)?;
+            if determinant(first, last).mul(Interval::point(sign)).lo <= 0.0 {
+                return Ok(false);
             }
-            let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-            stack[0] = ([0.0, 1.0], 0);
-            let mut pending = 1;
-            while pending != 0 {
-                pending -= 1;
-                let (range, depth) = stack[pending];
-                active_piece_range = Some((match piece {
-                    Piece::Outgoing => "outgoing",
-                    Piece::Middle => "middle",
-                    Piece::Incoming => "incoming",
-                }, range, depth));
-                phase = "whole radial factored Jacobian/angular half-plane";
-                work.charge(1, cancel)?;
-                let h = self.factored_jet(
-                    domain,
-                    recipe,
-                    piece,
-                    UNIT,
-                    Interval::new(range[0], range[1])?,
-                    work,
-                    cancel,
-                )?;
-                if h.factored_jacobian.mul(Interval::point(sign)).lo > 0.0
-                    && dot2(row, h.q).lo > 0.0
-                {
+            for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
+                if !active(recipe, piece) {
                     continue;
                 }
-                let mid = range[0] * 0.5 + range[1] * 0.5;
-                if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
-                    return Ok(false);
+                let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
+                stack[0] = ([0.0, 1.0], 0);
+                let mut pending = 1;
+                while pending != 0 {
+                    pending -= 1;
+                    let (range, depth) = stack[pending];
+                    active_piece_range = Some((
+                        match piece {
+                            Piece::Outgoing => "outgoing",
+                            Piece::Middle => "middle",
+                            Piece::Incoming => "incoming",
+                        },
+                        range,
+                        depth,
+                    ));
+                    phase = "whole radial factored Jacobian/angular half-plane";
+                    work.charge(1, cancel)?;
+                    let h = self.factored_jet(
+                        domain,
+                        recipe,
+                        piece,
+                        UNIT,
+                        Interval::new(range[0], range[1])?,
+                        work,
+                        cancel,
+                    )?;
+                    if h.factored_jacobian.mul(Interval::point(sign)).lo > 0.0
+                        && dot2(row, h.q).lo > 0.0
+                    {
+                        continue;
+                    }
+                    let mid = range[0] * 0.5 + range[1] * 0.5;
+                    if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
+                        return Ok(false);
+                    }
+                    stack[pending] = ([mid, range[1]], depth + 1);
+                    stack[pending + 1] = ([range[0], mid], depth + 1);
+                    pending += 2;
                 }
-                stack[pending] = ([mid, range[1]], depth + 1);
-                stack[pending + 1] = ([range[0], mid], depth + 1);
-                pending += 2;
             }
-        }
-        // The original boundary expressions agree at all three piece joins.
-        // Strict angular monotonicity inside ONE open half-plane rules out
-        // winding aliases and self intersections. Distinct first/last rays
-        // close this simple arc at the single analytic-pole apex. The radial
-        // determinant has this same sign on the entire closed factored disk.
-        Ok(true)
+            // The original boundary expressions agree at all three piece joins.
+            // Strict angular monotonicity inside ONE open half-plane rules out
+            // winding aliases and self intersections. Distinct first/last rays
+            // close this simple arc at the single analytic-pole apex. The radial
+            // determinant has this same sign on the entire closed factored disk.
+            Ok(true)
         })();
         outcome.map_err(|error| work.annotate_error(error, before, format_args!(
             "SphericalPole Jordan/factoredJac face={} coedges={:?} phase={phase} piece_range={active_piece_range:?}",
@@ -1707,102 +1745,102 @@ impl PoleComparison {
         let mut active_boundary = None;
         let mut active_joint = None;
         let outcome = (|| {
-        self.validate(domain, recipe, self.vertex)?;
-        work.charge(1, cancel)?;
-        if remaining_bytes < STACK_BYTES {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "pole comparison closed ownership exceeds admitted scratch",
-            ));
-        }
-        phase = "complete Cartesian Jordan/factored Jacobian";
-        if !self.regular_jordan(domain, recipe, work, cancel)? {
-            return Err(ownership_failure(
-                recipe,
-                "pole closed Cartesian Jordan/factoredJac",
-            ));
-        }
-        phase = "nonowning original collar inventory";
-        let Some(collar) =
-            OriginalCollar::for_enclosure(domain, recipe.outgoing.use_, work, cancel)?
-        else {
-            return Err(ownership_failure(
-                recipe,
-                "pole original nonowning inventory",
-            ));
-        };
-        for (index, _) in domain.native().coedges().iter().enumerate() {
-            if index == recipe.outgoing.use_.coedge || index == recipe.incoming.use_.coedge {
-                continue;
-            }
-            for span in domain.boundary_parameter_intervals(index)? {
-                let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-                stack[0] = (span, 0);
-                let mut pending = 1;
-                while pending != 0 {
-                    pending -= 1;
-                    let (range, depth) = stack[pending];
-                    active_boundary = Some((index, range, depth));
-                    phase = "foreign original trim/collar image";
-                    work.charge(1, cancel)?;
-                    let other = collar.other_collar_enclosure(index, range, work, cancel)?;
-                    phase = "complete pole reference vs foreign trim/collar exclusion";
-                    if self.misses_original_box(domain, recipe, other, work, cancel)? {
-                        continue;
-                    }
-                    let mid = range[0] * 0.5 + range[1] * 0.5;
-                    if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
-                        return Err(ownership_failure(
-                            recipe,
-                            format_args!(
-                                "pole foreign original trim+collar coedge={index} range={range:?}"
-                            ),
-                        ));
-                    }
-                    stack[pending] = ([mid, range[1]], depth + 1);
-                    stack[pending + 1] = ([range[0], mid], depth + 1);
-                    pending += 2;
-                }
-            }
-        }
-        active_boundary = None;
-        for (index, joint) in domain.native().joints().iter().enumerate() {
-            active_joint = Some(index);
-            phase = "foreign original joint exclusion";
+            self.validate(domain, recipe, self.vertex)?;
             work.charge(1, cancel)?;
-            if index == self.joint_index {
-                continue;
-            }
-            let other = joint.enclosure.map(|v| Interval {
-                lo: v.lower,
-                hi: v.upper,
-            });
-            if !self.misses_original_box(domain, recipe, other, work, cancel)? {
-                return Err(ownership_failure(
-                    recipe,
-                    format_args!("pole foreign original joint index={index}"),
+            if remaining_bytes < STACK_BYTES {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "pole comparison closed ownership exceeds admitted scratch",
                 ));
             }
-        }
-        active_joint = None;
-        phase = "original outgoing/incoming central exclusion";
-        if !self.central_misses(domain, recipe, recipe.outgoing, work, cancel)?
-            || recipe.incoming.edge != recipe.outgoing.edge
-                && !self.central_misses(domain, recipe, recipe.incoming, work, cancel)?
-        {
-            return Err(ownership_failure(
-                recipe,
-                "pole original shared-exit central atlas/support",
-            ));
-        }
-        phase = "strict original local-inverse Inside calibration";
-        if !self.calibrate(domain, recipe, work, cancel)? {
-            return Err(ownership_failure(
-                recipe,
-                "pole original local-inverse Inside calibration",
-            ));
-        }
-        Ok(true)
+            phase = "complete Cartesian Jordan/factored Jacobian";
+            if !self.regular_jordan(domain, recipe, work, cancel)? {
+                return Err(ownership_failure(
+                    recipe,
+                    "pole closed Cartesian Jordan/factoredJac",
+                ));
+            }
+            phase = "nonowning original collar inventory";
+            let Some(collar) =
+                OriginalCollar::for_enclosure(domain, recipe.outgoing.use_, work, cancel)?
+            else {
+                return Err(ownership_failure(
+                    recipe,
+                    "pole original nonowning inventory",
+                ));
+            };
+            for (index, _) in domain.native().coedges().iter().enumerate() {
+                if index == recipe.outgoing.use_.coedge || index == recipe.incoming.use_.coedge {
+                    continue;
+                }
+                for span in domain.boundary_parameter_intervals(index)? {
+                    let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
+                    stack[0] = (span, 0);
+                    let mut pending = 1;
+                    while pending != 0 {
+                        pending -= 1;
+                        let (range, depth) = stack[pending];
+                        active_boundary = Some((index, range, depth));
+                        phase = "foreign original trim/collar image";
+                        work.charge(1, cancel)?;
+                        let other = collar.other_collar_enclosure(index, range, work, cancel)?;
+                        phase = "complete pole reference vs foreign trim/collar exclusion";
+                        if self.misses_original_box(domain, recipe, other, work, cancel)? {
+                            continue;
+                        }
+                        let mid = range[0] * 0.5 + range[1] * 0.5;
+                        if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
+                            return Err(ownership_failure(
+                                recipe,
+                                format_args!(
+                                    "pole foreign original trim+collar coedge={index} range={range:?}"
+                                ),
+                            ));
+                        }
+                        stack[pending] = ([mid, range[1]], depth + 1);
+                        stack[pending + 1] = ([range[0], mid], depth + 1);
+                        pending += 2;
+                    }
+                }
+            }
+            active_boundary = None;
+            for (index, joint) in domain.native().joints().iter().enumerate() {
+                active_joint = Some(index);
+                phase = "foreign original joint exclusion";
+                work.charge(1, cancel)?;
+                if index == self.joint_index {
+                    continue;
+                }
+                let other = joint.enclosure.map(|v| Interval {
+                    lo: v.lower,
+                    hi: v.upper,
+                });
+                if !self.misses_original_box(domain, recipe, other, work, cancel)? {
+                    return Err(ownership_failure(
+                        recipe,
+                        format_args!("pole foreign original joint index={index}"),
+                    ));
+                }
+            }
+            active_joint = None;
+            phase = "original outgoing/incoming central exclusion";
+            if !self.central_misses(domain, recipe, recipe.outgoing, work, cancel)?
+                || recipe.incoming.edge != recipe.outgoing.edge
+                    && !self.central_misses(domain, recipe, recipe.incoming, work, cancel)?
+            {
+                return Err(ownership_failure(
+                    recipe,
+                    "pole original shared-exit central atlas/support",
+                ));
+            }
+            phase = "strict original local-inverse Inside calibration";
+            if !self.calibrate(domain, recipe, work, cancel)? {
+                return Err(ownership_failure(
+                    recipe,
+                    "pole original local-inverse Inside calibration",
+                ));
+            }
+            Ok(true)
         })();
         outcome.map_err(|error| work.annotate_error(error, before, format_args!(
             "SphericalPole disk ownership face={} coedges={:?} phase={phase} foreign_boundary={active_boundary:?} foreign_joint={active_joint:?}",
@@ -1894,6 +1932,59 @@ mod properties {
                     .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
                     .unwrap();
                 comparison.validate(&domain, recipe, vertex).unwrap();
+                let original = OriginalCornerComparison::SphericalPole(comparison);
+                assert!(
+                    original
+                        .validates_original_joint(&domain, recipe, vertex, comparison.joint_index,)
+                        .unwrap()
+                );
+                assert!(
+                    !original
+                        .validates_original_joint(
+                            &domain,
+                            recipe,
+                            vertex,
+                            domain.native().joints().len(),
+                        )
+                        .unwrap()
+                );
+                let exact_exit = |edge, back, parameter| {
+                    [recipe.incoming, recipe.outgoing].into_iter().any(|end| {
+                        end.edge == edge && end.absolute_back == back && end.exit == parameter
+                    })
+                };
+                assert!(
+                    plan.qualified_original_joint_image(
+                        source,
+                        &domain,
+                        comparison.joint_index,
+                        scratch,
+                        &mut work,
+                        &cancel,
+                        &exact_exit,
+                    )
+                    .unwrap(),
+                    "whole original pole image/source cut face={face}"
+                );
+                assert!(
+                    !plan
+                        .qualified_original_joint_image(
+                            source,
+                            &domain,
+                            comparison.joint_index,
+                            scratch,
+                            &mut work,
+                            &cancel,
+                            &|edge, back, parameter| {
+                                exact_exit(edge, back, parameter)
+                                    && !(edge == recipe.incoming.edge
+                                        && back == recipe.incoming.absolute_back
+                                        && parameter == recipe.incoming.exit)
+                            },
+                        )
+                        .unwrap(),
+                    "both absolute-germ exits remain mandatory"
+                );
                 assert!(
                     comparison
                         .disk_owned(&domain, recipe, scratch, &mut work, &cancel,)
@@ -1952,6 +2043,25 @@ mod properties {
                     Err(error) => assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate),
                     Ok(_) => panic!("changed literal original normalization must refuse"),
                 }
+                assert!(
+                    original
+                        .validates_original_joint(
+                            &domain,
+                            &wrong_gauge,
+                            vertex,
+                            comparison.joint_index,
+                        )
+                        .is_err(),
+                    "whole-joint dispatch must bind the literal original germ"
+                );
+                let mut wrong_axis = comparison;
+                wrong_axis.polar_axis = 1 - wrong_axis.polar_axis;
+                assert!(
+                    OriginalCornerComparison::SphericalPole(wrong_axis)
+                        .validates_original_joint(&domain, recipe, vertex, comparison.joint_index)
+                        .is_err(),
+                    "whole-joint dispatch cannot borrow another pole axis"
+                );
                 let mut wrong_branch = comparison;
                 wrong_branch.pole = match comparison.pole {
                     SphericalPole::North => SphericalPole::South,
@@ -1961,6 +2071,12 @@ mod properties {
                     Err(error) => assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate),
                     Ok(_) => panic!("foreign original pole branch must refuse"),
                 }
+                assert!(
+                    OriginalCornerComparison::SphericalPole(wrong_branch)
+                        .validates_original_joint(&domain, recipe, vertex, comparison.joint_index)
+                        .is_err(),
+                    "whole-joint dispatch cannot borrow the opposite original pole"
+                );
                 seen[index] = true;
             }
         }

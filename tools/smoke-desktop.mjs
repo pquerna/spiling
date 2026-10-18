@@ -8,10 +8,12 @@ import { spawn } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { decodeMesh, validateMeshManifest, SECTION_PLANE_TOLERANCE_MM } from "../packages/protocol/src/index.ts";
+import { decodeMesh, validateMeshManifest, SECTION_PLANE_TOLERANCE_MM, JOB_CANCEL_AFTER_MS, JOB_CANCEL_GRACE_MS } from "../packages/protocol/src/index.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { crc32, deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
+
+const nativeJobObservationMs = JOB_CANCEL_AFTER_MS + JOB_CANCEL_GRACE_MS + 5_000;
 
 // Original acceptance image encoding; production image interpretation stays native.
 function grayPng(pattern) {
@@ -97,7 +99,7 @@ async function inspectCanonicalImagePreview(record, reload = false) {
     const current = await surfaceState();
     return !current.working && current.imagePreview?.record.image_hash === record.image_hash
       ? current : false;
-  }, "canonical owned image preview", 65000);
+  }, "canonical owned image preview", nativeJobObservationMs);
   assert.equal(state.imagePreview.width, imagePattern.width);
   assert.equal(state.imagePreview.height, imagePattern.height);
   const canvas = await evaluate(`(() => {
@@ -383,7 +385,7 @@ async function inspectGeometry() {
         : false;
     },
     "native part import and GPU publication",
-    65000,
+    nativeJobObservationMs,
   );
   const partIds = new Map(
     recipe.parts.map((part, index) => [part.key, imported.occurrences[index].occurrence_id]),
@@ -568,7 +570,7 @@ async function bridgeJob(response, sessionId) {
       return operation.status === "completed" ? operation.result : false;
     },
     "actual native project job",
-    60000,
+    nativeJobObservationMs,
   );
 }
 async function bridgeOccurrences(scene) {
@@ -828,7 +830,7 @@ async function inspectManufacturingSource(stage) {
     const current = await geometryState();
     return current.occurrences.length === 1 && !current.active_job &&
       !current.stale && !current.transferring ? current : false;
-  }, "settled native source inspection", 65000);
+  }, "settled native source inspection", nativeJobObservationMs);
   const occurrence = scene.occurrences[0];
   const definition = scene.definitions.find((row) => row.definition_id === occurrence.definition_id);
   assert.ok(definition?.face_count > 0, "Source has inspectable native faces");
@@ -1089,7 +1091,7 @@ async function inspectManufacturing() {
       return current.occurrences.length === 1 && !current.active_job && !current.stale;
     },
     "real native token import",
-    65000,
+    nativeJobObservationMs,
   );
   const sourceInspection = scenario === "manufacturing"
     ? await inspectManufacturingSource("imported") : null;
@@ -1148,7 +1150,7 @@ async function inspectManufacturing() {
   const afterBedCancellation = await until(async () => {
     const current = await manufacturingState();
     return !current.working && !(await geometryState()).active_job ? current : false;
-  }, "bed cancellation/ACK-winning terminal completion", 65000);
+  }, "bed cancellation/ACK-winning terminal completion", JOB_CANCEL_GRACE_MS + 5_000);
   assert.equal(afterBedCancellation.project_revision, beforeBedProject.project_revision,
     "Cancelling bed preparation cannot mutate the project");
   assert.deepEqual((await geometryState()).scene, beforeBedScene.scene,
@@ -1159,7 +1161,7 @@ async function inspectManufacturing() {
   const prepared = await until(async () => {
     const current = await manufacturingState();
     return current.bed_proposal && !current.working ? current : false;
-  }, "read-only native center-and-bed proposal", 65000);
+  }, "read-only native center-and-bed proposal", nativeJobObservationMs);
   const proposal = prepared.bed_proposal;
   assert.equal(prepared.bed_proposal_stale, false);
   assert.equal(prepared.project_revision, beforeBedProject.project_revision, "Prepare cannot mutate the project");
@@ -1213,7 +1215,7 @@ async function inspectManufacturing() {
   await until(async () => {
     const current = await manufacturingState();
     return current.bed_proposal && !current.bed_proposal_stale && !current.working;
-  }, "fresh read-only proposal after explicit Clear", 65000);
+  }, "fresh read-only proposal after explicit Clear", nativeJobObservationMs);
   await click("manufacturing-bed-apply");
   const appliedBed = await until(async () => {
     const current = await geometryState();
@@ -1301,7 +1303,7 @@ async function inspectManufacturing() {
         return current.selected_artifact && !current.working;
       },
       "untextured native cylinder compile",
-      65000,
+      nativeJobObservationMs,
     );
     await click("manufacturing-verify-motion");
     await until(
@@ -1310,7 +1312,7 @@ async function inspectManufacturing() {
         return current.fresh && current.replay && !current.working;
       },
       "independent untextured cylinder motion",
-      65000,
+      nativeJobObservationMs,
     );
     await input('[data-testid="manufacturing-export-path"]', "baseline-export");
     await click("manufacturing-debug-export");
@@ -1333,7 +1335,7 @@ async function inspectManufacturing() {
       return current.selected_artifact && !current.working ? current : false;
     },
     "native immutable compile",
-    65000,
+    nativeJobObservationMs,
   );
   const record = state.selected_artifact;
   assert.equal(state.fresh, false, "Stored verified flags confer no fresh authority");
@@ -1344,7 +1346,7 @@ async function inspectManufacturing() {
       return current.fresh && !current.working ? current : false;
     },
     "fresh report-only verification",
-    65000,
+    nativeJobObservationMs,
   );
   assert.equal(state.replay, null);
   assert.equal(state.report.verified, true);
@@ -1356,7 +1358,7 @@ async function inspectManufacturing() {
       return current.fresh && current.replay && !current.working ? current : false;
     },
     "actual replay transport and panel",
-    65000,
+    nativeJobObservationMs,
   );
   assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
   assert.equal(
@@ -1386,7 +1388,7 @@ async function inspectManufacturing() {
       return !current.working ? current : false;
     },
     "native cancellation/ACK-winning terminal completion",
-    65000,
+    JOB_CANCEL_GRACE_MS + 5_000,
   );
   assert.deepEqual(
     cancelled.selected_artifact,
@@ -1405,7 +1407,7 @@ async function inspectManufacturing() {
       return current.fresh && current.replay && !current.working ? current : false;
     },
     "fresh replay after cancellation",
-    65000,
+    nativeJobObservationMs,
   );
   await input('[data-testid="manufacturing-events"]', "1");
   await until(
@@ -1595,7 +1597,7 @@ async function inspectManufacturing() {
       return current.read_only && current.selected_artifact?.hash === record.hash ? current : false;
     },
     "source-independent read-only reopen",
-    65000,
+    nativeJobObservationMs,
   );
   assert.equal(state.fresh, false, "Reopen requires fresh Verify");
   assert.equal(
@@ -1623,7 +1625,7 @@ async function inspectManufacturing() {
       return current.fresh && current.replay && !current.working ? current : false;
     },
     "read-only fresh replay",
-    65000,
+    nativeJobObservationMs,
   );
   assert.equal(state.project_revision, reopenedRevision);
   assert.deepEqual(state.selected_artifact, record);
@@ -1656,7 +1658,7 @@ async function inspectManufacturing() {
   await until(
     async () => (await text("engine-status")) === "running",
     "new session reopens attached checkpoint",
-    65000,
+    nativeJobObservationMs,
   );
   enginePid = (await invoke("engine_status")).hello.pid;
   state = await until(async () => {
@@ -1675,7 +1677,7 @@ async function inspectManufacturing() {
       return current.fresh && current.replay && !current.working ? current : false;
     },
     "fresh session-independent replay after restart",
-    65000,
+    nativeJobObservationMs,
   );
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.equal(state.report.verified, true);
@@ -1746,7 +1748,11 @@ try {
   const target = await until(
     async () => {
       try {
-        const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+        const remaining = Math.max(1, deadline - Date.now());
+        const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+          signal: AbortSignal.timeout(Math.min(5000, remaining)),
+        });
+        const targets = await response.json();
         return targets.find((item) => item.type === "page" && item.url !== "about:blank");
       } catch {
         return undefined;
@@ -1757,8 +1763,26 @@ try {
   );
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolveResult, reject) => {
-    socket.addEventListener("open", resolveResult, { once: true });
-    socket.addEventListener("error", reject, { once: true });
+    const finish = (error) => {
+      clearTimeout(timer);
+      socket.removeEventListener("open", opened);
+      socket.removeEventListener("error", failed);
+      socket.removeEventListener("close", closed);
+      if (error) reject(error);
+      else resolveResult();
+    };
+    const opened = () => finish();
+    const failed = () => finish(new Error("CEF debugger WebSocket failed to open"));
+    const closed = (event) => finish(
+      new Error(`CEF debugger WebSocket closed before opening: ${event.code}`),
+    );
+    const timer = setTimeout(
+      () => finish(new Error("Timed out: CEF debugger WebSocket open")),
+      15000,
+    );
+    socket.addEventListener("open", opened, { once: true });
+    socket.addEventListener("error", failed, { once: true });
+    socket.addEventListener("close", closed, { once: true });
   });
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);

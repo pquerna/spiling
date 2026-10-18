@@ -34,16 +34,15 @@ pub use analysis::{
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
     PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
     PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedGeometrySource,
-    PreparedMaterialSource,
-    ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest,
-    SourceLeafRequest, analyze_height_domain, analyze_placed_height_domain,
-    capture_projected_voids, certify_endpoint_ownership, certify_endpoint_stratum_ownership,
-    certify_native_collar_incidence, certify_native_critical_collar,
-    certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
-    certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
-    material_projected_bounds, placed_bounds, placed_material_bounds, prepare_geometry_source,
-    prepare_material_source,
-    projected_bounds, projected_protected_void_envelopes,
+    PreparedMaterialSource, ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy,
+    SlabAnalysis, SlabRequest, SourceLeafRequest, analyze_height_domain,
+    analyze_placed_height_domain, capture_projected_voids, certify_endpoint_ownership,
+    certify_endpoint_stratum_ownership, certify_native_collar_incidence,
+    certify_native_critical_collar, certify_native_one_sided_source_leaf,
+    certify_native_source_leaf, certify_native_union, certify_planar_capsule_clearance,
+    certify_planar_capsule_pair_clearance, material_projected_bounds, placed_bounds,
+    placed_material_bounds, prepare_geometry_source, prepare_material_source, projected_bounds,
+    projected_protected_void_envelopes,
 };
 pub use kernel::Definition;
 pub use section::{
@@ -61,7 +60,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "d5de658a8b589efdeb78970d79a0563c789c268a";
+pub const KERNEL_REVISION: &str = "5f197d081054000db544a8ad716bc447a04be707";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
@@ -96,9 +95,10 @@ pub struct SectionLoopMm {
 }
 
 /// Owned native section; loop identities are local to this result, never source faces.
-/// This certifies a geometric intersection or conservative projection, not
-/// closure of toleranced source material. Material reuse and support require
-/// the separate descriptor-bound slab/leaf and completed-union authority.
+/// This certifies geometric intersection correspondence or conservative
+/// projection, not a Jordan sampled polygon or closure of toleranced source
+/// material. Material reuse and support require separate descriptor-bound
+/// slab/leaf and completed-union authority on the actual returned polygon.
 #[derive(Debug)]
 pub struct NativeSection {
     pub(crate) plane: PlaneMm,
@@ -157,6 +157,29 @@ impl NativeSection {
     }
     pub fn achieved_plane_error_mm(&self) -> f64 {
         self.certificate.maximum_plane_error_mm
+    }
+    /// Charge a completely bounded bidirectional reference-polyline Hausdorff
+    /// displacement in addition to the original native curve enclosure. This
+    /// neither promises topology of the old sampled PL loop nor grants material
+    /// authority: slab/leaf and actual-polygon qualification remain mandatory.
+    pub(crate) fn charge_reference_displacement(
+        &mut self,
+        displacement_mm: f64,
+    ) -> Result<(), GeometryError> {
+        let total = (self.certificate.maximum_chord_error_mm + displacement_mm).next_up();
+        if !self.is_native_intersection()
+            || !displacement_mm.is_finite()
+            || displacement_mm < 0.0
+            || !total.is_finite()
+            || total > spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM
+        {
+            return Err(GeometryError::new(
+                spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate,
+                "reference polyline displacement exceeds native sampling authority",
+            ));
+        }
+        self.certificate.maximum_chord_error_mm = total;
+        Ok(())
     }
     pub(crate) fn loop_source_face_ordinals(&self, index: usize) -> Option<&[usize]> {
         if !self.is_native_intersection() || self.loop_source_faces.len() != self.loops.len() {

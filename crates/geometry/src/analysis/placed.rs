@@ -1220,6 +1220,142 @@ fn place_endpoint_strata(
     Ok(())
 }
 
+/// A regular endpoint may continue to the native reference without continuing
+/// through the opposite critical coface. These are independent CLOSED material
+/// products on their own domains, never whole-parent metrics or motion tubes.
+fn certify_endpoint_radial_products(
+    source: &crate::PreparedMaterialSource<'_>,
+    map: &HeightMap,
+    request: &PlacedSlabRequest,
+    result: &mut SlabAnalysis,
+    coexisting_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    if result.radial_slab.is_some()
+        || result.section.loops.is_empty()
+        || result.invariance.is_some()
+    {
+        return Ok(());
+    }
+    let Some(complex) = result.collar_complex.as_ref() else {
+        return Ok(());
+    };
+    if complex.height_space() != super::collar::NativeCollarHeightSpace::World
+        || complex
+            .world_regular_boundary_xy_speed_mm_per_mm()
+            .is_some()
+    {
+        return Ok(());
+    }
+    work.charge(1, cancel)?;
+    let inline_bytes = ActualMaterialCoordinates::SCRATCH_BYTES
+        .saturating_add(std::mem::size_of::<SlabRequest>())
+        .saturating_add(std::mem::size_of::<[[f64; 2]; 3]>());
+    super::slab::remaining_scratch(
+        coexisting_bytes
+            .saturating_add(result.retained_bytes())
+            .saturating_add(inline_bytes),
+    )?;
+    let sample_band = super::collar::sample_plane_height_bounds(
+        source.definition(),
+        result,
+        map.matrix,
+        request.pose,
+    )?;
+    let parent = request.world_height_interval_mm;
+    if !(parent[0] < sample_band.lo && sample_band.hi < parent[1]) {
+        return Ok(());
+    }
+    let mut below: Option<f64> = None;
+    let mut above: Option<f64> = None;
+    for band in complex.event_faces().map(|(_, height, _)| height).chain(
+        complex
+            .boundary_critical_bands()
+            .iter()
+            .map(|band| band.height_interval_mm()),
+    ) {
+        work.charge(1, cancel)?;
+        if band[1] < parent[0] || band[0] > parent[1] {
+            continue;
+        }
+        if band[1] < sample_band.lo {
+            below = Some(below.map_or(band[1], |height| height.max(band[1])));
+        } else if sample_band.hi < band[0] {
+            above = Some(above.map_or(band[0], |height| height.min(band[0])));
+        } else {
+            // Metadata cannot propose a continuation through a critical sample.
+            return Ok(());
+        }
+    }
+    let proposals = [
+        above.map(|height| [parent[0], sample_band.hi.midpoint(height)]),
+        below.map(|height| [sample_band.lo.midpoint(height), parent[1]]),
+    ];
+    for (side, proposal) in proposals.into_iter().enumerate() {
+        let Some(interval) = proposal else {
+            continue;
+        };
+        if !(interval[0] < sample_band.lo && sample_band.hi < interval[1])
+            || (side == 0 && !above.is_some_and(|height| interval[1] < height))
+            || (side == 1 && !below.is_some_and(|height| height < interval[0]))
+            || !(interval[0] < request.sample_world_z_mm && request.sample_world_z_mm < interval[1])
+        {
+            continue;
+        }
+        let source_interval = map.source_range(interval)?;
+        let source_band = result.capture.source_sample_height_band_mm;
+        let parent_request = result.capture.request;
+        if source_interval[0] < parent_request.height_interval_mm[0]
+            || source_interval[1] > parent_request.height_interval_mm[1]
+            || !(source_interval[0] < source_band[0] && source_band[1] < source_interval[1])
+            || !(source_interval[0] < parent_request.sample_height_mm
+                && parent_request.sample_height_mm < source_interval[1])
+        {
+            continue;
+        }
+        let source_request = SlabRequest {
+            height_interval_mm: source_interval,
+            ..parent_request
+        };
+        let coordinates = ActualMaterialCoordinates::placed(
+            source.definition(),
+            map,
+            interval,
+            request.sample_world_z_mm,
+            work,
+            cancel,
+        )?;
+        let remaining = super::slab::remaining_scratch(
+            coexisting_bytes
+                .saturating_add(result.retained_bytes())
+                .saturating_add(inline_bytes),
+        )?;
+        result.endpoint_radial_products[side] =
+            match super::critical::material_link::certify_closed_radial_material_product(
+                source.trim_source(),
+                &source_request,
+                &coordinates,
+                remaining,
+                work,
+                cancel,
+            ) {
+                Ok(product) => product,
+                Err(failure)
+                    if matches!(
+                        failure.code,
+                        GeometryErrorCode::AnalysisIndeterminate
+                            | GeometryErrorCode::ParameterCorrespondenceUnavailable
+                    ) =>
+                {
+                    None
+                }
+                Err(failure) => return Err(failure),
+            };
+    }
+    Ok(())
+}
+
 pub(crate) fn analyze_placed_slab(
     source: &crate::PreparedMaterialSource<'_>,
     request: &PlacedSlabRequest,
@@ -1404,6 +1540,9 @@ pub(crate) fn analyze_placed_slab(
                         "actual native sample plane is not inside the captured slab",
                     ));
                 }
+                let endpoint_radial_bytes = std::mem::size_of::<
+                    [Option<super::critical::ClosedRadialMaterialProduct>; 2],
+                >();
                 let transform_limit = query_byte_limit
                     .checked_sub(
                         capture.definition_id.allocated_bytes()
@@ -1411,6 +1550,7 @@ pub(crate) fn analyze_placed_slab(
                             + std::mem::size_of_val(&radial)
                             + std::mem::size_of_val(&prepared)
                             + proof_inline_bytes
+                            + endpoint_radial_bytes
                             + std::mem::size_of::<WorldSampleCandidate>(),
                     )
                     .ok_or_else(|| {
@@ -1433,6 +1573,7 @@ pub(crate) fn analyze_placed_slab(
                     .saturating_add(ActualMaterialCoordinates::SCRATCH_BYTES)
                     .saturating_add(std::mem::size_of_val(&radial))
                     .saturating_add(std::mem::size_of_val(&prepared))
+                    .saturating_add(endpoint_radial_bytes)
                     .saturating_add(proof_inline_bytes);
                 let occupied = super::slab::occupied_envelope(
                     &prepared.section,
@@ -1456,6 +1597,7 @@ pub(crate) fn analyze_placed_slab(
                     endpoint_strata: Vec::new(),
                     collar_complex: None,
                     radial_slab: Some(radial),
+                    endpoint_radial_products: [None; 2],
                     capture,
                 });
             }
@@ -1650,6 +1792,15 @@ pub(crate) fn analyze_placed_slab(
             )?;
         }
     }
+    certify_endpoint_radial_products(
+        source,
+        &map,
+        request,
+        &mut result,
+        coexisting_bytes.saturating_sub(candidate_bytes),
+        work,
+        cancel,
+    )?;
     Ok(result)
 }
 

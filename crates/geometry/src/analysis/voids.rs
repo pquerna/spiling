@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Lazy, source-bound outer projections of original native void branches.
+//! Lazy, source-bound outer projections protecting native bounded complement.
 //!
 //! An outer mask is deliberately not a material section, a collision witness,
 //! or a claim that its convexified interior is empty. It protects a corridor:
 //! failure to route around it must remain an unresolved support corridor.
+//! An accepted closed-source C0 cover may instead protect ALL possible bounded
+//! complement components in exactly its captured slab. That exclusion mask has
+//! no Hole lineage and makes no absence, branch, regularity or material claim.
 //!
 //! Proper native regular flow preserves the original Hole roles. Its source
 //! height velocity is projected through the actual stored pose polynomial; a
@@ -41,12 +44,14 @@ pub enum ProtectedVoidHeightScope {
 
 #[derive(Debug)]
 pub struct NativeProtectedVoidEnvelope {
-    source_loop_index: usize,
+    source_loop_index: Option<usize>,
     world_xy_outer: SectionLoopMm,
     height_scope: ProtectedVoidHeightScope,
 }
 impl NativeProtectedVoidEnvelope {
-    pub fn source_loop_index(&self) -> usize {
+    /// `Some` identifies a real captured native Hole. `None` denotes a
+    /// conservative closed-source complement overcover, not an invented loop.
+    pub fn source_loop_index(&self) -> Option<usize> {
         self.source_loop_index
     }
     pub fn world_xy_outer(&self) -> &SectionLoopMm {
@@ -138,6 +143,16 @@ impl NativeVoidContinuation {
     }
 }
 
+/// Opaque, fixed-size C0 authority supplied only by a bound, accepted native
+/// collar incidence. A bounded planar complement lies in the convex hull of
+/// its material boundary; the rectangle encloses that complete source boundary
+/// projection, not merely sampled material or the filled metric's target.
+#[derive(Debug, Clone, Copy)]
+struct ClosedSourceComplementCover {
+    world_xy: [[f64; 2]; 2],
+    world_interval: [f64; 2],
+}
+
 /// Compact continuation receipt retained after joint acceptance. Original Hole
 /// buffers and any complete original collar authority move here; material and
 /// occupied contours die with the consumed slab. Projection stays lazy.
@@ -155,6 +170,7 @@ pub struct NativeVoidProjectionCapture {
     native_errors: [f64; 3],
     continuation: NativeVoidContinuation,
     holes: Vec<NativeCapturedHole>,
+    closed_complement: Option<ClosedSourceComplementCover>,
 }
 impl NativeVoidProjectionCapture {
     pub fn definition_id(&self) -> &DefinitionId {
@@ -170,9 +186,8 @@ impl NativeVoidProjectionCapture {
         self.world_sample
     }
     pub fn retained_bytes(&self) -> usize {
-        let bytes = self
-            .definition_id
-            .allocated_bytes()
+        let bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.definition_id.allocated_bytes())
             .saturating_add(
                 self.holes
                     .capacity()
@@ -195,7 +210,54 @@ impl NativeVoidProjectionCapture {
 /// Only a whole-interval proof of zero native voids permits `None`. Unsupported
 /// future projection/scope obligations remain deferred until actual demand.
 pub fn capture_projected_voids(
+    analysis: SlabAnalysis,
+    byte_limit: u32,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<NativeVoidProjectionCapture>, GeometryError> {
+    capture_projected_voids_using(analysis, None, byte_limit, work, cancel)
+}
+
+pub(super) fn capture_closed_source_projected_voids(
+    analysis: SlabAnalysis,
+    world_xy: [[f64; 2]; 2],
+    world_interval: [f64; 2],
+    byte_limit: u32,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<NativeVoidProjectionCapture>, GeometryError> {
+    for bounds in world_xy {
+        Interval::new(bounds[0], bounds[1])?;
+        if bounds[0] >= bounds[1] {
+            return Err(unresolved(
+                "closed source complement projection has no positive XY interior",
+            ));
+        }
+    }
+    Interval::new(world_interval[0], world_interval[1])?;
+    if world_interval[0] >= world_interval[1]
+        || analysis.world_height_interval_mm() != Some(world_interval)
+    {
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "closed source complement projection changed its exact CLOSED world interval",
+        ));
+    }
+    capture_projected_voids_using(
+        analysis,
+        Some(ClosedSourceComplementCover {
+            world_xy,
+            world_interval,
+        }),
+        byte_limit,
+        work,
+        cancel,
+    )
+}
+
+fn capture_projected_voids_using(
     mut analysis: SlabAnalysis,
+    closed_complement: Option<ClosedSourceComplementCover>,
     byte_limit: u32,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -286,6 +348,11 @@ pub fn capture_projected_voids(
         used: 0,
         limit: (byte_limit as usize).min(MAX_BYTES),
     };
+    storage.debit(
+        std::mem::size_of::<NativeVoidProjectionCapture>(),
+        work,
+        cancel,
+    )?;
     storage.debit(analysis.definition_id().allocated_bytes(), work, cancel)?;
     let mut holes = Vec::new();
     storage.reserve(&mut holes, count, work, cancel)?;
@@ -397,6 +464,7 @@ pub fn capture_projected_voids(
         native_errors,
         continuation,
         holes,
+        closed_complement,
     }))
 }
 
@@ -1105,7 +1173,7 @@ fn original_column_faces(
 }
 
 fn native_height_scopes(
-    definition: &Definition,
+    source: crate::section::OriginalTrimSource<'_, '_>,
     capture: &NativeVoidProjectionCapture,
     faces: &[ColumnFace],
     transport_supports: &[super::critical::material_link::SourceTransportSupport],
@@ -1113,6 +1181,7 @@ fn native_height_scopes(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Vec<Option<ProtectedVoidHeightScope>>, GeometryError> {
+    let definition = source.definition();
     // Original column incidence supplies a representation-independent raw lane.
     // Wherever G is active, the complete actual wall/floor/clearance/degree
     // theorem below is required before this full source scope is reusable.
@@ -1407,14 +1476,20 @@ fn native_height_scopes(
                 // Revalidate the COMPLETE original component, its actual
                 // collars/cones, all exits, floor sheets and nonincident source
                 // clearance before using ANY scalar or physical error bound.
+                let before = work.consumed();
                 super::critical::material_link::prove_source_wall_component(
-                    crate::section::OriginalTrimSource::standalone(definition),
+                    source,
                     &component,
                     [lower_safe, upper_safe],
                     storage.limit.saturating_sub(storage.used),
                     work,
                     cancel,
-                )?;
+                ).map_err(|error| work.annotate_error(
+                    error, before, format_args!(
+                        "protected void complete source wall/floor proof; faces={component:?}, source_endpoints={:?}",
+                        [lower_safe, upper_safe],
+                    ),
+                ))?;
             }
             if result[index].is_some() {
                 return Err(unresolved(
@@ -1442,6 +1517,47 @@ pub fn projected_protected_void_envelopes(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeProjectedVoids, GeometryError> {
+    projected_protected_void_envelopes_using(
+        crate::section::OriginalTrimSource::standalone(definition),
+        definition.retained_query_proof_bytes(),
+        capture,
+        policy,
+        work,
+        cancel,
+    )
+}
+
+impl crate::PreparedMaterialSource<'_> {
+    /// Project a bound capture while borrowing immutable original domains and
+    /// selected source recipes. The byte limit excludes this retained owner;
+    /// all pose, height, branch, floor and clearance proofs remain query-local.
+    pub fn projected_protected_void_envelopes(
+        &self,
+        capture: &NativeVoidProjectionCapture,
+        policy: ProtectedVoidPolicy,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<NativeProjectedVoids, GeometryError> {
+        projected_protected_void_envelopes_using(
+            self.trim_source(),
+            0,
+            capture,
+            policy,
+            work,
+            cancel,
+        )
+    }
+}
+
+fn projected_protected_void_envelopes_using(
+    source: crate::section::OriginalTrimSource<'_, '_>,
+    source_proof_bytes: usize,
+    capture: &NativeVoidProjectionCapture,
+    policy: ProtectedVoidPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeProjectedVoids, GeometryError> {
+    let definition = source.definition();
     work.charge(1, cancel)?;
     if !policy.maximum_xy_error_mm.is_finite() || policy.maximum_xy_error_mm <= 0.0 {
         return Err(error(
@@ -1465,14 +1581,63 @@ pub fn projected_protected_void_envelopes(
         used: 0,
         limit: (policy.byte_limit as usize).min(MAX_BYTES),
     };
+    storage.debit(std::mem::size_of::<NativeProjectedVoids>(), work, cancel)?;
     storage.debit(definition.id().allocated_bytes(), work, cancel)?;
     storage.debit(
         66 * std::mem::size_of::<([[f64; 2]; 2], u8)>(),
         work,
         cancel,
     )?;
-    storage.debit(definition.retained_query_proof_bytes(), work, cancel)?;
+    storage.debit(source_proof_bytes, work, cancel)?;
     storage.debit(capture.retained_bytes(), work, cancel)?;
+    if capture.holes.is_empty()
+        && capture.continuation.critical_counts() != Some([0, 0])
+        && let Some(cover) = capture.closed_complement
+    {
+        // No Hole or no-void theorem is manufactured here. At every captured
+        // height, any bounded XY complement component lies in the convex hull
+        // of its material boundary. The accepted complete source C0 projection
+        // bounds that hull, including G and its physical uncertainty.
+        let [[x0, x1], [y0, y1]] = cover.world_xy;
+        if orientation([x0, y0], [x1, y0], [x1, y1])? != 1 {
+            return Err(unresolved(
+                "closed source complement rectangle has no proved positive orientation",
+            ));
+        }
+        let mut envelopes = Vec::new();
+        storage.reserve(&mut envelopes, 1, work, cancel)?;
+        let mut points_mm = Vec::new();
+        storage.reserve(&mut points_mm, 5, work, cancel)?;
+        points_mm.extend_from_slice(&[
+            [x0, y0, 0.0],
+            [x1, y0, 0.0],
+            [x1, y1, 0.0],
+            [x0, y1, 0.0],
+            [x0, y0, 0.0],
+        ]);
+        envelopes.push(NativeProtectedVoidEnvelope {
+            source_loop_index: None,
+            world_xy_outer: SectionLoopMm {
+                is_hole: false,
+                points_mm,
+            },
+            height_scope: ProtectedVoidHeightScope::Bounded {
+                lower_mm: cover.world_interval[0],
+                upper_mm: cover.world_interval[1],
+            },
+        });
+        return Ok(NativeProjectedVoids {
+            definition_id: definition.id().clone(),
+            material_realization: capture.material_realization,
+            placed_pose: pose,
+            world_height_interval_mm: capture.world_interval,
+            sample_world_z_mm: capture.world_sample,
+            _source_request: request,
+            _world_shape_error_policy_mm: capture.world_policy,
+            _policy: policy,
+            envelopes,
+        });
+    }
     // Reject a structurally noncolumn branch before evaluating the entire
     // source realization. Reuse this SAME classification in the full proof;
     // passing this necessary precondition never grants material authority.
@@ -1483,14 +1648,22 @@ pub fn projected_protected_void_envelopes(
     let transport_supports = if capture.holes.is_empty() {
         Vec::new()
     } else {
+        let before = work.consumed();
         super::critical::material_link::source_transport_supports(
-            crate::section::OriginalTrimSource::standalone(definition),
+            source,
             matrix[2],
             None,
             storage.limit.saturating_sub(storage.used),
             work,
             cancel,
-        )?
+        )
+        .map_err(|error| {
+            work.annotate_error(
+                error,
+                before,
+                "protected void complete source transport supports",
+            )
+        })?
     };
     storage.debit(
         transport_supports
@@ -1524,9 +1697,14 @@ pub fn projected_protected_void_envelopes(
         let no_void = match &capture.continuation {
             NativeVoidContinuation::ClosedRadial(product) => {
                 product.kind() == super::critical::RadialRegionKind::Disk
-                    && capture.pose.is_some_and(|pose| product.matches_world(
-                        definition, pose, capture.world_interval, capture.world_sample,
-                    ))
+                    && capture.pose.is_some_and(|pose| {
+                        product.matches_world(
+                            definition,
+                            pose,
+                            capture.world_interval,
+                            capture.world_sample,
+                        )
+                    })
             }
             NativeVoidContinuation::OriginalCollar(complex)
                 if complex.definition_id() == definition.id()
@@ -1548,8 +1726,15 @@ pub fn projected_protected_void_envelopes(
             _ => false,
         };
         if !no_void {
-            return Err(unresolved(
-                "critical native void has no complete original disk-product or sample Hole branch ownership",
+            return Err(GeometryError::new(
+                GeometryErrorCode::AnalysisIndeterminate,
+                format!(
+                    "critical native void has no complete original disk-product or sample Hole branch ownership; source_interval={:?}, world_interval={:?}, sample={}, critical_counts={:?}",
+                    request.height_interval_mm,
+                    capture.world_interval,
+                    capture.world_sample,
+                    capture.continuation.critical_counts(),
+                ),
             ));
         }
     }
@@ -1611,16 +1796,33 @@ pub fn projected_protected_void_envelopes(
     )?;
     let sample_error = finite(native_error.add(realization_seed_error))?;
     if sample_error.hi > policy.maximum_xy_error_mm {
-        return Err(error(
+        return Err(GeometryError::new(
             GeometryErrorCode::ShapeErrorExceeded,
-            "protected void native and realized sample error exceeds XY policy",
+            format!(
+                "protected void native and realized sample error exceeds XY policy; source_interval={:?}, world_interval={:?}, source_sample_band={:?}, world_sample={}, holes={}, native_errors={:?}, native_error={}, sample_realization_error={}, global_realization_error={}, projected_speed={}, projection_norm={}, source_height_error={}, realization_seed_error={}, sample_error={}, maximum_xy_error={}",
+                request.height_interval_mm,
+                capture.world_interval,
+                capture.source_sample_height_band_mm,
+                capture.world_sample,
+                capture.holes.len(),
+                capture.native_errors,
+                native_error.hi,
+                sample_realization_error,
+                source_realization_error_mm,
+                speed,
+                projection.hi,
+                source_height_error.hi,
+                realization_seed_error.hi,
+                sample_error.hi,
+                policy.maximum_xy_error_mm,
+            ),
         ));
     }
     let scopes = if capture.holes.is_empty() {
         Vec::new()
     } else {
         native_height_scopes(
-            definition,
+            source,
             capture,
             &faces,
             &transport_supports,
@@ -1672,7 +1874,7 @@ pub fn projected_protected_void_envelopes(
         // authorize this PER-HOLE boundary even for a critical slab capture.
         let world_xy_outer = outward_hull(&hole.boundary, radius, &mut storage, work, cancel)?;
         envelopes.push(NativeProtectedVoidEnvelope {
-            source_loop_index: hole.source_loop_index,
+            source_loop_index: Some(hole.source_loop_index),
             world_xy_outer,
             height_scope,
         });
@@ -1754,6 +1956,8 @@ mod tests {
                 corrected_interval: [4.0, 4.0],
                 // Horizontal-only correction is still an active material obligation.
                 displacement_interval: [0.0, 0.0],
+                realized_witness_interval: None,
+                realized_endpoint_witnesses: None,
                 source_error_mm: 1.0e-8,
             },
         ];
@@ -2023,6 +2227,68 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("actual native outer protected void")
+    }
+
+    #[test]
+    fn independent_housing_upper_hole_preserves_frozen_projection_accuracy() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::import_step(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+            ),
+            &cancel,
+        )
+        .unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let source = crate::prepare_material_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
+        // This actual upper housing section needs bounded reference-cycle
+        // correspondence as well as native curve, Boolean and physical G error.
+        let analysis = source
+            .analyze_placed_slab(
+                &super::super::PlacedSlabRequest {
+                    pose: RigidPoseMm::IDENTITY,
+                    world_height_interval_mm: [7.99999914893617, 8.199999127659574],
+                    sample_world_z_mm: 8.099999138297871,
+                    native_shape_error_mm: 0.1,
+                },
+                crate::MAX_PREPARED_SECTION_BYTES.saturating_sub(source.retained_bytes()),
+                &mut work,
+                &cancel,
+            )
+            .expect("completed original housing upper slab");
+        let capture = capture_projected_voids(analysis, MAX_BYTES as u32, &mut work, &cancel)
+            .unwrap()
+            .expect("real native housing Hole capture");
+        let projected = source
+            .projected_protected_void_envelopes(
+                &capture,
+                ProtectedVoidPolicy {
+                    maximum_xy_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                    byte_limit: crate::MAX_PREPARED_SECTION_BYTES
+                        .saturating_sub(source.retained_bytes())
+                        .min(MAX_BYTES) as u32,
+                },
+                &mut work,
+                &cancel,
+            )
+            .expect(
+                "retained original housing recipes preserve the complete Hole/floor projection",
+            );
+        assert_eq!(projected.envelopes().len(), 1);
+        assert!(projected.envelopes()[0].source_loop_index().is_some());
+        let ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } =
+            projected.envelopes()[0].height_scope()
+        else {
+            panic!("the original blind housing Hole must retain its material-facing floor");
+        };
+        assert!(lower_mm.is_finite() && lower_mm <= capture.world_interval[0]);
+        assert_eq!(upper_mm, capture.world_interval[1]);
     }
 
     #[test]

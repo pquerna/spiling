@@ -192,10 +192,12 @@ impl PreparedFaceTrimDomain<'_> {
         cancel: &AtomicBool,
     ) -> Result<crate::parametric::ChartCurveEnclosure, GeometryError> {
         self.original_coedge_uv_c1_jet(coedge_index, range, work, cancel)?
-            .ok_or_else(|| GeometryError::new(
-                GeometryErrorCode::SingularGeometry,
-                "original coedge UV source is not qualified C1 on the closed interval",
-            ))
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::SingularGeometry,
+                    "original coedge UV source is not qualified C1 on the closed interval",
+                )
+            })
     }
 
     /// Retain the already evaluated literal jet when C1 is qualified; callers
@@ -219,9 +221,9 @@ impl PreparedFaceTrimDomain<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<crate::parametric::ChartCurveEnclosure, GeometryError> {
-        Ok(self.original_coedge_uv_evaluation(
-            coedge_index, native_range, false, work, cancel,
-        )?.expect("piecewise evaluation has no C1 qualification"))
+        Ok(self
+            .original_coedge_uv_evaluation(coedge_index, native_range, false, work, cancel)?
+            .expect("piecewise evaluation has no C1 qualification"))
     }
 
     fn original_coedge_uv_evaluation(
@@ -249,7 +251,9 @@ impl PreparedFaceTrimDomain<'_> {
         let jet = if require_c1 {
             crate::parametric::curve2d_c1_jet(chart, range, work, cancel)?
         } else {
-            Some(crate::parametric::curve2d_piecewise_jet(chart, range, work, cancel)?)
+            Some(crate::parametric::curve2d_piecewise_jet(
+                chart, range, work, cancel,
+            )?)
         };
         let slope = proof.uv_parameter_derivative();
         Ok(jet.map(|jet| crate::parametric::ChartCurveEnclosure {
@@ -315,6 +319,8 @@ impl PreparedFaceTrimDomain<'_> {
         self.native.retained_bytes()
     }
 
+    /// Original PCurve parameter spans, not native C3D parameter spans.
+    /// Native collar queries require the sealed correspondence's preimage.
     pub(crate) fn boundary_parameter_intervals(
         &self,
         coedge_index: usize,
@@ -764,26 +770,34 @@ mod retained_receipt_tests {
                         chart.position.map(|v| [v.lo, v.hi]),
                         uv.position.map(|v| [v.lo, v.hi])
                     );
-                    assert!(domain.original_coedge_uv_c1_jet(
-                        index, [a, b], &mut work, &cancel,
-                    ).unwrap().is_some());
-                    let piecewise = domain.original_coedge_uv_piecewise_jet(
-                        index, [a, b], &mut work, &cancel,
-                    ).unwrap();
-                    let strict = domain.original_coedge_uv_jet(
-                        index, [a, b], &mut work, &cancel,
-                    ).unwrap();
+                    assert!(
+                        domain
+                            .original_coedge_uv_c1_jet(index, [a, b], &mut work, &cancel,)
+                            .unwrap()
+                            .is_some()
+                    );
+                    let piecewise = domain
+                        .original_coedge_uv_piecewise_jet(index, [a, b], &mut work, &cancel)
+                        .unwrap();
+                    let strict = domain
+                        .original_coedge_uv_jet(index, [a, b], &mut work, &cancel)
+                        .unwrap();
                     assert_eq!(
                         piecewise.position.map(|v| [v.lo, v.hi]),
                         strict.position.map(|v| [v.lo, v.hi]),
                     );
                     let face = &definition.trimmed_solid.boundaries()[0].faces()[face_index];
                     let literal = face.trims()[binding.owner[1]][binding.owner[2]]
-                        .as_ref().unwrap();
+                        .as_ref()
+                        .unwrap();
                     let image = proof.uv_parameter_image([a, b]).unwrap();
                     let raw = crate::parametric::curve2d_piecewise_jet(
-                        literal, [image.lo, image.hi], &mut work, &cancel,
-                    ).unwrap();
+                        literal,
+                        [image.lo, image.hi],
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap();
                     let slope = proof.uv_parameter_derivative();
                     for axis in 0..2 {
                         let expected = raw.derivative[axis].mul(slope);
@@ -793,8 +807,10 @@ mod retained_receipt_tests {
                         );
                         let expected = raw.second_derivative[axis].mul(slope.square());
                         assert_eq!(
-                            [piecewise.second_derivative[axis].lo,
-                             piecewise.second_derivative[axis].hi],
+                            [
+                                piecewise.second_derivative[axis].lo,
+                                piecewise.second_derivative[axis].hi
+                            ],
                             [expected.lo, expected.hi],
                         );
                     }
@@ -870,13 +886,17 @@ mod retained_receipt_tests {
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
         );
         assert_eq!(
-            domain.original_coedge_uv_c1_jet(0, [0.0, 0.0], &mut work, &cancel)
-                .unwrap_err().code,
+            domain
+                .original_coedge_uv_c1_jet(0, [0.0, 0.0], &mut work, &cancel)
+                .unwrap_err()
+                .code,
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
         );
         assert_eq!(
-            domain.original_coedge_uv_piecewise_jet(0, [0.0, 0.0], &mut work, &cancel)
-                .unwrap_err().code,
+            domain
+                .original_coedge_uv_piecewise_jet(0, [0.0, 0.0], &mut work, &cancel)
+                .unwrap_err()
+                .code,
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
         );
     }

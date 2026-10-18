@@ -141,6 +141,15 @@ struct NativeRadialLeaf {
     inner_cover_radius_mm: f64,
 }
 
+/// Independent CLOSED continuation authority for one regular endpoint. Its
+/// domain need not reach the opposite (possibly critical) coface of the leaf.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NativeEndpointRadialLeaf {
+    radial: NativeRadialLeaf,
+    world_height_interval_mm: [f64; 2],
+    source_height_interval_mm: [f64; 2],
+}
+
 /// An independently proved source-M material CORE contributor. With no extra
 /// outgoing endpoint strata this also covers the CLOSED slab; otherwise only
 /// the core closure is claimed. No contour coordinates are retained.
@@ -165,6 +174,7 @@ pub struct NativeSourceLeafReceipt {
     native_world_z_invariant: bool,
     native_convex_section_topology: bool,
     radial_product: Option<NativeRadialLeaf>,
+    endpoint_radial_products: [Option<NativeEndpointRadialLeaf>; 2],
     sample_loops: Arc<Vec<NativeSourceLoopCapture>>,
     rectangle: Option<Arc<NativeRectangleLeafWitness>>,
 }
@@ -456,6 +466,77 @@ impl NativeCriticalCollarIncidence {
     }
     pub fn occupied_xy_bounds_mm(&self) -> [[f64; 2]; 2] {
         self.inner.occupied_xy_bounds_mm
+    }
+    /// Consume exactly this incidence's frozen native slab for lazy support
+    /// exclusion. The closed-source C0 projection protects every possible
+    /// bounded complement component only inside the captured CLOSED world
+    /// interval. It establishes no Hole lineage, absence, regularity, occupied
+    /// material or stronger source-leaf proof kind.
+    pub fn capture_projected_voids(
+        &self,
+        analysis: SlabAnalysis,
+        byte_limit: u32,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<super::NativeVoidProjectionCapture>, GeometryError> {
+        work.charge(1, cancel)?;
+        let current = self.current_leaf();
+        let collar = self.native_collar();
+        let request = analysis.request();
+        let captured = collar.source_request();
+        let exact_request = request.height_interval_mm.map(f64::to_bits)
+            == captured.height_interval_mm.map(f64::to_bits)
+            && request.sample_height_mm.to_bits() == captured.sample_height_mm.to_bits()
+            && request.native_shape_error_mm.to_bits() == captured.native_shape_error_mm.to_bits()
+            && request.frame.origin_mm.map(f64::to_bits)
+                == captured.frame.origin_mm.map(f64::to_bits)
+            && request.frame.x_axis.map(f64::to_bits) == captured.frame.x_axis.map(f64::to_bits)
+            && request.frame.y_axis.map(f64::to_bits) == captured.frame.y_axis.map(f64::to_bits)
+            && request.frame.z_axis.map(f64::to_bits) == captured.frame.z_axis.map(f64::to_bits);
+        let exact_pose = analysis.placed_pose().is_some_and(|pose| {
+            pose.translation_mm.map(f64::to_bits) == current.pose().translation_mm.map(f64::to_bits)
+                && pose.rotation_xyzw.map(f64::to_bits)
+                    == current.pose().rotation_xyzw.map(f64::to_bits)
+        });
+        if !exact_request
+            || !exact_pose
+            || analysis.definition_id() != current.definition_id()
+            || analysis.material_realization_identity() != current.material_realization_identity()
+            || analysis
+                .world_height_interval_mm()
+                .map(|v| v.map(f64::to_bits))
+                != Some(current.world_height_interval_mm().map(f64::to_bits))
+            || analysis.sample_world_z_mm().map(f64::to_bits)
+                != Some(current.sample_world_z_mm().to_bits())
+            || analysis.world_shape_error_policy_mm().map(f64::to_bits)
+                != Some(current.native_shape_error_policy_mm().to_bits())
+            || current.native_sample_sha256() != &native_sample_hash(&analysis, work, cancel)?
+            || !analysis.collar_complex.as_ref().is_some_and(|complex| {
+                complex.height_space() == NativeCollarHeightSpace::World
+                    && complex.definition_id() == current.definition_id()
+                    && complex.material_realization_identity()
+                        == current.material_realization_identity()
+                    && collar.complex_sha256() == &complex.native_complex_sha256()
+            })
+            || (current.is_positive()
+                && !collar.material_targets().iter().any(|target| {
+                    target.side() == NativeCriticalCollarTargetSide::Current
+                        && same_leaf(target.leaf(), current)
+                }))
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "closed complement capture changed its accepted source/pose/slab/sample/collar/current-M binding",
+            ));
+        }
+        super::voids::capture_closed_source_projected_voids(
+            analysis,
+            collar.closed_source_complement_xy_bounds_mm(),
+            current.world_height_interval_mm(),
+            byte_limit,
+            work,
+            cancel,
+        )
     }
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -1549,6 +1630,7 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.native_world_z_invariant == b.native_world_z_invariant
         && a.native_convex_section_topology == b.native_convex_section_topology
         && a.radial_product == b.radial_product
+        && a.endpoint_radial_products == b.endpoint_radial_products
 }
 fn hash_source(hash: &mut Sha256, source: &NativeUnionSourceCapture) {
     hash.update(source.occurrence_id().get().to_le_bytes());
@@ -1596,17 +1678,34 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
     }
     hash.update([u8::from(leaf.radial_product.is_some())]);
     if let Some(radial) = leaf.radial_product {
-        hash.update(radial.product_sha256);
-        hash.update(radial.axis_sha256);
-        hash.update([radial.kind as u8]);
-        for value in radial
-            .center
-            .into_iter()
-            .flatten()
-            .chain([radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm])
-        {
-            hash.update(value.to_bits().to_le_bytes());
+        hash_radial_leaf(hash, radial);
+    }
+    for endpoint in leaf.endpoint_radial_products {
+        hash.update([u8::from(endpoint.is_some())]);
+        if let Some(endpoint) = endpoint {
+            hash_radial_leaf(hash, endpoint.radial);
+            for value in endpoint
+                .world_height_interval_mm
+                .into_iter()
+                .chain(endpoint.source_height_interval_mm)
+            {
+                hash.update(value.to_bits().to_le_bytes());
+            }
         }
+    }
+}
+
+fn hash_radial_leaf(hash: &mut Sha256, radial: NativeRadialLeaf) {
+    hash.update(radial.product_sha256);
+    hash.update(radial.axis_sha256);
+    hash.update([radial.kind as u8]);
+    for value in radial
+        .center
+        .into_iter()
+        .flatten()
+        .chain([radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm])
+    {
+        hash.update(value.to_bits().to_le_bytes());
     }
 }
 
@@ -1868,9 +1967,27 @@ fn shape_regions_separated(
 fn boundary_loop_confinement(
     leaf: &NativeSourceLeafReceipt,
     tube: &NativeBoundaryTube,
+    side: usize,
+    interface: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
+    // This is the native all-height graph/ordering/census theorem, calibrated
+    // against this exact actual M. It is not a filled-distance motion tube.
+    let whole_product = leaf.proof_kind == NativeSourceLeafProofKind::ClosedSlab
+        && leaf.radial_product.is_some()
+        && leaf.world_height_interval_mm[side].to_bits() == interface.to_bits();
+    let endpoint_product = leaf.endpoint_radial_products[side].is_some_and(|endpoint| {
+        let range = endpoint.world_height_interval_mm;
+        leaf.world_height_interval_mm[side].to_bits() == interface.to_bits()
+            && range[0] <= interface
+            && interface <= range[1]
+            && range[0] < leaf.sample_world_z_mm
+            && leaf.sample_world_z_mm < range[1]
+    });
+    if whole_product || endpoint_product {
+        return Ok(());
+    }
     if tube.stationary || leaf.sample_loops.len() == 1 {
         return Ok(());
     }
@@ -1912,6 +2029,7 @@ fn boundary_loop_confinement(
 fn certify_regular_material_interface(
     before: &NativeSourceLeafReceipt,
     after: &NativeSourceLeafReceipt,
+    interface: f64,
     before_tube: &NativeBoundaryTube,
     after_tube: &NativeBoundaryTube,
     scratch: &mut Scratch,
@@ -1927,11 +2045,16 @@ fn certify_regular_material_interface(
             ),
         )
     };
-    if before.sample_loops.len() != after.sample_loops.len() {
+    if !before.source.same_material_recipe(&after.source)
+        || before.pose() != after.pose()
+        || before.world_height_interval_mm[1].to_bits() != interface.to_bits()
+        || after.world_height_interval_mm[0].to_bits() != interface.to_bits()
+        || before.sample_loops.len() != after.sample_loops.len()
+    {
         return Err(unresolved());
     }
-    boundary_loop_confinement(before, before_tube, work, cancel)?;
-    boundary_loop_confinement(after, after_tube, work, cancel)?;
+    boundary_loop_confinement(before, before_tube, 1, interface, work, cancel)?;
+    boundary_loop_confinement(after, after_tube, 0, interface, work, cancel)?;
     let single = before.sample_loops.len() == 1
         && !before.sample_loops[0].hole
         && !after.sample_loops[0].hole;
@@ -2455,12 +2578,20 @@ impl NativeUnionBindingLedger {
                         certify_regular_material_interface(
                             previous,
                             current,
+                            interface,
                             before,
                             after,
                             &mut scratch,
                             work,
                             cancel,
-                        )?;
+                        ).map_err(|failure| error(failure.code, format!(
+                            "native regular interface cut={interface}; previous={:?}/{:?}/radial={:?}; current={:?}/{:?}/radial={:?}; boundary_tubes={:?}/{:?}: {}",
+                            previous.world_height_interval_mm, previous.proof_kind,
+                            previous.radial_product.map(|p| (p.kind, p.center)),
+                            current.world_height_interval_mm, current.proof_kind,
+                            current.radial_product.map(|p| (p.kind, p.center)),
+                            before.distance_mm, after.distance_mm, failure.message,
+                        )))?;
                     }
                 }
             }
@@ -3176,6 +3307,12 @@ pub(super) fn native_sample_hash(
         hash.update(radial.product.identity_sha256());
         hash.update(radial.bound_mm.to_bits().to_le_bytes());
     }
+    for product in &analysis.endpoint_radial_products {
+        hash.update([u8::from(product.is_some())]);
+        if let Some(product) = product {
+            hash.update(product.identity_sha256());
+        }
+    }
     hash.update((analysis.endpoint_strata().len() as u64).to_le_bytes());
     for stratum in analysis.endpoint_strata() {
         work.charge(1, cancel)?;
@@ -3230,14 +3367,97 @@ pub fn certify_native_source_leaf(
     certify_source_leaf(request, false, work, cancel)
 }
 
-/// A directed SAMPLE-prism -> original CLOSED source fact. It establishes
-/// neither reverse target coverage nor native event/interface incidence.
+/// A directed SAMPLE-prism -> original CLOSED source metric. This metric alone
+/// establishes neither reverse coverage nor incidence; any regular endpoint
+/// authority is issued separately from a genuine CLOSED material product.
 pub fn certify_native_one_sided_source_leaf(
     request: &SourceLeafRequest<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeSourceLeafReceipt, GeometryError> {
     certify_source_leaf(request, true, work, cancel)
+}
+
+fn certify_endpoint_radial_leaves(
+    request: &SourceLeafRequest<'_>,
+    interval: [f64; 2],
+    sample: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Option<NativeEndpointRadialLeaf>; 2], GeometryError> {
+    let analysis = request.analysis;
+    let mut endpoints = [None; 2];
+    if analysis
+        .endpoint_radial_products
+        .iter()
+        .all(Option::is_none)
+    {
+        return Ok(endpoints);
+    }
+    let source_request = analysis.request();
+    let source_sample_band = analysis.capture.source_sample_height_band_mm;
+    let world_sample_band = super::collar::sample_plane_height_bounds(
+        request.definition,
+        analysis,
+        super::placed::rotation(request.pose)?,
+        request.pose,
+    )?;
+    for (side, product) in analysis.endpoint_radial_products.iter().enumerate() {
+        let Some(product) = product else {
+            continue;
+        };
+        work.charge(1, cancel)?;
+        let world_range = product.coordinates().world_interval();
+        let source_range = product.source_request().height_interval_mm;
+        let expected_request = super::SlabRequest {
+            height_interval_mm: source_range,
+            ..source_request
+        };
+        if !product.matches_source_world(
+            request.definition,
+            request.pose,
+            &expected_request,
+            world_range,
+            sample,
+        ) || world_range[side].to_bits() != interval[side].to_bits()
+            || world_range[0] < interval[0]
+            || world_range[1] > interval[1]
+            || !(world_range[0] < world_sample_band.lo && world_sample_band.hi < world_range[1])
+            || source_range[0] < source_request.height_interval_mm[0]
+            || source_range[1] > source_request.height_interval_mm[1]
+            || !(source_range[0] < source_sample_band[0] && source_sample_band[1] < source_range[1])
+        {
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "endpoint radial product does not bind its own CLOSED source/world domain and actual native reference",
+            ));
+        }
+        let Some(region) = certify_actual_polygon_radial_region(
+            request.actual_used_source_loops,
+            product.coordinates(),
+            product.kind(),
+            work,
+            cancel,
+        )?
+        else {
+            // No endpoint authority is issued. The existing true boundary-tube
+            // path remains available; a filled metric is never substituted.
+            continue;
+        };
+        endpoints[side] = Some(NativeEndpointRadialLeaf {
+            radial: NativeRadialLeaf {
+                product_sha256: product.identity_sha256(),
+                axis_sha256: product.coordinates().axis_sha256(),
+                kind: product.kind(),
+                center: product.coordinates().world_center_enclosure(),
+                outer_kernel_radius_mm: region.outer_kernel_radius_mm(),
+                inner_cover_radius_mm: region.inner_cover_radius_mm(),
+            },
+            world_height_interval_mm: world_range,
+            source_height_interval_mm: source_range,
+        });
+    }
+    Ok(endpoints)
 }
 
 fn certify_source_leaf(
@@ -3554,6 +3774,8 @@ fn certify_source_leaf(
     } else {
         None
     };
+    let endpoint_radial_products =
+        certify_endpoint_radial_leaves(request, interval, z, work, cancel)?;
     let sample_region_error_mm = Interval::point(analysis.section.achieved_chord_error_mm())
         .add(Interval::point(analysis.section.achieved_plane_error_mm()))
         .add(Interval::point(analysis.section.boolean_tolerance_mm))
@@ -3699,6 +3921,7 @@ fn certify_source_leaf(
         rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
         radial_product,
+        endpoint_radial_products,
         sample_coordinate_error_mm: exact_rectangle_bound
             .is_none()
             .then_some(policy.candidate_coordinate_error_mm),
@@ -4209,7 +4432,10 @@ pub fn certify_native_union(
                         unresolved(
                             index,
                             index,
-                            "native critical band requires original coface/root incidence or a sealed whole-source convex proof",
+                            &format!(
+                                "native critical band requires original coface/root incidence or a sealed whole-source convex proof; closed_world_interval_mm={interval:?} native_reference_z_mm={z} critical_sides={:?} native_endpoint_closures={:?}",
+                                leaf.critical_interfaces, leaf.native_endpoint_closure,
+                            ),
                         ),
                     ));
                 }
@@ -9532,6 +9758,52 @@ mod tests {
             .record(last, &um, &[&ul], &mut work, &cancel)
             .unwrap();
         assert_eq!(ledger.finalize(&mut work, &cancel).unwrap().slab_count(), 3);
+        // A coincident empty-Hole sample is not authority for another native
+        // reference. The exclusion receipt must bind the accepted full capture.
+        let stale = ranged_slab(&definition, pose, [4.08, 4.18], 4.11, 0, &mut work);
+        assert_eq!(
+            cc.capture_projected_voids(stale, MAX_SCRATCH as u32, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+        );
+        let capture = cc
+            .capture_projected_voids(current, MAX_SCRATCH as u32, &mut work, &cancel)
+            .unwrap()
+            .expect("off-sample pocket remains protected, not absent");
+        let protected = super::super::projected_protected_void_envelopes(
+            &definition,
+            &capture,
+            super::super::ProtectedVoidPolicy {
+                maximum_xy_error_mm: 0.05,
+                byte_limit: MAX_SCRATCH as u32,
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(protected.envelopes().len(), 1);
+        let envelope = &protected.envelopes()[0];
+        assert_eq!(envelope.source_loop_index(), None);
+        assert_eq!(
+            envelope.height_scope(),
+            super::super::ProtectedVoidHeightScope::Bounded {
+                lower_mm: 4.08,
+                upper_mm: 4.18,
+            },
+        );
+        let rectangle = envelope.world_xy_outer();
+        assert!(!rectangle.is_hole);
+        assert_eq!(rectangle.points_mm.first(), rectangle.points_mm.last());
+        assert!(rectangle.points_mm.iter().all(|point| point[2] == 0.0));
+        for boundary in um.iter().filter(|boundary| boundary.is_hole) {
+            for point in &boundary.points_mm {
+                for axis in 0..2 {
+                    assert!(rectangle.points_mm[0][axis] <= point[axis]);
+                    assert!(point[axis] <= rectangle.points_mm[2][axis]);
+                }
+            }
+        }
     }
 
     fn original_opposing_pockets() -> Definition {
