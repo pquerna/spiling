@@ -209,7 +209,7 @@ fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info()
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         kernel: "monstertruck".into(),
         geometry_capabilities: vec!["source_backed_geometry".into()],
-        project_capabilities: vec!["recoverable_projects_v5".into()],
+        project_capabilities: vec!["recoverable_projects_v6".into()],
         manufacturing_capabilities: vec!["planar_software_compile_v1".into()],
         max_message_bytes: MAX_CONTROL_BYTES,
         max_artifact_bytes: MAX_ARTIFACT_BYTES,
@@ -307,12 +307,12 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             "native_vertical_cylinder_face_v1".into(),
         ],
         project_capabilities: vec![
-            "recoverable_projects_v5".into(),
+            "recoverable_projects_v6".into(),
             "source_face_surface_finish_v3".into(),
             "surface_image_assets_v1".into(),
         ],
         manufacturing_capabilities: vec![
-            "manufacturing_schema6".into(),
+            "manufacturing_schema7".into(),
             "mapped_image_relief_v1".into(),
             "varying_z_material_domains_v1".into(),
             "bounded_vertical_rib_construction_v1".into(),
@@ -333,9 +333,12 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     hello.engine_build = env!("CARGO_PKG_VERSION").into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.engine_build = spiling_contracts::ENGINE_BUILD_ID.into();
-    hello.project_capabilities[0] = "recoverable_projects_v2".into();
-    assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[0] = "recoverable_projects_v5".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.project_capabilities[0] = "recoverable_projects_v6".into();
+    hello.manufacturing_capabilities[0] = "manufacturing_schema6".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.manufacturing_capabilities[0] = "manufacturing_schema7".into();
     hello.project_capabilities[1] = "source_face_surface_finish_v1".into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.project_capabilities[1] = "source_face_surface_finish_v3".into();

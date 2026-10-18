@@ -3,6 +3,72 @@
 
 //! Independent borrowed stored-path semantic cursor. No realization/emitter imports.
 use spiling_contracts::manufacturing::*;
+use std::cmp::Ordering;
+use std::sync::atomic::AtomicBool;
+
+/// Check authored seam semantics independently of path/program correspondence.
+/// The prior endpoint is projected because accepted byte replay must reach that
+/// exact command-space point. No path is reordered or copied here.
+pub(super) fn validate_preferred_seams(
+    plan: &NormalizedPrintPlan,
+    recipe: &PlanarPrintRecipe,
+    mut previous: Option<[f64; 3]>,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    let SeamPolicy::PreferredBuildDirection { xy } = recipe.seam_policy else {
+        return Ok(());
+    };
+    let zero = |value: f64| if value == 0.0 { 0.0 } else { value };
+    let score = |point: [f64; 3]| zero(point[0] * xy[0] + point[1] * xy[1]);
+    let lex_xy = |a: [f64; 3], b: [f64; 3]| {
+        zero(a[0])
+            .total_cmp(&zero(b[0]))
+            .then_with(|| zero(a[1]).total_cmp(&zero(b[1])))
+    };
+    for layer in &plan.layers {
+        for path in &layer.paths {
+            super::cancelled(cancel)?;
+            let points = &path.points_mm;
+            if path.kind == DepositionKind::Perimeter && points.first() == points.last() {
+                let start = super::project_xyz6_point_mm(points[0])?;
+                let start_score = score(start);
+                for &raw in &points[1..points.len() - 1] {
+                    super::cancelled(cancel)?;
+                    let candidate = super::project_xyz6_point_mm(raw)?;
+                    let precedes_start = match score(candidate).total_cmp(&start_score) {
+                        Ordering::Greater => true,
+                        Ordering::Less => false,
+                        Ordering::Equal => {
+                            let proximity = previous.map_or(Ordering::Equal, |from| {
+                                super::distance(from, candidate)
+                                    .total_cmp(&super::distance(from, start))
+                            });
+                            proximity
+                                .then_with(|| lex_xy(candidate, start))
+                                .then_with(|| lex_xy(raw, points[0]))
+                                .is_lt()
+                        }
+                    };
+                    if precedes_start {
+                        return Err(super::failed(
+                            "perimeter start violates authored preferred build direction",
+                        ));
+                    }
+                }
+                // Identical projected/raw XY ties have the same physical seam;
+                // their pre-rotation cyclic indices are not retained by the plan.
+                previous = Some(start);
+            } else {
+                previous = points
+                    .last()
+                    .copied()
+                    .map(super::project_xyz6_point_mm)
+                    .transpose()?;
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {

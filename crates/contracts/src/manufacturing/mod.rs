@@ -22,7 +22,7 @@ pub use process::*;
 mod resolution;
 pub use resolution::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 6;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 7;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -577,6 +577,57 @@ impl PrinterSpecification {
         Ok(())
     }
 }
+/// Closed-path start selection in the printer's build/machine XY frame.
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SeamPolicy {
+    Nearest,
+    PreferredBuildDirection { xy: [f64; 2] },
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawSeamPolicy {
+    Nearest {},
+    PreferredBuildDirection { xy: [f64; 2] },
+}
+impl<'de> Deserialize<'de> for SeamPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = match RawSeamPolicy::deserialize(deserializer)? {
+            RawSeamPolicy::Nearest {} => Self::Nearest,
+            RawSeamPolicy::PreferredBuildDirection { xy } => Self::PreferredBuildDirection { xy },
+        };
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl SeamPolicy {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if let Self::PreferredBuildDirection { xy } = self {
+            let norm = xy[0].hypot(xy[1]);
+            if !xy.iter().all(|value| value.is_finite())
+                || !norm.is_finite()
+                || (norm - 1.0).abs() > crate::geometry::POSE_NORM_TOLERANCE
+            {
+                return Err(invalid(
+                    "preferred seam direction requires a finite unit build/machine XY vector",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// Rectilinear deposition axes in the printer's build/machine XY frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RectilinearAxisPolicy {
+    X,
+    Y,
+    #[serde(rename = "alternating_xy")]
+    AlternatingXY,
+    #[serde(rename = "alternating_yx")]
+    AlternatingYX,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlanarPrintRecipe {
@@ -597,6 +648,8 @@ pub struct PlanarPrintRecipe {
     pub flow_multiplier: f64,
     pub process: ProcessPolicy,
     pub supports: SupportPolicy,
+    pub seam_policy: SeamPolicy,
+    pub rectilinear_axis: RectilinearAxisPolicy,
 }
 impl PlanarPrintRecipe {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
@@ -606,6 +659,7 @@ impl PlanarPrintRecipe {
         label(&self.material_revision)?;
         self.process.validate()?;
         self.supports.validate()?;
+        self.seam_policy.validate()?;
         positive(&[
             self.filament_diameter_mm,
             self.layer_height_mm,
@@ -1087,6 +1141,24 @@ impl NormalizedPrintPlan {
                 ));
             }
             lower_z = layer.z_mm;
+            let ordinary_fixed_axis = match intent.recipe.rectilinear_axis {
+                RectilinearAxisPolicy::X => 1,
+                RectilinearAxisPolicy::Y => 0,
+                RectilinearAxisPolicy::AlternatingXY => {
+                    if layer.index.is_multiple_of(2) {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                RectilinearAxisPolicy::AlternatingYX => {
+                    if layer.index.is_multiple_of(2) {
+                        0
+                    } else {
+                        1
+                    }
+                }
+            };
             if layer.paths.is_empty() {
                 let SupportPolicy::Breakaway { .. } = intent.recipe.supports else {
                     return Err(invalid(
@@ -1193,6 +1265,15 @@ impl NormalizedPrintPlan {
                 {
                     return Err(invalid("perimeter closure must be explicit"));
                 }
+                let fixed_axis = matches!(
+                    path.kind,
+                    DepositionKind::BottomSkin
+                        | DepositionKind::TopSkin
+                        | DepositionKind::SolidFill
+                        | DepositionKind::SparseFill
+                )
+                .then_some(ordinary_fixed_axis);
+                let mut previous_fixed_coordinate = None;
                 for point in &path.points_mm {
                     if (0..3).any(|i| {
                         !point[i].is_finite()
@@ -1203,6 +1284,19 @@ impl NormalizedPrintPlan {
                         return Err(invalid(
                             "path point is nonfinite, out of envelope or not planar",
                         ));
+                    }
+                    if let Some(axis) = fixed_axis {
+                        // Bind ordinary deposition to actual emitted XYZ6
+                        // coordinates, not a geometric angular tolerance.
+                        let coordinate =
+                            program_coordinates::project_xyz6_coordinate_mm(point[axis])?;
+                        if previous_fixed_coordinate.is_some_and(|previous| previous != coordinate)
+                        {
+                            return Err(invalid(
+                                "ordinary deposition segment violates the authored rectilinear axis",
+                            ));
+                        }
+                        previous_fixed_coordinate = Some(coordinate);
                     }
                     if complete {
                         for axis in 0..2 {

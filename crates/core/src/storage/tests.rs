@@ -967,6 +967,129 @@ fn manufacturing_assets_precede_first_normal_and_saveas_checkpoints() {
     assert!(!reopened.info().dirty);
 }
 #[test]
+fn strict_recipe_policy_checkpoint_admission_has_no_prior_format_or_policy_defaults() {
+    let manifest = crate::tests::manufactured().capture().manifest;
+    let original = serde_json::to_value(&manifest).unwrap();
+    assert_eq!(
+        parse_manifest(&serde_json::to_vec(&original).unwrap()).unwrap(),
+        manifest
+    );
+    for field in ["seam_policy", "rectilinear_axis"] {
+        let mut missing = original.clone();
+        missing["manufacturing_intent"]["recipe"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert_eq!(
+            parse_manifest(&serde_json::to_vec(&missing).unwrap())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
+    for (field, policy) in [
+        (
+            "seam_policy",
+            serde_json::json!({"kind":"preferred_build_direction","xy":[2.0,0.0]}),
+        ),
+        ("seam_policy", serde_json::json!({"kind":"unknown"})),
+        ("rectilinear_axis", serde_json::json!("unknown")),
+    ] {
+        let mut invalid = original.clone();
+        invalid["manufacturing_intent"]["recipe"][field] = policy;
+        assert_eq!(
+            parse_manifest(&serde_json::to_vec(&invalid).unwrap())
+                .unwrap_err()
+                .code,
+            ProjectErrorCode::InvalidProject
+        );
+    }
+    let mut legacy = original;
+    legacy["format_version"] = serde_json::json!(5);
+    legacy["manufacturing_intent"]["printer"]["schema_version"] = serde_json::json!(6);
+    legacy["manufacturing_intent"]["recipe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("seam_policy");
+    legacy["manufacturing_intent"]["recipe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("rectilinear_axis");
+    assert_eq!(
+        parse_manifest(&serde_json::to_vec(&legacy).unwrap())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::UnsupportedFormat
+    );
+    let recovery = serde_json::json!({"manifest":legacy});
+    assert_eq!(
+        parse_recovery(&serde_json::to_vec(&recovery).unwrap())
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::UnsupportedFormat
+    );
+}
+
+#[test]
+fn consumed_recipe_policies_save_reopen_with_matching_durable_bundle_provenance() {
+    use spiling_contracts::manufacturing::{RectilinearAxisPolicy, SeamPolicy};
+    for rectilinear_axis in [
+        RectilinearAxisPolicy::X,
+        RectilinearAxisPolicy::Y,
+        RectilinearAxisPolicy::AlternatingXY,
+        RectilinearAxisPolicy::AlternatingYX,
+    ] {
+        let sandbox = Sandbox::new();
+        let mut project = crate::tests::manufactured();
+        save_project(&mut project, Some(sandbox.target()));
+        let original = project.snapshot().manufacturing_artifact.clone().unwrap();
+        let mut intent = crate::tests::manufacturing_intent();
+        intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, -0.8] };
+        intent.recipe.rectilinear_axis = rectilinear_axis;
+        let prepared = project
+            .prepare(Edit::SetManufacturingIntent {
+                intent: intent.clone().into(),
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+        assert!(project.info().dirty);
+        assert!(project.snapshot().manufacturing_artifact.is_none());
+        project.undo().unwrap();
+        assert!(!project.info().dirty);
+        assert!(Arc::ptr_eq(
+            &original,
+            project.snapshot().manufacturing_artifact.as_ref().unwrap()
+        ));
+        project.redo().unwrap();
+        let bundle = crate::tests::manufacturing_bundle(&project);
+        assert_eq!(bundle.provenance.intent, intent);
+        assert_ne!(bundle.provenance.input_hash, original.record.input_hash);
+        let asset = crate::tests::bundle_asset(&bundle);
+        let prepared = project
+            .prepare(Edit::PublishManufacturing {
+                asset: asset.clone(),
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+        save_project(&mut project, None);
+        let manifest = project.capture().manifest;
+        drop(project);
+        let reopened =
+            Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+        assert_eq!(reopened.capture().manifest, manifest);
+        assert_eq!(
+            reopened.snapshot().manufacturing_intent.as_deref(),
+            Some(&intent)
+        );
+        let snapshot = reopened.snapshot();
+        let restored = snapshot.manufacturing_artifact.as_ref().unwrap();
+        assert_eq!(restored.record, asset.record);
+        assert_eq!(restored.validate().unwrap().provenance.intent, intent);
+        assert!(!reopened.info().dirty);
+    }
+}
+
+#[test]
 fn manufacturing_fresh_reopen_ignores_deleted_original_and_readonly_rejects_edits() {
     let sandbox = Sandbox::new();
     let mut project = crate::tests::manufactured();

@@ -13,6 +13,7 @@ import {
   REPLAY_LIFECYCLE_LAYER,
   type PreflightCheck,
 } from "@spiling/protocol";
+import type { RectilinearAxisPolicy, SeamPolicy } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
 import { scalarFields, policyScalarFields } from "./draft.ts";
 import { useManufacturing } from "./useManufacturing.ts";
@@ -255,6 +256,58 @@ export function ManufacturingPanel({
                 />
               </label>
             ))}
+          </fieldset>
+          <fieldset disabled={!writable} className="manufacturing-draft">
+            <legend>Perimeter starts and rectilinear orientation — placed build/machine XY</legend>
+            <label>
+              Perimeter seam
+              <select
+                data-testid="manufacturing-seam-policy"
+                value={draft.seamPolicyKind}
+                onChange={(event) => manufacturing.editSeamPolicy(event.target.value as SeamPolicy["kind"])}
+              >
+                <option value="nearest">Nearest</option>
+                <option value="preferred_build_direction">Preferred build direction</option>
+              </select>
+            </label>
+            {draft.seamPolicyKind === "preferred_build_direction" && (
+              <>
+                <p>
+                  Enter a finite nonzero XY direction in placed build/machine coordinates, not
+                  source or camera coordinates. Apply normalizes it to a unit direction.
+                </p>
+                {([0, 1] as const).map((axis) => (
+                  <label key={axis}>
+                    Preferred build direction {axis === 0 ? "X" : "Y"}
+                    <input
+                      type="number"
+                      step="any"
+                      data-testid={`manufacturing-seam-direction-${axis === 0 ? "x" : "y"}`}
+                      value={draft.preferredDirection[axis]}
+                      onChange={(event) => manufacturing.editPreferredDirection(axis, event.target.value)}
+                    />
+                  </label>
+                ))}
+              </>
+            )}
+            <label>
+              Rectilinear axis
+              <select
+                data-testid="manufacturing-rectilinear-axis"
+                value={draft.intent.recipe.rectilinear_axis}
+                onChange={(event) => manufacturing.editRectilinearAxis(event.target.value as RectilinearAxisPolicy)}
+              >
+                <option value="x">X</option>
+                <option value="y">Y</option>
+                <option value="alternating_xy">Alternating X/Y</option>
+                <option value="alternating_yx">Alternating Y/X</option>
+              </select>
+            </label>
+            <p>
+              Preferred direction chooses perimeter starts at existing vertices; it does not add
+              seam geometry. Rectilinear axes are in placed build/machine XY. Bridge and support
+              paths can retain admitted orientation exceptions.
+            </p>
           </fieldset>
           <p>
             Native event-aligned layers can have nonnominal final or shelf thickness; bead/flow uses

@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds Native M to the original toleranced-material realization contract v1.
-pub const PLANNER_VERSION: &str = "9";
+/// Binds authored build-frame seam and rectilinear policies to actual deposition.
+pub const PLANNER_VERSION: &str = "10";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 

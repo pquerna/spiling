@@ -53,7 +53,8 @@ fn intent() -> ManufacturingIntent {
         },
         "recipe":{"id":"solid","revision":"1","material_id":"nominal","material_revision":"1","filament_diameter_mm":1.75,"layer_height_mm":0.2,"native_shape_error_mm":0.1,"bead_width_mm":0.4,"perimeter_count":1,"infill_fraction":1.0,"top_skin_thickness_mm":0.2,"bottom_skin_thickness_mm":0.2,"print_speed_mm_s":20.0,"travel_speed_mm_s":80.0,"flow_multiplier":1.0,
             "process":{"first_layer_speed_factor":1.0,"first_layer_flow_factor":1.0,"fan_first_layers":0,"fan_after_first_layers":0,"bridge_speed_factor":1.0,"bridge_flow_factor":1.0,"bridge_fan_pwm":0,"max_bridge_span_mm":5.0,"retraction":{"kind":"disabled"}},
-            "supports":{"kind":"disabled"}}
+            "supports":{"kind":"disabled"},
+            "seam_policy":{"kind":"nearest"},"rectilinear_axis":"alternating_xy"}
     })).unwrap()
 }
 async fn spawn() -> EngineClient {
@@ -504,6 +505,16 @@ async fn compiled_bundle_survives_source_deletion_and_fresh_read_only_replay() {
     for fraction in [0.0, f64::NAN, 1.01] {
         let mut invalid = intent();
         invalid.recipe.infill_fraction = fraction;
+        invalid_inputs.push(invalid);
+    }
+    for xy in [
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [f64::NAN, 1.0],
+        [1.0, f64::INFINITY],
+    ] {
+        let mut invalid = intent();
+        invalid.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy };
         invalid_inputs.push(invalid);
     }
     let mut invalid = intent();

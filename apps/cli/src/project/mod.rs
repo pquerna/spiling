@@ -1474,6 +1474,61 @@ mod tests {
     }
 
     #[test]
+    fn intent_json_preserves_consumed_policies_and_rejects_missing_or_invalid_choices() {
+        let root = env::temp_dir().join(format!("spiling-policies-{}", SessionId::new().as_str()));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("intent.json");
+        let mut intent = decode_intent(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/manufacturing/solid-fill.intent.json"
+        )))
+        .unwrap();
+        intent.recipe.seam_policy =
+            spiling_contracts::manufacturing::SeamPolicy::PreferredBuildDirection {
+                xy: [0.6, -0.8],
+            };
+        intent.recipe.rectilinear_axis = spiling_contracts::manufacturing::RectilinearAxisPolicy::Y;
+        let load = || {
+            parse(
+                [
+                    OsString::from("open"),
+                    OsString::from("project"),
+                    OsString::from("--intent"),
+                    file.as_os_str().to_os_string(),
+                ]
+                .into_iter(),
+                None,
+                None,
+            )
+        };
+        let original = serde_json::to_value(&intent).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let Command::Project { workflow, .. } = load().unwrap().unwrap().command else {
+            panic!("project expected");
+        };
+        let [Operation::Intent(received)] = workflow.operations.as_slice() else {
+            panic!("existing typed intent operation expected");
+        };
+        assert_eq!(received.as_ref(), &intent);
+        for field in ["seam_policy", "rectilinear_axis"] {
+            let mut missing = original.clone();
+            missing["recipe"].as_object_mut().unwrap().remove(field);
+            std::fs::write(&file, serde_json::to_vec(&missing).unwrap()).unwrap();
+            assert!(load().is_err(), "{field}");
+        }
+        for (field, policy) in [
+            ("seam_policy", serde_json::json!({"kind":"unknown"})),
+            ("rectilinear_axis", serde_json::json!("unknown")),
+        ] {
+            let mut invalid = original.clone();
+            invalid["recipe"][field] = policy;
+            std::fs::write(&file, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(load().is_err(), "{field}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn intent_json_is_bounded_before_child_spawn() {
         let root = env::temp_dir().join(format!("spiling-intent-{}", SessionId::new().as_str()));
         std::fs::create_dir(&root).unwrap();

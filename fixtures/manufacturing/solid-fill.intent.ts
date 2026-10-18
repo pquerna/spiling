@@ -9,7 +9,7 @@ const intent = {
   printer,
   recipe: {
     id: "software-solid-fill",
-    revision: "4",
+    revision: "5",
     material_id: "nominal-software-filament",
     material_revision: "1",
     filament_diameter_mm: 1.75,
@@ -35,6 +35,8 @@ const intent = {
       retraction: { kind: "enabled", distance_mm: 0.8, speed_mm_s: 25, minimum_travel_mm: 2, z_hop_mm: 0.2 },
     },
     supports: { kind: "disabled" },
+    seam_policy: { kind: "nearest" },
+    rectilinear_axis: "alternating_xy",
   },
 } satisfies ManufacturingIntent;
 

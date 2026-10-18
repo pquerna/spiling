@@ -90,12 +90,14 @@ fn manifest_does_not_admit_runtime_handles_or_incompatible_coordinate_contracts(
         changed[field] = value;
         assert!(serde_json::from_value::<ProjectManifest>(changed).is_err());
     }
-    let mut changed = manifest();
-    changed.format_version = PROJECT_FORMAT_VERSION + 1;
-    assert_eq!(
-        changed.validate().unwrap_err().code,
-        ProjectErrorCode::UnsupportedFormat
-    );
+    for format_version in [PROJECT_FORMAT_VERSION - 1, PROJECT_FORMAT_VERSION + 1] {
+        let mut changed = manifest();
+        changed.format_version = format_version;
+        assert_eq!(
+            changed.validate().unwrap_err().code,
+            ProjectErrorCode::UnsupportedFormat
+        );
+    }
 }
 
 #[test]

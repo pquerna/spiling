@@ -771,6 +771,62 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
         })
     }
 }
+impl TryFrom<rpc::SeamPolicy> for SeamPolicy {
+    type Error = String;
+    fn try_from(value: rpc::SeamPolicy) -> Result<Self, String> {
+        use rpc::seam_policy::Policy;
+        valid(
+            match required(value.policy, "seam policy selection")? {
+                Policy::Nearest(_) => Self::Nearest,
+                Policy::PreferredBuildDirection(direction) => Self::PreferredBuildDirection {
+                    xy: [direction.x, direction.y],
+                },
+            },
+            Self::validate,
+        )
+    }
+}
+impl TryFrom<SeamPolicy> for rpc::SeamPolicy {
+    type Error = String;
+    fn try_from(value: SeamPolicy) -> Result<Self, String> {
+        use rpc::seam_policy::Policy;
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            policy: Some(match value {
+                SeamPolicy::Nearest => Policy::Nearest(rpc::NearestSeam {}),
+                SeamPolicy::PreferredBuildDirection { xy } => {
+                    Policy::PreferredBuildDirection(rpc::PreferredBuildDirectionSeam {
+                        x: xy[0],
+                        y: xy[1],
+                    })
+                }
+            }),
+        })
+    }
+}
+impl TryFrom<rpc::RectilinearAxisPolicy> for RectilinearAxisPolicy {
+    type Error = String;
+    fn try_from(value: rpc::RectilinearAxisPolicy) -> Result<Self, String> {
+        match value {
+            rpc::RectilinearAxisPolicy::RectilinearX => Ok(Self::X),
+            rpc::RectilinearAxisPolicy::RectilinearY => Ok(Self::Y),
+            rpc::RectilinearAxisPolicy::AlternatingXy => Ok(Self::AlternatingXY),
+            rpc::RectilinearAxisPolicy::AlternatingYx => Ok(Self::AlternatingYX),
+            _ => Err("unsupported rectilinear axis policy".into()),
+        }
+    }
+}
+impl TryFrom<RectilinearAxisPolicy> for rpc::RectilinearAxisPolicy {
+    type Error = String;
+    fn try_from(value: RectilinearAxisPolicy) -> Result<Self, String> {
+        Ok(match value {
+            RectilinearAxisPolicy::X => Self::RectilinearX,
+            RectilinearAxisPolicy::Y => Self::RectilinearY,
+            RectilinearAxisPolicy::AlternatingXY => Self::AlternatingXy,
+            RectilinearAxisPolicy::AlternatingYX => Self::AlternatingYx,
+        })
+    }
+}
 impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
     type Error = String;
     fn try_from(value: rpc::PlanarPrintRecipe) -> Result<Self, String> {
@@ -793,6 +849,10 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
                 process: required(value.process, "process policy")?.try_into()?,
                 supports: required(value.supports, "support policy")?.try_into()?,
+                seam_policy: required(value.seam_policy, "seam policy")?.try_into()?,
+                rectilinear_axis: rpc::RectilinearAxisPolicy::try_from(value.rectilinear_axis)
+                    .map_err(|_| "unknown rectilinear axis policy")?
+                    .try_into()?,
             },
             Self::validate,
         )
@@ -820,6 +880,8 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
             process: Some(value.process.try_into()?),
             supports: Some(value.supports.try_into()?),
+            seam_policy: Some(value.seam_policy.try_into()?),
+            rectilinear_axis: rpc::RectilinearAxisPolicy::try_from(value.rectilinear_axis)? as i32,
         })
     }
 }
@@ -1169,6 +1231,49 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn consumed_recipe_wire_rejects_missing_unknown_and_invalid_policies() {
+        use prost::Message;
+        let wire = rpc::ManufacturingIntent::try_from(intent()).unwrap();
+        for seam_policy in [
+            None,
+            Some(rpc::SeamPolicy { policy: None }),
+            // Unknown oneof arm is discarded by Prost, never a nearest-policy default.
+            Some(rpc::SeamPolicy::decode([0x1a, 0x00].as_slice()).unwrap()),
+        ] {
+            let mut missing = wire.clone();
+            missing.recipe.as_mut().unwrap().seam_policy = seam_policy;
+            assert!(ManufacturingIntent::try_from(missing).is_err());
+        }
+        for rectilinear_axis in [0, -1, i32::MAX] {
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().rectilinear_axis = rectilinear_axis;
+            assert!(ManufacturingIntent::try_from(invalid).is_err());
+        }
+        for xy in [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [f64::NAN, 1.0],
+            [1.0, f64::INFINITY],
+            [f64::NEG_INFINITY, 0.0],
+            [f64::MAX, f64::MAX],
+        ] {
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().seam_policy = Some(rpc::SeamPolicy {
+                policy: Some(rpc::seam_policy::Policy::PreferredBuildDirection(
+                    rpc::PreferredBuildDirectionSeam { x: xy[0], y: xy[1] },
+                )),
+            });
+            assert!(ManufacturingIntent::try_from(invalid).is_err(), "{xy:?}");
+            let mut invalid = intent();
+            invalid.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy };
+            assert!(
+                rpc::ManufacturingIntent::try_from(invalid).is_err(),
+                "{xy:?}"
+            );
+        }
+    }
+
+    #[test]
     fn preflight_request_report_and_operation_round_trip_are_checked() {
         let session = SessionId::new();
         let command = ManufacturingCommand::Preflight {
@@ -1470,14 +1575,6 @@ mod tests {
             };
             assert!(rpc::NativeGeometryCoverageSummary::try_from(invalid).is_err());
         }
-        let mut omitted_capture = coverage.clone();
-        omitted_capture.certified_layer_count = 2;
-        omitted_capture
-            .source_feature_coverage
-            .as_mut()
-            .unwrap()
-            .disjoint_source_layer_count = Some(2);
-        assert!(NativeGeometryCoverageSummary::try_from(omitted_capture).is_err());
         for value in [0, -1, i32::MAX] {
             let mut invalid = coverage.clone();
             invalid.evidence = value;

@@ -1424,6 +1424,60 @@ async function inspectManufacturing() {
     async () => (await manufacturingState()).selected_intent?.recipe.flow_multiplier === 1,
     "Core intent restored",
   );
+  let q1Intent = null;
+  if (scenario === "manufacturing") {
+    const beforePolicies = await manufacturingState();
+    await input('[data-testid="manufacturing-seam-policy"]', "preferred_build_direction");
+    await input('[data-testid="manufacturing-seam-direction-x"]', "0");
+    await input('[data-testid="manufacturing-seam-direction-y"]', "0");
+    await input('[data-testid="manufacturing-rectilinear-axis"]', "y");
+    await click("manufacturing-apply");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working &&
+        await evaluate("!!document.querySelector('#manufacturing-operation-failure')") &&
+        (await text("manufacturing-message")).trim().length > 0;
+    }, "zero preferred direction presents an error before native Apply");
+    assert.equal((await manufacturingState()).project_revision, beforePolicies.project_revision);
+    assert.deepEqual((await manufacturingState()).selected_intent, beforePolicies.selected_intent);
+    assert.equal((await manufacturingState()).draft_changed, true, "Invalid authored direction is retained");
+    for (const axis of ["x", "y"])
+      assert.equal(await evaluate(
+        `document.querySelector('[data-testid="manufacturing-seam-direction-${axis}"]').value`),
+      "0", "Rejected preferred direction remains in the operator draft");
+    await input('[data-testid="manufacturing-seam-direction-x"]', "3");
+    await input('[data-testid="manufacturing-seam-direction-y"]', "4");
+    await click("manufacturing-apply");
+    state = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && !current.draft_changed &&
+        current.selected_intent?.recipe.seam_policy.kind === "preferred_build_direction"
+        ? current : false;
+    }, "authored perimeter and rectilinear policies Apply");
+    q1Intent = structuredClone(beforePolicies.selected_intent);
+    q1Intent.recipe.seam_policy = {kind:"preferred_build_direction",xy:[0.6,0.8]};
+    q1Intent.recipe.rectilinear_axis = "y";
+    assert.deepEqual(state.selected_intent, q1Intent, "Only the two authored policies change");
+    await click("project-undo");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && !current.draft_changed &&
+        JSON.stringify(current.selected_intent) === JSON.stringify(beforePolicies.selected_intent);
+    }, "Core policy Undo");
+    await click("project-redo");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && !current.draft_changed &&
+        JSON.stringify(current.selected_intent) === JSON.stringify(q1Intent);
+    }, "Core policy Redo");
+    assert.equal(await evaluate(
+      `document.querySelector('[data-testid="manufacturing-seam-policy"]').value`),
+    "preferred_build_direction");
+    assert.equal(await evaluate(
+      `document.querySelector('[data-testid="manufacturing-rectilinear-axis"]').value`), "y");
+    await evaluate(`document.querySelector('[data-testid="manufacturing-seam-policy"]').scrollIntoView({block:'center'})`);
+    await screenshot("manufacturing-authored-policies");
+  }
   let baseline = null;
   if (cylindricalFinishScenario || imageReliefScenario) {
     await click("manufacturing-compile");
@@ -1511,6 +1565,8 @@ async function inspectManufacturing() {
   );
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.deepEqual(state.selected_artifact, record);
+  if (q1Intent)
+    assert.deepEqual(state.selected_intent, q1Intent, "Fresh actual replay retains the authored policies");
   await expectManufacturingStep("ready");
   await evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]').scrollIntoView({block:'start'})`);
   await screenshot("manufacturing-guided-ready");
@@ -1601,6 +1657,25 @@ async function inspectManufacturing() {
   assert.ok(kinds.has("bottom_skin"));
   assert.ok(kinds.has("top_skin"));
   assert.ok(kinds.has("sparse_fill"));
+  if (q1Intent) {
+    const perimeters = plan.layers.flatMap(layer => layer.paths.filter(path => path.kind === "perimeter"));
+    assert.ok(perimeters.length > 0);
+    for (const path of perimeters) {
+      const vertices = path.points_mm.slice(0, -1);
+      assert.deepEqual(path.points_mm[0], path.points_mm.at(-1), "Preferred seam preserves closure");
+      const projection = point => Number(point[0].toFixed(6)) * 0.6 + Number(point[1].toFixed(6)) * 0.8;
+      const start = projection(vertices[0]);
+      assert.ok(vertices.every(point => projection(point) <= start + 1e-6),
+        "Canonicalized perimeter starts on the preferred machine-XY side at an existing vertex");
+    }
+    const ordinary = new Set(["bottom_skin", "top_skin", "solid_fill", "sparse_fill"]);
+    const bedHatch = plan.layers[0].paths.filter(path => ordinary.has(path.kind));
+    assert.ok(bedHatch.length > 0, "Bed-supported ordinary hatch exercises authored constant Y");
+    for (const path of bedHatch)
+      assert.ok(path.points_mm.every(point => Math.abs(point[0] - path.points_mm[0][0]) <= 1e-6),
+        "Ordinary bed hatch follows machine Y; bridge/support orientation exceptions are not constrained");
+    assert.equal(state.report.verified, true, "Fresh native replay independently admits these emitted paths");
+  }
   if (surface) {
     const provenance = JSON.parse(exported["provenance.json"]);
     assert.deepEqual(provenance.surface_overlays, surface.document);
@@ -1744,6 +1819,14 @@ async function inspectManufacturing() {
     await evaluate("document.querySelector('[data-testid=\"manufacturing-compile\"]').disabled"),
     true,
   );
+  if (q1Intent) {
+    assert.deepEqual(state.selected_intent, q1Intent, "Source-independent reopen retains both authored policies");
+    for (const testId of ["manufacturing-seam-policy", "manufacturing-seam-direction-x",
+      "manufacturing-seam-direction-y", "manufacturing-rectilinear-axis"])
+      assert.equal(await evaluate(
+        `document.querySelector('[data-testid="${testId}"]').matches(':disabled')`),
+      true, "Read-only disables every policy control");
+  }
   if (surface) {
     assert.deepEqual((await surfaceState()).surface_overlays, surface.document);
     assert.equal(
@@ -1769,6 +1852,8 @@ async function inspectManufacturing() {
   );
   assert.equal(state.project_revision, reopenedRevision);
   assert.deepEqual(state.selected_artifact, record);
+  if (q1Intent)
+    assert.deepEqual(state.selected_intent, q1Intent, "Read-only actual replay preserves authored policy intent");
   await input('[data-testid="manufacturing-export-path"]', "export-readonly");
   await click("manufacturing-debug-export");
   await until(
@@ -1822,10 +1907,15 @@ async function inspectManufacturing() {
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.equal(state.report.verified, true);
   assert.deepEqual(state.selected_artifact, record);
-  if (customManufacturingSource)
-    assert.deepEqual(state.selected_intent,
-      JSON.parse(await readFile(resolve(fixtureRoot, "operator.intent.json"), "utf8")),
-      "Fresh engine retains unchanged complete-sparse intent");
+  if (customManufacturingSource) {
+    const expected = JSON.parse(await readFile(resolve(fixtureRoot, "operator.intent.json"), "utf8"));
+    expected.recipe.seam_policy = q1Intent.recipe.seam_policy;
+    expected.recipe.rectilinear_axis = q1Intent.recipe.rectilinear_axis;
+    assert.deepEqual(state.selected_intent, expected,
+      "Fresh engine retains the complete-sparse declaration with only the two explicitly authored policies");
+  }
+  if (q1Intent)
+    assert.deepEqual(state.selected_intent, q1Intent, "Fresh engine and actual replay retain authored policies");
   const reopenedSourceInspection = scenario === "manufacturing"
     ? await inspectManufacturingSource("fresh-engine") : null;
   if (sourceInspection) {

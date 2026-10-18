@@ -444,7 +444,7 @@ async fn project_writer_lock_read_only_rejections_and_kill_release_are_recoverab
             .hello()
             .project_capabilities
             .iter()
-            .any(|value| value == "recoverable_projects_v5")
+            .any(|value| value == "recoverable_projects_v6")
     );
     assert_eq!(
         import(&mut writer, &fixture("box-mm.step")).await.status,

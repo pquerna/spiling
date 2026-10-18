@@ -36,6 +36,8 @@ fn intent() -> ManufacturingIntent {
             layer_height_mm: 0.4,
             bead_width_mm: 0.6,
             perimeter_count: 1,
+            seam_policy: SeamPolicy::Nearest,
+            rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
             infill_fraction: 1.0,
             top_skin_thickness_mm: 0.8,
             bottom_skin_thickness_mm: 0.8,
@@ -119,6 +121,280 @@ fn pose(x: f64, y: f64, z: f64) -> RigidPoseMm {
     RigidPoseMm {
         translation_mm: [x, y, z],
         ..RigidPoseMm::IDENTITY
+    }
+}
+
+fn actual_motion(bundle: &ManufacturingBundle) -> Vec<(u8, u32, [f64; 3])> {
+    let bytes = serde_json::to_vec(bundle).unwrap();
+    let inspection = inspect_bundle(
+        bundle,
+        &SourceHash::from_bytes(&bytes),
+        VerificationOutput::ReportAndMotion,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(inspection.report.verified);
+    inspection.replay.unwrap().bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
+        .map(|record| {
+            (
+                record[46],
+                u16::from_le_bytes(record[44..46].try_into().unwrap()) as u32,
+                std::array::from_fn(|axis| {
+                    f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
+                }),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    for fraction in [0.25, 1.0] {
+        for policy in [
+            RectilinearAxisPolicy::X,
+            RectilinearAxisPolicy::Y,
+            RectilinearAxisPolicy::AlternatingXY,
+            RectilinearAxisPolicy::AlternatingYX,
+        ] {
+            let mut intent = intent();
+            intent.recipe.infill_fraction = fraction;
+            intent.recipe.rectilinear_axis = policy;
+            let bundle = scene.compile(&intent).unwrap();
+            let motion = actual_motion(&bundle);
+            let mut roles = std::collections::BTreeSet::new();
+            for pair in motion.windows(2) {
+                let (kind, index, end) = pair[1];
+                if !(2..=5).contains(&kind) {
+                    continue;
+                }
+                roles.insert(kind);
+                let along_x = match policy {
+                    RectilinearAxisPolicy::X => true,
+                    RectilinearAxisPolicy::Y => false,
+                    RectilinearAxisPolicy::AlternatingXY => index.is_multiple_of(2),
+                    RectilinearAxisPolicy::AlternatingYX => !index.is_multiple_of(2),
+                };
+                let start = pair[0].2;
+                let fixed = usize::from(along_x);
+                assert_eq!(
+                    start[fixed], end[fixed],
+                    "{policy:?}, layer {index}, role {kind}"
+                );
+                assert_ne!(start[1 - fixed], end[1 - fixed]);
+            }
+            assert!(roles.contains(&3) && roles.contains(&4));
+            assert!(roles.contains(&(if fraction == 1.0 { 2 } else { 5 })));
+            assert!(
+                bundle
+                    .plan
+                    .layers
+                    .iter()
+                    .all(|layer| { layer.region_coverage.surface_added_area_mm2 == 0.0 })
+            );
+        }
+    }
+}
+
+#[test]
+fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
+    let scene = Scene::new(
+        include_bytes!(
+            "../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[pose(98.0, 101.0, 0.0)],
+    );
+    let mut intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, 0.8] };
+    let bundle = scene.compile(&intent).unwrap();
+    let motion = actual_motion(&bundle);
+    let mut orthogonal_bridges = 0;
+    let mut ordinary = 0;
+    let mut aligned = std::collections::BTreeMap::<(u32, usize, u64), Vec<[f64; 2]>>::new();
+    for pair in motion.windows(2) {
+        let (kind, layer, end) = pair[1];
+        let start = pair[0].2;
+        if (2..=5).contains(&kind) {
+            assert_eq!(
+                start[0], end[0],
+                "ordinary role {kind} ignored Y at layer {layer}"
+            );
+            ordinary += 1;
+        } else if kind == 8 && start[1] == end[1] && start[0] != end[0] {
+            orthogonal_bridges += 1;
+        }
+        if (1..=5).contains(&kind) || kind == 8 {
+            let axis = if start[1] == end[1] {
+                Some(0)
+            } else if start[0] == end[0] {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(axis) = axis.filter(|axis| start[*axis] != end[*axis]) {
+                aligned
+                    .entry((layer, axis, start[1 - axis].to_bits()))
+                    .or_default()
+                    .push([start[axis].min(end[axis]), start[axis].max(end[axis])]);
+            }
+        }
+    }
+    assert!(ordinary > 0 && orthogonal_bridges > 0);
+    for ((layer, _, _), mut intervals) in aligned {
+        intervals.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]));
+        assert!(
+            intervals.windows(2).all(|pair| pair[0][1] <= pair[1][0]),
+            "duplicate aligned actual deposition at layer {layer}"
+        );
+    }
+    assert!(
+        bundle
+            .plan
+            .layers
+            .iter()
+            .all(|layer| layer.region_coverage.surface_added_area_mm2 == 0.0)
+    );
+}
+
+#[test]
+fn preferred_seams_use_build_sides_and_keep_actual_protected_holes() {
+    let scene = Scene::new(HOLE, &[pose(30.0, 40.0, 0.0)]);
+    let mut programs = Vec::new();
+    for x in [1.0, -1.0] {
+        let mut intent = intent();
+        intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [x, 0.0] };
+        let bundle = scene.compile(&intent).unwrap();
+        let motion = actual_motion(&bundle);
+        let first_wall = &bundle.plan.layers[0].paths[0];
+        let extremum = first_wall
+            .points_mm
+            .iter()
+            .map(|p| p[0] * x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((motion[0].2[0] * x - extremum).abs() <= 0.0000005);
+        assert_eq!(motion[0].0, 0);
+        for pair in motion.windows(2) {
+            if !matches!(pair[1].0, 1..=5 | 8) {
+                continue;
+            }
+            let a = [pair[0].2[0] - 40.0, pair[0].2[1] - 50.0];
+            let d = [pair[1].2[0] - pair[0].2[0], pair[1].2[1] - pair[0].2[1]];
+            let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1])).clamp(0.0, 1.0);
+            assert!((a[0] + t * d[0]).hypot(a[1] + t * d[1]) >= 3.0 - 0.01);
+        }
+        assert_eq!(
+            bundle.plan.layers[0]
+                .paths
+                .iter()
+                .filter(|p| p.kind == DepositionKind::Perimeter)
+                .count(),
+            2
+        );
+        programs.push(bundle.program);
+    }
+    assert_ne!(programs[0], programs[1]);
+}
+
+#[test]
+fn build_direction_and_prime_endpoint_resolve_actual_seam_ties() {
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    let scene = Scene::new(BOX, &[pose(30.0, 40.0, 0.0)]);
+    let mut diagnostic = intent();
+    diagnostic.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, -0.0] };
+    let without_prior = scene.compile(&diagnostic).unwrap();
+    let first = &without_prior.plan.layers[0].paths[0];
+    let max_x = first
+        .points_mm
+        .iter()
+        .map(|point| point[0])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_y = first
+        .points_mm
+        .iter()
+        .map(|point| point[1])
+        .fold(f64::INFINITY, f64::min);
+    assert_eq!(
+        actual_motion(&without_prior)[0].2,
+        project_xyz6_point_mm([max_x, min_y, first.points_mm[0][2]]).unwrap()
+    );
+
+    let mut complete = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    let JobWorkflow::CompleteMarlin { job } = &mut complete.printer.workflow else {
+        panic!("complete-job fixture must declare its lifecycle");
+    };
+    job.prime_start_mm = [25.0, 70.0, 0.2];
+    job.prime_end_mm = [50.0, 70.0, 0.2];
+    complete.recipe.seam_policy = SeamPolicy::Nearest;
+    let nearest = scene.compile(&complete).unwrap();
+    complete.recipe.seam_policy = diagnostic.recipe.seam_policy;
+    let preferred = scene.compile(&complete).unwrap();
+    for bundle in [&nearest, &preferred] {
+        let wall = &bundle.plan.layers[0].paths[0];
+        let max_x = wall
+            .points_mm
+            .iter()
+            .map(|point| point[0])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = wall
+            .points_mm
+            .iter()
+            .map(|point| point[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let motion = actual_motion(bundle);
+        let body_entry = motion.windows(2).find(|pair| pair[1].0 == 1).unwrap()[0].2;
+        assert_eq!(
+            body_entry,
+            project_xyz6_point_mm([max_x, max_y, wall.points_mm[0][2]]).unwrap()
+        );
+    }
+    let rotated = Scene::new(
+        BOX,
+        &[RigidPoseMm {
+            translation_mm: [70.0, 70.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 1.0, 0.0],
+        }],
+    );
+    let bundle = rotated.compile(&diagnostic).unwrap();
+    let start = actual_motion(&bundle)[0].2;
+    assert!((start[0] - 69.7).abs() < 0.000001);
+    assert!((start[1] - 60.3).abs() < 0.000001);
+}
+
+#[test]
+fn saved_verification_cannot_authorize_an_incompatible_planner() {
+    let mut bundle = Scene::new(BOX, &[RigidPoseMm::IDENTITY])
+        .compile(&intent())
+        .unwrap();
+    assert!(bundle.verification.verified);
+    bundle.provenance.planner_version = "unsupported-source-semantics".into();
+    let bytes = serde_json::to_vec(&bundle).unwrap();
+    let decoded = decode_bundle(&bytes).unwrap();
+    for output in [
+        VerificationOutput::ReportOnly,
+        VerificationOutput::ReportAndMotion,
+    ] {
+        assert_eq!(
+            inspect_bundle(
+                &decoded,
+                &SourceHash::from_bytes(&bytes),
+                output,
+                &AtomicBool::new(false)
+            )
+            .err()
+            .unwrap()
+            .code,
+            ManufacturingErrorCode::UnsupportedCapability,
+        );
     }
 }
 
@@ -476,7 +752,7 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         },
         DepositionPath {
             kind: DepositionKind::SolidFill,
-            points_mm: vec![[5.0, 1.0, 0.4], [5.0, 5.0, 0.4]],
+            points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
         },
     ];
     let recipe = &intent.recipe;

@@ -3,7 +3,11 @@
  * SPDX-License-Identifier: OSL-3.0
  * Licensed under the Open Software License version 3.0
  */
-import type { ManufacturingIntent, ManufacturingArtifactRecord } from "@spiling/protocol";
+import type {
+  ManufacturingIntent,
+  ManufacturingArtifactRecord,
+  SeamPolicy,
+} from "@spiling/protocol";
 export const scalarFields = [
   ["layer_height_mm", "Layer height (mm)"],
   ["native_shape_error_mm", "Native shape error budget (mm)"],
@@ -56,6 +60,8 @@ export interface IntentDraft {
   values: Record<ScalarField, string>;
   base: string;
   policyValues: Record<string, string>;
+  seamPolicyKind: SeamPolicy["kind"];
+  preferredDirection: [string, string];
 }
 export const intentIdentity = (intent: ManufacturingIntent | null) => JSON.stringify(intent);
 export function makeDraft(
@@ -65,11 +71,31 @@ export function makeDraft(
   return {
     intent: structuredClone(intent),
     base: intentIdentity(base),
+    seamPolicyKind: intent.recipe.seam_policy.kind,
+    preferredDirection: intent.recipe.seam_policy.kind === "preferred_build_direction"
+      ? intent.recipe.seam_policy.xy.map(String) as [string, string]
+      : ["", ""],
     policyValues: Object.fromEntries(policyScalarFields(intent).map(([key]) => [key, String(policyValue(intent, key))])),
     values: Object.fromEntries(
       scalarFields.map(([key]) => [key, String(intent.recipe[key])]),
     ) as Record<ScalarField, string>,
   };
+}
+function preferredBuildDirection(draft: IntentDraft): [number, number] {
+  const [xText, yText] = draft.preferredDirection;
+  const x = Number(xText), y = Number(yText);
+  const scale = Math.max(Math.abs(x), Math.abs(y));
+  if (!xText.trim() || !yText.trim() || !Number.isFinite(x) || !Number.isFinite(y) || scale === 0)
+    throw new Error("Preferred build direction XY must contain two finite numbers and be nonzero.");
+  const original = draft.intent.recipe.seam_policy;
+  // Preserve admitted unit vectors exactly through reload and unrelated scalar edits.
+  if (original.kind === "preferred_build_direction" && x === original.xy[0] && y === original.xy[1])
+    return [x === 0 ? 0 : x, y === 0 ? 0 : y];
+  // Scale before taking the norm so both huge and subnormal authored inputs remain usable.
+  const scaledX = x / scale, scaledY = y / scale;
+  const length = Math.hypot(scaledX, scaledY);
+  const normalizedX = scaledX / length, normalizedY = scaledY / length;
+  return [normalizedX === 0 ? 0 : normalizedX, normalizedY === 0 ? 0 : normalizedY];
 }
 export function draftIntent(draft: IntentDraft): ManufacturingIntent {
   const intent = structuredClone(draft.intent);
@@ -105,6 +131,9 @@ export function draftIntent(draft: IntentDraft): ManufacturingIntent {
       intent.recipe as unknown as Record<string, unknown>);
     target[last] = value;
   }
+  intent.recipe.seam_policy = draft.seamPolicyKind === "nearest"
+    ? { kind: "nearest" }
+    : { kind: "preferred_build_direction", xy: preferredBuildDirection(draft) };
   return intent;
 }
 export function draftChanged(draft: IntentDraft | null): boolean {

@@ -42,7 +42,7 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
     [1, 1, 0.4],
     [5, 1, 0.4],
     [5, 1, 0.4],
-    [5, 5, 0.4],
+    [9, 1, 0.4],
   ]);
   assert.deepEqual(
     [0, 1, 2, 3].map((event) => replay.position(event)),

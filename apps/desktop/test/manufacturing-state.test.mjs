@@ -127,6 +127,78 @@ test("explicit native shape policy survives scalar Apply and authoritative draft
   assert.equal(original.recipe.native_shape_error_mm, 0.075);
 });
 
+test("authored seam direction normalizes robustly without changing the admitted declaration", () => {
+  const original = structuredClone(intent);
+  for (const [input, expected] of [
+    [["3", "4"], [0.6, 0.8]],
+    [["-3", "4"], [-0.6, 0.8]],
+    [["1e308", "1e308"], [Math.SQRT1_2, Math.SQRT1_2]],
+    [["5e-324", "-5e-324"], [Math.SQRT1_2, -Math.SQRT1_2]],
+    [["-0", "4"], [0, 1]],
+    [["4", "-0"], [1, 0]],
+  ]) {
+    const draft = makeDraft(original, original);
+    draft.seamPolicyKind = "preferred_build_direction";
+    draft.preferredDirection = input;
+    assert.equal(draftChanged(draft), true);
+    const applied = draftIntent(draft);
+    assert.equal(applied.recipe.seam_policy.kind, "preferred_build_direction");
+    const xy = applied.recipe.seam_policy.xy;
+    assert.ok(Math.abs(Math.hypot(...xy) - 1) < 1e-15);
+    xy.forEach((value, index) => {
+      assert.ok(Math.abs(value - expected[index]) < 1e-15);
+      assert.equal(Object.is(value, -0), false, "Unit direction canonicalizes signed zero");
+    });
+    assert.deepEqual(applied.printer, original.printer);
+    assert.deepEqual(applied.recipe.process, original.recipe.process);
+    assert.deepEqual(applied.recipe.supports, original.recipe.supports);
+    assert.deepEqual(draft.preferredDirection, input, "Apply conversion does not rewrite authored text");
+  }
+  assert.deepEqual(intent, original);
+});
+
+test("invalid preferred direction blocks full intent conversion and retains dirty input", () => {
+  for (const input of [
+    ["0", "0"], ["-0", "0"], ["", "1"], ["1", " "],
+    ["NaN", "1"], ["1", "NaN"], ["Infinity", "1"], ["1", "-Infinity"],
+    ["1e309", "1"],
+  ]) {
+    const draft = makeDraft(intent, intent);
+    draft.seamPolicyKind = "preferred_build_direction";
+    draft.preferredDirection = input;
+    assert.throws(() => draftIntent(draft),
+      error => error instanceof Error && error.message.trim().length > 0);
+    assert.equal(draftChanged(draft), true);
+    assert.deepEqual(draft.preferredDirection, input);
+    assert.deepEqual(draft.intent, intent, "Rejected input never mutates admitted intent");
+    draft.seamPolicyKind = "nearest";
+    assert.equal(draftChanged(draft), false, "Inactive direction text does not change nearest intent");
+    assert.deepEqual(draftIntent(draft), intent);
+  }
+});
+
+test("seam and every rectilinear choice survive JSON Apply/reload and participate in dirty state", () => {
+  for (const axis of ["x", "y", "alternating_xy", "alternating_yx"]) {
+    const draft = makeDraft(intent, intent);
+    draft.intent.recipe.rectilinear_axis = axis;
+    assert.equal(draftChanged(draft), axis !== intent.recipe.rectilinear_axis);
+    draft.seamPolicyKind = "preferred_build_direction";
+    draft.preferredDirection = ["1", "2"];
+    const applied = draftIntent(draft);
+    assert.equal(applied.recipe.rectilinear_axis, axis);
+    const saved = JSON.parse(JSON.stringify(applied));
+    const reopened = makeDraft(saved, saved);
+    assert.equal(draftChanged(reopened), false);
+    assert.deepEqual(draftIntent(reopened), applied, "No renormalization drift after reopen");
+    reopened.values.print_speed_mm_s = "36";
+    assert.deepEqual(draftIntent(reopened).recipe.seam_policy, applied.recipe.seam_policy);
+    reopened.seamPolicyKind = "nearest";
+    assert.deepEqual(draftIntent(reopened).recipe.seam_policy, { kind: "nearest" });
+    assert.equal(draftChanged(reopened), true);
+    assert.equal(draftIntent(reopened).recipe.rectilinear_axis, axis);
+  }
+});
+
 test("enabled support edits retain explicit zero gap and disabled policies are never invented", () => {
   const supported = structuredClone(intent);
   supported.recipe.supports = { kind: "breakaway", density: 0.25, xy_clearance_mm: 0.5,

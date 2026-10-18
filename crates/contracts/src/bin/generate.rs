@@ -107,6 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         MachineComponent::decl(&config),
         PrinterSpecification::decl(&config),
         PlanarPrintRecipe::decl(&config),
+        SeamPolicy::decl(&config),
+        RectilinearAxisPolicy::decl(&config),
         ProcessPolicy::decl(&config),
         RetractionPolicy::decl(&config),
         SupportPolicy::decl(&config),

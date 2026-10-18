@@ -19,7 +19,7 @@ struct EdgeBounds {
 fn resource(message: &str) -> ManufacturingError {
     error(ManufacturingErrorCode::ResourceLimit, message)
 }
-fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
+pub(super) fn charge(work: &mut usize, amount: usize) -> Result<(), ManufacturingError> {
     let before = *work;
     *work = before
         .checked_add(amount)

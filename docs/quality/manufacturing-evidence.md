@@ -116,6 +116,23 @@ accounting; native M/C identity cannot authorize D reuse.
 Classification clips to current fill. Skin reaches beneath upcoming pocket walls
 with half-bead wall overlap; unchanged vertical sections gain no extra skin.
 
+Required job-wide seam and rectilinear-axis intent uses the existing full-intent
+Apply/history transaction. [`HatchAxis::for_policy`](../../crates/manufacturing/src/planner/region.rs)
+resolves X/Y or alternating XY/YX from actual scheduled index. Template reuse
+keys the resolved axis inside the existing final-D/classification/height identity.
+Actual-stroke recovery selects only complete all-genuine Bridge row runs from
+the same borrowed role owner/density, rooted in actual original XY demand.
+Core ownership is exactly that original polygon intersected with the selected
+row bands, including curved/hole-edge cells—not each stroke's endpoint rectangle.
+Existing nearest-direct-anchor construction reserves only its actual merged
+stroke extent × bead-width corridor across affected roles.
+Clip original authored strokes to the exact complement, preserving lattice, role
+and holes elsewhere. Merge coincident Bridge rows once, reprove every final Bridge
+and the full mixed candidate, and reconstruct after lower/contact strokes change.
+No unrelated fully supported row inherits a Bridge label. Actual extra anchor
+extrusion enters nominal volume, not a physical porosity claim. Support raster
+keeps its separately admitted policy and all geometry/work/flow limits stay fixed.
+
 [`support::realize`](../../crates/manufacturing/src/planner/support/mod.rs) and
 [`AnchorWorkspace`](../../crates/manufacturing/src/planner/support/anchors.rs) derive
 bridge/contact anchors from actual prior deposited capsules, never filled domains
@@ -126,6 +143,9 @@ capsules must clear continuous target and actual object/bridge capsules under th
 shared [XYZ6 coordinate contract](../../crates/contracts/src/manufacturing/program_coordinates.rs),
 including full bead height and minimum Z/XY gaps. Candidate corridor offsets alone
 do not certify clearance. Editing a lower finish can invalidate an upper route.
+Varying-image support corridors can still refuse conservatively when finish
+envelopes cover more height than an actual contact query; target/void clearance
+is never waived to admit such a route.
 Auxiliary bridge rows clip positive fill at actual required hatch coordinates.
 Required groups use strict physical XYZ6 bead-footprint overlap, not rounded
 endpoint equality; tangency and genuine sparse gaps stay separate. Each group
@@ -140,9 +160,16 @@ do not inherit straight-bridge authority.
 
 [`realization::canonicalize`](../../crates/manufacturing/src/realization/mod.rs) fixes
 the normalized plan before [`backend::emit`](../../crates/manufacturing/src/backend/mod.rs).
+Perimeter starts select existing vertices at XYZ6 positions from the explicit
+nearest/preferred build-XY policy, preserving winding and closure. Exact projected
+ties use actual previous-position distance, lexicographic projected/raw XY and
+original cyclic index; complete-job prime supplies the initial previous position.
+No source pose or camera rotation changes the declared build direction.
 The independent [`verifier`](../../crates/manufacturing/src/verifier/mod.rs) parses
 actual command bytes and modal state against expected paths, lifecycle, coordinates,
 extrusion, feeds and declared process limits; it does not trust emitter comments.
+Final coordinate validation rejects ordinary paths off the authored layer axis;
+the independent verifier checks preferred seams before consuming expected paths.
 `inspect_bundle` repeats this verification and optionally streams bounded actual
 motion into [SPLR](../protocol/replay.md), not a visualization of intended moves.
 
@@ -158,7 +185,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project5/manufacturing6/surface3, planner9, emitter/verifier4
+Current identities are project6/manufacturing7/surface3, planner10, emitter/verifier4
 and SPLR3; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both

@@ -217,7 +217,7 @@ fn validate_format(bytes: &[u8], recovery: bool) -> Result<(), ProjectError> {
     if version != PROJECT_FORMAT_VERSION {
         return Err(error(
             ProjectErrorCode::UnsupportedFormat,
-            "only project format 5 is supported",
+            format!("only project format {PROJECT_FORMAT_VERSION} is supported"),
         ));
     }
     Ok(())

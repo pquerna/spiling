@@ -455,6 +455,9 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
                 retraction: spiling_contracts::manufacturing::RetractionPolicy::Disabled,
             },
             supports: spiling_contracts::manufacturing::SupportPolicy::Disabled,
+            seam_policy: spiling_contracts::manufacturing::SeamPolicy::Nearest,
+            rectilinear_axis:
+                spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
         },
     }
 }
@@ -484,6 +487,10 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         requested_infill_fraction: recipe.infill_fraction,
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
+    };
+    let end = match recipe.rectilinear_axis {
+        RectilinearAxisPolicy::Y | RectilinearAxisPolicy::AlternatingYX => [1.0, 2.0, 0.2],
+        RectilinearAxisPolicy::X | RectilinearAxisPolicy::AlternatingXY => [2.0, 1.0, 0.2],
     };
     ManufacturingBundle {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
@@ -515,7 +522,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "1".into(),
             },
-            planner_version: "8".into(),
+            planner_version: "10".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -551,13 +558,14 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
                     kind: DepositionKind::BottomSkin,
-                    points_mm: vec![[1.0, 1.0, 0.2], [2.0, 1.0, 0.2]],
+                    points_mm: vec![[1.0, 1.0, 0.2], end],
                 }],
                 region_coverage,
             }],
         },
         program: format!(
-            "; SOFTWARE VALIDATION ONLY, NOT MACHINE READY\nG21\nG90\nM82\nG92 E0\nG0 X1 Y1 Z0.2 F1200\nG1 X2 Y1 Z0.2 E{filament:.9} F600\n"
+            "; SOFTWARE VALIDATION ONLY, NOT MACHINE READY\nG21\nG90\nM82\nG92 E0\nG0 X1 Y1 Z0.2 F1200\nG1 X{} Y{} Z0.2 E{filament:.9} F600\n",
+            end[0], end[1]
         ),
         // Storage tests exercise schema/integrity, not an independent replay service.
         verification: VerificationReport {
@@ -678,6 +686,57 @@ fn manufacturing_geometry_and_intent_history_restore_coherent_shared_assets() {
         project.snapshot().manufacturing_artifact.as_ref().unwrap()
     ));
 }
+#[test]
+fn seam_and_axis_intent_edits_invalidate_and_restore_artifacts_through_history() {
+    use spiling_contracts::manufacturing::{RectilinearAxisPolicy, SeamPolicy};
+    let baseline = manufacturing_intent();
+    let mut seam = baseline.clone();
+    seam.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, -0.8] };
+    let mut axis = baseline.clone();
+    axis.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
+    for changed in [seam, axis] {
+        let mut project = manufactured();
+        let original = project.snapshot().manufacturing_artifact.clone().unwrap();
+        let before = project.info().revision;
+        edit(
+            &mut project,
+            Edit::SetManufacturingIntent {
+                intent: changed.clone().into(),
+            },
+        );
+        assert!(project.info().revision > before);
+        assert_eq!(
+            project.snapshot().manufacturing_intent.as_deref(),
+            Some(&changed)
+        );
+        assert!(project.snapshot().manufacturing_artifact.is_none());
+        assert_ne!(
+            manufacturing_bundle(&project).provenance.input_hash,
+            original.record.input_hash
+        );
+        project.undo().unwrap();
+        assert_eq!(
+            project.snapshot().manufacturing_intent.as_deref(),
+            Some(&baseline)
+        );
+        assert!(Arc::ptr_eq(
+            &original,
+            project.snapshot().manufacturing_artifact.as_ref().unwrap()
+        ));
+        project.redo().unwrap();
+        assert_eq!(
+            project.snapshot().manufacturing_intent.as_deref(),
+            Some(&changed)
+        );
+        assert!(project.snapshot().manufacturing_artifact.is_none());
+        project.undo().unwrap();
+        assert!(Arc::ptr_eq(
+            &original,
+            project.snapshot().manufacturing_artifact.as_ref().unwrap()
+        ));
+    }
+}
+
 #[test]
 fn manufacturing_publication_rejects_stale_foreign_and_semantic_mismatch_atomically() {
     let mut project = manufactured();

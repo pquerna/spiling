@@ -117,6 +117,16 @@ program bytes, never trust a stored `verified` flag. Export uses the common excl
 writer. [Manufacturing](manufacturing-evidence.md) maps the implementation and current
 refusals; [authoring](authoring-evidence.md) maps transactions and recovery.
 
+Seam and hatch direction are required recipe data: `seam_policy` is `nearest` or
+`preferred_build_direction` with normalized build-XY `xy`; `rectilinear_axis` is
+`x`, `y`, `alternating_xy` or `alternating_yx`. The production panel exposes these
+alongside the existing Apply/history controls and normalizes an authored nonzero
+vector on Apply. Compare fresh emitted motion, not only displayed intent: preferred
+perimeter entries use existing build-side vertices, ordinary bed hatch follows the
+chosen axis, and bridge/support exceptions retain actual-anchor admission. Save,
+remove only an owned original source copy, then inspect in a fresh engine to check
+the same policies and bytes survive independently of that path.
+
 Source-face finishes are ordinary revision-bound project edits. Use current native
 occurrence/face IDs, choose scope and explicitly Apply; Undo/Redo/Save remain Core
 operations. Whole-face ribs and image relief retain narrow certified carrier/pose

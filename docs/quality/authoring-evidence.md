@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Source-backed authoring reference
 
-Core owns persistent project state; the engine composes it with disposable native geometry and display caches. CLI and desktop use the same services, not separate project writers. Current storage is project format5 with strict refusal of incompatible formats.
+Core owns persistent project state; the engine composes it with disposable native geometry and display caches. CLI and desktop use the same services, not separate project writers. Current storage is project format6 with strict refusal of incompatible formats.
 
 Canonical contracts: [project format, durability and recovery](../protocol/project.md), [control and operations](../protocol/control.md), [display](../protocol/display.md). This page maps their invariants to Rust; it is not a qualification log.
 

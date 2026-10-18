@@ -19,6 +19,8 @@ pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
         layer_height_mm: 0.4,
         bead_width_mm: 0.6,
         perimeter_count: 1,
+        seam_policy: SeamPolicy::Nearest,
+        rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
         top_skin_thickness_mm: 0.81,
         bottom_skin_thickness_mm: 0.41,
         infill_fraction: fraction,
@@ -101,7 +103,7 @@ fn output(
         .paths(
             0.4 * (index + 1) as f64,
             0.4,
-            region::HatchAxis::preferred(index),
+            region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
             &recipe,
             &mut 0,
             &cancel,
@@ -376,7 +378,7 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
             .paths(
                 schedule[index as usize].z,
                 schedule[index as usize].height,
-                region::HatchAxis::preferred(index),
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
                 &recipe,
                 &mut 0,
                 &cancel,
@@ -614,7 +616,7 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
             .paths(
                 0.4 * (index + 1) as f64,
                 0.4,
-                region::HatchAxis::preferred(index),
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
                 &recipe,
                 &mut 0,
                 &cancel,

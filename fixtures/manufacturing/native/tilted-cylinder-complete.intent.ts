@@ -10,7 +10,7 @@ const intent = {
   recipe: {
     ...completeIntent.recipe,
     id: "native-deadline-tilt",
-    revision: "4",
+    revision: "5",
     layer_height_mm: 0.4,
     bead_width_mm: 0.6,
     perimeter_count: 1,
@@ -30,6 +30,8 @@ const intent = {
       retraction: { kind: "disabled" },
     },
     supports: { kind: "disabled" },
+    seam_policy: { kind: "nearest" },
+    rectilinear_axis: "alternating_xy",
   },
 } satisfies ManufacturingIntent;
 

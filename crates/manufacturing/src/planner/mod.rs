@@ -679,26 +679,20 @@ pub(crate) fn plan(
                 surface_resolution.extend(records);
             }
         }
-        let parity = index as usize % 2;
-        if templates[parity].is_none() {
+        let axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, index);
+        let axis_slot = usize::from(axis == region::HatchAxis::Y);
+        if templates[axis_slot].is_none() {
             let mut template_segments = segments;
-            templates[parity] = Some(
+            templates[axis_slot] = Some(
                 classified
                     .as_ref()
                     .expect("region classification initialized")
-                    .paths(
-                        z,
-                        height,
-                        region::HatchAxis::preferred(index),
-                        recipe,
-                        &mut template_segments,
-                        cancel,
-                    )?,
+                    .paths(z, height, axis, recipe, &mut template_segments, cancel)?,
             );
         }
-        let (template, coverage) = templates[parity]
+        let (template, coverage) = templates[axis_slot]
             .as_ref()
-            .expect("current parity template initialized");
+            .expect("current axis template initialized");
         let additional = template
             .iter()
             .map(|p| p.points_mm.len() - 1)
@@ -768,7 +762,7 @@ pub(crate) fn plan(
         &mut segments,
         cancel,
         &mut admission.geometry_work,
-        |index, axis, segments, retained_support_points| {
+        |index, axis, segments, retained_support_points, recovery| {
             let live_retained_points = retained_points
                 .checked_add(retained_support_points)
                 .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -818,27 +812,60 @@ pub(crate) fn plan(
                 recipe,
                 cancel,
             )?;
-            let paths = classified
-                .paths(
-                    elevation.z,
-                    elevation.height,
-                    axis,
-                    recipe,
+            let hatch_layer = region::HatchLayer {
+                z: elevation.z,
+                height: elevation.height,
+                axis,
+                recipe,
+            };
+            let recovering_components = recovery.is_some();
+            let paths = if let Some(anchors) = recovery {
+                let query_points = skin_query_retained_points(0, &[&lower, &upper])?;
+                let mut check_component =
+                    |candidate: &mut support::RasterCandidate, axis, scratch: usize| {
+                        let live = scratch.checked_add(query_points).ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "component and query scratch overflow",
+                            )
+                        })?;
+                        anchors(candidate, axis, live)
+                    };
+                classified.paths_with_bridge_recovery(
+                    &hatch_layer,
                     segments,
+                    |scratch, work| {
+                        boolean::charge(neighborhoods.work_mut(), work)?;
+                        admit_skin_scratch(
+                            live_retained_points,
+                            &mut neighborhoods,
+                            &[&lower, &upper],
+                            scratch,
+                            cancel,
+                        )
+                    },
+                    &mut check_component,
                     cancel,
                 )?
-                .0;
-            let whole_rows = classified.whole_rows(
-                &paths,
-                &region::HatchLayer {
-                    z: elevation.z,
-                    height: elevation.height,
-                    axis,
-                    recipe,
-                },
-                segments,
-                cancel,
-            )?;
+            } else {
+                classified
+                    .paths(
+                        elevation.z,
+                        elevation.height,
+                        axis,
+                        recipe,
+                        segments,
+                        cancel,
+                    )?
+                    .0
+            };
+            let whole_rows = if recovering_components {
+                // A bridge band and authored complement are disjoint owners.
+                // Global row extension must not re-enter the selected band.
+                Vec::new()
+            } else {
+                classified.whole_rows(&paths, &hatch_layer, segments, cancel)?
+            };
             Ok(support::RasterCandidate { paths, whole_rows })
         },
         |demand_bounds, point_limit, support_work, native_work| {

@@ -137,6 +137,10 @@ impl AnchorWorkspace {
         self.record_limit = remaining_records.min(MAX_DEPOSITION_SEGMENTS as usize);
     }
 
+    pub(in crate::planner) fn retained_records(&self) -> usize {
+        self.intervals.capacity() + self.uncovered.capacity()
+    }
+
     /// Uncovered normalized centerline intervals with actual endpoint-anchor presence
     /// and provenance. Candidate endpoint disks may certify positive-area anchors;
     /// they do not enlarge interior intervals or shorten measured unsupported spans.
@@ -218,6 +222,12 @@ impl AnchorWorkspace {
                             "retained deposited-anchor interval budget exceeded",
                         ));
                     }
+                    super::reserve_component_record(
+                        &mut self.intervals,
+                        1,
+                        self.uncovered.capacity(),
+                        self.record_limit,
+                    )?;
                     self.intervals.push((start / length, end / length, direct));
                 }
             }
@@ -276,6 +286,12 @@ impl AnchorWorkspace {
                 "combined retained anchor interval budget exceeded",
             ));
         }
+        super::reserve_component_record(
+            &mut self.uncovered,
+            1,
+            self.intervals.capacity(),
+            self.record_limit,
+        )?;
         self.uncovered.push(gap);
         Ok(())
     }

@@ -567,11 +567,13 @@ pub(super) enum HatchAxis {
     Y,
 }
 impl HatchAxis {
-    pub(super) fn preferred(index: u32) -> Self {
-        if index.is_multiple_of(2) {
-            Self::X
-        } else {
-            Self::Y
+    pub(super) fn for_policy(policy: RectilinearAxisPolicy, index: u32) -> Self {
+        match policy {
+            RectilinearAxisPolicy::X => Self::X,
+            RectilinearAxisPolicy::Y => Self::Y,
+            RectilinearAxisPolicy::AlternatingXY if index.is_multiple_of(2) => Self::X,
+            RectilinearAxisPolicy::AlternatingYX if !index.is_multiple_of(2) => Self::X,
+            RectilinearAxisPolicy::AlternatingXY | RectilinearAxisPolicy::AlternatingYX => Self::Y,
         }
     }
     pub(super) fn orthogonal(self) -> Self {
@@ -600,55 +602,102 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let HatchLayer {
-        z: _,
-        height: h,
-        axis,
-        recipe,
-    } = *layer;
-    let width = recipe.bead_width_mm;
-    let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
     for polygon in &fill.0 {
-        check_cancel(cancel)?;
+        let rows = HatchRows::new(polygon, fraction, layer)?;
+        hatch_polygon(polygon, kind, &rows, layer, paths, segments, cancel)?;
+    }
+    Ok(())
+}
+
+/// Prepared lattice shared by retention admission and actual component hatch.
+pub(super) struct HatchRows {
+    count: usize,
+    start: f64,
+    spacing: f64,
+    edges: usize,
+}
+
+impl HatchRows {
+    pub(super) fn new(
+        polygon: &Polygon<f64>,
+        fraction: f64,
+        layer: &HatchLayer<'_>,
+    ) -> Result<Self, ManufacturingError> {
+        let width = layer.recipe.bead_width_mm;
+        let h = layer.height;
+        let solid_spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h;
         let rect = polygon
             .bounding_rect()
             .ok_or_else(|| unsupported("fill has no finite bounds"))?;
-        let swap = axis == HatchAxis::Y;
-        let (min, max) = if swap {
+        let (min, max) = if layer.axis == HatchAxis::Y {
             (rect.min().x, rect.max().x)
         } else {
             (rect.min().y, rect.max().y)
         };
-        // Multiplying density before dividing avoids overflow for tiny finite
-        // fractions; a single centered sparse row needs no finite huge pitch.
-        let row_count = (((max - min) / solid_spacing) * fraction).ceil().max(1.0);
-        if !row_count.is_finite()
-            || row_count > (MAX_DEPOSITION_SEGMENTS as usize - *segments) as f64
-        {
+        let count = (((max - min) / solid_spacing) * fraction).ceil().max(1.0);
+        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
             return Err(resource("rectilinear hatch row limit exceeded"));
         }
-        let spacing = if row_count == 1.0 {
+        let spacing = if count == 1.0 {
             0.0
         } else {
             solid_spacing / fraction
         };
-        let start = min + ((max - min) - (row_count - 1.0) * spacing) * 0.5;
-        let mut hits = Vec::new();
-        for row in 0..row_count as usize {
-            check_cancel(cancel)?;
-            hits.clear();
-            let coordinate = start + row as f64 * spacing;
-            row_intersections(polygon, coordinate, axis, &mut hits, cancel)?;
-            append_hatch_row(
-                &hits,
-                coordinate,
-                kind,
-                layer,
-                row % 2 == 1,
-                paths,
-                segments,
-            )?;
-        }
+        let edges = std::iter::once(polygon.exterior())
+            .chain(polygon.interiors())
+            .try_fold(0usize, |total, ring| {
+                total.checked_add(ring.0.len().saturating_sub(1))
+            })
+            .ok_or_else(|| resource("component hatch boundary count overflow"))?;
+        Ok(Self {
+            count: count as usize,
+            start: min + ((max - min) - (count - 1.0) * spacing) * 0.5,
+            spacing,
+            edges,
+        })
+    }
+
+    pub(super) fn point_bound(&self) -> Result<usize, ManufacturingError> {
+        // Row intersections stay live beside all emitted endpoints.
+        self.count
+            .checked_add(1)
+            .and_then(|count| self.edges.checked_mul(count))
+            .filter(|points| *points <= MAX_DEPOSITION_SEGMENTS as usize)
+            .ok_or_else(|| resource("component hatch point bound exceeds retained budget"))
+    }
+}
+
+/// The borrowed component is the same classified owner for both axis proposals.
+pub(super) fn hatch_polygon(
+    polygon: &Polygon<f64>,
+    kind: DepositionKind,
+    rows: &HatchRows,
+    layer: &HatchLayer<'_>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
+    check_cancel(cancel)?;
+    if rows.count > MAX_DEPOSITION_SEGMENTS as usize - *segments {
+        return Err(resource("rectilinear hatch row limit exceeded"));
+    }
+    let mut hits = Vec::new();
+    hits.try_reserve_exact(rows.edges)
+        .map_err(|_| resource("component hatch intersection allocation refused"))?;
+    for row in 0..rows.count {
+        check_cancel(cancel)?;
+        hits.clear();
+        let coordinate = rows.start + row as f64 * rows.spacing;
+        row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
+        append_hatch_row(
+            &hits,
+            coordinate,
+            kind,
+            layer,
+            row % 2 == 1,
+            paths,
+            segments,
+        )?;
     }
     Ok(())
 }
@@ -811,7 +860,7 @@ fn row_intersections(
             }
         }
     }
-    hits.sort_by(f64::total_cmp);
+    hits.sort_unstable_by(f64::total_cmp);
     if hits.len() % 2 != 0 {
         return Err(unsupported(
             "rectilinear hatch clipping has odd boundary parity",
@@ -820,7 +869,7 @@ fn row_intersections(
     Ok(())
 }
 
-fn append_hatch_row(
+pub(super) fn append_hatch_row(
     hits: &[f64],
     coordinate: f64,
     kind: DepositionKind,

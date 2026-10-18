@@ -126,6 +126,8 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             layer_height_mm: 1.0,
             bead_width_mm: 1.0,
             perimeter_count: 1,
+            seam_policy: SeamPolicy::Nearest,
+            rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
             infill_fraction: 1.0,
             top_skin_thickness_mm: 1.0,
             bottom_skin_thickness_mm: 1.0,
@@ -412,14 +414,19 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
     let (intent, mut plan) = fixture();
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![DepositionPath {
-        kind: DepositionKind::SolidFill,
-        points_mm: vec![[1.0, 1.0, 1.0], [4.0, 5.0, 1.0]],
+        kind: DepositionKind::Perimeter,
+        points_mm: vec![
+            [1.0, 1.0, 1.0],
+            [4.0, 5.0, 1.0],
+            [4.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
     }];
     refresh_volumes(&intent, &mut plan);
-    let program = "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\n";
+    let program = "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X1 Y1 Z1 F1200\nG1 X4 Y5 Z1 E1.25 F600\nG1 X4 Y1 Z1 E2.25 F600\nG1 X1 Y1 Z1 E3 F600\n";
     let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
-    assert_eq!(report.filament_length_mm, 1.25);
-    assert_eq!(report.deposition_segments, 1);
+    assert_eq!(report.filament_length_mm, 3.0);
+    assert_eq!(report.deposition_segments, 3);
     assert_eq!(report.travel_segments, 1);
 }
 
@@ -1188,6 +1195,154 @@ fn cooling_transition_and_variable_height_properties_use_actual_bytes() {
 }
 
 #[test]
+fn preferred_seam_rejects_a_matching_policy_ignoring_plan_and_program() {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, 0.8] };
+    let cancel = AtomicBool::new(false);
+    // General geometry validation deliberately accepts pre-canonical plans.
+    plan.validate(&intent).unwrap();
+    let error = verify(GOLDEN, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let canonical_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(
+        verify(&canonical_program, &plan, &intent, &cancel)
+            .unwrap()
+            .verified
+    );
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
+    let points = &mut plan.layers[0].paths[0].points_mm;
+    points.pop();
+    points.rotate_left(2);
+    points.push(points[0]);
+    plan.validate(&intent).unwrap();
+    let policy_ignoring_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert_ne!(policy_ignoring_program, canonical_program);
+    let error = verify(&policy_ignoring_program, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+    assert_eq!(
+        verify_actual(
+            &policy_ignoring_program,
+            &plan,
+            &intent,
+            &cancel,
+            Some(&mut sink)
+        )
+        .unwrap_err()
+        .code,
+        ManufacturingErrorCode::VerificationFailed,
+        "Packed actual replay enforces the same authored seam boundary"
+    );
+}
+
+#[test]
+fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
+    for point in &mut plan.layers[0].paths[0].points_mm {
+        point[1] += 9.0;
+    }
+    plan.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::Perimeter,
+        points_mm: vec![
+            [7.0, 1.0, 1.0],
+            [9.0, 1.0, 1.0],
+            [9.0, 5.0, 1.0],
+            [7.0, 5.0, 1.0],
+            [7.0, 1.0, 1.0],
+        ],
+    });
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 10.0, 1.0]);
+    assert_eq!(plan.layers[0].paths[1].points_mm[0], [9.0, 5.0, 1.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+    let points = &mut plan.layers[0].paths[1].points_mm;
+    points.pop();
+    points.rotate_left(3);
+    points.push(points[0]);
+    assert_eq!(points[0], [9.0, 1.0, 1.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+}
+
+#[test]
+fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
+    let cancel = AtomicBool::new(false);
+    for prime_y in [None, Some(10.0), Some(3.000_000_4)] {
+        let (mut intent, mut plan) = if prime_y.is_some() {
+            complete_fixture()
+        } else {
+            fixture()
+        };
+        intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, -0.0] };
+        if let (Some(y), JobWorkflow::CompleteMarlin { job }) =
+            (prime_y, &mut intent.printer.workflow)
+        {
+            job.prime_end_mm[1] = y;
+        }
+        // Both right vertices project to X5. Raw X must not defeat the exact
+        // command-space tie: absent prior motion choose Y1, with high prime
+        // choose Y5. A prime just above raw Y3 projects to Y3 and ties at Y1.
+        plan.layers[0].paths[0].points_mm[1][0] = 5.000_000_1;
+        plan.layers[0].paths[0].points_mm[2][0] = 5.000_000_4;
+        refresh_volumes(&intent, &mut plan);
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        let expected_y = if prime_y == Some(10.0) { 5.0 } else { 1.0 };
+        assert_eq!(plan.layers[0].paths[0].points_mm[0][1], expected_y);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+
+        let points = &mut plan.layers[0].paths[0].points_mm;
+        points.pop();
+        let other = points
+            .iter()
+            .position(|p| p[0] > 5.0 && p[1] != expected_y)
+            .unwrap();
+        points.rotate_left(other);
+        points.push(points[0]);
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
+        assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+    }
+}
+
+#[test]
+fn preferred_seam_score_has_no_proximity_epsilon_and_bridge_contours_are_exempt() {
+    let (mut intent, mut plan) = complete_fixture();
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
+    // A one-XYZ6-step score advantage wins even though the prime endpoint is
+    // much closer to the lower-scoring upper vertex.
+    plan.layers[0].paths[0].points_mm[1][0] = 5.000_001;
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+
+    let points = &mut plan.layers[0].paths[0].points_mm;
+    points.pop();
+    points.rotate_left(1);
+    points.push(points[0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+
+    // The same closed geometry under an admitted bridge role is not a
+    // perimeter seam request. Its separate process semantics still replay.
+    plan.layers[0].paths[0].kind = DepositionKind::Bridge;
+    refresh_volumes(&intent, &mut plan);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+}
+
+#[test]
 fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     let (intent, mut plan) = fixture();
     plan.layers.truncate(1);
@@ -1203,7 +1358,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
             [10.0, 10.0, 1.0],
         ],
     });
-    plan.layers[0].paths[1].points_mm = vec![[20.0, 20.0, 1.0], [2.0, 2.0, 1.0]];
+    plan.layers[0].paths[1].points_mm = vec![[20.0, 2.0, 1.0], [2.0, 2.0, 1.0]];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
@@ -1211,7 +1366,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     assert_eq!(plan.layers[0].paths[2].points_mm[0], [2.0, 2.0, 1.0]);
     let emitted = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     assert!(emitted.contains("G0 X2.000000 Y2.000000 Z1.000000"));
-    assert!(!emitted.contains("G0 X20.000000 Y20.000000"));
+    assert!(!emitted.contains("G0 X20.000000 Y2.000000"));
     verify(&emitted, &plan, &intent, &cancel).unwrap();
     assert_eq!(
         emitted,

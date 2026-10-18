@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: interface cutover implemented; operation qualification incomplete. Generic native faces and independent display availability use `step-native-trimmed-v2`, `mesh-trimmed-mm-0.05-v2`, project5/manufacturing6/planner9. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) records exercised flows and explicit fitting/housing limits. No alternate kernel, mesh slicing fallback or physical printer qualification is introduced.
+Status: interface cutover implemented; operation qualification incomplete. Generic native faces and independent display availability use `step-native-trimmed-v2` and `mesh-trimmed-mm-0.05-v2`; executable project/manufacturing constants identify the current strict storage generation. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) records exercised flows and explicit fitting/housing limits. No alternate kernel, mesh slicing fallback or physical printer qualification is introduced.
 
 ## 1. Decision and user outcome
 
@@ -27,7 +27,7 @@ Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alter
 
 ## 2. Historical design baseline and qualification gaps
 
-Current consumer pin: all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), all eleven lockfile Git sources and `crates/geometry::KERNEL_REVISION` select `d5de658a8b589efdeb78970d79a0563c789c268a`. The source-inspection baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`; its restrictions describe the pre-cutover design baseline, not current generic admission. Pins are provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates measured producers and remaining numerical/manufacturing limits.
+Current native dependency identity is owned by all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), their lockfile Git sources and `crates/geometry::KERNEL_REVISION`; these must agree. The source-inspection baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`; its restrictions describe the pre-cutover design baseline, not current generic admission. Pins are provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates measured producers and remaining numerical/manufacturing limits.
 
 | Family | Kernel path at the design baseline, from source inspection | Pre-cutover Spiling restriction | Work identified by the design |
 | --- | --- | --- | --- |

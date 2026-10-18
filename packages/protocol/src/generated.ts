@@ -205,7 +205,11 @@ export type MachineComponent = { id: string, role: MachineComponentRole, pose: R
 
 export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, };
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, };
+
+export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], };
+
+export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_yx";
 
 export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
 
@@ -320,7 +324,7 @@ export const JOB_CANCEL_AFTER_MS = 300000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 5 as const;
+export const PROJECT_FORMAT_VERSION = 6 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
@@ -337,7 +341,7 @@ export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 6 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 7 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;

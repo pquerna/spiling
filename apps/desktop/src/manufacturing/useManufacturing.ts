@@ -12,6 +12,8 @@ import {
   type ManufacturingResponse,
   type ManufacturingIntent,
   type VerificationOutput,
+  type RectilinearAxisPolicy,
+  type SeamPolicy,
 } from "@spiling/protocol";
 import { native, type ManufacturingLayer } from "../native.ts";
 import type { ManufacturingHost } from "../useWorkbench.ts";
@@ -319,6 +321,29 @@ export function useManufacturing(host: ManufacturingHost) {
     setFailure(null);
     setMessage("");
     setDraft(previous => previous ? { ...previous, policyValues: { ...previous.policyValues, [key]: value } } : null);
+  }
+  function editSeamPolicy(value: SeamPolicy["kind"]) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => previous ? { ...previous, seamPolicyKind: value } : null);
+  }
+  function editPreferredDirection(axis: 0 | 1, value: string) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => {
+      if (!previous) return null;
+      const preferredDirection: [string, string] = [...previous.preferredDirection];
+      preferredDirection[axis] = value;
+      return { ...previous, preferredDirection };
+    });
+  }
+  function editRectilinearAxis(value: RectilinearAxisPolicy) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => previous ? {
+      ...previous,
+      intent: { ...previous.intent, recipe: { ...previous.intent.recipe, rectilinear_axis: value } },
+    } : null);
   }
   function reloadDraft() {
     const intent = statusRef.current?.intent;
@@ -635,6 +660,9 @@ export function useManufacturing(host: ManufacturingHost) {
     selectSoftwareIntent,
     editScalar,
     editPolicyScalar,
+    editSeamPolicy,
+    editPreferredDirection,
+    editRectilinearAxis,
     reloadDraft,
     apply: () => perform("apply"),
     compile: () => perform("compile"),

@@ -77,6 +77,8 @@ fn intent() -> ManufacturingIntent {
                 retraction: RetractionPolicy::Disabled,
             },
             supports: SupportPolicy::Disabled,
+            seam_policy: SeamPolicy::Nearest,
+            rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
         },
     }
 }
@@ -395,7 +397,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "8".into(),
+            planner_version: "10".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },
@@ -473,7 +475,7 @@ fn native_shape_error_is_required_positive_and_persisted_as_semantic_intent() {
         assert!(invalid.validate().is_err(), "{value}");
     }
     let mut old = intent.clone();
-    old.printer.schema_version = 5;
+    old.printer.schema_version = MANUFACTURING_SCHEMA_VERSION - 1;
     assert!(old.validate().is_err());
     let captured = bundle();
     let bytes = serde_json::to_vec(&captured).unwrap();
@@ -507,8 +509,83 @@ fn native_shape_error_is_required_positive_and_persisted_as_semantic_intent() {
         .remove("native_shape_error_mm");
     assert!(decode_bundle(&serde_json::to_vec(&missing).unwrap()).is_err());
     let mut old = serde_json::to_value(&captured).unwrap();
-    old["schema_version"] = serde_json::json!(5);
+    old["schema_version"] = serde_json::json!(MANUFACTURING_SCHEMA_VERSION - 1);
     assert!(decode_bundle(&serde_json::to_vec(&old).unwrap()).is_err());
+}
+
+#[test]
+fn seam_and_axis_json_are_explicit_strict_and_preserve_unit_directions() {
+    let original = intent();
+    let value = serde_json::to_value(&original).unwrap();
+    assert_eq!(
+        value["recipe"]["seam_policy"],
+        serde_json::json!({"kind":"nearest"})
+    );
+    assert_eq!(value["recipe"]["rectilinear_axis"], "alternating_xy");
+    for (axis, name) in [
+        (RectilinearAxisPolicy::X, "x"),
+        (RectilinearAxisPolicy::Y, "y"),
+        (RectilinearAxisPolicy::AlternatingXY, "alternating_xy"),
+        (RectilinearAxisPolicy::AlternatingYX, "alternating_yx"),
+    ] {
+        let mut authored = original.clone();
+        authored.recipe.rectilinear_axis = axis;
+        authored.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, -0.8] };
+        let json = serde_json::to_value(&authored).unwrap();
+        assert_eq!(json["recipe"]["rectilinear_axis"], name);
+        assert_eq!(
+            json["recipe"]["seam_policy"],
+            serde_json::json!({"kind":"preferred_build_direction","xy":[0.6,-0.8]})
+        );
+        assert_eq!(
+            decode_intent(&serde_json::to_vec(&authored).unwrap()).unwrap(),
+            authored
+        );
+    }
+    for policy in [
+        serde_json::json!({}),
+        serde_json::json!({"kind":"unknown"}),
+        serde_json::json!({"kind":"nearest","xy":[1.0,0.0]}),
+        serde_json::json!({"kind":"preferred_build_direction"}),
+        serde_json::json!({"kind":"preferred_build_direction","xy":[1.0]}),
+        serde_json::json!({"kind":"preferred_build_direction","xy":[1.0,0.0,0.0]}),
+        serde_json::json!({"kind":"preferred_build_direction","xy":[1.0,0.0],"frame":"camera"}),
+    ] {
+        let mut invalid = value.clone();
+        invalid["recipe"]["seam_policy"] = policy;
+        assert!(decode_intent(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+    for policy in [
+        serde_json::json!("alternating_x_y"),
+        serde_json::json!("unknown"),
+        serde_json::Value::Null,
+    ] {
+        let mut invalid = value.clone();
+        invalid["recipe"]["rectilinear_axis"] = policy;
+        assert!(decode_intent(&serde_json::to_vec(&invalid).unwrap()).is_err());
+    }
+    for xy in [
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [f64::MIN_POSITIVE, 0.0],
+        [f64::MAX, f64::MAX],
+        [f64::NAN, 1.0],
+        [1.0, f64::INFINITY],
+        [f64::NEG_INFINITY, 0.0],
+        [1.0 + 2.0 * crate::geometry::POSE_NORM_TOLERANCE, 0.0],
+    ] {
+        let mut invalid = original.clone();
+        invalid.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy };
+        assert!(invalid.validate().is_err(), "{xy:?}");
+    }
+    let xy = [1.0 + 0.5 * crate::geometry::POSE_NORM_TOLERANCE, 0.0];
+    let mut admitted = original;
+    admitted.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy };
+    admitted.validate().unwrap();
+    assert_eq!(
+        decode_intent(&serde_json::to_vec(&admitted).unwrap()).unwrap(),
+        admitted
+    );
 }
 
 #[test]
@@ -598,6 +675,156 @@ fn fixed_layer_paths_reject_implicit_closure_zero_nonfinite_and_out_of_frame_mov
     changed = valid;
     changed.layers[0].z_mm -= 5.0;
     assert!(changed.validate(&intent).is_err());
+}
+
+#[test]
+fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_policy() {
+    for (policy, fixed_axes) in [
+        (RectilinearAxisPolicy::X, [1, 1]),
+        (RectilinearAxisPolicy::Y, [0, 0]),
+        (RectilinearAxisPolicy::AlternatingXY, [1, 0]),
+        (RectilinearAxisPolicy::AlternatingYX, [0, 1]),
+    ] {
+        let mut data = intent();
+        data.recipe.rectilinear_axis = policy;
+        for kind in [
+            DepositionKind::BottomSkin,
+            DepositionKind::TopSkin,
+            DepositionKind::SolidFill,
+            DepositionKind::SparseFill,
+        ] {
+            data.recipe.infill_fraction = if kind == DepositionKind::SparseFill {
+                0.25
+            } else {
+                1.0
+            };
+            let mut accepted = segmented_plan(&[&[2], &[2]]);
+            for (layer, fixed_axis) in accepted.layers.iter_mut().zip(fixed_axes) {
+                let coverage = &mut layer.region_coverage;
+                coverage.wall_area_mm2 = 0.0;
+                coverage.requested_infill_fraction = data.recipe.infill_fraction;
+                match kind {
+                    DepositionKind::BottomSkin => coverage.bottom_skin_area_mm2 = 50.0,
+                    DepositionKind::TopSkin => coverage.top_skin_area_mm2 = 50.0,
+                    DepositionKind::SolidFill => coverage.solid_interior_area_mm2 = 50.0,
+                    DepositionKind::SparseFill => {
+                        coverage.sparse_interior_area_mm2 = 50.0;
+                        coverage.intentional_void_area_mm2 = 37.5;
+                    }
+                    _ => unreachable!(),
+                }
+                let along = 1 - fixed_axis;
+                let path = &mut layer.paths[0];
+                path.kind = kind;
+                for (index, point) in path.points_mm.iter_mut().enumerate() {
+                    point[fixed_axis] = 10.0;
+                    point[along] = 10.0 + index as f64;
+                }
+            }
+            accepted.validate(&data).unwrap();
+            for (index, fixed_axis) in fixed_axes.into_iter().enumerate() {
+                let mut orthogonal = accepted.clone();
+                for point in &mut orthogonal.layers[index].paths[0].points_mm {
+                    point.swap(0, 1);
+                }
+                let error = orthogonal.validate(&data).unwrap_err();
+                assert_eq!(error.code, ManufacturingErrorCode::InvalidSpecification);
+                let mut diagonal = accepted.clone();
+                diagonal.layers[index].paths[0].points_mm[2][fixed_axis] += 1.0;
+                assert_eq!(
+                    diagonal.validate(&data).unwrap_err().code,
+                    ManufacturingErrorCode::InvalidSpecification
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_axis_uses_exact_xyz6_projection_without_geometric_epsilon() {
+    let mut data = intent();
+    data.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    let mut accepted = segmented_plan(&[&[1]]);
+    accepted.layers[0].paths[0].points_mm[0][1] = 10.0000004;
+    accepted.layers[0].paths[0].points_mm[1][1] = 10.00000049;
+    accepted.validate(&data).unwrap();
+    let mut changed = accepted.clone();
+    changed.layers[0].paths[0].points_mm[1][1] = 10.00000051;
+    assert_eq!(
+        changed.validate(&data).unwrap_err().message,
+        "ordinary deposition segment violates the authored rectilinear axis"
+    );
+    accepted.layers[0].paths[0].points_mm[0][1] = -0.0;
+    accepted.layers[0].paths[0].points_mm[1][1] = 0.0;
+    accepted.validate(&data).unwrap();
+}
+
+#[test]
+fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters() {
+    let mut data = intent();
+    data.printer.capabilities.generated_supports = true;
+    data.recipe.supports = SupportPolicy::Breakaway {
+        density: 0.5,
+        xy_clearance_mm: 0.3,
+        z_gap_mm: 0.2,
+        interface_thickness_mm: 0.2,
+    };
+    let mut scheduled = segmented_plan(&[&[1], &[1]]);
+    let first = &mut scheduled.layers[0];
+    first.paths[0].kind = DepositionKind::SupportInterface;
+    first.region_coverage.section_area_mm2 = 0.0;
+    first.region_coverage.source_section_area_mm2 = 0.0;
+    first.region_coverage.wall_area_mm2 = 0.0;
+    first.region_coverage.support_area_mm2 = 1.0;
+    first.region_coverage.support_nominal_deposition_volume_mm3 = 0.1;
+    scheduled.validate(&data).unwrap();
+    scheduled.layers[1].paths[0].points_mm[1].swap(0, 1);
+    assert_eq!(
+        scheduled.validate(&data).unwrap_err().message,
+        "ordinary deposition segment violates the authored rectilinear axis"
+    );
+    for kind in [
+        DepositionKind::Bridge,
+        DepositionKind::Support,
+        DepositionKind::SupportInterface,
+    ] {
+        let mut accepted = plan();
+        accepted.layers[0].paths.push(DepositionPath {
+            kind,
+            points_mm: vec![[30.0, 30.0, 5.2], [31.0, 31.0, 5.2]],
+        });
+        if matches!(
+            kind,
+            DepositionKind::Support | DepositionKind::SupportInterface
+        ) {
+            accepted.layers[0].region_coverage.support_area_mm2 = 1.0;
+            accepted.layers[0]
+                .region_coverage
+                .support_nominal_deposition_volume_mm3 = 0.1;
+        }
+        accepted.validate(&data).unwrap();
+    }
+}
+
+#[test]
+fn durable_bundle_rejects_rehashed_axis_mismatch_before_stored_verification() {
+    let mut captured = bundle();
+    captured.plan = segmented_plan(&[&[3]]);
+    decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap();
+    captured.provenance.intent.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
+    let provenance = &mut captured.provenance;
+    provenance.input_hash = input_fingerprint(
+        &provenance.project_id,
+        &provenance.definitions,
+        &provenance.occurrences,
+        &provenance.intent,
+        &provenance.surface_overlays,
+    )
+    .unwrap();
+    provenance.validate().unwrap();
+    captured.verification.verified = true;
+    let error = decode_bundle(&serde_json::to_vec(&captured).unwrap()).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::InvalidSpecification);
 }
 
 #[test]
@@ -887,7 +1114,14 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                     .map(|count| DepositionPath {
                         kind: DepositionKind::SolidFill,
                         points_mm: (0..=*count)
-                            .map(|point| [10.0 + (point % 2) as f64, 10.0, z_mm])
+                            .map(|point| {
+                                let delta = (point % 2) as f64;
+                                if index.is_multiple_of(2) {
+                                    [10.0 + delta, 10.0, z_mm]
+                                } else {
+                                    [10.0, 10.0 + delta, z_mm]
+                                }
+                            })
                             .collect(),
                     })
                     .collect(),
@@ -1107,9 +1341,9 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
 }
 
 #[test]
-fn schema5_process_and_support_fields_are_required_without_defaults() {
+fn recipe_policies_are_required_without_defaults() {
     let original = serde_json::to_value(intent()).unwrap();
-    for field in ["process", "supports"] {
+    for field in ["process", "supports", "seam_policy", "rectilinear_axis"] {
         let mut missing = original.clone();
         missing["recipe"].as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<ManufacturingIntent>(missing).is_err());

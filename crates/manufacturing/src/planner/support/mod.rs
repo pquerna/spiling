@@ -21,6 +21,164 @@ pub(super) struct RasterCandidate {
     pub(super) whole_rows: Vec<DepositionPath>,
 }
 
+fn component_admission<'a>(
+    (candidate, axis, budget): (&mut RasterCandidate, region::HatchAxis, usize),
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+    recipe: &PlanarPrintRecipe,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError> {
+    if !candidate.whole_rows.is_empty() {
+        let owned = candidate
+            .paths
+            .iter()
+            .chain(&candidate.whole_rows)
+            .map(|path| path.points_mm.capacity())
+            .sum::<usize>();
+        let retained = (MAX_DEPOSITION_SEGMENTS as usize)
+            .checked_sub(budget)
+            .and_then(|total| total.checked_sub(owned))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "corridor raster retention accounting mismatch",
+                )
+            })?;
+        coalesce_bridge_rows(
+            candidate,
+            BridgeRowContext {
+                axis,
+                retained_points: retained,
+                recipe,
+            },
+            previous.clone(),
+            contacts.clone(),
+            anchors,
+            work,
+            cancel,
+        )?;
+    }
+    let paths = &candidate.paths;
+    let query_budget = (budget / 2).max(anchors.retained_records());
+    let witness_budget = budget.checked_sub(query_budget).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "live component anchor workspace exceeds retention",
+        )
+    })?;
+    let mut proof = super::classification::ComponentAnchorAdmission {
+        supported: true,
+        bridges: Vec::new(),
+        demands: Vec::new(),
+        workspace_points: anchors.retained_records(),
+    };
+    for (index, path) in paths.iter().enumerate() {
+        check_cancel(cancel)?;
+        if path.kind == DepositionKind::Perimeter {
+            continue;
+        }
+        if path.points_mm.len() != 2 {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "component hatch is not a straight stroke",
+            ));
+        }
+        let a = path.points_mm[0];
+        let b = path.points_mm[1];
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        anchors.set_budget(query_budget);
+        let mut bridge = false;
+        let mut demand = false;
+        for gap in anchors.gaps(
+            AnchorCandidate {
+                endpoints_mm: [a, b],
+                bead_width_mm: recipe.bead_width_mm,
+            },
+            previous.clone(),
+            contacts.clone(),
+            work,
+            cancel,
+        )? {
+            match strokes::gap_kind(
+                gap,
+                (gap.end - gap.start) * length,
+                recipe.bead_width_mm,
+                recipe.process.max_bridge_span_mm,
+            ) {
+                strokes::GapKind::Supported | strokes::GapKind::Contact => {}
+                strokes::GapKind::Bridge => bridge = true,
+                strokes::GapKind::Demand => {
+                    demand = true;
+                    reserve_component_record(
+                        &mut proof.demands,
+                        2,
+                        proof.bridges.capacity(),
+                        witness_budget,
+                    )?;
+                    proof.demands.push([
+                        std::array::from_fn(|axis| a[axis] + (b[axis] - a[axis]) * gap.start),
+                        std::array::from_fn(|axis| a[axis] + (b[axis] - a[axis]) * gap.end),
+                    ]);
+                }
+            }
+        }
+        if demand {
+            proof.supported = false;
+        } else if bridge {
+            reserve_component_record(
+                &mut proof.bridges,
+                1,
+                proof.demands.capacity() * 2,
+                witness_budget,
+            )?;
+            proof.bridges.push(index);
+        }
+    }
+    proof.workspace_points = anchors.retained_records();
+    Ok(proof)
+}
+
+fn component_budget(retained: usize, scratch: usize) -> Result<usize, ManufacturingError> {
+    (MAX_DEPOSITION_SEGMENTS as usize)
+        .checked_sub(retained)
+        .and_then(|budget| budget.checked_sub(scratch))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "component raster and anchor scratch exceed retained budget",
+            )
+        })
+}
+
+fn reserve_component_record<T>(
+    values: &mut Vec<T>,
+    units: usize,
+    other: usize,
+    budget: usize,
+) -> Result<(), ManufacturingError> {
+    if values.len() < values.capacity() {
+        return Ok(());
+    }
+    let limit = budget.saturating_sub(other) / units;
+    let capacity = values.capacity().saturating_mul(2).max(4).min(limit);
+    if capacity <= values.len() {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "component anchor witness retention exceeded",
+        ));
+    }
+    values
+        .try_reserve_exact(capacity - values.len())
+        .map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "component anchor witness allocation refused",
+            )
+        })
+}
+
 pub(super) struct ProtectedVoidSet {
     pub regions: MultiPolygon<f64>,
     pub scopes: Vec<spiling_geometry::ProtectedVoidHeightScope>,
@@ -100,6 +258,7 @@ pub(super) fn realize(
         region::HatchAxis,
         &mut usize,
         usize,
+        Option<&mut super::classification::ComponentAnchorCheck<'_>>,
     ) -> Result<RasterCandidate, ManufacturingError>,
     mut project_voids: impl FnMut(
         &[[[f64; 2]; 2]],
@@ -121,10 +280,6 @@ pub(super) fn realize(
     // Deposited-stroke comparisons are not polygon Boolean work.
     let mut anchor_work = 0usize;
     let mut anchors = AnchorWorkspace::default();
-    let mut axes: Vec<_> = layers
-        .iter()
-        .map(|layer| region::HatchAxis::preferred(layer.index))
-        .collect();
     let mut joined_layers = vec![false; layers.len()];
     let mut original_bridge_roles = Vec::new();
     anchors.set_budget(remaining_geometry_budget(retained, &[], &[], &[])?);
@@ -132,6 +287,7 @@ pub(super) fn realize(
         let (prior, remaining) = layers.split_at_mut(index);
         let layer = &mut remaining[0];
         check_cancel(cancel)?;
+        let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
         let previous = prior[index - 1].paths.iter();
         let mut admission = strokes::analyze(
             &layer.paths,
@@ -143,13 +299,31 @@ pub(super) fn realize(
             cancel,
         )?;
         if admission.failure.is_some() {
-            // Test both axes against actual strokes. Required contiguous pieces
-            // may extend to direct anchors only inside their positive-fill row.
+            // Preserve ordinary authored hatch; only a finite demanded role
+            // component may acquire an independently proved Bridge construction.
             let without_old = *segments - path_segments(&layer.paths);
-            for axis in [axes[index], axes[index].orthogonal()] {
+            for recover_components in [false, true] {
+                let axis = authored_axis;
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut candidate = raster(index, axis, &mut staged_segments, 0)?;
+                let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                    component_admission(
+                        (candidate, axis, component_budget(retained, scratch)?),
+                        previous.clone(),
+                        std::iter::empty(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )
+                };
+                let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
+                    if recover_components {
+                        Some(&mut check_component)
+                    } else {
+                        None
+                    };
+                let mut candidate = raster(index, axis, &mut staged_segments, 0, recovery)?;
                 let joined = coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
@@ -178,11 +352,14 @@ pub(super) fn realize(
                 // own direct-anchor proof. Keep that monotone improvement even
                 // when another stroke still needs support; do not demand a
                 // corridor for fragments that we can already anchor.
-                if complete || (axis == axes[index] && joined) {
+                let component_bridges = candidate
+                    .paths
+                    .iter()
+                    .any(|path| path.kind == DepositionKind::Bridge);
+                if complete || joined || component_bridges {
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths = candidate.paths;
-                    axes[index] = axis;
-                    joined_layers[index] = joined;
+                    joined_layers[index] = joined || component_bridges;
                     admission = other;
                     if complete {
                         break;
@@ -480,7 +657,8 @@ pub(super) fn realize(
             &mut work,
             cancel,
         )?;
-        let preferred = region::HatchAxis::preferred(layer.index);
+        let preferred =
+            region::HatchAxis::for_policy(RectilinearAxisPolicy::AlternatingXY, layer.index);
         let mut paths = Vec::new();
         for axis in [preferred, preferred.orthogonal()] {
             anchors.set_budget(0);
@@ -572,6 +750,7 @@ pub(super) fn realize(
     for index in 1..layers.len() {
         let (prior, remaining) = layers.split_at_mut(index);
         let layer = &mut remaining[0];
+        let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
         let begin = object_start[index];
         let previous = prior[index - 1].paths.iter();
         let contact_paths = contact_tops[index]
@@ -584,16 +763,32 @@ pub(super) fn realize(
             let without_old = *segments - path_segments(&layer.paths[begin..]);
             let mut staged_segments = without_old;
             anchors.set_budget(0);
+            let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                component_admission(
+                    (
+                        candidate,
+                        axis,
+                        component_budget(retained_regions, scratch)?,
+                    ),
+                    previous.clone(),
+                    contact.clone(),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )
+            };
             let mut candidate = raster(
                 index,
-                axes[index],
+                authored_axis,
                 &mut staged_segments,
                 retained_support_points,
+                Some(&mut check_component),
             )?;
             coalesce_bridge_rows(
                 &mut candidate,
                 BridgeRowContext {
-                    axis: axes[index],
+                    axis: authored_axis,
                     retained_points: retained_regions,
                     recipe,
                 },
@@ -619,11 +814,38 @@ pub(super) fn realize(
         )?;
         if admission.failure.is_some() {
             let without_old = *segments - path_segments(&layer.paths[begin..]);
-            for axis in [axes[index], axes[index].orthogonal()] {
+            for recover_components in [false, true] {
+                let axis = authored_axis;
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut candidate =
-                    raster(index, axis, &mut staged_segments, retained_support_points)?;
+                let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                    component_admission(
+                        (
+                            candidate,
+                            axis,
+                            component_budget(retained_regions, scratch)?,
+                        ),
+                        previous.clone(),
+                        contact.clone(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )
+                };
+                let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
+                    if recover_components {
+                        Some(&mut check_component)
+                    } else {
+                        None
+                    };
+                let mut candidate = raster(
+                    index,
+                    axis,
+                    &mut staged_segments,
+                    retained_support_points,
+                    recovery,
+                )?;
                 coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
@@ -651,7 +873,6 @@ pub(super) fn realize(
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths.truncate(begin);
                     layer.paths.extend(candidate.paths);
-                    axes[index] = axis;
                     admission = other;
                     break;
                 }
@@ -682,8 +903,9 @@ pub(super) fn realize(
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
-                    "layer {index} Z {:.6}: neither orthogonal native raster has bounded actual deposited/contact anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
+                    "layer {index} Z {:.6}: no raster satisfies both authored normal-fill axis {authored_axis:?} (policy {:?}) and bounded actual deposited/contact anchors; role {:?}, stroke {:?} to {:?}, gap ({:.12},{:.12}) span {:.12}; contact layer {:?}, nearest contact {:?}, nearest previous object {:?}",
                     layer.z_mm,
+                    recipe.rectilinear_axis,
                     path.kind,
                     a,
                     b,
@@ -790,7 +1012,7 @@ fn candidate_budget(
         .iter()
         .try_fold(retained, |total, path| {
             total
-                .checked_add(path.points_mm.len())
+                .checked_add(path.points_mm.capacity())
                 .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
                 .ok_or_else(|| {
                     error(
@@ -827,6 +1049,21 @@ fn coalesce_bridge_rows<'a>(
     let budget = candidate_budget(&candidate.paths, retained_points)?;
     let staged = MAX_DEPOSITION_SEGMENTS as usize - budget;
     let budget = candidate_budget(&candidate.whole_rows, staged)?;
+    let original_len = candidate.paths.len();
+    let workspace_budget = budget.checked_sub(original_len).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "bridge row ownership workspace exceeded",
+        )
+    })?;
+    let query_budget = (workspace_budget / 2).max(anchors.retained_records());
+    let pieces_budget = workspace_budget.checked_sub(query_budget).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "live bridge anchor workspace exceeded",
+        )
+    })?;
+    anchors.set_budget(query_budget);
     let mut pieces = Vec::new();
     for (index, path) in candidate.paths.iter().enumerate() {
         check_cancel(cancel)?;
@@ -841,34 +1078,28 @@ fn coalesce_bridge_rows<'a>(
         }
         let lo = grid(a[along])?.min(grid(b[along])?);
         let hi = grid(a[along])?.max(grid(b[along])?);
-        if pieces.len() >= budget {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "combined alternative raster/row ownership budget exceeded",
-            ));
-        }
+        reserve_component_record(&mut pieces, 2, 0, pieces_budget)?;
         pieces.push((row, lo, hi, index));
     }
-    let budget = budget.checked_sub(pieces.len()).ok_or_else(|| {
-        error(
-            ManufacturingErrorCode::ResourceLimit,
-            "combined alternative raster/row ownership budget exceeded",
-        )
-    })?;
-    anchors.set_budget(budget);
     pieces.sort_unstable_by(|a, b| {
         a.0.total_cmp(&b.0)
             .then(a.1.total_cmp(&b.1))
             .then(a.2.total_cmp(&b.2))
     });
-    let original_len = candidate.paths.len();
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Ownership {
         Required,
         Replaced,
         Removed,
     }
-    let mut ownership = vec![Ownership::Required; original_len];
+    let mut ownership = Vec::new();
+    ownership.try_reserve_exact(original_len).map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "bridge row ownership allocation refused",
+        )
+    })?;
+    ownership.resize(original_len, Ownership::Required);
     let mut joined = false;
     for mut row in std::mem::take(&mut candidate.whole_rows) {
         check_cancel(cancel)?;

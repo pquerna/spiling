@@ -265,6 +265,27 @@ message PlanarPrintRecipe {
   ProcessPolicy process = 15;
   SupportPolicy supports = 16;
   double native_shape_error_mm = 17;
+  SeamPolicy seam_policy = 18;
+  RectilinearAxisPolicy rectilinear_axis = 19;
+}
+message NearestSeam {}
+message PreferredBuildDirectionSeam {
+  // Finite normalized unit vector in build/machine XY, not source or camera XY.
+  double x = 1;
+  double y = 2;
+}
+message SeamPolicy {
+  oneof policy {
+    NearestSeam nearest = 1;
+    PreferredBuildDirectionSeam preferred_build_direction = 2;
+  }
+}
+enum RectilinearAxisPolicy {
+  RECTILINEAR_AXIS_POLICY_UNSPECIFIED = 0;
+  RECTILINEAR_X = 1;
+  RECTILINEAR_Y = 2;
+  ALTERNATING_XY = 3;
+  ALTERNATING_YX = 4;
 }
 message RetractionDisabled {}
 message RetractionEnabled {

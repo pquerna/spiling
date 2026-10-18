@@ -52,7 +52,7 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         spiling_contracts::ENGINE_BUILD_ID
     );
     for expected in [
-        "recoverable_projects_v5",
+        "recoverable_projects_v6",
         "source_face_surface_finish_v3",
         "surface_image_assets_v1",
     ] {
@@ -65,7 +65,7 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         );
     }
     for expected in [
-        "manufacturing_schema6",
+        "manufacturing_schema7",
         "mapped_image_relief_v1",
         "varying_z_material_domains_v1",
         "bounded_vertical_rib_construction_v1",

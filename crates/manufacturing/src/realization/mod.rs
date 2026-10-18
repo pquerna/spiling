@@ -31,6 +31,61 @@ fn rank(kind: DepositionKind) -> u8 {
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
 }
+fn unsigned_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
+fn xy_compare(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
+    unsigned_zero(a[0])
+        .total_cmp(&unsigned_zero(b[0]))
+        .then_with(|| unsigned_zero(a[1]).total_cmp(&unsigned_zero(b[1])))
+}
+
+/// Compare only existing vertices in command coordinates. Raw coordinates and
+/// cyclic index break exact projected ties without merging nearby candidates.
+fn perimeter_seam(
+    points: &[[f64; 3]],
+    policy: SeamPolicy,
+    position: Option<[f64; 3]>,
+    cancel: &AtomicBool,
+) -> Result<usize, ManufacturingError> {
+    let mut seam = 0;
+    let mut best = project_xyz6_point_mm(points[0])?;
+    let score = |point: [f64; 3]| match policy {
+        SeamPolicy::Nearest => 0.0,
+        SeamPolicy::PreferredBuildDirection { xy } => {
+            unsigned_zero(point[0] * xy[0] + point[1] * xy[1])
+        }
+    };
+    let mut best_score = score(best);
+    let mut best_distance = None;
+    for index in 1..points.len() - 1 {
+        check_cancel(cancel)?;
+        let candidate = project_xyz6_point_mm(points[index])?;
+        let candidate_score = score(candidate);
+        let preference = best_score.total_cmp(&candidate_score);
+        let mut candidate_distance = None;
+        let order = preference
+            .then_with(|| {
+                position.map_or(std::cmp::Ordering::Equal, |from| {
+                    let candidate =
+                        *candidate_distance.get_or_insert_with(|| distance(from, candidate));
+                    candidate.total_cmp(best_distance.get_or_insert_with(|| distance(from, best)))
+                })
+            })
+            .then_with(|| xy_compare(candidate, best))
+            .then_with(|| xy_compare(points[index], points[seam]))
+            .then_with(|| index.cmp(&seam));
+        if order == std::cmp::Ordering::Less {
+            seam = index;
+            best = candidate;
+            best_score = candidate_score;
+            best_distance = candidate_distance;
+        }
+    }
+    Ok(seam)
+}
+
 /// Canonical geometry traversal is stored in the normalized plan, never hidden
 /// in the emitter. In-place sort/rotation/reversal requires no motion/index vector.
 pub(crate) fn canonicalize(
@@ -65,8 +120,19 @@ pub(crate) fn canonicalize(
         });
         for path in &mut layer.paths {
             check_cancel(cancel)?;
-            if let Some(from) = position {
-                let n = path.points_mm.len();
+            let n = path.points_mm.len();
+            if path.kind == DepositionKind::Perimeter && path.points_mm[0] == path.points_mm[n - 1]
+            {
+                let seam = perimeter_seam(
+                    &path.points_mm,
+                    intent.recipe.seam_policy,
+                    position.map(project_xyz6_point_mm).transpose()?,
+                    cancel,
+                )?;
+                let _ = path.points_mm.pop();
+                path.points_mm.rotate_left(seam);
+                path.points_mm.push(path.points_mm[0]);
+            } else if let Some(from) = position {
                 if path.points_mm[0] == path.points_mm[n - 1] {
                     let mut seam = 0;
                     for i in 1..n - 1 {
