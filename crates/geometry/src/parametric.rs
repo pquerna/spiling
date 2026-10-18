@@ -1191,7 +1191,11 @@ fn axis_span_smooth(
         // C1 with bounded piecewise second derivatives suffices for Taylor.
         // Structural C0 knots require an independent continuity proof; merely
         // small one-sided differences or a single extracted band cannot do it.
-        if knot.lo < range[1] && range[0] < knot.hi && end - low >= knots.degree {
+        // Native spline extrapolation continues the terminal piece across an
+        // outer knot. Only a knot with source pieces on both sides is a join.
+        let terminal = matches!(knots.source, KnotSource::Borrowed(_))
+            && (value == knots.raw(0) || value == knots.raw(knots.len() - 1));
+        if !terminal && knot.lo < range[1] && range[0] < knot.hi && end - low >= knots.degree {
             return Ok(false);
         }
         low = end;
@@ -3039,6 +3043,50 @@ mod tests {
         assert!(enclosure.position[1].hi > 0.28);
         assert!(work.consumed() > 0);
     }
+
+    #[test]
+    fn rational_surface_extension_does_not_inherit_strict_curve_domain() {
+        use monstertruck_modeling::{BsplineSurface, KnotVector, NurbsSurface, Vector4};
+        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
+            (
+                KnotVector::from(vec![0.0, 1.0, 2.0, 3.0]),
+                KnotVector::bezier_knot(1),
+            ),
+            vec![
+                vec![
+                    Vector4::new(0.0, 0.0, 7.0, 1.0),
+                    Vector4::new(0.0, 1.0, 7.0, 1.0),
+                ],
+                vec![
+                    Vector4::new(1.0, 0.0, 7.0, 1.0),
+                    Vector4::new(1.0, 1.0, 7.0, 1.0),
+                ],
+            ],
+        )));
+        // Outside the regular U interval, only the first tensor row contributes.
+        // Its nonzero basis mass cancels in the quotient: (0, v, 7).
+        // This is a coefficient-extension enclosure, not source-domain admission.
+        let jet = surface_enclosure(
+            &surface,
+            [[0.5; 2]; 2],
+            &mut GeometryWorkBudget::new(1_000_000),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        for (actual, expected) in [
+            (jet.position, [0.0, 0.5, 7.0]),
+            (jet.du, [0.0; 3]),
+            (jet.dv, [0.0, 1.0, 0.0]),
+        ] {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    actual.lo <= expected && expected <= actual.hi && actual.hi - actual.lo < 1e-9,
+                    "{actual:?} does not tightly enclose {expected}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn rational_sign_normalization_and_mixed_denominator_exclusion() {
         use monstertruck_modeling::{BsplineCurve, KnotVector, NurbsCurve, Vector4};

@@ -2836,7 +2836,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-assembly"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "monstertruck-core",
  "rayon",
@@ -2845,7 +2845,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-core"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "cgmath",
  "matext4cgmath",
@@ -2857,7 +2857,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-derive"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -2868,7 +2868,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-geometry"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -2881,7 +2881,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-io"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "chrono",
  "derive_more 2.1.1",
@@ -2902,7 +2902,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-mesh"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "array-macro",
  "bytemuck",
@@ -2918,7 +2918,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-meshing"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "array-macro",
  "derive_more 2.1.1",
@@ -2937,7 +2937,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-modeling"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "derive_more 2.1.1",
  "itertools 0.14.0",
@@ -2956,7 +2956,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-solid"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "ahash",
  "derive_more 2.1.1",
@@ -2976,7 +2976,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-topology"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "monstertruck-core",
  "monstertruck-traits",
@@ -2991,7 +2991,7 @@ dependencies = [
 [[package]]
 name = "monstertruck-traits"
 version = "0.4.1"
-source = "git+https://github.com/pquerna/monstertruck?rev=5f197d081054000db544a8ad716bc447a04be707#5f197d081054000db544a8ad716bc447a04be707"
+source = "git+https://github.com/pquerna/monstertruck?rev=dae59326248d0d068ca4c3a1e52223bfbf1707e0#dae59326248d0d068ca4c3a1e52223bfbf1707e0"
 dependencies = [
  "getrandom 0.4.3",
  "monstertruck-core",

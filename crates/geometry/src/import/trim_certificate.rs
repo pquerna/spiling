@@ -1090,7 +1090,11 @@ fn chart_jet(
     let mut native = model::ValidatedGeometryBudget::new(
         usize::try_from(work.remaining()).unwrap_or(usize::MAX),
     );
-    let result = model::validated_curve2d_jet(chart, [range.lo, range.hi], &mut native, cancel);
+    // Correspondence compares complete one-sided bounds. C1 is qualified
+    // independently before a Taylor residual is used below.
+    let result = model::validated_curve2d_piecewise_jet(
+        chart, [range.lo, range.hi], &mut native, cancel,
+    );
     work.charge(native.consumed() as u64, &AtomicBool::new(false))?;
     check_cancel(cancel)?;
     let jet = result.map_err(parametric::native_error)?;
@@ -1118,7 +1122,7 @@ fn composed_surface(
         });
         [enclosure.lo, enclosure.hi]
     });
-    parametric::surface_enclosure(surface, domain, work, cancel)
+    parametric::surface_piecewise_enclosure(surface, domain, work, cancel)
 }
 struct MappedCorrespondence<'a, 'source> {
     source: &'a Source<'source>,

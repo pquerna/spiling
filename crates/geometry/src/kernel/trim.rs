@@ -672,6 +672,7 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
     }
     let mut native_work =
         ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
+    let mut stage = "original natural-boundary joints";
     let result = (|| {
         let evidence = original_natural_boundaries(
             face,
@@ -688,6 +689,7 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
             .min(32 * 1024 * 1024)
             .checked_sub(evidence_bytes)
             .ok_or(TrimDomainError::ResourceLimit)?;
+        stage = "original coedge parameter domain";
         let mut prepared = prepare_face_parameter_domain_with_natural_boundaries(
             face,
             margin_uv,
@@ -701,13 +703,18 @@ pub(crate) fn prepare_face_trim_domain_with_byte_limit<'a>(
             cancel,
         )?;
         if let Some(bounds) = identity.parameter.native_uv_domain {
+            stage = "original surface parameter restriction";
             prepared.restrict_parameter_domain(bounds, &mut native_work, cancel)?;
         }
         Ok(prepared)
     })();
     crate::parametric::debit_native_work(work, native_work.consumed(), cancel)?;
     Ok(PreparedFaceTrimDomain {
-        native: result.map_err(trim_error)?,
+        native: result.map_err(|cause| {
+            let mut error = trim_error(cause);
+            error.message = format!("{stage}: {}", error.message);
+            error
+        })?,
         source_chart_error_mm,
         certified_uv_domain: identity.parameter.native_uv_domain,
         definition,

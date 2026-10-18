@@ -48,6 +48,7 @@ use step_p21::ast::Parameter;
 pub(crate) use trim_certificate::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
 
 pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IMPORT_CHART_WORK: u64 = 128_000_000;
 
 fn query_index_storage_bound(capacity: usize) -> Option<usize> {
     if capacity == 0 {
@@ -1228,7 +1229,7 @@ pub(crate) fn import_step(
     }
     let mut boundary_curves = Vec::with_capacity(shell.edges.len() + shell.vertices.len());
     let mut boundary_parameters = Vec::with_capacity(shell.edges.len());
-    let mut chart_work = GeometryWorkBudget::new(50_000_000);
+    let mut chart_work = GeometryWorkBudget::new(MAX_IMPORT_CHART_WORK);
     let mut chart_diagnostic = trim_certificate::CorrespondenceDiagnostic::default();
     let mut continuation_owners = HashMap::new();
     for (index, edge) in shell.edges.iter().enumerate() {
@@ -1797,12 +1798,25 @@ pub(crate) fn import_step(
                             ));
                         }
                     }
-                } else if !edge.is_geometric_consistent()
-                    || !face.with_surface(|surface| edge.with_curve(|curve| surface.include(curve)))
-                {
-                    return Err(invalid(
-                        "normalized explicit native coedge is geometrically inconsistent",
-                    ));
+                } else {
+                    let consistent = edge.is_geometric_consistent();
+                    let included = consistent.then(|| {
+                        face.with_surface(|surface| edge.with_curve(|curve| surface.include(curve)))
+                    });
+                    if included != Some(true) {
+                        let endpoints = edge.with_curve(|curve| {
+                            let range = curve.range_tuple();
+                            (
+                                range,
+                                array(curve.subs(range.0)),
+                                array(curve.subs(range.1)),
+                            )
+                        });
+                        return Err(invalid(&format!(
+                            "normalized explicit native coedge is geometrically inconsistent: face {} wire {wire_index} coedge {coedge_index} native edge {} orientation={} edge_consistent={consistent} carrier_includes={included:?} native_curve={endpoints:?} topology_endpoints={front:?}/{back:?}",
+                            faces[face_index].face_id.as_str(), slot.index, edge.orientation(),
+                        )));
+                    }
                 }
                 let distance =
                     |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).hypot(p[1] - q[1]).hypot(p[2] - q[2]);

@@ -33,9 +33,27 @@ result establishes physical printability or machine readiness.
   literal source PCURVEs and original continuations. `OriginalCoedgeCorrespondence`
   in [`trim_certificate.rs`](../../crates/geometry/src/import/trim_certificate.rs)
   proves whole-range physical position and relative tangent correspondence under
-  the captured parameter map. Samples, inverse guesses and chart guides do not
-  supply this authority; correspondence alone does not prove trim topology,
-  inverse coverage or native incidence.
+  the captured parameter map, retaining both incident continuous pieces at knots.
+  Taylor estimates require independent C1 qualification. Samples, inverse guesses
+  and chart guides do not supply this authority; correspondence alone does not
+  prove trim topology, inverse coverage or native incidence.
+
+The pinned kernel owns closed-edge subdivision and rational curve bounds.
+Unclamped NURBS use the homogeneous B-spline's regular domain
+`[U_degree, U_control_count]`, not the exterior knot support. Point evaluation and
+strict curve enclosures use interior one-sided endpoint branches; internal knots
+retain both incident bounds after each rational piece is dehomogenized.
+Reversed UV uses preserve literal spline knots behind parameter operators.
+Nonrepresentable transported knots remain outward parameter bands for continuous
+position/winding proofs; strict boundary jets and C1/Taylor consumers retain
+their independent qualification.
+Shared exact children retain the original source restrictions in every oriented
+use. Inclusion sampling borrows those active knot spans rather than allocating
+unique-knot vectors or evaluating exterior support. A singular point-inverse
+solve may retain an independently matching seed; this grants neither a unique
+inverse nor regularity. Explicit carrier contradictions on declared closed edges
+are fatal; unsupported conversion still uses the loader's loss report, which
+Spiling admission must reject.
 
 Generic `FaceInfo.geometry` may carry optional exact analytic metadata. That
 metadata describes a face; it does not authorize a finish, slab reuse or a
@@ -87,7 +105,12 @@ carrier must finish before entering `Face::with_surface`.
 `SurfaceFunctionalEnclosure` and spatial `SurfaceFirstEnclosure` from full
 second-order jets. Continuous one-sided first bounds are not C1 or Hessian
 authority; strict smoothness and second-order consumers retain their own queries.
+Taylor qualification treats a spline's terminal coefficient extension as one
+piece, not an interior C0 join. Genuine internal and reflected uncertain knot
+bands still need original C1 proof.
 Native work is debited on refusal and cancellation as well as success.
+Optional surface-to-curve reductions must decline outside the reduced curve's
+regular domain, preserving the full tensor evaluator's extension semantics.
 
 Closed-height contraction in `analysis/slab.rs` computes a necessary parameter
 cover, not occupancy or containment. Only proved whole-box height containment
@@ -185,6 +208,15 @@ limits: native intermediate objects also require host-process memory bounds.
 Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
+
+Import's chart pass shares one 128M-unit work allowance; each correspondence
+is capped at 8M units from that same allowance. Neither changes geometry
+tolerances or the separate retained-proof byte limits.
+
+The independent unclamped spline housing admits native import and saved-source
+reopening with original face identity and closed-edge restrictions. Placement
+can still exhaust directional-support work; raw sections can refuse
+natural-boundary chart preparation. This source is not admitted to manufacturing.
 
 The independent tapered fitting and rounded housing complete the unchanged
 complete-sparse operator through CLI and the hardware workbench: native face

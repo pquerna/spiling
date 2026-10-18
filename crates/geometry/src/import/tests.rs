@@ -536,6 +536,44 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
 }
 
 #[test]
+fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictions() {
+    use std::collections::BTreeMap;
+    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
+    let definition = import_step(&source, &cancelled()).expect("unchanged rational closed edge");
+    let end = 6.28318530718;
+    let middle = end / 2.0;
+    let mut children = BTreeMap::new();
+    for face in &definition.source_topology.faces {
+        for coedge in face.wires.iter().flat_map(|wire| &wire.coedges) {
+            if coedge.source_edge != Some(798) {
+                continue;
+            }
+            assert_eq!(coedge.source_curve_range.range_tuple(), (0.0, end));
+            let range = coedge.restricted_curve_range.range_tuple();
+            if let Some(previous) = children.insert(coedge.native_edge_index, range) {
+                assert_eq!(previous, range, "shared uses retain the same native child");
+            }
+        }
+    }
+    let mut ranges: Vec<_> = children.into_values().collect();
+    ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(ranges, [(0.0, middle), (middle, end)]);
+}
+
+#[test]
+fn rational_closed_edge_domain_does_not_heal_an_inconsistent_original_vertex() {
+    let source = fixture("independent-exporters/occt-spline-housing-mm.step");
+    let invalid = std::str::from_utf8(&source).unwrap().replace(
+        "#800 = CARTESIAN_POINT('',(15.,9.,10.));",
+        "#800 = CARTESIAN_POINT('',(16.,9.,10.));",
+    );
+    assert!(
+        import_step(invalid.as_bytes(), &cancelled()).is_err(),
+        "regular domain correction cannot snap an inconsistent original vertex"
+    );
+}
+
+#[test]
 fn regular_native_families_import_with_original_face_and_edge_identity() {
     for (name, source_solid, metadata) in crate::parity_fixtures::recipes() {
         let source = crate::parity_fixtures::original(name, source_solid);
