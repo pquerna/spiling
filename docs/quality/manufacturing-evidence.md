@@ -27,6 +27,14 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
   eligibility and bounded native preparation. Preflight returns a revision-bound
   report without artifact/history mutation. `Admitted` is not native layer, wall,
   bridge or support success; required Compile evidence remains not evaluated.
+- Workbench [`useManufacturing`](../../apps/desktop/src/manufacturing/useManufacturing.ts)
+  owns transient drafts, scoped operation failures and current inspection;
+  [`workflow.ts`](../../apps/desktop/src/manufacturing/workflow.ts) derives the next
+  explicit action without another authority/state machine. Status must match the
+  current project/revision; bundle freshness remains selected-content/session bound,
+  so stale Preflight after Compile does not invalidate fresh bytes. Required input
+  failures stay separate from optional Compile analysis. Read-only snapshots allow
+  Preflight/fresh inspection/export, never Apply or Compile.
 
 Native interval work, deposited-stroke anchor comparisons and planar overlay work
 each have an independent cumulative 128-million-unit ceiling. These bound

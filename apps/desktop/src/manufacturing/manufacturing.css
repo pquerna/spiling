@@ -62,3 +62,24 @@
 .manufacturing-controls progress {
   width: 100%;
 }
+.manufacturing-next-step {
+  border: 1px solid #557581;
+  border-left: 3px solid #8ab6bd;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 14px 0;
+}
+.manufacturing-next-step p {
+  line-height: 1.5;
+}
+.manufacturing-next-step a {
+  color: #b5e2e7;
+}
+.manufacturing-failure {
+  border-left: 3px solid #d4a270;
+  padding-left: 10px;
+}
+.manufacturing-failure pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

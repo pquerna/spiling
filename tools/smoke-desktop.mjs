@@ -1030,6 +1030,13 @@ async function inspectSurfaceFinishAuthoring() {
   };
 }
 
+async function expectManufacturingStep(id) {
+  await until(
+    () => evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]')?.dataset.state === ${JSON.stringify(id)}`),
+    `operator next step ${id}`,
+  );
+}
+
 async function inspectManufacturing() {
   await until(
     () => evaluate("!!document.querySelector('[data-testid=\"manufacturing-panel\"]')"),
@@ -1121,7 +1128,8 @@ async function inspectManufacturing() {
     customManufacturingSource ? "0.8" : "0.6",
     "Failed profile loading preserves the existing operator draft",
   );
-  await click("manufacturing-apply");
+  await expectManufacturingStep("draft");
+  await click("manufacturing-next-action");
   state = await until(async () => {
     const current = await manufacturingState();
     return current.selected_intent && !current.working && !current.draft_changed ? current : false;
@@ -1139,6 +1147,32 @@ async function inspectManufacturing() {
     true,
     "Unchanged intent is not submitted",
   );
+  if (scenario === "manufacturing") {
+    const original = (await geometryState()).occurrences[0].pose;
+    await input('input[aria-label="Translation X"]', "250");
+    await click("apply-pose");
+    await until(async () => (await geometryState()).occurrences[0].pose.translation_mm[0] === 250,
+      "ordinary placement outside the declared bed");
+    await expectManufacturingStep("preflight");
+    await click("manufacturing-next-action");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && current.preflight?.input_revision === current.project_revision
+        ? current : false;
+    }, "native off-bed input admission");
+    const refused = (await manufacturingState()).preflight;
+    assert.equal(refused.disposition, "refused");
+    assert.ok(refused.checks.some(check => check.required && check.code === "outside_envelope"));
+    await expectManufacturingStep("refused");
+    assert.equal(await evaluate(`document.querySelector('[data-testid="manufacturing-next-action"]')`), null,
+      "Refusal offers review, not a recommended Compile");
+    await evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]').scrollIntoView({block:'start'})`);
+    await screenshot("manufacturing-required-admission-refusal");
+    await click("project-undo");
+    await until(async () => JSON.stringify((await geometryState()).occurrences[0].pose) === JSON.stringify(original),
+      "Core Undo restores original placement after refusal");
+    await expectManufacturingStep("preflight");
+  }
   const beforeBedScene = await geometryState();
   const beforeBedProject = await manufacturingState();
   const bedOccurrence = beforeBedScene.occurrences[0].occurrence_id;
@@ -1234,7 +1268,8 @@ async function inspectManufacturing() {
   await until(async () => JSON.stringify((await geometryState()).occurrences[0].pose) === JSON.stringify(appliedBed.occurrences[0].pose),
     "one Core Redo restores the reviewed bed pose");
   const beforePreflight = await manufacturingState();
-  await click("manufacturing-preflight");
+  await expectManufacturingStep("preflight");
+  await click("manufacturing-next-action");
   state = await until(async () => {
     const current = await manufacturingState();
     return !current.working &&
@@ -1253,6 +1288,7 @@ async function inspectManufacturing() {
   const preflight = state.preflight;
   assert.equal(state.project_revision, beforePreflight.project_revision);
   assert.deepEqual(state.selected_artifact, beforePreflight.selected_artifact);
+  await expectManufacturingStep("compile");
   const appliedRevision = state.project_revision;
   await input('[data-testid="manufacturing-perimeter_count"]', "9");
   await click("manufacturing-apply");
@@ -1268,6 +1304,8 @@ async function inspectManufacturing() {
     "Failed Apply retains the operator draft",
   );
   assert.equal((await manufacturingState()).project_revision, appliedRevision);
+  assert.equal(await evaluate(`!!document.querySelector('#manufacturing-operation-failure')`), true,
+    "Native failed Apply has stage-labelled visible recovery guidance");
   await click("manufacturing-reset-draft");
   await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
   await click("manufacturing-apply");
@@ -1328,7 +1366,10 @@ async function inspectManufacturing() {
     };
   }
   const surface = surfaceFinishScenario ? await inspectSurfaceFinishAuthoring() : null;
-  await click("manufacturing-compile");
+  await expectManufacturingStep("preflight");
+  await click("manufacturing-next-action");
+  await expectManufacturingStep("compile");
+  await click("manufacturing-next-action");
   state = await until(
     async () => {
       const current = await manufacturingState();
@@ -1339,6 +1380,7 @@ async function inspectManufacturing() {
   );
   const record = state.selected_artifact;
   assert.equal(state.fresh, false, "Stored verified flags confer no fresh authority");
+  await expectManufacturingStep("verify");
   await click("manufacturing-verify-report");
   state = await until(
     async () => {
@@ -1351,7 +1393,8 @@ async function inspectManufacturing() {
   assert.equal(state.replay, null);
   assert.equal(state.report.verified, true);
   assert.deepEqual(state.selected_artifact, record, "Inspection does not change the Core artifact");
-  await click("manufacturing-verify-motion");
+  await expectManufacturingStep("inspect");
+  await click("manufacturing-next-action");
   state = await until(
     async () => {
       const current = await manufacturingState();
@@ -1376,6 +1419,9 @@ async function inspectManufacturing() {
   );
   assert.equal(state.replay.display_ready, !manufacturingDiagnostic);
   assert.deepEqual(state.selected_artifact, record);
+  await expectManufacturingStep("ready");
+  await evaluate(`document.querySelector('[data-testid="manufacturing-next-step"]').scrollIntoView({block:'start'})`);
+  await screenshot("manufacturing-guided-ready");
   const cancellationRequested = await cancelAcceptedOperation("manufacturing-verify-motion");
   assert.equal(
     cancellationRequested,

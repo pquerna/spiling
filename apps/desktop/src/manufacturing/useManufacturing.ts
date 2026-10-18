@@ -43,6 +43,21 @@ interface Inspection {
   invalidated: boolean;
   layers: ManufacturingLayer[];
 }
+
+type ManufacturingAction = "apply" | "compile" | "inspect" | "preflight";
+export interface ManufacturingReviewState {
+  status: Status | null;
+  changed: boolean;
+  conflict: boolean;
+  fresh: boolean;
+  inspection: Inspection | null;
+  working: boolean;
+  admittingReplay: boolean;
+  preflight: Preflight | null;
+  bedProposal: BedPosePreparation | null;
+  bedProposalStale: boolean;
+  failure: { action: ManufacturingAction; message: string } | null;
+}
 export function useManufacturing(host: ManufacturingHost) {
   const hostRef = useRef(host);
   hostRef.current = host;
@@ -57,6 +72,12 @@ export function useManufacturing(host: ManufacturingHost) {
   const [message, setMessage] = useState("");
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [working, setWorking] = useState(false);
+  const [failure, setFailure] = useState<{
+    action: ManufacturingAction;
+    message: string;
+    revision: number | undefined;
+    authority: string;
+  } | null>(null);
   const [bedProposal, setBedProposal] = useState<{
     preparation: BedPosePreparation;
     authority: string;
@@ -167,6 +188,7 @@ export function useManufacturing(host: ManufacturingHost) {
       setMessage("");
       setWorking(false);
       setPreflight(null);
+      setFailure(null);
       if (inspectionRef.current) {
         const historical = {
           ...inspectionRef.current,
@@ -205,6 +227,7 @@ export function useManufacturing(host: ManufacturingHost) {
 
   async function selectIntent(relativePath?: string) {
     if (!writable) return;
+    setFailure(null);
     setWorking(true);
     await hostRef.current.run(async (token) => {
       try {
@@ -229,6 +252,7 @@ export function useManufacturing(host: ManufacturingHost) {
   }
   async function prepareBed(occurrenceId: number, center: boolean) {
     if (!writable || !statusRef.current?.intent || changed || conflict) return;
+    setFailure(null);
     const id = ++bedRequest.current;
     const capturedAuthority = currentAuthority;
     const capturedEnvelope = statusRef.current.intent.printer.build_envelope;
@@ -250,6 +274,7 @@ export function useManufacturing(host: ManufacturingHost) {
   }
   async function applyBed() {
     if (!writable || !bedProposal || bedProposalStale) return;
+    setFailure(null);
     const snapshot = hostRef.current.snapshot();
     const liveAuthority = `${snapshot.phase === "running" ? snapshot.hello?.session_id ?? "" : ""}:${snapshot.project?.project_id ?? ""}:${snapshot.projectEpoch}`;
     if (bedProposal.authority !== liveAuthority) {
@@ -275,6 +300,7 @@ export function useManufacturing(host: ManufacturingHost) {
     }
   }
   function selectSoftwareIntent() {
+    setFailure(null);
     const next = makeDraft(softwareIntent, statusRef.current?.intent ?? null);
     draftRef.current = next;
     setDraft(next);
@@ -283,11 +309,15 @@ export function useManufacturing(host: ManufacturingHost) {
     );
   }
   function editScalar(key: ScalarField, value: string) {
+    setFailure(null);
+    setMessage("");
     setDraft((previous) =>
       previous ? { ...previous, values: { ...previous.values, [key]: value } } : null,
     );
   }
   function editPolicyScalar(key: string, value: string) {
+    setFailure(null);
+    setMessage("");
     setDraft(previous => previous ? { ...previous, policyValues: { ...previous.policyValues, [key]: value } } : null);
   }
   function reloadDraft() {
@@ -296,8 +326,9 @@ export function useManufacturing(host: ManufacturingHost) {
     draftRef.current = next;
     setDraft(next);
     setMessage("");
+    setFailure(null);
   }
-  async function perform(action: "apply" | "compile" | "inspect" | "preflight", output?: VerificationOutput) {
+  async function perform(action: ManufacturingAction, output?: VerificationOutput) {
     if (!available || ((action === "apply" || action === "compile") && !writable)) return;
     if (action === "apply" && (!draftRef.current || !draftChanged(draftRef.current) || conflict))
       return;
@@ -306,11 +337,13 @@ export function useManufacturing(host: ManufacturingHost) {
       if (action === "apply") appliedIntent = draftIntent(draftRef.current!);
     } catch (error) {
       setMessage(String(error));
+      setFailure({ action, message: String(error), revision, authority: currentAuthority });
       return;
     }
     const id = ++request.current;
     setWorking(true);
     setMessage("");
+    setFailure(null);
     await hostRef.current.run(async (token) => {
       try {
         const before = await refresh(token);
@@ -483,7 +516,14 @@ export function useManufacturing(host: ManufacturingHost) {
         } catch {
           /* Session teardown/supersession has no draft authority. */
         }
-        if (mounted.current && request.current === id) setMessage(String(error));
+        if (mounted.current && request.current === id) {
+          setMessage(String(error));
+          setFailure({
+            action, message: String(error),
+            revision: hostRef.current.snapshot().project?.revision,
+            authority: currentAuthority,
+          });
+        }
         throw error;
       }
     });
@@ -519,6 +559,7 @@ export function useManufacturing(host: ManufacturingHost) {
   }
   async function exportBundle(relativePath?: string) {
     if (!available || !fresh || !inspection) return;
+    setFailure(null);
     const captured = inspection;
     setWorking(true);
     setMessage("");
@@ -574,6 +615,7 @@ export function useManufacturing(host: ManufacturingHost) {
     draft,
     inspection,
     preflight,
+    failure: failure?.authority === currentAuthority && failure.revision === revision ? failure : null,
     selectIntent,
     prepareBed,
     bedProposal: bedProposal?.preparation ?? null,

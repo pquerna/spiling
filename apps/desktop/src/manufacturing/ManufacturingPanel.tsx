@@ -11,10 +11,12 @@ import {
   MAX_DEPOSITION_SEGMENTS,
   REPLAY_KIND_LABELS,
   REPLAY_LIFECYCLE_LAYER,
+  type PreflightCheck,
 } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
 import { scalarFields, policyScalarFields } from "./draft.ts";
 import { useManufacturing } from "./useManufacturing.ts";
+import { nextManufacturingStep } from "./workflow.ts";
 import "./manufacturing.css";
 
 export function ManufacturingPanel({
@@ -42,6 +44,18 @@ export function ManufacturingPanel({
   const event =
     replay && manufacturing.eventCount > 0 && !emptyLayer ? manufacturing.eventCount - 1 : null;
   const job = host.state.activeJob;
+  const nextStep = nextManufacturingStep(host.state, manufacturing);
+  async function runNextAction() {
+    switch (nextStep.action) {
+      case "load_intent": return manufacturing.selectIntent();
+      case "apply": return manufacturing.apply();
+      case "reload": return manufacturing.reloadDraft();
+      case "preflight": return manufacturing.preflightIntent();
+      case "compile": return manufacturing.compile();
+      case "inspect": return manufacturing.inspect("report_and_motion");
+      case "export": return manufacturing.exportBundle();
+    }
+  }
   return (
     <section
       className="manufacturing-controls geometry-controls"
@@ -50,6 +64,29 @@ export function ManufacturingPanel({
     >
       <h2>Manufacturing review</h2>
       <strong>Software-only — not machine-ready</strong>
+      <section className="manufacturing-next-step" data-testid="manufacturing-next-step"
+        data-state={nextStep.id} aria-labelledby="manufacturing-next-heading">
+        <small>Next step · project revision {host.state.project?.revision ?? "—"}
+          {host.state.project?.read_only ? " · read-only" : ""}</small>
+        <h3 id="manufacturing-next-heading" aria-live="polite">{nextStep.title}</h3>
+        <p>{nextStep.detail}</p>
+        {nextStep.action && (
+          <button data-testid="manufacturing-next-action" disabled={!available}
+            onClick={() => { void runNextAction(); }}>{nextStep.label}</button>
+        )}
+        {nextStep.href && <a href={nextStep.href}>{nextStep.label}</a>}
+      </section>
+      {manufacturing.failure && (
+        <section id="manufacturing-operation-failure" role="alert" className="manufacturing-failure">
+          <h3>{manufacturing.failure.action === "inspect" ? "Verification" : manufacturing.failure.action} operation stopped</h3>
+          <p>No completed result is claimed. Review the native diagnostic, then correct the input
+            or placement, or explicitly retry using the operation controls.</p>
+          <details>
+            <summary>Full operation diagnostic</summary>
+            <pre data-testid="manufacturing-message">{manufacturing.failure.message}</pre>
+          </details>
+        </section>
+      )}
       <p>
         Review explicit requirements, compile an immutable bundle, and independently replay the
         actual emitted program. No Print or machine connection is provided.
@@ -315,7 +352,7 @@ export function ManufacturingPanel({
         </p>
       </fieldset>
       {manufacturing.bedProposal && (
-        <section aria-label="Review native bed proposal" data-testid="manufacturing-bed-review">
+        <section id="manufacturing-bed-review" aria-label="Review native bed proposal" data-testid="manufacturing-bed-review">
           <h3>Review native bed pose — not yet applied</h3>
           {manufacturing.bedProposalStale && (
             <p role="alert" data-testid="manufacturing-bed-stale">
@@ -401,33 +438,24 @@ export function ManufacturingPanel({
         </button>
       </div>
       {manufacturing.preflight && (
-        <section data-testid="manufacturing-preflight-report">
-          <h3>Preflight — captured input admission</h3>
+        <section id="manufacturing-preflight-review" data-testid="manufacturing-preflight-report">
+          <h3>Preflight — input admission, not Compile success</h3>
           <p>
             Revision {manufacturing.preflight.input_revision};
             {manufacturing.preflight.input_revision === host.state.project?.revision
               ? " current"
-              : " stale — rerun"}
-            . Disposition: {manufacturing.preflight.disposition}. Software only:{" "}
-            {String(manufacturing.preflight.software_only)}. Required unevaluated or indeterminate
-            checks remain unresolved, not passed. Compile-only checks are optional admission
-            evidence: pending, partial, unsupported or failed native analysis does not itself
-            refuse admitted input. Admission does not authorize Compile or certify its outcome.
-            Physical qualification is absent.
+              : " stale — rerun for current input"}
+            . Disposition: <strong>{manufacturing.preflight.disposition}</strong>.
+            Required unresolved evidence is not passed. Software only; physical qualification is absent.
           </p>
-          <ul>
-            {manufacturing.preflight.checks.map((check, index) => (
-              <li key={index}>
-                <strong>
-                  {check.severity}: {check.code}
-                </strong>{" "}
-                — {check.message}; evidence: {check.evidence}; required: {String(check.required)}
-                ; scope: {check.required ? "required input admission" : "Compile-only analysis"}
-                {check.occurrence_id !== null && <>; occurrence {check.occurrence_id}</>}
-                {check.face_id !== null && <>; face {check.face_id}</>}
-              </li>
-            ))}
-          </ul>
+          <h4>Required input admission</h4>
+          <PreflightChecks checks={manufacturing.preflight.checks.filter(check => check.required)} />
+          <details>
+            <summary>Compile-only analysis and other advisories</summary>
+            <p>These checks are not input-admission authority. Pending, partial or failed optional
+              analysis does not itself refuse admitted input; Compile must establish its own result.</p>
+            <PreflightChecks checks={manufacturing.preflight.checks.filter(check => !check.required)} />
+          </details>
         </section>
       )}
       {job && manufacturing.working && (
@@ -451,9 +479,11 @@ export function ManufacturingPanel({
           </button>
         </div>
       )}
-      <output data-testid="manufacturing-message" role="status">
-        {manufacturing.message}
-      </output>
+      {!manufacturing.failure && (
+        <output data-testid="manufacturing-message" role="status">
+          {manufacturing.message}
+        </output>
+      )}
       {status?.artifact && (
         <details open>
           <summary>Server-selected immutable bundle</summary>
@@ -819,4 +849,15 @@ export function ManufacturingPanel({
       </details>
     </section>
   );
+}
+
+function PreflightChecks({ checks }: { checks: PreflightCheck[] }) {
+  return <ul>{checks.map((check, index) => (
+    <li key={index}>
+      <strong>{check.severity}: {check.code}</strong> — {check.message};
+      evidence: {check.evidence}; required: {String(check.required)}
+      {check.occurrence_id !== null && <>; occurrence {check.occurrence_id}</>}
+      {check.face_id !== null && <>; face {check.face_id}</>}
+    </li>
+  ))}</ul>;
 }

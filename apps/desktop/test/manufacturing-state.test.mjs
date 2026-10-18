@@ -12,6 +12,7 @@ import {
   makeDraft,
   inspectionIsFresh,
 } from "../src/manufacturing/draft.ts";
+import { nextManufacturingStep } from "../src/manufacturing/workflow.ts";
 
 const intent = JSON.parse(
   await readFile(
@@ -139,4 +140,87 @@ test("enabled support edits retain explicit zero gap and disabled policies are n
   const disabled = makeDraft(intent, intent);
   assert.equal("supports.density" in disabled.policyValues, false);
   assert.deepEqual(draftIntent(disabled).recipe.supports, intent.recipe.supports);
+});
+
+function guidance() {
+  return {
+    state: { phase: "running", busy: false, stale: false,
+      project: { project_id: "project", revision: 9, read_only: false }, occurrences: [{}] },
+    review: { status: { info: { project_id: "project", revision: 9 }, intent, artifact: null },
+      changed: false, conflict: false, fresh: false, inspection: null, working: false,
+      admittingReplay: false, preflight: null, bedProposal: null, bedProposalStale: false,
+      failure: null },
+  };
+}
+
+test("guidance requires current admission and does not promote optional Compile evidence", () => {
+  const { state, review } = guidance();
+  review.preflight = { input_revision: 8, disposition: "admitted", checks: [] };
+  assert.equal(nextManufacturingStep(state, review).action, "preflight");
+  review.preflight.input_revision = 9;
+  review.preflight.checks = [{ required: false, severity: "error", evidence: "failed" }];
+  assert.equal(nextManufacturingStep(state, review).action, "compile",
+    "Optional Compile failure does not replace the engine's admission disposition");
+  for (const disposition of ["refused", "unresolved"]) {
+    review.preflight.disposition = disposition;
+    const step = nextManufacturingStep(state, review);
+    assert.equal(step.action, undefined, "A refused/unresolved input must not recommend Compile");
+    assert.equal(step.href, "#manufacturing-preflight-review");
+  }
+});
+
+test("read-only snapshots can preflight and freshly inspect/export but never mutate", () => {
+  const { state, review } = guidance();
+  state.project.read_only = true;
+  assert.equal(nextManufacturingStep(state, review).action, "preflight");
+  review.preflight = { input_revision: 9, disposition: "admitted", checks: [] };
+  assert.equal(nextManufacturingStep(state, review).action, undefined);
+  review.status.artifact = { hash: "selected" };
+  assert.equal(nextManufacturingStep(state, review).action, "inspect");
+  review.fresh = true;
+  review.inspection = { result: { report: { verified: true } }, replay: {} };
+  assert.equal(nextManufacturingStep(state, review).action, "export");
+  review.changed = true;
+  assert.equal(nextManufacturingStep(state, review).action, undefined);
+});
+
+test("drafts, conflicts and pending authority supersede an otherwise exportable program", () => {
+  const { state, review } = guidance();
+  review.status.artifact = { hash: "selected" };
+  review.fresh = true;
+  review.inspection = { result: { report: { verified: true } }, replay: {} };
+  review.changed = true;
+  assert.equal(nextManufacturingStep(state, review).action, "apply");
+  review.conflict = true;
+  assert.equal(nextManufacturingStep(state, review).action, "reload");
+  review.status.info.revision = 8;
+  assert.equal(nextManufacturingStep(state, review).action, undefined);
+  review.status.info.revision = 9;
+  state.stale = true;
+  assert.equal(nextManufacturingStep(state, review).action, undefined);
+});
+
+test("fresh selected content survives stale Preflight but failed verification cannot export", () => {
+  const { state, review } = guidance();
+  review.preflight = { input_revision: 8, disposition: "refused", checks: [] };
+  review.status.artifact = { hash: "selected" };
+  assert.equal(nextManufacturingStep(state, review).action, "inspect");
+  review.fresh = true;
+  review.inspection = { result: { report: { verified: true } }, replay: null };
+  assert.equal(nextManufacturingStep(state, review).action, "inspect");
+  review.inspection.replay = {};
+  assert.equal(nextManufacturingStep(state, review).action, "export");
+  review.inspection.result.report.verified = false;
+  assert.equal(nextManufacturingStep(state, review).action, undefined);
+});
+
+test("a current operation failure directs review instead of automatically retrying Compile", () => {
+  const { state, review } = guidance();
+  review.preflight = { input_revision: 9, disposition: "admitted", checks: [] };
+  review.failure = { action: "compile", message: "A bounded native operation stopped." };
+  const step = nextManufacturingStep(state, review);
+  assert.equal(step.action, undefined);
+  assert.equal(step.href, "#manufacturing-operation-failure");
+  review.failure = null;
+  assert.equal(nextManufacturingStep(state, review).action, "compile");
 });
