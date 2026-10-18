@@ -135,17 +135,33 @@ keeps its separately admitted policy and all geometry/work/flow limits stay fixe
 
 [`support::realize`](../../crates/manufacturing/src/planner/support/mod.rs) and
 [`AnchorWorkspace`](../../crates/manufacturing/src/planner/support/anchors.rs) derive
-bridge/contact anchors from actual prior deposited capsules, never filled domains
-or an invented anchor map. Support routing consumes every crossed lower slab's
-continuous-target outer occupancy and protected native voids. Both regenerated
-hatch alternatives retain the same D/skin dependencies. Final support/interface
-capsules must clear continuous target and actual object/bridge capsules under the
-shared [XYZ6 coordinate contract](../../crates/contracts/src/manufacturing/program_coordinates.rs),
-including full bead height and minimum Z/XY gaps. Candidate corridor offsets alone
-do not certify clearance. Editing a lower finish can invalidate an upper route.
-Varying-image support corridors can still refuse conservatively when finish
-envelopes cover more height than an actual contact query; target/void clearance
-is never waived to admit such a route.
+bridge/contact anchors from actual deposited capsules, never filled domains or an
+invented anchor map. Demand-rooted regional Bridge construction may span a genuine
+nontrivial uncovered interval between two certified endpoint anchors, including
+the original eligible support-contact layer. Contact provenance stays distinct;
+fully supported, tiny and one-sided-admissible strokes do not acquire Bridge process.
+
+Support routes exclude continuous-target occupancy, protected native voids and
+sampled final-D owners extruded over prior object beads' full actual XYZ6 height.
+These D prisms are conservative outer exclusions, not anchor maps. Higher column
+portions shrink monotonically around them; the original nearest gap-eligible
+contact top never moves down to manufacture contact authority. Half-bead beveled
+placement search and outward protected-void query scopes propose candidates only.
+Final support/interface capsules must clear continuous target and actual
+object/bridge capsules under the shared
+[XYZ6 coordinate contract](../../crates/contracts/src/manufacturing/program_coordinates.rs),
+including full bead height and unchanged minimum Z/XY gaps.
+
+Mapped-image occupancy uses the shared bilinear interval evaluator over the whole
+outward transported requested/native source-Z intersection, with actual period,
+phase and row orientation. Local maxima rebuild the original planar/cylindrical
+construction envelope, never scale its base. Closed capture pieces meet at the
+next representable value above actual XYZ6 bead-height upper enclosures, preserving
+native C and independent non-image additions. If conservative outer exclusions
+leave no certified corridor, refusal is indeterminate; if no admitted bead is
+printable, geometry is unsupported. Neither result establishes exact collision.
+Editing a lower finish can invalidate an upper route; regenerated hatches retain
+the same D/skin owners.
 Auxiliary bridge rows clip positive fill at actual required hatch coordinates.
 Required groups use strict physical XYZ6 bead-footprint overlap, not rounded
 endpoint equality; tangency and genuine sparse gaps stay separate. Each group
@@ -185,7 +201,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project6/manufacturing7/surface3, planner10, emitter/verifier4
+Current identities are project6/manufacturing7/surface3, planner11, emitter/verifier4
 and SPLR3; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both

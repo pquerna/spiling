@@ -6,7 +6,7 @@ use spiling_contracts::{
     project::{ProjectError, ProjectErrorCode},
     surface::{ImageReliefParameters, SurfaceLayerId},
 };
-use spiling_surface_fields::{HeightImage, ImageField};
+use spiling_surface_fields::{FieldBounds, HeightImage, ImageField};
 use std::sync::Arc;
 
 pub(super) struct ImageMapping {
@@ -107,6 +107,38 @@ impl ImageMapping {
         self.parameters.depth_mm
             * self.image.record().width as f64
             * self.parameters.u_repeats as f64
+    }
+    pub(super) fn occupied_interval_bounds(
+        &self,
+        world: [f64; 2],
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<FieldBounds, ManufacturingError> {
+        check_cancel(cancel)?;
+        let lower = (world[0] - self.translation_z).next_down();
+        let upper = (world[1] - self.translation_z).next_up();
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(error(
+                ManufacturingErrorCode::UnsupportedGeometry,
+                "image source-height envelope is nonfinite",
+            ));
+        }
+        let source = if self.sigma > 0.0 {
+            [lower, upper]
+        } else {
+            [-upper, -lower]
+        };
+        let record = self.image.record();
+        let scan = (record.width as usize)
+            .checked_mul(2 * record.height as usize + 3)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "image occupied-band scan overflow",
+                )
+            })?;
+        super::super::boolean::charge(work, scan)?;
+        Ok(self.field()?.interval_bounds(source[0], source[1]))
     }
     pub fn zero_row(&self, world_z: f64) -> bool {
         self.field()

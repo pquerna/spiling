@@ -3,7 +3,8 @@
 
 use super::{SectionSpan, boolean_budget, region, span_at};
 use crate::{check_cancel, error};
-use geo::{Area, BooleanOps, BoundingRect, MultiPolygon, Polygon};
+use geo::algorithm::buffer::{BufferStyle, LineJoin};
+use geo::{Area, BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
@@ -22,7 +23,12 @@ pub(super) struct RasterCandidate {
 }
 
 fn component_admission<'a>(
-    (candidate, axis, budget): (&mut RasterCandidate, region::HatchAxis, usize),
+    (candidate, axis, budget, contact_bridge): (
+        &mut RasterCandidate,
+        region::HatchAxis,
+        usize,
+        bool,
+    ),
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
     contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
     recipe: &PlanarPrintRecipe,
@@ -107,7 +113,10 @@ fn component_admission<'a>(
                 recipe.bead_width_mm,
                 recipe.process.max_bridge_span_mm,
             ) {
-                strokes::GapKind::Supported | strokes::GapKind::Contact => {}
+                strokes::GapKind::Supported => {}
+                // Only an explicit demand-rooted orthogonal construction may
+                // use a real bounded gap ending on eligible support contacts.
+                strokes::GapKind::Contact => bridge |= contact_bridge,
                 strokes::GapKind::Bridge => bridge = true,
                 strokes::GapKind::Demand => {
                     demand = true;
@@ -308,7 +317,12 @@ pub(super) fn realize(
                 anchors.set_budget(0);
                 let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
                     component_admission(
-                        (candidate, axis, component_budget(retained, scratch)?),
+                        (
+                            candidate,
+                            axis,
+                            component_budget(retained, scratch)?,
+                            axis != authored_axis,
+                        ),
                         previous.clone(),
                         std::iter::empty(),
                         recipe,
@@ -405,6 +419,9 @@ pub(super) fn realize(
     // Native all-Z void branches are projected only after actual strokes prove
     // demand. Scheduled hole samples cannot certify a protected projection.
     let mut demand_bounds = Vec::with_capacity(demands.len());
+    // Enclose the half-bead placement search with the existing offset
+    // construction allowance before querying any nearby protected void.
+    let search_bound = (width / 2.0 + super::OFFSET_TOLERANCE_MM * 0.5).next_up();
     for demand in &demands {
         check_cancel(cancel)?;
         let candidate = &sections[span_at(sections, demand.target as u32)].material;
@@ -415,8 +432,14 @@ pub(super) fn realize(
             )
         })?;
         demand_bounds.push([
-            [bounds.min().x, bounds.max().x],
-            [bounds.min().y, bounds.max().y],
+            [
+                (bounds.min().x - search_bound).next_down(),
+                (bounds.max().x + search_bound).next_up(),
+            ],
+            [
+                (bounds.min().y - search_bound).next_down(),
+                (bounds.max().y + search_bound).next_up(),
+            ],
         ]);
     }
     let projected = project_voids(
@@ -441,6 +464,67 @@ pub(super) fn realize(
     let mut interfaces = vec![empty; layers.len()];
     let mut object_start = vec![0; layers.len()];
     let mut contact_tops = vec![None; layers.len()];
+    remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    // Borrow each final-D owner once. Its nominal bead prism remains an outer
+    // exclusion after any later re-hatching; it never supplies an anchor.
+    let available =
+        remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    if sections.len() > available {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "nominal object scope retention exceeded",
+        ));
+    }
+    let mut nominal: Vec<(usize, f64)> = Vec::new();
+    nominal.try_reserve_exact(sections.len()).map_err(|_| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "nominal object scope allocation refused",
+        )
+    })?;
+    for (index, section) in sections.iter().enumerate() {
+        check_cancel(cancel)?;
+        if section.material.0.is_empty() {
+            continue;
+        }
+        let mut floor: Option<f64> = None;
+        for object in &layers[section.start as usize..section.end as usize] {
+            super::native::charge_support_clearance(&mut work, cancel)?;
+            if object.paths.is_empty() {
+                continue;
+            }
+            let lower = program_coordinates::project_xyz6_segment_bead_height_mm(
+                object.z_mm,
+                object.z_mm,
+                object.height_mm,
+            )?[0];
+            floor = Some(floor.map_or(lower, |value| value.min(lower)));
+        }
+        if let Some(floor) = floor {
+            nominal.push((index, floor));
+        }
+    }
+    super::boolean::charge(
+        &mut work,
+        nominal.len().checked_mul(nominal.len()).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "nominal object scope sorting work overflow",
+            )
+        })?,
+    )?;
+    nominal.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    check_cancel(cancel)?;
+    let base_retained = retained;
+    let retained = retained
+        .checked_add(nominal.capacity())
+        .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "nominal object scope retention exceeded",
+            )
+        })?;
     remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     for demand in &demands {
         check_cancel(cancel)?;
@@ -473,7 +557,8 @@ pub(super) fn realize(
         let interface_bottom = layers[top].z_mm - interface_thickness_mm;
         // Realized object D supplies a conservative support candidate only
         // AFTER actual deposited strokes prove demand; it is never an anchor map.
-        // Original/derived boundaries avoid scalloped capsule-strip contours.
+        // The half-bead search expansion permits a real support bead under an
+        // outer edge; subsequent C/nominal-D clipping and actual proofs own it.
         let candidate = &sections[span_at(sections, demand.target as u32)].material;
         remaining_geometry_budget(
             retained,
@@ -481,7 +566,19 @@ pub(super) fn realize(
             &interfaces,
             &[&protected, candidate],
         )?;
-        let mut column = candidate.clone();
+        charge_boolean(candidate, candidate, &mut work, cancel)?;
+        // Beveled corners bound this placement search without constructing a
+        // fine round-disk Minkowski sum. Search geometry is never occupied C.
+        let mut column =
+            candidate.buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel));
+        check_cancel(cancel)?;
+        region::check_size(&column)?;
+        remaining_geometry_budget(
+            retained,
+            &support_regions,
+            &interfaces,
+            &[&protected, candidate, &column],
+        )?;
         // Certify a fixed-XY corridor all the way to the bed before publishing.
         // Top-down publication before lower clipping leaves floating components.
         for section in &sections[..=span_at(sections, top as u32)] {
@@ -611,10 +708,60 @@ pub(super) fn realize(
             ));
         }
         region::canonicalize(&mut column);
-        let column = Arc::new(column);
+        let mut column = Arc::new(column);
         let mut shared_union = None;
+        let mut next_nominal = 0;
         for i in 0..=top {
             check_cancel(cancel)?;
+            let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
+                layers[i].z_mm,
+                layers[i].z_mm,
+                layers[i].height_mm,
+            )?[1];
+            // Higher portions are subsets of the already bed-anchored lower
+            // column. Do not lower/remap its original eligible contact top.
+            while let Some(&(index, floor)) = nominal.get(next_nominal) {
+                super::native::charge_support_clearance(&mut work, cancel)?;
+                if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
+                    break;
+                }
+                for polygon in &sections[index].material.0 {
+                    check_cancel(cancel)?;
+                    if column.0.is_empty() {
+                        break;
+                    }
+                    super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
+                    let distance = candidate_clearance_distance(polygon, &column, xy_clearance_mm)?;
+                    let clearance = region::offset_polygon(polygon, distance, cancel)?;
+                    remaining_geometry_budget(
+                        retained,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column, &clearance],
+                    )?;
+                    charge_boolean(&column, &clearance, &mut work, cancel).map_err(|mut e| {
+                        e.message = format!(
+                            "support layer {i}, nominal object owner {index}: {}",
+                            e.message,
+                        );
+                        e
+                    })?;
+                    let next = column.difference(&clearance);
+                    region::check_size(&next)?;
+                    remaining_geometry_budget(
+                        retained,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column, &clearance, &next],
+                    )?;
+                    column = Arc::new(next);
+                    shared_union = None;
+                }
+                next_nominal += 1;
+            }
+            if column.0.is_empty() {
+                break;
+            }
             merge_shared(
                 &mut support_regions[i],
                 &column,
@@ -639,6 +786,8 @@ pub(super) fn realize(
             )?;
         }
     }
+    drop(nominal);
+    let retained = base_retained;
     // Support centers stay half a bead inside the clipped support region. This
     // gives the nominal bead, not only its centerline, the declared XY clearance.
     for i in 0..layers.len() {
@@ -769,6 +918,7 @@ pub(super) fn realize(
                         candidate,
                         axis,
                         component_budget(retained_regions, scratch)?,
+                        axis != authored_axis,
                     ),
                     previous.clone(),
                     contact.clone(),
@@ -824,6 +974,7 @@ pub(super) fn realize(
                             candidate,
                             axis,
                             component_budget(retained_regions, scratch)?,
+                            axis != authored_axis,
                         ),
                         previous.clone(),
                         contact.clone(),

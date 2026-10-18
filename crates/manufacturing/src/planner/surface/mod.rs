@@ -8,6 +8,7 @@ use geo::{Coord, MultiPolygon};
 use spiling_contracts::geometry::{
     AabbMm, AnalyticSurfaceDescription, FaceId, GeometryErrorCode, OccurrenceRecord, SurfaceFamily,
 };
+use spiling_contracts::manufacturing::program_coordinates::project_xyz6_segment_bead_height_mm;
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::surface::{SurfaceFinish, SurfaceScope};
 use std::{
@@ -80,6 +81,110 @@ impl PreparedFinish {
         &self,
         occupied: &mut Arc<super::ContinuousOccupied>,
         heights: &OccupiedHeightScope,
+        schedule: &[super::LayerElevation],
+        retained_points: usize,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<(), ManufacturingError> {
+        let requested = [
+            heights.requested[0].max(heights.native[0]),
+            heights.requested[1].min(heights.native[1]),
+        ];
+        if requested[0] > requested[1] {
+            return Ok(());
+        }
+        let Some(image) = self.image() else {
+            return self.include_occupied_piece(
+                occupied,
+                heights,
+                None,
+                retained_points,
+                work,
+                cancel,
+            );
+        };
+        let whole = image.occupied_interval_bounds(requested, work, cancel)?;
+        if whole.maximum == 0.0 && whole.dz == 0.0 {
+            return Ok(());
+        }
+        if whole.dz == 0.0 || requested[0] == requested[1] {
+            return self.include_occupied_piece(
+                occupied,
+                heights,
+                Some(whole.maximum),
+                retained_points,
+                work,
+                cancel,
+            );
+        }
+        // Use exactly the final capsule check's actual XYZ6 upper enclosure.
+        // The next representable cut leaves every closed C piece present, but
+        // keeps a higher slab's peak off the preceding contact sheet.
+        let mut low = 0;
+        let mut high = schedule.len();
+        while low < high {
+            check_cancel(cancel)?;
+            super::boolean::charge(work, 1)?;
+            let middle = low + (high - low) / 2;
+            let layer = &schedule[middle];
+            let cut =
+                project_xyz6_segment_bead_height_mm(layer.z, layer.z, layer.height)?[1].next_up();
+            if cut <= requested[0] {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let mut start = requested[0];
+        for layer in &schedule[low..] {
+            check_cancel(cancel)?;
+            super::boolean::charge(work, 1)?;
+            let cut =
+                project_xyz6_segment_bead_height_mm(layer.z, layer.z, layer.height)?[1].next_up();
+            let end = cut.min(requested[1]);
+            if end > start {
+                let interval = image.occupied_interval_bounds([start, end], work, cancel)?;
+                if interval.maximum != 0.0 || interval.dz != 0.0 {
+                    self.include_occupied_piece(
+                        occupied,
+                        &OccupiedHeightScope {
+                            requested: [start, end],
+                            native: heights.native,
+                        },
+                        Some(interval.maximum),
+                        retained_points,
+                        work,
+                        cancel,
+                    )?;
+                }
+                start = end;
+            }
+            if start == requested[1] {
+                return Ok(());
+            }
+        }
+        let interval = image.occupied_interval_bounds([start, requested[1]], work, cancel)?;
+        if interval.maximum != 0.0 || interval.dz != 0.0 {
+            self.include_occupied_piece(
+                occupied,
+                &OccupiedHeightScope {
+                    requested: [start, requested[1]],
+                    native: heights.native,
+                },
+                Some(interval.maximum),
+                retained_points,
+                work,
+                cancel,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn include_occupied_piece(
+        &self,
+        occupied: &mut Arc<super::ContinuousOccupied>,
+        heights: &OccupiedHeightScope,
+        maximum: Option<f64>,
         retained_points: usize,
         work: &mut usize,
         cancel: &AtomicBool,
@@ -87,17 +192,26 @@ impl PreparedFinish {
         let [lower_z, upper_z] = heights.requested;
         let native_height = heights.native;
         check_cancel(cancel)?;
-        let bounds = self.bounds();
+        let mut bounds = self.bounds();
         if upper_z < native_height[0] || lower_z > native_height[1] {
             return Ok(());
         }
-        let cloned_points = if Arc::strong_count(occupied) > 1 {
-            occupied.point_count
-        } else {
-            0
-        };
+        if let (Some(image), Some(maximum)) = (self.image(), maximum)
+            && (0.0..1.0).contains(&maximum)
+        {
+            let depth = (maximum * image.parameters.depth_mm)
+                .next_up()
+                .min(image.parameters.depth_mm);
+            let height = [bounds.min[2], bounds.max[2]];
+            bounds = match &self.shape {
+                PreparedShape::Planar(field) => field.construction_bounds(depth, height)?,
+                PreparedShape::Cylindrical(field) => {
+                    cylindrical::construction_bounds(field.source_bounds_xy, depth, height)?
+                }
+            };
+        }
         retained_points
-            .checked_add(cloned_points)
+            .checked_add(occupied.point_count)
             .and_then(|n| n.checked_add(5))
             .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
             .ok_or_else(|| {
@@ -569,24 +683,7 @@ pub(super) fn metadata(
             let s = field.sample_parameter(index);
             field.peak_mm = field.peak_mm.max(field.displacement(s, (z0 + z1) / 2.0));
         }
-        for s in [field.margin, field.width - field.margin] {
-            for distance in [0.0, field.depth] {
-                let p = field.point(s, distance);
-                for (a, coordinate) in [p.x, p.y].into_iter().enumerate() {
-                    field.bounds.min[a] = field.bounds.min[a].min(coordinate);
-                    field.bounds.max[a] = field.bounds.max[a].max(coordinate);
-                }
-            }
-        }
-        // Every actual chain/frame-adjusted sample stays within this reserved
-        // construction radius of the declared field. Include it in nominal
-        // printer/component/other-occurrence exclusion, not physical proof.
-        for axis in 0..2 {
-            field.bounds.min[axis] -= SURFACE_ROUNDING_MM;
-            field.bounds.max[axis] += SURFACE_ROUNDING_MM;
-        }
-        field.bounds.min[2] = z0.min(z1);
-        field.bounds.max[2] = z0.max(z1);
+        field.bounds = field.construction_bounds(field.depth, [z0.min(z1), z0.max(z1)])?;
         result.push(PreparedFinish {
             shape: PreparedShape::Planar(field),
         });
@@ -595,6 +692,38 @@ pub(super) fn metadata(
 }
 
 impl RibField {
+    fn construction_bounds(
+        &self,
+        depth: f64,
+        height: [f64; 2],
+    ) -> Result<AabbMm, ManufacturingError> {
+        let mut bounds = AabbMm {
+            min: [f64::INFINITY, f64::INFINITY, height[0]],
+            max: [f64::NEG_INFINITY, f64::NEG_INFINITY, height[1]],
+        };
+        for s in [self.margin, self.width - self.margin] {
+            for distance in [0.0, depth] {
+                let point = self.point(s, distance);
+                for (axis, coordinate) in [point.x, point.y].into_iter().enumerate() {
+                    if !coordinate.is_finite() {
+                        return Err(unsupported(
+                            &self.face_id,
+                            "nonfinite planar construction envelope",
+                        ));
+                    }
+                    bounds.min[axis] = bounds.min[axis].min(coordinate);
+                    bounds.max[axis] = bounds.max[axis].max(coordinate);
+                }
+            }
+        }
+        // Global metadata and interval envelopes retain the SAME admitted
+        // source/frame/phase construction reserve.
+        for axis in 0..2 {
+            bounds.min[axis] -= SURFACE_ROUNDING_MM;
+            bounds.max[axis] += SURFACE_ROUNDING_MM;
+        }
+        Ok(bounds)
+    }
     pub(super) fn sample_points(&self) -> usize {
         self.samples
             + 9

@@ -24,6 +24,7 @@ use std::{
 pub(super) struct CylinderField {
     pub(super) face_id: FaceId,
     pub(super) bounds: AabbMm,
+    pub(super) source_bounds_xy: [[f64; 2]; 2],
     pub(super) samples: usize,
     center: Coord<f64>,
     x: [f64; 2],
@@ -34,6 +35,38 @@ pub(super) struct CylinderField {
     phase: f64,
     arithmetic: f64,
     pub(super) image: Option<super::ImageMapping>,
+}
+
+pub(super) fn construction_bounds(
+    source_xy: [[f64; 2]; 2],
+    depth: f64,
+    height: [f64; 2],
+) -> Result<AabbMm, ManufacturingError> {
+    let extent = depth + SECTION_SAMPLING_TOLERANCE_MM + SURFACE_ROUNDING_MM;
+    let bounds = AabbMm {
+        min: [
+            source_xy[0][0] - extent,
+            source_xy[0][1] - extent,
+            height[0],
+        ],
+        max: [
+            source_xy[1][0] + extent,
+            source_xy[1][1] + extent,
+            height[1],
+        ],
+    };
+    if bounds
+        .min
+        .iter()
+        .chain(&bounds.max)
+        .any(|value| !value.is_finite())
+    {
+        return Err(error(
+            ManufacturingErrorCode::UnsupportedGeometry,
+            "nonfinite cylindrical construction envelope",
+        ));
+    }
+    Ok(bounds)
 }
 
 fn resource(message: &str) -> ManufacturingError {
@@ -203,21 +236,18 @@ pub(super) fn metadata(
             "combined cylindrical profile sampling budget exceeded",
         ));
     }
-    let extent = depth + SECTION_SAMPLING_TOLERANCE_MM + SURFACE_ROUNDING_MM;
+    let source_bounds_xy = [
+        [source_bounds.min[0], source_bounds.min[1]],
+        [source_bounds.max[0], source_bounds.max[1]],
+    ];
     Ok(CylinderField {
         face_id: face_id.clone(),
-        bounds: AabbMm {
-            min: [
-                source_bounds.min[0] - extent,
-                source_bounds.min[1] - extent,
-                center[2].min(top[2]),
-            ],
-            max: [
-                source_bounds.max[0] + extent,
-                source_bounds.max[1] + extent,
-                center[2].max(top[2]),
-            ],
-        },
+        bounds: construction_bounds(
+            source_bounds_xy,
+            depth,
+            [center[2].min(top[2]), center[2].max(top[2])],
+        )?,
+        source_bounds_xy,
         samples: required as usize,
         center: Coord {
             x: center[0],
@@ -752,12 +782,23 @@ mod tests {
             Coord { x: 4.0, y: -3.0 },
             Coord { x: 2.0, y: -3.0 },
         ]);
+        let source_bounds_xy = outer.iter().fold(
+            [[f64::INFINITY; 2], [f64::NEG_INFINITY; 2]],
+            |mut bounds, point| {
+                for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                    bounds[0][axis] = bounds[0][axis].min(value);
+                    bounds[1][axis] = bounds[1][axis].max(value);
+                }
+                bounds
+            },
+        );
         let field = CylinderField {
             face_id: FaceId::from_step_entity(1).unwrap(),
             bounds: AabbMm {
                 min: [-2.13, -7.13, 0.0],
                 max: [8.13, 3.13, 8.0],
             },
+            source_bounds_xy,
             samples: 1000,
             center,
             x: [1.0, 0.0],

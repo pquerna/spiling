@@ -338,6 +338,7 @@ pub(crate) fn plan(
                         requested: [slab_start, schedule[(end - 1) as usize].z],
                         native: [native_bounds.min[2], native_bounds.max[2]],
                     },
+                    &schedule,
                     live_retained + native_points + region::point_count(&next),
                     &mut surface_work,
                     cancel,

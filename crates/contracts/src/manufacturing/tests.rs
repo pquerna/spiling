@@ -397,7 +397,7 @@ fn bundle() -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "pinned".into(),
             },
-            planner_version: "10".into(),
+            planner_version: "11".into(),
             emitter_version: "4".into(),
             verifier_version: "4".into(),
         },

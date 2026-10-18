@@ -376,7 +376,7 @@ fn saved_verification_cannot_authorize_an_incompatible_planner() {
         .compile(&intent())
         .unwrap();
     assert!(bundle.verification.verified);
-    bundle.provenance.planner_version = "unsupported-source-semantics".into();
+    bundle.provenance.planner_version = "10".into();
     let bytes = serde_json::to_vec(&bundle).unwrap();
     let decoded = decode_bundle(&bytes).unwrap();
     for output in [

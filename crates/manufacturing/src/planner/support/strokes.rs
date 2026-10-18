@@ -5,7 +5,9 @@ use super::anchors::AnchorGap;
 use super::{AnchorCandidate, AnchorWorkspace};
 use crate::check_cancel;
 use crate::planner::OFFSET_TOLERANCE_MM;
-use spiling_contracts::manufacturing::{DepositionPath, ManufacturingError, PlanarPrintRecipe};
+use spiling_contracts::manufacturing::{
+    DepositionKind, DepositionPath, ManufacturingError, PlanarPrintRecipe,
+};
 use std::sync::atomic::AtomicBool;
 
 pub(super) enum GapKind {
@@ -93,7 +95,11 @@ pub(super) fn analyze<'a>(
                     recipe.bead_width_mm,
                     recipe.process.max_bridge_span_mm,
                 ) {
-                    GapKind::Supported | GapKind::Contact => {}
+                    GapKind::Supported => {}
+                    // Preserve eligible contact provenance. Only a consumed,
+                    // explicitly constructed Bridge uses bridge process here;
+                    // ordinary contact-supported rows stay ordinary.
+                    GapKind::Contact => bridge |= path.kind == DepositionKind::Bridge,
                     GapKind::Bridge => bridge = true,
                     GapKind::Demand => {
                         demand = true;

@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds authored build-frame seam and rectilinear policies to actual deposition.
-pub const PLANNER_VERSION: &str = "10";
+/// Binds authored build-frame policies and height-scoped image occupancy to deposition.
+pub const PLANNER_VERSION: &str = "11";
 pub const EMITTER_VERSION: &str = "4";
 pub const VERIFIER_VERSION: &str = "4";
 
