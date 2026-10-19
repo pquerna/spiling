@@ -6,17 +6,24 @@ Licensed under the Open Software License version 3.0
 
 # Spiling
 
-Spiling aims to turn authoritative CAD/BREP geometry and explicit manufacturing requirements into inspectable, verified manufacturing artifacts—not just a mesh preview. The intended workbench preserves geometry and source-face identity from import through planning, then independently verifies the emitted machine program.
+Spiling is an experimental desktop app for preparing FDM jobs from mechanical CAD models. You choose how the parts are filled and finished, inspect the printer instructions it generates, and save the job. The desktop app and CLI use the same native Rust engine.
 
-The first intended product is a recoverable STEP-to-print workflow for one tested machine configuration, with a desktop workbench and CLI using the same native Rust engine.
+It is for engineers and workshop users who start from STEP files. Spiling is early software: it is not production-ready, machine-ready, or physically qualified. Do not use it to run a printer.
 
-## Status
+## What you can do today
 
-**Spiling is not a functional manufacturing product yet. It is not recommended for use.**
+- Open a supported STEP model, arrange the parts or copies in the build area, and run a check before generating instructions.
+- Set one infill density for every copy of a part, or a different density for just one copy. Choose a preferred seam side and fill direction, and add ribs or image relief to faces the app supports.
+- Inspect the actual G-code the app generated, not just the viewport preview.
+- Undo changes, save the job, and reopen it without the original CAD or image file.
 
-The engine, CLI and CEF workbench implement source-backed recoverable STEP projects and a software-only slicer through authenticated gRPC, Google Operations and ByteStream. Operators load explicit inert printer intent, prepare the bed, run read-only Preflight, Compile and independently replay/export actual G-code. Project5/manufacturing6/surface3/planner8 persists ordered face finishes and content-addressed height images. Certified upright full-height exterior planar/cylindrical faces support ribs and imported image relief varying in both source U and Z, with source BREP unchanged. Import/apply is atomic and undoable; canonical preview, remapping, save and fresh read-only reopening do not require the original image afterward. Image events and adaptive displacement-error bounds feed ordinary walls/skins/infill and final-shape support corridors. Native geometry and realized material have independent cache identities; nominal-bead resolution advisories are not physical texture verification. See the [image-relief interfaces and support dependencies](docs/adr/003-spatial-image-relief.md) and [measured manufacturing evidence](docs/quality/manufacturing-evidence.md). Emitter/verifier4 and SPLR3 remain unchanged. Programs are **not machine ready**; configuration/calibration hashes are declarations, not measurements. Dedicated procedural texture controls, material/color painting, branching/fin supports and printer execution remain outside implemented support. Synthetic Triangle is an explicit diagnostic, never an import fallback.
+A saved job keeps its own copy of the imported CAD model and any relief image, so you can move the job folder as a unit. Reopening uses those stored bytes; it does not automatically follow later edits to your CAD file. If a stored file is missing or changed, the app reports an error rather than silently substituting it.
 
-Packaged WebGPU presentation and physical-platform acceptance remain unverified. Windows, macOS, and Linux are intended targets, not certified support claims. See [geometry evidence](docs/quality/geometry-evidence.md), [software manufacturing evidence](docs/quality/manufacturing-evidence.md), [operation evidence](docs/quality/engine-operations.md) and [bootstrap evidence](docs/quality/B0-evidence.md) for exercised results, support limits and unmet gates.
+## Current limits
+
+Spiling is software-only. Programs are **not machine ready** or physically qualified: printability, grip, collisions, packaged desktop support, and printer execution remain unverified. Windows, macOS, and Linux are intended targets, not certified support claims.
+
+Only some STEP models are supported; general STEP documents and assemblies are not. Tool or material switching and printer execution are not supported today. Some CAD models, and jobs that combine several complex parts, fail current compute or support limits. See [measured manufacturing status and limits](docs/quality/manufacturing-evidence.md) for the exercised envelope.
 
 ## Experimental installation from source
 
@@ -33,17 +40,27 @@ pnpm bootstrap
 
 The repository pins the Rust toolchain and dependencies. The first native build downloads a substantial CEF distribution. See the [development and packaging guide](docs/quality/development.md) for launching the development shell, checks, and experimental packages.
 
-## Documentation
+## Technical documentation
 
-- [Development, packaging, and contributing](docs/quality/development.md)
-- [Architecture and bootstrap acceptance](docs/quality/B0-plan.md)
-- [Engine control protocol](docs/protocol/control.md)
-- [Measured status and support limits](docs/quality/B0-evidence.md)
+Support, evidence, and development:
+
+- [Measured manufacturing status and limits](docs/quality/manufacturing-evidence.md)
 - [Native geometry support and evidence](docs/quality/geometry-evidence.md)
+- [Engine operation evidence](docs/quality/engine-operations.md)
+- [Bootstrap and packaging evidence](docs/quality/B0-evidence.md)
+- [Development, packaging, and contributing](docs/quality/development.md)
+
+Formats and control:
+
 - [Project format and persistence](docs/protocol/project.md)
 - [Software manufacturing contracts](docs/protocol/manufacturing.md)
+- [Engine control protocol](docs/protocol/control.md)
+
+Design decisions:
+
+- [Architecture and bootstrap acceptance](docs/quality/B0-plan.md)
 - [Cylindrical finish interfaces and general-purpose foundations](docs/adr/002-cylindrical-grip-ribs.md)
-- [Mapped image relief, durable assets and final-shape support flow](docs/adr/003-spatial-image-relief.md)
+- [Mapped image relief, durable assets, and final-shape support flow](docs/adr/003-spatial-image-relief.md)
 
 ## License
 
