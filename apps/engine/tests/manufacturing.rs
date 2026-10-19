@@ -1426,6 +1426,7 @@ fn sparse_layer(
     ProcessEdit::AddLayer {
         scope,
         selector: ProcessSelector::WholeOwnedVolume,
+        interface: None,
         action: ProcessAction::Replace {
             value: ProcessValue::SparseFraction { fraction },
         },
@@ -1442,6 +1443,333 @@ fn effective_process(
         .find(|resolved| resolved.occurrence_id == occurrence_id)
         .expect("current occurrence has an authoritative effective process")
         .value
+}
+
+#[tokio::test]
+async fn rounded_housing_two_zone_separator_survives_native_bed_placement_and_fresh_export() {
+    use spiling_contracts::{
+        process::{ProcessEdit, ProcessInterfacePermission, ProcessProvenance, ProcessSelector},
+        surface::SurfaceScope,
+    };
+    use spiling_engine_client::export::OutputDirectory;
+
+    let work = Workspace::new();
+    std::fs::create_dir(work.0.join("independent-exporters")).unwrap();
+    let source = work.source("independent-exporters/occt-rounded-housing-mm.step");
+    let checkpoint = work.0.join("housing-project");
+    let mut client = spawn().await;
+    import(&mut client, &source).await;
+    let mut requested = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    requested.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    set_intent(&mut client, requested.clone()).await;
+
+    let captured = scene(&mut client).await;
+    let GeometryResponse::ScenePage { occurrences, .. } = client
+        .geometry(GeometryCommand::GetScenePage {
+            session_id: captured.session_id.clone(),
+            revision: captured.revision,
+            kind: ScenePageKind::Occurrences,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("housing occurrence")
+    };
+    assert_eq!(occurrences.len(), 1);
+    let occurrence = &occurrences[0];
+    let revision = status(&mut client).await.0.revision;
+    // Operator placement must use native support/contact, not a guessed Z offset.
+    let prepared = client
+        .prepare_bed_pose(
+            &captured,
+            revision,
+            occurrence,
+            requested.printer.build_envelope,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scene(&mut client).await, captured);
+    assert!(matches!(
+        client
+            .geometry(GeometryCommand::SetInstancePose {
+                session_id: captured.session_id,
+                base_revision: prepared.scene_revision,
+                project_revision: prepared.project_revision,
+                occurrence_id: occurrence.occurrence_id,
+                pose: prepared.pose,
+            })
+            .await
+            .unwrap(),
+        GeometryResponse::SceneChanged { .. }
+    ));
+    let placed_scene = scene(&mut client).await;
+    let scope = SurfaceScope::Definition {
+        definition_id: occurrence.definition_id.clone(),
+    };
+    let whole = edit_process(
+        &mut client,
+        ProcessEdit::SetSparseFraction {
+            scope: scope.clone(),
+            fraction: 0.20,
+        },
+    )
+    .await;
+    let whole_provenance = effective_process(&whole, occurrence.occurrence_id)
+        .provenance
+        .unwrap();
+    let bounds = ProcessSelector::SourceBoxMm {
+        min: [-1.0, -1.0, -1.0],
+        max: [8.0, 19.0, 11.0],
+    };
+    let authored = edit_process(
+        &mut client,
+        ProcessEdit::SetBoxSparseFraction {
+            scope: scope.clone(),
+            min: [-1.0, -1.0, -1.0],
+            max: [8.0, 19.0, 11.0],
+            fraction: 0.60,
+            interface: Some(ProcessInterfacePermission::SeparatorWall),
+        },
+    )
+    .await;
+    let (box_layer, box_operation) = authored
+        .process_document
+        .layers
+        .iter()
+        .find_map(|layer| {
+            layer
+                .operations
+                .iter()
+                .find(|operation| operation.selector == bounds)
+                .map(|operation| (layer.layer_id, operation.operation_id))
+        })
+        .expect("authored source box");
+    let box_provenance = ProcessProvenance {
+        layer_id: box_layer,
+        operation_id: box_operation,
+    };
+    let eligibility = preflight(&mut client).await;
+    assert_eq!(eligibility.status, JobStatus::Completed, "{eligibility:?}");
+    let Some(JobResult::ManufacturingPreflight { report }) = eligibility.result else {
+        panic!("housing preflight report")
+    };
+    assert_eq!(report.disposition, PreflightDisposition::Admitted);
+    assert!(report.software_only);
+    let record = compile(&mut client).await;
+    let bundle = fetch_bundle(&mut client, &record).await.unwrap();
+    assert!(record.summary.software_only && bundle.verification.verified);
+    assert_eq!(bundle.provenance.intent, requested);
+    assert_eq!(
+        bundle.provenance.process_document,
+        authored.process_document
+    );
+    assert_eq!(bundle.provenance.definitions.len(), 1);
+    assert_eq!(bundle.provenance.occurrences.len(), 1);
+    assert_eq!(bundle.provenance.occurrences[0].pose, prepared.pose);
+    assert_eq!(scene(&mut client).await, placed_scene);
+    // Finite-selection outcomes describe boxes. The whole-owned base remains
+    // independently attributed on the actual light region, not another box.
+    assert!(record.summary.process_resolution.iter().any(|resolution| {
+        resolution.occurrence_id == occurrence.occurrence_id
+            && resolution.definition_id == occurrence.definition_id
+            && resolution.provenance == box_provenance
+            && resolution.status == ProcessRegionStatus::Applied
+    }));
+    for (fraction, provenance) in [(0.20, whole_provenance), (0.60, box_provenance)] {
+        assert!(bundle.plan.layers.iter().any(|layer| {
+            layer.paths.iter().any(|path| {
+                let Some(DepositionOwner::Regional { region_index }) = path.owner else {
+                    return false;
+                };
+                let region = &layer.region_coverage.process_regions[usize::from(region_index)];
+                region.fraction == fraction
+                    && region.area_mm2 > 0.0
+                    && region.contributions.iter().any(|contribution| {
+                        contribution.occurrence_id == occurrence.occurrence_id
+                            && contribution.definition_id == occurrence.definition_id
+                            && contribution.provenance == Some(provenance)
+                    })
+            })
+        }));
+    }
+    let separator_segments: usize = bundle
+        .plan
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.paths)
+        .filter(|path| path.kind == DepositionKind::SeparatorWall)
+        .map(|path| path.points_mm.len() - 1)
+        .sum();
+    assert!(separator_segments > 0);
+    let mut interfaces = 0;
+    for layer in &bundle.plan.layers {
+        for interface in &layer.region_coverage.process_interfaces {
+            interfaces += 1;
+            assert_eq!(interface.occurrence_id, occurrence.occurrence_id);
+            assert_eq!(interface.definition_id, occurrence.definition_id);
+            assert_eq!(interface.provenance, box_provenance);
+            assert_eq!(interface.axis, 0);
+            assert_eq!(interface.thickness_mm, requested.recipe.bead_width_mm);
+            assert!(interface.area_mm2 > 0.0 && !interface.centerlines_mm.is_empty());
+            let fractions = interface
+                .region_indices
+                .map(|index| layer.region_coverage.process_regions[usize::from(index)].fraction);
+            assert!(fractions == [0.20, 0.60] || fractions == [0.60, 0.20]);
+        }
+    }
+    assert!(interfaces > 0);
+
+    // A bounds adjustment keeps authoring identity and invalidates the old result;
+    // undo restores exactly the successful source-owned authority.
+    let adjusted = edit_process(
+        &mut client,
+        ProcessEdit::SetBoxSparseFraction {
+            scope,
+            min: [-1.0, -1.0, -1.0],
+            max: [7.0, 19.0, 11.0],
+            fraction: 0.60,
+            interface: Some(ProcessInterfacePermission::SeparatorWall),
+        },
+    )
+    .await;
+    let adjusted_layer = adjusted
+        .process_document
+        .layers
+        .iter()
+        .find(|layer| layer.layer_id == box_layer)
+        .unwrap();
+    let adjusted_operation = adjusted_layer
+        .operations
+        .iter()
+        .find(|operation| operation.operation_id == box_operation)
+        .unwrap();
+    assert_eq!(
+        adjusted_operation.selector,
+        ProcessSelector::SourceBoxMm {
+            min: [-1.0, -1.0, -1.0],
+            max: [7.0, 19.0, 11.0],
+        }
+    );
+    assert!(status(&mut client).await.1.is_none());
+    assert_eq!(scene(&mut client).await, placed_scene);
+    history(&mut client, true).await;
+    let restored = status(&mut client).await;
+    assert_eq!(restored.0.process_document, authored.process_document);
+    assert_eq!(restored.1, Some(record.clone()));
+
+    let mut original_motion = None;
+    for phase in ["live", "fresh-read-only"] {
+        let before = status(&mut client).await;
+        assert_eq!(before.0.read_only, phase == "fresh-read-only");
+        assert_eq!(before.0.process_document, authored.process_document);
+        assert_eq!(before.1, Some(record.clone()));
+        let ManufacturingResponse::OperationAccepted { operation } = client
+            .manufacturing(ManufacturingCommand::Inspect {
+                session_id: client.hello().session_id.clone(),
+                base_revision: before.0.revision,
+                output: VerificationOutput::ReportAndMotion,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("housing actual-program inspection")
+        };
+        let inspected = wait(&mut client, operation.name).await;
+        assert_eq!(inspected.status, JobStatus::Completed, "{inspected:?}");
+        let Some(JobResult::ManufacturingVerified {
+            record: verified_record,
+            report,
+            provenance,
+            replay_display: Some(display),
+            ..
+        }) = inspected.result
+        else {
+            panic!("housing actual-program report and motion")
+        };
+        assert_eq!(verified_record, record);
+        assert!(report.verified);
+        assert_eq!(provenance.input_hash, record.input_hash);
+        assert_eq!(provenance.process_document, authored.process_document);
+        assert_eq!(
+            display.info.program_hash,
+            SourceHash::from_bytes(bundle.program.as_bytes())
+        );
+        let motion = client
+            .fetch_replay_display(&record, &display)
+            .await
+            .unwrap();
+        let mut program_lines = bundle.program.lines();
+        let mut previous_line = 0;
+        let mut actual_separators = 0;
+        for event in motion[REPLAY_HEADER_BYTES..]
+            .as_chunks::<REPLAY_RECORD_BYTES>()
+            .0
+        {
+            let source_line = u32::from_le_bytes(event[40..44].try_into().unwrap());
+            let line = program_lines
+                .nth((source_line - previous_line - 1) as usize)
+                .unwrap();
+            previous_line = source_line;
+            assert!(line.starts_with("G0 ") || line.starts_with("G1 "));
+            for (axis, offset) in [('X', 0), ('Y', 8), ('Z', 16), ('E', 24), ('F', 32)] {
+                if let Some(value) = line
+                    .split_ascii_whitespace()
+                    .find_map(|word| word.strip_prefix(axis).and_then(|v| v.parse::<f64>().ok()))
+                {
+                    assert_eq!(
+                        f64::from_le_bytes(event[offset..offset + 8].try_into().unwrap()),
+                        value
+                    );
+                }
+            }
+            // SPLR's documented separator-wall role, not a perimeter/bridge alias.
+            if event[46] == 13 {
+                actual_separators += 1;
+                assert!(line.starts_with("G1 "));
+            }
+        }
+        assert_eq!(actual_separators, separator_segments);
+        if let Some(original) = &original_motion {
+            assert_eq!(&motion, original);
+        }
+        let fetched = fetch_bundle(&mut client, &record).await.unwrap();
+        assert_eq!(fetched, bundle);
+        let destination = work.0.join(phase);
+        let mut output = OutputDirectory::create(&destination).unwrap();
+        output
+            .write_manufacturing_bundle(&fetched, &report)
+            .unwrap();
+        output.write("motion.splr", &motion).unwrap();
+        assert_eq!(status(&mut client).await, before);
+        output.commit();
+        drop(output);
+        assert_eq!(
+            std::fs::read(destination.join("program.gcode")).unwrap(),
+            bundle.program.as_bytes()
+        );
+        assert_eq!(
+            serde_json::from_slice::<VerificationReport>(
+                &std::fs::read(destination.join("verification.json")).unwrap()
+            )
+            .unwrap(),
+            report
+        );
+        if phase == "live" {
+            original_motion = Some(motion);
+            save(&mut client, &checkpoint).await;
+            client.shutdown().await.unwrap();
+            std::fs::remove_file(&source).unwrap();
+            client = spawn().await;
+            let opened = open(&mut client, &checkpoint, true).await;
+            assert_eq!(opened.status, JobStatus::Completed, "{opened:?}");
+        }
+    }
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1577,6 +1905,7 @@ async fn process_overrides_resolve_inherit_reset_and_survive_history_and_read_on
         ProcessEdit::AddOperation {
             layer_id: local_layer,
             selector: ProcessSelector::WholeOwnedVolume,
+            interface: None,
             action: ProcessAction::Erase,
         },
     )

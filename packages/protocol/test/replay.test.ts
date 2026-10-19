@@ -35,7 +35,6 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
   const replay = await decodeReplayDisplay(golden, descriptor);
   assert.equal(replay.bytes, golden);
   assert.equal(replay.eventCount, descriptor.info.event_count);
-  assert.equal(descriptor.info.schema_version, 3);
   assert.equal(replay.processCount, descriptor.info.process_count);
   assert.equal(replay.lifecycleCount, descriptor.info.lifecycle_count);
   assert.deepEqual(fixture.actual_positions.slice(0, 4), [
@@ -89,7 +88,7 @@ const corruptions: [string, (data: DataView) => void][] = [
   ["header count", (data) => data.setUint32(8, 0xffffffff, true)],
   ["lifecycle header count", (data) => data.setUint32(28, 1, true)],
   ["reserved tail", (data) => data.setUint8(95, 1)],
-  ["unknown kind", (data) => data.setUint8(96 + 46, 13)],
+  ["unknown kind", (data) => data.setUint8(96 + 46, 0xff)],
   ["unknown flags", (data) => data.setUint8(96 + 47, 2)],
   ["invented first start", (data) => data.setUint8(96 + 47, 1)],
   ["unknown later start", (data) => data.setUint8(144 + 47, 0)],
@@ -249,7 +248,7 @@ test("stationary extrusion and new deposition roles are independently admitted",
     new DataView(corrupted).setFloat64(offset!, mutation!, true);
     await assert.rejects(decodeReplayDisplay(corrupted, await rehash(corrupted, value)), ReplayDecodeError);
   }
-  for (const role of [8, 9, 10]) {
+  for (const role of [8, 9, 10, 13]) {
     const roleBytes = bytes.slice(0);
     new DataView(roleBytes).setUint8(240 + 46, role);
     const decoded = await decodeReplayDisplay(roleBytes, await rehash(roleBytes, value));
@@ -260,7 +259,7 @@ test("stationary extrusion and new deposition roles are independently admitted",
   await assert.rejects(decodeReplayDisplay(countBytes, await rehash(countBytes, value)), ReplayDecodeError);
 });
 
-// Compose structural SPLR3 cases around native body bytes. This does not assert
+// Compose structural packed-replay cases around native body bytes. This does not assert
 // that this composition is a native-verified executable machine program.
 async function lifecycleCase(): Promise<{
   bytes: ArrayBuffer;

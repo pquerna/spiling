@@ -7,7 +7,10 @@ use crate::{
     output::{OutputDirectory, OutputFile},
     set_once,
 };
-use spiling_contracts::process::{MAX_PROCESS_DOCUMENT_BYTES, ProcessEdit, ProcessValue};
+use spiling_contracts::process::{
+    MAX_PROCESS_DOCUMENT_BYTES, ProcessEdit, ProcessInterfacePermission, ProcessSelector,
+    ProcessValue,
+};
 use spiling_contracts::surface::{
     ImageReliefParameters, MAX_SURFACE_DOCUMENT_BYTES, SurfaceFinish, SurfaceLayerId, SurfaceScope,
     SurfaceScopeKind,
@@ -75,6 +78,14 @@ enum Operation {
     RemoveSurfaceFinish(SurfaceLayerId),
     SurfaceFinishEnabled(SurfaceLayerId, bool),
     ProcessSet(OccurrenceId, SurfaceScopeKind, ProcessValue),
+    ProcessSetBox {
+        occurrence: OccurrenceId,
+        scope: SurfaceScopeKind,
+        min: [f64; 3],
+        max: [f64; 3],
+        fraction: f64,
+        interface: Option<ProcessInterfacePermission>,
+    },
     ProcessReset(OccurrenceId, SurfaceScopeKind),
     ProcessEdit(ProcessEdit),
     ProcessResolve(OccurrenceId),
@@ -257,6 +268,41 @@ pub fn parse(
                 };
                 value.validate()?;
                 operations.push(Operation::ProcessSet(occurrence, scope, value));
+            }
+            Some("--process-set-box") => {
+                let occurrence =
+                    OccurrenceId::new(text(&mut args, "--process-set-box occurrence")?.parse()?)?;
+                let scope = process_scope_kind(&mut args, "--process-set-box scope")?;
+                let min = [
+                    text(&mut args, "--process-set-box min X mm")?.parse()?,
+                    text(&mut args, "--process-set-box min Y mm")?.parse()?,
+                    text(&mut args, "--process-set-box min Z mm")?.parse()?,
+                ];
+                let max = [
+                    text(&mut args, "--process-set-box max X mm")?.parse()?,
+                    text(&mut args, "--process-set-box max Y mm")?.parse()?,
+                    text(&mut args, "--process-set-box max Z mm")?.parse()?,
+                ];
+                ProcessSelector::SourceBoxMm { min, max }.validate()?;
+                let fraction = text(&mut args, "--process-set-box fraction")?.parse()?;
+                ProcessValue::SparseFraction { fraction }.validate()?;
+                let interface =
+                    match text(&mut args, "--process-set-box separator permission")?.as_str() {
+                        "none" => None,
+                        "separator-wall" => Some(ProcessInterfacePermission::SeparatorWall),
+                        _ => return Err(
+                            "--process-set-box requires explicit none or separator-wall permission"
+                                .into(),
+                        ),
+                    };
+                operations.push(Operation::ProcessSetBox {
+                    occurrence,
+                    scope,
+                    min,
+                    max,
+                    fraction,
+                    interface,
+                });
             }
             Some("--process-reset") => {
                 let occurrence =
@@ -820,7 +866,10 @@ async fn execute(
                     .await?;
                 complete(client, response).await?;
             }
-            Operation::ProcessSet(..) | Operation::ProcessReset(..) | Operation::ProcessEdit(_) => {
+            Operation::ProcessSet(..)
+            | Operation::ProcessSetBox { .. }
+            | Operation::ProcessReset(..)
+            | Operation::ProcessEdit(_) => {
                 let edit = match operation {
                     Operation::ProcessSet(occurrence_id, kind, value) => {
                         label = "process_set";
@@ -828,6 +877,23 @@ async fn execute(
                         ProcessEdit::SetSparseFraction {
                             scope: process_scope(client, occurrence_id, kind).await?,
                             fraction,
+                        }
+                    }
+                    Operation::ProcessSetBox {
+                        occurrence,
+                        scope,
+                        min,
+                        max,
+                        fraction,
+                        interface,
+                    } => {
+                        label = "process_set_box";
+                        ProcessEdit::SetBoxSparseFraction {
+                            scope: process_scope(client, occurrence, scope).await?,
+                            min,
+                            max,
+                            fraction,
+                            interface,
                         }
                     }
                     Operation::ProcessReset(occurrence_id, kind) => {
@@ -862,7 +928,12 @@ async fn execute(
                     .ok_or("process resolution requires an explicit manufacturing intent and a current occurrence")?;
                 let evidence = serde_json::json!({
                     "project_revision": project.revision,
-                    "resolved": resolved,
+                    "base_whole_owned_resolution": resolved,
+                    "finite_box_intent": project.process_document.layers.iter().filter(|layer| match &layer.scope {
+                        SurfaceScope::Definition{definition_id}=>definition_id==&resolved.definition_id,
+                        SurfaceScope::Occurrence{occurrence_id,expected_definition_id}=>*occurrence_id==resolved.occurrence_id && expected_definition_id==&resolved.definition_id,
+                    }).filter(|layer|layer.operations.iter().any(|operation|matches!(operation.selector,ProcessSelector::SourceBoxMm{..}))).collect::<Vec<_>>(),
+                    "spatial_output_authority": "Fresh compiled process_resolution/region/interface records and actual emitted replay; base resolution excludes finite boxes",
                 });
                 process_inspections.push(evidence.clone());
                 process_resolution = Some(evidence);
@@ -1225,6 +1296,98 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn box_process_arguments_are_explicit_typed_ordered_and_readonly_safe() {
+        let flags = [
+            "--process-set-box",
+            "1",
+            "occurrence",
+            "-1",
+            "-2",
+            "-3",
+            "4",
+            "5",
+            "6",
+            "0.6",
+            "none",
+        ];
+        for permission in ["none", "separator-wall"] {
+            let mut args = vec!["open", "project"];
+            args.extend(flags);
+            *args.last_mut().unwrap() = permission;
+            args.extend(["--undo", "--redo"]);
+            let options = parse_args(&args).unwrap().unwrap();
+            let Command::Project { workflow, .. } = options.command else {
+                panic!("expected project command");
+            };
+            let [
+                Operation::ProcessSetBox {
+                    occurrence,
+                    scope,
+                    min,
+                    max,
+                    fraction,
+                    interface,
+                },
+                Operation::Undo,
+                Operation::Redo,
+            ] = workflow.operations.as_slice()
+            else {
+                panic!("expected ordered typed box edit and history");
+            };
+            assert_eq!(occurrence.get(), 1);
+            assert_eq!(*scope, SurfaceScopeKind::Occurrence);
+            assert_eq!(*min, [-1.0, -2.0, -3.0]);
+            assert_eq!(*max, [4.0, 5.0, 6.0]);
+            assert_eq!(*fraction, 0.6);
+            assert_eq!(
+                *interface,
+                if permission == "none" {
+                    None
+                } else {
+                    Some(ProcessInterfacePermission::SeparatorWall)
+                },
+            );
+        }
+        for (index, invalid) in [
+            (1, "0"),
+            (2, "face"),
+            (3, "NaN"),
+            (4, "inf"),
+            (5, "-inf"),
+            (6, "-1"),
+            (7, "-3"),
+            (8, "-3"),
+            (9, "0"),
+            (9, "1.01"),
+            (9, "NaN"),
+            (10, "true"),
+            (10, "--approve-separator"),
+        ] {
+            let mut args = vec!["open", "project"];
+            let mut invalid_flags = flags;
+            invalid_flags[index] = invalid;
+            args.extend(invalid_flags);
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
+        let mut missing_permission = vec!["open", "project"];
+        missing_permission.extend(&flags[..flags.len() - 1]);
+        assert!(parse_args(&missing_permission).is_err());
+        for mode in ["inspect", "open"] {
+            let mut args = vec![mode, "project"];
+            args.extend(flags);
+            if mode == "open" {
+                args.push("--read-only");
+            }
+            assert!(
+                parse_args(&args)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("read-only")
+            );
+        }
     }
     #[test]
     fn process_arguments_reject_invalid_authoring_and_allow_readonly_resolution() {

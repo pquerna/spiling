@@ -77,7 +77,7 @@ export function createReplayDisplay(
   const batches: Batch[] = [];
   const materials: (LineBasicMaterial | PointsMaterial)[] = [];
   const geometries: BufferGeometry[] = [];
-  const counts = new Uint32Array(13);
+  const counts = new Uint32Array(14);
   for (let event = 1; event < replay.eventCount; event++) {
     const kind = data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46);
     counts[kind] = counts[kind]! + 1;
@@ -114,6 +114,7 @@ export function createReplayDisplay(
       "#b3e5ff",
       "#e26086",
       "#f6b8ce",
+      "#f5ef44",
     ];
     for (let kind = 0; kind < counts.length; kind++) {
       if (!counts[kind]) continue;

@@ -11,21 +11,58 @@ use crate::{
 impl TryFrom<rpc::ProcessSelector> for ProcessSelector {
     type Error = String;
     fn try_from(v: rpc::ProcessSelector) -> Result<Self, String> {
-        match required(v.kind, "process selector")? {
-            rpc::process_selector::Kind::WholeOwnedVolume(_) => Ok(Self::WholeOwnedVolume),
-        }
+        let selector = match required(v.kind, "process selector")? {
+            rpc::process_selector::Kind::WholeOwnedVolume(_) => Self::WholeOwnedVolume,
+            rpc::process_selector::Kind::SourceBoxMm(v) => Self::SourceBoxMm {
+                min: required(v.min, "source box min")?.try_into()?,
+                max: required(v.max, "source box max")?.try_into()?,
+            },
+        };
+        selector.validate().map_err(|e| e.to_string())?;
+        Ok(selector)
     }
 }
-impl From<ProcessSelector> for rpc::ProcessSelector {
-    fn from(v: ProcessSelector) -> Self {
-        Self {
+impl TryFrom<ProcessSelector> for rpc::ProcessSelector {
+    type Error = String;
+    fn try_from(v: ProcessSelector) -> Result<Self, String> {
+        v.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
             kind: Some(match v {
                 ProcessSelector::WholeOwnedVolume => {
                     rpc::process_selector::Kind::WholeOwnedVolume(rpc::WholeOwnedVolume {})
                 }
+                ProcessSelector::SourceBoxMm { min, max } => {
+                    rpc::process_selector::Kind::SourceBoxMm(rpc::SourceBoxMm {
+                        min: Some(min.try_into()?),
+                        max: Some(max.try_into()?),
+                    })
+                }
             }),
+        })
+    }
+}
+impl TryFrom<i32> for ProcessInterfacePermission {
+    type Error = String;
+    fn try_from(value: i32) -> Result<Self, String> {
+        match rpc::ProcessInterfacePermission::try_from(value)
+            .map_err(|_| "unknown process interface permission")?
+        {
+            rpc::ProcessInterfacePermission::SeparatorWall => Ok(Self::SeparatorWall),
+            rpc::ProcessInterfacePermission::Unspecified => {
+                Err("unspecified process interface permission".into())
+            }
         }
     }
+}
+impl From<ProcessInterfacePermission> for rpc::ProcessInterfacePermission {
+    fn from(value: ProcessInterfacePermission) -> Self {
+        match value {
+            ProcessInterfacePermission::SeparatorWall => Self::SeparatorWall,
+        }
+    }
+}
+fn interface_to_wire(value: Option<ProcessInterfacePermission>) -> Option<i32> {
+    value.map(|value| rpc::ProcessInterfacePermission::from(value) as i32)
 }
 impl TryFrom<rpc::ProcessValue> for ProcessValue {
     type Error = String;
@@ -97,6 +134,7 @@ impl TryFrom<rpc::ProcessDocument> for ProcessDocument {
                         .map_err(|e| e.to_string())?,
                     selector: required(operation.selector, "process selector")?.try_into()?,
                     action: required(operation.action, "process action")?.try_into()?,
+                    interface: operation.interface.map(TryInto::try_into).transpose()?,
                 });
             }
             layers.push(ProcessLayer {
@@ -124,8 +162,9 @@ impl TryFrom<ProcessDocument> for rpc::ProcessDocument {
             for operation in layer.operations {
                 operations.push(rpc::ProcessOperation {
                     operation_id: operation.operation_id.get(),
-                    selector: Some(operation.selector.into()),
+                    selector: Some(operation.selector.try_into()?),
                     action: Some(operation.action.try_into()?),
+                    interface: interface_to_wire(operation.interface),
                 });
             }
             layers.push(rpc::ProcessLayer {
@@ -219,7 +258,7 @@ impl TryFrom<rpc::ProcessEdit> for ProcessEdit {
     type Error = String;
     fn try_from(v: rpc::ProcessEdit) -> Result<Self, String> {
         use rpc::process_edit::Op;
-        Ok(match required(v.op, "process edit")? {
+        let edit = match required(v.op, "process edit")? {
             Op::SetSparseFraction(v) => {
                 ProcessValue::SparseFraction {
                     fraction: v.fraction,
@@ -231,10 +270,18 @@ impl TryFrom<rpc::ProcessEdit> for ProcessEdit {
                     fraction: v.fraction,
                 }
             }
+            Op::SetBoxSparseFraction(v) => Self::SetBoxSparseFraction {
+                scope: required(v.scope, "process scope")?.try_into()?,
+                min: required(v.min, "source box min")?.try_into()?,
+                max: required(v.max, "source box max")?.try_into()?,
+                fraction: v.fraction,
+                interface: v.interface.map(TryInto::try_into).transpose()?,
+            },
             Op::AddLayer(v) => Self::AddLayer {
                 scope: required(v.scope, "process scope")?.try_into()?,
                 selector: required(v.selector, "process selector")?.try_into()?,
                 action: required(v.action, "process action")?.try_into()?,
+                interface: v.interface.map(TryInto::try_into).transpose()?,
             },
             Op::RemoveLayer(v) => Self::RemoveLayer {
                 layer_id: ProcessLayerId::new(v.layer_id).map_err(|e| e.to_string())?,
@@ -251,11 +298,13 @@ impl TryFrom<rpc::ProcessEdit> for ProcessEdit {
                 layer_id: ProcessLayerId::new(v.layer_id).map_err(|e| e.to_string())?,
                 selector: required(v.selector, "process selector")?.try_into()?,
                 action: required(v.action, "process action")?.try_into()?,
+                interface: v.interface.map(TryInto::try_into).transpose()?,
             },
             Op::UpdateOperation(v) => Self::UpdateOperation {
                 operation_id: ProcessOperationId::new(v.operation_id).map_err(|e| e.to_string())?,
                 selector: required(v.selector, "process selector")?.try_into()?,
                 action: required(v.action, "process action")?.try_into()?,
+                interface: v.interface.map(TryInto::try_into).transpose()?,
             },
             Op::RemoveOperation(v) => Self::RemoveOperation {
                 operation_id: ProcessOperationId::new(v.operation_id).map_err(|e| e.to_string())?,
@@ -267,7 +316,9 @@ impl TryFrom<rpc::ProcessEdit> for ProcessEdit {
             Op::Reset(v) => Self::Reset {
                 scope: required(v.scope, "process scope")?.try_into()?,
             },
-        })
+        };
+        edit.validate().map_err(|e| e.to_string())?;
+        Ok(edit)
     }
 }
 impl TryFrom<ProcessEdit> for rpc::ProcessEdit {
@@ -283,14 +334,29 @@ impl TryFrom<ProcessEdit> for rpc::ProcessEdit {
                         fraction,
                     })
                 }
+                ProcessEdit::SetBoxSparseFraction {
+                    scope,
+                    min,
+                    max,
+                    fraction,
+                    interface,
+                } => Op::SetBoxSparseFraction(rpc::SetProcessBoxSparseFraction {
+                    scope: Some(scope.try_into()?),
+                    min: Some(min.try_into()?),
+                    max: Some(max.try_into()?),
+                    fraction,
+                    interface: interface_to_wire(interface),
+                }),
                 ProcessEdit::AddLayer {
                     scope,
                     selector,
                     action,
+                    interface,
                 } => Op::AddLayer(rpc::AddProcessLayer {
                     scope: Some(scope.try_into()?),
-                    selector: Some(selector.into()),
+                    selector: Some(selector.try_into()?),
                     action: Some(action.try_into()?),
+                    interface: interface_to_wire(interface),
                 }),
                 ProcessEdit::RemoveLayer { layer_id } => Op::RemoveLayer(rpc::RemoveProcessLayer {
                     layer_id: layer_id.get(),
@@ -311,19 +377,23 @@ impl TryFrom<ProcessEdit> for rpc::ProcessEdit {
                     layer_id,
                     selector,
                     action,
+                    interface,
                 } => Op::AddOperation(rpc::AddProcessOperation {
                     layer_id: layer_id.get(),
-                    selector: Some(selector.into()),
+                    selector: Some(selector.try_into()?),
                     action: Some(action.try_into()?),
+                    interface: interface_to_wire(interface),
                 }),
                 ProcessEdit::UpdateOperation {
                     operation_id,
                     selector,
                     action,
+                    interface,
                 } => Op::UpdateOperation(rpc::UpdateProcessOperation {
                     operation_id: operation_id.get(),
-                    selector: Some(selector.into()),
+                    selector: Some(selector.try_into()?),
                     action: Some(action.try_into()?),
+                    interface: interface_to_wire(interface),
                 }),
                 ProcessEdit::RemoveOperation { operation_id } => {
                     Op::RemoveOperation(rpc::RemoveProcessOperation {

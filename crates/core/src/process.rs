@@ -9,10 +9,12 @@ pub(super) fn apply_process_edit(
     next_layer: &mut u32,
     next_operation: &mut u32,
 ) -> Result<(), ProjectError> {
+    edit.validate()?;
     fn operation(
         next: &mut u32,
         selector: ProcessSelector,
         action: ProcessAction,
+        interface: Option<ProcessInterfacePermission>,
     ) -> Result<ProcessOperation, ProjectError> {
         action.validate()?;
         let operation_id = ProcessOperationId::new(*next)?;
@@ -26,6 +28,7 @@ pub(super) fn apply_process_edit(
             operation_id,
             selector,
             action,
+            interface,
         })
     }
     fn layer_index(doc: &ProcessDocument, id: ProcessLayerId) -> Result<usize, ProjectError> {
@@ -51,6 +54,87 @@ pub(super) fn apply_process_edit(
             .ok_or_else(|| invalid("unknown process operation"))
     }
     match edit {
+        ProcessEdit::SetBoxSparseFraction {
+            scope,
+            min,
+            max,
+            fraction,
+            interface,
+        } => {
+            let selector = ProcessSelector::SourceBoxMm { min, max };
+            let value = ProcessValue::SparseFraction { fraction };
+            let contains = |selector: ProcessSelector, min: [f64; 3], max: [f64; 3]| match selector
+            {
+                ProcessSelector::WholeOwnedVolume => true,
+                ProcessSelector::SourceBoxMm { min: lo, max: hi } => {
+                    (0..3).all(|axis| lo[axis] <= min[axis] && hi[axis] >= max[axis])
+                }
+            };
+            let mut winner = None;
+            'layers: for (layer, entry) in doc.layers.iter().enumerate().rev() {
+                if !entry.enabled || entry.scope != scope {
+                    continue;
+                }
+                for (index, operation) in entry.operations.iter().enumerate().rev() {
+                    match (operation.selector, operation.action) {
+                        (ProcessSelector::WholeOwnedVolume, ProcessAction::Erase) => break,
+                        (ProcessSelector::WholeOwnedVolume, ProcessAction::Replace { .. }) => {
+                            if !entry.operations[index + 1..].iter().any(|later| {
+                                matches!(later.selector, ProcessSelector::SourceBoxMm { .. })
+                                    && later.action == ProcessAction::Erase
+                            }) {
+                                break 'layers;
+                            }
+                        }
+                        (
+                            ProcessSelector::SourceBoxMm { min, max },
+                            ProcessAction::Replace { .. },
+                        ) => {
+                            let hidden = entry.operations[index + 1..]
+                                .iter()
+                                .any(|later| contains(later.selector, min, max))
+                                || doc.layers[layer + 1..].iter().any(|later| {
+                                    later.enabled
+                                        && later.scope == scope
+                                        && later.operations.last().is_some_and(|operation| {
+                                            matches!(
+                                                operation.action,
+                                                ProcessAction::Replace { .. }
+                                            ) && contains(operation.selector, min, max)
+                                        })
+                                });
+                            if hidden {
+                                continue;
+                            }
+                            if winner.replace((layer, index)).is_some() {
+                                return Err(invalid(
+                                    "box adjustment has multiple possible exact-scope targets",
+                                ));
+                            }
+                        }
+                        (ProcessSelector::SourceBoxMm { .. }, ProcessAction::Erase) => {}
+                    }
+                }
+            }
+            if let Some((layer, index)) = winner {
+                let operation = &mut doc.layers[layer].operations[index];
+                operation.selector = selector;
+                operation.action = ProcessAction::Replace { value };
+                operation.interface = interface;
+            } else {
+                return apply_process_edit(
+                    doc,
+                    ProcessEdit::AddLayer {
+                        scope,
+                        selector,
+                        action: ProcessAction::Replace { value },
+                        interface,
+                    },
+                    next_layer,
+                    next_operation,
+                );
+            }
+        }
         ProcessEdit::SetSparseFraction { scope, fraction } => {
             let value = ProcessValue::SparseFraction { fraction };
             value.validate()?;
@@ -85,6 +169,7 @@ pub(super) fn apply_process_edit(
                         scope,
                         selector: ProcessSelector::WholeOwnedVolume,
                         action: ProcessAction::Replace { value },
+                        interface: None,
                     },
                     next_layer,
                     next_operation,
@@ -95,6 +180,7 @@ pub(super) fn apply_process_edit(
             scope,
             selector,
             action,
+            interface,
         } => {
             if doc.layers.len() == MAX_PROCESS_LAYERS
                 || doc
@@ -116,7 +202,7 @@ pub(super) fn apply_process_edit(
                     "process layer allocator exhausted",
                 )
             })?;
-            let first = operation(next_operation, selector, action)?;
+            let first = operation(next_operation, selector, action, interface)?;
             doc.layers.reserve_exact(1);
             doc.layers.push(ProcessLayer {
                 layer_id,
@@ -146,6 +232,7 @@ pub(super) fn apply_process_edit(
             layer_id,
             selector,
             action,
+            interface,
         } => {
             let index = layer_index(doc, layer_id)?;
             if doc
@@ -160,7 +247,7 @@ pub(super) fn apply_process_edit(
                     "process operation budget exceeded",
                 ));
             }
-            let operation = operation(next_operation, selector, action)?;
+            let operation = operation(next_operation, selector, action, interface)?;
             doc.layers[index].operations.reserve_exact(1);
             doc.layers[index].operations.push(operation);
         }
@@ -168,6 +255,7 @@ pub(super) fn apply_process_edit(
             operation_id,
             selector,
             action,
+            interface,
         } => {
             action.validate()?;
             let (layer, index) = operation_index(doc, operation_id)?;
@@ -175,6 +263,7 @@ pub(super) fn apply_process_edit(
                 operation_id,
                 selector,
                 action,
+                interface,
             };
         }
         ProcessEdit::RemoveOperation { operation_id } => {
@@ -195,8 +284,8 @@ pub(super) fn apply_process_edit(
             operations.insert(index, operation);
         }
         ProcessEdit::Reset { scope } => {
-            // O1 has one channel: clear every exact-scope contribution, including
-            // disabled/erased layers, so reset never revives a prior scoped override.
+            // Clear every exact-scope contribution, including disabled/erased
+            // whole-volume and box layers, so reset cannot revive a prior override.
             doc.layers.retain(|layer| layer.scope != scope);
         }
     }

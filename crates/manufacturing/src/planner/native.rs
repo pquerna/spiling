@@ -3167,6 +3167,8 @@ mod actual_deposition_tests {
                         section_area_mm2: object_area,
                         source_section_area_mm2: object_area,
                         surface_added_area_mm2: 0.0,
+                        separator_area_mm2: 0.0,
+                        process_interfaces: Vec::new(),
                         wall_area_mm2: 0.0,
                         bottom_skin_area_mm2: 0.0,
                         top_skin_area_mm2: 0.0,
@@ -3189,6 +3191,7 @@ mod actual_deposition_tests {
                     },
                     paths: vec![DepositionPath {
                         kind,
+                        owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },
                         points_mm: vec![[x, 0.0, z], [x + 1.0, 0.0, z]],
                     }],
                 });

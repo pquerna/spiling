@@ -7,11 +7,13 @@ use boolean::budget as boolean_budget;
 mod classification;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
+mod bonds;
 mod native;
 mod preflight;
 mod region;
-mod support;
+pub(crate) mod support;
 mod surface;
+mod zones;
 pub use preflight::preflight;
 #[cfg(test)]
 mod native_tests;
@@ -99,6 +101,24 @@ pub(crate) fn plan(
         &mut surface_work,
         cancel,
     )?;
+    let mut process_captures = Vec::new();
+    process_captures
+        .try_reserve_exact(input.occurrences.len())
+        .map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "process capture allocation refused",
+            )
+        })?;
+    for occurrence in input.occurrences {
+        process_captures.push(zones::capture(
+            input,
+            &admission,
+            occurrence.occurrence_id,
+            &mut surface_work,
+            cancel,
+        )?);
+    }
     let prepared_sources = prepare_sources(
         geometry_sources,
         admission.native_capture_proposal_bytes(),
@@ -297,6 +317,10 @@ pub(crate) fn plan(
             for (occurrence_id, material, bytes) in &native_contributions {
                 process_domains.push(process_domain(
                     input,
+                    process_captures
+                        .iter()
+                        .find(|capture| capture.occurrence_id == *occurrence_id)
+                        .and_then(|capture| capture.zone),
                     *occurrence_id,
                     Arc::clone(material),
                     *bytes,
@@ -335,6 +359,10 @@ pub(crate) fn plan(
             {
                 process_domains.push(process_domain(
                     input,
+                    process_captures
+                        .iter()
+                        .find(|capture| capture.occurrence_id == *occurrence_id)
+                        .and_then(|capture| capture.zone),
                     *occurrence_id,
                     Arc::clone(&finished),
                     finished_bytes,
@@ -549,6 +577,7 @@ pub(crate) fn plan(
     drop(native_material);
     drop(native_occupied_shared);
     let mut layers = Vec::with_capacity(count as usize);
+    let mut retained_plan_bytes = layers.capacity() * std::mem::size_of::<PrintLayer>();
     let mut segments = 0usize;
     let skin_inset_mm = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
     let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset_mm, surface_work)?;
@@ -662,6 +691,7 @@ pub(crate) fn plan(
                 )?
                 .with_process(
                     &sections[current].process_domains,
+                    recipe,
                     classification::fixed_point_budget(skin_retained_points(
                         retained_points,
                         &neighborhoods,
@@ -672,6 +702,20 @@ pub(crate) fn plan(
                 )?,
             );
             key = Some(next_key);
+            for &(occurrence_id, provenance) in &classified
+                .as_ref()
+                .expect("classified process regions")
+                .applied_operations
+            {
+                if let Some(capture) = process_captures.iter_mut().find(|capture| {
+                    capture.occurrence_id == occurrence_id
+                        && capture
+                            .zone
+                            .is_some_and(|zone| zone.provenance == provenance)
+                }) {
+                    capture.applied = true;
+                }
+            }
         }
         if !admission.surface_fields.is_empty() {
             let native_span = native_surfaces
@@ -754,12 +798,20 @@ pub(crate) fn plan(
         let axis_slot = usize::from(axis == region::HatchAxis::Y);
         if templates[axis_slot].is_none() {
             let mut template_segments = segments;
-            templates[axis_slot] = Some(
-                classified
-                    .as_ref()
-                    .expect("region classification initialized")
-                    .paths(z, height, axis, recipe, &mut template_segments, cancel)?,
-            );
+            let classified = classified
+                .as_ref()
+                .expect("region classification initialized");
+            let (paths, proposed) =
+                classified.paths(z, height, axis, recipe, &mut template_segments, cancel)?;
+            let base = skin_retained_points(retained_points, &neighborhoods, &[])?
+                + classified.retained_points()
+                + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
+            let mut admit = classification::fixed_point_budget(base);
+            admit(
+                bonds::coverage_bytes(proposed).div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+            )?;
+            let coverage = proposed.clone();
+            templates[axis_slot] = Some((paths, coverage));
         }
         let (template, coverage) = templates[axis_slot]
             .as_ref()
@@ -768,6 +820,53 @@ pub(crate) fn plan(
             .iter()
             .map(|p| p.points_mm.len() - 1)
             .sum::<usize>();
+        let ribs = coverage
+            .process_interfaces
+            .iter()
+            .map(|i| i.centerlines_mm.len())
+            .sum::<usize>();
+        let rib_bytes = ribs
+            .checked_mul(
+                std::mem::size_of::<DepositionPath>() + 2 * std::mem::size_of::<[f64; 3]>(),
+            )
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "separator output accounting overflow",
+                )
+            })?;
+        let layer_bytes = bonds::path_bytes(template)
+            .checked_add(bonds::coverage_bytes(coverage))
+            .and_then(|bytes| bytes.checked_add(rib_bytes))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "layer output byte accounting overflow",
+                )
+            })?;
+        retained_plan_bytes = retained_plan_bytes
+            .checked_add(layer_bytes)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "plan output byte accounting overflow",
+                )
+            })?;
+        let template_bytes = templates
+            .iter()
+            .flatten()
+            .map(|(paths, coverage)| bonds::path_bytes(paths) + bonds::coverage_bytes(coverage))
+            .sum::<usize>();
+        if retained_plan_bytes
+            .checked_add(template_bytes)
+            .and_then(|n| n.checked_add(resolution_allocated_bytes))
+            .is_none_or(|n| n > MAX_MANUFACTURING_BUNDLE_BYTES as usize)
+        {
+            return Err(error(
+                ManufacturingErrorCode::ResourceLimit,
+                "live plan output clones and interface metadata exceed the existing manufacturing byte budget",
+            ));
+        }
         segments = segments
             .checked_add(additional)
             .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -777,11 +876,12 @@ pub(crate) fn plan(
                     "deposition segment limit exceeded",
                 )
             })?;
-        let mut paths = Vec::with_capacity(template.len());
+        let mut paths = Vec::with_capacity(template.len() + ribs);
         for path in template {
             check_cancel(cancel)?;
             paths.push(DepositionPath {
                 kind: path.kind,
+                owner: path.owner,
                 points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
             });
         }
@@ -822,12 +922,13 @@ pub(crate) fn plan(
     // Support reserves this derived-cache pool once; regeneration may evict and
     // rebuild within it, but cannot silently increase retained support staging.
     neighborhoods.freeze_retained_capacity();
+    let support_native_points = skin_retained_points(retained_points, &neighborhoods, &[])?;
     support::realize(
         &mut layers,
         &support::SupportInput {
             sections: &sections,
             schedule: &schedule,
-            native_points: skin_retained_points(retained_points, &neighborhoods, &[])?,
+            native_points: support_native_points,
             recipe,
         },
         &mut segments,
@@ -885,6 +986,7 @@ pub(crate) fn plan(
             )?
             .with_process(
                 &sections[current].process_domains,
+                recipe,
                 classification::fixed_point_budget(skin_retained_points(
                     live_retained_points,
                     &neighborhoods,
@@ -940,6 +1042,16 @@ pub(crate) fn plan(
                     )?
                     .0
             };
+            let base =
+                skin_retained_points(live_retained_points, &neighborhoods, &[&lower, &upper])?
+                    + classified.retained_points()
+                    + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
+            let mut admit = classification::fixed_point_budget(base);
+            admit(
+                bonds::interface_bytes(&classified.coverage.process_interfaces)
+                    .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+            )?;
+            let process_interfaces = classified.coverage.process_interfaces.clone();
             let whole_rows = if recovering_components {
                 // A bridge band and authored complement are disjoint owners.
                 // Global row extension must not re-enter the selected band.
@@ -947,7 +1059,11 @@ pub(crate) fn plan(
             } else {
                 classified.whole_rows(&paths, &hatch_layer, segments, cancel)?
             };
-            Ok(support::RasterCandidate { paths, whole_rows })
+            Ok(support::RasterCandidate {
+                paths,
+                whole_rows,
+                process_interfaces,
+            })
         },
         |demand_bounds, point_limit, support_work, native_work| {
             native::project_protected_voids(
@@ -965,14 +1081,82 @@ pub(crate) fn plan(
                 cancel,
             )
         },
+        |index, candidate, segments, work| {
+            let current = span_at(&sections, index as u32);
+            let base = support_native_points
+                + candidate
+                    .paths
+                    .iter()
+                    .map(|p| p.points_mm.capacity())
+                    .sum::<usize>();
+            bonds::construct(
+                &mut candidate.process_interfaces,
+                &sections[current].process_domains,
+                &mut candidate.paths,
+                schedule[index].z,
+                recipe,
+                segments,
+                classification::fixed_point_budget(base),
+                work,
+                cancel,
+            )
+        },
     )?;
+    for layer in &mut layers {
+        bonds::refresh_witness_kinds(layer)?;
+    }
     // No-support/no-demand paths never project or retain unused negative-space
     // captures beyond support admission.
     drop(native_coverage.protected_voids);
     drop(native_coverage.material_proof);
     drop(prepared_sources);
+    if process_captures
+        .iter()
+        .map(|capture| capture.operations.len())
+        .sum::<usize>()
+        > MAX_PROCESS_REGIONS
+    {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "process resolution output limit exceeded",
+        ));
+    }
     let result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        process_resolution: process_captures
+            .iter()
+            .flat_map(|capture| {
+                capture
+                    .operations
+                    .iter()
+                    .map(move |&provenance| ProcessRegionResolution {
+                        occurrence_id: capture.occurrence_id,
+                        definition_id: input
+                            .occurrences
+                            .iter()
+                            .find(|o| o.occurrence_id == capture.occurrence_id)
+                            .expect("captured occurrence")
+                            .definition_id
+                            .clone(),
+                        provenance,
+                        status: if capture.applied
+                            && capture
+                                .zone
+                                .is_some_and(|zone| zone.provenance == provenance)
+                        {
+                            if capture.zone.is_some_and(|zone| {
+                                zone.values[0].fraction == zone.values[1].fraction
+                            }) {
+                                ProcessRegionStatus::NoDensityChange
+                            } else {
+                                ProcessRegionStatus::Applied
+                            }
+                        } else {
+                            ProcessRegionStatus::NoEligibleInterior
+                        },
+                    })
+            })
+            .collect(),
         native_geometry: NativeGeometryCoverageSummary {
             requested_shape_error_mm: recipe.native_shape_error_mm,
             achieved_shape_error_mm: native_coverage.achieved_shape_error_mm,
@@ -1012,10 +1196,12 @@ struct ProcessDomain {
     material: Arc<MultiPolygon<f64>>,
     coverage: ProcessRegionCoverage,
     bytes: usize,
+    zone: Option<zones::Zone>,
 }
 
 fn process_domain(
     input: &CompilerInput<'_>,
+    zone: Option<zones::Zone>,
     occurrence_id: spiling_contracts::geometry::OccurrenceId,
     material: Arc<MultiPolygon<f64>>,
     bytes: usize,
@@ -1047,6 +1233,7 @@ fn process_domain(
             }],
         },
         bytes,
+        zone,
     })
 }
 
@@ -1085,7 +1272,12 @@ fn validate_process_overlap(
     for (index, a) in domains.iter().enumerate() {
         for b in &domains[..index] {
             check_cancel(cancel)?;
-            if a.coverage.fraction == b.coverage.fraction {
+            let spatial = a
+                .zone
+                .is_some_and(|zone| zone.values[0].fraction != zone.values[1].fraction)
+                || b.zone
+                    .is_some_and(|zone| zone.values[0].fraction != zone.values[1].fraction);
+            if !spatial && a.coverage.fraction == b.coverage.fraction {
                 continue;
             }
             let (Some(a_bounds), Some(b_bounds)) =
@@ -1102,7 +1294,7 @@ fn validate_process_overlap(
                 return Err(error(
                     ManufacturingErrorCode::InvalidSpecification,
                     format!(
-                        "incompatible whole-volume sparse fractions for occurrences {} and {} in final-D interval [{},{}] mm",
+                        "overlapping process profiles for occurrences {} and {} in final-D interval [{},{}] mm require unsupported spatial composition (including interface neighbors/extent/construction)",
                         a.coverage.contributions[0].occurrence_id.get(),
                         b.coverage.contributions[0].occurrence_id.get(),
                         interval[0],
@@ -1629,6 +1821,8 @@ fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
         section_area_mm2: 0.0,
         source_section_area_mm2: 0.0,
         surface_added_area_mm2: 0.0,
+        separator_area_mm2: 0.0,
+        process_interfaces: Vec::new(),
         wall_area_mm2: 0.0,
         bottom_skin_area_mm2: 0.0,
         top_skin_area_mm2: 0.0,
@@ -1704,7 +1898,6 @@ pub(super) fn forward(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     let r = rotate(pose, p);
     std::array::from_fn(|a| r[a] + pose.translation_mm[a])
 }
-#[cfg(test)]
 fn rotate_inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     let [x, y, z, w] = pose.rotation_xyzw;
     rotate(
@@ -1715,7 +1908,6 @@ fn rotate_inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
         p,
     )
 }
-#[cfg(test)]
 fn inverse(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
     rotate_inverse(pose, std::array::from_fn(|a| p[a] - pose.translation_mm[a]))
 }

@@ -10,14 +10,14 @@ use spiling_contracts::manufacturing::{
 };
 use std::sync::atomic::AtomicBool;
 
-pub(super) enum GapKind {
+pub(crate) enum GapKind {
     Supported,
     Bridge,
     Contact,
     Demand,
 }
 
-pub(super) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> GapKind {
+pub(crate) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> GapKind {
     let left = gap.left;
     let right = gap.right;
     // A fully unanchored tiny sampled edge is not a supported overhang. Anchors
@@ -89,6 +89,22 @@ pub(super) fn analyze<'a>(
                 let start = gap.start;
                 let end = gap.end;
                 let span = (end - start) * length;
+                if path.kind == DepositionKind::SeparatorWall
+                    && !matches!(
+                        gap_kind(
+                            gap,
+                            span,
+                            recipe.bead_width_mm,
+                            recipe.process.max_bridge_span_mm
+                        ),
+                        GapKind::Supported
+                    )
+                {
+                    return Err(crate::error(
+                        spiling_contracts::manufacturing::ManufacturingErrorCode::UnsupportedGeometry,
+                        "UnsupportedInterface: permanent separator needs actual lower strokes; Bridge/support substitution is not authorized",
+                    ));
+                }
                 match gap_kind(
                     gap,
                     span,
@@ -130,7 +146,7 @@ pub(super) fn analyze<'a>(
 /// Maximal straight strokes, including across the seam of a closed contour.
 /// Native points are never removed or moved. Only floating arithmetic roundoff
 /// in the two-product cross product admits collinearity; curved edges stay distinct.
-pub(in crate::planner) struct StrokeRuns<'a> {
+pub(crate) struct StrokeRuns<'a> {
     points: &'a [[f64; 3]],
     closed: bool,
     seam: usize,
@@ -138,7 +154,7 @@ pub(in crate::planner) struct StrokeRuns<'a> {
     segments: usize,
 }
 impl<'a> StrokeRuns<'a> {
-    pub(in crate::planner) fn new(points: &'a [[f64; 3]]) -> Self {
+    pub(crate) fn new(points: &'a [[f64; 3]]) -> Self {
         let segments = points.len().saturating_sub(1);
         let closed = segments > 1 && points.first() == points.last();
         let seam = if closed {
@@ -220,10 +236,12 @@ mod tests {
         let anchors = [
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
+                owner: None,
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
             },
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
+                owner: None,
                 points_mm: vec![[23.3, 0.3, 8.0], [42.7, 0.3, 8.0]],
             },
         ];
@@ -297,10 +315,16 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
         let path = DepositionPath {
             kind: DepositionKind::TopSkin,
+            owner: Some(
+                spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
+                    skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin,
+                },
+            ),
             points_mm: vec![[0.4, 0.0, 0.8], [1.6, 0.0, 0.8]],
         };
         let cancel = AtomicBool::new(false);
@@ -371,6 +395,7 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
         let cancel = AtomicBool::new(false);
@@ -381,6 +406,11 @@ mod tests {
         for (a, b) in [(0.5, 1.5), (0.51, 1.49)] {
             let path = DepositionPath {
                 kind: DepositionKind::TopSkin,
+                owner: Some(
+                    spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
+                        skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin,
+                    },
+                ),
                 points_mm: vec![[a, 0.0, 0.8], [b, 0.0, 0.8]],
             };
             let gaps = query

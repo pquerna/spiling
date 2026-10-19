@@ -60,7 +60,35 @@ export interface ManufacturingReviewState {
   bedProposalStale: boolean;
   failure: { action: ManufacturingAction; message: string } | null;
 }
-export function useManufacturing(host: ManufacturingHost) {
+export interface ManufacturingController extends ManufacturingReviewState {
+  draft: IntentDraft | null;
+  message: string;
+  available: boolean;
+  writable: boolean;
+  layer: number | null;
+  eventCount: number;
+  showTravel: boolean;
+  showSource: boolean;
+  selectIntent(relativePath?: string): Promise<void>;
+  prepareBed(occurrenceId: number, center: boolean): Promise<void>;
+  applyBed(): Promise<void>;
+  clearBedProposal(): void;
+  selectSoftwareIntent(): void;
+  editScalar(key: ScalarField, value: string): void;
+  editPolicyScalar(key: string, value: string): void;
+  editSeamPolicy(value: SeamPolicy["kind"]): void;
+  editPreferredDirection(axis: 0 | 1, value: string): void;
+  editRectilinearAxis(value: RectilinearAxisPolicy): void;
+  reloadDraft(): void;
+  apply(): Promise<void>;
+  compile(): Promise<void>;
+  preflightIntent(): Promise<void>;
+  inspect(output: VerificationOutput): Promise<void>;
+  updateView(layer: number | null, eventCount: number, showTravel: boolean, showSource: boolean): Promise<void>;
+  exportBundle(relativePath?: string): Promise<void>;
+  cancelPreview(): void;
+}
+export function useManufacturing(host: ManufacturingHost): ManufacturingController {
   const hostRef = useRef(host);
   hostRef.current = host;
   const [status, setStatus] = useState<Status | null>(null);
@@ -94,6 +122,7 @@ export function useManufacturing(host: ManufacturingHost) {
   const request = useRef(0),
     refreshSequence = useRef(0),
     mounted = useRef(true);
+  const changingView = useRef(false);
   const authority = useRef("");
   const session = host.state.phase === "running" ? host.state.hello?.session_id : null;
   const projectId = host.state.project?.project_id;
@@ -563,7 +592,7 @@ export function useManufacturing(host: ManufacturingHost) {
     nextTravel: boolean,
     nextSource: boolean,
   ) {
-    if (!fresh || !inspection?.replay) return;
+    if (!fresh || !inspection?.replay || working || changingView.current) return;
     const replay = inspection.replay;
     if (
       !Number.isInteger(nextCount) ||
@@ -575,20 +604,29 @@ export function useManufacturing(host: ManufacturingHost) {
       setMessage("Replay control outside the validated layer/event bounds.");
       return;
     }
-    setLayer(nextLayer);
-    setEventCount(nextCount);
-    setShowTravel(nextTravel);
-    setShowSource(nextSource);
-    if (!inspection.displayReady) return;
+    changingView.current = true;
+    setWorking(true);
     try {
-      await hostRef.current.setReplayView({
-        layer: nextLayer,
-        eventCount: nextCount,
-        showTravel: nextTravel,
-        showSource: nextSource,
-      });
+      if (inspection.displayReady)
+        await hostRef.current.setReplayView({
+          layer: nextLayer,
+          eventCount: nextCount,
+          showTravel: nextTravel,
+          showSource: nextSource,
+        });
+      if (mounted.current && inspectionRef.current?.request === inspection.request && !inspectionRef.current.invalidated) {
+        // Describe the admitted draw, not an optimistic request that the
+        // viewport's single-flight ownership may have refused.
+        setLayer(nextLayer);
+        setEventCount(nextCount);
+        setShowTravel(nextTravel);
+        setShowSource(nextSource);
+      }
     } catch (error) {
       if (mounted.current) setMessage(String(error));
+    } finally {
+      changingView.current = false;
+      if (mounted.current) setWorking(false);
     }
   }
   async function exportBundle(relativePath?: string) {

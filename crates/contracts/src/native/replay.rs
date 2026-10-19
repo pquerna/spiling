@@ -226,6 +226,7 @@ mod tests {
             byte_count: 10,
             summary: ManufacturingSummary {
                 layers: 1,
+                process_resolution: vec![],
                 native_geometry: NativeGeometryCoverageSummary {
                     requested_shape_error_mm: 0.1,
                     achieved_shape_error_mm: 0.0,

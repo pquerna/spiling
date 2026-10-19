@@ -3,7 +3,12 @@
 // Licensed under the Open Software License version 3.0
 
 //! Checked typed manufacturing RPC adapters. Bundle JSON remains a persistence format.
-use crate::{geometry::SourceHash, manufacturing::*, project::ProjectRevision, rpc};
+use crate::{
+    geometry::{DefinitionId, OccurrenceId, SourceHash},
+    manufacturing::*,
+    project::ProjectRevision,
+    rpc,
+};
 use std::sync::Arc;
 
 fn required<T>(value: Option<T>, field: &str) -> Result<T, String> {
@@ -1012,9 +1017,59 @@ impl TryFrom<NativeGeometryCoverageSummary> for rpc::NativeGeometryCoverageSumma
         })
     }
 }
+impl TryFrom<rpc::ProcessRegionResolution> for ProcessRegionResolution {
+    type Error = String;
+    fn try_from(value: rpc::ProcessRegionResolution) -> Result<Self, String> {
+        let provenance = required(value.provenance, "process resolution provenance")?;
+        Ok(Self {
+            occurrence_id: OccurrenceId::new(value.occurrence_id).map_err(|e| e.to_string())?,
+            definition_id: DefinitionId::parse(value.definition_id).map_err(|e| e.to_string())?,
+            provenance: crate::process::ProcessProvenance {
+                layer_id: crate::process::ProcessLayerId::new(provenance.layer_id)
+                    .map_err(|e| e.to_string())?,
+                operation_id: crate::process::ProcessOperationId::new(provenance.operation_id)
+                    .map_err(|e| e.to_string())?,
+            },
+            status: match rpc::ProcessRegionStatus::try_from(value.status)
+                .map_err(|_| "unknown process region status")?
+            {
+                rpc::ProcessRegionStatus::Applied => ProcessRegionStatus::Applied,
+                rpc::ProcessRegionStatus::NoEligibleInterior => {
+                    ProcessRegionStatus::NoEligibleInterior
+                }
+                rpc::ProcessRegionStatus::NoDensityChange => ProcessRegionStatus::NoDensityChange,
+                rpc::ProcessRegionStatus::Unspecified => {
+                    return Err("unspecified process region status".into());
+                }
+            },
+        })
+    }
+}
+impl From<ProcessRegionResolution> for rpc::ProcessRegionResolution {
+    fn from(value: ProcessRegionResolution) -> Self {
+        Self {
+            occurrence_id: value.occurrence_id.get(),
+            definition_id: value.definition_id.into(),
+            provenance: Some(rpc::ProcessProvenance {
+                layer_id: value.provenance.layer_id.get(),
+                operation_id: value.provenance.operation_id.get(),
+            }),
+            status: match value.status {
+                ProcessRegionStatus::Applied => rpc::ProcessRegionStatus::Applied,
+                ProcessRegionStatus::NoEligibleInterior => {
+                    rpc::ProcessRegionStatus::NoEligibleInterior
+                }
+                ProcessRegionStatus::NoDensityChange => rpc::ProcessRegionStatus::NoDensityChange,
+            } as i32,
+        }
+    }
+}
 impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
     type Error = String;
     fn try_from(value: rpc::ManufacturingSummary) -> Result<Self, String> {
+        if value.process_resolution.len() > MAX_PROCESS_REGIONS {
+            return Err("process resolution limit exceeded".into());
+        }
         valid(
             Self {
                 layers: value.layers,
@@ -1033,6 +1088,11 @@ impl TryFrom<rpc::ManufacturingSummary> for ManufacturingSummary {
                 .try_into()?,
                 native_geometry: required(value.native_geometry, "native geometry coverage")?
                     .try_into()?,
+                process_resolution: value
+                    .process_resolution
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
             },
             Self::validate,
         )
@@ -1054,6 +1114,11 @@ impl TryFrom<ManufacturingSummary> for rpc::ManufacturingSummary {
             support_filament_length_mm: value.support_filament_length_mm,
             surface_resolution: Some(value.surface_resolution.try_into()?),
             native_geometry: Some(value.native_geometry.try_into()?),
+            process_resolution: value
+                .process_resolution
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
     }
 }
@@ -1473,6 +1538,7 @@ mod tests {
             byte_count: 6,
             summary: ManufacturingSummary {
                 layers: 1,
+                process_resolution: vec![],
                 paths: 1,
                 deposition_segments: 2,
                 deposited_volume_mm3: 1.0,

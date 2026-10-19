@@ -56,27 +56,30 @@ message AddSurfaceFinishRequest { uint32 base_revision = 1; FaceRef face_ref = 2
 message RemoveSurfaceFinishRequest { uint32 base_revision = 1; uint32 layer_id = 2; }
 message SetSurfaceFinishEnabledRequest { uint32 base_revision = 1; uint32 layer_id = 2; bool enabled = 3; }
 message WholeOwnedVolume {}
-message ProcessSelector { oneof kind { WholeOwnedVolume whole_owned_volume = 1; } }
+message SourceBoxMm { Vec3 min = 1; Vec3 max = 2; }
+message ProcessSelector { oneof kind { WholeOwnedVolume whole_owned_volume = 1; SourceBoxMm source_box_mm = 2; } }
+enum ProcessInterfacePermission { PROCESS_INTERFACE_PERMISSION_UNSPECIFIED = 0; PROCESS_INTERFACE_PERMISSION_SEPARATOR_WALL = 1; }
 message SparseFraction { double fraction = 1; }
 message ProcessValue { oneof kind { SparseFraction sparse_fraction = 1; } }
 message ProcessErase {}
 message ProcessAction { oneof kind { ProcessValue replace = 1; ProcessErase erase = 2; } }
-message ProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message ProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; optional ProcessInterfacePermission interface = 4; }
 message ProcessLayer { uint32 layer_id = 1; SurfaceScope scope = 2; bool enabled = 3; repeated ProcessOperation operations = 4; }
 message ProcessDocument { uint32 schema_version = 1; repeated ProcessLayer layers = 2; }
 message ProcessProvenance { uint32 layer_id = 1; uint32 operation_id = 2; }
 message ResolvedProcessValue { double fraction = 1; ProcessProvenance provenance = 2; }
 message ResolvedOccurrenceProcess { uint32 occurrence_id = 1; string definition_id = 2; double global_fraction = 3; ResolvedProcessValue value = 4; ResolvedProcessValue inherited = 5; }
-message AddProcessLayer { SurfaceScope scope = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message AddProcessLayer { SurfaceScope scope = 1; ProcessSelector selector = 2; ProcessAction action = 3; optional ProcessInterfacePermission interface = 4; }
 message RemoveProcessLayer { uint32 layer_id = 1; }
 message SetProcessLayerEnabled { uint32 layer_id = 1; bool enabled = 2; }
 message MoveProcessLayer { uint32 layer_id = 1; uint32 index = 2; }
-message AddProcessOperation { uint32 layer_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
-message UpdateProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; }
+message AddProcessOperation { uint32 layer_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; optional ProcessInterfacePermission interface = 4; }
+message UpdateProcessOperation { uint32 operation_id = 1; ProcessSelector selector = 2; ProcessAction action = 3; optional ProcessInterfacePermission interface = 4; }
 message RemoveProcessOperation { uint32 operation_id = 1; }
 message MoveProcessOperation { uint32 operation_id = 1; uint32 index = 2; }
 message ResetProcessScope { SurfaceScope scope = 1; }
 message SetProcessSparseFraction { SurfaceScope scope = 1; double fraction = 2; }
+message SetProcessBoxSparseFraction { SurfaceScope scope = 1; Vec3 min = 2; Vec3 max = 3; double fraction = 4; optional ProcessInterfacePermission interface = 5; }
 message ProcessEdit {
  oneof op {
   AddProcessLayer add_layer = 1;
@@ -89,6 +92,7 @@ message ProcessEdit {
   MoveProcessOperation move_operation = 8;
   ResetProcessScope reset = 9;
   SetProcessSparseFraction set_sparse_fraction = 10;
+  SetProcessBoxSparseFraction set_box_sparse_fraction = 11;
  }
 }
 message EditProcessRequest { uint32 base_revision = 1; ProcessEdit edit = 2; }

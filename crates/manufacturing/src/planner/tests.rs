@@ -98,17 +98,37 @@ fn output(
 ) -> (Vec<DepositionPath>, PlanarRegionCoverage) {
     let cancel = AtomicBool::new(false);
     let recipe = recipe(fraction);
-    classify(section, below, above, &recipe, &cancel)
-        .unwrap()
-        .paths(
-            0.4 * (index + 1) as f64,
-            0.4,
-            region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
-            &recipe,
-            &mut 0,
-            &cancel,
-        )
-        .unwrap()
+    let regions = classify(section, below, above, &recipe, &cancel).unwrap();
+    own_output(
+        regions
+            .paths(
+                0.4 * (index + 1) as f64,
+                0.4,
+                region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
+                &recipe,
+                &mut 0,
+                &cancel,
+            )
+            .unwrap(),
+        0.4,
+        &recipe,
+    )
+}
+fn own_output(
+    (paths, coverage): (Vec<DepositionPath>, &PlanarRegionCoverage),
+    height: f64,
+    recipe: &PlanarPrintRecipe,
+) -> (Vec<DepositionPath>, PlanarRegionCoverage) {
+    let mut coverage = coverage.clone();
+    let area = ((recipe.bead_width_mm - height) * height
+        + std::f64::consts::PI * (height * 0.5).powi(2))
+        * recipe.flow_multiplier;
+    coverage.nominal_deposition_volume_mm3 = paths
+        .iter()
+        .flat_map(|p| p.points_mm.windows(2))
+        .map(|e| (e[1][0] - e[0][0]).hypot(e[1][1] - e[0][1]) * area)
+        .sum();
+    (paths, coverage)
 }
 fn partition(coverage: &PlanarRegionCoverage) {
     let sum = coverage.wall_area_mm2
@@ -601,7 +621,7 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
         let below_inset = region::offset(below, -inset, &cancel).unwrap();
         let above_inset = region::offset(above, -inset, &cancel).unwrap();
         for index in 0..2 {
-            let cached = ClassifiedRegions::new(
+            let regions = ClassifiedRegions::new(
                 Arc::clone(&layout),
                 &below_inset,
                 &above_inset,
@@ -614,16 +634,21 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
                 &recipe,
                 &cancel,
             )
-            .unwrap()
-            .paths(
-                0.4 * (index + 1) as f64,
-                0.4,
-                region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
-                &recipe,
-                &mut 0,
-                &cancel,
-            )
             .unwrap();
+            let cached = own_output(
+                regions
+                    .paths(
+                        0.4 * (index + 1) as f64,
+                        0.4,
+                        region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
+                        &recipe,
+                        &mut 0,
+                        &cancel,
+                    )
+                    .unwrap(),
+                0.4,
+                &recipe,
+            );
             let uncached = output(&section, below, above, 0.25, index);
             assert_eq!(cached, uncached);
             partition(&cached.1);
@@ -760,10 +785,12 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
     let anchors = [
         DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[2.0, 0.0, 0.4], [2.0, 10.0, 0.4]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[8.0, 0.0, 0.4], [8.0, 10.0, 0.4]],
         },
     ];
@@ -783,6 +810,7 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
     assert!(((gaps[1].end - gaps[1].start) * 10.0 - 5.4).abs() < 1e-10);
     let holed = [DepositionPath {
         kind: DepositionKind::Perimeter,
+        owner: None,
         points_mm: vec![
             [4.0, 4.0, 0.4],
             [6.0, 4.0, 0.4],
@@ -842,6 +870,7 @@ fn exact_deposited_capsules_keep_curved_caps_and_bounded_work() {
     let mut query = support::AnchorWorkspace::default();
     let paths = [DepositionPath {
         kind: DepositionKind::SparseFill,
+        owner: None,
         points_mm: vec![[0.0, 0.0, 0.4], [0.0, 10.0, 0.4]],
     }];
     let gaps = query
@@ -901,6 +930,7 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
     let mut query = support::AnchorWorkspace::default();
     let paths = [20.5, 21.5, 22.5].map(|x| DepositionPath {
         kind: DepositionKind::Support,
+        owner: None,
         points_mm: vec![[x, 0.3, 0.8], [x, 9.7, 0.8]],
     });
     let tangent = query
@@ -942,10 +972,16 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
 fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
     let previous = [DepositionPath {
         kind: DepositionKind::BottomSkin,
+        owner: Some(
+            spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
+                skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin,
+            },
+        ),
         points_mm: vec![[0.0, 0.0, 0.8], [2.0, 0.0, 0.8]],
     }];
     let contact = [DepositionPath {
         kind: DepositionKind::SupportInterface,
+        owner: None,
         points_mm: vec![[8.0, 0.0, 0.6], [10.0, 0.0, 0.6]],
     }];
     let mut query = super::support::AnchorWorkspace::default();

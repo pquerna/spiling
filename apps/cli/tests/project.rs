@@ -1536,15 +1536,15 @@ fn process_operator_workflow(source_fixture: &str) {
         *first_value
     );
     assert_eq!(
-        authored["process_inspections"][0]["resolved"]["value"],
+        authored["process_inspections"][0]["base_whole_owned_resolution"]["value"],
         *first_value
     );
     assert_eq!(
-        authored["process_inspections"][1]["resolved"]["value"],
+        authored["process_inspections"][1]["base_whole_owned_resolution"]["value"],
         *first_value
     );
     assert_eq!(
-        authored["process_inspections"][2]["resolved"]["value"],
+        authored["process_inspections"][2]["base_whole_owned_resolution"]["value"],
         *second_value
     );
     let document = authored["project"]["process_document"].clone();
@@ -1652,15 +1652,15 @@ fn process_operator_workflow(source_fixture: &str) {
             .unwrap(),
     );
     assert_eq!(
-        inherited["process_inspections"][0]["resolved"]["value"],
+        inherited["process_inspections"][0]["base_whole_owned_resolution"]["value"],
         *first_value
     );
     assert_eq!(
-        inherited["process_inspections"][1]["resolved"]["value"],
+        inherited["process_inspections"][1]["base_whole_owned_resolution"]["value"],
         *second_value
     );
     assert_eq!(
-        inherited["process_inspections"][2]["resolved"]["value"],
+        inherited["process_inspections"][2]["base_whole_owned_resolution"]["value"],
         *first_value
     );
     assert!(inherited["manufacturing"]["artifact"].is_null());
@@ -1724,5 +1724,158 @@ fn process_operator_workflow(source_fixture: &str) {
         report(cli("inspect", &project).output().unwrap())["project"]["revision"],
         baseline["project"]["revision"]
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual bounded process authoring regression; requires SPILING_TEST_ENGINE"]
+fn process_box_authoring_persists_explicit_permission_and_uses_shared_history() {
+    let root = root();
+    let project = root.join("box-process-project");
+    let intent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/manufacturing/complete-sparse.intent.json");
+    let created = report(
+        cli("create", &project)
+            .arg("--import")
+            .arg(fixture("box-mm.step"))
+            .arg("--intent")
+            .arg(intent)
+            .output()
+            .unwrap(),
+    );
+    let occurrence = created["occurrences"][0]["occurrence_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let unauthorized = report(
+        cli("edit", &project)
+            .args([
+                "--process-set-box",
+                &occurrence,
+                "occurrence",
+                "1",
+                "1",
+                "1",
+                "5",
+                "8",
+                "8",
+                "0.6",
+                "none",
+                "--process-resolve",
+                &occurrence,
+            ])
+            .output()
+            .unwrap(),
+    );
+    let document = &unauthorized["project"]["process_document"];
+    let operation = &document["layers"][0]["operations"][0];
+    assert_eq!(operation["selector"]["kind"], "source_box_mm");
+    assert_eq!(
+        operation["selector"]["min"],
+        serde_json::json!([1.0, 1.0, 1.0])
+    );
+    assert!(operation["interface"].is_null());
+    let operation_id = operation["operation_id"].clone();
+    assert_eq!(
+        resolved_process(&unauthorized, &occurrence)["value"],
+        resolved_process(&created, &occurrence)["value"],
+        "base whole-owned resolution must not claim a uniform box value",
+    );
+    assert_eq!(
+        report(cli("inspect", &project).output().unwrap())["project"]["process_document"],
+        *document,
+    );
+    let authorized = report(
+        cli("edit", &project)
+            .args([
+                "--process-set",
+                &occurrence,
+                "occurrence",
+                "0.2",
+                "--process-set-box",
+                &occurrence,
+                "occurrence",
+                "2",
+                "1",
+                "1",
+                "6",
+                "8",
+                "8",
+                "0.7",
+                "separator-wall",
+                "--undo",
+                "--redo",
+                "--process-resolve",
+                &occurrence,
+            ])
+            .output()
+            .unwrap(),
+    );
+    let boxes: Vec<&Value> = authorized["project"]["process_document"]["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|layer| layer["operations"].as_array().unwrap())
+        .filter(|operation| operation["selector"]["kind"] == "source_box_mm")
+        .collect();
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0]["operation_id"], operation_id);
+    assert_eq!(
+        boxes[0]["selector"]["min"],
+        serde_json::json!([2.0, 1.0, 1.0])
+    );
+    assert_eq!(
+        boxes[0]["selector"]["max"],
+        serde_json::json!([6.0, 8.0, 8.0])
+    );
+    assert_eq!(boxes[0]["interface"], "separator_wall");
+    assert_eq!(boxes[0]["action"]["value"]["fraction"], 0.7);
+    assert_eq!(
+        resolved_process(&authorized, &occurrence)["value"]["fraction"],
+        0.2
+    );
+    let reset = report(
+        cli("edit", &project)
+            .args([
+                "--process-reset",
+                &occurrence,
+                "occurrence",
+                "--undo",
+                "--redo",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        reset["project"]["process_document"]["layers"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        report(cli("inspect", &project).output().unwrap())["project"]["process_document"],
+        reset["project"]["process_document"],
+    );
+    let rejected = terminal_error(
+        Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+            .arg("--engine")
+            .arg(root.join("missing-engine"))
+            .args(["project", "inspect"])
+            .arg(&project)
+            .args([
+                "--process-set-box",
+                &occurrence,
+                "definition",
+                "1",
+                "1",
+                "1",
+                "5",
+                "8",
+                "8",
+                "0.6",
+                "separator-wall",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert!(rejected["message"].as_str().unwrap().contains("read-only"));
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! SPLR schema 3 admission. This is display integrity, not program verification.
+//! SPLR schema 4 admission. This is display integrity, not program verification.
 use super::*;
 use crate::ArtifactView;
 
@@ -9,7 +9,7 @@ pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: u32 = 300_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
 pub const REPLAY_RECORD_BYTES: usize = 48;
-pub const REPLAY_SCHEMA_VERSION: u32 = 3;
+pub const REPLAY_SCHEMA_VERSION: u32 = 4;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -251,7 +251,7 @@ pub fn validate_replay_display(
             || line <= previous_line
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
-            || kind > 12
+            || kind > 13
             || flags != u8::from(index != 0)
             || (index == 0 && (kind != 0 && kind != 6))
             || (index == 0 && kind == 0 && next_layer != 0)
@@ -517,7 +517,7 @@ mod tests {
             rebind(&corrupted, &mut rebound);
             assert!(validate_replay_display(&corrupted, &rebound).is_err());
         }
-        for kind in [8, 9, 10] {
+        for kind in [8, 9, 10, 13] {
             let mut role = events.clone();
             role[240 + 46] = kind;
             let mut rebound = descriptor.clone();
@@ -537,6 +537,7 @@ mod tests {
             (96 + 46, 1),
             (96 + 2 * 48 + 46, 3),
             (96 + 2 * 48 + 44, 1),
+            (96 + 48 + 46, 14),
         ] {
             let mut corrupted = bytes.clone();
             corrupted[offset] = value;
@@ -562,6 +563,13 @@ mod tests {
                 "offset {offset}"
             );
         }
+        let mut old = bytes.clone();
+        old[4..6].copy_from_slice(&3u16.to_le_bytes());
+        let mut old_descriptor = descriptor.clone();
+        rebind(&old, &mut old_descriptor);
+        assert!(validate_replay_display(&old, &old_descriptor).is_err());
+        old_descriptor.info.schema_version = 3;
+        assert!(old_descriptor.validate().is_err());
         let mut corrupted = bytes.clone();
         corrupted[96 + 48 + 40..96 + 48 + 44].copy_from_slice(&5u32.to_le_bytes());
         let mut rebound = descriptor.clone();

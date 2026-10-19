@@ -120,6 +120,8 @@ fn coverage() -> PlanarRegionCoverage {
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
         process_regions: vec![],
+        process_interfaces: vec![],
+        separator_area_mm2: 0.0,
     }
 }
 
@@ -149,6 +151,7 @@ fn regional_bundle() -> ManufacturingBundle {
             operations: vec![ProcessOperation {
                 operation_id: ProcessOperationId::new(index as u32 + 1).unwrap(),
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: ProcessAction::Replace {
                     value: ProcessValue::SparseFraction { fraction },
                 },
@@ -686,6 +689,7 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 fn plan() -> NormalizedPrintPlan {
     NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        process_resolution: vec![],
         sampling_tolerance_mm: 0.005,
         surface_tolerance_mm: 0.001,
         offset_tolerance_mm: 0.005,
@@ -700,6 +704,7 @@ fn plan() -> NormalizedPrintPlan {
             region_coverage: coverage(),
             paths: vec![DepositionPath {
                 kind: DepositionKind::Perimeter,
+                owner: None,
                 points_mm: vec![
                     [10.0, 10.0, 5.2],
                     [20.0, 10.0, 5.2],
@@ -740,8 +745,8 @@ fn bundle() -> ManufacturingBundle {
                 revision: "pinned".into(),
             },
             planner_version: "contract-test-planner".into(),
-            emitter_version: "4".into(),
-            verifier_version: "4".into(),
+            emitter_version: "5".into(),
+            verifier_version: "5".into(),
         },
         plan: plan(),
         program: "; arbitrary bytes do not imply replay success\n".into(),
@@ -1065,6 +1070,15 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
                 let along = 1 - fixed_axis;
                 let path = &mut layer.paths[0];
                 path.kind = kind;
+                path.owner = match kind {
+                    DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::BottomSkin,
+                    }),
+                    DepositionKind::TopSkin => Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::TopSkin,
+                    }),
+                    _ => None,
+                };
                 for (index, point) in path.points_mm.iter_mut().enumerate() {
                     point[fixed_axis] = 10.0;
                     point[along] = 10.0 + index as f64;
@@ -1140,6 +1154,15 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
         let mut accepted = plan();
         accepted.layers[0].paths.push(DepositionPath {
             kind,
+            owner: match kind {
+                DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::BottomSkin,
+                }),
+                DepositionKind::TopSkin => Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::TopSkin,
+                }),
+                _ => None,
+            },
             points_mm: vec![[30.0, 30.0, 5.2], [31.0, 31.0, 5.2]],
         });
         if matches!(
@@ -1474,6 +1497,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                     .iter()
                     .map(|count| DepositionPath {
                         kind: DepositionKind::SolidFill,
+                        owner: None,
                         points_mm: (0..=*count)
                             .map(|point| {
                                 let delta = (point % 2) as f64;
@@ -1601,7 +1625,7 @@ fn cumulative_segment_excess_is_rejected_before_decoding_later_points() {
 fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
     for points in ["[]", "[[10,10,5.2]]"] {
         let json = format!(
-            r#"{{"schema_version":{MANUFACTURING_SCHEMA_VERSION},"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
+            r#"{{"schema_version":{MANUFACTURING_SCHEMA_VERSION},"layers":[{{"index":0,"z_mm":5.2,"section_z_mm":5.1,"paths":[{{"kind":"solid_fill","owner":null,"points_mm":{points}}},INVALID]}}],"sampling_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"offset_tolerance_mm":0.005,"layer_quantization_mm":0.000001}}"#
         );
         let error = serde_json::from_str::<NormalizedPrintPlan>(&json).unwrap_err();
         assert!(error.is_data(), "{error:?}");
@@ -1614,13 +1638,13 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     let coverage = serde_json::to_string(&expected.layers[0].region_coverage).unwrap();
     let native_geometry = serde_json::to_string(&expected.native_geometry).unwrap();
     let points = r#"[[10,10,5.2],[11,10,5.2]]"#;
-    let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill"}}"#);
+    let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill","owner":null}}"#);
     let layer = format!(
         r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
     );
     let wrap = |layer: &str| {
         format!(
-            r#"{{"native_geometry":{native_geometry},"surface_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
+            r#"{{"native_geometry":{native_geometry},"surface_resolution":[],"process_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
         )
     };
     assert_eq!(
@@ -1631,7 +1655,8 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         r#""kind":"solid_fill""#.to_string(),
         format!(r#""points_mm":{points}"#),
     ] {
-        let duplicate = format!(r#"{{{field},"points_mm":{points},"kind":"solid_fill"}}"#);
+        let duplicate =
+            format!(r#"{{{field},"points_mm":{points},"kind":"solid_fill","owner":null}}"#);
         let changed = format!(
             r#"{{"region_coverage":{coverage},"paths":[{duplicate}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
         );
@@ -1659,7 +1684,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         );
     }
     for changed_path in [
-        format!(r#"{{"kind":"solid_fill","points_mm":{points},"extra":0}}"#),
+        format!(r#"{{"kind":"solid_fill","owner":null,"points_mm":{points},"extra":0}}"#),
         format!(r#"{{"points_mm":{points}}}"#),
         r#"{"kind":"solid_fill"}"#.to_string(),
     ] {
@@ -1806,6 +1831,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
     let mut mixed = plan();
     mixed.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Support,
+        owner: None,
         points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
     });
     mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
@@ -2485,4 +2511,406 @@ fn xyz6_gap_rejects_nonfinite_compensation_despite_finite_subtraction_head() {
         failure.code,
         ManufacturingErrorCode::ProgramCoordinateConditioningFailure
     );
+}
+
+#[test]
+fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
+    use crate::process::{ProcessLayerId, ProcessOperationId, ProcessProvenance};
+    let (_, _, occurrences) = inputs();
+    let interface = ProcessInterfaceCoverage {
+        occurrence_id: occurrences[0].occurrence_id,
+        definition_id: occurrences[0].definition_id.clone(),
+        provenance: ProcessProvenance {
+            layer_id: ProcessLayerId::new(1).unwrap(),
+            operation_id: ProcessOperationId::new(1).unwrap(),
+        },
+        region_indices: [0, 1],
+        axis: 0,
+        coordinate_mm: 15.0,
+        thickness_mm: intent().recipe.bead_width_mm,
+        bonding_overlap_mm: intent().recipe.bead_width_mm / 2.0,
+        area_mm2: 4.0,
+        centerlines_mm: vec![[[15.0, 10.0], [15.0, 20.0]]],
+        endpoint_bonds: vec![[
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[10., 9.8], [20., 9.8]],
+            },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[10., 20.2], [20., 20.2]],
+            },
+        ]],
+    };
+    interface.validate().unwrap();
+    let mut planned = plan();
+    planned.process_resolution = vec![ProcessRegionResolution {
+        occurrence_id: interface.occurrence_id,
+        definition_id: interface.definition_id.clone(),
+        provenance: interface.provenance,
+        status: ProcessRegionStatus::Applied,
+    }];
+    let coverage = &mut planned.layers[0].region_coverage;
+    coverage.wall_area_mm2 -= interface.area_mm2 + 2.0;
+    coverage.separator_area_mm2 = interface.area_mm2;
+    coverage.process_interfaces = vec![interface.clone()];
+    coverage.process_regions = [
+        (0.5, Some(interface.provenance)),
+        (intent().recipe.infill_fraction, None),
+    ]
+    .into_iter()
+    .map(|(fraction, provenance)| ProcessRegionCoverage {
+        area_mm2: 1.0,
+        fraction,
+        contributions: vec![ProcessRegionContribution {
+            occurrence_id: interface.occurrence_id,
+            definition_id: interface.definition_id.clone(),
+            provenance,
+        }],
+    })
+    .collect();
+    coverage.solid_interior_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .filter(|r| r.fraction == 1.)
+        .map(|r| r.area_mm2)
+        .sum();
+    coverage.sparse_interior_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .filter(|r| r.fraction < 1.)
+        .map(|r| r.area_mm2)
+        .sum();
+    coverage.intentional_void_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .map(|r| r.area_mm2 * (1. - r.fraction))
+        .sum();
+    planned.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::SeparatorWall,
+        owner: None,
+        points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
+    });
+    planned.validate(&intent()).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<NormalizedPrintPlan>(&serde_json::to_vec(&planned).unwrap())
+            .unwrap(),
+        planned,
+    );
+    let mut missing = planned.clone();
+    missing.layers[0].paths.pop();
+    assert!(missing.validate(&intent()).is_err());
+    let mut duplicated = planned.clone();
+    duplicated.layers[0]
+        .paths
+        .push(planned.layers[0].paths.last().unwrap().clone());
+    assert!(duplicated.validate(&intent()).is_err());
+    let mut uncertified = plan();
+    uncertified.layers[0]
+        .paths
+        .push(planned.layers[0].paths.last().unwrap().clone());
+    assert!(uncertified.validate(&intent()).is_err());
+    let mut double_counted = planned.clone();
+    double_counted.layers[0].region_coverage.wall_area_mm2 += interface.area_mm2;
+    assert!(double_counted.validate(&intent()).is_err());
+    let mut incorrect_area = planned.clone();
+    incorrect_area.layers[0].region_coverage.process_interfaces[0].area_mm2 += 1.0;
+    assert!(incorrect_area.validate(&intent()).is_err());
+    let mutations: [fn(&mut ProcessInterfaceCoverage); 8] = [
+        |value: &mut ProcessInterfaceCoverage| value.axis = 2,
+        |value: &mut ProcessInterfaceCoverage| value.coordinate_mm = f64::NAN,
+        |value: &mut ProcessInterfaceCoverage| value.thickness_mm = f64::INFINITY,
+        |value: &mut ProcessInterfaceCoverage| value.bonding_overlap_mm = 0.0,
+        |value: &mut ProcessInterfaceCoverage| value.bonding_overlap_mm /= 2.0,
+        |value: &mut ProcessInterfaceCoverage| value.area_mm2 = -1.0,
+        |value: &mut ProcessInterfaceCoverage| value.centerlines_mm[0][1][0] += 0.01,
+        |value: &mut ProcessInterfaceCoverage| {
+            value.centerlines_mm[0][1] = value.centerlines_mm[0][0]
+        },
+    ];
+    for mutate in mutations {
+        let mut invalid = interface.clone();
+        mutate(&mut invalid);
+        assert!(invalid.validate().is_err());
+    }
+    let mut missing = serde_json::to_value(&planned.layers[0].region_coverage).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("process_interfaces");
+    assert!(serde_json::from_value::<PlanarRegionCoverage>(missing).is_err());
+    let mut missing = serde_json::to_value(&planned.layers[0].region_coverage).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("separator_area_mm2");
+    assert!(serde_json::from_value::<PlanarRegionCoverage>(missing).is_err());
+}
+
+#[test]
+fn separator_bundle_requires_explicit_permission_and_consistent_source_binding() {
+    use crate::process::*;
+    let mut captured = bundle();
+    let occurrence = captured.provenance.occurrences[0].clone();
+    let provenance = ProcessProvenance {
+        layer_id: ProcessLayerId::new(1).unwrap(),
+        operation_id: ProcessOperationId::new(1).unwrap(),
+    };
+    captured
+        .provenance
+        .process_document
+        .layers
+        .push(ProcessLayer {
+            layer_id: provenance.layer_id,
+            scope: crate::surface::SurfaceScope::Occurrence {
+                occurrence_id: occurrence.occurrence_id,
+                expected_definition_id: occurrence.definition_id.clone(),
+            },
+            enabled: true,
+            operations: vec![ProcessOperation {
+                operation_id: provenance.operation_id,
+                selector: ProcessSelector::SourceBoxMm {
+                    min: [0.0; 3],
+                    max: [20.0; 3],
+                },
+                action: ProcessAction::Replace {
+                    value: ProcessValue::SparseFraction { fraction: 0.5 },
+                },
+                interface: Some(ProcessInterfacePermission::SeparatorWall),
+            }],
+        });
+    captured.plan.process_resolution = vec![ProcessRegionResolution {
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: occurrence.definition_id.clone(),
+        provenance,
+        status: ProcessRegionStatus::Applied,
+    }];
+    let coverage = &mut captured.plan.layers[0].region_coverage;
+    coverage.wall_area_mm2 -= 6.0;
+    coverage.separator_area_mm2 = 4.0;
+    coverage.process_regions = [
+        (0.5, Some(provenance)),
+        (captured.provenance.intent.recipe.infill_fraction, None),
+    ]
+    .into_iter()
+    .map(|(fraction, provenance)| ProcessRegionCoverage {
+        area_mm2: 1.0,
+        fraction,
+        contributions: vec![ProcessRegionContribution {
+            occurrence_id: occurrence.occurrence_id,
+            definition_id: occurrence.definition_id.clone(),
+            provenance,
+        }],
+    })
+    .collect();
+    coverage.solid_interior_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .filter(|r| r.fraction == 1.)
+        .map(|r| r.area_mm2)
+        .sum();
+    coverage.sparse_interior_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .filter(|r| r.fraction < 1.)
+        .map(|r| r.area_mm2)
+        .sum();
+    coverage.intentional_void_area_mm2 = coverage
+        .process_regions
+        .iter()
+        .map(|r| r.area_mm2 * (1. - r.fraction))
+        .sum();
+    coverage.process_interfaces = vec![ProcessInterfaceCoverage {
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: occurrence.definition_id,
+        provenance,
+        region_indices: [0, 1],
+        axis: 0,
+        coordinate_mm: 15.0,
+        thickness_mm: captured.provenance.intent.recipe.bead_width_mm,
+        bonding_overlap_mm: captured.provenance.intent.recipe.bead_width_mm / 2.0,
+        area_mm2: 4.0,
+        centerlines_mm: vec![[[15.0, 10.0], [15.0, 20.0]]],
+        endpoint_bonds: vec![[
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[10., 9.8], [20., 9.8]],
+            },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[10., 20.2], [20., 20.2]],
+            },
+        ]],
+    }];
+    captured.plan.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::SeparatorWall,
+        owner: None,
+        points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
+    });
+    captured.verification.deposition_segments += 1;
+    let rebind = |bundle: &mut ManufacturingBundle| {
+        bundle.provenance.input_hash = input_fingerprint(
+            &bundle.provenance.project_id,
+            &bundle.provenance.definitions,
+            &bundle.provenance.occurrences,
+            &bundle.provenance.intent,
+            &bundle.provenance.surface_overlays,
+            &bundle.provenance.process_document,
+        )
+        .unwrap();
+    };
+    rebind(&mut captured);
+    captured.validate().unwrap();
+    let mut unauthorized = captured.clone();
+    unauthorized.provenance.process_document.layers[0].operations[0].interface = None;
+    rebind(&mut unauthorized);
+    assert!(unauthorized.validate().is_err());
+    let mut wrong_source = captured.clone();
+    wrong_source.plan.layers[0]
+        .region_coverage
+        .process_interfaces[0]
+        .definition_id = DefinitionId::from_source_sha256(&[88; 32]);
+    assert!(wrong_source.validate().is_err());
+    let mut wrong_id = captured.clone();
+    wrong_id.plan.layers[0].region_coverage.process_interfaces[0]
+        .provenance
+        .operation_id = ProcessOperationId::new(2).unwrap();
+    assert!(wrong_id.validate().is_err());
+}
+
+#[test]
+fn empty_box_resolution_is_explicit_source_bound_and_visible_in_native_summary() {
+    use crate::process::*;
+    let mut captured = bundle();
+    let occurrence = captured.provenance.occurrences[0].clone();
+    let provenance = ProcessProvenance {
+        layer_id: ProcessLayerId::new(1).unwrap(),
+        operation_id: ProcessOperationId::new(1).unwrap(),
+    };
+    captured
+        .provenance
+        .process_document
+        .layers
+        .push(ProcessLayer {
+            layer_id: provenance.layer_id,
+            scope: crate::surface::SurfaceScope::Definition {
+                definition_id: occurrence.definition_id.clone(),
+            },
+            enabled: true,
+            operations: vec![ProcessOperation {
+                operation_id: provenance.operation_id,
+                selector: ProcessSelector::SourceBoxMm {
+                    min: [1000.0; 3],
+                    max: [1001.0; 3],
+                },
+                action: ProcessAction::Replace {
+                    value: ProcessValue::SparseFraction { fraction: 0.6 },
+                },
+                interface: None,
+            }],
+        });
+    captured.plan.process_resolution = vec![ProcessRegionResolution {
+        occurrence_id: occurrence.occurrence_id,
+        definition_id: occurrence.definition_id,
+        provenance,
+        status: ProcessRegionStatus::NoEligibleInterior,
+    }];
+    captured.provenance.input_hash = input_fingerprint(
+        &captured.provenance.project_id,
+        &captured.provenance.definitions,
+        &captured.provenance.occurrences,
+        &captured.provenance.intent,
+        &captured.provenance.surface_overlays,
+        &captured.provenance.process_document,
+    )
+    .unwrap();
+    captured.validate().unwrap();
+    let summary = captured.summary();
+    assert_eq!(summary.process_resolution, captured.plan.process_resolution);
+    let wire: crate::rpc::ManufacturingSummary = summary.clone().try_into().unwrap();
+    assert_eq!(
+        ManufacturingSummary::try_from(wire.clone()).unwrap(),
+        summary
+    );
+    for status in [0, -1, 3, i32::MAX] {
+        let mut invalid = wire.clone();
+        invalid.process_resolution[0].status = status;
+        assert!(ManufacturingSummary::try_from(invalid).is_err());
+    }
+    let mut missing_id = wire.clone();
+    missing_id.process_resolution[0].provenance = None;
+    assert!(ManufacturingSummary::try_from(missing_id).is_err());
+    let mut wrong_id = wire;
+    wrong_id.process_resolution[0].occurrence_id = 0;
+    assert!(ManufacturingSummary::try_from(wrong_id).is_err());
+    let mut duplicate = captured.clone();
+    duplicate
+        .plan
+        .process_resolution
+        .push(captured.plan.process_resolution[0].clone());
+    assert!(duplicate.validate().is_err());
+    let mut false_applied = captured.clone();
+    false_applied.plan.process_resolution[0].status = ProcessRegionStatus::Applied;
+    assert!(false_applied.validate().is_err());
+    let mut unbound = captured.clone();
+    unbound.plan.process_resolution[0].provenance.operation_id =
+        ProcessOperationId::new(2).unwrap();
+    assert!(unbound.validate().is_err());
+    let mut missing = serde_json::to_value(&captured.plan).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("process_resolution");
+    assert!(serde_json::from_value::<NormalizedPrintPlan>(missing).is_err());
+    let mut missing = serde_json::to_value(&summary).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("process_resolution");
+    assert!(serde_json::from_value::<ManufacturingSummary>(missing).is_err());
+}
+
+#[test]
+fn immutable_construction_owner_is_required_and_role_checked() {
+    for (kind, origin, valid) in [
+        ("bottom_skin", "bottom_skin", true),
+        ("top_skin", "top_skin", true),
+        ("bridge", "bottom_skin", true),
+        ("bridge", "top_skin", true),
+        ("bottom_skin", "top_skin", false),
+        ("top_skin", "bottom_skin", false),
+        ("separator_wall", "top_skin", false),
+        ("sparse_fill", "bottom_skin", false),
+    ] {
+        let json = format!(
+            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"points_mm":[[0,0,1],[1,0,1]]}}"#
+        );
+        assert_eq!(serde_json::from_str::<DepositionPath>(&json).is_ok(), valid);
+    }
+    for kind in [
+        "bridge",
+        "solid_fill",
+        "separator_wall",
+        "bottom_skin",
+        "top_skin",
+    ] {
+        let json = format!(r#"{{"kind":"{kind}","owner":null,"points_mm":[[0,0,1],[1,0,1]]}}"#);
+        assert_eq!(
+            serde_json::from_str::<DepositionPath>(&json).is_ok(),
+            !matches!(kind, "bottom_skin" | "top_skin")
+        );
+        let missing = format!(r#"{{"kind":"{kind}","points_mm":[[0,0,1],[1,0,1]]}}"#);
+        assert!(serde_json::from_str::<DepositionPath>(&missing).is_err());
+    }
+    for kind in [
+        "sparse_fill",
+        "solid_fill",
+        "bridge",
+        "perimeter",
+        "separator_wall",
+    ] {
+        let json = format!(
+            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"points_mm":[[0,0,1],[1,0,1]]}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<DepositionPath>(&json).is_ok(),
+            matches!(kind, "sparse_fill" | "solid_fill" | "bridge")
+        );
+    }
 }

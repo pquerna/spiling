@@ -646,12 +646,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(jobs::internal)?,
         ),
         project_capabilities: [
-            "recoverable_projects_v7",
+            "recoverable_projects_v8",
             "project_transactions_v1",
             "project_read_only_v1",
             "source_face_surface_finish_v3",
             "surface_image_assets_v1",
-            "source_bound_process_v1",
+            "source_bound_process_v2",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -660,7 +660,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "planar_software_compile_v1",
             "independent_program_replay_v1",
             "immutable_bundle_bytestream_v1",
-            "manufacturing_schema8",
+            "manufacturing_schema9",
             "mapped_image_relief_v1",
             "varying_z_material_domains_v1",
             "bounded_vertical_rib_construction_v1",

@@ -2164,6 +2164,7 @@ fn process_durable_source_deleted_readonly_reopen_preserves_inheritance_reset_an
                 edit: ProcessEdit::AddLayer {
                     scope,
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Replace {
                         value: ProcessValue::SparseFraction { fraction },
                     },
@@ -2272,6 +2273,7 @@ fn process_disabled_targets_and_required_counters_are_strict_on_fresh_reopen() {
                     expected_definition_id: definition_id,
                 },
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: ProcessAction::Replace {
                     value: ProcessValue::SparseFraction { fraction: 0.5 },
                 },
@@ -2353,6 +2355,7 @@ fn process_recovery_preserves_newer_layer_and_operation_allocator_high_water() {
                 edit: ProcessEdit::AddLayer {
                     scope: scope.clone(),
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Replace {
                         value: ProcessValue::SparseFraction { fraction },
                     },
@@ -2396,4 +2399,88 @@ fn process_recovery_preserves_newer_layer_and_operation_allocator_high_water() {
     );
     save_project(&mut recovered, None);
     assert!(!recovered.info().dirty);
+}
+
+#[test]
+fn box_process_intent_persists_explicit_permission_bounds_and_allocator_high_water() {
+    use spiling_contracts::{process::*, surface::SurfaceScope};
+    let sandbox = Sandbox::new();
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let scope = SurfaceScope::Definition {
+        definition_id: definition_id.clone(),
+    };
+    let set = |project: &mut Project, interface, min, max| {
+        let prepared = project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::SetBoxSparseFraction {
+                    scope: scope.clone(),
+                    min,
+                    max,
+                    fraction: 0.6,
+                    interface,
+                },
+            })
+            .unwrap();
+        project.commit(prepared).unwrap();
+    };
+    set(&mut project, None, [-1.0; 3], [2.0; 3]);
+    save_project(&mut project, Some(sandbox.target()));
+    let unauthorized = project.capture().manifest;
+    drop(project);
+    let mut reopened =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reopened.capture().manifest, unauthorized);
+    set(
+        &mut reopened,
+        Some(ProcessInterfacePermission::SeparatorWall),
+        [1.0; 3],
+        [4.0; 3],
+    );
+    let authorized = reopened.capture().manifest;
+    assert_eq!(
+        authorized.next_process_layer,
+        unauthorized.next_process_layer
+    );
+    assert_eq!(
+        authorized.next_process_operation,
+        unauthorized.next_process_operation
+    );
+    save_project(&mut reopened, None);
+    drop(reopened);
+    let mut reopened =
+        Project::from_loaded(open(&sandbox.target(), false, false, &flag()).unwrap()).unwrap();
+    assert_eq!(reopened.capture().manifest, authorized);
+    assert_eq!(
+        reopened
+            .info()
+            .process_document
+            .resolve_definition(&definition_id, 0.2)
+            .fraction,
+        0.2
+    );
+    assert_eq!(
+        reopened
+            .info()
+            .process_document
+            .resolve_at(&definition_id, OccurrenceId::new(1).unwrap(), 0.2, [2.0; 3])
+            .fraction,
+        0.6
+    );
+    let prepared = reopened
+        .prepare(Edit::Process {
+            edit: ProcessEdit::Reset { scope },
+        })
+        .unwrap();
+    reopened.commit(prepared).unwrap();
+    assert!(reopened.info().process_document.layers.is_empty());
+    reopened.undo().unwrap();
+    assert_eq!(
+        reopened.capture().manifest.process_document,
+        authorized.process_document
+    );
+    assert_eq!(
+        reopened.capture().manifest.next_process_operation,
+        authorized.next_process_operation
+    );
 }

@@ -119,6 +119,7 @@ impl Scene {
                 operations: vec![ProcessOperation {
                     operation_id: ProcessOperationId::new(index as u32 + 1).unwrap(),
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Replace {
                         value: ProcessValue::SparseFraction { fraction },
                     },
@@ -194,7 +195,7 @@ fn assert_actual_sparse_row_pitch(
     let micrometres = |value: f64| (value * 1_000_000.0).round() as i64;
     let levels: BTreeSet<_> = motion
         .iter()
-        .filter(|(kind, _, _)| matches!(kind, 1..=5 | 8))
+        .filter(|(kind, _, _)| matches!(kind, 1..=5 | 8 | 13))
         .map(|(_, _, end)| micrometres(end[2]))
         .collect();
     let mut rows = BTreeMap::<i64, BTreeSet<i64>>::new();
@@ -256,7 +257,7 @@ fn actual_object_geometry(
     let mut geometry = Vec::new();
     for pair in motion.windows(2) {
         let (kind, _, end) = pair[1];
-        if !matches!(kind, 1..=5 | 8) {
+        if !matches!(kind, 1..=5 | 8 | 13) {
             continue;
         }
         let start = std::array::from_fn(|axis| pair[0].2[axis] - translation[axis]);
@@ -329,7 +330,7 @@ fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore()
         let mut pocket_segments = 0;
         for pair in motion.windows(2) {
             let (kind, _, end) = pair[1];
-            if !matches!(kind, 1..=5 | 8) {
+            if !matches!(kind, 1..=5 | 8 | 13) {
                 continue;
             }
             let a = [
@@ -406,6 +407,7 @@ fn native_process_noop_intent_preserves_actual_commands_and_hatch_phase() {
             operations: vec![ProcessOperation {
                 operation_id: ProcessOperationId::new(1).unwrap(),
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action,
             }],
         }];
@@ -471,6 +473,379 @@ fn native_process_overlap_conflicts_and_admitted_compatible_union_keeps_contribu
                         .collect()
         })
     }));
+}
+
+fn author_end_zone(scene: &mut Scene, bounds: [[f64; 3]; 2], authorized: bool) {
+    let layer = scene
+        .process_document
+        .layers
+        .iter()
+        .map(|l| l.layer_id.get())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let operation = scene
+        .process_document
+        .layers
+        .iter()
+        .flat_map(|l| &l.operations)
+        .map(|o| o.operation_id.get())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    scene.process_document.layers.push(ProcessLayer {
+        layer_id: ProcessLayerId::new(layer).unwrap(),
+        scope: SurfaceScope::Definition {
+            definition_id: scene.occurrences[0].definition_id.clone(),
+        },
+        enabled: true,
+        operations: vec![ProcessOperation {
+            operation_id: ProcessOperationId::new(operation).unwrap(),
+            selector: ProcessSelector::SourceBoxMm {
+                min: bounds[0],
+                max: bounds[1],
+            },
+            interface: authorized
+                .then_some(spiling_contracts::process::ProcessInterfacePermission::SeparatorWall),
+            action: ProcessAction::Replace {
+                value: ProcessValue::SparseFraction { fraction: 0.60 },
+            },
+        }],
+    });
+}
+
+#[test]
+fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separator() {
+    // Captured actual native center-and-bed result, not a fabricated Z reserve.
+    // The child-service regression independently exercises its derivation.
+    let placed: OccurrenceRecord = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/manufacturing/rounded-housing-bed-occurrence.json"
+    ))
+    .unwrap();
+    let translation = placed.pose.translation_mm;
+    let mut scene = Scene::new(
+        include_bytes!(
+            "../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &[placed.pose],
+    );
+    assert_eq!(scene.occurrences[0].definition_id, placed.definition_id);
+    scene.set_process_fractions(&[0.20]);
+    scene.process_document.layers[0].scope = SurfaceScope::Definition {
+        definition_id: placed.definition_id,
+    };
+    author_end_zone(&mut scene, [[-1., -1., -1.], [8., 19., 11.]], true);
+    let recipe = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/housing-two-zone.intent.json"
+    ))
+    .unwrap();
+    let bundle = scene.compile(&recipe).unwrap();
+    let motion = actual_motion(&bundle);
+    for (window, fraction) in [
+        ([[2., 6.], [2., 16.], [2.2, 3.]], 0.60),
+        ([[17., 21.], [2., 16.], [2.2, 3.]], 0.20),
+    ] {
+        assert_actual_sparse_row_pitch(
+            &motion,
+            translation,
+            window,
+            recipe.recipe.bead_width_mm,
+            fraction,
+        );
+    }
+    let mut actual_separators = std::collections::BTreeSet::new();
+    for pair in motion.windows(2).filter(|p| p[1].0 == 13) {
+        let (_, layer, b) = pair[1];
+        let a = pair[0].2;
+        assert_eq!(a[0], translation[0] + 8.);
+        assert_eq!(b[0], translation[0] + 8.);
+        assert!(a[1] != b[1]);
+        assert!(
+            actual_separators.insert((
+                layer,
+                (a[1].min(b[1]) * 1e6).round() as i64,
+                (a[1].max(b[1]) * 1e6).round() as i64
+            )),
+            "no duplicate separator extrusion"
+        );
+    }
+    assert!(!actual_separators.is_empty());
+    for layer in &bundle.plan.layers {
+        let c = &layer.region_coverage;
+        assert_eq!(
+            c.separator_area_mm2,
+            c.process_interfaces.iter().map(|i| i.area_mm2).sum::<f64>()
+        );
+        if !c.process_interfaces.is_empty() {
+            assert!(c.process_regions.iter().any(|r| r.fraction == 0.20));
+            assert!(c.process_regions.iter().any(|r| r.fraction == 0.60));
+        }
+    }
+    // Actual machine motion above the blind floor must not enter the R3 pocket.
+    for pair in motion
+        .windows(2)
+        .filter(|p| matches!(p[1].0, 1..=5 | 8 | 13) && p[1].2[2] > 4.2)
+    {
+        let a = [
+            pair[0].2[0] - (translation[0] + 12.),
+            pair[0].2[1] - (translation[1] + 9.),
+        ];
+        let b = [
+            pair[1].2[0] - (translation[0] + 12.),
+            pair[1].2[1] - (translation[1] + 9.),
+        ];
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let t = (-(a[0] * d[0] + a[1] * d[1]) / (d[0] * d[0] + d[1] * d[1])).clamp(0., 1.);
+        let native_xy = if pair[1].0 == 1 {
+            bundle.plan.sampling_tolerance_mm
+                + bundle.plan.offset_tolerance_mm
+                + 0.0000005 * std::f64::consts::SQRT_2
+        } else {
+            0.
+        };
+        assert!(
+            (a[0] + t * d[0]).hypot(a[1] + t * d[1])
+                >= 3. + recipe.recipe.bead_width_mm * 0.5 - native_xy,
+            "actual byte bead violates bounded native contour or strict regional pocket exclusion"
+        );
+    }
+    let first = bundle
+        .plan
+        .layers
+        .iter()
+        .position(|layer| !layer.region_coverage.process_interfaces.is_empty())
+        .unwrap();
+    let indices = bundle.plan.layers[first].region_coverage.process_interfaces[0].region_indices;
+    let mut wrong_owner = bundle.plan.clone();
+    let row = wrong_owner.layers[first]
+        .paths
+        .iter_mut()
+        .find(|p| {
+            p.owner
+                == Some(DepositionOwner::Regional {
+                    region_index: indices[1],
+                })
+        })
+        .unwrap();
+    row.owner = Some(DepositionOwner::Regional {
+        region_index: indices[0],
+    });
+    assert_reemitted_interface_refuses(wrong_owner, &recipe);
+    let mut excessive = bundle.plan.clone();
+    let row = excessive.layers[first]
+        .paths
+        .iter_mut()
+        .find(|p| {
+            p.owner
+                == Some(DepositionOwner::Regional {
+                    region_index: indices[1],
+                })
+                && p.points_mm.len() == 2
+        })
+        .unwrap();
+    let end = usize::from(row.points_mm[0][0] > row.points_mm[1][0]);
+    row.points_mm[end][0] = translation[0] + 8. + recipe.recipe.bead_width_mm * 0.5 - 0.000001;
+    assert_reemitted_interface_refuses(excessive, &recipe);
+    let mut floating = bundle.plan.clone();
+    floating.layers[first - 1]
+        .paths
+        .retain(|path| path.kind == DepositionKind::Perimeter);
+    assert_reemitted_interface_refuses(floating, &recipe);
+    // A skin label/witness alone is not a one-hop connection to actual wall
+    // deposition. Move both skin ends off walls but keep the real rib contact.
+    let mut island = bundle.plan.clone();
+    let interface = &island.layers[first].region_coverage.process_interfaces[0];
+    let c = interface.coordinate_mm;
+    let (skin_kind, old) = interface
+        .endpoint_bonds
+        .iter()
+        .flatten()
+        .find_map(|bond| match bond {
+            ProcessEndpointBond::Skin {
+                skin_kind,
+                skin_segment_mm,
+                ..
+            } => Some((*skin_kind, *skin_segment_mm)),
+            _ => None,
+        })
+        .expect("filleted housing's initial rib has an actual mandatory skin witness");
+    let kind = match skin_kind {
+        ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
+        ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
+    };
+    let path = island.layers[first]
+        .paths
+        .iter_mut()
+        .find(|p| {
+            p.kind == kind && p.points_mm.len() == 2 && {
+                let xy = [
+                    [p.points_mm[0][0], p.points_mm[0][1]],
+                    [p.points_mm[1][0], p.points_mm[1][1]],
+                ];
+                xy == old || xy == [old[1], old[0]]
+            }
+        })
+        .unwrap();
+    path.points_mm[0][0] = c - 1.;
+    path.points_mm[1][0] = c + 1.;
+    let changed = [
+        [path.points_mm[0][0], path.points_mm[0][1]],
+        [path.points_mm[1][0], path.points_mm[1][1]],
+    ];
+    for bond in island.layers[first]
+        .region_coverage
+        .process_interfaces
+        .iter_mut()
+        .flat_map(|i| i.endpoint_bonds.iter_mut().flatten())
+    {
+        if let ProcessEndpointBond::Skin {
+            skin_segment_mm, ..
+        } = bond
+            && (*skin_segment_mm == old || *skin_segment_mm == [old[1], old[0]])
+        {
+            *skin_segment_mm = changed;
+        }
+    }
+    assert_reemitted_interface_refuses(island, &recipe);
+}
+
+fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &ManufacturingIntent) {
+    for layer in &mut plan.layers {
+        let h = layer.height_mm;
+        let area = ((intent.recipe.bead_width_mm - h) * h
+            + std::f64::consts::PI * (h * 0.5).powi(2))
+            * intent.recipe.flow_multiplier;
+        layer.region_coverage.nominal_deposition_volume_mm3 = layer
+            .paths
+            .iter()
+            .filter(|p| {
+                !matches!(
+                    p.kind,
+                    DepositionKind::Support | DepositionKind::SupportInterface
+                )
+            })
+            .map(|p| {
+                let factor = if p.kind == DepositionKind::Bridge {
+                    intent.recipe.process.bridge_flow_factor
+                } else {
+                    1.
+                } * if layer.index == 0 {
+                    intent.recipe.process.first_layer_flow_factor
+                } else {
+                    1.
+                };
+                p.points_mm
+                    .windows(2)
+                    .map(|e| (e[1][0] - e[0][0]).hypot(e[1][1] - e[0][1]) * area * factor)
+                    .sum::<f64>()
+            })
+            .sum();
+    }
+    plan.validate(intent).unwrap();
+    realization::canonicalize(&mut plan, intent, &AtomicBool::new(false)).unwrap();
+    let actual = backend::emit(&plan, intent, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        verifier::verify_actual(&actual, &plan, intent, &AtomicBool::new(false), None)
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+}
+
+#[test]
+fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossing() {
+    let mut scene = Scene::new(HOLE, &[pose(40., 40., 0.)]);
+    author_end_zone(&mut scene, [[-1., -1., -1.], [10., 21., 9.]], true);
+    let mut intent = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/complete-sparse.intent.json"
+    ))
+    .unwrap();
+    intent.recipe.infill_fraction = 0.20;
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    let bundle = scene.compile(&intent).unwrap();
+    let motion = actual_motion(&bundle);
+    let mut tested = 0;
+    for pair in motion.windows(2).filter(|p| p[1].0 == 13) {
+        let a = pair[0].2;
+        let b = pair[1].2;
+        assert_eq!(a[0], 50.);
+        assert_eq!(b[0], 50.);
+        assert!(
+            a[1].max(b[1]) < 47. || a[1].min(b[1]) > 53.,
+            "actual split separator must preserve the R3 through-bore"
+        );
+        tested += 1;
+    }
+    assert!(tested > 0);
+    let mut forged = bundle.plan.clone();
+    let layer = forged
+        .layers
+        .iter_mut()
+        .find(|l| {
+            l.region_coverage
+                .process_interfaces
+                .iter()
+                .any(|i| i.centerlines_mm.len() == 2)
+        })
+        .unwrap();
+    let interface = layer
+        .region_coverage
+        .process_interfaces
+        .iter_mut()
+        .find(|i| i.centerlines_mm.len() == 2)
+        .unwrap();
+    let joined = [
+        interface.centerlines_mm[0][0],
+        interface.centerlines_mm[1][1],
+    ];
+    let bonds = [
+        interface.endpoint_bonds[0][0],
+        interface.endpoint_bonds[1][1],
+    ];
+    interface.centerlines_mm = vec![joined];
+    interface.endpoint_bonds = vec![bonds];
+    layer
+        .paths
+        .retain(|p| p.kind != DepositionKind::SeparatorWall);
+    layer.paths.push(DepositionPath {
+        kind: DepositionKind::SeparatorWall,
+        owner: None,
+        points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
+    });
+    assert_reemitted_interface_refuses(forged, &intent);
+}
+
+#[test]
+fn box_requirements_refuse_unauthorized_extra_face_and_positive_sliver() {
+    let mut recipe = intent();
+    recipe.recipe.infill_fraction = 0.20;
+    recipe.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    for (bounds, authorized) in [
+        ([[-1., -1., -1.], [8., 21., 9.]], false),
+        ([[-1., -1., -1.], [8., 12., 9.]], true),
+        ([[-1., -1., -1.], [0.8, 21., 9.]], true),
+    ] {
+        let mut scene = Scene::new(HOLE, &[pose(40., 40., 0.)]);
+        author_end_zone(&mut scene, bounds, authorized);
+        assert_eq!(
+            scene.compile(&recipe).unwrap_err().code,
+            ManufacturingErrorCode::InvalidSpecification,
+            "nonempty unfulfilled interface obligation must never become exported success"
+        );
+    }
+    for axis in [
+        RectilinearAxisPolicy::Y,
+        RectilinearAxisPolicy::AlternatingXY,
+        RectilinearAxisPolicy::AlternatingYX,
+    ] {
+        let mut scene = Scene::new(HOLE, &[pose(40., 40., 0.)]);
+        author_end_zone(&mut scene, [[-1., -1., -1.], [8., 21., 9.]], true);
+        recipe.recipe.rectilinear_axis = axis;
+        assert_eq!(
+            scene.compile(&recipe).unwrap_err().code,
+            ManufacturingErrorCode::InvalidSpecification
+        );
+    }
 }
 
 #[test]
@@ -1088,10 +1463,12 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     bundle.plan.layers[0].paths = vec![
         DepositionPath {
             kind: DepositionKind::SolidFill,
+            owner: None,
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
         },
         DepositionPath {
             kind: DepositionKind::SolidFill,
+            owner: None,
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
         },
     ];

@@ -524,6 +524,7 @@ impl Project {
             Edit::Process { edit } => {
                 if let ProcessEdit::AddLayer { scope, .. }
                 | ProcessEdit::SetSparseFraction { scope, .. }
+                | ProcessEdit::SetBoxSparseFraction { scope, .. }
                 | ProcessEdit::Reset { scope } = &edit
                 {
                     let valid = match scope {

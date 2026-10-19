@@ -1,8 +1,8 @@
 {
   "printer": {
-    "schema_version": 8,
+    "schema_version": 9,
     "id": "software-marlin2-reference",
-    "revision": "7",
+    "revision": "8",
     "name": "Complete Marlin 2 software reference — physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
@@ -152,7 +152,9 @@
     "supports": {
       "kind": "disabled"
     },
-    "seam_policy": { "kind": "nearest" },
+    "seam_policy": {
+      "kind": "nearest"
+    },
     "rectilinear_axis": "alternating_xy"
   }
 }

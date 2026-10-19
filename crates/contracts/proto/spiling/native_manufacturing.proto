@@ -360,6 +360,18 @@ message NativeGeometryCoverageSummary {
   uint32 certified_layer_count = 10;
   NativeFeatureCoverageSummary source_feature_coverage = 11;
 }
+enum ProcessRegionStatus {
+  PROCESS_REGION_STATUS_UNSPECIFIED = 0;
+  PROCESS_REGION_STATUS_APPLIED = 1;
+  PROCESS_REGION_STATUS_NO_ELIGIBLE_INTERIOR = 2;
+  PROCESS_REGION_STATUS_NO_DENSITY_CHANGE = 3;
+}
+message ProcessRegionResolution {
+  uint32 occurrence_id = 1;
+  string definition_id = 2;
+  ProcessProvenance provenance = 3;
+  ProcessRegionStatus status = 4;
+}
 message ManufacturingSummary {
   uint32 layers = 1;
   uint32 paths = 2;
@@ -372,6 +384,7 @@ message ManufacturingSummary {
   double support_filament_length_mm = 9;
   SurfaceResolutionTotals surface_resolution = 10;
   NativeGeometryCoverageSummary native_geometry = 11;
+  repeated ProcessRegionResolution process_resolution = 12;
 }
 // Sampled nominal-bead advisory counts, not an emitted-verification certificate.
 message SurfaceResolutionTotals { uint64 evaluated_witnesses = 1; uint64 resolved = 2; uint64 ambiguous = 3; uint64 below_nominal_resolution = 4; uint64 unavailable = 5; bool coverage_complete = 6; }

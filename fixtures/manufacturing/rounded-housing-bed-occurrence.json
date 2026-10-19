@@ -1,0 +1,17 @@
+{
+  "occurrence_id": 1,
+  "definition_id": "231e6756a0d83411687c295200acbd6bdf8c27a25fc97aa570c2be0525e84a64",
+  "pose": {
+    "rotation_xyzw": [
+      0,
+      0,
+      0,
+      1
+    ],
+    "translation_mm": [
+      98,
+      100.99999999999977,
+      1.225587472778531e-9
+    ]
+  }
+}

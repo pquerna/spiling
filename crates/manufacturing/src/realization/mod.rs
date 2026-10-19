@@ -22,10 +22,11 @@ fn rank(kind: DepositionKind) -> u8 {
         DepositionKind::SupportInterface => 1,
         DepositionKind::Perimeter => 2,
         DepositionKind::BottomSkin => 3,
-        DepositionKind::SolidFill => 4,
-        DepositionKind::SparseFill => 5,
-        DepositionKind::TopSkin => 6,
-        DepositionKind::Bridge => 7,
+        DepositionKind::TopSkin => 4,
+        DepositionKind::Bridge => 5,
+        DepositionKind::SeparatorWall => 6,
+        DepositionKind::SolidFill => 7,
+        DepositionKind::SparseFill => 8,
     }
 }
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {

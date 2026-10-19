@@ -1,8 +1,8 @@
 {
   "printer": {
-    "schema_version": 8,
+    "schema_version": 9,
     "id": "software-cartesian-reference",
-    "revision": "8",
+    "revision": "9",
     "name": "Software Cartesian reference — not machine-ready",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
@@ -79,7 +79,9 @@
       "output_dialect": "cartesian_absolute_gcode_v1",
       "generated_supports": false
     },
-    "workflow": { "kind": "diagnostic_body_only" },
+    "workflow": {
+      "kind": "diagnostic_body_only"
+    },
     "nozzle_diameter_mm": 0.4,
     "max_feed_mm_s": 150,
     "max_volumetric_flow_mm3_s": 12
@@ -117,8 +119,12 @@
         "z_hop_mm": 0.2
       }
     },
-    "supports": { "kind": "disabled" },
-    "seam_policy": { "kind": "nearest" },
+    "supports": {
+      "kind": "disabled"
+    },
+    "seam_policy": {
+      "kind": "nearest"
+    },
     "rectilinear_axis": "alternating_xy"
   }
 }

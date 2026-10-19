@@ -373,6 +373,7 @@ fn wall_piece(
     } else {
         paths.push(DepositionPath {
             kind,
+            owner: None,
             points_mm: vec![from, to],
         });
     }

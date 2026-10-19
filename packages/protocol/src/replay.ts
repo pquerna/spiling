@@ -16,7 +16,7 @@ import {
 import type { ReplayDisplayDescriptor } from "./generated.ts";
 import { bounds, hash, keys, uint, verifyHash, zero } from "./display.ts";
 
-export type ReplayKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+export type ReplayKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
 export const REPLAY_KIND_LABELS = [
   "travel",
   "perimeter",
@@ -31,6 +31,7 @@ export const REPLAY_KIND_LABELS = [
   "support_interface",
   "retract",
   "unretract",
+  "separator_wall",
 ] as const;
 export const REPLAY_LIFECYCLE_LAYER = 65535;
 
@@ -92,7 +93,7 @@ export async function decodeReplayDisplay(
   hash(info.input_hash, fail);
   hash(info.program_hash, fail);
   hash(resource.sha256, fail);
-  if (info.schema_version !== 3 || info.frame !== "right_handed_millimetres")
+  if (info.schema_version !== 4 || info.frame !== "right_handed_millimetres")
     fail("unsupported schema or coordinate frame");
   if (
     typeof info.verifier_version !== "string" ||
@@ -129,7 +130,7 @@ export async function decodeReplayDisplay(
   const data = new DataView(bytes, 0, length);
   if (
     data.getUint32(0, true) !== 0x524c5053 ||
-    data.getUint16(4, true) !== 3 ||
+    data.getUint16(4, true) !== 4 ||
     data.getUint16(6, true) !== REPLAY_HEADER_BYTES ||
     data.getUint32(12, true) !== REPLAY_RECORD_BYTES
   )
@@ -185,7 +186,7 @@ export async function decodeReplayDisplay(
       fail("invalid extrusion or feed");
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_BUNDLE_BYTES);
     if (line <= lastLine) fail("source line sequence is not increasing");
-    if (kind > 12 || flags !== (index === 0 ? 0 : 1)) fail("unknown kind or invalid start flags");
+    if (kind > 13 || flags !== (index === 0 ? 0 : 1)) fail("unknown kind or invalid start flags");
     if (index === 0 && kind !== 0 && kind !== 6)
       fail("first endpoint must be unknown-start travel");
     if (kind === 6 || kind === 7) {

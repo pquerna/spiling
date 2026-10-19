@@ -16,20 +16,21 @@ import {
 import type { RectilinearAxisPolicy, SeamPolicy } from "@spiling/protocol";
 import type { ManufacturingHost } from "../useWorkbench.ts";
 import { scalarFields, policyScalarFields } from "./draft.ts";
-import { useManufacturing } from "./useManufacturing.ts";
+import type { ManufacturingController } from "./useManufacturing.ts";
 import { nextManufacturingStep } from "./workflow.ts";
 import "./manufacturing.css";
 
 export function ManufacturingPanel({
   host,
+  manufacturing,
   cancel,
   diagnosticImport,
 }: {
   host: ManufacturingHost;
+  manufacturing: ManufacturingController;
   cancel: () => void;
   diagnosticImport: (source: string) => Promise<void>;
 }) {
-  const manufacturing = useManufacturing(host);
   const [exportPath, setExportPath] = useState("manufacturing-export");
   const [intentPath, setIntentPath] = useState(
     "fixtures/manufacturing/complete-sparse.intent.json",
@@ -551,6 +552,26 @@ export function ManufacturingPanel({
             {status.artifact.summary.paths} paths; {status.artifact.summary.deposition_segments}{" "}
             deposition segments.
           </p>
+          {status.artifact.summary.process_resolution.length > 0 && (
+            <section data-testid="manufacturing-process-resolution">
+              <h4>Compiled physical process regions</h4>
+              <ul>
+                {status.artifact.summary.process_resolution.map(record => (
+                  <li key={`${record.occurrence_id}:${record.provenance.operation_id}`}>
+                    Body {record.occurrence_id}, operation {record.provenance.operation_id}:{" "}
+                    <strong>{record.status === "no_eligible_interior" ? "NoEligibleInterior" : record.status === "no_density_change" ? "NoDensityChange" : "Applied"}</strong>
+                    {record.status === "no_eligible_interior"
+                      ? " — the effective selection owns no eligible finished interior; no separator or fill was invented."
+                      : record.status === "no_density_change"
+                        ? " — selected interior already has this fraction; ordinary hatch phase is unchanged and no separator is added."
+                        : " — inspect actual separator_wall motion and the adjoining density rows in fresh replay."}
+                  </li>
+                ))}
+              </ul>
+              <p>Separator deposition is a separate permanent role, never ordinary fill or an automatically authorized Bridge.
+                This software contact check is not measured bonding strength or machine readiness.</p>
+            </section>
+          )}
           <dl data-testid="manufacturing-native-geometry-coverage">
             <dt>Actual occurrence-query / slab coverage evidence</dt>
             <dd>{status.artifact.summary.native_geometry.evidence}</dd>
@@ -720,7 +741,7 @@ export function ManufacturingPanel({
             </pre>
           </details>
           {replay && (
-            <fieldset disabled={!fresh}>
+            <fieldset disabled={!fresh || manufacturing.working}>
               <legend>Actual emitted-program replay — endpoint coordinates in mm</legend>
               <p>
                 {replay.eventCount} events, {replay.depositionCount} object + support deposition,{" "}

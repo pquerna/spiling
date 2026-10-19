@@ -8,9 +8,11 @@ use geo::{Area, BooleanOps, BoundingRect, Buffer, MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
-pub(super) use anchors::{AnchorCandidate, AnchorWorkspace};
+pub(super) use anchors::inward_bond_endpoint;
+pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond};
 mod strokes;
-pub(super) use strokes::StrokeRuns;
+pub(crate) use strokes::StrokeRuns;
+pub(crate) use strokes::{GapKind, gap_kind};
 mod raster;
 
 struct Demand {
@@ -20,6 +22,7 @@ struct Demand {
 pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
+    pub(super) process_interfaces: Vec<ProcessInterfaceCoverage>,
 }
 
 fn component_admission<'a>(
@@ -275,6 +278,12 @@ pub(super) fn realize(
         &mut usize,
         &mut spiling_geometry::GeometryWorkBudget,
     ) -> Result<ProtectedVoidSet, ManufacturingError>,
+    mut finalize_interface: impl FnMut(
+        usize,
+        &mut RasterCandidate,
+        &mut usize,
+        &mut usize,
+    ) -> Result<bool, ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
     let SupportInput {
         sections,
@@ -292,10 +301,17 @@ pub(super) fn realize(
     let mut joined_layers = vec![false; layers.len()];
     let mut original_bridge_roles = Vec::new();
     anchors.set_budget(remaining_geometry_budget(retained, &[], &[], &[])?);
+    if let Some(first) = layers.first_mut() {
+        if !finalize_layer_interface(0, first, segments, &mut work, &mut finalize_interface)? {
+            return Err(super::bonds::unresolved(first));
+        }
+    }
     for index in 1..layers.len() {
         let (prior, remaining) = layers.split_at_mut(index);
         let layer = &mut remaining[0];
         check_cancel(cancel)?;
+        let mut interface_bound =
+            finalize_layer_interface(index, layer, segments, &mut work, &mut finalize_interface)?;
         let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
         let previous = prior[index - 1].paths.iter();
         let mut admission = strokes::analyze(
@@ -307,7 +323,7 @@ pub(super) fn realize(
             &mut anchor_work,
             cancel,
         )?;
-        if admission.failure.is_some() {
+        if admission.failure.is_some() || !interface_bound {
             // Preserve ordinary authored hatch; only a finite demanded role
             // component may acquire an independently proved Bridge construction.
             let without_old = *segments - path_segments(&layer.paths);
@@ -351,6 +367,17 @@ pub(super) fn realize(
                     &mut anchor_work,
                     cancel,
                 )?;
+                let candidate_bound =
+                    finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)?;
+                if !candidate_bound {
+                    if recover_components && !interface_bound {
+                        // Diagnostic only: an unresolved layer always refuses
+                        // before it can become the next layer's anchor authority.
+                        layer.paths = candidate.paths;
+                        layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                    }
+                    continue;
+                }
                 anchors.set_budget(candidate_budget(&candidate.paths, retained)?);
                 let other = strokes::analyze(
                     &candidate.paths,
@@ -373,6 +400,8 @@ pub(super) fn realize(
                 if complete || joined || component_bridges {
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths = candidate.paths;
+                    layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                    interface_bound = true;
                     joined_layers[index] = joined || component_bridges;
                     admission = other;
                     if complete {
@@ -381,6 +410,9 @@ pub(super) fn realize(
                 }
             }
             anchors.set_budget(remaining_geometry_budget(retained, &[], &[], &[])?);
+        }
+        if !interface_bound {
+            return Err(super::bonds::unresolved(layer));
         }
         if let Some(failure) = admission.failure.take() {
             if matches!(recipe.supports, SupportPolicy::Disabled) {
@@ -948,9 +980,15 @@ pub(super) fn realize(
                 &mut anchor_work,
                 cancel,
             )?;
+            if !finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)? {
+                layer.paths = candidate.paths;
+                layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                return Err(super::bonds::unresolved(layer));
+            }
             *segments = without_old + path_segments(&candidate.paths);
             layer.paths.truncate(begin);
             layer.paths.extend(candidate.paths);
+            layer.region_coverage.process_interfaces = candidate.process_interfaces;
             anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
         }
         let mut admission = strokes::analyze(
@@ -1010,6 +1048,9 @@ pub(super) fn realize(
                     &mut anchor_work,
                     cancel,
                 )?;
+                if !finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)? {
+                    continue;
+                }
                 anchors.set_budget(candidate_budget(&candidate.paths, retained_regions)?);
                 let other = strokes::analyze(
                     &candidate.paths,
@@ -1024,6 +1065,7 @@ pub(super) fn realize(
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths.truncate(begin);
                     layer.paths.extend(candidate.paths);
+                    layer.region_coverage.process_interfaces = candidate.process_interfaces;
                     admission = other;
                     break;
                 }
@@ -1144,6 +1186,34 @@ pub(super) fn realize(
     Ok(())
 }
 
+/// Move existing buffers, never copy geometry. Final construction is complete
+/// before this layer can supply lower anchors to its successor.
+fn finalize_layer_interface(
+    index: usize,
+    layer: &mut PrintLayer,
+    segments: &mut usize,
+    work: &mut usize,
+    finalize: &mut impl FnMut(
+        usize,
+        &mut RasterCandidate,
+        &mut usize,
+        &mut usize,
+    ) -> Result<bool, ManufacturingError>,
+) -> Result<bool, ManufacturingError> {
+    if layer.region_coverage.process_interfaces.is_empty() {
+        return Ok(true);
+    }
+    let mut candidate = RasterCandidate {
+        paths: std::mem::take(&mut layer.paths),
+        whole_rows: Vec::new(),
+        process_interfaces: std::mem::take(&mut layer.region_coverage.process_interfaces),
+    };
+    let result = finalize(index, &mut candidate, segments, work);
+    layer.paths = candidate.paths;
+    layer.region_coverage.process_interfaces = candidate.process_interfaces;
+    result
+}
+
 fn support_role(kind: DepositionKind) -> bool {
     matches!(
         kind,
@@ -1173,6 +1243,27 @@ fn candidate_budget(
                 })
         })
         .map(|total| MAX_DEPOSITION_SEGMENTS as usize - total)
+}
+
+fn matches_skin_witness(path: &DepositionPath, bond: &ProcessEndpointBond) -> bool {
+    let ProcessEndpointBond::Skin {
+        skin_kind,
+        process_kind,
+        skin_segment_mm,
+        ..
+    } = bond
+    else {
+        return false;
+    };
+    if path.kind != *process_kind
+        || path.owner != Some(DepositionOwner::MandatorySkin { skin: *skin_kind })
+        || path.points_mm.len() != 2
+    {
+        return false;
+    }
+    let a = [path.points_mm[0][0], path.points_mm[0][1]];
+    let b = [path.points_mm[1][0], path.points_mm[1][1]];
+    [a, b] == *skin_segment_mm || [b, a] == *skin_segment_mm
 }
 
 fn coalesce_bridge_rows<'a>(
@@ -1218,7 +1309,12 @@ fn coalesce_bridge_rows<'a>(
     let mut pieces = Vec::new();
     for (index, path) in candidate.paths.iter().enumerate() {
         check_cancel(cancel)?;
-        if path.points_mm.len() != 2 || path.kind == DepositionKind::Perimeter {
+        if path.points_mm.len() != 2
+            || matches!(
+                path.kind,
+                DepositionKind::Perimeter | DepositionKind::SeparatorWall
+            )
+        {
             continue;
         }
         let a = path.points_mm[0];
@@ -1240,6 +1336,7 @@ fn coalesce_bridge_rows<'a>(
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Ownership {
         Required,
+        Frozen,
         Replaced,
         Removed,
     }
@@ -1251,6 +1348,30 @@ fn coalesce_bridge_rows<'a>(
         )
     })?;
     ownership.resize(original_len, Ownership::Required);
+    for &(_, _, _, index) in &pieces {
+        for bond in candidate
+            .process_interfaces
+            .iter()
+            .flat_map(|interface| interface.endpoint_bonds.iter().flatten())
+        {
+            check_cancel(cancel)?;
+            *work = work
+                .checked_add(1)
+                .filter(|n| *n <= anchors::MAX_ANCHOR_PAIR_WORK)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "cumulative bridge witness ownership work budget exceeded",
+                    )
+                })?;
+            if matches_skin_witness(&candidate.paths[index], bond) {
+                // The actual continuous wall connection is already chosen.
+                // Freeze construction, not lower-anchor/support admission.
+                ownership[index] = Ownership::Frozen;
+                break;
+            }
+        }
+    }
     let mut joined = false;
     for mut row in std::mem::take(&mut candidate.whole_rows) {
         check_cancel(cancel)?;
@@ -1276,6 +1397,21 @@ fn coalesce_bridge_rows<'a>(
         let mut previous_emitted_end = None;
         while cursor < end {
             check_cancel(cancel)?;
+            let (_, start, stop, index) = pieces[cursor];
+            if ownership[index] == Ownership::Frozen {
+                if stop > lo && start < hi {
+                    let points = &candidate.paths[index].points_mm;
+                    let required_end = points[0][along].max(points[1][along]);
+                    previous_required_end = Some(
+                        previous_required_end
+                            .map_or(required_end, |previous: f64| previous.max(required_end)),
+                    );
+                    previous_emitted_end =
+                        Some(previous_emitted_end.map_or(stop, |previous: f64| previous.max(stop)));
+                }
+                cursor += 1;
+                continue;
+            }
             let group_begin = cursor;
             let mut first = None;
             let mut last = None;
@@ -1283,9 +1419,15 @@ fn coalesce_bridge_rows<'a>(
             let mut required_start = f64::INFINITY;
             let mut required_end = f64::NEG_INFINITY;
             let mut count = 0;
+            let mut core_owner = None;
             while cursor < end {
                 check_cancel(cancel)?;
                 let (_, start, stop, index) = pieces[cursor];
+                if ownership[index] == Ownership::Frozen && stop > lo && start < hi {
+                    // Retain frozen rows as required barriers so a neighbor
+                    // cannot consume their geometry as an unrequired extension.
+                    break;
+                }
                 if ownership[index] != Ownership::Required
                     || start < lo
                     || stop > hi
@@ -1319,6 +1461,14 @@ fn coalesce_bridge_rows<'a>(
                     }
                 }
                 first.get_or_insert(index);
+                let piece_owner = candidate.paths[index].owner;
+                if count == 0 {
+                    core_owner = piece_owner;
+                } else if core_owner != piece_owner {
+                    // Every required core owner must agree. Anchor-only end
+                    // extensions do not contribute a new mandatory owner.
+                    core_owner = None;
+                }
                 // Nested or overlapping owners cannot move the union's end
                 // backwards or discard material owned by an earlier piece.
                 if stop > covered {
@@ -1351,6 +1501,7 @@ fn coalesce_bridge_rows<'a>(
             previous_emitted_end = Some(grid(required_end)?);
             row.points_mm[0][along] = required_start;
             row.points_mm[1][along] = required_end;
+            row.owner = core_owner;
             let required_proof = strokes::analyze(
                 std::slice::from_ref(&row),
                 previous.clone(),
@@ -1446,6 +1597,7 @@ fn coalesce_bridge_rows<'a>(
             // Reuse an existing two-point owner instead of retaining both all
             // original pieces and newly allocated group paths until compaction.
             candidate.paths[first].kind = row.kind;
+            candidate.paths[first].owner = row.owner;
             candidate.paths[first]
                 .points_mm
                 .copy_from_slice(&row.points_mm);
@@ -1693,6 +1845,15 @@ mod tests {
     fn row(kind: DepositionKind, a: f64, b: f64, z: f64) -> DepositionPath {
         DepositionPath {
             kind,
+            owner: match kind {
+                DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::BottomSkin,
+                }),
+                DepositionKind::TopSkin => Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::TopSkin,
+                }),
+                _ => None,
+            },
             points_mm: vec![[a, 0.0, z], [b, 0.0, z]],
         }
     }
@@ -1706,6 +1867,7 @@ mod tests {
                 row(DepositionKind::SolidFill, 7.0, 9.0, 0.8),
             ],
             whole_rows: vec![row(DepositionKind::Bridge, 1.0, 9.0, 0.8)],
+            process_interfaces: Vec::new(),
         };
         let previous = [
             row(DepositionKind::SolidFill, 0.0, 3.0, 0.4),
@@ -1731,10 +1893,103 @@ mod tests {
         );
         assert_eq!(candidate.paths.len(), 1);
         assert_eq!(candidate.paths[0].kind, DepositionKind::Bridge);
+        assert_eq!(candidate.paths[0].owner, None);
         assert_eq!(
             candidate.paths[0].points_mm,
             [[1.0, 0.0, 0.8], [9.0, 0.0, 0.8]]
         );
+    }
+
+    #[test]
+    fn bridge_core_origin_requires_unanimous_original_mandatory_skin() {
+        use DepositionKind::{BottomSkin, Bridge, SparseFill, TopSkin};
+        let previous = [
+            row(DepositionKind::SolidFill, 0.0, 3.0, 0.4),
+            row(DepositionKind::SolidFill, 7.0, 10.0, 0.4),
+        ];
+        let recipe = crate::planner::tests::recipe(1.0);
+        for (kinds, expected) in [
+            (
+                [TopSkin, TopSkin, TopSkin],
+                Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::TopSkin,
+                }),
+            ),
+            (
+                [BottomSkin, BottomSkin, BottomSkin],
+                Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::BottomSkin,
+                }),
+            ),
+            ([TopSkin, BottomSkin, TopSkin], None),
+            ([SparseFill, TopSkin, TopSkin], None),
+            ([TopSkin, TopSkin, SparseFill], None),
+            ([Bridge, Bridge, Bridge], None),
+        ] {
+            for converted in [false, true] {
+                let mut paths = vec![
+                    row(kinds[0], 1.0, 3.0, 0.8),
+                    row(kinds[1], 3.0, 7.0, 0.8),
+                    row(kinds[2], 7.0, 9.0, 0.8),
+                ];
+                if converted {
+                    for path in &mut paths {
+                        path.kind = Bridge;
+                    }
+                }
+                let mut candidate = RasterCandidate {
+                    paths,
+                    whole_rows: vec![row(Bridge, 1.0, 9.0, 0.8)],
+                    process_interfaces: Vec::new(),
+                };
+                assert!(
+                    coalesce_bridge_rows(
+                        &mut candidate,
+                        BridgeRowContext {
+                            axis: region::HatchAxis::X,
+                            retained_points: 0,
+                            recipe: &recipe,
+                        },
+                        previous.iter(),
+                        std::iter::empty(),
+                        &mut AnchorWorkspace::default(),
+                        &mut 0,
+                        &AtomicBool::new(false),
+                    )
+                    .unwrap()
+                );
+                assert_eq!(candidate.paths.len(), 1);
+                assert_eq!(candidate.paths[0].kind, Bridge);
+                assert_eq!(candidate.paths[0].owner, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn chosen_skin_witness_matches_only_unchanged_role_origin_and_exact_xy() {
+        let bond = ProcessEndpointBond::Skin {
+            skin_kind: ProcessSkinKind::TopSkin,
+            process_kind: DepositionKind::Bridge,
+            skin_segment_mm: [[3.0, 0.0], [7.0, 0.0]],
+            wall_segment_mm: [[3.0, -1.0], [3.0, 1.0]],
+        };
+        let mut path = row(DepositionKind::TopSkin, 3.0, 7.0, 0.8);
+        path.kind = DepositionKind::Bridge;
+        assert!(matches_skin_witness(&path, &bond));
+        path.points_mm.reverse();
+        assert!(matches_skin_witness(&path, &bond));
+        path.points_mm[0][0] += 0.000001;
+        assert!(!matches_skin_witness(&path, &bond));
+        path.points_mm[0][0] = 7.0;
+        path.kind = DepositionKind::TopSkin;
+        assert!(!matches_skin_witness(&path, &bond));
+        path.kind = DepositionKind::Bridge;
+        path.owner = None;
+        assert!(!matches_skin_witness(&path, &bond));
+        path.owner = Some(DepositionOwner::MandatorySkin {
+            skin: ProcessSkinKind::BottomSkin,
+        });
+        assert!(!matches_skin_witness(&path, &bond));
     }
 
     #[test]
@@ -1745,6 +2000,7 @@ mod tests {
                 row(DepositionKind::SparseFill, 7.0, 9.0, 0.8),
             ],
             whole_rows: vec![row(DepositionKind::Bridge, 1.0, 9.0, 0.8)],
+            process_interfaces: Vec::new(),
         };
         let previous = [
             row(DepositionKind::SolidFill, 0.0, 3.0, 0.4),
@@ -1783,6 +2039,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let previous = [3.0, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
         for nested in [false, true] {
@@ -1804,6 +2061,7 @@ mod tests {
             let mut candidate = RasterCandidate {
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 0.5, 9.0, 0.8)],
+                process_interfaces: Vec::new(),
             };
             let mut anchors = AnchorWorkspace::default();
             let mut work = 0;
@@ -1894,12 +2152,14 @@ mod tests {
                 .flatten()
                 .map(|x| DepositionPath {
                     kind: DepositionKind::SparseFill,
+                    owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                 })
                 .collect();
             let mut candidate = RasterCandidate {
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 1.0, 10.0, 0.8)],
+                process_interfaces: Vec::new(),
             };
             let mut anchors = AnchorWorkspace::default();
             let mut work = 0;
@@ -1993,6 +2253,7 @@ mod tests {
             let previous = [2.5, 7.5].map(|x| {
                 orient(DepositionPath {
                     kind: DepositionKind::SparseFill,
+                    owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                 })
             });
@@ -2019,6 +2280,7 @@ mod tests {
                     let mut candidate = RasterCandidate {
                         paths: required.clone(),
                         whole_rows: vec![orient(row(DepositionKind::Bridge, 1.0, 9.0, 0.8))],
+                        process_interfaces: Vec::new(),
                     };
                     let prior = previous.iter().filter(|_| !missing_previous);
                     let mut anchors = AnchorWorkspace::default();
@@ -2088,6 +2350,7 @@ mod tests {
         let required = vec![row(DepositionKind::TopSkin, 3.2, 6.8, 0.8)];
         let prior = [2.5, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
         let layer = region::HatchLayer {
@@ -2099,8 +2362,10 @@ mod tests {
         for missing_anchor in [false, true] {
             let previous = prior.iter().filter(|_| !missing_anchor);
             let mut candidate = RasterCandidate {
-                whole_rows: region::bridge_rows(&fill, &required, &layer, &mut 0, &cancel).unwrap(),
+                whole_rows: region::bridge_rows(&fill, &[], &required, &layer, &mut 0, &cancel)
+                    .unwrap(),
                 paths: required.clone(),
+                process_interfaces: Vec::new(),
             };
             let mut anchors = AnchorWorkspace::default();
             let mut work = 0;
@@ -2152,6 +2417,10 @@ mod tests {
                 assert!(
                     candidate.paths.iter().any(|actual| {
                         actual.kind == DepositionKind::Bridge
+                            && actual.owner
+                                == Some(DepositionOwner::MandatorySkin {
+                                    skin: ProcessSkinKind::TopSkin,
+                                })
                             && actual.points_mm[0][0].min(actual.points_mm[1][0]) <= 3.2
                             && actual.points_mm[0][0].max(actual.points_mm[1][0]) >= 6.8
                             && actual
@@ -2263,6 +2532,7 @@ mod tests {
         let mut candidate = RasterCandidate {
             whole_rows: region::bridge_rows(
                 &fill,
+                &[],
                 &required,
                 &region::HatchLayer {
                     z: 0.8,
@@ -2275,6 +2545,7 @@ mod tests {
             )
             .unwrap(),
             paths: required.clone(),
+            process_interfaces: Vec::new(),
         };
         assert_eq!(candidate.whole_rows.len(), 2);
         let previous = [
@@ -2327,6 +2598,9 @@ mod tests {
         };
         let required = vec![DepositionPath {
             kind: DepositionKind::TopSkin,
+            owner: Some(DepositionOwner::MandatorySkin {
+                skin: ProcessSkinKind::TopSkin,
+            }),
             points_mm: vec![[1.0, 2.0, 0.8], [9.0, 2.0, 0.8]],
         }];
         let polygon = |points: Vec<(f64, f64)>| Polygon::new(geo::LineString::from(points), vec![]);
@@ -2353,7 +2627,8 @@ mod tests {
                 (0.0, 0.0),
             ])]);
             for fill in [&isolated, &connected] {
-                let rows = region::bridge_rows(fill, &required, &layer, &mut 0, &cancel).unwrap();
+                let rows =
+                    region::bridge_rows(fill, &[], &required, &layer, &mut 0, &cancel).unwrap();
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].points_mm, [[0.0, 2.0, 0.8], [10.0, 2.0, 0.8]]);
             }

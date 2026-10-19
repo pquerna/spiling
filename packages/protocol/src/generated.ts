@@ -157,13 +157,15 @@ export type ProcessLayerId = number;
 
 export type ProcessOperationId = number;
 
-export type ProcessSelector = { "kind": "whole_owned_volume" };
+export type ProcessSelector = { "kind": "whole_owned_volume" } | { "kind": "source_box_mm", min: [number, number, number], max: [number, number, number], };
+
+export type ProcessInterfacePermission = "separator_wall";
 
 export type ProcessValue = { "kind": "sparse_fraction", fraction: number, };
 
 export type ProcessAction = { "kind": "replace", value: ProcessValue, } | { "kind": "erase" };
 
-export type ProcessOperation = { operation_id: ProcessOperationId, selector: ProcessSelector, action: ProcessAction, };
+export type ProcessOperation = { operation_id: ProcessOperationId, selector: ProcessSelector, action: ProcessAction, interface: ProcessInterfacePermission | null, };
 
 export type ProcessLayer = { layer_id: ProcessLayerId, scope: SurfaceScope, enabled: boolean, operations: Array<ProcessOperation>, };
 
@@ -173,13 +175,33 @@ export type ProcessProvenance = { layer_id: ProcessLayerId, operation_id: Proces
 
 export type ResolvedProcessValue = { fraction: number, provenance: ProcessProvenance | null, };
 
-export type ResolvedOccurrenceProcess = { occurrence_id: OccurrenceId, definition_id: DefinitionId, global_fraction: number, inherited: ResolvedProcessValue, value: ResolvedProcessValue, };
+export type ResolvedOccurrenceProcess = { occurrence_id: OccurrenceId, definition_id: DefinitionId, global_fraction: number, 
+/**
+ * Definition inheritance for the whole-volume base, ignoring spatial masks.
+ */
+inherited: ResolvedProcessValue, 
+/**
+ * Whole-volume base for this occurrence; not a uniform spatial-density claim.
+ */
+value: ResolvedProcessValue, };
 
-export type ProcessEdit = { "op": "set_sparse_fraction", scope: SurfaceScope, fraction: number, } | { "op": "add_layer", scope: SurfaceScope, selector: ProcessSelector, action: ProcessAction, } | { "op": "remove_layer", layer_id: ProcessLayerId, } | { "op": "set_layer_enabled", layer_id: ProcessLayerId, enabled: boolean, } | { "op": "move_layer", layer_id: ProcessLayerId, index: number, } | { "op": "add_operation", layer_id: ProcessLayerId, selector: ProcessSelector, action: ProcessAction, } | { "op": "update_operation", operation_id: ProcessOperationId, selector: ProcessSelector, action: ProcessAction, } | { "op": "remove_operation", operation_id: ProcessOperationId, } | { "op": "move_operation", operation_id: ProcessOperationId, index: number, } | { "op": "reset", scope: SurfaceScope, };
+export type ProcessEdit = { "op": "set_sparse_fraction", scope: SurfaceScope, fraction: number, } | { "op": "set_box_sparse_fraction", scope: SurfaceScope, min: [number, number, number], max: [number, number, number], fraction: number, interface: ProcessInterfacePermission | null, } | { "op": "add_layer", scope: SurfaceScope, selector: ProcessSelector, action: ProcessAction, interface: ProcessInterfacePermission | null, } | { "op": "remove_layer", layer_id: ProcessLayerId, } | { "op": "set_layer_enabled", layer_id: ProcessLayerId, enabled: boolean, } | { "op": "move_layer", layer_id: ProcessLayerId, index: number, } | { "op": "add_operation", layer_id: ProcessLayerId, selector: ProcessSelector, action: ProcessAction, interface: ProcessInterfacePermission | null, } | { "op": "update_operation", operation_id: ProcessOperationId, selector: ProcessSelector, action: ProcessAction, interface: ProcessInterfacePermission | null, } | { "op": "remove_operation", operation_id: ProcessOperationId, } | { "op": "move_operation", operation_id: ProcessOperationId, index: number, } | { "op": "reset", scope: SurfaceScope, };
 
 export type ProcessRegionContribution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance | null, };
 
 export type ProcessRegionCoverage = { area_mm2: number, fraction: number, contributions: Array<ProcessRegionContribution>, };
+
+export type ProcessSkinKind = "bottom_skin" | "top_skin";
+
+export type DepositionOwner = { "kind": "mandatory_skin", skin: ProcessSkinKind, } | { "kind": "regional", region_index: number, };
+
+export type ProcessEndpointBond = { "kind": "wall", wall_segment_mm: [[number, number], [number, number]], } | { "kind": "skin", skin_kind: ProcessSkinKind, process_kind: DepositionKind, skin_segment_mm: [[number, number], [number, number]], wall_segment_mm: [[number, number], [number, number]], };
+
+export type ProcessInterfaceCoverage = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, region_indices: [number, number], axis: number, coordinate_mm: number, thickness_mm: number, bonding_overlap_mm: number, area_mm2: number, centerlines_mm: Array<[[number, number], [number, number]]>, endpoint_bonds: Array<[ProcessEndpointBond, ProcessEndpointBond]>, };
+
+export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_density_change";
+
+export type ProcessRegionResolution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, status: ProcessRegionStatus, };
 
 export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
 
@@ -257,11 +279,15 @@ export type PreflightReport = { input_revision: ProjectRevision, disposition: Pr
 
 export type ManufacturingIntent = { printer: PrinterSpecification, recipe: PlanarPrintRecipe, };
 
-export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface";
+export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
 
-export type DepositionPath = { kind: DepositionKind, points_mm: Array<[number, number, number]>, };
+export type DepositionPath = { kind: DepositionKind, 
+/**
+ * Immutable original construction purpose, never inferred from Bridge shape.
+ */
+owner: DepositionOwner | null, points_mm: Array<[number, number, number]>, };
 
-export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, };
+export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, };
 
 export type PrintLayer = { index: number, z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
@@ -279,7 +305,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, };
+export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -301,7 +327,7 @@ export type SurfaceResolution = { surface_layer_id: SurfaceLayerId, occurrence_i
 
 export type SurfaceResolutionTotals = { evaluated_witnesses: number, resolved: number, ambiguous: number, below_nominal_resolution: number, unavailable: number, coverage_complete: boolean, };
 
-export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, };
+export type ManufacturingSummary = { layers: number, paths: number, deposition_segments: number, deposited_volume_mm3: number, filament_length_mm: number, support_deposition_segments: number, support_deposited_volume_mm3: number, support_filament_length_mm: number, software_only: boolean, surface_resolution: SurfaceResolutionTotals, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, };
 
 export type ManufacturingBundle = { schema_version: number, provenance: ManufacturingProvenance, plan: NormalizedPrintPlan, program: string, verification: VerificationReport, };
 
@@ -312,7 +338,7 @@ export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "
 export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_CONTROL_BYTES = 65536 as const;
-export const PROCESS_SCHEMA_VERSION = 1 as const;
+export const PROCESS_SCHEMA_VERSION = 2 as const;
 export const MAX_PROCESS_LAYERS = 64 as const;
 export const MAX_PROCESS_OPERATIONS = 256 as const;
 export const MAX_PROCESS_DOCUMENT_BYTES = 65536 as const;
@@ -339,7 +365,7 @@ export const MAX_REPLAY_DISPLAY_BYTES = 16777216 as const;
 export const MAX_REPLAY_EVENTS = 300004 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
 export const REPLAY_RECORD_BYTES = 48 as const;
-export const REPLAY_SCHEMA_VERSION = 3 as const;
+export const REPLAY_SCHEMA_VERSION = 4 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;
@@ -356,7 +382,7 @@ export const JOB_CANCEL_AFTER_MS = 300000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 7 as const;
+export const PROJECT_FORMAT_VERSION = 8 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
@@ -373,7 +399,7 @@ export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 8 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 9 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;

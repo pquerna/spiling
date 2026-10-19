@@ -33,6 +33,8 @@ fn coverage() -> PlanarRegionCoverage {
         section_area_mm2: 16.0,
         source_section_area_mm2: 16.0,
         surface_added_area_mm2: 0.0,
+        separator_area_mm2: 0.0,
+        process_interfaces: Vec::new(),
         wall_area_mm2: 16.0,
         bottom_skin_area_mm2: 0.0,
         top_skin_area_mm2: 0.0,
@@ -150,6 +152,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     };
     let mut plan = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        process_resolution: Vec::new(),
         native_geometry: NativeGeometryCoverageSummary {
             requested_shape_error_mm: intent.recipe.native_shape_error_mm,
             achieved_shape_error_mm: 0.0,
@@ -183,6 +186,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 paths: vec![
                     DepositionPath {
                         kind: DepositionKind::Perimeter,
+                        owner: None,
                         points_mm: vec![
                             [1.0, 1.0, 1.0],
                             [5.0, 1.0, 1.0],
@@ -193,6 +197,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                     },
                     DepositionPath {
                         kind: DepositionKind::SolidFill,
+                        owner: None,
                         points_mm: vec![[2.0, 2.0, 1.0], [6.0, 2.0, 1.0]],
                     },
                 ],
@@ -205,6 +210,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 region_coverage: coverage(),
                 paths: vec![DepositionPath {
                     kind: DepositionKind::SolidFill,
+                    owner: None,
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
                 }],
             },
@@ -415,6 +421,7 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![DepositionPath {
         kind: DepositionKind::Perimeter,
+        owner: None,
         points_mm: vec![
             [1.0, 1.0, 1.0],
             [4.0, 5.0, 1.0],
@@ -599,6 +606,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
     plan.native_geometry.certified_layer_count = 1;
     plan.layers[0].paths = vec![DepositionPath {
         kind: DepositionKind::SolidFill,
+        owner: None,
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
     }];
     refresh_volumes(&intent, &mut plan);
@@ -674,6 +682,7 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     plan.layers[0].paths = vec![
         spiling_contracts::manufacturing::DepositionPath {
             kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
+            owner: None,
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
         };
         spiling_contracts::manufacturing::MAX_DEPOSITION_SEGMENTS as usize
@@ -952,14 +961,17 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers[0].paths = vec![
         DepositionPath {
             kind: DepositionKind::SolidFill,
+            owner: None,
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
         },
         DepositionPath {
             kind: DepositionKind::SupportInterface,
+            owner: None,
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
         },
         DepositionPath {
             kind: DepositionKind::Support,
+            owner: None,
             points_mm: vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0]],
         },
     ];
@@ -969,6 +981,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers[1].section_z_mm = 1.25;
     plan.layers[1].paths = vec![DepositionPath {
         kind: DepositionKind::Bridge,
+        owner: None,
         points_mm: vec![[11.0, 1.0, 1.5], [15.0, 1.0, 1.5]],
     }];
     refresh_volumes(&intent, &mut plan);
@@ -1246,6 +1259,7 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
     }
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Perimeter,
+        owner: None,
         points_mm: vec![
             [7.0, 1.0, 1.0],
             [9.0, 1.0, 1.0],
@@ -1350,6 +1364,7 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     // its third vertex. The following open stroke should enter its far endpoint.
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Perimeter,
+        owner: None,
         points_mm: vec![
             [10.0, 10.0, 1.0],
             [10.0, 2.0, 1.0],

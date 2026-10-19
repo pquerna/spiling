@@ -485,6 +485,8 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         protected_hole_area_mm2: 0.0,
         nominal_deposition_volume_mm3: volume,
         process_regions: vec![],
+        process_interfaces: vec![],
+        separator_area_mm2: 0.0,
         support_area_mm2: 0.0,
         support_nominal_deposition_volume_mm3: 0.0,
     };
@@ -524,12 +526,13 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 version: "1".into(),
                 revision: "1".into(),
             },
-            planner_version: "12".into(),
-            emitter_version: "4".into(),
-            verifier_version: "4".into(),
+            planner_version: "13".into(),
+            emitter_version: "5".into(),
+            verifier_version: "5".into(),
         },
         plan: NormalizedPrintPlan {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
+            process_resolution: vec![],
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.1,
                 achieved_shape_error_mm: 0.0,
@@ -560,6 +563,11 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
                     kind: DepositionKind::BottomSkin,
+                    owner: Some(
+                        spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
+                            skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin,
+                        },
+                    ),
                     points_mm: vec![[1.0, 1.0, 0.2], end],
                 }],
                 region_coverage,
@@ -1635,6 +1643,7 @@ fn process_set(scope: SurfaceScope, fraction: f64) -> Edit {
         edit: ProcessEdit::AddLayer {
             scope,
             selector: ProcessSelector::WholeOwnedVolume,
+            interface: None,
             action: ProcessAction::Replace {
                 value: ProcessValue::SparseFraction { fraction },
             },
@@ -1742,6 +1751,7 @@ fn process_ordered_operations_erase_disable_reorder_and_update_are_real_transact
             edit: ProcessEdit::AddOperation {
                 layer_id: second.layer_id,
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: ProcessAction::Erase,
             },
         },
@@ -1764,6 +1774,7 @@ fn process_ordered_operations_erase_disable_reorder_and_update_are_real_transact
             edit: ProcessEdit::UpdateOperation {
                 operation_id: second.operations[0].operation_id,
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: ProcessAction::Replace {
                     value: ProcessValue::SparseFraction { fraction: 0.65 },
                 },
@@ -1982,6 +1993,7 @@ fn process_bounds_and_rejected_edits_leave_document_and_allocators_unchanged() {
                 edit: ProcessEdit::AddOperation {
                     layer_id,
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Erase,
                 },
             },
@@ -1994,6 +2006,7 @@ fn process_bounds_and_rejected_edits_leave_document_and_allocators_unchanged() {
                 edit: ProcessEdit::AddOperation {
                     layer_id,
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Erase
                 }
             })
@@ -2023,6 +2036,7 @@ fn process_bounds_and_rejected_edits_leave_document_and_allocators_unchanged() {
                 edit: ProcessEdit::UpdateOperation {
                     operation_id,
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Replace {
                         value: ProcessValue::SparseFraction { fraction: f64::NAN }
                     }
@@ -2171,4 +2185,255 @@ fn normal_process_adjustments_reuse_winning_ids_before_intent_and_reset_inherits
         new_layer.operations[0].operation_id.get(),
         counters.next_process_operation
     );
+}
+
+#[test]
+fn box_adjustments_reuse_ids_change_bounds_and_keep_whole_values_truthful() {
+    let mut project = imported();
+    let definition_id = project.snapshot().sources.keys().next().unwrap().clone();
+    let occurrence_id = OccurrenceId::new(1).unwrap();
+    let scope = SurfaceScope::Definition {
+        definition_id: definition_id.clone(),
+    };
+    let set = |scope, min, max, fraction, interface| Edit::Process {
+        edit: ProcessEdit::SetBoxSparseFraction {
+            scope,
+            min,
+            max,
+            fraction,
+            interface,
+        },
+    };
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetSparseFraction {
+                scope: scope.clone(),
+                fraction: 0.3,
+            },
+        },
+    );
+    edit(
+        &mut project,
+        set(scope.clone(), [0.0; 3], [10.0; 3], 0.6, None),
+    );
+    let initial = project.capture().manifest;
+    let original = initial.process_document.layers[1].clone();
+    for index in 0..(MAX_PROCESS_LAYERS * 2) {
+        edit(
+            &mut project,
+            set(
+                scope.clone(),
+                [1.0; 3],
+                [11.0; 3],
+                0.4 + (index % 3) as f64 * 0.1,
+                Some(ProcessInterfacePermission::SeparatorWall),
+            ),
+        );
+    }
+    let adjusted = project.capture().manifest;
+    assert_eq!(adjusted.next_process_layer, initial.next_process_layer);
+    assert_eq!(
+        adjusted.next_process_operation,
+        initial.next_process_operation
+    );
+    assert_eq!(adjusted.process_document.layers.len(), 2);
+    assert_eq!(
+        adjusted.process_document.layers[1].layer_id,
+        original.layer_id
+    );
+    assert_eq!(
+        adjusted.process_document.layers[1].operations[0].operation_id,
+        original.operations[0].operation_id
+    );
+    assert_eq!(
+        adjusted
+            .process_document
+            .resolve_definition(&definition_id, 0.2)
+            .fraction,
+        0.3
+    );
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetSparseFraction {
+                scope: scope.clone(),
+                fraction: 0.35,
+            },
+        },
+    );
+    let document = project.snapshot().process_document.clone();
+    assert_eq!(document.layers.len(), 2);
+    assert_eq!(document.layers[1], adjusted.process_document.layers[1]);
+    assert_eq!(
+        document
+            .resolve(&definition_id, occurrence_id, 0.2)
+            .fraction,
+        0.35
+    );
+    assert_eq!(
+        document
+            .resolve_at(&definition_id, occurrence_id, 0.2, [0.0; 3])
+            .fraction,
+        0.35
+    );
+    assert_eq!(
+        document
+            .resolve_at(&definition_id, occurrence_id, 0.2, [5.0; 3])
+            .provenance
+            .unwrap()
+            .operation_id,
+        original.operations[0].operation_id
+    );
+    edit(
+        &mut project,
+        Edit::SetManufacturingIntent {
+            intent: Arc::new(manufacturing_intent()),
+        },
+    );
+    assert_eq!(project.info().resolved_process[0].value.fraction, 0.35);
+    assert_eq!(project.info().process_document, *document);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::Reset {
+                scope: scope.clone(),
+            },
+        },
+    );
+    assert!(project.info().process_document.layers.is_empty());
+    project.undo().unwrap();
+    assert_eq!(project.info().process_document, *document);
+    project.redo().unwrap();
+    edit(&mut project, set(scope, [0.0; 3], [2.0; 3], 0.8, None));
+    let replacement = project.capture().manifest;
+    assert_eq!(
+        replacement.process_document.layers[0].layer_id.get(),
+        adjusted.next_process_layer
+    );
+    assert_eq!(
+        replacement.process_document.layers[0].operations[0]
+            .operation_id
+            .get(),
+        adjusted.next_process_operation
+    );
+}
+
+#[test]
+fn box_authoring_erases_disable_and_bad_edits_preserve_transaction_invariants() {
+    let mut project = imported();
+    let scope = definition_scope(&project);
+    let set = |scope, min, max| Edit::Process {
+        edit: ProcessEdit::SetBoxSparseFraction {
+            scope,
+            min,
+            max,
+            fraction: 0.5,
+            interface: None,
+        },
+    };
+    edit(&mut project, set(scope.clone(), [0.0; 3], [1.0; 3]));
+    let first = project.info().process_document.layers[0].clone();
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::AddOperation {
+                layer_id: first.layer_id,
+                selector: first.operations[0].selector,
+                action: ProcessAction::Erase,
+                interface: None,
+            },
+        },
+    );
+    edit(&mut project, set(scope.clone(), [0.0; 3], [2.0; 3]));
+    let second = project.info().process_document.layers[1].clone();
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::SetLayerEnabled {
+                layer_id: second.layer_id,
+                enabled: false,
+            },
+        },
+    );
+    edit(&mut project, set(scope.clone(), [0.0; 3], [3.0; 3]));
+    assert_eq!(project.info().process_document.layers.len(), 3);
+    let before = project.capture().manifest;
+    for (min, max) in [
+        ([0.0; 3], [0.0; 3]),
+        ([f64::NAN; 3], [1.0; 3]),
+        ([0.0; 3], [f64::INFINITY; 3]),
+    ] {
+        assert!(project.prepare(set(scope.clone(), min, max)).is_err());
+    }
+    assert!(
+        project
+            .prepare(set(
+                SurfaceScope::Occurrence {
+                    occurrence_id: OccurrenceId::new(1).unwrap(),
+                    expected_definition_id: DefinitionId::from_source_sha256(&[99; 32]),
+                },
+                [0.0; 3],
+                [1.0; 3]
+            ))
+            .is_err()
+    );
+    assert_eq!(project.capture().manifest, before);
+    edit(
+        &mut project,
+        Edit::Process {
+            edit: ProcessEdit::Reset { scope },
+        },
+    );
+    assert!(project.info().process_document.layers.is_empty());
+    project.undo().unwrap();
+    assert_eq!(
+        project.capture().manifest.process_document,
+        before.process_document
+    );
+    assert_eq!(
+        project.capture().manifest.next_process_operation,
+        before.next_process_operation
+    );
+}
+
+#[test]
+fn box_adjustment_refuses_ambiguous_targets_without_mutating_allocators() {
+    let mut project = imported();
+    let scope = definition_scope(&project);
+    for min in [[0.0; 3], [2.0; 3]] {
+        edit(
+            &mut project,
+            Edit::Process {
+                edit: ProcessEdit::AddLayer {
+                    scope: scope.clone(),
+                    selector: ProcessSelector::SourceBoxMm {
+                        min,
+                        max: min.map(|value| value + 1.0),
+                    },
+                    action: ProcessAction::Replace {
+                        value: ProcessValue::SparseFraction { fraction: 0.5 },
+                    },
+                    interface: None,
+                },
+            },
+        );
+    }
+    let before = project.capture().manifest;
+    assert_eq!(
+        project
+            .prepare(Edit::Process {
+                edit: ProcessEdit::SetBoxSparseFraction {
+                    scope,
+                    min: [0.0; 3],
+                    max: [3.0; 3],
+                    fraction: 0.6,
+                    interface: None,
+                },
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::InvalidProject
+    );
+    assert_eq!(project.capture().manifest, before);
 }

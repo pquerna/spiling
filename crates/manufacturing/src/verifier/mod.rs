@@ -853,6 +853,7 @@ pub(crate) fn verify_actual(
                     DepositionKind::Bridge => 8,
                     DepositionKind::Support => 9,
                     DepositionKind::SupportInterface => 10,
+                    DepositionKind::SeparatorWall => 13,
                 }
             };
             sink.push(
@@ -883,6 +884,7 @@ pub(crate) fn verify_actual(
     for skipped in volume_layer as usize + 1..plan.layers.len() {
         verify_region_volume(&plan.layers[skipped], 0.0, 0.0)?;
     }
+    interfaces::verify_projected_byte_geometry(plan, recipe, cancel)?;
     let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
@@ -925,5 +927,6 @@ pub(crate) fn verify_actual(
     })
 }
 
+mod interfaces;
 #[cfg(test)]
 mod tests;

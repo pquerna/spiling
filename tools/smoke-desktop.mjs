@@ -152,13 +152,15 @@ const manufacturingDiagnostic = args.includes("--diagnostic-no-gpu");
 const customManufacturingSource = option("--manufacturing-source");
 const requireHardwareGpu = args.includes("--require-hardware-gpu");
 const processOverrides = args.includes("--process-overrides");
+const processZones = args.includes("--process-zones");
+if (processZones && processOverrides) throw new Error("Choose within-part zones or separate-copy overrides, not both");
 const evidenceDirectory = option("--evidence-directory");
 if (
-  processOverrides &&
+  (processOverrides || processZones) &&
   (scenario !== "manufacturing" || !customManufacturingSource || manufacturingDiagnostic)
 )
   throw new Error(
-    "--process-overrides requires the actual hardware manufacturing workflow and a named admitted source",
+    "Process authoring requires the actual hardware manufacturing workflow and a named admitted source",
   );
 if (evidenceDirectory) await mkdir(resolve(evidenceDirectory), { recursive: false });
 if (
@@ -197,7 +199,7 @@ const manufacturingSource = customManufacturingSource
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides (actual hardware named-source manufacturing)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones (actual hardware named-source manufacturing)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -325,7 +327,7 @@ async function click(id) {
     () =>
       evaluate(`(() => {
         const button = document.querySelector('[data-testid="${id}"]');
-        if (!button || button.disabled) return false;
+        if (!button || button.matches(':disabled')) return false;
         button.click();
         return true;
       })()`),
@@ -348,7 +350,7 @@ async function input(selector, value) {
     () =>
       evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
-    if (!element || element.disabled) return false;
+    if (!element || element.matches(':disabled')) return false;
     const prototype = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype
       : element.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, ${JSON.stringify(String(value))});
@@ -1754,7 +1756,7 @@ async function inspectManufacturing() {
     "Core intent restored",
   );
   let q1Intent = null;
-  if (scenario === "manufacturing") {
+  if (scenario === "manufacturing" && !processZones) {
     const beforePolicies = await manufacturingState();
     await input('[data-testid="manufacturing-seam-policy"]', "preferred_build_direction");
     await input('[data-testid="manufacturing-seam-direction-x"]', "0");
@@ -1871,10 +1873,6 @@ async function inspectManufacturing() {
           (await effective(id))[scope === "definition" ? "inherited" : "value"].fraction === value,
         "authoritative whole-volume process Apply",
       );
-      await until(
-        async () => /Effective sparse fraction/.test(await text("process-effective")),
-        "visible effective native process value",
-      );
     };
     await set(first.occurrence_id, "definition", 0.3);
     await set(second.occurrence_id, "occurrence", 0.4);
@@ -1896,7 +1894,6 @@ async function inspectManufacturing() {
       await evaluate(`document.querySelector('[data-testid="process-fraction"]').value`),
       "0.2",
     );
-    assert.match(await text("process-effective"), /Effective sparse fraction for occurrence: 0.6/);
     await evaluate(
       `document.querySelector('[data-testid="process-panel"]').scrollIntoView({block:'start'})`,
     );
@@ -1917,6 +1914,48 @@ async function inspectManufacturing() {
       `document.querySelector('[data-testid="process-panel"]').scrollIntoView({block:'start'})`,
     );
     await screenshot("manufacturing-local-process-overrides");
+  }
+  if (processZones) {
+    const current = await manufacturingState();
+    q1Intent = structuredClone(current.selected_intent);
+    q1Intent.recipe.rectilinear_axis = "x";
+    await input('[data-testid="manufacturing-rectilinear-axis"]', "x");
+    await click("manufacturing-apply");
+    await until(async () => JSON.stringify((await manufacturingState()).selected_intent) === JSON.stringify(q1Intent), "Explicit fixed-X join axis Apply");
+    const project = async () => bridgeProject((await manufacturingState()).session_id);
+    const first = (await geometryState()).occurrences[0];
+    assert.equal((await geometryState()).occurrences.length, 1, "The outcome is two areas of ONE actual source part");
+    await selectOccurrence(first.occurrence_id);
+    await input('[data-testid="process-scope"]', "definition");
+    await input('[data-testid="process-region-mode"]', "whole");
+    await input('[data-testid="process-fraction"]', "0.20");
+    await click("process-apply");
+    await until(async () => (await project()).resolved_process[0].inherited.fraction === 0.20, "Whole-owned lighter-body base Apply");
+    await input('[data-testid="process-region-mode"]', "box");
+    for (const [side, values] of [["min", [-1,-1,-1]], ["max", [8.5,19,11]]])
+      for (const [axis, value] of values.entries())
+        await input(`[data-testid="process-box-${side}-${"xyz"[axis]}"]`, String(value));
+    await input('[data-testid="process-fraction"]', "0.55");
+    await click("process-separator-approval");
+    await click("process-apply");
+    const box = document => document.process_document.layers.flatMap(layer => layer.operations).find(operation => operation.selector.kind === "source_box_mm");
+    const initial = await until(async () => box(await project()), "Explicit authorized physical box Apply");
+    assert.equal(initial.interface, "separator_wall");
+    await input('[data-testid="process-box-max-x"]', "8");
+    await input('[data-testid="process-fraction"]', "0.60");
+    await click("process-apply");
+    await until(async () => {
+      const changed = box(await project());
+      return changed.selector.max[0] === 8 && changed.action.value.fraction === 0.60;
+    }, "Bounds/fraction edit updates stable zone operation");
+    assert.equal(box(await project()).operation_id, initial.operation_id);
+    await click("project-undo");
+    await until(async () => box(await project()).selector.max[0] === 8.5, "Zone bounds Undo");
+    await click("project-redo");
+    await until(async () => box(await project()).selector.max[0] === 8, "Zone bounds Redo");
+    localProcess = (await project()).process_document;
+    await evaluate(`document.querySelector('[data-testid="process-panel"]').scrollIntoView({block:'start'})`);
+    await screenshot("manufacturing-housing-zone-approval");
   }
   let baseline = null;
   if (cylindricalFinishScenario || imageReliefScenario) {
@@ -2105,7 +2144,7 @@ async function inspectManufacturing() {
   assert.ok(
     plan.layers.every((layer) =>
       layer.region_coverage.process_regions.every((region) =>
-        processOverrides ? [0.2, 0.6].includes(region.fraction) : region.fraction === 0.25,
+        processOverrides || processZones ? [0.2, 0.6].includes(region.fraction) : region.fraction === 0.25,
       ),
     ),
   );
@@ -2124,11 +2163,43 @@ async function inspectManufacturing() {
   assert.ok(kinds.has("bottom_skin"));
   assert.ok(kinds.has("top_skin"));
   assert.ok(kinds.has("sparse_fill"));
+  if (processZones) {
+    assert.ok(kinds.has("separator_wall"), "Actual dedicated open separator role is present");
+    assert.ok(plan.process_resolution.some(record => record.status === "applied"));
+    assert.ok(plan.layers.some(layer => layer.region_coverage.separator_area_mm2 > 0));
+    const interior = plan.layers.filter(layer =>
+      layer.paths.some(path => path.kind === "separator_wall") &&
+      [0.20, 0.60].every(fraction => layer.paths.some(path =>
+        path.kind === "sparse_fill" && path.owner?.kind === "regional" &&
+        layer.region_coverage.process_regions[path.owner.region_index].fraction === fraction,
+      )),
+    );
+    assert.ok(interior.length > 0, "One actual layer contains both regional fills and the joining rib");
+    const middle = interior.reduce((a, b) => Math.abs(a.z_mm - 5) <= Math.abs(b.z_mm - 5) ? a : b);
+    await input('[data-testid="manufacturing-layer"]', String(middle.index));
+    await until(async () => !(await manufacturingState()).working &&
+      await evaluate(`document.querySelector('[data-testid="manufacturing-layer"]').value === ${JSON.stringify(String(middle.index))}`),
+      "Actual middle-layer draw completes");
+    if (await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked"))
+      await click("manufacturing-source-bodies");
+    await until(async () => !(await manufacturingState()).working &&
+      !(await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked")),
+      "Source-hidden draw completes");
+    assert.equal(await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked"), false);
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    await screenshot("manufacturing-housing-two-zones-source-hidden");
+    if (evidenceDirectory)
+      await writeFile(resolve(evidenceDirectory, "interior-layer.json"), JSON.stringify({
+        index: middle.index, z_mm: middle.z_mm, height_mm: middle.height_mm,
+        source_bodies_visible: false, show_travel: false,
+      }, null, 2), { flag: "wx" });
+  }
   if (evidenceDirectory) {
     for (const [name, content] of Object.entries(exported))
       await writeFile(resolve(evidenceDirectory, name), content, { flag: "wx" });
   }
-  if (q1Intent) {
+  if (q1Intent && !processZones) {
     const perimeters = plan.layers.flatMap((layer) =>
       layer.paths.filter((path) => path.kind === "perimeter"),
     );
@@ -2298,8 +2369,8 @@ async function inspectManufacturing() {
   );
   if (surface) await click(`surface-remove-${surface.layer_id}`);
   else if (localProcess) {
-    await selectOccurrence((await geometryState()).occurrences[1].occurrence_id);
-    await input('[data-testid="process-scope"]', "occurrence");
+    await selectOccurrence((await geometryState()).occurrences[processZones ? 0 : 1].occurrence_id);
+    await input('[data-testid="process-scope"]', processZones ? "definition" : "occurrence");
     await click("process-reset");
   } else {
     await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
@@ -2355,7 +2426,7 @@ async function inspectManufacturing() {
   );
   if (localProcess) {
     assert.deepEqual((await bridgeProject(state.session_id)).process_document, localProcess);
-    await selectOccurrence((await geometryState()).occurrences[1].occurrence_id);
+    await selectOccurrence((await geometryState()).occurrences[processZones ? 0 : 1].occurrence_id);
     assert.equal(
       await evaluate(`document.querySelector('[data-testid="process-apply"]').disabled`),
       true,
@@ -2371,12 +2442,10 @@ async function inspectManufacturing() {
       q1Intent,
       "Source-independent reopen retains both authored policies",
     );
-    for (const testId of [
-      "manufacturing-seam-policy",
-      "manufacturing-seam-direction-x",
-      "manufacturing-seam-direction-y",
-      "manufacturing-rectilinear-axis",
-    ])
+    const policyControls = ["manufacturing-seam-policy", "manufacturing-rectilinear-axis"];
+    if (q1Intent.recipe.seam_policy.kind === "preferred_build_direction")
+      policyControls.push("manufacturing-seam-direction-x", "manufacturing-seam-direction-y");
+    for (const testId of policyControls)
       assert.equal(
         await evaluate(`document.querySelector('[data-testid="${testId}"]').matches(':disabled')`),
         true,

@@ -13,12 +13,12 @@ pub(super) const MAX_ANCHOR_PAIR_WORK: usize = 128_000_000;
 /// separately certified positive-area overlap of actual candidate endpoint disks.
 /// No source-material anchor, polygonized circle or overlay tolerance expansion.
 #[derive(Debug)]
-pub(in crate::planner) struct AnchorGap {
-    pub(in crate::planner) start: f64,
-    pub(in crate::planner) end: f64,
-    pub(in crate::planner) left: bool,
-    pub(in crate::planner) right: bool,
-    pub(in crate::planner) direct_ends: bool,
+pub(crate) struct AnchorGap {
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+    pub(crate) left: bool,
+    pub(crate) right: bool,
+    pub(crate) direct_ends: bool,
 }
 
 #[derive(Default)]
@@ -37,9 +37,9 @@ struct SegmentCapsule {
 
 /// A nominal candidate bead segment in world millimetres. Only its endpoint
 /// coordinates are copied; previous/contact path arrays remain borrowed.
-pub(in crate::planner) struct AnchorCandidate {
-    pub(in crate::planner) endpoints_mm: [[f64; 3]; 2],
-    pub(in crate::planner) bead_width_mm: f64,
+pub(crate) struct AnchorCandidate {
+    pub(crate) endpoints_mm: [[f64; 3]; 2],
+    pub(crate) bead_width_mm: f64,
 }
 
 impl AnchorCandidate {
@@ -114,7 +114,7 @@ pub(super) fn emitted_coordinate_separation_lower_mm(
     Ok(lower)
 }
 
-pub(in crate::planner) struct AnchorWorkspace {
+pub(crate) struct AnchorWorkspace {
     intervals: Vec<(f64, f64, bool)>,
     uncovered: Vec<AnchorGap>,
     record_limit: usize,
@@ -145,11 +145,34 @@ impl AnchorWorkspace {
     /// and provenance. Candidate endpoint disks may certify positive-area anchors;
     /// they do not enlarge interior intervals or shorten measured unsupported spans.
     /// Stroke-pair work is cumulative across queries, not workspace-local.
-    pub(in crate::planner) fn gaps<'a>(
+    pub(crate) fn gaps<'a>(
         &mut self,
         candidate: AnchorCandidate,
         previous: impl Iterator<Item = &'a DepositionPath>,
         contacts: impl Iterator<Item = &'a DepositionPath>,
+        work: &mut usize,
+        cancel: &AtomicBool,
+    ) -> Result<&[AnchorGap], ManufacturingError> {
+        self.gaps_edges(
+            candidate,
+            previous
+                .flat_map(|path| path.points_mm.windows(2).map(|e| (Ok([e[0], e[1]]), true)))
+                .chain(
+                    contacts.flat_map(|path| {
+                        path.points_mm.windows(2).map(|e| (Ok([e[0], e[1]]), false))
+                    }),
+                ),
+            work,
+            cancel,
+        )
+    }
+
+    /// Borrow/project already byte-associated segment endpoints without making
+    /// a second motion stream. Shared math supplies no planner join authority.
+    pub(crate) fn gaps_edges(
+        &mut self,
+        candidate: AnchorCandidate,
+        edges: impl Iterator<Item = (Result<[[f64; 3]; 2], ManufacturingError>, bool)>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
@@ -173,63 +196,59 @@ impl AnchorWorkspace {
         self.intervals.clear();
         self.uncovered.clear();
         let mut endpoints = [EndpointAnchor::default(), EndpointAnchor::default()];
-        for (path, direct) in previous
-            .map(|path| (path, true))
-            .chain(contacts.map(|path| (path, false)))
-        {
-            for edge in path.points_mm.windows(2) {
-                check_cancel(cancel)?;
-                *work = work
-                    .checked_add(1)
-                    .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
-                    .ok_or_else(|| {
-                        error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "cumulative deposited-stroke anchor work budget exceeded",
-                        )
-                    })?;
-                let c = [edge[0][0], edge[0][1]];
-                let d = [edge[1][0], edge[1][1]];
-                if c.iter().chain(&d).any(|x| !x.is_finite()) {
+        for (edge, direct) in edges {
+            let edge = edge?;
+            check_cancel(cancel)?;
+            *work = work
+                .checked_add(1)
+                .filter(|n| *n <= MAX_ANCHOR_PAIR_WORK)
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "cumulative deposited-stroke anchor work budget exceeded",
+                    )
+                })?;
+            let c = [edge[0][0], edge[0][1]];
+            let d = [edge[1][0], edge[1][1]];
+            if c.iter().chain(&d).any(|x| !x.is_finite()) {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "nonfinite deposited anchor segment",
+                ));
+            }
+            // A broad-phase box may reject only when both the original-radius
+            // centerline and the two endpoint-disk footprints cannot intersect.
+            let endpoint_reach = radius + radius;
+            if a[0].min(b[0]) > c[0].max(d[0]) + endpoint_reach
+                || a[0].max(b[0]) < c[0].min(d[0]) - endpoint_reach
+                || a[1].min(b[1]) > c[1].max(d[1]) + endpoint_reach
+                || a[1].max(b[1]) < c[1].min(d[1]) - endpoint_reach
+            {
+                continue;
+            }
+            let capsule = SegmentCapsule::new(c, d, radius)?;
+            for (endpoint, point) in endpoints.iter_mut().zip([[a[0], a[1]], [b[0], b[1]]]) {
+                if (!endpoint.present || (direct && !endpoint.direct))
+                    && capsule.overlaps_endpoint(point, radius)?
+                {
+                    endpoint.present = true;
+                    endpoint.direct |= direct;
+                }
+            }
+            if let Some((start, end)) = capsule.interval([a[0], a[1]], direction, length)? {
+                if self.intervals.len() >= self.record_limit {
                     return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        "nonfinite deposited anchor segment",
+                        ManufacturingErrorCode::ResourceLimit,
+                        "retained deposited-anchor interval budget exceeded",
                     ));
                 }
-                // A broad-phase box may reject only when both the original-radius
-                // centerline and the two endpoint-disk footprints cannot intersect.
-                let endpoint_reach = radius + radius;
-                if a[0].min(b[0]) > c[0].max(d[0]) + endpoint_reach
-                    || a[0].max(b[0]) < c[0].min(d[0]) - endpoint_reach
-                    || a[1].min(b[1]) > c[1].max(d[1]) + endpoint_reach
-                    || a[1].max(b[1]) < c[1].min(d[1]) - endpoint_reach
-                {
-                    continue;
-                }
-                let capsule = SegmentCapsule::new(c, d, radius)?;
-                for (endpoint, point) in endpoints.iter_mut().zip([[a[0], a[1]], [b[0], b[1]]]) {
-                    if (!endpoint.present || (direct && !endpoint.direct))
-                        && capsule.overlaps_endpoint(point, radius)?
-                    {
-                        endpoint.present = true;
-                        endpoint.direct |= direct;
-                    }
-                }
-                if let Some((start, end)) = capsule.interval([a[0], a[1]], direction, length)? {
-                    if self.intervals.len() >= self.record_limit {
-                        return Err(error(
-                            ManufacturingErrorCode::ResourceLimit,
-                            "retained deposited-anchor interval budget exceeded",
-                        ));
-                    }
-                    super::reserve_component_record(
-                        &mut self.intervals,
-                        1,
-                        self.uncovered.capacity(),
-                        self.record_limit,
-                    )?;
-                    self.intervals.push((start / length, end / length, direct));
-                }
+                super::reserve_component_record(
+                    &mut self.intervals,
+                    1,
+                    self.uncovered.capacity(),
+                    self.record_limit,
+                )?;
+                self.intervals.push((start / length, end / length, direct));
             }
         }
         self.intervals
@@ -297,6 +316,140 @@ impl AnchorWorkspace {
     }
 }
 
+fn endpoint_distance_enclosed(
+    point: [f64; 3],
+    segment: [[f64; 3]; 2],
+) -> Result<(f64, f64), ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::{
+        project_xyz6_point_mm, xyz6_coordinate_error_mm,
+    };
+    let p = project_xyz6_point_mm(point)?;
+    let a = project_xyz6_point_mm(segment[0])?;
+    let b = project_xyz6_point_mm(segment[1])?;
+    let error_at = |p: [f64; 3]| -> Result<f64, ManufacturingError> {
+        Ok(xyz6_coordinate_error_mm(p[0])?.hypot(xyz6_coordinate_error_mm(p[1])?))
+    };
+    let scale = p
+        .into_iter()
+        .chain(a)
+        .chain(b)
+        .fold(1_f64, |s, x| s.max(x.abs()));
+    let enclosure = error_at(p)? + error_at(a)?.max(error_at(b)?) + scale * 64. * f64::EPSILON;
+    let distance =
+        SegmentCapsule::new([a[0], a[1]], [b[0], b[1]], 0.)?.endpoint_distance([p[0], p[1]])?;
+    Ok((distance, enclosure))
+}
+
+/// Canonical decimal dimensions admit exact rational capsule comparison.
+/// Doubled micrometres represent both XYZ6 points and a half-bead radius.
+/// Checked overflow/noncanonical dimensions use the outward floating proof.
+fn exact_decimal_bond(
+    point: [f64; 3],
+    segment: [[f64; 3]; 2],
+    width: f64,
+) -> Result<Option<bool>, ManufacturingError> {
+    use spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    let grid = |value: f64| {
+        let integer = (value * 1_000_000.).round();
+        if integer.is_finite() && integer / 1_000_000. == value {
+            (integer as i128).checked_mul(2)
+        } else {
+            None
+        }
+    };
+    let p = project_xyz6_point_mm(point)?;
+    let a = project_xyz6_point_mm(segment[0])?;
+    let b = project_xyz6_point_mm(segment[1])?;
+    let ([Some(px), Some(py)], [Some(ax), Some(ay)], [Some(bx), Some(by)], Some(radius)) = (
+        [p[0], p[1]].map(grid),
+        [a[0], a[1]].map(grid),
+        [b[0], b[1]].map(grid),
+        grid(width),
+    ) else {
+        return Ok(None);
+    };
+    let proof = || -> Option<bool> {
+        let v = [bx - ax, by - ay];
+        let q = [px - ax, py - ay];
+        let square = |v: [i128; 2]| v[0].checked_mul(v[0])?.checked_add(v[1].checked_mul(v[1])?);
+        let length = square(v)?;
+        if length == 0 {
+            return Some(false);
+        }
+        let dot = q[0]
+            .checked_mul(v[0])?
+            .checked_add(q[1].checked_mul(v[1])?)?;
+        let (numerator, denominator) = if dot <= 0 {
+            (square(q)?, 1)
+        } else if dot >= length {
+            (square([px - bx, py - by])?, 1)
+        } else {
+            let cross = q[0]
+                .checked_mul(v[1])?
+                .checked_sub(q[1].checked_mul(v[0])?)?;
+            (cross.checked_mul(cross)?, length)
+        };
+        let half = radius / 2;
+        Some(
+            numerator >= half.checked_mul(half)?.checked_mul(denominator)?
+                && numerator < radius.checked_mul(radius)?.checked_mul(denominator)?,
+        )
+    };
+    Ok(proof())
+}
+
+/// Maximum nominal overlap is half a bead. The separately returned Cartesian
+/// representation enclosure is not a source-to-projection manufacturing slack.
+pub(crate) fn endpoint_bond(
+    point: [f64; 3],
+    segment: [[f64; 3]; 2],
+    width: f64,
+) -> Result<bool, ManufacturingError> {
+    if let Some(bonded) = exact_decimal_bond(point, segment, width)? {
+        return Ok(bonded);
+    }
+    let (distance, enclosure) = endpoint_distance_enclosed(point, segment)?;
+    Ok(distance + enclosure < width && distance - enclosure >= width * 0.5)
+}
+
+pub(in crate::planner) fn inward_bond_endpoint(
+    endpoint: [f64; 3],
+    other: [f64; 3],
+    witness: [[f64; 3]; 2],
+    width: f64,
+) -> Result<Option<[f64; 3]>, ManufacturingError> {
+    if endpoint_bond(endpoint, witness, width)? {
+        return Ok(Some(endpoint));
+    }
+    let (distance, enclosure) = endpoint_distance_enclosed(endpoint, witness)?;
+    if distance + enclosure >= width {
+        return Ok(None);
+    }
+    let delta = [other[0] - endpoint[0], other[1] - endpoint[1]];
+    let length = delta[0].hypot(delta[1]);
+    if !length.is_finite() || length <= 0. {
+        return Ok(None);
+    }
+    let direction = [delta[0] / length, delta[1] / length];
+    let capsule = SegmentCapsule::new(
+        [witness[0][0], witness[0][1]],
+        [witness[1][0], witness[1][1]],
+        width * 0.75,
+    )?;
+    let Some((_, exit)) = capsule.interval([endpoint[0], endpoint[1]], direction, length)? else {
+        return Ok(None);
+    };
+    if exit >= length * 0.5 {
+        return Ok(None);
+    }
+    let candidate = [
+        endpoint[0] + direction[0] * exit,
+        endpoint[1] + direction[1] * exit,
+        endpoint[2],
+    ];
+    Ok(endpoint_bond(candidate, witness, width)?.then_some(candidate))
+}
+
 // A capsule is convex: its rectangle and two endpoint disks yield one connected
 // interval on a line. Their interval hull is therefore its exact intersection.
 impl SegmentCapsule {
@@ -323,6 +476,10 @@ impl SegmentCapsule {
         point: [f64; 2],
         candidate_radius: f64,
     ) -> Result<bool, ManufacturingError> {
+        Ok(self.endpoint_distance(point)? < self.radius + candidate_radius)
+    }
+
+    fn endpoint_distance(&self, point: [f64; 2]) -> Result<f64, ManufacturingError> {
         let q = [point[0] - self.c[0], point[1] - self.c[1]];
         let along = dot(q, self.unit).clamp(0.0, self.length);
         let distance = (q[0] - along * self.unit[0]).hypot(q[1] - along * self.unit[1]);
@@ -332,9 +489,7 @@ impl SegmentCapsule {
                 "nonfinite nominal endpoint-footprint distance",
             ));
         }
-        // Two positive-radius footprints have positive overlap area iff this strict
-        // distance is below their radius sum. Equality is tangent with zero area.
-        Ok(distance < self.radius + candidate_radius)
+        Ok(distance)
     }
 
     fn interval(

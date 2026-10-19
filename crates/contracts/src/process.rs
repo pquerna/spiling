@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Ordered source-bound whole-owned-volume process intent, independent of face finishes.
+//! Ordered source-bound process intent, independent of face finishes.
 use crate::{
     geometry::{DefinitionId, OccurrenceId, OccurrenceRecord},
     project::{ProjectError, ProjectErrorCode, StoredDefinition},
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
-pub const PROCESS_SCHEMA_VERSION: u32 = 1;
+pub const PROCESS_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PROCESS_LAYERS: usize = 64;
 pub const MAX_PROCESS_OPERATIONS: usize = 256;
 pub const MAX_PROCESS_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -51,10 +51,33 @@ macro_rules! identity {
 identity!(ProcessLayerId);
 identity!(ProcessOperationId);
 
-#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessSelector {
     WholeOwnedVolume,
+    SourceBoxMm { min: [f64; 3], max: [f64; 3] },
+}
+impl ProcessSelector {
+    pub fn validate(&self) -> Result<(), ProjectError> {
+        if let Self::SourceBoxMm { min, max } = self
+            && (0..3).any(|axis| {
+                !min[axis].is_finite() || !max[axis].is_finite() || min[axis] >= max[axis]
+            })
+        {
+            return Err(invalid(
+                "source box bounds must be finite and strictly ordered",
+            ));
+        }
+        Ok(())
+    }
+    fn selects(&self, point_definition_mm: Option<[f64; 3]>) -> bool {
+        match self {
+            Self::WholeOwnedVolume => true,
+            Self::SourceBoxMm { min, max } => point_definition_mm.is_some_and(|point| {
+                (0..3).all(|axis| point[axis] >= min[axis] && point[axis] < max[axis])
+            }),
+        }
+    }
 }
 impl<'de> Deserialize<'de> for ProcessSelector {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -62,11 +85,43 @@ impl<'de> Deserialize<'de> for ProcessSelector {
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum Checked {
             WholeOwnedVolume {},
+            SourceBoxMm { min: [f64; 3], max: [f64; 3] },
         }
-        match Checked::deserialize(d)? {
-            Checked::WholeOwnedVolume {} => Ok(Self::WholeOwnedVolume),
-        }
+        let selector = match Checked::deserialize(d)? {
+            Checked::WholeOwnedVolume {} => Self::WholeOwnedVolume,
+            Checked::SourceBoxMm { min, max } => Self::SourceBoxMm { min, max },
+        };
+        selector.validate().map_err(serde::de::Error::custom)?;
+        Ok(selector)
     }
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessInterfacePermission {
+    SeparatorWall,
+}
+fn required_interface<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ProcessInterfacePermission>, D::Error> {
+    Option::deserialize(d)
+}
+fn validate_interface(
+    selector: ProcessSelector,
+    interface: Option<ProcessInterfacePermission>,
+    action: ProcessAction,
+) -> Result<(), ProjectError> {
+    selector.validate()?;
+    if selector == ProcessSelector::WholeOwnedVolume && interface.is_some() {
+        return Err(invalid(
+            "interface permission requires a source box selector",
+        ));
+    }
+    if interface.is_some() && !matches!(action, ProcessAction::Replace { .. }) {
+        return Err(invalid(
+            "separator permission belongs to a winning box Replace, never Erase",
+        ));
+    }
+    Ok(())
 }
 #[derive(Debug, Clone, Copy, Serialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -125,12 +180,41 @@ impl ProcessAction {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessOperation {
     pub operation_id: ProcessOperationId,
     pub selector: ProcessSelector,
     pub action: ProcessAction,
+    pub interface: Option<ProcessInterfacePermission>,
+}
+impl ProcessOperation {
+    pub fn validate(&self) -> Result<(), ProjectError> {
+        validate_interface(self.selector, self.interface, self.action)?;
+        self.action.validate()
+    }
+}
+impl<'de> Deserialize<'de> for ProcessOperation {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Checked {
+            operation_id: ProcessOperationId,
+            selector: ProcessSelector,
+            action: ProcessAction,
+            #[serde(deserialize_with = "required_interface")]
+            interface: Option<ProcessInterfacePermission>,
+        }
+        let value = Checked::deserialize(d)?;
+        let operation = Self {
+            operation_id: value.operation_id,
+            selector: value.selector,
+            action: value.action,
+            interface: value.interface,
+        };
+        operation.validate().map_err(serde::de::Error::custom)?;
+        Ok(operation)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -262,7 +346,7 @@ impl ProcessDocument {
                 if !operations.insert(operation.operation_id) {
                     return Err(invalid("duplicate process operation identity"));
                 }
-                operation.action.validate()?;
+                operation.validate()?;
             }
         }
         if operations.len() > MAX_PROCESS_OPERATIONS
@@ -318,20 +402,35 @@ impl ProcessDocument {
         occurrence_id: OccurrenceId,
         global_fraction: f64,
     ) -> ResolvedProcessValue {
-        self.resolve_scopes(definition_id, Some(occurrence_id), global_fraction)
+        self.resolve_scopes(definition_id, Some(occurrence_id), global_fraction, None)
     }
     pub fn resolve_definition(
         &self,
         definition_id: &DefinitionId,
         global_fraction: f64,
     ) -> ResolvedProcessValue {
-        self.resolve_scopes(definition_id, None, global_fraction)
+        self.resolve_scopes(definition_id, None, global_fraction, None)
+    }
+    pub fn resolve_at(
+        &self,
+        definition_id: &DefinitionId,
+        occurrence_id: OccurrenceId,
+        global_fraction: f64,
+        point_definition_mm: [f64; 3],
+    ) -> ResolvedProcessValue {
+        self.resolve_scopes(
+            definition_id,
+            Some(occurrence_id),
+            global_fraction,
+            Some(point_definition_mm),
+        )
     }
     fn resolve_scopes(
         &self,
         definition_id: &DefinitionId,
         occurrence_id: Option<OccurrenceId>,
         global_fraction: f64,
+        point_definition_mm: Option<[f64; 3]>,
     ) -> ResolvedProcessValue {
         let mut result = ResolvedProcessValue {
             fraction: global_fraction,
@@ -357,6 +456,9 @@ impl ProcessDocument {
                 }
                 let mut contribution = None;
                 for operation in &layer.operations {
+                    if !operation.selector.selects(point_definition_mm) {
+                        continue;
+                    }
                     contribution = match operation.action {
                         ProcessAction::Replace {
                             value: ProcessValue::SparseFraction { fraction },
@@ -399,18 +501,25 @@ impl ProcessDocument {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessEdit {
     SetSparseFraction {
         scope: SurfaceScope,
-        #[serde(deserialize_with = "sparse_fraction")]
         fraction: f64,
+    },
+    SetBoxSparseFraction {
+        scope: SurfaceScope,
+        min: [f64; 3],
+        max: [f64; 3],
+        fraction: f64,
+        interface: Option<ProcessInterfacePermission>,
     },
     AddLayer {
         scope: SurfaceScope,
         selector: ProcessSelector,
         action: ProcessAction,
+        interface: Option<ProcessInterfacePermission>,
     },
     RemoveLayer {
         layer_id: ProcessLayerId,
@@ -427,11 +536,13 @@ pub enum ProcessEdit {
         layer_id: ProcessLayerId,
         selector: ProcessSelector,
         action: ProcessAction,
+        interface: Option<ProcessInterfacePermission>,
     },
     UpdateOperation {
         operation_id: ProcessOperationId,
         selector: ProcessSelector,
         action: ProcessAction,
+        interface: Option<ProcessInterfacePermission>,
     },
     RemoveOperation {
         operation_id: ProcessOperationId,
@@ -451,19 +562,113 @@ impl ProcessEdit {
                 fraction: *fraction,
             }
             .validate(),
-            Self::AddLayer { action, .. }
-            | Self::AddOperation { action, .. }
-            | Self::UpdateOperation { action, .. } => action.validate(),
+            Self::SetBoxSparseFraction {
+                min, max, fraction, ..
+            } => {
+                ProcessSelector::SourceBoxMm {
+                    min: *min,
+                    max: *max,
+                }
+                .validate()?;
+                ProcessValue::SparseFraction {
+                    fraction: *fraction,
+                }
+                .validate()
+            }
+            Self::AddLayer {
+                selector,
+                action,
+                interface,
+                ..
+            }
+            | Self::AddOperation {
+                selector,
+                action,
+                interface,
+                ..
+            }
+            | Self::UpdateOperation {
+                selector,
+                action,
+                interface,
+                ..
+            } => {
+                validate_interface(*selector, *interface, *action)?;
+                action.validate()
+            }
             _ => Ok(()),
         }
     }
 }
-fn sparse_fraction<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-    let fraction = f64::deserialize(d)?;
-    ProcessValue::SparseFraction { fraction }
-        .validate()
-        .map_err(serde::de::Error::custom)?;
-    Ok(fraction)
+impl<'de> Deserialize<'de> for ProcessEdit {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(
+            remote = "ProcessEdit",
+            tag = "op",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Checked {
+            SetSparseFraction {
+                scope: SurfaceScope,
+                fraction: f64,
+            },
+            SetBoxSparseFraction {
+                scope: SurfaceScope,
+                min: [f64; 3],
+                max: [f64; 3],
+                fraction: f64,
+                #[serde(deserialize_with = "required_interface")]
+                interface: Option<ProcessInterfacePermission>,
+            },
+            AddLayer {
+                scope: SurfaceScope,
+                selector: ProcessSelector,
+                action: ProcessAction,
+                #[serde(deserialize_with = "required_interface")]
+                interface: Option<ProcessInterfacePermission>,
+            },
+            RemoveLayer {
+                layer_id: ProcessLayerId,
+            },
+            SetLayerEnabled {
+                layer_id: ProcessLayerId,
+                enabled: bool,
+            },
+            MoveLayer {
+                layer_id: ProcessLayerId,
+                index: u32,
+            },
+            AddOperation {
+                layer_id: ProcessLayerId,
+                selector: ProcessSelector,
+                action: ProcessAction,
+                #[serde(deserialize_with = "required_interface")]
+                interface: Option<ProcessInterfacePermission>,
+            },
+            UpdateOperation {
+                operation_id: ProcessOperationId,
+                selector: ProcessSelector,
+                action: ProcessAction,
+                #[serde(deserialize_with = "required_interface")]
+                interface: Option<ProcessInterfacePermission>,
+            },
+            RemoveOperation {
+                operation_id: ProcessOperationId,
+            },
+            MoveOperation {
+                operation_id: ProcessOperationId,
+                index: u32,
+            },
+            Reset {
+                scope: SurfaceScope,
+            },
+        }
+        let edit = Checked::deserialize(d)?;
+        edit.validate().map_err(serde::de::Error::custom)?;
+        Ok(edit)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -472,7 +677,9 @@ pub struct ResolvedOccurrenceProcess {
     pub occurrence_id: OccurrenceId,
     pub definition_id: DefinitionId,
     pub global_fraction: f64,
+    /// Definition inheritance for the whole-volume base, ignoring spatial masks.
     pub inherited: ResolvedProcessValue,
+    /// Whole-volume base for this occurrence; not a uniform spatial-density claim.
     pub value: ResolvedProcessValue,
 }
 
@@ -490,6 +697,7 @@ mod tests {
                 .map(|(index, action)| ProcessOperation {
                     operation_id: ProcessOperationId::new(id * 10 + index as u32).unwrap(),
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: *action,
                 })
                 .collect(),
@@ -498,6 +706,209 @@ mod tests {
     fn replace(fraction: f64) -> ProcessAction {
         ProcessAction::Replace {
             value: ProcessValue::SparseFraction { fraction },
+        }
+    }
+    #[test]
+    fn box_resolution_is_half_open_and_erase_is_spatial_and_layer_local() {
+        let definition_id = DefinitionId::from_source_sha256(&[8; 32]);
+        let occurrence_id = OccurrenceId::new(1).unwrap();
+        let definition = SurfaceScope::Definition {
+            definition_id: definition_id.clone(),
+        };
+        let occurrence = SurfaceScope::Occurrence {
+            occurrence_id,
+            expected_definition_id: definition_id.clone(),
+        };
+        let selector = ProcessSelector::SourceBoxMm {
+            min: [0.0; 3],
+            max: [10.0; 3],
+        };
+        let mut scoped = layer(3, occurrence, &[replace(0.8), ProcessAction::Erase]);
+        scoped.operations[1].selector = selector;
+        let mut boxed = layer(2, definition.clone(), &[replace(0.6)]);
+        boxed.operations[0].selector = selector;
+        let mut doc = ProcessDocument {
+            schema_version: PROCESS_SCHEMA_VERSION,
+            // Definition precedence is independent of physical list position.
+            layers: vec![scoped, layer(1, definition, &[replace(0.3)]), boxed],
+        };
+        doc.validate().unwrap();
+        assert_eq!(
+            doc.resolve(&definition_id, occurrence_id, 0.2).fraction,
+            0.8
+        );
+        assert_eq!(doc.resolve_definition(&definition_id, 0.2).fraction, 0.3);
+        assert_eq!(
+            doc.resolve_at(&definition_id, occurrence_id, 0.2, [0.0; 3])
+                .fraction,
+            0.6
+        );
+        assert_eq!(
+            doc.resolve_at(&definition_id, occurrence_id, 0.2, [5.0; 3])
+                .fraction,
+            0.6
+        );
+        for axis in 0..3 {
+            let mut point = [5.0; 3];
+            point[axis] = 10.0;
+            assert_eq!(
+                doc.resolve_at(&definition_id, occurrence_id, 0.2, point)
+                    .fraction,
+                0.8
+            );
+            point[axis] = -0.001;
+            assert_eq!(
+                doc.resolve_at(&definition_id, occurrence_id, 0.2, point)
+                    .fraction,
+                0.8
+            );
+        }
+        doc.layers[0].operations[0].selector = selector;
+        assert_eq!(
+            doc.resolve(&definition_id, occurrence_id, 0.2).fraction,
+            0.3
+        );
+        assert_eq!(
+            doc.resolve_at(&definition_id, occurrence_id, 0.2, [5.0; 3])
+                .fraction,
+            0.6
+        );
+        doc.layers[0].operations.pop();
+        assert_eq!(
+            doc.resolve_at(&definition_id, occurrence_id, 0.2, [5.0; 3])
+                .fraction,
+            0.8
+        );
+        doc.layers[0].enabled = false;
+        assert_eq!(
+            doc.resolve_at(&definition_id, occurrence_id, 0.2, [5.0; 3])
+                .fraction,
+            0.6
+        );
+    }
+    #[test]
+    fn box_bounds_and_explicit_interface_are_checked_on_every_boundary() {
+        let scope = SurfaceScope::Definition {
+            definition_id: DefinitionId::from_source_sha256(&[8; 32]),
+        };
+        let selector = ProcessSelector::SourceBoxMm {
+            min: [0.0; 3],
+            max: [1.0; 3],
+        };
+        let command = ProcessEdit::SetBoxSparseFraction {
+            scope: scope.clone(),
+            min: [0.0; 3],
+            max: [1.0; 3],
+            fraction: 0.5,
+            interface: None,
+        };
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert!(encoded["interface"].is_null());
+        assert_eq!(
+            serde_json::from_value::<ProcessEdit>(encoded.clone()).unwrap(),
+            command
+        );
+        let mut missing = encoded.clone();
+        missing.as_object_mut().unwrap().remove("interface");
+        assert!(serde_json::from_value::<ProcessEdit>(missing).is_err());
+        let operation = ProcessOperation {
+            operation_id: ProcessOperationId::new(1).unwrap(),
+            selector,
+            action: replace(0.5),
+            interface: None,
+        };
+        let mut missing = serde_json::to_value(&operation).unwrap();
+        missing.as_object_mut().unwrap().remove("interface");
+        assert!(serde_json::from_value::<ProcessOperation>(missing).is_err());
+        for axis in 0..3 {
+            for bound in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.0, 2.0] {
+                let mut min = [0.0; 3];
+                min[axis] = bound;
+                let invalid = ProcessSelector::SourceBoxMm { min, max: [1.0; 3] };
+                assert!(invalid.validate().is_err());
+                assert!(crate::rpc::ProcessSelector::try_from(invalid).is_err());
+            }
+            for bound in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+                let mut max = [1.0; 3];
+                max[axis] = bound;
+                assert!(
+                    ProcessSelector::SourceBoxMm { min: [0.0; 3], max }
+                        .validate()
+                        .is_err()
+                );
+                let wire = crate::rpc::ProcessSelector {
+                    kind: Some(crate::rpc::process_selector::Kind::SourceBoxMm(
+                        crate::rpc::SourceBoxMm {
+                            min: Some([0.0; 3].try_into().unwrap()),
+                            max: Some(crate::rpc::Vec3 {
+                                x: max[0],
+                                y: max[1],
+                                z: max[2],
+                            }),
+                        },
+                    )),
+                };
+                assert!(ProcessSelector::try_from(wire).is_err());
+            }
+            let mut invalid = encoded.clone();
+            invalid["max"][axis] = serde_json::json!(0.0);
+            assert!(serde_json::from_value::<ProcessEdit>(invalid).is_err());
+        }
+        for edit in [
+            ProcessEdit::AddLayer {
+                scope: scope.clone(),
+                selector,
+                action: ProcessAction::Erase,
+                interface: Some(ProcessInterfacePermission::SeparatorWall),
+            },
+            ProcessEdit::AddOperation {
+                layer_id: ProcessLayerId::new(1).unwrap(),
+                selector,
+                action: ProcessAction::Erase,
+                interface: Some(ProcessInterfacePermission::SeparatorWall),
+            },
+            ProcessEdit::UpdateOperation {
+                operation_id: ProcessOperationId::new(1).unwrap(),
+                selector,
+                action: ProcessAction::Erase,
+                interface: Some(ProcessInterfacePermission::SeparatorWall),
+            },
+        ] {
+            assert!(
+                edit.validate().is_err(),
+                "Erase cannot authorize construction"
+            );
+            assert!(
+                serde_json::from_value::<ProcessEdit>(serde_json::to_value(&edit).unwrap())
+                    .is_err()
+            );
+            assert!(crate::rpc::ProcessEdit::try_from(edit).is_err());
+        }
+        let mut erased = operation.clone();
+        erased.action = ProcessAction::Erase;
+        erased.interface = Some(ProcessInterfacePermission::SeparatorWall);
+        assert!(erased.validate().is_err());
+        assert!(
+            serde_json::from_value::<ProcessOperation>(serde_json::to_value(&erased).unwrap())
+                .is_err()
+        );
+        let mut forbidden = operation;
+        forbidden.selector = ProcessSelector::WholeOwnedVolume;
+        forbidden.interface = Some(ProcessInterfacePermission::SeparatorWall);
+        assert!(forbidden.validate().is_err());
+        assert!(
+            serde_json::from_value::<ProcessOperation>(serde_json::to_value(&forbidden).unwrap())
+                .is_err()
+        );
+        let invalid_edit = ProcessEdit::AddLayer {
+            scope,
+            selector: forbidden.selector,
+            action: forbidden.action,
+            interface: forbidden.interface,
+        };
+        assert!(crate::rpc::ProcessEdit::try_from(invalid_edit).is_err());
+        for permission in [0, -1, 2, i32::MAX] {
+            assert!(ProcessInterfacePermission::try_from(permission).is_err());
         }
     }
     #[test]
@@ -655,7 +1066,8 @@ mod tests {
                     operations: vec![crate::rpc::ProcessOperation {
                         operation_id: 1,
                         selector: None,
-                        action: None
+                        action: None,
+                        interface: None,
                     }]
                 }]
             })
@@ -680,9 +1092,24 @@ mod tests {
                 scope: scope.clone(),
                 fraction: 0.4,
             },
+            ProcessEdit::SetBoxSparseFraction {
+                scope: scope.clone(),
+                min: [0.0; 3],
+                max: [10.0; 3],
+                fraction: 0.6,
+                interface: Some(ProcessInterfacePermission::SeparatorWall),
+            },
+            ProcessEdit::SetBoxSparseFraction {
+                scope: scope.clone(),
+                min: [-10.0; 3],
+                max: [0.0; 3],
+                fraction: 0.7,
+                interface: None,
+            },
             ProcessEdit::AddLayer {
                 scope: scope.clone(),
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: replace(0.4),
             },
             ProcessEdit::RemoveLayer { layer_id },
@@ -694,11 +1121,13 @@ mod tests {
             ProcessEdit::AddOperation {
                 layer_id,
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: ProcessAction::Erase,
             },
             ProcessEdit::UpdateOperation {
                 operation_id,
                 selector: ProcessSelector::WholeOwnedVolume,
+                interface: None,
                 action: replace(0.5),
             },
             ProcessEdit::RemoveOperation { operation_id },
@@ -751,6 +1180,7 @@ mod public_state_tests {
                 operations: vec![ProcessOperation {
                     operation_id: ProcessOperationId::new(1).unwrap(),
                     selector: ProcessSelector::WholeOwnedVolume,
+                    interface: None,
                     action: ProcessAction::Replace {
                         value: ProcessValue::SparseFraction { fraction: 0.3 },
                     },

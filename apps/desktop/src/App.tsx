@@ -13,6 +13,7 @@ import {
 } from "@spiling/protocol";
 import { useWorkbench, type Phase } from "./useWorkbench.ts";
 import { ManufacturingPanel } from "./manufacturing/ManufacturingPanel.tsx";
+import { useManufacturing } from "./manufacturing/useManufacturing.ts";
 import { SurfaceFinishPanel } from "./surface/SurfaceFinishPanel.tsx";
 import { ProcessPanel } from "./ProcessPanel.tsx";
 
@@ -206,6 +207,7 @@ function Workbench() {
     pointer = useRef<[number, number] | null>(null);
   const workbench = useWorkbench(canvas, diagnosticCanvas),
     { state, execute } = workbench;
+  const manufacturing = useManufacturing(workbench.manufacturingHost);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [plane, setPlane] = useState(["0", "0", "4", "0", "0", "1"]),
     [planeError, setPlaneError] = useState("");
@@ -421,6 +423,7 @@ function Workbench() {
           </section>
           <ManufacturingPanel
             host={workbench.manufacturingHost}
+            manufacturing={manufacturing}
             cancel={workbench.cancel}
             diagnosticImport={(source) => workbench.debugImport([source])}
           />
@@ -500,7 +503,18 @@ function Workbench() {
               </li>
             ))}
           </ul>
-          <ProcessPanel state={state} selected={selected} edit={workbench.editProcess} />
+          <ProcessPanel
+            state={state}
+            selected={selected}
+            edit={workbench.editProcess}
+            beadWidthMm={
+              manufacturing.status?.info.project_id === state.project?.project_id &&
+              manufacturing.status?.info.revision === state.project?.revision &&
+              state.phase === "running" && !state.stale
+                ? manufacturing.status?.intent?.recipe.bead_width_mm ?? null
+                : null
+            }
+          />
           {selected && (
             <>
               <div className="geometry-buttons">

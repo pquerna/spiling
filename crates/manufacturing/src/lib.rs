@@ -19,10 +19,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds source-owned regional process intent to actual interior deposition.
-pub const PLANNER_VERSION: &str = "12";
-pub const EMITTER_VERSION: &str = "4";
-pub const VERIFIER_VERSION: &str = "4";
+/// Binds source-owned zones and explicitly authorized open separators to deposition.
+pub const PLANNER_VERSION: &str = "13";
+pub const EMITTER_VERSION: &str = "5";
+pub const VERIFIER_VERSION: &str = "5";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

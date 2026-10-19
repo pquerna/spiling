@@ -101,33 +101,57 @@ radial cores are not complete closed-material certificates.
   replacement for the geometry service's continuous-source occupancy proof.
 
 [`process`](../../crates/contracts/src/process.rs) is a separate Core-owned channel,
-not a face finish. Whole-owned-volume SparseFraction resolves recipe → ordered
-definition layers → ordered occurrence layers, with per-layer replace/erase.
-Normal Apply reuses the responsible scoped operation. One exact-scope Reset clears
-all contributions, including disabled and erased layers, revealing current inheritance.
-The workbench displays server-resolved effective, definition and recipe values.
-Source/pose/finish/process edits invalidate the complete artifact and pending jobs.
+not a face finish. SparseFraction resolves recipe → ordered definition layers →
+ordered occurrence layers, with spatial, layer-local Replace/Erase. Whole-owned
+Apply never edits a box winner; its resolved value is the **base**, not a claim of
+uniform output. Box Apply moves the unique active scoped box without changing its
+operation identity; ambiguous targets diagnose. Reset clears every exact-scope
+contribution, including disabled/erased layers. Source/pose/finish/process edits
+invalidate the complete artifact and pending jobs.
 
-Native capture retains the original admitted per-occurrence operands before union,
-sharing unchanged singleton geometry. Finish realization produces per-occurrence
-final D before global `WallLayout` and skin classification. The eligible interior
-intersects those retained operands; it never recovers owners by labeling a final
-mesh/union. Same-valued contributions may coalesce only under existing geometry
-authority. Different fractions with actual positive material overlap diagnose;
-overlapping bounding boxes alone are not that proof. Uniform/no-op intent retains
-the ordinary hatch lattice. Partition sets cannot discard nonempty slivers or use
-scalar area tolerance as ownership authority.
+Native capture retains admitted per-occurrence operands before union, sharing
+unchanged singleton geometry. Finish realization produces occurrence final D
+before global walls/skins. [`zones`](../../crates/manufacturing/src/planner/zones.rs)
+admits one definition-local physical-mm X/Y boundary against the **finished**
+enclosure, including relief; the other five box faces must lie outside it.
+Local Z remains parallel to build Z and the authored hatch axis must be fixed and
+compatible. Empty effective selection reports `NoEligibleInterior`. No-op intent
+retains the ordinary lattice. Multi-source spatial overlap diagnoses rather than
+lending a different source's density, permission or contributors.
 
-`process_regions` records area, fraction and all source/winner contributions.
-Solid/sparse areas and nominal void sum those regions; no averaged/global density
-authorizes heterogeneous output. Actual volume remains actual stroke/bead volume.
-Support and bridge recovery consume the same regional domains/fractions and changed
-actual deposition, with auxiliary row ownership confined to its process region.
+The two band cuts share original vertices and cut nodes through a
+[source-edge parameter ledger](../../crates/manufacturing/src/planner/zones/partition.rs).
+Complete edge coverage, opposite cut pairs, halfspace membership and all cycle
+consumption establish disjoint ownership without independently quantized reunion,
+area epsilon or positive-sliver discard. Exterior walls, mandatory skins and
+source holes retain their original global construction.
+
+`process_regions` records each area's fraction and source/winner contributions.
+The explicitly authorized `process_interfaces` band is reserved once, excluded
+from both fills and emitted as an **open SeparatorWall**, never a closed perimeter
+or support-exempt Bridge. Actual volume is actual stroke/bead volume, not nominal
+fraction. [`bonds`](../../crates/manufacturing/src/planner/bonds.rs) freezes actual
+shortened endpoints before a layer becomes lower-anchor authority. Terminal
+contact uses actual same-source walls, or earlier continuous mandatory skin
+itself bonded to a wall; skin-carried genuine Bridge also needs its full actual
+span/lower-anchor proof. Current future ribs cannot anchor earlier skin.
+
+Adjacent generators share the definition-origin physical-mm frame transported
+with the occurrence. Recovery preserves unanimous immutable mandatory-skin or
+regional owner; mixed ownership grants neither authority. Regional genuine
+parallel Bridge recovery uses the boundary-aware phase and actual capsule join,
+not a rotation/contact waiver. The
+[fresh interface verifier](../../crates/manufacturing/src/verifier/interfaces.rs)
+checks decoded segments, order, flow, ownership and previous-layer anchors.
+Half-bead maximum physical overlap is separate from XYZ6 representation enclosure.
 
 Playback's **Show source bodies** control hides opaque native meshes and highlights
 so an interior layer can be inspected directly in actual emitted-program motion.
 Layer/event/travel controls filter that decoded motion, not normalized planned paths.
 Hidden bodies are not pickable; clearing or replacing replay restores source visibility.
+Replay view controls use the existing bounded working/single-flight admission:
+layer, cursor and source-visibility values commit only after the GPU update
+succeeds. A refused update cannot advertise a source-hidden draw that never happened.
 
 ## Walls, skins, bridges and supports
 
@@ -230,8 +254,8 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project7/manufacturing8/surface3, planner12, emitter/verifier4
-and SPLR3; executable constants and exact native pin remain authoritative.
+Current identities are project8/manufacturing9/process2/surface3, planner13,
+emitter/verifier5 and SPLR4; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both
 independent parts also complete the hardware workbench flow with native picking.
@@ -255,21 +279,44 @@ reopen; stale/cancelled/resource nonpublication). [Development](development.md) 
 build, unchanged real-operator and hardware-runner commands. Preserve owned temporary
 inputs, exclusive outputs and source-deleted fresh reopen in those user flows.
 
-For a local-process operator, create a project with the complete sparse intent and
-an admitted source, add a separated second occurrence of its stored definition,
-then use `--process-set 1 definition 0.20 --process-set 2 occurrence 0.60`.
-`--process-resolve` reports authoritative inherited/effective values and winners.
-Compile/fresh Verify/export, remove only the owned original source copy, and
-`project inspect --verify --manufacturing-out NEW_DIRECTORY --replay-out NEW_SPLR`
-in a fresh read-only inspection process. Reset occurrence2 once, verify inheritance, then Undo.
-In the workbench use the visible Local sparse process panel below Instances.
-The hardware smoke runner's `--process-overrides --manufacturing-source RELATIVE_STEP`
-performs those controls with repeated Apply/reset/history and source-independent
-read-only reopen; `--evidence-directory NEW_DIRECTORY` retains exported byte evidence.
-Measure adjacent actual sparse rows in a known source-relative interior window:
-spacing is `((width-height)*height + pi*(height/2)^2)/(height*fraction)`.
-Do not infer it from path counts or window height divided by rows. Compare exterior
-closed edges and protected voids independently from seam starts and bridge roles.
+For separate-copy process authoring, use `--process-set 1 definition 0.20
+--process-set 2 occurrence 0.60` on admitted separated occurrences. CLI resolution
+labels `base_whole_owned_resolution` separately from `finite_box_intent`.
+
+The bounded within-part reference is the unchanged
+[`occt-rounded-housing-mm.step`](../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step):
+a housing with a denser end and lighter body, **not a bracket**. Generate its
+explicit fixed-X recipe with `pnpm manufacturing:intent
+fixtures/manufacturing/housing-two-zone.intent.ts NEW_INTENT.json`. Use an owned
+byte-identical source copy and exclusive output paths:
+
+```sh
+target/debug/spiling-cli project create NEW_PROJECT \
+  --import OWNED_SOURCE.step --intent NEW_INTENT.json --center-on-bed 1 \
+  --process-set 1 definition 0.20 \
+  --process-set-box 1 definition -1 -1 -1 8 19 11 0.60 separator-wall \
+  --process-resolve 1 --preflight --compile --verify \
+  --manufacturing-out NEW_EXPORT --replay-out NEW_REPLAY.splr --save \
+  --engine target/debug/spiling-engine
+```
+
+Native center-and-bed placement supplies the actual pose; do not author a guessed
+Z reserve. Edit bounds/fractions with visible Apply, inspect explicit permanent
+separator approval, then Undo/Redo. Save, remove only the owned original source
+copy, and use fresh `project inspect --verify --manufacturing-out NEW_DIRECTORY
+--replay-out NEW_SPLR` to inspect/export read-only from stored program authority.
+The hardware runner's `--process-zones --manufacturing-source
+fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step
+--evidence-directory NEW_DIRECTORY` exercises this flow. **Show source bodies**
+must be off for the mid-layer interior proof; opaque source PNGs are not evidence.
+
+Measure ALL adjacent actual regional rows in source-relative interior windows:
+pitch is `((width-height)*height + pi*(height/2)^2)/(height*fraction)`. Separately
+check one kind13 rib, actual terminal/side bonds, unique extrusion, E8/XYZ6
+enclosures and protected voids. New fill/rib capsules must not enter the analytic
+pocket. Existing ordinary native contour conformance uses the plan's declared
+sampling/offset budgets, not requested vertical shape error or physical contact
+slack; this is bounded hole preservation, not an exact-circle claim.
 
 ## Physical qualification remains separate
 

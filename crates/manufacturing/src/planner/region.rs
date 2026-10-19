@@ -602,8 +602,25 @@ pub(super) fn hatch(
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    hatch_with_phase(fill, kind, fraction, layer, None, paths, segments, cancel)
+}
+
+pub(super) fn hatch_with_phase(
+    fill: &MultiPolygon<f64>,
+    kind: DepositionKind,
+    fraction: f64,
+    layer: &HatchLayer<'_>,
+    common_phase: Option<[f64; 2]>,
+    paths: &mut Vec<DepositionPath>,
+    segments: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<(), ManufacturingError> {
     for polygon in &fill.0 {
-        let rows = HatchRows::new(polygon, fraction, layer)?;
+        let rows = if let Some(origin) = common_phase {
+            HatchRows::common(polygon, fraction, layer, origin)?
+        } else {
+            HatchRows::new(polygon, fraction, layer)?
+        };
         hatch_polygon(polygon, kind, &rows, layer, paths, segments, cancel)?;
     }
     Ok(())
@@ -657,6 +674,39 @@ impl HatchRows {
         })
     }
 
+    /// Adjoining zones share the transported physical definition origin,
+    /// never their cropped bounds or a distant build-global phase.
+    pub(super) fn common(
+        polygon: &Polygon<f64>,
+        fraction: f64,
+        layer: &HatchLayer<'_>,
+        origin: [f64; 2],
+    ) -> Result<Self, ManufacturingError> {
+        let mut rows = Self::new(polygon, fraction, layer)?;
+        let width = layer.recipe.bead_width_mm;
+        let h = layer.height;
+        let spacing = ((width - h) * h + std::f64::consts::PI * (h * 0.5).powi(2)) / h / fraction;
+        let rect = polygon
+            .bounding_rect()
+            .ok_or_else(|| unsupported("fill has no finite bounds"))?;
+        let (min, max) = if layer.axis == HatchAxis::Y {
+            (rect.min().x, rect.max().x)
+        } else {
+            (rect.min().y, rect.max().y)
+        };
+        let origin = origin[usize::from(layer.axis == HatchAxis::X)];
+        let first = ((min - origin) / spacing).ceil();
+        let stop = ((max - origin) / spacing).ceil();
+        let count = (stop - first).max(0.);
+        if !count.is_finite() || count > MAX_DEPOSITION_SEGMENTS as f64 {
+            return Err(resource("common phase hatch row limit exceeded"));
+        }
+        rows.start = origin + first * spacing;
+        rows.count = count as usize;
+        rows.spacing = spacing;
+        Ok(rows)
+    }
+
     pub(super) fn point_bound(&self) -> Result<usize, ManufacturingError> {
         // Row intersections stay live beside all emitted endpoints.
         self.count
@@ -707,6 +757,7 @@ pub(super) fn hatch_polygon(
 /// bridge ownership must follow emitted rows, not invent a second lattice.
 pub(super) fn bridge_rows<'a>(
     fill: &MultiPolygon<f64>,
+    exclusions: &[MultiPolygon<f64>],
     required: impl IntoIterator<Item = &'a DepositionPath>,
     layer: &HatchLayer<'_>,
     segments: &mut usize,
@@ -720,8 +771,10 @@ pub(super) fn bridge_rows<'a>(
     let mut intervals = Vec::new();
     for path in required {
         check_cancel(cancel)?;
-        if path.kind != DepositionKind::Perimeter
-            && path.points_mm.len() == 2
+        if !matches!(
+            path.kind,
+            DepositionKind::Perimeter | DepositionKind::SeparatorWall
+        ) && path.points_mm.len() == 2
             && grid(path.points_mm[0][fixed]) == grid(path.points_mm[1][fixed])
         {
             if intervals.len() >= MAX_DEPOSITION_SEGMENTS as usize - *segments {
@@ -732,6 +785,7 @@ pub(super) fn bridge_rows<'a>(
                 grid(path.points_mm[0][along].max(path.points_mm[1][along])),
                 grid(path.points_mm[0][fixed]),
                 path.points_mm[0][fixed],
+                path.owner,
             ));
         }
     }
@@ -745,6 +799,14 @@ pub(super) fn bridge_rows<'a>(
     let mut rows = Vec::new();
     let mut hits = Vec::new();
     let mut local = Vec::new();
+    let exclusion_edges = exclusions.iter().map(point_count).sum::<usize>();
+    if exclusion_edges > MAX_DEPOSITION_SEGMENTS as usize - *segments - intervals.len() {
+        return Err(resource("bridge exclusion row scratch limit exceeded"));
+    }
+    let mut excluded = Vec::new();
+    excluded
+        .try_reserve_exact(exclusion_edges)
+        .map_err(|_| resource("bridge exclusion row allocation refused"))?;
     for polygon in &fill.0 {
         check_cancel(cancel)?;
         let rect = polygon
@@ -789,33 +851,75 @@ pub(super) fn bridge_rows<'a>(
                     .sum::<usize>();
             charge_bridge_rows(&mut work, edges + owners.len())?;
             row_intersections(polygon, coordinate, layer.axis, &mut hits, cancel)?;
-            for pair in hits.as_chunks::<2>().0 {
-                check_cancel(cancel)?;
-                let lo = grid(pair[0]);
-                let hi = grid(pair[1]);
-                let begin = owners.partition_point(|piece| piece.0 < lo);
-                let end = owners.partition_point(|piece| piece.0 <= hi);
-                charge_bridge_rows(&mut work, end - begin + 1)?;
-                // Auxiliary bounds are relevant only when this exact positive
-                // interval owns a complete required piece. Unrequested islands,
-                // tangent points and tiny slivers are not deposition proposals.
-                if !owners[begin..end].iter().any(|piece| piece.1 <= hi) {
-                    continue;
+            excluded.clear();
+            charge_bridge_rows(&mut work, exclusion_edges)?;
+            for polygon in exclusions.iter().flat_map(|region| &region.0) {
+                row_intersections(polygon, coordinate, layer.axis, &mut excluded, cancel)?;
+            }
+            excluded.sort_unstable_by(f64::total_cmp);
+            for full in hits.as_chunks::<2>().0 {
+                let mut cursor = full[0];
+                let end = full[1];
+                let mut cuts = excluded.as_chunks::<2>().0.iter();
+                for pair in std::iter::from_fn(|| {
+                    while cursor < end {
+                        if let Some(cut) = cuts.next() {
+                            if cut[1] <= cursor {
+                                continue;
+                            }
+                            let start = cursor;
+                            cursor = cursor.max(cut[1]);
+                            if start < end.min(cut[0]) {
+                                return Some([start, end.min(cut[0])]);
+                            }
+                        } else {
+                            let start = cursor;
+                            cursor = end;
+                            return Some([start, end]);
+                        }
+                    }
+                    None
+                }) {
+                    check_cancel(cancel)?;
+                    let lo = grid(pair[0]);
+                    let hi = grid(pair[1]);
+                    let begin = owners.partition_point(|piece| piece.0 < lo);
+                    let end = owners.partition_point(|piece| piece.0 <= hi);
+                    charge_bridge_rows(&mut work, end - begin + 1)?;
+                    // Auxiliary bounds are relevant only when this exact positive
+                    // interval owns a complete required piece. Unrequested islands,
+                    // tangent points and tiny slivers are not deposition proposals.
+                    let mut complete = owners[begin..end].iter().filter(|piece| piece.1 <= hi);
+                    let Some(first_owner) = complete.next() else {
+                        continue;
+                    };
+                    let core_owner = first_owner
+                        .4
+                        .filter(|owner| complete.all(|piece| piece.4 == Some(*owner)));
+                    if intervals.len()
+                        + local.len()
+                        + hits.len()
+                        + excluded.capacity()
+                        + rows.len() * 2
+                        + 2
+                        > MAX_DEPOSITION_SEGMENTS as usize - *segments
+                    {
+                        return Err(resource("bridge row ownership scratch limit exceeded"));
+                    }
+                    let first_path = rows.len();
+                    append_hatch_row(
+                        &pair,
+                        coordinate,
+                        DepositionKind::Bridge,
+                        layer,
+                        false,
+                        &mut rows,
+                        segments,
+                    )?;
+                    for path in &mut rows[first_path..] {
+                        path.owner = core_owner;
+                    }
                 }
-                if intervals.len() + local.len() + hits.len() + rows.len() * 2 + 2
-                    > MAX_DEPOSITION_SEGMENTS as usize - *segments
-                {
-                    return Err(resource("bridge row ownership scratch limit exceeded"));
-                }
-                append_hatch_row(
-                    pair,
-                    coordinate,
-                    DepositionKind::Bridge,
-                    layer,
-                    false,
-                    &mut rows,
-                    segments,
-                )?;
             }
             first = stop;
         }
@@ -831,7 +935,7 @@ fn charge_bridge_rows(work: &mut usize, amount: usize) -> Result<(), Manufacturi
     Ok(())
 }
 
-fn row_intersections(
+pub(super) fn row_intersections(
     polygon: &Polygon<f64>,
     coordinate: f64,
     axis: HatchAxis,
@@ -929,7 +1033,19 @@ fn push_path(
             ),
         ));
     }
-    paths.push(DepositionPath { kind, points_mm });
+    paths.push(DepositionPath {
+        kind,
+        owner: match kind {
+            DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
+                skin: ProcessSkinKind::BottomSkin,
+            }),
+            DepositionKind::TopSkin => Some(DepositionOwner::MandatorySkin {
+                skin: ProcessSkinKind::TopSkin,
+            }),
+            _ => None,
+        },
+        points_mm,
+    });
     Ok(())
 }
 fn reserve_segments(count: &mut usize, additional: usize) -> Result<(), ManufacturingError> {

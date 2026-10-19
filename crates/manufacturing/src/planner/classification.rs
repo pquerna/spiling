@@ -13,7 +13,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 /// One admitted erosion per realized D span, shared by both raster axes.
 pub(super) struct WallLayout {
     wall_centers: Vec<MultiPolygon<f64>>,
-    fill: MultiPolygon<f64>,
+    pub(super) fill: MultiPolygon<f64>,
     section_area_mm2: f64,
     wall_area_mm2: f64,
     protected_hole_area_mm2: f64,
@@ -90,16 +90,22 @@ impl WallLayout {
 /// remain excluded by every Boolean operation; sparse void is a nominal fraction
 /// of its interior domain, not a manufactured geometry or strength assertion.
 pub(super) struct ClassifiedRegions {
-    layout: Arc<WallLayout>,
-    bottom: MultiPolygon<f64>,
-    top: MultiPolygon<f64>,
-    interiors: Vec<InteriorRegion>,
-    coverage: PlanarRegionCoverage,
+    pub(super) layout: Arc<WallLayout>,
+    pub(super) bottom: MultiPolygon<f64>,
+    pub(super) top: MultiPolygon<f64>,
+    pub(super) interiors: Vec<InteriorRegion>,
+    pub(super) separator_bands: Vec<MultiPolygon<f64>>,
+    pub(super) coverage: PlanarRegionCoverage,
+    pub(super) applied_operations: Vec<(
+        spiling_contracts::geometry::OccurrenceId,
+        spiling_contracts::process::ProcessProvenance,
+    )>,
 }
 
-struct InteriorRegion {
-    domain: MultiPolygon<f64>,
-    coverage: ProcessRegionCoverage,
+pub(super) struct InteriorRegion {
+    pub(super) domain: MultiPolygon<f64>,
+    pub(super) coverage: ProcessRegionCoverage,
+    pub(super) frame_origin_mm: Option<[f64; 2]>,
 }
 
 pub(super) struct ComponentAnchorAdmission {
@@ -124,6 +130,22 @@ pub(super) type ComponentAnchorCheck<'a> = dyn FnMut(
     + 'a;
 
 impl ClassifiedRegions {
+    pub(super) fn retained_points(&self) -> usize {
+        region::point_count(&self.bottom)
+            + region::point_count(&self.top)
+            + self
+                .separator_bands
+                .iter()
+                .map(region::point_count)
+                .sum::<usize>()
+            + self
+                .interiors
+                .iter()
+                .map(|i| region::point_count(&i.domain))
+                .sum::<usize>()
+            + super::bonds::coverage_bytes(&self.coverage)
+                .div_ceil(std::mem::size_of::<geo::Coord<f64>>())
+    }
     pub(super) fn new(
         layout: Arc<WallLayout>,
         survives_below: &MultiPolygon<f64>,
@@ -180,6 +202,8 @@ impl ClassifiedRegions {
             intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
             protected_hole_area_mm2: layout.protected_hole_area_mm2,
             nominal_deposition_volume_mm3: 0.0,
+            separator_area_mm2: 0.0,
+            process_interfaces: Vec::new(),
             process_regions: if interior_area > 0.0 {
                 vec![ProcessRegionCoverage {
                     area_mm2: interior_area,
@@ -200,11 +224,14 @@ impl ClassifiedRegions {
                 vec![InteriorRegion {
                     domain: interior,
                     coverage: coverage.process_regions[0].clone(),
+                    frame_origin_mm: None,
                 }]
             } else {
                 Vec::new()
             },
+            separator_bands: Vec::new(),
             coverage,
+            applied_operations: Vec::new(),
         })
     }
 
@@ -213,6 +240,7 @@ impl ClassifiedRegions {
     pub(super) fn with_process(
         mut self,
         domains: &[super::ProcessDomain],
+        recipe: &PlanarPrintRecipe,
         admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
         work: &mut usize,
         cancel: &AtomicBool,
@@ -220,9 +248,13 @@ impl ClassifiedRegions {
         if domains.is_empty() || self.interiors.is_empty() {
             return Ok(self);
         }
-        if domains
-            .iter()
-            .all(|domain| domain.coverage.fraction == domains[0].coverage.fraction)
+        // Spatial cuts retain each captured source owner. Coalescing their base
+        // fractions first would leave stale contributors after one owner is cut.
+        let spatial = domains.iter().any(|domain| domain.zone.is_some());
+        if !spatial
+            && domains
+                .iter()
+                .all(|domain| domain.coverage.fraction == domains[0].coverage.fraction)
         {
             let fraction = domains[0].coverage.fraction;
             let interior = &mut self.interiors[0];
@@ -236,7 +268,7 @@ impl ClassifiedRegions {
             self.coverage.solid_interior_area_mm2 = if fraction == 1.0 { area } else { 0.0 };
             self.coverage.sparse_interior_area_mm2 = if fraction < 1.0 { area } else { 0.0 };
             self.coverage.intentional_void_area_mm2 = area * (1.0 - fraction);
-            return Ok(self);
+            return super::zones::partition(self, domains, recipe, admit, work, cancel);
         }
         let original = self
             .interiors
@@ -252,9 +284,10 @@ impl ClassifiedRegions {
         let mut partial_cut = false;
         for (domain_index, domain) in domains.iter().enumerate() {
             let fraction = domain.coverage.fraction;
-            if domains[..domain_index]
-                .iter()
-                .any(|prior| prior.coverage.fraction == fraction)
+            if !spatial
+                && domains[..domain_index]
+                    .iter()
+                    .any(|prior| prior.coverage.fraction == fraction)
             {
                 continue;
             }
@@ -263,7 +296,13 @@ impl ClassifiedRegions {
             let mut contributors = Vec::new();
             for (index, source) in domains
                 .iter()
-                .filter(|source| source.coverage.fraction == fraction)
+                .filter(|source| {
+                    if spatial {
+                        std::ptr::eq(*source, domain)
+                    } else {
+                        source.coverage.fraction == fraction
+                    }
+                })
                 .enumerate()
             {
                 contributors.extend(source.coverage.contributions.iter().cloned());
@@ -297,6 +336,7 @@ impl ClassifiedRegions {
             if !owned.0.is_empty() {
                 completed.push(InteriorRegion {
                     domain: owned,
+                    frame_origin_mm: None,
                     coverage: ProcessRegionCoverage {
                         area_mm2: area,
                         fraction,
@@ -395,7 +435,7 @@ impl ClassifiedRegions {
             .map(|region| region.coverage.area_mm2 * (1.0 - region.coverage.fraction))
             .sum();
         self.interiors = completed;
-        Ok(self)
+        super::zones::partition(self, domains, recipe, outer_admit, work, cancel)
     }
 
     pub(super) fn paths(
@@ -406,7 +446,7 @@ impl ClassifiedRegions {
         recipe: &PlanarPrintRecipe,
         segments: &mut usize,
         cancel: &AtomicBool,
-    ) -> Result<(Vec<DepositionPath>, PlanarRegionCoverage), ManufacturingError> {
+    ) -> Result<(Vec<DepositionPath>, &PlanarRegionCoverage), ManufacturingError> {
         let mut paths = Vec::new();
         for centers in &self.layout.wall_centers {
             region::wall_paths(centers, z, &mut paths, segments, cancel)?;
@@ -435,9 +475,10 @@ impl ClassifiedRegions {
             segments,
             cancel,
         )?;
-        for interior in &self.interiors {
+        for (region_index, interior) in self.interiors.iter().enumerate() {
             let fraction = interior.coverage.fraction;
-            region::hatch(
+            let begin = paths.len();
+            region::hatch_with_phase(
                 &interior.domain,
                 if fraction == 1.0 {
                     DepositionKind::SolidFill
@@ -446,10 +487,16 @@ impl ClassifiedRegions {
                 },
                 fraction,
                 &layer,
+                interior.frame_origin_mm,
                 &mut paths,
                 segments,
                 cancel,
             )?;
+            for path in &mut paths[begin..] {
+                path.owner = Some(DepositionOwner::Regional {
+                    region_index: region_index as u16,
+                });
+            }
         }
         if paths.is_empty() {
             return Err(error(
@@ -457,22 +504,9 @@ impl ClassifiedRegions {
                 "section has no printable nominal deposition paths",
             ));
         }
-        let h = height;
-        let bead_area = ((recipe.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
-            * recipe.flow_multiplier;
-        let mut coverage = self.coverage.clone();
-        coverage.nominal_deposition_volume_mm3 = paths
-            .iter()
-            .flat_map(|p| p.points_mm.windows(2))
-            .map(|p| (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]) * bead_area)
-            .sum();
-        if !coverage.nominal_deposition_volume_mm3.is_finite() {
-            return Err(error(
-                ManufacturingErrorCode::ResourceLimit,
-                "nominal deposition volume exceeds finite numeric range",
-            ));
-        }
-        Ok((paths, coverage))
+        // Final actual-stroke volume is computed once after support/recovery,
+        // including constructed separator endpoints and genuine Bridge process.
+        Ok((paths, &self.coverage))
     }
 
     /// Preserve authored role lattices outside demand-bound bridge cells and
@@ -489,6 +523,7 @@ impl ClassifiedRegions {
         let mut normal = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
         };
         for centers in &self.layout.wall_centers {
             region::wall_paths(centers, layer.z, &mut normal.paths, segments, cancel)?;
@@ -504,6 +539,7 @@ impl ClassifiedRegions {
         let mut bridge = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
         };
         let mut bridge_points = 0;
         let mut patches: Vec<BridgePatch<'_>> = Vec::new();
@@ -518,6 +554,7 @@ impl ClassifiedRegions {
         let mut probe = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
         };
         let base = point_sum(class_points, normal_points)?;
         let workspace = anchors(&mut probe, layer.axis, base)?.workspace_points;
@@ -534,12 +571,12 @@ impl ClassifiedRegions {
         };
         let normal_along = usize::from(layer.axis == region::HatchAxis::Y);
         let normal_fixed = 1 - normal_along;
-        for (domain, kind, fraction) in [
-            (&self.bottom, DepositionKind::BottomSkin, 1.0),
-            (&self.top, DepositionKind::TopSkin, 1.0),
+        for (domain, kind, fraction, owner) in [
+            (&self.bottom, DepositionKind::BottomSkin, 1.0, None),
+            (&self.top, DepositionKind::TopSkin, 1.0, None),
         ]
         .into_iter()
-        .chain(self.interiors.iter().map(|interior| {
+        .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
             let fraction = interior.coverage.fraction;
             (
                 &interior.domain,
@@ -549,8 +586,10 @@ impl ClassifiedRegions {
                     DepositionKind::SparseFill
                 },
                 fraction,
+                Some((index as u16, interior)),
             )
         })) {
+            let frame = owner.and_then(|(_, owner)| owner.frame_origin_mm);
             for polygon in &domain.0 {
                 check_cancel(cancel)?;
                 let base = recovery_points(
@@ -561,12 +600,17 @@ impl ClassifiedRegions {
                     patches.capacity(),
                 )?;
                 let workspace = anchors(&mut probe, layer.axis, base)?.workspace_points;
-                let rows = region::HatchRows::new(polygon, fraction, layer)?;
+                let rows = if let Some(origin) = frame {
+                    region::HatchRows::common(polygon, fraction, layer, origin)?
+                } else {
+                    region::HatchRows::new(polygon, fraction, layer)?
+                };
                 let bound = rows.point_bound()?;
                 admit(point_sum(point_sum(base, workspace)?, bound)?, bound)?;
                 let mut component = super::support::RasterCandidate {
                     paths: Vec::new(),
                     whole_rows: Vec::new(),
+                    process_interfaces: Vec::new(),
                 };
                 region::hatch_polygon(
                     polygon,
@@ -577,12 +621,60 @@ impl ClassifiedRegions {
                     segments,
                     cancel,
                 )?;
+                if let Some((index, _)) = owner {
+                    for path in &mut component.paths {
+                        path.owner = Some(DepositionOwner::Regional {
+                            region_index: index,
+                        });
+                    }
+                }
                 let component_points = path_points(&component.paths);
                 let live = point_sum(base, component_points)?;
                 let original = anchors(&mut component, layer.axis, live)?;
                 if !original.supported && !original.demands.is_empty() {
-                    let alternate_rows =
-                        region::HatchRows::new(polygon, fraction, &alternate_layer)?;
+                    let alternate_rows = if let Some(mut origin) = frame {
+                        let fixed = usize::from(alternate_layer.axis == region::HatchAxis::X);
+                        if let Some(interface) =
+                            self.coverage.process_interfaces.iter().find(|interface| {
+                                usize::from(interface.axis) == fixed
+                                    && owner.is_some_and(|(_, owner)| {
+                                        owner.coverage.contributions.iter().any(|c| {
+                                            c.occurrence_id == interface.occurrence_id
+                                                && c.definition_id == interface.definition_id
+                                        })
+                                    })
+                            })
+                        {
+                            let coordinates = || {
+                                polygon
+                                    .exterior()
+                                    .0
+                                    .iter()
+                                    .map(|p| if fixed == 0 { p.x } else { p.y })
+                            };
+                            let side = if coordinates().all(|value| value < interface.coordinate_mm)
+                            {
+                                -1.
+                            } else if coordinates().all(|value| value > interface.coordinate_mm) {
+                                1.
+                            } else {
+                                return Err(error(
+                                    ManufacturingErrorCode::InvalidSpecification,
+                                    "UnsupportedInterface: recovery owner crosses its separator",
+                                ));
+                            };
+                            // One shared interface frame, mirrored outward into
+                            // each owner. Quarter-bead physical overlap leaves
+                            // representation margin within half-bead permission.
+                            origin[fixed] = interface.coordinate_mm
+                                + side
+                                    * (layer.recipe.bead_width_mm
+                                        - interface.bonding_overlap_mm * 0.5);
+                        }
+                        region::HatchRows::common(polygon, fraction, &alternate_layer, origin)?
+                    } else {
+                        region::HatchRows::new(polygon, fraction, &alternate_layer)?
+                    };
                     let bound = alternate_rows.point_bound()?;
                     let live = point_sum(live, original.retained_points())?;
                     admit(
@@ -592,6 +684,7 @@ impl ClassifiedRegions {
                     let mut alternative = super::support::RasterCandidate {
                         paths: Vec::new(),
                         whole_rows: Vec::new(),
+                        process_interfaces: Vec::new(),
                     };
                     let mut staged_segments = *segments;
                     region::hatch_polygon(
@@ -603,6 +696,13 @@ impl ClassifiedRegions {
                         &mut staged_segments,
                         cancel,
                     )?;
+                    if let Some((index, _)) = owner {
+                        for path in &mut alternative.paths {
+                            path.owner = Some(DepositionOwner::Regional {
+                                region_index: index,
+                            });
+                        }
+                    }
                     let alternative_points = path_points(&alternative.paths);
                     let live = point_sum(live, alternative_points)?;
                     let whole_bound = whole_row_bound(&self.layout.fill, alternative.paths.len())?;
@@ -722,6 +822,8 @@ impl ClassifiedRegions {
                         if selected.peek() == Some(&index) {
                             selected.next();
                             path.kind = DepositionKind::Bridge;
+                            // The role changes, not the original polygon's
+                            // mandatory owner (including admitted extensions).
                             bridge_points = point_sum(bridge_points, path.points_mm.capacity())?;
                             bridge.paths.push(path);
                         }
@@ -827,6 +929,7 @@ impl ClassifiedRegions {
         let mut mixed = super::support::RasterCandidate {
             paths: Vec::new(),
             whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
         };
         let mut mixed_points = 0;
         let mut output_segments = initial_segments;
@@ -880,6 +983,7 @@ impl ClassifiedRegions {
                             &mut output_segments,
                         )?;
                         if mixed.paths.len() != before {
+                            mixed.paths.last_mut().unwrap().owner = path.owner;
                             mixed_points += mixed.paths.last().unwrap().points_mm.capacity();
                         }
                     }
@@ -907,6 +1011,7 @@ impl ClassifiedRegions {
                         &mut output_segments,
                     )?;
                     if mixed.paths.len() != before {
+                        mixed.paths.last_mut().unwrap().owner = path.owner;
                         mixed_points += mixed.paths.last().unwrap().points_mm.capacity();
                     }
                 }
@@ -959,16 +1064,25 @@ impl ClassifiedRegions {
         segments: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
-        if self.interiors.len() <= 1 {
-            return region::bridge_rows(&self.layout.fill, required, layer, segments, cancel);
-        }
         let mut rows = Vec::new();
-        for (domain, kind) in [
-            (&self.bottom, DepositionKind::BottomSkin),
-            (&self.top, DepositionKind::TopSkin),
+        for (domain, kind, original) in [
+            (
+                &self.bottom,
+                DepositionKind::BottomSkin,
+                Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::BottomSkin,
+                }),
+            ),
+            (
+                &self.top,
+                DepositionKind::TopSkin,
+                Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::TopSkin,
+                }),
+            ),
         ]
         .into_iter()
-        .chain(self.interiors.iter().map(|interior| {
+        .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
             (
                 &interior.domain,
                 if interior.coverage.fraction == 1.0 {
@@ -976,13 +1090,25 @@ impl ClassifiedRegions {
                 } else {
                     DepositionKind::SparseFill
                 },
+                Some(DepositionOwner::Regional {
+                    region_index: index as u16,
+                }),
             )
         })) {
+            let mandatory = matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin);
+            let corridor = if mandatory { &self.layout.fill } else { domain };
+            let excluded = if mandatory {
+                &self.separator_bands[..]
+            } else {
+                &[]
+            };
             let owned = region::bridge_rows(
-                domain,
-                required
-                    .iter()
-                    .filter(|path| path.kind == kind || path.kind == DepositionKind::Bridge),
+                corridor,
+                excluded,
+                required.iter().filter(|path| {
+                    (path.kind == kind || path.kind == DepositionKind::Bridge)
+                        && path.owner == original
+                }),
                 layer,
                 segments,
                 cancel,
@@ -996,7 +1122,7 @@ impl ClassifiedRegions {
 /// A conditioned exact set relation avoids re-quantizing already-contained
 /// eligible islands. Partial cuts use complementary operations on the same
 /// original operands; any unresolved residual remains an error, never an epsilon.
-fn split_process_region(
+pub(super) fn split_process_region(
     remaining: MultiPolygon<f64>,
     material: &MultiPolygon<f64>,
     work: &mut usize,
@@ -1068,7 +1194,7 @@ fn split_process_region(
     Ok((owned, next, partial))
 }
 
-fn strictly_contained_process_polygon(
+pub(super) fn strictly_contained_process_polygon(
     polygon: &Polygon<f64>,
     material: &MultiPolygon<f64>,
     work: &mut usize,

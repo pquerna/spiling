@@ -23,7 +23,7 @@ pub use process::*;
 mod resolution;
 pub use resolution::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 8;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 9;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -229,13 +229,14 @@ impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
 #[serde(field_identifier, rename_all = "snake_case")]
 enum PathField {
     Kind,
+    Owner,
     PointsMm,
 }
 struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
     type Value = DepositionPath;
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_struct("DepositionPath", &["kind", "points_mm"], self)
+        d.deserialize_struct("DepositionPath", &["kind", "owner", "points_mm"], self)
     }
 }
 impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
@@ -245,6 +246,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut kind = None;
+        let mut owner = None;
         let mut points_mm = None;
         while let Some(field) = map.next_key::<PathField>()? {
             match field {
@@ -254,6 +256,12 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     kind = Some(map.next_value()?);
                 }
+                PathField::Owner => {
+                    if owner.is_some() {
+                        return Err(serde::de::Error::duplicate_field("owner"));
+                    }
+                    owner = Some(map.next_value()?);
+                }
                 PathField::PointsMm => {
                     if points_mm.is_some() {
                         return Err(serde::de::Error::duplicate_field("points_mm"));
@@ -262,10 +270,13 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                 }
             }
         }
-        Ok(DepositionPath {
+        let path = DepositionPath {
             kind: kind.ok_or_else(|| serde::de::Error::missing_field("kind"))?,
+            owner: owner.ok_or_else(|| serde::de::Error::missing_field("owner"))?,
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
-        })
+        };
+        path.validate_owner().map_err(serde::de::Error::custom)?;
+        Ok(path)
     }
 }
 
@@ -416,9 +427,6 @@ impl<'de> serde::de::Visitor<'de> for LayersSeed<'_> {
     }
 }
 
-fn points<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[f64; 3]>, D::Error> {
-    serde::de::DeserializeSeed::deserialize(PointsSeed(&mut SegmentBudget::new()), d)
-}
 fn paths<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<DepositionPath>, D::Error> {
     serde::de::DeserializeSeed::deserialize(PathsSeed(&mut SegmentBudget::new()), d)
 }
@@ -789,13 +797,65 @@ pub enum DepositionKind {
     Bridge,
     Support,
     SupportInterface,
+    SeparatorWall,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DepositionOwner {
+    MandatorySkin { skin: ProcessSkinKind },
+    Regional { region_index: u16 },
+}
+impl DepositionOwner {
+    pub const fn skin_kind(self) -> Option<ProcessSkinKind> {
+        match self {
+            Self::MandatorySkin { skin } => Some(skin),
+            Self::Regional { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DepositionPath {
     pub kind: DepositionKind,
-    #[serde(deserialize_with = "points")]
+    /// Immutable original construction purpose, never inferred from Bridge shape.
+    pub owner: Option<DepositionOwner>,
     pub points_mm: Vec<[f64; 3]>,
+}
+impl<'de> Deserialize<'de> for DepositionPath {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::DeserializeSeed;
+        PathSeed(&mut SegmentBudget::new()).deserialize(d)
+    }
+}
+impl DepositionPath {
+    fn validate_owner(&self) -> Result<(), ManufacturingError> {
+        let valid = match self.kind {
+            DepositionKind::BottomSkin => {
+                self.owner
+                    == Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::BottomSkin,
+                    })
+            }
+            DepositionKind::TopSkin => {
+                self.owner
+                    == Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::TopSkin,
+                    })
+            }
+            DepositionKind::Bridge => true,
+            DepositionKind::SolidFill | DepositionKind::SparseFill => {
+                self.owner.is_none() || matches!(self.owner, Some(DepositionOwner::Regional { .. }))
+            }
+            _ => self.owner.is_none(),
+        };
+        if !valid {
+            return Err(invalid(
+                "deposition role disagrees with immutable construction ownership",
+            ));
+        }
+        Ok(())
+    }
 }
 pub const MAX_PROCESS_REGIONS: usize = 256;
 pub const MAX_PROCESS_REGION_CONTRIBUTIONS: usize = 256;
@@ -815,6 +875,245 @@ pub struct ProcessRegionCoverage {
     pub fraction: f64,
     #[serde(deserialize_with = "process_contributions")]
     pub contributions: Vec<ProcessRegionContribution>,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessRegionStatus {
+    Applied,
+    NoEligibleInterior,
+    NoDensityChange,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessRegionResolution {
+    pub occurrence_id: OccurrenceId,
+    pub definition_id: DefinitionId,
+    pub provenance: crate::process::ProcessProvenance,
+    pub status: ProcessRegionStatus,
+}
+fn process_resolution<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ProcessRegionResolution>, D::Error> {
+    bounded_vec::<D, _, MAX_PROCESS_REGIONS>(d)
+}
+fn validate_process_resolution(
+    records: &[ProcessRegionResolution],
+) -> Result<(), ManufacturingError> {
+    if records.len() > MAX_PROCESS_REGIONS {
+        return Err(resource("process resolution limit exceeded"));
+    }
+    let mut identities = BTreeSet::new();
+    for record in records {
+        if !identities.insert((
+            record.occurrence_id,
+            record.provenance.layer_id,
+            record.provenance.operation_id,
+        )) {
+            return Err(invalid("duplicate process region resolution"));
+        }
+    }
+    Ok(())
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSkinKind {
+    BottomSkin,
+    TopSkin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProcessEndpointBond {
+    Wall {
+        wall_segment_mm: [[f64; 2]; 2],
+    },
+    Skin {
+        skin_kind: ProcessSkinKind,
+        process_kind: DepositionKind,
+        skin_segment_mm: [[f64; 2]; 2],
+        wall_segment_mm: [[f64; 2]; 2],
+    },
+}
+
+/// Reserved separator material and its actual build-frame XY deposition.
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessInterfaceCoverage {
+    pub occurrence_id: OccurrenceId,
+    pub definition_id: DefinitionId,
+    pub provenance: crate::process::ProcessProvenance,
+    pub region_indices: [u16; 2],
+    pub axis: u8,
+    pub coordinate_mm: f64,
+    pub thickness_mm: f64,
+    pub bonding_overlap_mm: f64,
+    pub area_mm2: f64,
+    pub centerlines_mm: Vec<[[f64; 2]; 2]>,
+    pub endpoint_bonds: Vec<[ProcessEndpointBond; 2]>,
+}
+#[derive(Deserialize)]
+#[serde(remote = "ProcessInterfaceCoverage", deny_unknown_fields)]
+struct RawProcessInterfaceCoverage {
+    occurrence_id: OccurrenceId,
+    definition_id: DefinitionId,
+    provenance: crate::process::ProcessProvenance,
+    region_indices: [u16; 2],
+    axis: u8,
+    coordinate_mm: f64,
+    thickness_mm: f64,
+    bonding_overlap_mm: f64,
+    area_mm2: f64,
+    #[serde(deserialize_with = "interface_centerlines")]
+    centerlines_mm: Vec<[[f64; 2]; 2]>,
+    #[serde(deserialize_with = "interface_bonds")]
+    endpoint_bonds: Vec<[ProcessEndpointBond; 2]>,
+}
+fn interface_bonds<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<[ProcessEndpointBond; 2]>, D::Error> {
+    bounded_vec::<D, _, { MAX_DEPOSITION_SEGMENTS as usize }>(d)
+}
+fn interface_centerlines<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<[[f64; 2]; 2]>, D::Error> {
+    struct Centerlines;
+    impl<'de> serde::de::Visitor<'de> for Centerlines {
+        type Value = Vec<[[f64; 2]; 2]>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 100000 separator centerlines")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut lines = Vec::new();
+            let limit = MAX_DEPOSITION_SEGMENTS as usize;
+            while lines.len() < limit {
+                let Some(line) = seq.next_element()? else {
+                    return Ok(lines);
+                };
+                if lines.len() == lines.capacity() {
+                    lines.reserve_exact(lines.capacity().max(4).min(limit - lines.len()));
+                }
+                lines.push(line);
+            }
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "separator centerline limit exceeded",
+                ));
+            }
+            Ok(lines)
+        }
+    }
+    d.deserialize_seq(Centerlines)
+}
+impl<'de> Deserialize<'de> for ProcessInterfaceCoverage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = RawProcessInterfaceCoverage::deserialize(d)?;
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+impl ProcessInterfaceCoverage {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        positive(&[self.thickness_mm, self.bonding_overlap_mm, self.area_mm2])?;
+        if self.axis > 1
+            || !self.coordinate_mm.is_finite()
+            || self.bonding_overlap_mm != self.thickness_mm / 2.0
+            || self.centerlines_mm.is_empty()
+        {
+            return Err(invalid("invalid separator interface dimensions or axis"));
+        }
+        if self.centerlines_mm.capacity() > MAX_DEPOSITION_SEGMENTS as usize {
+            return Err(resource("separator centerline allocation limit exceeded"));
+        }
+        if self.endpoint_bonds.len() != self.centerlines_mm.len()
+            || self.endpoint_bonds.capacity() > MAX_DEPOSITION_SEGMENTS as usize
+        {
+            return Err(invalid(
+                "separator endpoints require one bounded actual bond witness each",
+            ));
+        }
+        for bond in self.endpoint_bonds.iter().flatten() {
+            let (wall, skin) = match bond {
+                ProcessEndpointBond::Wall { wall_segment_mm } => (wall_segment_mm, None),
+                ProcessEndpointBond::Skin {
+                    skin_kind,
+                    process_kind,
+                    skin_segment_mm,
+                    wall_segment_mm,
+                } => {
+                    let original = match skin_kind {
+                        ProcessSkinKind::BottomSkin => DepositionKind::BottomSkin,
+                        ProcessSkinKind::TopSkin => DepositionKind::TopSkin,
+                    };
+                    if *process_kind != original && *process_kind != DepositionKind::Bridge {
+                        return Err(invalid(
+                            "skin bond requires its original skin role or actual Bridge",
+                        ));
+                    }
+                    (wall_segment_mm, Some(skin_segment_mm))
+                }
+            };
+            for line in std::iter::once(wall).chain(skin) {
+                if line[0] == line[1] || line.iter().flatten().any(|v| !v.is_finite()) {
+                    return Err(invalid(
+                        "separator bond witness has invalid actual stroke coordinates",
+                    ));
+                }
+            }
+        }
+        let axis = self.axis as usize;
+        for line in &self.centerlines_mm {
+            if line.iter().flatten().any(|v| !v.is_finite())
+                || line[0] == line[1]
+                || line[0][axis] != line[1][axis]
+                || line[0][axis] != self.coordinate_mm
+                || !(line[0][1 - axis] - line[1][1 - axis]).is_finite()
+            {
+                return Err(invalid("invalid separator interface centerline"));
+            }
+        }
+        Ok(())
+    }
+}
+fn process_interfaces<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<ProcessInterfaceCoverage>, D::Error> {
+    struct Interfaces;
+    impl<'de> serde::de::Visitor<'de> for Interfaces {
+        type Value = Vec<ProcessInterfaceCoverage>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 256 interfaces and 100000 separator centerlines")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut interfaces = Vec::new();
+            let mut count = 0usize;
+            while interfaces.len() < MAX_PROCESS_REGIONS {
+                let Some(interface) = seq.next_element::<ProcessInterfaceCoverage>()? else {
+                    return Ok(interfaces);
+                };
+                count += interface.centerlines_mm.len();
+                if count > MAX_DEPOSITION_SEGMENTS as usize {
+                    return Err(serde::de::Error::custom(
+                        "separator centerline limit exceeded",
+                    ));
+                }
+                interfaces.reserve_exact(1);
+                interfaces.push(interface);
+            }
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "separator interface limit exceeded",
+                ));
+            }
+            Ok(interfaces)
+        }
+    }
+    d.deserialize_seq(Interfaces)
 }
 
 struct ProcessContributionsSeed<'a>(&'a mut usize);
@@ -962,6 +1261,9 @@ pub struct PlanarRegionCoverage {
     pub support_nominal_deposition_volume_mm3: f64,
     #[serde(deserialize_with = "process_regions")]
     pub process_regions: Vec<ProcessRegionCoverage>,
+    #[serde(deserialize_with = "process_interfaces")]
+    pub process_interfaces: Vec<ProcessInterfaceCoverage>,
+    pub separator_area_mm2: f64,
 }
 impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
@@ -969,6 +1271,43 @@ impl PlanarRegionCoverage {
             || self.process_regions.capacity() > MAX_PROCESS_REGIONS
         {
             return Err(resource("process region allocation limit exceeded"));
+        }
+        if self.process_interfaces.capacity() > MAX_PROCESS_REGIONS {
+            return Err(resource("separator interface allocation limit exceeded"));
+        }
+        let mut separator = 0.0;
+        let mut centerline_capacity = 0usize;
+        for interface in &self.process_interfaces {
+            interface.validate()?;
+            if interface.thickness_mm != recipe.bead_width_mm {
+                return Err(invalid(
+                    "separator thickness must equal the declared bead width",
+                ));
+            }
+            if interface.region_indices[0] == interface.region_indices[1] {
+                return Err(invalid("separator repeats its regional owner"));
+            }
+            for index in interface.region_indices {
+                let region = self
+                    .process_regions
+                    .get(usize::from(index))
+                    .ok_or_else(|| invalid("separator regional owner is outside layer coverage"))?;
+                if !region.contributions.iter().any(|c| {
+                    c.occurrence_id == interface.occurrence_id
+                        && c.definition_id == interface.definition_id
+                }) {
+                    return Err(invalid(
+                        "separator regional owner belongs to another occurrence",
+                    ));
+                }
+            }
+            separator += interface.area_mm2;
+            centerline_capacity = centerline_capacity
+                .checked_add(interface.centerlines_mm.capacity())
+                .ok_or_else(|| resource("separator centerline allocation overflow"))?;
+        }
+        if centerline_capacity > MAX_DEPOSITION_SEGMENTS as usize {
+            return Err(resource("separator centerline allocation limit exceeded"));
         }
         let mut contribution_capacity = 0usize;
         let mut solid = 0.0;
@@ -1008,6 +1347,7 @@ impl PlanarRegionCoverage {
             self.source_section_area_mm2,
             self.surface_added_area_mm2,
             self.wall_area_mm2,
+            self.separator_area_mm2,
             self.bottom_skin_area_mm2,
             self.top_skin_area_mm2,
             self.solid_interior_area_mm2,
@@ -1022,7 +1362,8 @@ impl PlanarRegionCoverage {
             + self.bottom_skin_area_mm2
             + self.top_skin_area_mm2
             + self.solid_interior_area_mm2
-            + self.sparse_interior_area_mm2;
+            + self.sparse_interior_area_mm2
+            + self.separator_area_mm2;
         let tolerance = 1e-7 * self.section_area_mm2.max(1.0);
         if values.iter().any(|v| !v.is_finite() || *v < 0.0)
             || (self.section_area_mm2 - self.source_section_area_mm2 - self.surface_added_area_mm2)
@@ -1033,6 +1374,7 @@ impl PlanarRegionCoverage {
                     || self.source_section_area_mm2 != 0.0
                     || self.surface_added_area_mm2 != 0.0
                     || !self.process_regions.is_empty()
+                    || !self.process_interfaces.is_empty()
                     || partition != 0.0
                     || self.protected_hole_area_mm2 != 0.0
                     || self.intentional_void_area_mm2 != 0.0))
@@ -1044,6 +1386,9 @@ impl PlanarRegionCoverage {
             || !sparse.is_finite()
             || !void.is_finite()
             || !partition.is_finite()
+            || !separator.is_finite()
+            || (separator == 0.0) != (self.separator_area_mm2 == 0.0)
+            || (self.separator_area_mm2 - separator).abs() > tolerance
             || (solid == 0.0) != (self.solid_interior_area_mm2 == 0.0)
             || (sparse == 0.0) != (self.sparse_interior_area_mm2 == 0.0)
             || (void == 0.0) != (self.intentional_void_area_mm2 == 0.0)
@@ -1199,6 +1544,8 @@ pub struct NormalizedPrintPlan {
     #[serde(deserialize_with = "resolution::records")]
     pub surface_resolution: Vec<SurfaceResolution>,
     pub native_geometry: NativeGeometryCoverageSummary,
+    #[serde(deserialize_with = "process_resolution")]
+    pub process_resolution: Vec<ProcessRegionResolution>,
 }
 /// Conservative object XY ownership envelope, padded for command serialization.
 pub type PrimeExclusionBoundsMm = [[f64; 2]; 2]; // [minimum XY, maximum XY]
@@ -1239,6 +1586,50 @@ impl NormalizedPrintPlan {
             return Err(invalid("unsupported plan schema"));
         }
         self.native_geometry.validate()?;
+        validate_process_resolution(&self.process_resolution)?;
+        if self.process_resolution.capacity() > MAX_PROCESS_REGIONS {
+            return Err(resource("process resolution allocation limit exceeded"));
+        }
+        for record in &self.process_resolution {
+            let used = self.layers.iter().any(|layer| {
+                layer.region_coverage.process_regions.iter().any(|region| {
+                    region.contributions.iter().any(|contribution| {
+                        contribution.occurrence_id == record.occurrence_id
+                            && contribution.definition_id == record.definition_id
+                            && contribution.provenance == Some(record.provenance)
+                    })
+                }) || layer
+                    .region_coverage
+                    .process_interfaces
+                    .iter()
+                    .any(|interface| {
+                        interface.occurrence_id == record.occurrence_id
+                            && interface.definition_id == record.definition_id
+                            && interface.provenance == record.provenance
+                    })
+            });
+            if (record.status == ProcessRegionStatus::Applied) != used {
+                return Err(invalid(
+                    "process region resolution disagrees with classified output",
+                ));
+            }
+        }
+        for interface in self
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.region_coverage.process_interfaces)
+        {
+            if !self.process_resolution.iter().any(|record| {
+                record.occurrence_id == interface.occurrence_id
+                    && record.definition_id == interface.definition_id
+                    && record.provenance == interface.provenance
+                    && record.status == ProcessRegionStatus::Applied
+            }) {
+                return Err(invalid(
+                    "separator interface omits applied process resolution",
+                ));
+            }
+        }
         if self.native_geometry.requested_shape_error_mm != intent.recipe.native_shape_error_mm {
             return Err(invalid(
                 "native geometry coverage does not bind recipe shape error",
@@ -1312,6 +1703,50 @@ impl NormalizedPrintPlan {
         let mut gap_start = None;
         for (index, layer) in self.layers.iter().enumerate() {
             layer.region_coverage.validate(&intent.recipe)?;
+            // The certificate and actual separator strokes are a bijection;
+            // neither a missing wall nor duplicated deposition can hide in area totals.
+            fn centerline_key(mut line: [[f64; 2]; 2]) -> [u64; 4] {
+                line = line.map(|point| point.map(|v| if v == 0.0 { 0.0 } else { v }));
+                if line[0][0]
+                    .total_cmp(&line[1][0])
+                    .then(line[0][1].total_cmp(&line[1][1]))
+                    .is_gt()
+                {
+                    line.swap(0, 1);
+                }
+                [line[0][0], line[0][1], line[1][0], line[1][1]]
+                    .map(|v| if v == 0.0 { 0 } else { v.to_bits() })
+            }
+            let mut separators = BTreeSet::new();
+            for interface in &layer.region_coverage.process_interfaces {
+                for line in &interface.centerlines_mm {
+                    if !separators.insert(centerline_key(*line)) {
+                        return Err(invalid("duplicate separator interface centerline"));
+                    }
+                }
+            }
+            for path in layer
+                .paths
+                .iter()
+                .filter(|path| path.kind == DepositionKind::SeparatorWall)
+            {
+                for segment in path.points_mm.windows(2) {
+                    let line = [
+                        [segment[0][0], segment[0][1]],
+                        [segment[1][0], segment[1][1]],
+                    ];
+                    if !separators.remove(&centerline_key(line)) {
+                        return Err(invalid(
+                            "separator path lacks a unique interface centerline",
+                        ));
+                    }
+                }
+            }
+            if !separators.is_empty() {
+                return Err(invalid(
+                    "separator interface centerline has no actual deposition",
+                ));
+            }
             let height = layer.height_mm;
             if layer.index != index as u32
                 || !layer.z_mm.is_finite()
@@ -1426,6 +1861,17 @@ impl NormalizedPrintPlan {
                 ));
             }
             for path in &layer.paths {
+                path.validate_owner()?;
+                if let Some(DepositionOwner::Regional { region_index }) = path.owner {
+                    if usize::from(region_index) >= layer.region_coverage.process_regions.len() {
+                        return Err(invalid(
+                            "deposition regional owner index is outside its layer coverage",
+                        ));
+                    }
+                    if path.points_mm.len() != 2 {
+                        return Err(invalid("regional deposition is not one open row"));
+                    }
+                }
                 if matches!(
                     path.kind,
                     DepositionKind::Support | DepositionKind::SupportInterface
@@ -1712,11 +2158,17 @@ pub struct ManufacturingSummary {
     pub software_only: bool,
     pub surface_resolution: SurfaceResolutionTotals,
     pub native_geometry: NativeGeometryCoverageSummary,
+    #[serde(deserialize_with = "process_resolution")]
+    pub process_resolution: Vec<ProcessRegionResolution>,
 }
 impl ManufacturingSummary {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
         self.surface_resolution.validate()?;
         self.native_geometry.validate()?;
+        validate_process_resolution(&self.process_resolution)?;
+        if self.process_resolution.capacity() > MAX_PROCESS_REGIONS {
+            return Err(resource("process resolution allocation limit exceeded"));
+        }
         if self.native_geometry.certified_layer_count != self.layers {
             return Err(invalid(
                 "native geometry coverage does not bind summary layers",
@@ -1780,6 +2232,46 @@ impl ManufacturingBundle {
         }
         let recipe = &self.provenance.intent.recipe;
         let process = &self.provenance.process_document;
+        let scope_matches = |scope: &crate::surface::SurfaceScope,
+                             definition_id: &DefinitionId,
+                             occurrence_id: OccurrenceId| {
+            match scope {
+                crate::surface::SurfaceScope::Definition { definition_id: id } => {
+                    id == definition_id
+                }
+                crate::surface::SurfaceScope::Occurrence {
+                    occurrence_id: id,
+                    expected_definition_id,
+                } => *id == occurrence_id && expected_definition_id == definition_id,
+            }
+        };
+        for record in &self.plan.process_resolution {
+            let source_known = self.provenance.occurrences.iter().any(|occurrence| {
+                occurrence.occurrence_id == record.occurrence_id
+                    && occurrence.definition_id == record.definition_id
+            });
+            let operation_known = process.layers.iter().any(|layer| {
+                layer.enabled
+                    && layer.layer_id == record.provenance.layer_id
+                    && scope_matches(&layer.scope, &record.definition_id, record.occurrence_id)
+                    && layer.operations.iter().any(|operation| {
+                        operation.operation_id == record.provenance.operation_id
+                            && matches!(
+                                operation.selector,
+                                crate::process::ProcessSelector::SourceBoxMm { .. }
+                            )
+                            && matches!(
+                                operation.action,
+                                crate::process::ProcessAction::Replace { .. }
+                            )
+                    })
+            });
+            if !source_known || !operation_known {
+                return Err(invalid(
+                    "process resolution references unknown source or box operation",
+                ));
+            }
+        }
         let has_overrides = self.provenance.occurrences.iter().any(|occurrence| {
             process
                 .resolve(
@@ -1789,6 +2281,20 @@ impl ManufacturingBundle {
                 )
                 .provenance
                 .is_some()
+                || process.layers.iter().any(|layer| {
+                    layer.enabled
+                        && scope_matches(
+                            &layer.scope,
+                            &occurrence.definition_id,
+                            occurrence.occurrence_id,
+                        )
+                        && layer.operations.iter().any(|operation| {
+                            matches!(
+                                operation.selector,
+                                crate::process::ProcessSelector::SourceBoxMm { .. }
+                            )
+                        })
+                })
         });
         for region in self
             .plan
@@ -1815,13 +2321,104 @@ impl ManufacturingBundle {
                     contribution.occurrence_id,
                     recipe.infill_fraction,
                 );
-                if resolved.provenance != contribution.provenance
-                    || resolved.fraction != region.fraction
-                {
+                let spatial = process.layers.iter().any(|layer| {
+                    layer.enabled
+                        && scope_matches(
+                            &layer.scope,
+                            &contribution.definition_id,
+                            contribution.occurrence_id,
+                        )
+                        && layer.operations.iter().any(|operation| {
+                            matches!(
+                                operation.selector,
+                                crate::process::ProcessSelector::SourceBoxMm { .. }
+                            )
+                        })
+                });
+                // Without spatial geometry, validate captured operation/source/value
+                // binding, not an invented whole-volume winner for a box partition.
+                let valid = if spatial {
+                    match contribution.provenance {
+                        None => region.fraction == recipe.infill_fraction,
+                        Some(provenance) => process.layers.iter().any(|layer| {
+                            layer.enabled
+                                && layer.layer_id == provenance.layer_id
+                                && scope_matches(
+                                    &layer.scope,
+                                    &contribution.definition_id,
+                                    contribution.occurrence_id,
+                                )
+                                && layer.operations.iter().any(|operation| {
+                                    operation.operation_id == provenance.operation_id
+                                        && operation.action
+                                            == crate::process::ProcessAction::Replace {
+                                                value:
+                                                    crate::process::ProcessValue::SparseFraction {
+                                                        fraction: region.fraction,
+                                                    },
+                                            }
+                                        && (!matches!(
+                                            operation.selector,
+                                            crate::process::ProcessSelector::SourceBoxMm { .. }
+                                        ) || self.plan.process_resolution.iter().any(
+                                            |record| {
+                                                record.occurrence_id == contribution.occurrence_id
+                                                    && record.definition_id
+                                                        == contribution.definition_id
+                                                    && record.provenance == provenance
+                                                    && record.status == ProcessRegionStatus::Applied
+                                            },
+                                        ))
+                                })
+                        }),
+                    }
+                } else {
+                    resolved.provenance == contribution.provenance
+                        && resolved.fraction == region.fraction
+                };
+                if !valid {
                     return Err(invalid(
-                        "process region disagrees with captured process winner",
+                        "process region disagrees with captured process attribution",
                     ));
                 }
+            }
+        }
+        for interface in self
+            .plan
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.region_coverage.process_interfaces)
+        {
+            let occurrence_known = self.provenance.occurrences.iter().any(|occurrence| {
+                occurrence.occurrence_id == interface.occurrence_id
+                    && occurrence.definition_id == interface.definition_id
+            });
+            let authorized = process.layers.iter().any(|layer| {
+                layer.enabled
+                    && layer.layer_id == interface.provenance.layer_id
+                    && scope_matches(
+                        &layer.scope,
+                        &interface.definition_id,
+                        interface.occurrence_id,
+                    )
+                    && layer.operations.iter().any(|operation| {
+                        operation.operation_id == interface.provenance.operation_id
+                            && matches!(
+                                operation.selector,
+                                crate::process::ProcessSelector::SourceBoxMm { .. }
+                            )
+                            && matches!(
+                                operation.action,
+                                crate::process::ProcessAction::Replace { .. }
+                            )
+                            && operation.interface
+                                == Some(crate::process::ProcessInterfacePermission::SeparatorWall)
+                    })
+            });
+            if !occurrence_known || !authorized || interface.thickness_mm != recipe.bead_width_mm {
+                return Err(invalid(
+                    "separator interface lacks captured source permission or bead width",
+                ));
             }
         }
         resolution::validate_attribution(
@@ -1872,6 +2469,7 @@ impl ManufacturingBundle {
                 &self.plan.surface_resolution,
             ),
             native_geometry: self.plan.native_geometry.clone(),
+            process_resolution: self.plan.process_resolution.clone(),
         }
     }
     /// Match metadata on an already validated bundle; caller checks exact byte hash/size.

@@ -22,13 +22,19 @@ export function ProcessPanel({
   state,
   selected,
   edit,
+  beadWidthMm,
 }: {
   state: WorkbenchState;
   selected: OccurrenceRecord | null;
   edit(edit: ProcessEdit): Promise<void>;
+  beadWidthMm: number | null;
 }) {
   const [scopeKind, setScopeKind] = useState<SurfaceScopeKind>("occurrence");
   const [fraction, setFraction] = useState("0.20");
+  const [mode, setMode] = useState<"whole" | "box">("whole");
+  const [min, setMin] = useState<[string, string, string]>(["", "", ""]);
+  const [max, setMax] = useState<[string, string, string]>(["", "", ""]);
+  const [separatorApproved, setSeparatorApproved] = useState(false);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const project = state.project;
@@ -59,9 +65,16 @@ export function ProcessPanel({
   const authority = `${state.hello?.session_id ?? ""}:${project?.project_id ?? ""}:${state.projectEpoch}`;
 
   useEffect(() => {
-    setFraction(scopeFraction === undefined ? "0.20" : String(scopeFraction));
+    if (mode === "whole")
+      setFraction(scopeFraction === undefined ? "0.20" : String(scopeFraction));
     setMessage("");
-  }, [authority, selected?.occurrence_id, scopeKind, scopeFraction]);
+  }, [authority, selected?.occurrence_id, scopeKind, scopeFraction, mode]);
+
+  useEffect(() => {
+    setMin(["", "", ""]);
+    setMax(["", "", ""]);
+    setSeparatorApproved(false);
+  }, [authority, selected?.occurrence_id, scopeKind]);
 
   function target(): SurfaceScope {
     if (!selected) throw new Error("Select a source instance first.");
@@ -82,7 +95,27 @@ export function ProcessPanel({
       );
       return;
     }
-    await submit({ op: "set_sparse_fraction", scope: target(), fraction: value });
+    if (mode === "whole") {
+      await submit({ op: "set_sparse_fraction", scope: target(), fraction: value });
+      return;
+    }
+    const lower = min.map(Number) as [number, number, number];
+    const upper = max.map(Number) as [number, number, number];
+    if (
+      [...min, ...max].some((bound) => bound.trim() === "") ||
+      lower.some((bound, axis) => !Number.isFinite(bound) || !Number.isFinite(upper[axis]) || bound >= upper[axis]!)
+    ) {
+      setMessage("Enter six finite definition-local mm bounds with min < max on X, Y and Z.");
+      return;
+    }
+    await submit({
+      op: "set_box_sparse_fraction",
+      scope: target(),
+      min: lower,
+      max: upper,
+      fraction: value,
+      interface: separatorApproved ? "separator_wall" : null,
+    });
   }
   async function submit(change: ProcessEdit) {
     setWorking(true);
@@ -91,8 +124,10 @@ export function ProcessPanel({
       await edit(change);
       setMessage(
         change.op === "reset"
-          ? "Local layers in this scope removed. The engine's inherited value is shown below."
-          : "Local sparse layer applied. Compile and fresh Verify are required before export.",
+          ? "All local layers in this scope removed, including boxes. The engine's base inherited value is shown below."
+          : change.op === "set_box_sparse_fraction" && change.interface === null
+            ? "Box intent saved without separator authorization. Compile blocks nonempty joins. No joined artifact is claimed."
+            : "Local sparse intent applied. Compile and fresh Verify are required before export.",
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -109,8 +144,8 @@ export function ProcessPanel({
     >
       <h2>Local sparse process</h2>
       <p>
-        Whole owned source volume only. This changes sparse fill, not source geometry, wall or skin
-        recipes.
+        Author whole owned source volume or a bounded physical box mask. Sparse fraction is not a
+        strength guarantee. Source geometry and global wall/skin recipes are unchanged.
       </p>
       {!selected ? (
         <p>Select an instance above to inspect or override its sparse fraction.</p>
@@ -125,12 +160,80 @@ export function ProcessPanel({
               <select
                 data-testid="process-scope"
                 value={scopeKind}
+                disabled={!writable}
                 onChange={(event) => setScopeKind(event.target.value as SurfaceScopeKind)}
               >
                 <option value="occurrence">Occurrence — only this instance</option>
                 <option value="definition">Definition — all instances of this source</option>
               </select>
             </label>
+            <label>
+              Physical region
+              <select
+                data-testid="process-region-mode"
+                value={mode}
+                disabled={!writable}
+                onChange={(event) => setMode(event.target.value as "whole" | "box")}
+              >
+                <option value="whole">Whole owned volume</option>
+                <option value="box">Bounded box — definition-local mm</option>
+              </select>
+            </label>
+            {mode === "box" && (
+              <>
+                <p>
+                  Bounds use the immutable source definition frame, before occurrence placement.
+                  Min is inclusive; max is exclusive. This mask is not new source geometry.
+                </p>
+                {(["min", "max"] as const).map((side) => (
+                  <fieldset key={side} disabled={!writable}>
+                    <legend>{side === "min" ? "Minimum" : "Maximum"} bounds (mm)</legend>
+                    <div className="numeric-triple">
+                      {(side === "min" ? min : max).map((bound, axis) => (
+                        <label key={axis}>
+                          {"XYZ"[axis]} {side} (mm)
+                          <input
+                            data-testid={`process-box-${side}-${"xyz"[axis]}`}
+                            type="number"
+                            step="any"
+                            required
+                            value={bound}
+                            onChange={(event) => {
+                              const update = side === "min" ? setMin : setMax;
+                              update((previous) =>
+                                previous.map((value, index) => index === axis ? event.target.value : value) as [string, string, string],
+                              );
+                            }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                ))}
+                <label>
+                  <input
+                    data-testid="process-separator-approval"
+                    type="checkbox"
+                    checked={separatorApproved}
+                    disabled={!writable}
+                    onChange={(event) => setSeparatorApproved(event.target.checked)}
+                  />
+                  I authorize a permanent separator wall at density interfaces.
+                </label>
+                <p data-testid="process-separator-thickness">
+                  Permanent separator rib width / thickness: {beadWidthMm === null
+                    ? "unavailable — apply a job recipe and refresh current native state"
+                    : `${beadWidthMm} mm — current applied recipe bead width`}.
+                  {" "}Physical allowed overlap with the separator: {beadWidthMm === null
+                    ? "unavailable until a current applied recipe is present"
+                    : `${beadWidthMm / 2} mm — half the recipe bead width`}.
+                  {" "}Representation error is accounted for separately by the compiler.
+                  {" "}This is permanent deposited material, not removable support or a strength
+                  qualification. Leaving approval unchecked saves explicitly unauthorized intent;
+                  Compile blocks nonempty joins.
+                </p>
+              </>
+            )}
             <label>
               Sparse fraction (0 &lt; fraction ≤ 1)
               <input
@@ -160,10 +263,10 @@ export function ProcessPanel({
             </div>
           </form>
           <p>
-            Apply updates the engine-resolved local override, allocating a layer only when needed.
-            Reset removes every layer in the chosen scope and reveals definition inheritance or the
-            job recipe. Definition edits are shared; occurrence intent still wins. Project Undo /
-            Redo restores edits.
+            Whole Apply updates only the engine's whole-volume winner. Box Apply updates the
+            exact-scope box operation, including changed bounds, or allocates once. Reset removes
+            every layer in the chosen scope, including boxes. Only the engine resolves spatial
+            precedence. Definition edits are shared. Project Undo / Redo restores edits.
           </p>
           <output className="project-controls" data-testid="process-effective" aria-live="polite">
             {state.stale || state.phase !== "running" ? (
@@ -172,9 +275,10 @@ export function ProcessPanel({
               </strong>
             ) : resolved ? (
               <>
-                <strong>Effective sparse fraction for occurrence: {resolved.value.fraction}</strong>
+                <strong>Base whole-owned sparse fraction for occurrence: {resolved.value.fraction}</strong>
+                <span>Box masks are excluded from these base values; authored boxes are listed below.</span>
                 <span>
-                  Selected {scopeKind} scope fraction: {scopeFraction}
+                  Selected {scopeKind} base whole-owned fraction: {scopeFraction}
                 </span>
                 <span data-testid="process-inherited-recipe">
                   Inherited job recipe: {resolved.global_fraction}
@@ -201,8 +305,8 @@ export function ProcessPanel({
               </span>
             )}
           </output>
-          <details data-testid="process-layers">
-            <summary>Source-bound layers ({relatedLayers.length})</summary>
+          <details open data-testid="process-layers">
+            <summary>Authored source-bound layers ({relatedLayers.length})</summary>
             {relatedLayers.length === 0 ? (
               <p>No local layers for this source or instance.</p>
             ) : (
@@ -216,7 +320,19 @@ export function ProcessPanel({
                     <ul>
                       {layer.operations.map((operation) => (
                         <li key={operation.operation_id}>
-                          Operation {operation.operation_id}: whole owned volume ·{" "}
+                          Operation {operation.operation_id}:{" "}
+                          {operation.selector.kind === "source_box_mm" ? (
+                            <>
+                              box in definition-local mm · min [{operation.selector.min.join(", ")}]
+                              {" "}inclusive · max [{operation.selector.max.join(", ")}] exclusive ·{" "}
+                              <strong>
+                                {operation.interface === "separator_wall"
+                                  ? "permanent separator wall authorized"
+                                  : "UNAUTHORIZED separator — Compile blocks nonempty joins"}
+                              </strong>
+                              {" · "}
+                            </>
+                          ) : "whole owned volume · "}
                           {operation.action.kind === "replace"
                             ? `replace sparse fraction ${operation.action.value.fraction}`
                             : "erase this layer's contribution (reveal inheritance)"}
