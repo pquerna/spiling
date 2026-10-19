@@ -1582,6 +1582,37 @@ tangency. Retain full same-intent fitting/housing CLI Compile, independent
 replay, save/reopen/export and workbench gates. Numeric flow availability alone
 does not count as any of these outcomes.
 
+#### Constant inner material for eligible deposition
+
+Geometry's opaque [`NativeInnerMaterialPrism`](../../crates/geometry/src/analysis/joint/inner_prism.rs)
+is a query on existing original-source/closed-slab ownership, not a new kernel,
+cache or whole-part invariance certificate. Only direct same-azimuth **per-role**
+boundary displacement with the complete original filled-map/census supplies
+its inner displacement bound `e`. A general complete-metric seal and endpoint
+radial reuse leave this stronger origin absent; neither can be promoted by a flag.
+Independently certify oriented correspondence from native reference polygon P
+to the actual retained Q with bound `d`; do not count source error twice.
+
+For the entire filled proposed superset G, require strict clearance greater
+than `e + d + r` from **every** outer/hole boundary of Q, where `r` encloses the
+actual nominal bead radius and XY projection error. Prove component membership
+with an interior witness and complete boundary exclusion, including a native
+hole or outer boundary wholly inside G: edge-distance/G-boundary checks alone
+miss that case. The complete filled-map and per-role displacement then preserve
+the selected inner material throughout the closed slab. This proves a constant
+eligible subset even when outer native material varies, not equality of sections.
+Regional cuts and all hatch footprints must remain within that same hashed G+r.
+
+Bind every original source/ref/pose, reference plane, native P and actual Q
+hashes, policy and closed capture scope. The **outer actual XYZ6 Z enclosure**
+of the full bead must fit that scope, not merely its raw associated interval.
+Retain only compact witnesses under existing source/slab byte and work budgets.
+Known insufficient margin/boundary contact is an eligibility veto; binding,
+indeterminate arithmetic, cancellation and exhaustion remain typed failures.
+Final-D/field invariance, skins/events/process ownership, actual base/landing
+support and nominal separator bonds remain independent manufacturing obligations.
+This is software nominal-material authority, not measured beads or adhesion.
+
 ### 8.3 Reuse requires proof
 
 Retain `PreparedSections` as job-local borrowed native preparation. It accelerates searches; it does not certify identical slices. One fixed sampled M prism may serve multiple layers only under the same complete captured source/pose/height-range/policy/producer proof: exact source invariance or a sealed closed radial slab combining full world metric, native material topology and polygon calibration. The latter does not assert identical C sections, a separate clipped-layer or same-height XY error bound, or permission to extend the interval. Retain the original whole-interval authority; do not manufacture narrower per-layer certificates. Unknown means compute actual sections. No family name, shared bounds, repeated mesh or same sampled polygon authorizes reuse.

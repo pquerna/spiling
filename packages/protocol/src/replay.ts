@@ -12,6 +12,7 @@ import {
   MAX_DEPOSITION_SEGMENTS,
   MAX_MANUFACTURING_BUNDLE_BYTES,
   MAX_MANUFACTURING_LABEL_BYTES,
+  MAX_PROCESS_REGIONS,
 } from "./generated.ts";
 import type { ReplayDisplayDescriptor } from "./generated.ts";
 import { bounds, hash, keys, uint, verifyHash, zero } from "./display.ts";
@@ -51,6 +52,8 @@ export interface DecodedReplayDisplay {
   layer(index: number): number;
   kind(index: number): ReplayKind;
   knownStart(index: number): boolean;
+  /** Nominal expected-plan association; never a physical bead measurement. */
+  association(index: number): { beadWidthMm: number; physicalZMm: [number, number]; regionalOwner: number | "mandatory_skin" | null } | null;
 }
 export class ReplayDecodeError extends Error {
   constructor(message: string) {
@@ -93,7 +96,7 @@ export async function decodeReplayDisplay(
   hash(info.input_hash, fail);
   hash(info.program_hash, fail);
   hash(resource.sha256, fail);
-  if (info.schema_version !== 4 || info.frame !== "right_handed_millimetres")
+  if (info.schema_version !== 5 || info.frame !== "right_handed_millimetres")
     fail("unsupported schema or coordinate frame");
   if (
     typeof info.verifier_version !== "string" ||
@@ -130,7 +133,7 @@ export async function decodeReplayDisplay(
   const data = new DataView(bytes, 0, length);
   if (
     data.getUint32(0, true) !== 0x524c5053 ||
-    data.getUint16(4, true) !== 4 ||
+    data.getUint16(4, true) !== 5 ||
     data.getUint16(6, true) !== REPLAY_HEADER_BYTES ||
     data.getUint32(12, true) !== REPLAY_RECORD_BYTES
   )
@@ -186,7 +189,22 @@ export async function decodeReplayDisplay(
       fail("invalid extrusion or feed");
     uint(line, "source line", fail, 1, MAX_MANUFACTURING_BUNDLE_BYTES);
     if (line <= lastLine) fail("source line sequence is not increasing");
-    if (kind > 13 || flags !== (index === 0 ? 0 : 1)) fail("unknown kind or invalid start flags");
+    const associated = (kind >= 1 && kind <= 5) || (kind >= 8 && kind <= 10) || kind === 13;
+    if (kind > 13 || flags !== ((index === 0 ? 0 : 1) | (associated ? 2 : 0))) fail("unknown kind or invalid association/start flags");
+    const width = data.getFloat64(start + 48, true);
+    const lower = data.getFloat64(start + 56, true);
+    const upper = data.getFloat64(start + 64, true);
+    const owner = data.getUint32(start + 72, true);
+    zero(data, start + 76, start + 80, fail);
+    if (associated) {
+      if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(lower) ||
+          !Number.isFinite(upper) || lower >= upper || Math.abs(upper - data.getFloat64(start + 16, true)) > 0.000000500001 ||
+          (owner < 0xfffffffe && owner >= MAX_PROCESS_REGIONS))
+        fail("invalid nominal deposition association");
+    } else {
+      zero(data, start + 48, start + 72, fail);
+      if (owner !== 0xffffffff) fail("nondeposition association owner");
+    }
     if (index === 0 && kind !== 0 && kind !== 6)
       fail("first endpoint must be unknown-start travel");
     if (kind === 6 || kind === 7) {
@@ -203,14 +221,14 @@ export async function decodeReplayDisplay(
         fail("invalid lifecycle sequence");
       if (
         lifecyclePhase === 2 &&
-        (data.getFloat64(start, true) !== data.getFloat64(start - 48, true) ||
-          data.getFloat64(start + 8, true) !== data.getFloat64(start - 40, true) ||
-          data.getFloat64(start + 16, true) <= data.getFloat64(start - 32, true))
+        (data.getFloat64(start, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES, true) ||
+          data.getFloat64(start + 8, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES + 8, true) ||
+          data.getFloat64(start + 16, true) <= data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true))
       )
         fail("final lift must be vertical with increasing Z");
       if (
         lifecyclePhase === 3 &&
-        data.getFloat64(start + 16, true) !== data.getFloat64(start - 32, true)
+        data.getFloat64(start + 16, true) !== data.getFloat64(start - REPLAY_RECORD_BYTES + 16, true)
       )
         fail("park must retain clearance Z");
       if (kind === 7) {
@@ -298,6 +316,16 @@ export async function decodeReplayDisplay(
     sourceLine: (index: number) => data.getUint32(offset(index) + 40, true),
     layer: (index: number) => data.getUint16(offset(index) + 44, true),
     kind: (index: number) => data.getUint8(offset(index) + 46) as ReplayKind,
-    knownStart: (index: number) => data.getUint8(offset(index) + 47) === 1,
+    knownStart: (index: number) => (data.getUint8(offset(index) + 47) & 1) !== 0,
+    association(index: number) {
+      const start = offset(index);
+      if ((data.getUint8(start + 47) & 2) === 0) return null;
+      const owner = data.getUint32(start + 72, true);
+      return {
+        beadWidthMm: data.getFloat64(start + 48, true),
+        physicalZMm: [data.getFloat64(start + 56, true), data.getFloat64(start + 64, true)] as [number, number],
+        regionalOwner: owner === 0xffffffff ? null : owner === 0xfffffffe ? "mandatory_skin" as const : owner,
+      };
+    },
   });
 }

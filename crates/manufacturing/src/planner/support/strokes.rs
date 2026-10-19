@@ -41,20 +41,20 @@ pub(crate) fn gap_kind(gap: &AnchorGap, span: f64, width: f64, limit: f64) -> Ga
     }
 }
 
-pub(super) struct Failure {
-    pub(super) path: usize,
-    pub(super) first: usize,
-    pub(super) last: usize,
-    pub(super) start: f64,
-    pub(super) end: f64,
-    pub(super) span: f64,
+pub(in crate::planner) struct Failure {
+    pub(in crate::planner) path: usize,
+    pub(in crate::planner) first: usize,
+    pub(in crate::planner) last: usize,
+    pub(in crate::planner) start: f64,
+    pub(in crate::planner) end: f64,
+    pub(in crate::planner) span: f64,
 }
-pub(super) struct Admission {
-    pub(super) bridges: Vec<usize>,
-    pub(super) failure: Option<Failure>,
+pub(in crate::planner) struct Admission {
+    pub(in crate::planner) bridges: Vec<usize>,
+    pub(in crate::planner) failure: Option<Failure>,
 }
 
-pub(super) fn analyze<'a>(
+pub(in crate::planner) fn analyze<'a>(
     paths: &[DepositionPath],
     previous: impl Iterator<Item = &'a DepositionPath> + Clone,
     contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
@@ -79,10 +79,10 @@ pub(super) fn analyze<'a>(
             for gap in anchors.gaps(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
-                    bead_width_mm: recipe.bead_width_mm,
+                    bead_width_mm: path.bead_width_mm,
                 },
-                previous.clone(),
-                contacts.clone(),
+                previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                contacts.clone().filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
                 work,
                 cancel,
             )? {
@@ -94,7 +94,7 @@ pub(super) fn analyze<'a>(
                         gap_kind(
                             gap,
                             span,
-                            recipe.bead_width_mm,
+                            path.bead_width_mm,
                             recipe.process.max_bridge_span_mm
                         ),
                         GapKind::Supported
@@ -108,7 +108,7 @@ pub(super) fn analyze<'a>(
                 match gap_kind(
                     gap,
                     span,
-                    recipe.bead_width_mm,
+                    path.bead_width_mm,
                     recipe.process.max_bridge_span_mm,
                 ) {
                     GapKind::Supported => {}
@@ -236,11 +236,15 @@ mod tests {
         let anchors = [
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
+                bead_width_mm: 0.6,
+                physical_z_mm: [7.6, 8.0],
                 owner: None,
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
             },
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
+                bead_width_mm: 0.6,
+                physical_z_mm: [7.6, 8.0],
                 owner: None,
                 points_mm: vec![[23.3, 0.3, 8.0], [42.7, 0.3, 8.0]],
             },
@@ -315,11 +319,15 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            bead_width_mm: 0.5,
+            physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
         let path = DepositionPath {
             kind: DepositionKind::TopSkin,
+            bead_width_mm: 0.5,
+            physical_z_mm: [0.4, 0.8],
             owner: Some(
                 spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
                     skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin,
@@ -395,6 +403,8 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            bead_width_mm: 0.5,
+            physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
@@ -406,6 +416,8 @@ mod tests {
         for (a, b) in [(0.5, 1.5), (0.51, 1.49)] {
             let path = DepositionPath {
                 kind: DepositionKind::TopSkin,
+                bead_width_mm: 0.5,
+                physical_z_mm: [0.4, 0.8],
                 owner: Some(
                     spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
                         skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin,
@@ -441,5 +453,50 @@ mod tests {
             assert!(refused.failure.is_some());
             assert!(refused.bridges.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    #[test]
+    fn admission_uses_actual_width_and_only_physically_adjacent_direct_strokes() {
+        let cancel = AtomicBool::new(false);
+        let mut recipe = crate::planner::tests::recipe(1.0);
+        recipe.bead_width_mm = 0.8;
+        let path = DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: None,
+            bead_width_mm: 0.2,
+            physical_z_mm: [0.4, 0.7],
+            points_mm: vec![[0.0, 0.0, 0.7], [0.4, 0.0, 0.7]],
+        };
+        let mut lower = DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: None,
+            bead_width_mm: 0.2,
+            physical_z_mm: [0.0, 0.4],
+            points_mm: vec![[0.0, -1.0, 0.4], [0.0, 1.0, 0.4]],
+        };
+        let mut anchors = AnchorWorkspace::default();
+        let first = analyze(
+            std::slice::from_ref(&path), std::iter::once(&lower),
+            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
+        ).unwrap();
+        assert!(first.failure.is_some(), "recipe width must not authorize a narrower stroke's overhang");
+        lower.bead_width_mm = 1.0;
+        let adjacent = analyze(
+            std::slice::from_ref(&path), std::iter::once(&lower),
+            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
+        ).unwrap();
+        assert!(adjacent.failure.is_none());
+        lower.physical_z_mm = [0.0, 0.3];
+        lower.points_mm.iter_mut().for_each(|point| point[2] = 0.3);
+        let separated = analyze(
+            std::slice::from_ref(&path), std::iter::once(&lower),
+            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
+        ).unwrap();
+        assert!(separated.failure.is_some(), "a nonadjacent previous capsule is not a direct anchor");
     }
 }

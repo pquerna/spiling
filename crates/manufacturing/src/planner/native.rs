@@ -74,6 +74,10 @@ struct ActualDepositionScope<'a> {
 
 pub(super) struct NativeSpan {
     pub end: u32,
+    /// All original source slabs carry exact closed-height invariance, not
+    /// merely a bounded moving radial material product.
+    pub invariant: bool,
+    pub inner_material: Option<Arc<Vec<spiling_geometry::NativeInnerMaterialPrism>>>,
     pub material: Arc<MultiPolygon<f64>>,
     pub finished: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>)>,
     pub contributions: Vec<(OccurrenceId, Arc<MultiPolygon<f64>>, usize)>,
@@ -98,6 +102,12 @@ pub(super) struct CompletedCoverage {
 pub(super) struct CapturedProtectedVoid {
     pub occurrence_id: OccurrenceId,
     pub capture: spiling_geometry::NativeVoidProjectionCapture,
+}
+
+fn inner_capture_bytes(captures: &Vec<spiling_geometry::NativeInnerMaterialPrism>) -> usize {
+    std::mem::size_of_val(captures) + 2 * std::mem::size_of::<usize>()
+        + captures.capacity() * std::mem::size_of::<spiling_geometry::NativeInnerMaterialPrism>()
+        + captures.iter().map(|capture| capture.retained_bytes()).sum::<usize>()
 }
 
 fn void_capture_bytes(captures: &Vec<CapturedProtectedVoid>) -> usize {
@@ -128,7 +138,7 @@ impl SourceMaterial {
     }
 }
 
-fn loop_bytes(loops: &Vec<spiling_geometry::SectionLoopMm>) -> usize {
+pub(super) fn loop_bytes(loops: &Vec<spiling_geometry::SectionLoopMm>) -> usize {
     loops
         .capacity()
         .saturating_mul(std::mem::size_of::<spiling_geometry::SectionLoopMm>())
@@ -209,6 +219,12 @@ pub(super) fn output_bytes(
                 .saturating_mul(std::mem::size_of::<super::NativeSurfaceSpan>()),
         );
     for (index, section) in sections.iter().enumerate() {
+        if let Some(captures) = &section.inner_material {
+            if !sections[..index].iter().any(|prior|
+                prior.inner_material.as_ref().is_some_and(|other| Arc::ptr_eq(captures, other))) {
+                bytes = bytes.saturating_add(inner_capture_bytes(captures));
+            }
+        }
         if !sections[..index]
             .iter()
             .any(|prior| Arc::ptr_eq(&prior.material, &section.material))
@@ -535,8 +551,10 @@ struct ReadyStage {
 
 impl ReadyStage {
     fn retained_bytes(&self) -> usize {
+        let inner_bytes = self.span.inner_material.as_ref().map_or(0, |value| inner_capture_bytes(value));
         self.pending
             .retained_bytes()
+            .saturating_add(inner_bytes)
             .saturating_add(loop_bytes(&self.candidate))
             .saturating_add(
                 self.positive
@@ -780,6 +798,7 @@ pub(super) fn collect_span(
                 Err(failure)
                     if failure.code == ManufacturingErrorCode::NativeShapeErrorExceeded =>
                 {
+                    
                     // Every future leaf tied to the old request is discarded.
                     // Rebuild the actual dependency frontier after refinement.
                     settled.clear();
@@ -860,6 +879,10 @@ pub(super) fn collect_span(
             } else {
                 0
             };
+            let invariant = current
+                .analyses
+                .iter()
+                .all(|evidence| evidence.analysis.invariance().is_some());
             for (occurrence, evidence) in occurrences.iter().zip(current.analyses) {
                 if matches!(
                     input.intent.recipe.supports,
@@ -931,6 +954,23 @@ pub(super) fn collect_span(
                     }
                 }
             }
+            let mut inner_material = Vec::new();
+            for material in &current.leaves {
+                if !current.contributions.iter().any(|(id, _, _)| *id == material.leaf.occurrence_id()) {
+                    continue;
+                }
+                if let Some(capture) = material.leaf.capture_constant_inner_prism() {
+                    if inner_material.capacity() == 0 {
+                        admit_bytes(resident_bytes, current.leaves.len()
+                            .saturating_mul(std::mem::size_of::<spiling_geometry::NativeInnerMaterialPrism>())
+                            .saturating_add(capture.retained_bytes().saturating_mul(current.leaves.len())), 0)?;
+                        inner_material.try_reserve_exact(current.leaves.len()).map_err(|_| error(
+                            ManufacturingErrorCode::ResourceLimit, "native inner-material capture allocation refused"))?;
+                    }
+                    inner_material.push(capture);
+                }
+            }
+            let inner_material = (!inner_material.is_empty()).then(|| Arc::new(inner_material));
             let positive = current
                 .leaves
                 .into_iter()
@@ -945,6 +985,8 @@ pub(super) fn collect_span(
                 protected_voids,
                 span: NativeSpan {
                     end: current.end,
+                    invariant,
+                    inner_material,
                     material: current.material,
                     finished: current.finished,
                     contributions: current.contributions,
@@ -1026,6 +1068,8 @@ pub(super) fn collect_span(
             "settled native lookahead no longer matches the actual shared schedule",
         ));
     }
+    
+    
     let metric = StageMetric {
         layers: ready.span.end - index,
         slabs: occurrences.len() as u32,
@@ -1196,6 +1240,7 @@ fn capture_base(
                 let analysis = match analysis {
                     Ok(analysis) => analysis,
                     Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
+                        
                         refine = true;
                         break;
                     }
@@ -1338,6 +1383,7 @@ fn capture_base(
             ) {
                 Ok(leaf) => leaf,
                 Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
+                    
                     refine = true;
                     break;
                 }
@@ -1463,7 +1509,7 @@ fn capture_base(
                     .process_document
                     .layers
                     .iter()
-                    .any(|layer| layer.enabled);
+                    .any(|layer| layer.enabled) || input.intent.recipe.infill_fraction < 1.0;
                 if process_enabled {
                     let bytes = material_bytes(&mut placed);
                     contribution_bytes = contribution_bytes
@@ -2134,7 +2180,7 @@ fn union_loops(
     )
 }
 
-fn encode_polygons<'a>(
+pub(super) fn encode_polygons<'a>(
     polygons: impl Iterator<Item = &'a geo::Polygon<f64>> + Clone,
     sample: f64,
     cancel: &AtomicBool,
@@ -2777,7 +2823,6 @@ pub(super) fn certify_support_clearance(
                     height: scope,
                     label: "continuous native/finish outer occupancy",
                 },
-                recipe.bead_width_mm,
                 xy_clearance_mm,
                 native_work,
                 support_work,
@@ -2795,7 +2840,6 @@ pub(super) fn certify_support_clearance(
                 height: *scope,
                 label: "projected protected native void",
             },
-            recipe.bead_width_mm,
             xy_clearance_mm,
             native_work,
             support_work,
@@ -2811,7 +2855,6 @@ pub(super) fn certify_support_clearance(
             schedule,
             vertical,
         },
-        recipe.bead_width_mm,
         xy_clearance_mm,
         z_gap_mm,
         native_work,
@@ -2824,7 +2867,6 @@ pub(super) fn certify_support_clearance(
 fn certify_polygon_capsules(
     layers: &[PrintLayer],
     forbidden: &ForbiddenPolygonScope<'_>,
-    bead_width: f64,
     clearance: f64,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
     support_work: &mut usize,
@@ -2848,8 +2890,9 @@ fn certify_polygon_capsules(
             }
             for edge in path.points_mm.windows(2) {
                 charge_support_clearance(support_work, cancel)?;
-                let [lower, upper] =
-                    project_xyz6_segment_bead_height_mm(edge[0][2], edge[1][2], layer.height_mm)?;
+                let [lower, upper] = project_xyz6_segment_bead_height_mm(
+                    edge[0][2], edge[1][2], path.height_mm(),
+                )?;
                 let relevant = match scope {
                     spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
                         lower_mm <= upper && upper_mm >= lower
@@ -2869,7 +2912,7 @@ fn certify_polygon_capsules(
                     segment,
                     encoded.as_ref().expect("encoded actual forbidden polygon"),
                     spiling_geometry::PlanarCapsuleClearancePolicy {
-                        radius_mm: bead_width * 0.5,
+                        radius_mm: path.bead_width_mm * 0.5,
                         required_gap_mm: clearance,
                         endpoint_error_mm,
                     },
@@ -2952,7 +2995,7 @@ fn deposition_vertical_extensions(
             );
             for point in &path.points_mm {
                 charge_support_clearance(work, cancel)?;
-                let [lower, upper] = project_xyz6_bead_height_mm(point[2], layer.height_mm)?;
+                let [lower, upper] = project_xyz6_bead_height_mm(point[2], path.height_mm())?;
                 extensions[0] = extensions[0].max((elevation.lower_z - lower).next_up());
                 extensions[1] = extensions[1].max((upper - elevation.z).next_up());
             }
@@ -3028,7 +3071,6 @@ fn partition_schedule(
 
 fn certify_deposited_clearance(
     deposition: &ActualDepositionScope<'_>,
-    bead_width: f64,
     xy_gap: f64,
     z_gap: f64,
     native_work: &mut spiling_geometry::GeometryWorkBudget,
@@ -3072,7 +3114,7 @@ fn certify_deposited_clearance(
                 let support_height = project_xyz6_segment_bead_height_mm(
                     support_edge[0][2],
                     support_edge[1][2],
-                    support_layer.height_mm,
+                    support.height_mm(),
                 )?;
                 let (support_xy, support_error) = emitted_xy_segment(support_edge)?;
                 for object_layer in objects {
@@ -3090,7 +3132,7 @@ fn certify_deposited_clearance(
                             let object_height = project_xyz6_segment_bead_height_mm(
                                 object_edge[0][2],
                                 object_edge[1][2],
-                                object_layer.height_mm,
+                                object.height_mm(),
                             )?;
                             let above = program_coordinates::enclosed_vertical_gap_mm(
                                 object_height[0],
@@ -3109,11 +3151,11 @@ fn certify_deposited_clearance(
                             let (object_xy, object_error) = emitted_xy_segment(object_edge)?;
                             spiling_geometry::certify_planar_capsule_pair_clearance([
                                 spiling_geometry::PlanarCapsuleMm {
-                                    segment_xy_mm: support_xy, radius_mm: bead_width * 0.5,
+                                    segment_xy_mm: support_xy, radius_mm: support.bead_width_mm * 0.5,
                                     endpoint_error_mm: support_error,
                                 },
                                 spiling_geometry::PlanarCapsuleMm {
-                                    segment_xy_mm: object_xy, radius_mm: bead_width * 0.5,
+                                    segment_xy_mm: object_xy, radius_mm: object.bead_width_mm * 0.5,
                                     endpoint_error_mm: object_error,
                                 },
                             ], xy_gap, native_work, cancel).map_err(|failure| super::native_error(failure,
@@ -3161,6 +3203,7 @@ mod actual_deposition_tests {
                 layers.push(PrintLayer {
                     index,
                     z_mm: z,
+                    lower_z_mm: lower,
                     height_mm: height,
                     section_z_mm: lower + height * 0.5,
                     region_coverage: PlanarRegionCoverage {
@@ -3192,6 +3235,8 @@ mod actual_deposition_tests {
                     paths: vec![DepositionPath {
                         kind,
                         owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },
+                        bead_width_mm: 0.5,
+                        physical_z_mm: [lower, z],
                         points_mm: vec![[x, 0.0, z], [x + 1.0, 0.0, z]],
                     }],
                 });
@@ -3233,7 +3278,6 @@ mod actual_deposition_tests {
                     schedule: &schedule,
                     vertical,
                 },
-                0.5,
                 0.2,
                 required,
                 &mut native_work,

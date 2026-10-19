@@ -28,6 +28,7 @@ pub(crate) use critical::PreparedSourceVertexPlans;
 pub use joint::{
     CompletedNativeUnionProofSet, EndpointOwnershipRequest, NativeCriticalCollarIncidence,
     NativeInterfaceAttachment, NativeOwnedEndpoint, NativeSourceLeafProofKind,
+    NativeInnerMaterialPrism,
     NativeSourceLeafReceipt, NativeUnionBindingLedger, NativeUnionBoundaryEdge,
     NativeUnionBoundarySource, NativeUnionCoverage, NativeUnionOccurrence,
     NativeUnionOccurrenceEvidence, NativeUnionPolicy, NativeUnionProofKind,

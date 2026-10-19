@@ -37,6 +37,7 @@ struct SegmentCapsule {
 
 /// A nominal candidate bead segment in world millimetres. Only its endpoint
 /// coordinates are copied; previous/contact path arrays remain borrowed.
+#[derive(Clone, Copy)]
 pub(crate) struct AnchorCandidate {
     pub(crate) endpoints_mm: [[f64; 3]; 2],
     pub(crate) bead_width_mm: f64,
@@ -156,10 +157,10 @@ impl AnchorWorkspace {
         self.gaps_edges(
             candidate,
             previous
-                .flat_map(|path| path.points_mm.windows(2).map(|e| (Ok([e[0], e[1]]), true)))
+                .flat_map(|path| path.points_mm.windows(2).map(move |e| (Ok([e[0], e[1]]), true, path.bead_width_mm)))
                 .chain(
                     contacts.flat_map(|path| {
-                        path.points_mm.windows(2).map(|e| (Ok([e[0], e[1]]), false))
+                        path.points_mm.windows(2).map(move |e| (Ok([e[0], e[1]]), false, path.bead_width_mm))
                     }),
                 ),
             work,
@@ -172,7 +173,7 @@ impl AnchorWorkspace {
     pub(crate) fn gaps_edges(
         &mut self,
         candidate: AnchorCandidate,
-        edges: impl Iterator<Item = (Result<[[f64; 3]; 2], ManufacturingError>, bool)>,
+        edges: impl Iterator<Item = (Result<[[f64; 3]; 2], ManufacturingError>, bool, f64)>,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<&[AnchorGap], ManufacturingError> {
@@ -196,8 +197,15 @@ impl AnchorWorkspace {
         self.intervals.clear();
         self.uncovered.clear();
         let mut endpoints = [EndpointAnchor::default(), EndpointAnchor::default()];
-        for (edge, direct) in edges {
+        for (edge, direct, previous_width) in edges {
             let edge = edge?;
+            let previous_radius = previous_width * 0.5;
+            if !previous_radius.is_finite() || previous_radius <= 0.0 {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "nonfinite or zero deposited anchor bead width",
+                ));
+            }
             check_cancel(cancel)?;
             *work = work
                 .checked_add(1)
@@ -218,7 +226,7 @@ impl AnchorWorkspace {
             }
             // A broad-phase box may reject only when both the original-radius
             // centerline and the two endpoint-disk footprints cannot intersect.
-            let endpoint_reach = radius + radius;
+            let endpoint_reach = radius + previous_radius;
             if a[0].min(b[0]) > c[0].max(d[0]) + endpoint_reach
                 || a[0].max(b[0]) < c[0].min(d[0]) - endpoint_reach
                 || a[1].min(b[1]) > c[1].max(d[1]) + endpoint_reach
@@ -226,7 +234,7 @@ impl AnchorWorkspace {
             {
                 continue;
             }
-            let capsule = SegmentCapsule::new(c, d, radius)?;
+            let capsule = SegmentCapsule::new(c, d, previous_radius)?;
             for (endpoint, point) in endpoints.iter_mut().zip([[a[0], a[1]], [b[0], b[1]]]) {
                 if (!endpoint.present || (direct && !endpoint.direct))
                     && capsule.overlaps_endpoint(point, radius)?
@@ -561,4 +569,30 @@ fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[1] - a[1] * b[0]
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::*;
+
+    #[test]
+    fn previous_capsule_radius_is_independent_of_candidate_endpoint_radius() {
+        let cancel = AtomicBool::new(false);
+        let mut workspace = AnchorWorkspace::default();
+        let candidate = AnchorCandidate {
+            endpoints_mm: [[0.0, 0.0, 0.7], [2.0, 0.0, 0.7]],
+            bead_width_mm: 0.8,
+        };
+        for (width, start, end) in [(0.4, 0.4, 0.6), (1.2, 0.2, 0.8)] {
+            let gaps = workspace.gaps_edges(
+                candidate,
+                std::iter::once((Ok([[1.0, -1.0, 0.4], [1.0, 1.0, 0.4]]), true, width)),
+                &mut 0,
+                &cancel,
+            ).unwrap();
+            assert_eq!(gaps.len(), 2);
+            assert!((gaps[0].end - start).abs() < 1e-12);
+            assert!((gaps[1].start - end).abs() < 1e-12);
+        }
+    }
 }

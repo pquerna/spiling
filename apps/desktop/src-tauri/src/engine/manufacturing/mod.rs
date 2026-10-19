@@ -16,8 +16,9 @@ use spiling_contracts::{
         bounded_text,
     },
     manufacturing::{
-        ManufacturingArtifactRecord, ManufacturingCommand, ManufacturingIntent,
-        ManufacturingResponse, ReplayDisplayDescriptor, VerificationReport,
+        DepositionOwner, ManufacturingArtifactRecord, ManufacturingCommand, ManufacturingIntent,
+        ManufacturingResponse, ReplayDisplayDescriptor, SparseBandDisposition, SparseBandVeto,
+        VerificationReport,
     },
 };
 use spiling_engine_client::{ClientError, export::OutputDirectory};
@@ -95,9 +96,19 @@ pub struct SelectedManufacturingIntent {
 pub struct ManufacturingLayer {
     index: u32,
     z_mm: f64,
+    lower_z_mm: f64,
     height_mm: f64,
     section_z_mm: f64,
     deposition_segments: usize,
+    sparse_band: Option<ManufacturingSparseBand>,
+}
+
+#[derive(Serialize)]
+pub struct ManufacturingSparseBand {
+    first_layer: u32,
+    combined_regions: Vec<u16>,
+    combined_global: bool,
+    retained_fine: Vec<(SparseBandVeto, u32)>,
 }
 
 fn read_intent(reader: impl Read) -> Result<ManufacturingIntent, String> {
@@ -522,13 +533,15 @@ pub async fn manufacturing_layers(
         .map_err(|error| error.to_string())?;
     let mut supervisor = state.active().await?;
     check_active(&mut supervisor, &session, &record, Some(&capture.operation)).await?;
-    Ok(bundle
+    drop(supervisor);
+    let mut layers = bundle
         .plan
         .layers
         .iter()
         .map(|layer| ManufacturingLayer {
             index: layer.index,
             z_mm: layer.z_mm,
+            lower_z_mm: layer.lower_z_mm,
             height_mm: layer.height_mm,
             section_z_mm: layer.section_z_mm,
             deposition_segments: layer
@@ -536,8 +549,43 @@ pub async fn manufacturing_layers(
                 .iter()
                 .map(|path| path.points_mm.len() - 1)
                 .sum(),
+            sparse_band: None,
         })
-        .collect())
+        .collect::<Vec<_>>();
+    // One bounded summary per terminal layer, not per-stroke JSON metadata.
+    // Its earliest start also lets intermediate fine layers explain deferral.
+    for band in &bundle.plan.sparse_bands {
+        let view = layers[band.last_layer as usize]
+            .sparse_band
+            .get_or_insert_with(|| ManufacturingSparseBand {
+                first_layer: band.first_layer,
+                combined_regions: Vec::new(),
+                combined_global: false,
+                retained_fine: Vec::new(),
+            });
+        view.first_layer = view.first_layer.min(band.first_layer);
+        match band.disposition {
+            SparseBandDisposition::Combined => {
+                if let Some(DepositionOwner::Regional { region_index }) = band.owner {
+                    view.combined_regions.push(region_index);
+                } else {
+                    view.combined_global = true;
+                }
+            }
+            SparseBandDisposition::RetainedFine { reason } => {
+                if let Some((_, count)) = view
+                    .retained_fine
+                    .iter_mut()
+                    .find(|(existing, _)| *existing == reason)
+                {
+                    *count += 1;
+                } else {
+                    view.retained_fine.push((reason, 1));
+                }
+            }
+        }
+    }
+    Ok(layers)
 }
 
 async fn install_export(

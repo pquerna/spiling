@@ -424,6 +424,12 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            deposition_limits: spiling_contracts::manufacturing::DepositionLimits {
+                min_bead_width_mm: 0.4,
+                max_bead_width_mm: 0.4,
+                min_bead_height_mm: 0.000001,
+                max_bead_height_mm: 0.3,
+            },
             max_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 10.0,
         },
@@ -436,6 +442,7 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             layer_height_mm: 0.2,
             native_shape_error_mm: 0.1,
             bead_width_mm: 0.4,
+            sparse_infill: spiling_contracts::manufacturing::SparseInfillPolicy::Fine,
             perimeter_count: 1,
             infill_fraction: 1.0,
             top_skin_thickness_mm: 0.2,
@@ -457,6 +464,8 @@ pub(crate) fn manufacturing_intent() -> ManufacturingIntent {
             supports: spiling_contracts::manufacturing::SupportPolicy::Disabled,
             seam_policy: spiling_contracts::manufacturing::SeamPolicy::Nearest,
             rectilinear_axis:
+                spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
+            top_skin_axis:
                 spiling_contracts::manufacturing::RectilinearAxisPolicy::AlternatingXY,
         },
     }
@@ -533,6 +542,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
         plan: NormalizedPrintPlan {
             schema_version: MANUFACTURING_SCHEMA_VERSION,
             process_resolution: vec![],
+            sparse_bands: vec![],
             native_geometry: NativeGeometryCoverageSummary {
                 requested_shape_error_mm: 0.1,
                 achieved_shape_error_mm: 0.0,
@@ -558,11 +568,14 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             surface_resolution: vec![],
             layers: vec![PrintLayer {
                 index: 0,
+                lower_z_mm: 0.0,
                 z_mm: 0.2,
                 height_mm: 0.2,
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
                     kind: DepositionKind::BottomSkin,
+                    bead_width_mm: 0.4,
+                    physical_z_mm: [0.0, 0.2],
                     owner: Some(
                         spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
                             skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin,
@@ -704,7 +717,9 @@ fn seam_and_axis_intent_edits_invalidate_and_restore_artifacts_through_history()
     seam.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, -0.8] };
     let mut axis = baseline.clone();
     axis.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
-    for changed in [seam, axis] {
+    let mut top_axis = baseline.clone();
+    top_axis.recipe.top_skin_axis = RectilinearAxisPolicy::Y;
+    for changed in [seam, axis, top_axis] {
         let mut project = manufactured();
         let original = project.snapshot().manufacturing_artifact.clone().unwrap();
         let before = project.info().revision;

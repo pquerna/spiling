@@ -1,8 +1,8 @@
 {
   "printer": {
-    "schema_version": 9,
+    "schema_version": 10,
     "id": "software-cartesian-reference",
-    "revision": "9",
+    "revision": "10",
     "name": "Software Cartesian reference — not machine-ready",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
@@ -83,12 +83,13 @@
       "kind": "diagnostic_body_only"
     },
     "nozzle_diameter_mm": 0.4,
+    "deposition_limits": { "min_bead_width_mm": 0.45, "max_bead_width_mm": 0.45, "min_bead_height_mm": 0.000001, "max_bead_height_mm": 0.30 },
     "max_feed_mm_s": 150,
     "max_volumetric_flow_mm3_s": 12
   },
   "recipe": {
     "id": "software-solid-fill",
-    "revision": "5",
+    "revision": "6",
     "material_id": "nominal-software-filament",
     "material_revision": "1",
     "filament_diameter_mm": 1.75,
@@ -97,6 +98,7 @@
     "bead_width_mm": 0.45,
     "perimeter_count": 2,
     "infill_fraction": 1,
+    "sparse_infill": { "kind": "fine" },
     "top_skin_thickness_mm": 0.8,
     "bottom_skin_thickness_mm": 0.8,
     "print_speed_mm_s": 35,
@@ -125,6 +127,7 @@
     "seam_policy": {
       "kind": "nearest"
     },
+    "top_skin_axis": "alternating_xy",
     "rectilinear_axis": "alternating_xy"
   }
 }

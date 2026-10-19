@@ -6,11 +6,14 @@ import type { ManufacturingIntent } from "../../../packages/protocol/src/generat
 import completeIntent from "../complete-sparse.intent.ts";
 
 const intent = {
-  printer: completeIntent.printer,
+  printer: {
+    ...completeIntent.printer,
+    deposition_limits: { min_bead_width_mm: 0.6, max_bead_width_mm: 0.6, min_bead_height_mm: 0.000001, max_bead_height_mm: 0.4 },
+  },
   recipe: {
     ...completeIntent.recipe,
     id: "native-deadline-tilt",
-    revision: "5",
+    revision: "6",
     layer_height_mm: 0.4,
     bead_width_mm: 0.6,
     perimeter_count: 1,
@@ -32,6 +35,7 @@ const intent = {
     supports: { kind: "disabled" },
     seam_policy: { kind: "nearest" },
     rectilinear_axis: "alternating_xy",
+    top_skin_axis: "alternating_xy",
   },
 } satisfies ManufacturingIntent;
 

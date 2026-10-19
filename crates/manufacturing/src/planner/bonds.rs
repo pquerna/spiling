@@ -50,6 +50,7 @@ pub(super) fn construct(
     domains: &[ProcessDomain],
     paths: &mut Vec<DepositionPath>,
     z: f64,
+    lower_z: f64,
     recipe: &PlanarPrintRecipe,
     segments: &mut usize,
     mut admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
@@ -186,7 +187,7 @@ pub(super) fn construct(
                         point,
                         path.points_mm[1 - end],
                         ends,
-                        recipe.bead_width_mm,
+                        (path.bead_width_mm + recipe.bead_width_mm) * 0.5,
                     )? {
                         path.points_mm[end] = bonded;
                     }
@@ -198,6 +199,8 @@ pub(super) fn construct(
                 .ok_or_else(|| resource("separator segment budget exceeded"))?;
             paths.push(DepositionPath {
                 kind: DepositionKind::SeparatorWall,
+                bead_width_mm: recipe.bead_width_mm,
+                physical_z_mm: [lower_z, z],
                 owner: None,
                 points_mm: Vec::from(ends),
             });
@@ -221,7 +224,7 @@ fn terminal(
             check_cancel(cancel)?;
             boolean::charge(work, 1)?;
             if let Some(point) =
-                support::inward_bond_endpoint(endpoint, other, [edge[0], edge[1]], width)?
+                support::inward_bond_endpoint(endpoint, other, [edge[0], edge[1]], (width + paths[index].bead_width_mm) * 0.5)?
             {
                 return Ok(Some((
                     point,
@@ -240,7 +243,7 @@ fn terminal(
         let stroke = [skin.points_mm[0], skin.points_mm[1]];
         check_cancel(cancel)?;
         boolean::charge(work, 1)?;
-        let Some(point) = support::inward_bond_endpoint(endpoint, other, stroke, width)? else {
+        let Some(point) = support::inward_bond_endpoint(endpoint, other, stroke, (width + skin.bead_width_mm) * 0.5)? else {
             continue;
         };
         for &wall in walls {
@@ -248,7 +251,7 @@ fn terminal(
                 for &skin_end in &stroke {
                     check_cancel(cancel)?;
                     boolean::charge(work, 1)?;
-                    if support::endpoint_bond(skin_end, [edge[0], edge[1]], width)? {
+                    if support::endpoint_bond(skin_end, [edge[0], edge[1]], (skin.bead_width_mm + paths[wall].bead_width_mm) * 0.5)? {
                         return Ok(Some((point,ProcessEndpointBond::Skin{
                             skin_kind:skin.owner.and_then(DepositionOwner::skin_kind).ok_or_else(||invalid("surrounding stroke lost immutable mandatory-skin ownership"))?,
                             process_kind:skin.kind,
@@ -263,6 +266,7 @@ fn terminal(
 }
 
 pub(super) fn unresolved(layer: &PrintLayer) -> ManufacturingError {
+    
     let endpoint = layer
         .region_coverage
         .process_interfaces

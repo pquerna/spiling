@@ -26,6 +26,7 @@ import type {
   ManufacturingIntent,
   ManufacturingArtifactRecord,
   ReplayDisplayDescriptor,
+  SparseBandVeto,
   ProjectRevision,
   FaceRef,
   SurfaceScopeKind,
@@ -63,9 +64,16 @@ export interface SelectedManufacturingIntent {
 export interface ManufacturingLayer {
   index: number;
   z_mm: number;
+  lower_z_mm: number;
   height_mm: number;
   section_z_mm: number;
   deposition_segments: number;
+  sparse_band: {
+    first_layer: number;
+    combined_regions: number[];
+    combined_global: boolean;
+    retained_fine: [SparseBandVeto, number][];
+  } | null;
 }
 
 export const native = {

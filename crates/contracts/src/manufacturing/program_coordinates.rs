@@ -127,3 +127,18 @@ pub fn enclosed_vertical_gap_mm(
     }
     Ok(lower)
 }
+
+/// Guaranteed vertical interior of the associated nominal bead at its actual
+/// XYZ6 top. Unlike an outer clearance hull, this interval can establish strict
+/// positive nominal section overlap. It is not a physical bead measurement.
+pub fn project_xyz6_bead_inner_height_mm(
+    physical_z_mm: [f64; 2],
+) -> Result<[f64; 2], ManufacturingError> {
+    let z = project_xyz6_coordinate_mm(physical_z_mm[1])?;
+    let error = xyz6_coordinate_error_mm(z)?;
+    let height_lower = enclosed_vertical_gap_mm(physical_z_mm[1], physical_z_mm[0])?;
+    let top_upper = -enclosed_vertical_gap_mm(-z, error)?;
+    let lower_inner = -enclosed_vertical_gap_mm(height_lower, top_upper)?;
+    let upper_inner = enclosed_vertical_gap_mm(z, error)?;
+    Ok([lower_inner, upper_inner])
+}

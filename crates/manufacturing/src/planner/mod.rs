@@ -8,6 +8,7 @@ mod classification;
 mod neighborhood;
 use neighborhood::SkinNeighborhoods;
 mod bonds;
+mod combined;
 mod native;
 mod preflight;
 mod region;
@@ -141,6 +142,8 @@ pub(crate) fn plan(
     let mut native_slab_end = 0u32;
     let mut native_slab_start = 0u32;
     let mut native_surfaces = Vec::new();
+    let mut native_invariant = false;
+    let mut native_inner_material = None;
     let mut native_material = None;
     let mut native_material_bytes = 0usize;
     let mut native_contributions = Vec::new();
@@ -171,6 +174,7 @@ pub(crate) fn plan(
             // remain owned and charged by sections/native_surfaces.
             drop(native_material.take());
             native_contributions.clear();
+            drop(native_inner_material.take());
             drop(std::mem::take(&mut native_finished));
             native_required.clear();
             drop(native_occupied_shared.take());
@@ -205,6 +209,8 @@ pub(crate) fn plan(
             sample = schedule[index as usize].sample;
             native_slab_start = index;
             native_slab_end = captured.end;
+            native_invariant = captured.invariant;
+            native_inner_material = captured.inner_material;
             native_material = Some(captured.material);
             native_material_bytes = captured.material_bytes;
             native_contributions = captured.contributions;
@@ -447,9 +453,12 @@ pub(crate) fn plan(
         {
             retained_section_bytes = retained_section_bytes.saturating_add(next_bytes);
         }
+        
         sections.push(SectionSpan {
             start: index,
             end,
+            invariant: native_invariant,
+            inner_material: native_inner_material.clone(),
             material: next,
             process_domains,
             occupied,
@@ -596,6 +605,7 @@ pub(crate) fn plan(
         let z = elevation.z;
         let sample = elevation.sample;
         let height = elevation.height;
+        let top_axis = region::HatchAxis::for_policy(recipe.top_skin_axis, index);
         let current = span_at(&sections, index);
         let below = physical_neighbor(&schedule, index, recipe.bottom_skin_thickness_mm, false)
             .map(|i| span_at(&sections, i));
@@ -605,6 +615,7 @@ pub(crate) fn plan(
             layers.push(PrintLayer {
                 index,
                 z_mm: z,
+                lower_z_mm: elevation.lower_z,
                 height_mm: height,
                 section_z_mm: sample,
                 paths: Vec::new(),
@@ -612,7 +623,7 @@ pub(crate) fn plan(
             });
             continue;
         }
-        let next_key = (current, below, above, height.to_bits());
+        let next_key = (current, below, above, (z - elevation.lower_z).to_bits(), top_axis);
         if key != Some(next_key) {
             // Drop the prior classification before allocating its replacement.
             // The current wall layout survives skin-key changes, not span changes.
@@ -802,7 +813,7 @@ pub(crate) fn plan(
                 .as_ref()
                 .expect("region classification initialized");
             let (paths, proposed) =
-                classified.paths(z, height, axis, recipe, &mut template_segments, cancel)?;
+                classified.paths(z, elevation.lower_z, axis, top_axis, recipe, &mut template_segments, cancel)?;
             let base = skin_retained_points(retained_points, &neighborhoods, &[])?
                 + classified.retained_points()
                 + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
@@ -882,6 +893,8 @@ pub(crate) fn plan(
             paths.push(DepositionPath {
                 kind: path.kind,
                 owner: path.owner,
+                bead_width_mm: path.bead_width_mm,
+                physical_z_mm: [elevation.lower_z, z],
                 points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
             });
         }
@@ -892,6 +905,7 @@ pub(crate) fn plan(
         layers.push(PrintLayer {
             index,
             z_mm: z,
+            lower_z_mm: elevation.lower_z,
             height_mm: height,
             section_z_mm: sample,
             paths,
@@ -997,8 +1011,10 @@ pub(crate) fn plan(
             )?;
             let hatch_layer = region::HatchLayer {
                 z: elevation.z,
-                height: elevation.height,
+                lower_z: elevation.lower_z,
+                height: elevation.z - elevation.lower_z,
                 axis,
+                top_axis: region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
                 recipe,
             };
             let recovering_components = recovery.is_some();
@@ -1034,8 +1050,9 @@ pub(crate) fn plan(
                 classified
                     .paths(
                         elevation.z,
-                        elevation.height,
+                        elevation.lower_z,
                         axis,
+                        region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
                         recipe,
                         segments,
                         cancel,
@@ -1094,6 +1111,7 @@ pub(crate) fn plan(
                 &sections[current].process_domains,
                 &mut candidate.paths,
                 schedule[index].z,
+                schedule[index].lower_z,
                 recipe,
                 segments,
                 classification::fixed_point_budget(base),
@@ -1108,8 +1126,6 @@ pub(crate) fn plan(
     // No-support/no-demand paths never project or retain unused negative-space
     // captures beyond support admission.
     drop(native_coverage.protected_voids);
-    drop(native_coverage.material_proof);
-    drop(prepared_sources);
     if process_captures
         .iter()
         .map(|capture| capture.operations.len())
@@ -1121,8 +1137,9 @@ pub(crate) fn plan(
             "process resolution output limit exceeded",
         ));
     }
-    let result = NormalizedPrintPlan {
+    let mut result = NormalizedPrintPlan {
         schema_version: MANUFACTURING_SCHEMA_VERSION,
+        sparse_bands: Vec::new(),
         process_resolution: process_captures
             .iter()
             .flat_map(|capture| {
@@ -1178,12 +1195,32 @@ pub(crate) fn plan(
         layer_quantization_mm: LAYER_QUANTIZATION_MM,
     };
     result.validate(input.intent)?;
+    combined::combine(
+        &mut result,
+        input.intent,
+        &sections,
+        &schedule,
+        &wall_layouts,
+        &mut neighborhoods,
+        retained_points,
+        &mut admission.geometry_work,
+        retained_support_native_bytes.saturating_add(
+            native::output_bytes(&sections, &Vec::new(), retained_section_bytes)),
+        native_coverage.material_proof.sources(),
+        cancel,
+    )?;
+    result.native_geometry.geometry_work = admission.geometry_work.consumed();
+    result.validate(input.intent)?;
+    drop(native_coverage.material_proof);
+    drop(prepared_sources);
     Ok(result)
 }
 
 struct SectionSpan {
     start: u32,
     end: u32,
+    invariant: bool,
+    inner_material: Option<Arc<Vec<spiling_geometry::NativeInnerMaterialPrism>>>,
     material: Arc<MultiPolygon<f64>>,
     process_domains: Vec<ProcessDomain>,
     // None borrows exact all-Z invariant D. Otherwise this separately owned

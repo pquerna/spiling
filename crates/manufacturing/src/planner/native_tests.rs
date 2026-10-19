@@ -108,6 +108,12 @@ fn intent(supports: bool) -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            deposition_limits: DepositionLimits {
+                min_bead_width_mm: 0.01,
+                max_bead_width_mm: 2.0,
+                min_bead_height_mm: 0.000001,
+                max_bead_height_mm: 0.6,
+            },
             max_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
         },

@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
 pub(super) use anchors::inward_bond_endpoint;
 pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond};
-mod strokes;
+pub(in crate::planner) mod strokes;
 pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
 mod raster;
@@ -23,6 +23,12 @@ pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
     pub(super) process_interfaces: Vec<ProcessInterfaceCoverage>,
+}
+
+fn authored_component_axis(candidate: &RasterCandidate, index: u32, recipe: &PlanarPrintRecipe) -> region::HatchAxis {
+    let top = !candidate.paths.is_empty() && candidate.paths.iter().all(|path|
+        path.owner == Some(DepositionOwner::MandatorySkin { skin: ProcessSkinKind::TopSkin }));
+    region::HatchAxis::for_policy(if top { recipe.top_skin_axis } else { recipe.rectilinear_axis }, index)
 }
 
 fn component_admission<'a>(
@@ -103,17 +109,17 @@ fn component_admission<'a>(
         for gap in anchors.gaps(
             AnchorCandidate {
                 endpoints_mm: [a, b],
-                bead_width_mm: recipe.bead_width_mm,
+                bead_width_mm: path.bead_width_mm,
             },
-            previous.clone(),
-            contacts.clone(),
+            previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+            contacts.clone().filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
             work,
             cancel,
         )? {
             match strokes::gap_kind(
                 gap,
                 (gap.end - gap.start) * length,
-                recipe.bead_width_mm,
+                path.bead_width_mm,
                 recipe.process.max_bridge_span_mm,
             ) {
                 strokes::GapKind::Supported => {}
@@ -332,12 +338,13 @@ pub(super) fn realize(
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
                 let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                    let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
                     component_admission(
                         (
                             candidate,
                             axis,
                             component_budget(retained, scratch)?,
-                            axis != authored_axis,
+                            contact_bridge,
                         ),
                         previous.clone(),
                         std::iter::empty(),
@@ -525,12 +532,13 @@ pub(super) fn realize(
             if object.paths.is_empty() {
                 continue;
             }
-            let lower = program_coordinates::project_xyz6_segment_bead_height_mm(
-                object.z_mm,
-                object.z_mm,
-                object.height_mm,
-            )?[0];
-            floor = Some(floor.map_or(lower, |value| value.min(lower)));
+            for path in &object.paths {
+                let lower = program_coordinates::project_xyz6_bead_height_mm(
+                    path.physical_z_mm[1],
+                    path.physical_z_mm[1] - path.physical_z_mm[0],
+                )?[0];
+                floor = Some(floor.map_or(lower, |value| value.min(lower)));
+            }
         }
         if let Some(floor) = floor {
             nominal.push((index, floor));
@@ -560,16 +568,17 @@ pub(super) fn realize(
     remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     for demand in &demands {
         check_cancel(cancel)?;
+        let demanded_path = &layers[demand.target].paths[demand.failure.path];
         let floor = program_coordinates::project_xyz6_bead_height_mm(
-            layers[demand.target].z_mm,
-            layers[demand.target].height_mm,
+            demanded_path.physical_z_mm[1],
+            demanded_path.physical_z_mm[1] - demanded_path.physical_z_mm[0],
         )?[0];
         let mut contact_top = None;
         for i in (0..demand.target).rev() {
             super::native::charge_support_clearance(&mut work, cancel)?;
             let upper = program_coordinates::project_xyz6_bead_height_mm(
                 layers[i].z_mm,
-                layers[i].height_mm,
+                layers[i].z_mm - layers[i].lower_z_mm,
             )?[1];
             if program_coordinates::enclosed_vertical_gap_mm(floor, upper)? >= z_gap_mm {
                 contact_top = Some(i);
@@ -577,11 +586,22 @@ pub(super) fn realize(
             }
         }
         let Some(top) = contact_top else {
+            
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
-                    "layer {}: no printable support layer fits below the declared Z gap",
-                    demand.target
+                    "layer {}: no printable support layer fits below the declared Z gap {z_gap_mm} mm; demanded {:?} stroke {:?} to {:?}, physical interval {:?} mm, width {} mm, uncovered parameters [{:.9}, {:.9}], span {:.9} mm, emitted object floor {:.9} mm, bed {:.9} mm",
+                    demand.target,
+                    demanded_path.kind,
+                    demanded_path.points_mm[demand.failure.first],
+                    demanded_path.points_mm[demand.failure.last],
+                    demanded_path.physical_z_mm,
+                    demanded_path.bead_width_mm,
+                    demand.failure.start,
+                    demand.failure.end,
+                    demand.failure.span,
+                    floor,
+                    layers[0].lower_z_mm,
                 ),
             ));
         };
@@ -632,7 +652,7 @@ pub(super) fn realize(
                         )
                     })?;
                 if let Some([lower, upper]) = height {
-                    let bed = layers[0].z_mm - layers[0].height_mm;
+                    let bed = layers[0].lower_z_mm;
                     if lower > layers[top].z_mm || upper < bed {
                         continue;
                     }
@@ -674,7 +694,7 @@ pub(super) fn realize(
                         "cumulative protected-void scope work budget exceeded",
                     )
                 })?;
-            let corridor_lower = layers[0].z_mm - layers[0].height_mm;
+            let corridor_lower = layers[0].lower_z_mm;
             let corridor_upper = layers[top].z_mm;
             let relevant = match scope {
                 spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
@@ -716,6 +736,7 @@ pub(super) fn realize(
             let previous = &layers[demand.target - 1];
             let nearest_a = nearest_stroke([a[0], a[1]], previous.paths.iter(), &mut work, cancel)?;
             let nearest_b = nearest_stroke([b[0], b[1]], previous.paths.iter(), &mut work, cancel)?;
+            
             return Err(error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
                 format!(
@@ -748,7 +769,7 @@ pub(super) fn realize(
             let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
                 layers[i].z_mm,
                 layers[i].z_mm,
-                layers[i].height_mm,
+                layers[i].z_mm - layers[i].lower_z_mm,
             )?[1];
             // Higher portions are subsets of the already bed-anchored lower
             // column. Do not lower/remap its original eligible contact top.
@@ -848,8 +869,10 @@ pub(super) fn realize(
                 density,
                 &region::HatchLayer {
                     z: layer.z_mm,
-                    height: layer.height_mm,
+                    lower_z: layer.lower_z_mm,
+                    height: layer.z_mm - layer.lower_z_mm,
                     axis,
+                    top_axis: axis,
                     recipe,
                 },
                 *segments,
@@ -901,12 +924,14 @@ pub(super) fn realize(
         }
         *segments += path_segments(&paths);
         anchors.set_budget(0);
-        let bead_area = bead_area(layer, recipe);
         layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
         layer.region_coverage.support_nominal_deposition_volume_mm3 = paths
             .iter()
-            .flat_map(|path| path.points_mm.windows(2))
-            .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]) * bead_area)
+            .map(|path| {
+                path.points_mm.windows(2)
+                    .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]))
+                    .sum::<f64>() * bead_area(path, layer.index, recipe)
+            })
             .sum();
         object_start[i] = paths.len();
         paths.append(&mut layer.paths);
@@ -945,12 +970,13 @@ pub(super) fn realize(
             let mut staged_segments = without_old;
             anchors.set_budget(0);
             let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
                 component_admission(
                     (
                         candidate,
                         axis,
                         component_budget(retained_regions, scratch)?,
-                        axis != authored_axis,
+                        contact_bridge,
                     ),
                     previous.clone(),
                     contact.clone(),
@@ -1007,12 +1033,13 @@ pub(super) fn realize(
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
                 let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
+                    let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
                     component_admission(
                         (
                             candidate,
                             axis,
                             component_budget(retained_regions, scratch)?,
-                            axis != authored_axis,
+                            contact_bridge,
                         ),
                         previous.clone(),
                         contact.clone(),
@@ -1134,7 +1161,7 @@ pub(super) fn realize(
                     program_coordinates::project_xyz6_segment_bead_height_mm(
                         edge[0][2],
                         edge[1][2],
-                        layers[target].height_mm,
+                        path.physical_z_mm[1] - path.physical_z_mm[0],
                     )?[0],
                 );
             }
@@ -1149,7 +1176,7 @@ pub(super) fn realize(
                     program_coordinates::project_xyz6_segment_bead_height_mm(
                         edge[0][2],
                         edge[1][2],
-                        layers[top].height_mm,
+                        path.physical_z_mm[1] - path.physical_z_mm[0],
                     )?[1],
                 );
             }
@@ -1275,6 +1302,27 @@ fn coalesce_bridge_rows<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
+    let mut joined = false;
+    for axis in [context.axis, context.axis.orthogonal()] {
+        let fixed = usize::from(axis == region::HatchAxis::X);
+        if !candidate.whole_rows.iter().any(|row| row.points_mm.len() == 2
+            && row.points_mm[0][fixed] == row.points_mm[1][fixed]) { continue; }
+        joined |= coalesce_bridge_rows_on_axis(candidate, BridgeRowContext {
+            axis, retained_points: context.retained_points, recipe: context.recipe,
+        }, previous.clone(), contacts.clone(), anchors, work, cancel)?;
+    }
+    Ok(joined)
+}
+
+fn coalesce_bridge_rows_on_axis<'a>(
+    candidate: &mut RasterCandidate,
+    context: BridgeRowContext<'_>,
+    previous: impl Iterator<Item = &'a DepositionPath> + Clone,
+    contacts: impl Iterator<Item = &'a DepositionPath> + Clone,
+    anchors: &mut AnchorWorkspace,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<bool, ManufacturingError> {
     let BridgeRowContext {
         axis,
         retained_points,
@@ -1373,7 +1421,8 @@ fn coalesce_bridge_rows<'a>(
         }
     }
     let mut joined = false;
-    for mut row in std::mem::take(&mut candidate.whole_rows) {
+    for mut row in candidate.whole_rows.extract_if(.., |row|
+        row.points_mm.len() == 2 && row.points_mm[0][fixed] == row.points_mm[1][fixed]) {
         check_cancel(cancel)?;
         let key = grid(row.points_mm[0][fixed])?;
         let lo = grid(row.points_mm[0][along])?.min(grid(row.points_mm[1][along])?);
@@ -1398,7 +1447,10 @@ fn coalesce_bridge_rows<'a>(
         while cursor < end {
             check_cancel(cancel)?;
             let (_, start, stop, index) = pieces[cursor];
-            if ownership[index] == Ownership::Frozen {
+            if ownership[index] == Ownership::Frozen
+                || candidate.paths[index].bead_width_mm != row.bead_width_mm
+                || candidate.paths[index].physical_z_mm != row.physical_z_mm
+            {
                 if stop > lo && start < hi {
                     let points = &candidate.paths[index].points_mm;
                     let required_end = points[0][along].max(points[1][along]);
@@ -1423,7 +1475,11 @@ fn coalesce_bridge_rows<'a>(
             while cursor < end {
                 check_cancel(cancel)?;
                 let (_, start, stop, index) = pieces[cursor];
-                if ownership[index] == Ownership::Frozen && stop > lo && start < hi {
+                if (ownership[index] == Ownership::Frozen
+                    || candidate.paths[index].bead_width_mm != row.bead_width_mm
+                    || candidate.paths[index].physical_z_mm != row.physical_z_mm)
+                    && stop > lo && start < hi
+                {
                     // Retain frozen rows as required barriers so a neighbor
                     // cannot consume their geometry as an unrequired extension.
                     break;
@@ -1453,9 +1509,9 @@ fn coalesce_bridge_rows<'a>(
                     // connector still needs independent previous-anchor proof.
                     if !(AnchorCandidate {
                         endpoints_mm: [previous_piece.points_mm[0], previous_piece.points_mm[1]],
-                        bead_width_mm: recipe.bead_width_mm,
+                        bead_width_mm: previous_piece.bead_width_mm,
                     })
-                    .emitted_endpoint_footprint_overlaps(endpoint, recipe.bead_width_mm)?
+                    .emitted_endpoint_footprint_overlaps(endpoint, current_piece.bead_width_mm)?
                     {
                         break;
                     }
@@ -1529,14 +1585,14 @@ fn coalesce_bridge_rows<'a>(
                             p
                         },
                     ],
-                    bead_width_mm: recipe.bead_width_mm,
+                    bead_width_mm: row.bead_width_mm,
                 };
                 let length = extension_end - extension_start;
                 let mut start = ((required_start - extension_start) / length).clamp(0.0, 1.0);
                 let mut end = ((required_end - extension_start) / length).clamp(0.0, 1.0);
                 let mut anchored = true;
                 let gaps =
-                    anchors.gaps(whole, previous.clone(), std::iter::empty(), work, cancel)?;
+                    anchors.gaps(whole, previous.clone().filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]), std::iter::empty(), work, cancel)?;
                 for gap in gaps {
                     if gap.start <= start && start < gap.end {
                         anchored &= gap.left;
@@ -1575,14 +1631,14 @@ fn coalesce_bridge_rows<'a>(
             if let Some(left) = left_emitted_end
                 && emitted_start < grid(required_start)?
                 && anchors::emitted_coordinate_separation_lower_mm(emitted_start, left)?
-                    <= recipe.bead_width_mm
+                    <= row.bead_width_mm
             {
                 continue;
             }
             if let Some(right) = next_required_start
                 && emitted_end > grid(required_end)?
                 && anchors::emitted_coordinate_separation_lower_mm(grid(right)?, emitted_end)?
-                    <= recipe.bead_width_mm
+                    <= row.bead_width_mm
             {
                 continue;
             }
@@ -1637,14 +1693,14 @@ fn admission_error(
     )
 }
 
-fn object_volumes(layers: &mut [PrintLayer], recipe: &PlanarPrintRecipe) {
+pub(in crate::planner) fn object_volumes(layers: &mut [PrintLayer], recipe: &PlanarPrintRecipe) {
     for layer in layers {
-        let area = bead_area(layer, recipe);
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
             .paths
             .iter()
             .filter(|path| !support_role(path.kind))
             .map(|path| {
+                let area = bead_area(path, layer.index, recipe);
                 let factor = if path.kind == DepositionKind::Bridge {
                     recipe.process.bridge_flow_factor
                 } else {
@@ -1725,11 +1781,11 @@ fn nearest_stroke<'a>(
     Ok(nearest)
 }
 
-fn bead_area(layer: &PrintLayer, recipe: &PlanarPrintRecipe) -> f64 {
-    let h = layer.height_mm;
-    ((recipe.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
+fn bead_area(path: &DepositionPath, index: u32, recipe: &PlanarPrintRecipe) -> f64 {
+    let h = path.physical_z_mm[1] - path.physical_z_mm[0];
+    ((path.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
         * recipe.flow_multiplier
-        * if layer.index == 0 {
+        * if index == 0 {
             recipe.process.first_layer_flow_factor
         } else {
             1.0
@@ -1845,6 +1901,8 @@ mod tests {
     fn row(kind: DepositionKind, a: f64, b: f64, z: f64) -> DepositionPath {
         DepositionPath {
             kind,
+            bead_width_mm: 0.6,
+            physical_z_mm: [z - 0.4, z],
             owner: match kind {
                 DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
                     skin: ProcessSkinKind::BottomSkin,
@@ -2039,6 +2097,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let previous = [3.0, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            bead_width_mm: 0.6,
+            physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
@@ -2152,6 +2212,8 @@ mod tests {
                 .flatten()
                 .map(|x| DepositionPath {
                     kind: DepositionKind::SparseFill,
+                    bead_width_mm: 0.6,
+                    physical_z_mm: [0.0, 0.4],
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                 })
@@ -2243,6 +2305,7 @@ mod tests {
         ] {
             recipe.bead_width_mm = width;
             let orient = |mut path: DepositionPath| {
+                path.bead_width_mm = width;
                 if axis == region::HatchAxis::Y {
                     for point in &mut path.points_mm {
                         point.swap(0, 1);
@@ -2253,6 +2316,8 @@ mod tests {
             let previous = [2.5, 7.5].map(|x| {
                 orient(DepositionPath {
                     kind: DepositionKind::SparseFill,
+                    bead_width_mm: width,
+                    physical_z_mm: [0.0, 0.4],
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                 })
@@ -2350,13 +2415,17 @@ mod tests {
         let required = vec![row(DepositionKind::TopSkin, 3.2, 6.8, 0.8)];
         let prior = [2.5, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
+            bead_width_mm: 0.6,
+            physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
         });
         let layer = region::HatchLayer {
             z: 0.8,
+            lower_z: 0.4,
             height: 0.4,
             axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::X,
             recipe: &recipe,
         };
         for missing_anchor in [false, true] {
@@ -2474,7 +2543,7 @@ mod tests {
             &cancel,
         )
         .unwrap()
-        .paths(0.4, 0.4, region::HatchAxis::X, &recipe, &mut 0, &cancel)
+        .paths(0.4, 0.0, region::HatchAxis::X, region::HatchAxis::X, &recipe, &mut 0, &cancel)
         .unwrap()
         .0;
         let upcoming = ClassifiedRegions::new(
@@ -2486,7 +2555,7 @@ mod tests {
             &cancel,
         )
         .unwrap()
-        .paths(0.8, 0.4, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
+        .paths(0.8, 0.4, region::HatchAxis::Y, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
         .unwrap()
         .0
         .into_iter()
@@ -2536,8 +2605,10 @@ mod tests {
                 &required,
                 &region::HatchLayer {
                     z: 0.8,
+                    lower_z: 0.4,
                     height: 0.4,
                     axis: region::HatchAxis::X,
+                    top_axis: region::HatchAxis::X,
                     recipe: &recipe,
                 },
                 &mut 0,
@@ -2592,12 +2663,16 @@ mod tests {
         let recipe = crate::planner::tests::recipe(0.1);
         let layer = region::HatchLayer {
             z: 0.8,
+            lower_z: 0.4,
             height: 0.4,
             axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::X,
             recipe: &recipe,
         };
         let required = vec![DepositionPath {
             kind: DepositionKind::TopSkin,
+            bead_width_mm: recipe.bead_width_mm,
+            physical_z_mm: [0.4, 0.8],
             owner: Some(DepositionOwner::MandatorySkin {
                 skin: ProcessSkinKind::TopSkin,
             }),

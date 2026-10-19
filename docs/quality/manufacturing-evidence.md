@@ -153,6 +153,49 @@ Replay view controls use the existing bounded working/single-flight admission:
 layer, cursor and source-visibility values commit only after the GPU update
 succeeds. A refused update cannot advertise a source-hidden draw that never happened.
 
+## Fine exterior, combined eligible sparse interior
+
+[`planner::combined`](../../crates/manufacturing/src/planner/combined.rs) consumes
+the actual admitted fine alternative after ordinary analysis, without replacing
+the global fine schedule. It stages bounded same-nozzle/same-material regional
+SparseFill or genuine regional Bridge paths; walls, skins, holes, relief and the
+authorized separator remain fine. Effective source/profile identity crosses
+per-layer regional indices; an index alone is not band ownership.
+
+[`NativeInnerMaterialPrism`](../../crates/geometry/src/analysis/joint/inner_prism.rs)
+owns full-height inner material for a hashed filled superset. Only direct
+per-role radial displacement plus complete filled-map authority qualifies;
+a general radial metric seal or outer envelope does not. All native outer/hole
+boundaries, including a boundary wholly inside the candidate, participate.
+Actual outer XYZ6 Z scope and strict bead/projection/error margin are mandatory.
+Final-D/field invariance, skins/events, process ownership and actual deposited
+support remain separate gates. The [native decision](../adr/004-native-geometry-parity.md#constant-inner-material-for-eligible-deposition)
+and [band contract](../protocol/manufacturing.md#same-nozzle-combined-sparse-bands)
+own the theorem and construction details.
+
+Nominal width and physical `[lower,upper]` are path data throughout hatch pitch,
+stadium area/volume, capsules, clearance, backend E/flow and independent replay.
+H is the difference of true contiguous schedule boundaries, not clamped layer
+height or nominal interval count. Actual band-base strokes prove lower anchors;
+future coarse never stabilizes earlier fine walls. Each fine separator interval
+needs strict nominal inner-core contact plus independent outer overlap consent.
+Printing-time fine walls/rows and landing are reproved; a genuine fine landing
+Bridge is counted at its actual process feed/flow, not hidden as unchanged timing.
+
+Only known eligibility/support/core-bond failures retain fine with a reason.
+Numerical/topological hatch refusal, indeterminate work, exhaustion, stale work
+and cancellation propagate. Replay exposes actual commands separately from
+nominal dimensions and bounded band reasons; **Show source bodies** must be off
+to inspect the interior. These are associations/model assumptions, not measured
+beads, physical adhesion, strength, fit qualification or machine readiness.
+
+For comparisons use the actual admitted fine alternative with identical source,
+pose, profile, zones and complete fine Z schedule. Independent native jobs can
+adaptively refine differently within declared bounds; same nominal height is
+not a controlled schedule. Account the whole command stream, including travel,
+prime and retract/recover overhead. Commanded-motion lower bounds exclude
+acceleration/heating/homing and are not measured print-time speedups.
+
 ## Walls, skins, bridges and supports
 
 [`WallLayout`](../../crates/manufacturing/src/planner/classification.rs) admits wall
@@ -169,10 +212,13 @@ accounting; native M/C identity cannot authorize D reuse.
 Classification clips to current fill. Skin reaches beneath upcoming pocket walls
 with half-bead wall overlap; unchanged vertical sections gain no extra skin.
 
-Required job-wide seam and rectilinear-axis intent uses the existing full-intent
-Apply/history transaction. [`HatchAxis::for_policy`](../../crates/manufacturing/src/planner/region.rs)
-resolves X/Y or alternating XY/YX from actual scheduled index. Template reuse
-keys the resolved axis inside the existing final-D/classification/height identity.
+Required seam, ordinary rectilinear axis and independent top-skin axis use the
+existing full-intent Apply/history transaction.
+[`HatchAxis::for_policy`](../../crates/manufacturing/src/planner/region.rs)
+resolves X/Y or alternating XY/YX from the actual scheduled index. TopSkin uses
+its explicit role policy; regional sparse/Separator construction keeps its
+source-bound ordinary axis and phase. Template reuse keys the resolved axis
+within final-D/classification/physical-height dependencies.
 Actual-stroke recovery selects only complete all-genuine Bridge row runs from
 the same borrowed role owner/density, rooted in actual original XY demand.
 Core ownership is exactly that original polygon intersected with the selected
@@ -254,8 +300,8 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project8/manufacturing9/process2/surface3, planner13,
-emitter/verifier5 and SPLR4; executable constants and exact native pin remain authoritative.
+Current identities are project9/manufacturing10/process2/surface3, planner14,
+emitter/verifier6 and SPLR5; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both
 independent parts also complete the hardware workbench flow with native picking.
@@ -285,13 +331,15 @@ labels `base_whole_owned_resolution` separately from `finite_box_intent`.
 
 The bounded within-part reference is the unchanged
 [`occt-rounded-housing-mm.step`](../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step):
-a housing with a denser end and lighter body, **not a bracket**. Generate its
-explicit fixed-X recipe with `pnpm manufacturing:intent
-fixtures/manufacturing/housing-two-zone.intent.ts NEW_INTENT.json`. Use an owned
+a housing with a denser end and lighter body, **not a bracket**. Its paired
+`housing-h1-fine.intent.ts` and `housing-h1-combined.intent.ts` references share
+one explicit fine schedule/profile/top-skin policy and differ only in sparse
+combination intent. Generate inert data with `pnpm manufacturing:intent
+fixtures/manufacturing/housing-h1-combined.intent.ts NEW_INTENT.json`. Use an owned
 byte-identical source copy and exclusive output paths:
 
 ```sh
-target/debug/spiling-cli project create NEW_PROJECT \
+RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
   --import OWNED_SOURCE.step --intent NEW_INTENT.json --center-on-bed 1 \
   --process-set 1 definition 0.20 \
   --process-set-box 1 definition -1 -1 -1 8 19 11 0.60 separator-wall \
@@ -305,10 +353,12 @@ Z reserve. Edit bounds/fractions with visible Apply, inspect explicit permanent
 separator approval, then Undo/Redo. Save, remove only the owned original source
 copy, and use fresh `project inspect --verify --manufacturing-out NEW_DIRECTORY
 --replay-out NEW_SPLR` to inspect/export read-only from stored program authority.
-The hardware runner's `--process-zones --manufacturing-source
+The hardware runner's `--process-zones --combine-sparse --manufacturing-source
 fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step
---evidence-directory NEW_DIRECTORY` exercises this flow. **Show source bodies**
-must be off for the mid-layer interior proof; opaque source PNGs are not evidence.
+--evidence-directory NEW_DIRECTORY` exercises this flow. Launch engine/CLI with
+`RAYON_NUM_THREADS=1`; this bounds execution, not geometric tolerances. Turn
+**Show source bodies** off for actual coarse-height/owner and retained-fine
+inspection; opaque source PNGs are not evidence.
 
 Measure ALL adjacent actual regional rows in source-relative interior windows:
 pitch is `((width-height)*height + pi*(height/2)^2)/(height*fraction)`. Separately

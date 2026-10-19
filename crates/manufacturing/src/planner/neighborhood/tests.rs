@@ -25,6 +25,8 @@ fn sections(materials: impl IntoIterator<Item = MultiPolygon<f64>>) -> Vec<Secti
             occupied: None,
             start: i as u32,
             end: i as u32 + 1,
+            invariant: true,
+            inner_material: None,
             source_area_mm2: material.unsigned_area(),
             material: Arc::new(material),
             process_domains: Vec::new(),

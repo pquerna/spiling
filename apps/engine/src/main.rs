@@ -646,7 +646,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(jobs::internal)?,
         ),
         project_capabilities: [
-            "recoverable_projects_v8",
+            spiling_contracts::PROJECT_FORMAT_CAPABILITY,
             "project_transactions_v1",
             "project_read_only_v1",
             "source_face_surface_finish_v3",
@@ -660,7 +660,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "planar_software_compile_v1",
             "independent_program_replay_v1",
             "immutable_bundle_bytestream_v1",
-            "manufacturing_schema9",
+            spiling_contracts::MANUFACTURING_SCHEMA_CAPABILITY,
             "mapped_image_relief_v1",
             "varying_z_material_domains_v1",
             "bounded_vertical_rib_construction_v1",

@@ -62,6 +62,8 @@ export interface IntentDraft {
   policyValues: Record<string, string>;
   seamPolicyKind: SeamPolicy["kind"];
   preferredDirection: [string, string];
+  sparseInfillKind: "fine" | "combine_eligible";
+  sparseMaxHeight: string;
 }
 export const intentIdentity = (intent: ManufacturingIntent | null) => JSON.stringify(intent);
 export function makeDraft(
@@ -72,6 +74,9 @@ export function makeDraft(
     intent: structuredClone(intent),
     base: intentIdentity(base),
     seamPolicyKind: intent.recipe.seam_policy.kind,
+    sparseInfillKind: intent.recipe.sparse_infill.kind,
+    sparseMaxHeight: String(intent.recipe.sparse_infill.kind === "combine_eligible"
+      ? intent.recipe.sparse_infill.max_height_mm : Math.min(0.3, intent.printer.deposition_limits.max_bead_height_mm)),
     preferredDirection: intent.recipe.seam_policy.kind === "preferred_build_direction"
       ? intent.recipe.seam_policy.xy.map(String) as [string, string]
       : ["", ""],
@@ -131,6 +136,14 @@ export function draftIntent(draft: IntentDraft): ManufacturingIntent {
       intent.recipe as unknown as Record<string, unknown>);
     target[last] = value;
   }
+  const maxHeight = Number(draft.sparseMaxHeight);
+  if (draft.sparseInfillKind === "combine_eligible" &&
+      (!draft.sparseMaxHeight.trim() || !Number.isFinite(maxHeight) || maxHeight <= 0 ||
+       maxHeight > intent.printer.deposition_limits.max_bead_height_mm))
+    throw new Error("Combined sparse maximum height must be positive and within the declared software deposition envelope.");
+  intent.recipe.sparse_infill = draft.sparseInfillKind === "fine"
+    ? { kind: "fine" }
+    : { kind: "combine_eligible", max_height_mm: maxHeight };
   intent.recipe.seam_policy = draft.seamPolicyKind === "nearest"
     ? { kind: "nearest" }
     : { kind: "preferred_build_direction", xy: preferredBuildDirection(draft) };

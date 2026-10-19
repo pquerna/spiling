@@ -28,6 +28,15 @@ fn intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            deposition_limits: spiling_contracts::manufacturing::DepositionLimits {
+                min_bead_width_mm: 0.6,
+                max_bead_width_mm: 0.6,
+                min_bead_height_mm: 0.000001,
+                // Test-only software envelope encloses the .4 nominal
+                // schedule's actual subtraction intervals; this is not a
+                // maximum-height boundary-behavior test.
+                max_bead_height_mm: 0.5,
+            },
             max_feed_mm_s: 200.0,
             max_volumetric_flow_mm3_s: 100.0,
         },
@@ -40,9 +49,11 @@ fn intent() -> ManufacturingIntent {
             filament_diameter_mm: 1.75,
             layer_height_mm: 0.4,
             bead_width_mm: 0.6,
+            sparse_infill: spiling_contracts::manufacturing::SparseInfillPolicy::Fine,
             perimeter_count: 1,
             seam_policy: SeamPolicy::Nearest,
             rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
+            top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
             infill_fraction: 1.0,
             top_skin_thickness_mm: 0.8,
             bottom_skin_thickness_mm: 0.8,
@@ -288,6 +299,7 @@ fn native_process_occurrences_keep_actual_row_cadence_skins_and_protected_bore()
     .unwrap();
     intent.recipe.infill_fraction = 0.4;
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
     assert_eq!(
         preflight(&scene.input(&intent), &AtomicBool::new(false))
@@ -365,6 +377,7 @@ fn native_process_noop_intent_preserves_actual_commands_and_hatch_phase() {
     ))
     .unwrap();
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     assert_eq!(
         preflight(&scene.input(&intent), &AtomicBool::new(false))
             .unwrap()
@@ -762,6 +775,7 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
     .unwrap();
     intent.recipe.infill_fraction = 0.20;
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     let bundle = scene.compile(&intent).unwrap();
     let motion = actual_motion(&bundle);
     let mut tested = 0;
@@ -810,6 +824,8 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
     layer.paths.push(DepositionPath {
         kind: DepositionKind::SeparatorWall,
         owner: None,
+        bead_width_mm: intent.recipe.bead_width_mm,
+        physical_z_mm: [layer.lower_z_mm, layer.z_mm],
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
     });
     assert_reemitted_interface_refuses(forged, &intent);
@@ -820,6 +836,7 @@ fn box_requirements_refuse_unauthorized_extra_face_and_positive_sliver() {
     let mut recipe = intent();
     recipe.recipe.infill_fraction = 0.20;
     recipe.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    recipe.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     for (bounds, authorized) in [
         ([[-1., -1., -1.], [8., 21., 9.]], false),
         ([[-1., -1., -1.], [8., 12., 9.]], true),
@@ -841,6 +858,7 @@ fn box_requirements_refuse_unauthorized_extra_face_and_positive_sliver() {
         let mut scene = Scene::new(HOLE, &[pose(40., 40., 0.)]);
         author_end_zone(&mut scene, [[-1., -1., -1.], [8., 21., 9.]], true);
         recipe.recipe.rectilinear_axis = axis;
+        recipe.recipe.top_skin_axis = axis;
         assert_eq!(
             scene.compile(&recipe).unwrap_err().code,
             ManufacturingErrorCode::InvalidSpecification
@@ -855,6 +873,7 @@ fn native_process_support_regeneration_keeps_actual_occurrence_row_pitch() {
     scene.set_process_fractions(&[0.20, 0.60]);
     let mut intent = intent();
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
     intent.printer.capabilities.generated_supports = true;
     intent.recipe.supports = SupportPolicy::Breakaway {
         density: 0.3,
@@ -894,6 +913,7 @@ fn authored_rectilinear_axes_change_actual_skin_and_interior_motion() {
             let mut intent = intent();
             intent.recipe.infill_fraction = fraction;
             intent.recipe.rectilinear_axis = policy;
+            intent.recipe.top_skin_axis = policy;
             let bundle = scene.compile(&intent).unwrap();
             let motion = actual_motion(&bundle);
             let mut roles = std::collections::BTreeSet::new();
@@ -943,6 +963,7 @@ fn authored_housing_bridge_recovery_keeps_supported_fill_on_its_axis() {
     ))
     .unwrap();
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::Y;
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [0.6, 0.8] };
     let bundle = scene.compile(&intent).unwrap();
     let motion = actual_motion(&bundle);
@@ -1303,6 +1324,8 @@ fn unsupported_thin_support_envelope_and_invalid_profiles_are_errors() {
     let scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
     let mut data = intent();
     data.recipe.bead_width_mm = 12.0;
+    data.printer.deposition_limits.min_bead_width_mm = 12.0;
+    data.printer.deposition_limits.max_bead_width_mm = 12.0;
     data.recipe.print_speed_mm_s = 1.0;
     assert_eq!(
         scene.compile(&data).err().unwrap().code,
@@ -1464,11 +1487,15 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         DepositionPath {
             kind: DepositionKind::SolidFill,
             owner: None,
+            bead_width_mm: intent.recipe.bead_width_mm,
+            physical_z_mm: [0.0, 0.4],
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
         },
         DepositionPath {
             kind: DepositionKind::SolidFill,
             owner: None,
+            bead_width_mm: intent.recipe.bead_width_mm,
+            physical_z_mm: [0.0, 0.4],
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
         },
     ];

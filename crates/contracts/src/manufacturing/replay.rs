@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
 
-//! SPLR schema 4 admission. This is display integrity, not program verification.
+//! SPLR schema 5 admission. Associations are nominal plan data, not measurements.
 use super::*;
 use crate::ArtifactView;
 
-pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 16 * 1024 * 1024;
+pub const MAX_REPLAY_DISPLAY_BYTES: u32 = 32 * 1024 * 1024;
 pub const MAX_REPLAY_EVENTS: u32 = 300_004;
 pub const REPLAY_HEADER_BYTES: usize = 96;
-pub const REPLAY_RECORD_BYTES: usize = 48;
-pub const REPLAY_SCHEMA_VERSION: u32 = 4;
+pub const REPLAY_RECORD_BYTES: usize = 80;
+pub const REPLAY_SCHEMA_VERSION: u32 = 5;
 pub const REPLAY_MEDIA_TYPE: &str = "application/x-spiling-replay-motion";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -199,7 +199,7 @@ pub fn validate_replay_display(
         || u16_at(bytes, 4) != REPLAY_SCHEMA_VERSION as u16
         || u16_at(bytes, 6) != 96
         || u32_at(bytes, 8) != info.event_count
-        || u32_at(bytes, 12) != 48
+        || u32_at(bytes, 12) != REPLAY_RECORD_BYTES as u32
         || u32_at(bytes, 16) != info.deposition_count
         || u32_at(bytes, 20) != info.travel_count
         || u32_at(bytes, 24) != info.layer_count
@@ -252,11 +252,29 @@ pub fn validate_replay_display(
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
             || kind > 13
-            || flags != u8::from(index != 0)
+            || flags != (u8::from(index != 0) | if matches!(kind, 1..=5 | 8..=10 | 13) { 2 } else { 0 })
             || (index == 0 && (kind != 0 && kind != 6))
             || (index == 0 && kind == 0 && next_layer != 0)
         {
             return Err(corrupt("invalid replay record fields"));
+        }
+        let width = f64_at(record, 48);
+        let lower = f64_at(record, 56);
+        let upper = f64_at(record, 64);
+        let owner = u32_at(record, 72);
+        if u32_at(record, 76) != 0 {
+            return Err(corrupt("reserved replay association bytes"));
+        }
+        if flags & 2 != 0 {
+            if !width.is_finite() || width <= 0.0
+                || !lower.is_finite() || !upper.is_finite() || lower >= upper
+                || (upper - position[2]).abs() > 0.000_000_500_001
+                || (owner < u32::MAX - 1 && owner as usize >= MAX_PROCESS_REGIONS)
+            {
+                return Err(corrupt("invalid nominal deposition association"));
+            }
+        } else if record[48..72].iter().any(|b| *b != 0) || owner != u32::MAX {
+            return Err(corrupt("nondeposition has an association"));
         }
         if kind == 6 || kind == 7 {
             if info.lifecycle_count != 4 || next_layer != u16::MAX as u32 {
@@ -377,7 +395,7 @@ mod tests {
         bytes[..4].copy_from_slice(b"SPLR");
         bytes[4..6].copy_from_slice(&(REPLAY_SCHEMA_VERSION as u16).to_le_bytes());
         bytes[6..8].copy_from_slice(&96u16.to_le_bytes());
-        for (offset, value) in [(8, 4u32), (12, 48), (16, 2), (20, 2), (24, 1)] {
+        for (offset, value) in [(8, 4u32), (12, 80), (16, 2), (20, 2), (24, 1)] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
         for axis in 0..3 {
@@ -400,7 +418,7 @@ mod tests {
             bytes.extend_from_slice(&600.0f64.to_le_bytes());
             bytes.extend_from_slice(&(index as u32 + 5).to_le_bytes());
             bytes.extend_from_slice(&0u16.to_le_bytes());
-            bytes.extend_from_slice(&[kind, u8::from(index != 0)]);
+            append_association(&mut bytes, index, kind, position[2]);
         }
         let hash = SourceHash::from_bytes(&bytes);
         let descriptor = ReplayDisplayDescriptor {
@@ -427,6 +445,40 @@ mod tests {
             },
         };
         (bytes, descriptor)
+    }
+    fn append_association(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64) {
+        let associated = matches!(kind, 1..=5 | 8..=10 | 13);
+        bytes.extend_from_slice(&[kind, u8::from(index != 0) | if associated { 2 } else { 0 }]);
+        for value in if associated { [0.45, z - 0.2, z] } else { [0.0; 3] } {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    #[test]
+    fn nominal_associations_require_deposition_and_bounded_finite_dimensions() {
+        let (bytes, descriptor) = encoded();
+        for (record, offset, value) in [
+            (0, 48, 1.0f64),
+            (1, 48, 0.0),
+            (1, 56, f64::NEG_INFINITY),
+            (1, 64, 42.0),
+        ] {
+            let mut bad = bytes.clone();
+            let start = REPLAY_HEADER_BYTES + record * REPLAY_RECORD_BYTES + offset;
+            bad[start..start + 8].copy_from_slice(&value.to_le_bytes());
+            let mut rebound = descriptor.clone();
+            rebind(&bad, &mut rebound);
+            assert!(validate_replay_display(&bad, &rebound).is_err());
+        }
+        for (record, owner) in [(0, 0), (1, MAX_PROCESS_REGIONS as u32)] {
+            let mut bad = bytes.clone();
+            let start = REPLAY_HEADER_BYTES + record * REPLAY_RECORD_BYTES + 72;
+            bad[start..start + 4].copy_from_slice(&owner.to_le_bytes());
+            let mut rebound = descriptor.clone();
+            rebind(&bad, &mut rebound);
+            assert!(validate_replay_display(&bad, &rebound).is_err());
+        }
     }
     fn rebind(bytes: &[u8], descriptor: &mut ReplayDisplayDescriptor) {
         let hash = SourceHash::from_bytes(bytes);
@@ -457,7 +509,7 @@ mod tests {
             bytes.extend_from_slice(&600.0f64.to_le_bytes());
             bytes.extend_from_slice(&(index as u32 + 1).to_le_bytes());
             bytes.extend_from_slice(&layer.to_le_bytes());
-            bytes.extend_from_slice(&[kind, u8::from(index != 0)]);
+            append_association(&mut bytes, index, kind, position[2]);
         }
         for (offset, value) in [(8, 10u32), (28, 4), (88, 2)] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -470,14 +522,14 @@ mod tests {
         descriptor.resource.size_bytes = bytes.len().to_string();
         rebind(&bytes, &mut descriptor);
         validate_replay_display(&bytes, &descriptor).unwrap();
-        for (offset, value) in [(192 + 47, 0u8), (192 + 44, 1), (192 + 46, 12)] {
+        for (offset, value) in [(256 + 47, 0u8), (256 + 44, 1), (256 + 46, 12)] {
             let mut bad = bytes.clone();
             bad[offset] = value;
             let mut rebound = descriptor.clone();
             rebind(&bad, &mut rebound);
             assert!(validate_replay_display(&bad, &rebound).is_err());
         }
-        for (offset, value) in [(192, 0.1f64), (288 + 24, 1.1)] {
+        for (offset, value) in [(256, 0.1f64), (416 + 24, 1.1)] {
             let mut bad = bytes.clone();
             bad[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             let mut rebound = descriptor.clone();
@@ -488,21 +540,21 @@ mod tests {
     #[test]
     fn stationary_process_roles_and_exact_recovery_are_checked() {
         let (mut bytes, mut descriptor) = encoded();
-        let mut events = Vec::with_capacity(bytes.len() + 96);
-        events.extend_from_slice(&bytes[..144]);
+        let mut events = Vec::with_capacity(bytes.len() + 160);
+        events.extend_from_slice(&bytes[..176]);
         for (e, kind, line) in [(-0.8f64, 11u8, 6u32), (0.0, 12, 7)] {
-            let mut record = bytes[96..144].to_vec();
+            let mut record = bytes[96..176].to_vec();
             record[24..32].copy_from_slice(&e.to_le_bytes());
             record[40..44].copy_from_slice(&line.to_le_bytes());
             record[46] = kind;
             record[47] = 1;
             events.extend_from_slice(&record);
         }
-        for record in bytes[144..].as_chunks_mut::<48>().0 {
+        for record in bytes[176..].as_chunks_mut::<80>().0 {
             let line = u32_at(record, 40) + 2;
             record[40..44].copy_from_slice(&line.to_le_bytes());
         }
-        events.extend_from_slice(&bytes[144..]);
+        events.extend_from_slice(&bytes[176..]);
         events[8..12].copy_from_slice(&6u32.to_le_bytes());
         events[88..92].copy_from_slice(&2u32.to_le_bytes());
         descriptor.info.event_count = 6;
@@ -510,7 +562,7 @@ mod tests {
         descriptor.resource.size_bytes = events.len().to_string();
         rebind(&events, &mut descriptor);
         validate_replay_display(&events, &descriptor).unwrap();
-        for (offset, value) in [(144, 0.1f64), (144 + 24, 0.0), (192 + 24, 0.1)] {
+        for (offset, value) in [(176, 0.1f64), (176 + 24, 0.0), (256 + 24, 0.1)] {
             let mut corrupted = events.clone();
             corrupted[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             let mut rebound = descriptor.clone();
@@ -519,7 +571,7 @@ mod tests {
         }
         for kind in [8, 9, 10, 13] {
             let mut role = events.clone();
-            role[240 + 46] = kind;
+            role[336 + 46] = kind;
             let mut rebound = descriptor.clone();
             rebind(&role, &mut rebound);
             validate_replay_display(&role, &rebound).unwrap();
@@ -533,11 +585,11 @@ mod tests {
             (28, 1),
             (80, 1),
             (96 + 47, 1),
-            (96 + 48 + 47, 0),
+            (96 + 80 + 47, 0),
             (96 + 46, 1),
-            (96 + 2 * 48 + 46, 3),
-            (96 + 2 * 48 + 44, 1),
-            (96 + 48 + 46, 14),
+            (96 + 2 * 80 + 46, 3),
+            (96 + 2 * 80 + 44, 1),
+            (96 + 80 + 46, 14),
         ] {
             let mut corrupted = bytes.clone();
             corrupted[offset] = value;
@@ -551,8 +603,8 @@ mod tests {
         for (offset, value) in [
             (96, f64::NAN),
             (96 + 32, 0.0),
-            (96 + 2 * 48 + 24, 1.5),
-            (96 + 48 + 24, 0.0),
+            (96 + 2 * 80 + 24, 1.5),
+            (96 + 80 + 24, 0.0),
         ] {
             let mut corrupted = bytes.clone();
             corrupted[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
@@ -571,7 +623,7 @@ mod tests {
         old_descriptor.info.schema_version = 3;
         assert!(old_descriptor.validate().is_err());
         let mut corrupted = bytes.clone();
-        corrupted[96 + 48 + 40..96 + 48 + 44].copy_from_slice(&5u32.to_le_bytes());
+        corrupted[96 + 80 + 40..96 + 80 + 44].copy_from_slice(&5u32.to_le_bytes());
         let mut rebound = descriptor.clone();
         rebind(&corrupted, &mut rebound);
         assert!(validate_replay_display(&corrupted, &rebound).is_err());

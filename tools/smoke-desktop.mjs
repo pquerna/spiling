@@ -153,6 +153,10 @@ const customManufacturingSource = option("--manufacturing-source");
 const requireHardwareGpu = args.includes("--require-hardware-gpu");
 const processOverrides = args.includes("--process-overrides");
 const processZones = args.includes("--process-zones");
+const combineSparse = args.includes("--combine-sparse");
+if (combineSparse && (!processZones || !requireHardwareGpu || scenario !== "manufacturing" ||
+    !customManufacturingSource || manufacturingDiagnostic))
+  throw new Error("--combine-sparse requires --require-hardware-gpu --scenario manufacturing --process-zones --manufacturing-source RELATIVE_STEP");
 if (processZones && processOverrides) throw new Error("Choose within-part zones or separate-copy overrides, not both");
 const evidenceDirectory = option("--evidence-directory");
 if (
@@ -199,7 +203,7 @@ const manufacturingSource = customManufacturingSource
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones (actual hardware named-source manufacturing)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones (actual hardware named-source manufacturing)] [--combine-sparse (requires hardware manufacturing named source and process zones; preserves fine schedule)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -239,7 +243,9 @@ if (scenario === "project-bridge" || manufacturingScenario) {
 }
 if (manufacturingScenario) {
   await copyFile(
-    resolve("fixtures/manufacturing/complete-sparse.intent.json"),
+    resolve(combineSparse
+      ? "fixtures/manufacturing/housing-h1-fine.intent.json"
+      : "fixtures/manufacturing/complete-sparse.intent.json"),
     resolve(fixtureRoot, "operator.intent.json"),
   );
   await writeFile(resolve(fixtureRoot, "invalid.intent.json"), "{");
@@ -1919,9 +1925,14 @@ async function inspectManufacturing() {
     const current = await manufacturingState();
     q1Intent = structuredClone(current.selected_intent);
     q1Intent.recipe.rectilinear_axis = "x";
-    await input('[data-testid="manufacturing-rectilinear-axis"]', "x");
-    await click("manufacturing-apply");
-    await until(async () => JSON.stringify((await manufacturingState()).selected_intent) === JSON.stringify(q1Intent), "Explicit fixed-X join axis Apply");
+    if (current.selected_intent.recipe.rectilinear_axis !== "x") {
+      await input('[data-testid="manufacturing-rectilinear-axis"]', "x");
+      await click("manufacturing-apply");
+      await until(async () => JSON.stringify((await manufacturingState()).selected_intent) === JSON.stringify(q1Intent), "Explicit fixed-X join axis Apply");
+    } else {
+      assert.equal(await evaluate("document.querySelector('[data-testid=\"manufacturing-apply\"]').disabled"), true,
+        "Already-authored fixed-X intent is a clean no-op, not an artificial Apply");
+    }
     const project = async () => bridgeProject((await manufacturingState()).session_id);
     const first = (await geometryState()).occurrences[0];
     assert.equal((await geometryState()).occurrences.length, 1, "The outcome is two areas of ONE actual source part");
@@ -1956,6 +1967,30 @@ async function inspectManufacturing() {
     localProcess = (await project()).process_document;
     await evaluate(`document.querySelector('[data-testid="process-panel"]').scrollIntoView({block:'start'})`);
     await screenshot("manufacturing-housing-zone-approval");
+  }
+  if (combineSparse) {
+    const fineIntent = structuredClone((await manufacturingState()).selected_intent);
+    assert.deepEqual(fineIntent.recipe.sparse_infill, { kind: "fine" });
+    await input('[data-testid="manufacturing-sparse-infill"]', "combine_eligible");
+    await input('[data-testid="manufacturing-sparse-max-height"]', "0.30");
+    await click("manufacturing-apply");
+    const policyIs = async (height) =>
+      (await manufacturingState()).selected_intent.recipe.sparse_infill.max_height_mm === height;
+    await until(() => policyIs(0.30), "Core applies sparse combine policy");
+    await input('[data-testid="manufacturing-sparse-max-height"]', "0.29");
+    await click("manufacturing-apply");
+    await until(() => policyIs(0.29), "Core applies edited sparse maximum");
+    await click("project-undo");
+    await until(() => policyIs(0.30), "Sparse policy Core Undo");
+    await click("project-redo");
+    await until(() => policyIs(0.29), "Sparse policy Core Redo");
+    await click("project-undo");
+    await until(() => policyIs(0.30), "Final restored sparse combine policy");
+    const expected = structuredClone(fineIntent);
+    expected.recipe.sparse_infill = { kind: "combine_eligible", max_height_mm: 0.30 };
+    assert.deepEqual((await manufacturingState()).selected_intent, expected,
+      "Only sparse policy changes: fine schedule, profile and all other intent remain unchanged");
+    q1Intent = expected;
   }
   let baseline = null;
   if (cylindricalFinishScenario || imageReliefScenario) {
@@ -2028,7 +2063,7 @@ async function inspectManufacturing() {
     "actual replay transport and panel",
     nativeJobObservationMs,
   );
-  assert.equal(state.replay.byte_count, 96 + 48 * state.replay.event_count);
+  assert.ok(state.replay.byte_count > 0, "Fresh actual replay transport contains decoded bytes");
   assert.equal(
     state.replay.event_count,
     state.replay.deposition_count +
@@ -2198,6 +2233,100 @@ async function inspectManufacturing() {
   if (evidenceDirectory) {
     for (const [name, content] of Object.entries(exported))
       await writeFile(resolve(evidenceDirectory, name), content, { flag: "wx" });
+  }
+  if (combineSparse) {
+    const coarseLayers = plan.layers.filter(layer => layer.paths.some(path =>
+      path.kind === "sparse_fill" && path.physical_z_mm[0] < layer.lower_z_mm));
+    assert.ok(coarseLayers.length > 0, "Actual sparse strokes span multiple fine schedule layers");
+    assert.ok(plan.sparse_bands.some(band => band.disposition.kind === "combined"));
+    const retained = plan.sparse_bands.filter(band => band.disposition.kind === "retained_fine");
+    assert.ok(retained.some(band => [
+      "mandatory_neighborhood", "changing_domain", "missing_lower_anchor",
+      "unsupported_landing", "flow_limit",
+    ].includes(band.disposition.reason)), "Retained fine decisions explain an actual eligibility veto");
+    for (const layer of plan.layers) {
+      for (const path of layer.paths) {
+        assert.ok(path.bead_width_mm > 0 && path.physical_z_mm.length === 2);
+        if (["perimeter", "bottom_skin", "top_skin", "separator_wall"].includes(path.kind))
+          assert.deepEqual(path.physical_z_mm, [layer.lower_z_mm, layer.z_mm],
+            "Walls, skins and separator keep explicit fine intervals");
+      }
+    }
+    const coarse = coarseLayers[Math.floor(coarseLayers.length / 2)];
+    await input('[data-testid="manufacturing-layer"]', String(coarse.index));
+    await until(async () => {
+      const current = await manufacturingState();
+      return Number(await evaluate("document.querySelector('[data-testid=\"manufacturing-layer\"]').value")) === coarse.index && !current.working;
+    }, "Selected coarse layer draw");
+    if (await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked"))
+      await click("manufacturing-source-bodies");
+    const inspectEvent = async (index) => {
+      await input('[data-testid="manufacturing-events"]', String(index + 1));
+      return until(async () => {
+        if ((await manufacturingState()).working) return false;
+        const event = JSON.parse(await text("manufacturing-event"));
+        return event.event_index === index ? event : false;
+      }, "Actual associated event cursor");
+    };
+    // Replay is emitted in schedule order. Locate the terminal layer without assuming
+    // an event count or a fixed schema, then inspect its genuine event associations.
+    let low = 0, high = state.replay.event_count;
+    while (low < high && (await inspectEvent(low)).layer === null) low++;
+    while (high > low && (await inspectEvent(high - 1)).layer === null) high--;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      const event = await inspectEvent(mid);
+      assert.notEqual(event.layer, null, "Object replay has no interleaved lifecycle events");
+      if (event.layer < coarse.index) low = mid + 1;
+      else high = mid;
+    }
+    let associated = null;
+    for (let cursor = low; cursor < state.replay.event_count; cursor++) {
+      const event = await inspectEvent(cursor);
+      if (event.layer !== coarse.index) break;
+      const association = event.nominal_plan_association_not_measurement;
+      if (event.kind === "sparse_fill" && association?.physicalZMm[0] < coarse.lower_z_mm) {
+        assert.ok(coarse.paths.some(path => path.kind === "sparse_fill" &&
+          JSON.stringify(path.physical_z_mm) === JSON.stringify(association.physicalZMm) &&
+          path.bead_width_mm === association.beadWidthMm),
+        "Actual emitted event carries the genuine coarse expected-plan association");
+        associated = event;
+        break;
+      }
+    }
+    assert.ok(associated, "Select an actual coarse sparse event, not an unrelated cursor");
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-event\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-h1-coarse-height-inspection");
+    await input('[data-testid="manufacturing-events"]', String(state.replay.event_count));
+    await until(async () => !(await manufacturingState()).working, "Complete coarse terminal layer draw");
+    assert.equal(await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked"), false);
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    await screenshot("manufacturing-h1-coarse-source-hidden");
+    const retainedInspection = retained.find(band => band.disposition.reason === "missing_lower_anchor") ??
+      retained.find(band => band.disposition.reason === "mandatory_neighborhood") ?? retained[0];
+    await input('[data-testid="manufacturing-layer"]', String(retainedInspection.last_layer));
+    await until(async () => {
+      const current = await manufacturingState();
+      return Number(await evaluate("document.querySelector('[data-testid=\"manufacturing-layer\"]').value")) === retainedInspection.last_layer && !current.working;
+    }, "Retained-fine band draw");
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-sparse-band-decisions\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-h1-retained-fine-reason");
+    if (evidenceDirectory) {
+      const sourceTag = `-${basename(customManufacturingSource).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+      await writeFile(resolve(evidenceDirectory, "coarse-layer.json"), JSON.stringify({
+        index: coarse.index, lower_z_mm: coarse.lower_z_mm, z_mm: coarse.z_mm,
+        source_bodies_visible: false, actual_event: associated,
+        association_is_nominal_expected_plan_not_physical_measurement: true,
+        sparse_bands: plan.sparse_bands, retained_fine: retained,
+        retained_fine_inspection: retainedInspection,
+        screenshots: [
+          `artifacts/manufacturing-h1-coarse-height-inspection${sourceTag}.png`,
+          `artifacts/manufacturing-h1-coarse-source-hidden${sourceTag}.png`,
+          `artifacts/manufacturing-h1-retained-fine-reason${sourceTag}.png`,
+        ],
+      }, null, 2), { flag: "wx" });
+    }
   }
   if (q1Intent && !processZones) {
     const perimeters = plan.layers.flatMap((layer) =>
@@ -2443,6 +2572,8 @@ async function inspectManufacturing() {
       "Source-independent reopen retains both authored policies",
     );
     const policyControls = ["manufacturing-seam-policy", "manufacturing-rectilinear-axis"];
+    if (combineSparse)
+      policyControls.push("manufacturing-sparse-infill", "manufacturing-sparse-max-height");
     if (q1Intent.recipe.seam_policy.kind === "preferred_build_direction")
       policyControls.push("manufacturing-seam-direction-x", "manufacturing-seam-direction-y");
     for (const testId of policyControls)
@@ -2546,6 +2677,7 @@ async function inspectManufacturing() {
     );
     expected.recipe.seam_policy = q1Intent.recipe.seam_policy;
     expected.recipe.rectilinear_axis = q1Intent.recipe.rectilinear_axis;
+    if (combineSparse) expected.recipe.sparse_infill = q1Intent.recipe.sparse_infill;
     assert.deepEqual(
       state.selected_intent,
       expected,

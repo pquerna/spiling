@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: OSL-3.0
  * Licensed under the Open Software License version 3.0
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   MAX_REPLAY_DISPLAY_BYTES,
   MAX_REPLAY_EVENTS,
@@ -40,6 +40,24 @@ export function ManufacturingPanel({
   const { status, draft, inspection, fresh, available, writable } = manufacturing;
   const result = inspection?.result,
     replay = inspection?.replay;
+  const sparseMetrics = useMemo(() => {
+    if (!replay || !inspection) return null;
+    const schedule = new Map(inspection.layers.map(row => [row.index, row.lower_z_mm]));
+    let strokes = 0, combined = 0, min = Infinity, max = 0;
+    for (let index = 0; index < replay.eventCount; index++) {
+      if (replay.kind(index) !== 5) continue;
+      const association = replay.association(index)!;
+      const height = association.physicalZMm[1] - association.physicalZMm[0];
+      strokes++;
+      if (association.physicalZMm[0] < (schedule.get(replay.layer(index)) ?? -Infinity)) combined++;
+      min = Math.min(min, height);
+      max = Math.max(max, height);
+    }
+    return { strokes, combined, min: strokes ? min : 0, max };
+  }, [replay, inspection]);
+  const sparseBands = useMemo(() => inspection?.layers.filter(row => row.sparse_band) ?? [], [inspection]);
+  const selectedSparseBand = manufacturing.layer === null ? null : sparseBands.find(row =>
+    row.sparse_band!.first_layer <= manufacturing.layer! && manufacturing.layer! <= row.index);
   const emptyLayer =
     manufacturing.layer !== null &&
     inspection?.layers.find((row) => row.index === manufacturing.layer)?.deposition_segments === 0;
@@ -245,6 +263,23 @@ export function ManufacturingPanel({
                 />
               </label>
             ))}
+            <label>
+              Sparse infill schedule
+              <select data-testid="manufacturing-sparse-infill"
+                value={draft.sparseInfillKind}
+                onChange={(event) => manufacturing.editSparseInfill(event.target.value as "fine" | "combine_eligible", draft.sparseMaxHeight)}>
+                <option value="fine">Fine — every eligible schedule layer</option>
+                <option value="combine_eligible">Combine eligible — fixed-width sparse only</option>
+              </select>
+            </label>
+            {draft.sparseInfillKind === "combine_eligible" && <label>
+              Maximum associated sparse stroke height (mm)
+              <input type="number" step="any" data-testid="manufacturing-sparse-max-height"
+                value={draft.sparseMaxHeight}
+                onChange={(event) => manufacturing.editSparseInfill(draft.sparseInfillKind, event.target.value)} />
+            </label>}
+            <p>Global fine layer schedule, walls, skins and bridges are unchanged. Combining is
+              eligibility-gated; declared deposition limits are software envelopes, not physical qualification.</p>
             {policyScalarFields(draft.intent).map(([key, label]) => (
               <label key={key}>
                 {label}
@@ -304,10 +339,24 @@ export function ManufacturingPanel({
                 <option value="alternating_yx">Alternating Y/X</option>
               </select>
             </label>
+            <label>
+              Top-skin rectilinear axis
+              <select
+                data-testid="manufacturing-top-skin-axis"
+                value={draft.intent.recipe.top_skin_axis}
+                onChange={(event) => manufacturing.editTopSkinAxis(event.target.value as RectilinearAxisPolicy)}
+              >
+                <option value="x">X</option>
+                <option value="y">Y</option>
+                <option value="alternating_xy">Alternating X/Y</option>
+                <option value="alternating_yx">Alternating Y/X</option>
+              </select>
+            </label>
             <p>
               Preferred direction chooses perimeter starts at existing vertices; it does not add
-              seam geometry. Rectilinear axes are in placed build/machine XY. Bridge and support
-              paths can retain admitted orientation exceptions.
+              seam geometry. Rectilinear axes are in placed build/machine XY. Top-skin orientation
+              is independent of regional sparse fill. Bridge and support paths can retain admitted
+              orientation exceptions.
             </p>
           </fieldset>
           <p>
@@ -720,6 +769,7 @@ export function ManufacturingPanel({
                   <th>Z</th>
                   <th>Actual thickness</th>
                   <th>Native section Z</th>
+                  <th>Sparse-band admission ending here</th>
                 </tr>
               </thead>
               <tbody>
@@ -727,8 +777,14 @@ export function ManufacturingPanel({
                   <tr key={row.index}>
                     <td>{row.index}</td>
                     <td>{row.z_mm}</td>
-                    <td>{row.height_mm}</td>
+                    <td>{row.z_mm - row.lower_z_mm}</td>
                     <td>{row.section_z_mm}</td>
+                    <td>{row.sparse_band && <>
+                      Layers {row.sparse_band.first_layer}–{row.index}: combined regional owners{" "}
+                      {row.sparse_band.combined_regions.join(", ") || (row.sparse_band.combined_global ? "whole interior" : "none")};
+                      {" "}retained fine: {row.sparse_band.retained_fine.map(([reason, count]) =>
+                        `${reason.replaceAll("_", " ")} (${count})`).join("; ") || "none"}.
+                    </>}</td>
                   </tr>
                 ))}
               </tbody>
@@ -750,6 +806,24 @@ export function ManufacturingPanel({
                 {replay.layerCount} object layers. Positions, E and F come from decoded program
                 bytes, not planned paths.
               </p>
+              {sparseMetrics && <p data-testid="manufacturing-sparse-association-metrics">
+                Sparse strokes: {sparseMetrics.strokes}; associated height exceeds owning fine layer:
+                {" "}{sparseMetrics.combined}; nominal associated height range {sparseMetrics.min.toFixed(6)}
+                –{sparseMetrics.max.toFixed(6)} mm. Sparse colors progress green to amber with associated
+                height/width; walls and skins retain their separate role colors. Inspect each event’s
+                nominal width, physical-Z interval and regional owner below. These are verified
+                expected-plan associations, not measured physical bead dimensions.
+              </p>}
+              {sparseBands.length > 0 && <p data-testid="manufacturing-sparse-band-decisions">
+                {selectedSparseBand ? <>
+                  This physical band spans layers {selectedSparseBand.sparse_band!.first_layer}–{selectedSparseBand.index}.
+                  {" "}Combined regional owners: {selectedSparseBand.sparse_band!.combined_regions.join(", ") ||
+                    (selectedSparseBand.sparse_band!.combined_global ? "whole interior" : "none")}.
+                  {" "}Retained fine: {selectedSparseBand.sparse_band!.retained_fine.map(([reason, count]) =>
+                    `${reason.replaceAll("_", " ")} (${count})`).join("; ") || "none"}.
+                </> : <>Select a layer to inspect its band decision; the layer-accounting table lists all bands.</>}
+                {" "}Decisions describe admitted software construction, not physical support or adhesion.
+              </p>}
               <p>
                 Packed roles distinguish object walls/skins/fill/bridge, support/interface, travel,
                 lifecycle and prime. Retract/recover are stationary process events, not deposited
@@ -854,6 +928,7 @@ export function ManufacturingPanel({
                       position_mm: replay.position(event),
                       absolute_extrusion_mm: replay.extrusion(event),
                       feed_mm_min: replay.feed(event),
+                      nominal_plan_association_not_measurement: replay.association(event),
                     },
                     null,
                     2,

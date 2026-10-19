@@ -744,6 +744,7 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                     .collect::<Result<_, String>>()?,
                 capabilities: required(value.capabilities, "printer capabilities")?.try_into()?,
                 nozzle_diameter_mm: value.nozzle_diameter_mm,
+                deposition_limits: required(value.deposition_limits, "deposition limits")?.try_into()?,
                 max_feed_mm_s: value.max_feed_mm_s,
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
                 workflow: required(value.workflow, "job workflow")?.try_into()?,
@@ -770,10 +771,58 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
                 .collect::<Result<_, String>>()?,
             capabilities: Some(value.capabilities.try_into()?),
             nozzle_diameter_mm: value.nozzle_diameter_mm,
+            deposition_limits: Some(value.deposition_limits.try_into()?),
             max_feed_mm_s: value.max_feed_mm_s,
             max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
             workflow: Some(value.workflow.try_into()?),
         })
+    }
+}
+impl TryFrom<rpc::DepositionLimits> for DepositionLimits {
+    type Error = String;
+    fn try_from(value: rpc::DepositionLimits) -> Result<Self, String> {
+        valid(Self {
+            min_bead_width_mm: value.min_bead_width_mm,
+            max_bead_width_mm: value.max_bead_width_mm,
+            min_bead_height_mm: value.min_bead_height_mm,
+            max_bead_height_mm: value.max_bead_height_mm,
+        }, Self::validate)
+    }
+}
+impl TryFrom<DepositionLimits> for rpc::DepositionLimits {
+    type Error = String;
+    fn try_from(value: DepositionLimits) -> Result<Self, String> {
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self {
+            min_bead_width_mm: value.min_bead_width_mm,
+            max_bead_width_mm: value.max_bead_width_mm,
+            min_bead_height_mm: value.min_bead_height_mm,
+            max_bead_height_mm: value.max_bead_height_mm,
+        })
+    }
+}
+impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
+    type Error = String;
+    fn try_from(value: rpc::SparseInfillPolicy) -> Result<Self, String> {
+        use rpc::sparse_infill_policy::Policy;
+        valid(match required(value.policy, "sparse infill policy selection")? {
+            Policy::Fine(_) => Self::Fine,
+            Policy::CombineEligible(policy) => Self::CombineEligible {
+                max_height_mm: policy.max_height_mm,
+            },
+        }, Self::validate)
+    }
+}
+impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
+    type Error = String;
+    fn try_from(value: SparseInfillPolicy) -> Result<Self, String> {
+        use rpc::sparse_infill_policy::Policy;
+        value.validate().map_err(|e| e.to_string())?;
+        Ok(Self { policy: Some(match value {
+            SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
+            SparseInfillPolicy::CombineEligible { max_height_mm } =>
+                Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm }),
+        }) })
     }
 }
 impl TryFrom<rpc::SeamPolicy> for SeamPolicy {
@@ -854,9 +903,13 @@ impl TryFrom<rpc::PlanarPrintRecipe> for PlanarPrintRecipe {
                 bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
                 process: required(value.process, "process policy")?.try_into()?,
                 supports: required(value.supports, "support policy")?.try_into()?,
+                sparse_infill: required(value.sparse_infill, "sparse infill policy")?.try_into()?,
                 seam_policy: required(value.seam_policy, "seam policy")?.try_into()?,
                 rectilinear_axis: rpc::RectilinearAxisPolicy::try_from(value.rectilinear_axis)
                     .map_err(|_| "unknown rectilinear axis policy")?
+                    .try_into()?,
+                top_skin_axis: rpc::RectilinearAxisPolicy::try_from(value.top_skin_axis)
+                    .map_err(|_| "unknown top skin axis policy")?
                     .try_into()?,
             },
             Self::validate,
@@ -885,8 +938,10 @@ impl TryFrom<PlanarPrintRecipe> for rpc::PlanarPrintRecipe {
             bottom_skin_thickness_mm: value.bottom_skin_thickness_mm,
             process: Some(value.process.try_into()?),
             supports: Some(value.supports.try_into()?),
+            sparse_infill: Some(value.sparse_infill.try_into()?),
             seam_policy: Some(value.seam_policy.try_into()?),
             rectilinear_axis: rpc::RectilinearAxisPolicy::try_from(value.rectilinear_axis)? as i32,
+            top_skin_axis: rpc::RectilinearAxisPolicy::try_from(value.top_skin_axis)? as i32,
         })
     }
 }
@@ -1296,6 +1351,50 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn h1_wire_requires_limits_and_explicit_sparse_policy() {
+        use prost::Message;
+        let wire = rpc::ManufacturingIntent::try_from(intent()).unwrap();
+        let mut missing = wire.clone();
+        missing.printer.as_mut().unwrap().deposition_limits = None;
+        assert!(ManufacturingIntent::try_from(missing).is_err());
+        for policy in [
+            None,
+            Some(rpc::SparseInfillPolicy { policy: None }),
+            Some(rpc::SparseInfillPolicy::decode([0x1a, 0x00].as_slice()).unwrap()),
+        ] {
+            let mut missing = wire.clone();
+            missing.recipe.as_mut().unwrap().sparse_infill = policy;
+            assert!(ManufacturingIntent::try_from(missing).is_err());
+        }
+        for max_height_mm in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            let policy = SparseInfillPolicy::CombineEligible { max_height_mm };
+            assert!(rpc::SparseInfillPolicy::try_from(policy).is_err());
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().sparse_infill = Some(rpc::SparseInfillPolicy {
+                policy: Some(rpc::sparse_infill_policy::Policy::CombineEligible(
+                    rpc::CombineEligibleSparseInfill { max_height_mm },
+                )),
+            });
+            assert!(ManufacturingIntent::try_from(invalid).is_err());
+        }
+        let mut invalid = wire.clone();
+        invalid.printer.as_mut().unwrap().deposition_limits.as_mut().unwrap()
+            .min_bead_width_mm = 0.5;
+        assert!(ManufacturingIntent::try_from(invalid).is_err());
+        let mut invalid = wire.clone();
+        invalid.printer.as_mut().unwrap().deposition_limits.as_mut().unwrap()
+            .max_bead_height_mm = 0.1;
+        assert!(ManufacturingIntent::try_from(invalid).is_err());
+        for policy in [SparseInfillPolicy::Fine,
+            SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 }] {
+            let mut value = intent();
+            value.recipe.sparse_infill = policy;
+            let encoded = rpc::ManufacturingIntent::try_from(value.clone()).unwrap();
+            assert_eq!(ManufacturingIntent::try_from(encoded).unwrap(), value);
+        }
+    }
+
+    #[test]
     fn consumed_recipe_wire_rejects_missing_unknown_and_invalid_policies() {
         use prost::Message;
         let wire = rpc::ManufacturingIntent::try_from(intent()).unwrap();
@@ -1312,6 +1411,9 @@ mod tests {
         for rectilinear_axis in [0, -1, i32::MAX] {
             let mut invalid = wire.clone();
             invalid.recipe.as_mut().unwrap().rectilinear_axis = rectilinear_axis;
+            assert!(ManufacturingIntent::try_from(invalid).is_err());
+            let mut invalid = wire.clone();
+            invalid.recipe.as_mut().unwrap().top_skin_axis = rectilinear_axis;
             assert!(ManufacturingIntent::try_from(invalid).is_err());
         }
         for xy in [

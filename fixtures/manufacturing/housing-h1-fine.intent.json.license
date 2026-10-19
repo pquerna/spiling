@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+
+Original software-only H1 rounded-housing evaluation intent. Fine and combined inputs share all geometry, physical settings, fixed-X separator hatch and source-zone phase; only sparse_infill differs. Declared deposition limits are not physical qualification.

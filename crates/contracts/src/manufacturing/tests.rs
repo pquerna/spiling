@@ -46,6 +46,10 @@ fn intent() -> ManufacturingIntent {
             },
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
+            deposition_limits: DepositionLimits {
+                min_bead_width_mm: 0.45, max_bead_width_mm: 0.45,
+                min_bead_height_mm: 0.000001, max_bead_height_mm: 0.30,
+            },
             max_feed_mm_s: 150.0,
             max_volumetric_flow_mm3_s: 15.0,
         },
@@ -58,6 +62,7 @@ fn intent() -> ManufacturingIntent {
             layer_height_mm: 0.2,
             native_shape_error_mm: 0.02,
             bead_width_mm: 0.45,
+            sparse_infill: SparseInfillPolicy::Fine,
             perimeter_count: 2,
             infill_fraction: 1.0,
             top_skin_thickness_mm: 0.6,
@@ -79,6 +84,7 @@ fn intent() -> ManufacturingIntent {
             supports: SupportPolicy::Disabled,
             seam_policy: SeamPolicy::Nearest,
             rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
+            top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
         },
     }
 }
@@ -687,33 +693,33 @@ fn accepted_coverage_binds_recipe_occurrences_schedule_and_visible_summary() {
 }
 
 fn plan() -> NormalizedPrintPlan {
-    NormalizedPrintPlan {
-        schema_version: MANUFACTURING_SCHEMA_VERSION,
-        process_resolution: vec![],
-        sampling_tolerance_mm: 0.005,
-        surface_tolerance_mm: 0.001,
-        offset_tolerance_mm: 0.005,
-        layer_quantization_mm: 0.000001,
-        surface_resolution: vec![],
-        native_geometry: native_geometry(),
-        layers: vec![PrintLayer {
-            index: 0,
-            z_mm: 5.2,
-            height_mm: 0.2,
-            section_z_mm: 5.1,
-            region_coverage: coverage(),
-            paths: vec![DepositionPath {
-                kind: DepositionKind::Perimeter,
-                owner: None,
-                points_mm: vec![
-                    [10.0, 10.0, 5.2],
-                    [20.0, 10.0, 5.2],
-                    [20.0, 20.0, 5.2],
-                    [10.0, 10.0, 5.2],
-                ],
-            }],
+    NormalizedPrintPlan { schema_version: MANUFACTURING_SCHEMA_VERSION, sparse_bands: vec![], process_resolution: vec![],
+    sampling_tolerance_mm: 0.005,
+    surface_tolerance_mm: 0.001,
+    offset_tolerance_mm: 0.005,
+    layer_quantization_mm: 0.000001,
+    surface_resolution: vec![],
+    native_geometry: native_geometry(),
+    layers: vec![PrintLayer {
+        index: 0,
+        z_mm: 5.2,
+        lower_z_mm: 5.0,
+        height_mm: 0.2,
+        section_z_mm: 5.1,
+        region_coverage: coverage(),
+        paths: vec![DepositionPath {
+            kind: DepositionKind::Perimeter,
+            owner: None,
+            bead_width_mm: 0.45,
+            physical_z_mm: [5.0, 5.2],
+            points_mm: vec![
+                [10.0, 10.0, 5.2],
+                [20.0, 10.0, 5.2],
+                [20.0, 20.0, 5.2],
+                [10.0, 10.0, 5.2],
+            ],
         }],
-    }
+    }], }
 }
 fn bundle() -> ManufacturingBundle {
     let (project_id, definitions, occurrences) = inputs();
@@ -745,8 +751,8 @@ fn bundle() -> ManufacturingBundle {
                 revision: "pinned".into(),
             },
             planner_version: "contract-test-planner".into(),
-            emitter_version: "5".into(),
-            verifier_version: "5".into(),
+            emitter_version: "contract-test-emitter".into(),
+            verifier_version: "contract-test-verifier".into(),
         },
         plan: plan(),
         program: "; arbitrary bytes do not imply replay success\n".into(),
@@ -1035,6 +1041,7 @@ fn ordinary_deposition_rejects_orthogonal_and_diagonal_segments_for_each_axis_po
     ] {
         let mut data = intent();
         data.recipe.rectilinear_axis = policy;
+        data.recipe.top_skin_axis = policy;
         for kind in [
             DepositionKind::BottomSkin,
             DepositionKind::TopSkin,
@@ -1154,6 +1161,8 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
         let mut accepted = plan();
         accepted.layers[0].paths.push(DepositionPath {
             kind,
+            bead_width_mm: 0.45,
+            physical_z_mm: [5.0, 5.2],
             owner: match kind {
                 DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
                     skin: ProcessSkinKind::BottomSkin,
@@ -1490,25 +1499,22 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
             PrintLayer {
                 index: index as u32,
                 z_mm,
+                lower_z_mm: 5.0 + index as f64 * 0.2,
                 height_mm: 0.2,
                 section_z_mm: 5.0 + (index as f64 + 0.5) * 0.2,
                 region_coverage: coverage(),
                 paths: counts
                     .iter()
-                    .map(|count| DepositionPath {
-                        kind: DepositionKind::SolidFill,
-                        owner: None,
-                        points_mm: (0..=*count)
-                            .map(|point| {
-                                let delta = (point % 2) as f64;
-                                if index.is_multiple_of(2) {
-                                    [10.0 + delta, 10.0, z_mm]
-                                } else {
-                                    [10.0, 10.0 + delta, z_mm]
-                                }
-                            })
-                            .collect(),
-                    })
+                    .map(|count| DepositionPath { kind: DepositionKind::SolidFill, owner: None, bead_width_mm: 0.45, physical_z_mm: [5.0 + index as f64 * 0.2, z_mm], points_mm: (0..=*count)
+                        .map(|point| {
+                            let delta = (point % 2) as f64;
+                            if index.is_multiple_of(2) {
+                                [10.0 + delta, 10.0, z_mm]
+                            } else {
+                                [10.0, 10.0 + delta, z_mm]
+                            }
+                        })
+                        .collect() })
                     .collect(),
             }
         })
@@ -1635,105 +1641,58 @@ fn empty_and_single_point_paths_cannot_bypass_cumulative_admission() {
 #[test]
 fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
     let expected = segmented_plan(&[&[1]]);
-    let coverage = serde_json::to_string(&expected.layers[0].region_coverage).unwrap();
-    let native_geometry = serde_json::to_string(&expected.native_geometry).unwrap();
-    let points = r#"[[10,10,5.2],[11,10,5.2]]"#;
-    let path = format!(r#"{{"points_mm":{points},"kind":"solid_fill","owner":null}}"#);
-    let layer = format!(
-        r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
-    );
-    let wrap = |layer: &str| {
-        format!(
-            r#"{{"native_geometry":{native_geometry},"surface_resolution":[],"process_resolution":[],"layers":[{layer}],"layer_quantization_mm":0.000001,"offset_tolerance_mm":0.005,"surface_tolerance_mm":0.001,"sampling_tolerance_mm":0.005,"schema_version":{MANUFACTURING_SCHEMA_VERSION}}}"#
-        )
-    };
-    assert_eq!(
-        serde_json::from_str::<NormalizedPrintPlan>(&wrap(&layer)).unwrap(),
-        expected
-    );
-    for field in [
-        r#""kind":"solid_fill""#.to_string(),
-        format!(r#""points_mm":{points}"#),
+    let value = serde_json::to_value(&expected).unwrap();
+    assert_eq!(serde_json::from_value::<NormalizedPrintPlan>(value.clone()).unwrap(), expected);
+    for (level, fields) in [
+        (0, &["schema_version", "layers", "sparse_bands"][..]),
+        (1, &["index", "z_mm", "lower_z_mm", "height_mm", "section_z_mm", "paths", "region_coverage"][..]),
+        (2, &["kind", "owner", "bead_width_mm", "physical_z_mm", "points_mm"][..]),
     ] {
-        let duplicate =
-            format!(r#"{{{field},"points_mm":{points},"kind":"solid_fill","owner":null}}"#);
-        let changed = format!(
-            r#"{{"region_coverage":{coverage},"paths":[{duplicate}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
-        );
-        assert!(
-            serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed))
-                .unwrap_err()
-                .is_data()
-        );
-    }
-    for field in [
-        r#""index":0"#,
-        r#""z_mm":5.2"#,
-        r#""section_z_mm":5.1"#,
-        r#""height_mm":0.2"#,
-        &format!(r#""paths":[{path}]"#),
-        &format!(r#""region_coverage":{coverage}"#),
-    ] {
-        let duplicate = format!(
-            r#"{{{field},"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
-        );
-        assert!(
-            serde_json::from_str::<NormalizedPrintPlan>(&wrap(&duplicate))
-                .unwrap_err()
-                .is_data()
-        );
-    }
-    for changed_path in [
-        format!(r#"{{"kind":"solid_fill","owner":null,"points_mm":{points},"extra":0}}"#),
-        format!(r#"{{"points_mm":{points}}}"#),
-        r#"{"kind":"solid_fill"}"#.to_string(),
-    ] {
-        let changed_layer = format!(
-            r#"{{"region_coverage":{coverage},"paths":[{changed_path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0}}"#
-        );
-        assert!(
-            serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))
-                .unwrap_err()
-                .is_data()
-        );
-    }
-    for changed_layer in [
-        format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2,"index":0,"extra":0}}"#
-        ),
-        format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"z_mm":5.2}}"#
-        ),
-        format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"height_mm":0.2,"index":0}}"#
-        ),
-        format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"height_mm":0.2,"z_mm":5.2,"index":0}}"#
-        ),
-        format!(
-            r#"{{"region_coverage":{coverage},"height_mm":0.2,"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
-        ),
-        format!(r#"{{"paths":[{path}],"height_mm":0.2,"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#),
-        format!(
-            r#"{{"region_coverage":{coverage},"paths":[{path}],"section_z_mm":5.1,"z_mm":5.2,"index":0}}"#
-        ),
-    ] {
-        assert!(
-            serde_json::from_str::<NormalizedPrintPlan>(&wrap(&changed_layer))
-                .unwrap_err()
-                .is_data()
-        );
+        for field in fields {
+            let mut missing = value.clone();
+            let object = match level {
+                0 => &mut missing,
+                1 => &mut missing["layers"][0],
+                _ => &mut missing["layers"][0]["paths"][0],
+            };
+            object.as_object_mut().unwrap().remove(*field);
+            assert!(serde_json::from_value::<NormalizedPrintPlan>(missing).is_err(), "{field}");
+            let object = match level {
+                0 => &value,
+                1 => &value["layers"][0],
+                _ => &value["layers"][0]["paths"][0],
+            };
+            let encoded = serde_json::to_string(object).unwrap();
+            let duplicate = format!("{{\"{field}\":{},{}", object[*field], &encoded[1..]);
+            let invalid = match level {
+                0 => serde_json::from_str::<NormalizedPrintPlan>(&duplicate).is_err(),
+                1 => serde_json::from_str::<PrintLayer>(&duplicate).is_err(),
+                _ => serde_json::from_str::<DepositionPath>(&duplicate).is_err(),
+            };
+            assert!(invalid, "duplicate {field}");
+        }
+        let mut unknown = value.clone();
+        let object = match level {
+            0 => &mut unknown,
+            1 => &mut unknown["layers"][0],
+            _ => &mut unknown["layers"][0]["paths"][0],
+        };
+        object["extra"] = 0.into();
+        assert!(serde_json::from_value::<NormalizedPrintPlan>(unknown).is_err());
     }
 }
 
 #[test]
 fn recipe_policies_are_required_without_defaults() {
     let original = serde_json::to_value(intent()).unwrap();
-    for field in ["process", "supports", "seam_policy", "rectilinear_axis"] {
+    for field in ["process", "supports", "seam_policy", "rectilinear_axis", "top_skin_axis", "sparse_infill"] {
         let mut missing = original.clone();
         missing["recipe"].as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<ManufacturingIntent>(missing).is_err());
     }
+    let mut missing_limits = original.clone();
+    missing_limits["printer"].as_object_mut().unwrap().remove("deposition_limits");
+    assert!(serde_json::from_value::<ManufacturingIntent>(missing_limits).is_err());
     for field in [
         "first_layer_speed_factor",
         "first_layer_flow_factor",
@@ -1813,6 +1772,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
     layer.z_mm = 5.15;
     layer.section_z_mm = 5.075;
     for path in &mut layer.paths {
+        path.physical_z_mm = [5.0, 5.15];
         for point in &mut path.points_mm {
             point[2] = 5.15;
         }
@@ -1829,11 +1789,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
         interface_thickness_mm: 0.2,
     };
     let mut mixed = plan();
-    mixed.layers[0].paths.push(DepositionPath {
-        kind: DepositionKind::Support,
-        owner: None,
-        points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
-    });
+    mixed.layers[0].paths.push(DepositionPath { kind: DepositionKind::Support, owner: None, bead_width_mm: 0.45, physical_z_mm: [5.0, 5.2], points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]] });
     mixed.layers[0].region_coverage.support_area_mm2 = 1.0;
     mixed.layers[0]
         .region_coverage
@@ -1990,6 +1946,7 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     scheduled.layers[0].height_mm = 0.25;
     scheduled.layers[0].section_z_mm = 5.125;
     for path in &mut scheduled.layers[0].paths {
+        path.physical_z_mm = [5.0, 5.25];
         for point in &mut path.points_mm {
             point[2] = 5.25;
         }
@@ -1997,8 +1954,10 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     let mut object = scheduled.layers[0].clone();
     object.index = 2;
     object.z_mm = 5.75;
+    object.lower_z_mm = 5.5;
     object.section_z_mm = 5.625;
     for path in &mut object.paths {
+        path.physical_z_mm = [5.5, 5.75];
         for point in &mut path.points_mm {
             point[2] = 5.75;
         }
@@ -2016,14 +1975,9 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
     for path in &mut support.paths {
         path.kind = DepositionKind::SupportInterface;
     }
-    scheduled.layers.push(PrintLayer {
-        index: 1,
-        z_mm: 5.5,
-        height_mm: 0.25,
-        section_z_mm: 5.375,
-        region_coverage: zero,
-        paths: Vec::new(),
-    });
+    scheduled.layers.push(PrintLayer { index: 1, z_mm: 5.5, lower_z_mm: 5.5 - 0.25, height_mm: 0.25, section_z_mm: 5.375,
+    region_coverage: zero,
+    paths: Vec::new(), });
     scheduled.layers.push(object);
     scheduled.native_geometry.certified_layer_count = scheduled.layers.len() as u32;
     scheduled.native_geometry.slab_count = scheduled.layers.len() as u32;
@@ -2584,11 +2538,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
         .iter()
         .map(|r| r.area_mm2 * (1. - r.fraction))
         .sum();
-    planned.layers[0].paths.push(DepositionPath {
-        kind: DepositionKind::SeparatorWall,
-        owner: None,
-        points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
-    });
+    planned.layers[0].paths.push(DepositionPath { kind: DepositionKind::SeparatorWall, owner: None, bead_width_mm: 0.45, physical_z_mm: [5.0, 5.2], points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]] });
     planned.validate(&intent()).unwrap();
     assert_eq!(
         serde_json::from_slice::<NormalizedPrintPlan>(&serde_json::to_vec(&planned).unwrap())
@@ -2738,11 +2688,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
             },
         ]],
     }];
-    captured.plan.layers[0].paths.push(DepositionPath {
-        kind: DepositionKind::SeparatorWall,
-        owner: None,
-        points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
-    });
+    captured.plan.layers[0].paths.push(DepositionPath { kind: DepositionKind::SeparatorWall, owner: None, bead_width_mm: 0.45, physical_z_mm: [5.0, 5.2], points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]] });
     captured.verification.deposition_segments += 1;
     let rebind = |bundle: &mut ManufacturingBundle| {
         bundle.provenance.input_hash = input_fingerprint(
@@ -2828,7 +2774,7 @@ fn empty_box_resolution_is_explicit_source_bound_and_visible_in_native_summary()
         ManufacturingSummary::try_from(wire.clone()).unwrap(),
         summary
     );
-    for status in [0, -1, 3, i32::MAX] {
+    for status in [0, -1, i32::MAX] {
         let mut invalid = wire.clone();
         invalid.process_resolution[0].status = status;
         assert!(ManufacturingSummary::try_from(invalid).is_err());
@@ -2879,7 +2825,7 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         ("sparse_fill", "bottom_skin", false),
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(serde_json::from_str::<DepositionPath>(&json).is_ok(), valid);
     }
@@ -2890,12 +2836,12 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "bottom_skin",
         "top_skin",
     ] {
-        let json = format!(r#"{{"kind":"{kind}","owner":null,"points_mm":[[0,0,1],[1,0,1]]}}"#);
+        let json = format!(r#"{{"kind":"{kind}","owner":null,"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#);
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
             !matches!(kind, "bottom_skin" | "top_skin")
         );
-        let missing = format!(r#"{{"kind":"{kind}","points_mm":[[0,0,1],[1,0,1]]}}"#);
+        let missing = format!(r#"{{"kind":"{kind}","bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#);
         assert!(serde_json::from_str::<DepositionPath>(&missing).is_err());
     }
     for kind in [
@@ -2906,11 +2852,83 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "separator_wall",
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
             matches!(kind, "sparse_fill" | "solid_fill" | "bridge")
         );
     }
+}
+
+#[test]
+fn deposition_limits_and_sparse_records_are_explicit_and_strict() {
+    let valid = intent();
+    for mutation in 0..5 {
+        let mut changed = valid.clone();
+        match mutation {
+            0 => changed.printer.deposition_limits.min_bead_width_mm = 0.46,
+            1 => changed.printer.deposition_limits.max_bead_height_mm = 0.1,
+            2 => changed.printer.deposition_limits.min_bead_height_mm = f64::NAN,
+            3 => changed.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.0 },
+            _ => changed.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: f64::INFINITY },
+        }
+        assert!(changed.validate().is_err());
+    }
+    let decision = SparseBandDecision {
+        first_layer: 1, last_layer: 2, owner: None,
+        disposition: SparseBandDisposition::RetainedFine { reason: SparseBandVeto::MissingLowerAnchor },
+    };
+    let value = serde_json::to_value(decision).unwrap();
+    for field in ["first_layer", "last_layer", "owner", "disposition"] {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<SparseBandDecision>(missing).is_err());
+    }
+    let mut path = plan().layers.remove(0).paths.remove(0);
+    path.physical_z_mm[0] = path.physical_z_mm[1];
+    assert!(serde_json::from_value::<DepositionPath>(serde_json::to_value(path).unwrap()).is_err());
+}
+
+#[test]
+fn top_skin_axis_is_independent_of_other_ordinary_deposition() {
+    let mut data = intent();
+    data.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    data.recipe.top_skin_axis = RectilinearAxisPolicy::Y;
+    let mut top = segmented_plan(&[&[1]]);
+    let layer = &mut top.layers[0];
+    layer.region_coverage.wall_area_mm2 = 0.0;
+    layer.region_coverage.top_skin_area_mm2 = 50.0;
+    let path = &mut layer.paths[0];
+    path.kind = DepositionKind::TopSkin;
+    path.owner = Some(DepositionOwner::MandatorySkin { skin: ProcessSkinKind::TopSkin });
+    path.points_mm[1] = [10.0, 11.0, layer.z_mm];
+    top.validate(&data).unwrap();
+    let mut wrong_policy = data.clone();
+    wrong_policy.recipe.top_skin_axis = RectilinearAxisPolicy::X;
+    assert!(top.validate(&wrong_policy).is_err());
+    let mut bottom = top.clone();
+    bottom.layers[0].paths[0].kind = DepositionKind::BottomSkin;
+    bottom.layers[0].paths[0].owner = Some(DepositionOwner::MandatorySkin { skin: ProcessSkinKind::BottomSkin });
+    assert!(bottom.validate(&data).is_err(), "bottom skin still follows the global axis");
+}
+
+#[test]
+fn xyz6_nominal_bead_inner_interval_proves_only_guaranteed_vertical_overlap() {
+    use program_coordinates::{project_xyz6_bead_height_mm, project_xyz6_bead_inner_height_mm};
+    let exact = project_xyz6_bead_inner_height_mm([0.125, 0.25]).unwrap();
+    assert_eq!(exact, [0.125, 0.25], "exact dyadic endpoints need no decimal enclosure");
+    let coarse = project_xyz6_bead_inner_height_mm([0.1, 0.4]).unwrap();
+    for physical in [[0.1, 0.2], [0.2, 0.3], [0.3, 0.4]] {
+        let inner = project_xyz6_bead_inner_height_mm(physical).unwrap();
+        let outer = project_xyz6_bead_height_mm(physical[1], physical[1] - physical[0]).unwrap();
+        assert!(inner[0] >= outer[0] && inner[1] <= outer[1]);
+        assert!(coarse[0].max(inner[0]) < coarse[1].min(inner[1]));
+    }
+    let lower = 0.1f64;
+    let tiny = [lower, lower.next_up()];
+    assert!(tiny[0] < tiny[1]);
+    let inner = project_xyz6_bead_inner_height_mm(tiny).unwrap();
+    assert!(inner[0] >= inner[1], "positive nominal height does not imply guaranteed emitted interior");
+    assert!(project_xyz6_bead_inner_height_mm([0.0, f64::NAN]).is_err());
 }

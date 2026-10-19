@@ -92,6 +92,19 @@ impl ReplaySink {
         layer: u16,
         kind: u8,
     ) -> Result<(), ManufacturingError> {
+        self.push_associated(position, e, feed, line, layer, kind, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_associated(
+        &mut self,
+        position: [f64; 3],
+        e: f64,
+        feed: f64,
+        line: u32,
+        layer: u16,
+        kind: u8,
+        association: Option<super::expected::Association>,
+    ) -> Result<(), ManufacturingError> {
         let count = match kind {
             0 => self.travels,
             6 | 7 => self.lifecycle,
@@ -121,7 +134,25 @@ impl ReplaySink {
         self.bytes.extend_from_slice(&line.to_le_bytes());
         self.bytes.extend_from_slice(&layer.to_le_bytes());
         self.bytes.push(kind);
-        self.bytes.push(u8::from(self.events != 0));
+        self.bytes.push(u8::from(self.events != 0) | if association.is_some() { 2 } else { 0 });
+        let (width, physical_z, owner) = match association {
+            Some(association) => {
+                let physical_z = association.physical_z;
+                let owner = match association.owner {
+                    None => u32::MAX,
+                    Some(DepositionOwner::MandatorySkin { .. }) => u32::MAX - 1,
+                    Some(DepositionOwner::Regional { region_index }) => u32::from(region_index),
+                };
+                (association.width, physical_z, owner)
+            }
+            None => (0.0, [0.0; 2], u32::MAX),
+        };
+        self.bytes.extend_from_slice(&width.to_le_bytes());
+        for z in physical_z {
+            self.bytes.extend_from_slice(&z.to_le_bytes());
+        }
+        self.bytes.extend_from_slice(&owner.to_le_bytes());
+        self.bytes.extend_from_slice(&0u32.to_le_bytes());
         for (axis, value) in position.iter().enumerate() {
             self.min[axis] = self.min[axis].min(*value);
             self.max[axis] = self.max[axis].max(*value);

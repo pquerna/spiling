@@ -1,0 +1,178 @@
+{
+  "printer": {
+    "schema_version": 10,
+    "id": "software-marlin2-reference",
+    "revision": "9",
+    "name": "Complete Marlin 2 software reference — physically unqualified",
+    "coordinate_frame": "right_handed_millimetres",
+    "build_envelope": {
+      "min": [
+        0,
+        0,
+        0
+      ],
+      "max": [
+        220,
+        220,
+        220
+      ]
+    },
+    "components": [
+      {
+        "id": "bed",
+        "role": "bed",
+        "pose": {
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        "shape": {
+          "kind": "box",
+          "bounds_mm": {
+            "min": [
+              0,
+              0,
+              -4
+            ],
+            "max": [
+              220,
+              220,
+              0
+            ]
+          }
+        }
+      },
+      {
+        "id": "toolhead-envelope",
+        "role": "toolhead",
+        "pose": {
+          "translation_mm": [
+            0,
+            0,
+            0
+          ],
+          "rotation_xyzw": [
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        "shape": {
+          "kind": "cylinder",
+          "radius_mm": 10,
+          "height_mm": 25
+        }
+      }
+    ],
+    "capabilities": {
+      "motion_space": "cartesian_xyz",
+      "extruders": 1,
+      "output_dialect": "marlin2_single_extruder_gcode_v1",
+      "generated_supports": true
+    },
+    "workflow": {
+      "kind": "complete_marlin",
+      "job": {
+        "machine_id": "software-marlin2-reference",
+        "firmware_version": "2.1.2.5-software-contract-fixture",
+        "configuration_hash": "c46cf9a35f2916b3109dbbae2a06dc0cb212d4fe611b511bf1c72220bbcc147c",
+        "calibration_record_hash": "322df893a20557507671a732334464bebf7164d9c547e6ef09eea356e99b3a8b",
+        "homing_contract": "marlin_native_cartesian",
+        "home_position_mm": [
+          0,
+          0,
+          0
+        ],
+        "nozzle_temperature_c": 200,
+        "bed_temperature_c": 60,
+        "minimum_extrusion_temperature_c": 170,
+        "maximum_nozzle_temperature_c": 250,
+        "maximum_bed_temperature_c": 100,
+        "prime_start_mm": [
+          10,
+          210,
+          0.2
+        ],
+        "prime_end_mm": [
+          30,
+          210,
+          0.2
+        ],
+        "prime_filament_length_mm": 1.5,
+        "prime_speed_mm_s": 10,
+        "park_position_mm": [
+          0,
+          210,
+          20
+        ]
+      }
+    },
+    "nozzle_diameter_mm": 0.4,
+    "deposition_limits": {
+      "min_bead_width_mm": 0.45,
+      "max_bead_width_mm": 0.45,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
+    "max_feed_mm_s": 150,
+    "max_volumetric_flow_mm3_s": 12
+  },
+  "recipe": {
+    "id": "software-h1-housing",
+    "revision": "1",
+    "material_id": "nominal-software-filament",
+    "material_revision": "1",
+    "filament_diameter_mm": 1.75,
+    "layer_height_mm": 0.1,
+    "native_shape_error_mm": 0.1,
+    "bead_width_mm": 0.45,
+    "perimeter_count": 2,
+    "infill_fraction": 0.25,
+    "sparse_infill": {
+      "kind": "fine"
+    },
+    "top_skin_thickness_mm": 0.8,
+    "bottom_skin_thickness_mm": 0.8,
+    "print_speed_mm_s": 35,
+    "travel_speed_mm_s": 100,
+    "flow_multiplier": 1,
+    "process": {
+      "first_layer_speed_factor": 0.5,
+      "first_layer_flow_factor": 1,
+      "fan_first_layers": 0,
+      "fan_after_first_layers": 128,
+      "bridge_speed_factor": 0.6,
+      "bridge_flow_factor": 1,
+      "bridge_fan_pwm": 255,
+      "max_bridge_span_mm": 10,
+      "retraction": {
+        "kind": "enabled",
+        "distance_mm": 0.8,
+        "speed_mm_s": 25,
+        "minimum_travel_mm": 2,
+        "z_hop_mm": 0.2
+      }
+    },
+    "supports": {
+      "kind": "breakaway",
+      "density": 0.3,
+      "xy_clearance_mm": 0.3,
+      "z_gap_mm": 0.2,
+      "interface_thickness_mm": 0.4
+    },
+    "seam_policy": {
+      "kind": "nearest"
+    },
+    "top_skin_axis": "alternating_xy",
+    "rectilinear_axis": "x"
+  }
+}

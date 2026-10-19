@@ -304,11 +304,17 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
             &hello.geometry_capabilities,
             "native_vertical_cylinder_face_v1",
         ),
-        (&hello.project_capabilities, "recoverable_projects_v8"),
+        (
+            &hello.project_capabilities,
+            spiling_contracts::PROJECT_FORMAT_CAPABILITY,
+        ),
         (&hello.project_capabilities, "source_face_surface_finish_v3"),
         (&hello.project_capabilities, "surface_image_assets_v1"),
         (&hello.project_capabilities, "source_bound_process_v2"),
-        (&hello.manufacturing_capabilities, "manufacturing_schema9"),
+        (
+            &hello.manufacturing_capabilities,
+            spiling_contracts::MANUFACTURING_SCHEMA_CAPABILITY,
+        ),
         (&hello.manufacturing_capabilities, "mapped_image_relief_v1"),
         (
             &hello.manufacturing_capabilities,

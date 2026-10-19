@@ -441,20 +441,23 @@ impl ClassifiedRegions {
     pub(super) fn paths(
         &self,
         z: f64,
-        height: f64,
+        lower_z: f64,
         axis: region::HatchAxis,
+        top_axis: region::HatchAxis,
         recipe: &PlanarPrintRecipe,
         segments: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<(Vec<DepositionPath>, &PlanarRegionCoverage), ManufacturingError> {
         let mut paths = Vec::new();
         for centers in &self.layout.wall_centers {
-            region::wall_paths(centers, z, &mut paths, segments, cancel)?;
+            region::wall_paths(centers, z, lower_z, recipe.bead_width_mm, &mut paths, segments, cancel)?;
         }
         let layer = region::HatchLayer {
             z,
-            height,
+            lower_z,
+            height: z - lower_z,
             axis,
+            top_axis,
             recipe,
         };
         region::hatch(
@@ -470,7 +473,7 @@ impl ClassifiedRegions {
             &self.top,
             DepositionKind::TopSkin,
             1.0,
-            &layer,
+            &region::HatchLayer { axis: top_axis, ..layer },
             &mut paths,
             segments,
             cancel,
@@ -526,7 +529,7 @@ impl ClassifiedRegions {
             process_interfaces: Vec::new(),
         };
         for centers in &self.layout.wall_centers {
-            region::wall_paths(centers, layer.z, &mut normal.paths, segments, cancel)?;
+            region::wall_paths(centers, layer.z, layer.lower_z, layer.recipe.bead_width_mm, &mut normal.paths, segments, cancel)?;
         }
         let wall_count = normal.paths.len();
         let mut normal_points = path_points(&normal.paths);
@@ -565,12 +568,6 @@ impl ClassifiedRegions {
                 "role owner allocation refused",
             )
         })?;
-        let alternate_layer = region::HatchLayer {
-            axis: layer.axis.orthogonal(),
-            ..*layer
-        };
-        let normal_along = usize::from(layer.axis == region::HatchAxis::Y);
-        let normal_fixed = 1 - normal_along;
         for (domain, kind, fraction, owner) in [
             (&self.bottom, DepositionKind::BottomSkin, 1.0, None),
             (&self.top, DepositionKind::TopSkin, 1.0, None),
@@ -589,6 +586,14 @@ impl ClassifiedRegions {
                 Some((index as u16, interior)),
             )
         })) {
+            let role_layer = region::HatchLayer {
+                axis: if kind == DepositionKind::TopSkin { layer.top_axis } else { layer.axis },
+                ..*layer
+            };
+            let layer = &role_layer;
+            let alternate_layer = region::HatchLayer { axis: layer.axis.orthogonal(), ..*layer };
+            let normal_along = usize::from(layer.axis == region::HatchAxis::Y);
+            let normal_fixed = 1 - normal_along;
             let frame = owner.and_then(|(_, owner)| owner.frame_origin_mm);
             for polygon in &domain.0 {
                 check_cancel(cancel)?;
@@ -737,8 +742,9 @@ impl ClassifiedRegions {
                         &mut admit,
                         cancel,
                     )?;
+                    
                     let band_points = bands.capacity() * 2;
-                    let patch_base = point_sum(proof_live, band_points)? - patches.capacity() * 2;
+                    let patch_base = point_sum(proof_live, band_points)? - patches.capacity() * BRIDGE_PATCH_POINTS;
                     let selection_work = alternative
                         .paths
                         .len()
@@ -806,9 +812,10 @@ impl ClassifiedRegions {
                             hi = bands[band_index].interval[1];
                         }
                         if index == first {
-                            reserve_recovery_record(&mut patches, 2, patch_base, &mut admit)?;
+                            reserve_recovery_record(&mut patches, BRIDGE_PATCH_POINTS, patch_base, &mut admit)?;
                             patches.push(BridgePatch {
                                 owner: Some(polygon),
+                                along_axis: normal_fixed,
                                 along,
                                 across: [lo, hi],
                             });
@@ -854,14 +861,14 @@ impl ClassifiedRegions {
         let mut staged_segments = *segments;
         bridge.whole_rows = self.whole_rows(
             &bridge.paths,
-            &alternate_layer,
+            layer,
             &mut staged_segments,
             cancel,
         )?;
         let whole_points = path_points(&bridge.whole_rows);
         let merge = anchors(
             &mut bridge,
-            alternate_layer.axis,
+            layer.axis,
             point_sum(base, whole_points)?,
         )?;
         if !merge.supported || merge.bridges.len() != bridge.paths.len() {
@@ -881,24 +888,27 @@ impl ClassifiedRegions {
         for path in &bridge.paths {
             reserve_recovery_record(
                 &mut patches,
-                2,
+                BRIDGE_PATCH_POINTS,
                 point_sum(base, merge.workspace_points)?,
                 &mut admit,
             )?;
-            let coordinate = path.points_mm[0][normal_along];
+            let along_axis = if path.points_mm[0][0] == path.points_mm[1][0] { 1 } else { 0 };
+            let fixed_axis = 1 - along_axis;
+            let coordinate = path.points_mm[0][fixed_axis];
             patches.push(BridgePatch {
                 owner: None,
+                along_axis,
                 along: [
-                    path.points_mm[0][normal_fixed].min(path.points_mm[1][normal_fixed]),
-                    path.points_mm[0][normal_fixed].max(path.points_mm[1][normal_fixed]),
+                    path.points_mm[0][along_axis].min(path.points_mm[1][along_axis]),
+                    path.points_mm[0][along_axis].max(path.points_mm[1][along_axis]),
                 ],
                 across: [
-                    coordinate - layer.recipe.bead_width_mm * 0.5,
-                    coordinate + layer.recipe.bead_width_mm * 0.5,
+                    coordinate - path.bead_width_mm * 0.5,
+                    coordinate + path.bead_width_mm * 0.5,
                 ],
             });
         }
-        let staged = point_sum(base, patches.capacity() * 2)?;
+        let staged = point_sum(base, patches.capacity() * BRIDGE_PATCH_POINTS)?;
         let work = normal
             .paths
             .len()
@@ -939,15 +949,21 @@ impl ClassifiedRegions {
                 intervals.clear();
                 let a = path.points_mm[0];
                 let b = path.points_mm[1];
+                let normal_along = if a[0] == b[0] { 1 } else { 0 };
+                let normal_fixed = 1 - normal_along;
+                let path_layer = region::HatchLayer {
+                    axis: if normal_along == 0 { region::HatchAxis::X } else { region::HatchAxis::Y },
+                    ..*layer
+                };
                 for patch in &patches {
                     check_cancel(cancel)?;
                     if patch
                         .owner
                         .is_none_or(|polygon| std::ptr::eq(polygon, owner.owner))
-                        && a[normal_fixed] >= patch.along[0]
-                        && a[normal_fixed] <= patch.along[1]
+                        && a[normal_fixed] >= if patch.along_axis == normal_fixed { patch.along[0] } else { patch.across[0] }
+                        && a[normal_fixed] <= if patch.along_axis == normal_fixed { patch.along[1] } else { patch.across[1] }
                     {
-                        intervals.push(patch.across);
+                        intervals.push(if patch.along_axis == normal_along { patch.along } else { patch.across });
                     }
                 }
                 intervals
@@ -977,7 +993,7 @@ impl ClassifiedRegions {
                             &[cursor, interval[0].min(end)],
                             a[normal_fixed],
                             path.kind,
-                            layer,
+                            &path_layer,
                             a[normal_along] > b[normal_along],
                             &mut mixed.paths,
                             &mut output_segments,
@@ -1005,7 +1021,7 @@ impl ClassifiedRegions {
                         &[cursor, end],
                         a[normal_fixed],
                         path.kind,
-                        layer,
+                        &path_layer,
                         a[normal_along] > b[normal_along],
                         &mut mixed.paths,
                         &mut output_segments,
@@ -1065,6 +1081,11 @@ impl ClassifiedRegions {
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         let mut rows = Vec::new();
+        for axis in [layer.axis, layer.axis.orthogonal()] {
+        let row_layer = region::HatchLayer { axis, ..*layer };
+        let fixed = usize::from(axis == region::HatchAxis::X);
+        if !required.iter().any(|path| path.points_mm.len() == 2
+            && path.points_mm[0][fixed] == path.points_mm[1][fixed]) { continue; }
         for (domain, kind, original) in [
             (
                 &self.bottom,
@@ -1108,12 +1129,15 @@ impl ClassifiedRegions {
                 required.iter().filter(|path| {
                     (path.kind == kind || path.kind == DepositionKind::Bridge)
                         && path.owner == original
+                        && path.points_mm.len() == 2
+                        && path.points_mm[0][fixed] == path.points_mm[1][fixed]
                 }),
-                layer,
+                &row_layer,
                 segments,
                 cancel,
             )?;
             rows.extend(owned);
+        }
         }
         Ok(rows)
     }
@@ -1392,9 +1416,12 @@ struct BridgePatch<'a> {
     // A full hatch cell belongs only to its classified role. Actual bead
     // corridors reserve cross-role anchor extrusion without erasing skin cells.
     owner: Option<&'a Polygon<f64>>,
+    along_axis: usize,
     along: [f64; 2],
     across: [f64; 2],
 }
+const BRIDGE_PATCH_POINTS: usize = std::mem::size_of::<BridgePatch<'static>>()
+    .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
 
 fn recovery_points(
     class: usize,
@@ -1405,7 +1432,7 @@ fn recovery_points(
 ) -> Result<usize, ManufacturingError> {
     point_sum(
         point_sum(point_sum(point_sum(class, normal)?, bridge)?, owners)?,
-        patches.checked_mul(2).ok_or_else(|| {
+        patches.checked_mul(BRIDGE_PATCH_POINTS).ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
                 "bridge patch retention overflow",

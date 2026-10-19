@@ -214,8 +214,15 @@ message PrinterSpecification {
   double max_feed_mm_s = 10;
   double max_volumetric_flow_mm3_s = 11;
   JobWorkflow workflow = 12;
+  DepositionLimits deposition_limits = 13;
 }
 message DiagnosticBodyOnly {}
+message DepositionLimits {
+  double min_bead_width_mm = 1;
+  double max_bead_width_mm = 2;
+  double min_bead_height_mm = 3;
+  double max_bead_height_mm = 4;
+}
 enum HomingCoordinateContract {
   HOMING_COORDINATE_CONTRACT_UNSPECIFIED = 0;
   MARLIN_NATIVE_CARTESIAN = 1;
@@ -268,8 +275,18 @@ message PlanarPrintRecipe {
   double native_shape_error_mm = 17;
   SeamPolicy seam_policy = 18;
   RectilinearAxisPolicy rectilinear_axis = 19;
+  SparseInfillPolicy sparse_infill = 20;
+  RectilinearAxisPolicy top_skin_axis = 21;
 }
 message NearestSeam {}
+message CombineEligibleSparseInfill { double max_height_mm = 1; }
+message SparseInfillPolicy {
+  oneof policy {
+    FineSparseInfill fine = 1;
+    CombineEligibleSparseInfill combine_eligible = 2;
+  }
+}
+message FineSparseInfill {}
 message PreferredBuildDirectionSeam {
   // Finite normalized unit vector in build/machine XY, not source or camera XY.
   double x = 1;

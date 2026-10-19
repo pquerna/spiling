@@ -136,7 +136,7 @@ pub(super) fn point_segment_distance(
 fn point_segment_lower(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Result<f64, GeometryError> {
     Ok(point_segment_distance(p.map(Interval::point), a, b)?.lo)
 }
-fn segment_distance_lower(
+pub(super) fn segment_distance_lower(
     a: [f64; 2],
     b: [f64; 2],
     c: [f64; 2],

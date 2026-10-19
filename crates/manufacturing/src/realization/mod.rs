@@ -265,8 +265,8 @@ pub(crate) fn stream(
                 speed *= recipe.process.bridge_speed_factor;
                 flow *= recipe.process.bridge_flow_factor;
             }
-            let height = layer.height_mm;
-            let area = ((recipe.bead_width_mm - height) * height
+            let height = path.height_mm();
+            let area = ((path.bead_width_mm - height) * height
                 + std::f64::consts::PI * (height * 0.5).powi(2))
                 * flow;
             for edge in path.points_mm.windows(2) {

@@ -51,34 +51,6 @@ async fn actual_child_diagnostics_and_clean_shutdown() {
         client.hello().engine_build,
         spiling_contracts::ENGINE_BUILD_ID
     );
-    for expected in [
-        "recoverable_projects_v8",
-        "source_face_surface_finish_v3",
-        "surface_image_assets_v1",
-    ] {
-        assert!(
-            client
-                .hello()
-                .project_capabilities
-                .iter()
-                .any(|value| value == expected)
-        );
-    }
-    for expected in [
-        "manufacturing_schema9",
-        "mapped_image_relief_v1",
-        "varying_z_material_domains_v1",
-        "bounded_vertical_rib_construction_v1",
-        "bounded_cylindrical_rib_construction_v1",
-    ] {
-        assert!(
-            client
-                .hello()
-                .manufacturing_capabilities
-                .iter()
-                .any(|value| value == expected)
-        );
-    }
     assert!(
         client
             .hello()

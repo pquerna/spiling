@@ -546,6 +546,8 @@ pub(super) fn wall_centers(
 pub(super) fn wall_paths(
     centers: &MultiPolygon<f64>,
     z: f64,
+    lower_z: f64,
+    bead_width_mm: f64,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     cancel: &AtomicBool,
@@ -555,7 +557,7 @@ pub(super) fn wall_paths(
             check_cancel(cancel)?;
             reserve_segments(segments, ring.0.len() - 1)?;
             let points_mm = ring.0.iter().map(|c| [c.x, c.y, z]).collect();
-            push_path(paths, DepositionKind::Perimeter, points_mm)?;
+            push_path(paths, DepositionKind::Perimeter, points_mm, bead_width_mm, [lower_z, z])?;
         }
     }
     Ok(())
@@ -586,8 +588,10 @@ impl HatchAxis {
 
 pub(super) struct HatchLayer<'a> {
     pub z: f64,
+    pub lower_z: f64,
     pub height: f64,
     pub axis: HatchAxis,
+    pub top_axis: HatchAxis,
     pub recipe: &'a PlanarPrintRecipe,
 }
 
@@ -1010,7 +1014,7 @@ pub(super) fn append_hatch_row(
         if reverse {
             std::mem::swap(&mut a, &mut b);
         }
-        push_path(paths, kind, vec![a, b])?;
+        push_path(paths, kind, vec![a, b], layer.recipe.bead_width_mm, [layer.lower_z, layer.z])?;
     }
     Ok(())
 }
@@ -1018,6 +1022,8 @@ fn push_path(
     paths: &mut Vec<DepositionPath>,
     kind: DepositionKind,
     points_mm: Vec<[f64; 3]>,
+    bead_width_mm: f64,
+    physical_z_mm: [f64; 2],
 ) -> Result<(), ManufacturingError> {
     if let Some(edge) = points_mm
         .windows(2)
@@ -1035,6 +1041,8 @@ fn push_path(
     }
     paths.push(DepositionPath {
         kind,
+        bead_width_mm,
+        physical_z_mm,
         owner: match kind {
             DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
                 skin: ProcessSkinKind::BottomSkin,

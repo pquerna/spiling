@@ -253,13 +253,17 @@ export type MachineComponentShape = { "kind": "box", bounds_mm: AabbMm, } | { "k
 
 export type MachineComponent = { id: string, role: MachineComponentRole, pose: RigidPoseMm, shape: MachineComponentShape, };
 
-export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
+export type PrinterSpecification = { schema_version: number, id: string, revision: string, name: string, coordinate_frame: PrinterCoordinateFrame, build_envelope: AabbMm, components: Array<MachineComponent>, capabilities: PrinterCapabilities, workflow: JobWorkflow, nozzle_diameter_mm: number, deposition_limits: DepositionLimits, max_feed_mm_s: number, max_volumetric_flow_mm3_s: number, };
 
-export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, };
+export type DepositionLimits = { min_bead_width_mm: number, max_bead_width_mm: number, min_bead_height_mm: number, max_bead_height_mm: number, };
+
+export type PlanarPrintRecipe = { id: string, revision: string, material_id: string, material_revision: string, filament_diameter_mm: number, layer_height_mm: number, native_shape_error_mm: number, bead_width_mm: number, sparse_infill: SparseInfillPolicy, perimeter_count: number, infill_fraction: number, top_skin_thickness_mm: number, bottom_skin_thickness_mm: number, print_speed_mm_s: number, travel_speed_mm_s: number, flow_multiplier: number, process: ProcessPolicy, supports: SupportPolicy, seam_policy: SeamPolicy, rectilinear_axis: RectilinearAxisPolicy, top_skin_axis: RectilinearAxisPolicy, };
 
 export type SeamPolicy = { "kind": "nearest" } | { "kind": "preferred_build_direction", xy: [number, number], };
 
 export type RectilinearAxisPolicy = "x" | "y" | "alternating_xy" | "alternating_yx";
+
+export type SparseInfillPolicy = { "kind": "fine" } | { "kind": "combine_eligible", max_height_mm: number, };
 
 export type ProcessPolicy = { first_layer_speed_factor: number, first_layer_flow_factor: number, fan_first_layers: number, fan_after_first_layers: number, bridge_speed_factor: number, bridge_flow_factor: number, bridge_fan_pwm: number, max_bridge_span_mm: number, retraction: RetractionPolicy, };
 
@@ -285,11 +289,21 @@ export type DepositionPath = { kind: DepositionKind,
 /**
  * Immutable original construction purpose, never inferred from Bridge shape.
  */
-owner: DepositionOwner | null, points_mm: Array<[number, number, number]>, };
+owner: DepositionOwner | null, bead_width_mm: number, 
+/**
+ * Explicit occupied interval; upper endpoint belongs to the owning layer.
+ */
+physical_z_mm: [number, number], points_mm: Array<[number, number, number]>, };
+
+export type SparseBandDecision = { first_layer: number, last_layer: number, owner: DepositionOwner | null, disposition: SparseBandDisposition, };
+
+export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained_fine", reason: SparseBandVeto, };
+
+export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond";
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, };
 
-export type PrintLayer = { index: number, z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
+export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
 export type SkinCoverageScope = "scheduled_material_distance";
 
@@ -305,7 +319,7 @@ export type NativeGeometryCoverageSummary = { requested_shape_error_mm: number, 
  */
 slab_count: number, certified_layer_count: number, event_count: number, geometry_work: bigint, evidence: PreflightEvidence, source_feature_coverage: NativeFeatureCoverageSummary, skin_coverage: SkinCoverageScope, support_clearance: SupportClearanceScope, };
 
-export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, };
+export type NormalizedPrintPlan = { schema_version: number, layers: Array<PrintLayer>, sampling_tolerance_mm: number, surface_tolerance_mm: number, offset_tolerance_mm: number, layer_quantization_mm: number, surface_resolution: Array<SurfaceResolution>, native_geometry: NativeGeometryCoverageSummary, process_resolution: Array<ProcessRegionResolution>, sparse_bands: Array<SparseBandDecision>, };
 
 export type ManufacturingProvenance = { project_id: ProjectId, input_revision: ProjectRevision, input_hash: SourceHash, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, intent: ManufacturingIntent, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, surface_images: Array<SurfaceImageContent>, kernel: KernelIdentity, planner_version: string, emitter_version: string, verifier_version: string, };
 
@@ -361,11 +375,11 @@ export const MAX_DISPLAY_VERTICES = 1000000 as const;
 export const MAX_DISPLAY_TRIANGLES = 1000000 as const;
 export const MAX_SCENE_MESH_BYTES = 67108864 as const;
 export const MAX_SECTION_BYTES = 16777216 as const;
-export const MAX_REPLAY_DISPLAY_BYTES = 16777216 as const;
+export const MAX_REPLAY_DISPLAY_BYTES = 33554432 as const;
 export const MAX_REPLAY_EVENTS = 300004 as const;
 export const REPLAY_HEADER_BYTES = 96 as const;
-export const REPLAY_RECORD_BYTES = 48 as const;
-export const REPLAY_SCHEMA_VERSION = 4 as const;
+export const REPLAY_RECORD_BYTES = 80 as const;
+export const REPLAY_SCHEMA_VERSION = 5 as const;
 export const MAX_ENGINE_ARTIFACT_BYTES = 134217728 as const;
 export const MAX_GEOMETRY_CHUNK_BYTES = 1048576 as const;
 export const MAX_DISPLAY_BUFFER_BYTES = 134217728 as const;
@@ -382,7 +396,7 @@ export const JOB_CANCEL_AFTER_MS = 300000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 8 as const;
+export const PROJECT_FORMAT_VERSION = 9 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
@@ -399,10 +413,11 @@ export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 9 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 10 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;
+export const MAX_PROCESS_REGIONS = 256 as const;
 export const MAX_DEPOSITION_SEGMENTS = 100000 as const;
 export const MAX_MACHINE_COMPONENTS = 64 as const;
 export const MAX_PROFILE_JSON_BYTES = 32768 as const;

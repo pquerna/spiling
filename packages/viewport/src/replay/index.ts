@@ -77,10 +77,20 @@ export function createReplayDisplay(
   const batches: Batch[] = [];
   const materials: (LineBasicMaterial | PointsMaterial)[] = [];
   const geometries: BufferGeometry[] = [];
-  const counts = new Uint32Array(14);
+  // Sparse height/width classes change only batch membership, never vertex count.
+  // Dimensions are expected-plan associations; XYZ remains byte-derived.
+  const batchAt = (event: number): number => {
+    const start = REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES;
+    const kind = data.getUint8(start + 46);
+    if (kind !== 5) return kind;
+    const height = data.getFloat64(start + 64, true) - data.getFloat64(start + 56, true);
+    const width = data.getFloat64(start + 48, true);
+    return 14 + Math.min(15, Math.floor(height / width * 16));
+  };
+  const counts = new Uint32Array(30);
   for (let event = 1; event < replay.eventCount; event++) {
-    const kind = data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46);
-    counts[kind] = counts[kind]! + 1;
+    const batch = batchAt(event);
+    counts[batch] = counts[batch]! + 1;
   }
   const project = (event: number, axis: number): number => {
     const absolute = data.getFloat64(
@@ -116,16 +126,17 @@ export function createReplayDisplay(
       "#f6b8ce",
       "#f5ef44",
     ];
-    for (let kind = 0; kind < counts.length; kind++) {
-      if (!counts[kind]) continue;
+    for (let batch = 0; batch < counts.length; batch++) {
+      if (!counts[batch]) continue;
+      const kind = batch >= 14 ? 5 : batch;
+      const color = batch >= 14 ? `hsl(${150 - (batch - 14) * 8}, 80%, 62%)` : colors[kind];
       const stationary = kind === 11 || kind === 12;
       const vertices = stationary ? 1 : 2;
-      const positions = new Float32Array(counts[kind]! * vertices * 3);
-      const events = new Uint32Array(counts[kind]!);
+      const positions = new Float32Array(counts[batch]! * vertices * 3);
+      const events = new Uint32Array(counts[batch]!);
       let cursor = 0;
       for (let event = 1; event < replay.eventCount; event++) {
-        if (data.getUint8(REPLAY_HEADER_BYTES + event * REPLAY_RECORD_BYTES + 46) !== kind)
-          continue;
+        if (batchAt(event) !== batch) continue;
         events[cursor] = event;
         for (let endpoint = 0; endpoint < vertices; endpoint++)
           for (let axis = 0; axis < 3; axis++)
@@ -137,8 +148,8 @@ export function createReplayDisplay(
       geometries.push(geometry);
       geometry.setAttribute("position", new BufferAttribute(positions, 3));
       const material = stationary
-        ? new PointsMaterial({ color: colors[kind], size: 5, sizeAttenuation: false, depthTest: false })
-        : new LineBasicMaterial({ color: colors[kind], depthTest: false });
+        ? new PointsMaterial({ color, size: 5, sizeAttenuation: false, depthTest: false })
+        : new LineBasicMaterial({ color, depthTest: false });
       materials.push(material);
       const lines = stationary
         ? new Points(geometry, material as PointsMaterial)

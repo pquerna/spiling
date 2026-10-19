@@ -14,6 +14,7 @@ It is for engineers and workshop users who start from STEP files. Spiling is ear
 
 - Open a supported STEP model, arrange the parts or copies in the build area, and run a check before generating instructions.
 - Set infill density per part or copy, or use a bounded source-local box for a denser end and lighter body in one part. Within-part changes require explicit approval of a permanent joining wall. Choose a preferred seam side and fill direction, and add supported face ribs or image relief.
+- Request genuinely thicker eligible sparse-interior strokes with the same nozzle and material, keeping fine walls/skins and authored density zones. Inspect which bands combine or stay fine and why.
 - Inspect the actual G-code the app generated, not just the viewport preview.
 - Undo changes, save the job, and reopen it without the original CAD or image file.
 

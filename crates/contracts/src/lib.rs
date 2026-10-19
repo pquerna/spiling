@@ -45,8 +45,10 @@ pub use spiling::engine as rpc;
 
 pub const ENGINE_BUILD_ID: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    ";project8;manufacturing9;surface3;planner13"
+    ";project9;manufacturing10;surface3;planner14"
 );
+pub const PROJECT_FORMAT_CAPABILITY: &str = "recoverable_projects_v9";
+pub const MANUFACTURING_SCHEMA_CAPABILITY: &str = "manufacturing_schema10";
 pub const MAX_CONTROL_BYTES: u32 = 65_536;
 pub const MAX_BINARY_BYTES: u32 = 4_194_304;
 pub const MAX_ARTIFACT_BYTES: u32 = 262_144;

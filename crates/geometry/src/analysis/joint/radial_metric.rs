@@ -31,6 +31,9 @@ pub(in crate::analysis) struct ClosedRadialSlab {
     pub(super) product: ClosedRadialMaterialProduct,
     pub(super) bound_mm: f64,
     native_xy_sha256: [u8; 32],
+    // Only the complete per-role same-azimuth visitor establishes this
+    // stronger inner-material authority. A general filled metric does not.
+    pub(super) inner_displacement_mm: Option<f64>,
 }
 
 fn polygon_hash(
@@ -161,6 +164,7 @@ pub(in crate::analysis) fn seal_closed_radial_slab_from_complete_metric(
         product,
         bound_mm,
         native_xy_sha256,
+        inner_displacement_mm: None,
     }))
 }
 
@@ -490,6 +494,9 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
             .add(Interval::point(source_error))
             .hi,
         native_xy_sha256: polygon_hash(actual_native_loops, work, cancel)?,
+        inner_displacement_mm: Some(
+            Interval::point(maximum).add(Interval::point(source_error)).hi,
+        ),
     }))
 }
 

@@ -34,6 +34,8 @@ mod radial_metric;
 pub(super) use radial_metric::{
     ClosedRadialSlab, certify_closed_radial_slab, seal_closed_radial_slab_from_complete_metric,
 };
+mod inner_prism;
+pub use inner_prism::NativeInnerMaterialPrism;
 
 const MAX_SCRATCH: usize = 64 * 1024 * 1024;
 
@@ -139,6 +141,7 @@ struct NativeRadialLeaf {
     center: [[f64; 2]; 2],
     outer_kernel_radius_mm: f64,
     inner_cover_radius_mm: f64,
+    inner_displacement_mm: Option<f64>,
 }
 
 /// Independent CLOSED continuation authority for one regular endpoint. Its
@@ -1706,6 +1709,10 @@ fn hash_radial_leaf(hash: &mut Sha256, radial: NativeRadialLeaf) {
         .chain([radial.outer_kernel_radius_mm, radial.inner_cover_radius_mm])
     {
         hash.update(value.to_bits().to_le_bytes());
+    }
+    hash.update([u8::from(radial.inner_displacement_mm.is_some())]);
+    if let Some(displacement) = radial.inner_displacement_mm {
+        hash.update(displacement.to_bits().to_le_bytes());
     }
 }
 
@@ -3452,6 +3459,7 @@ fn certify_endpoint_radial_leaves(
                 center: product.coordinates().world_center_enclosure(),
                 outer_kernel_radius_mm: region.outer_kernel_radius_mm(),
                 inner_cover_radius_mm: region.inner_cover_radius_mm(),
+                inner_displacement_mm: None,
             },
             world_height_interval_mm: world_range,
             source_height_interval_mm: source_range,
@@ -3770,6 +3778,7 @@ fn certify_source_leaf(
             center: radial.product.coordinates().world_center_enclosure(),
             outer_kernel_radius_mm: region.outer_kernel_radius_mm(),
             inner_cover_radius_mm: region.inner_cover_radius_mm(),
+            inner_displacement_mm: radial.inner_displacement_mm,
         })
     } else {
         None

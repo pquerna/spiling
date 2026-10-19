@@ -18,9 +18,11 @@ pub(super) fn recipe(fraction: f64) -> PlanarPrintRecipe {
         filament_diameter_mm: 1.75,
         layer_height_mm: 0.4,
         bead_width_mm: 0.6,
+        sparse_infill: SparseInfillPolicy::Fine,
         perimeter_count: 1,
         seam_policy: SeamPolicy::Nearest,
         rectilinear_axis: RectilinearAxisPolicy::AlternatingXY,
+        top_skin_axis: RectilinearAxisPolicy::AlternatingXY,
         top_skin_thickness_mm: 0.81,
         bottom_skin_thickness_mm: 0.41,
         infill_fraction: fraction,
@@ -103,8 +105,9 @@ fn output(
         regions
             .paths(
                 0.4 * (index + 1) as f64,
-                0.4,
+                0.4 * index as f64,
                 region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
+                region::HatchAxis::for_policy(recipe.top_skin_axis, index),
                 &recipe,
                 &mut 0,
                 &cancel,
@@ -319,6 +322,8 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         SectionSpan {
             start: 0,
             end: 6,
+            invariant: true,
+            inner_material: None,
             material: Arc::new(rectangle(20.0, 10.0)),
             process_domains: Vec::new(),
             occupied: None,
@@ -327,6 +332,8 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         SectionSpan {
             start: 6,
             end: 12,
+            invariant: true,
+            inner_material: None,
             material: Arc::new(rectangle(10.0, 10.0)),
             process_domains: Vec::new(),
             occupied: None,
@@ -399,8 +406,9 @@ fn physical_skin_horizon_tracks_shrinking_local_top_and_slab_transition() {
         let (_, coverage) = classified
             .paths(
                 schedule[index as usize].z,
-                schedule[index as usize].height,
+                schedule[index as usize].lower_z,
                 region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
+                region::HatchAxis::for_policy(recipe.top_skin_axis, index),
                 &recipe,
                 &mut 0,
                 &cancel,
@@ -513,7 +521,8 @@ fn cancellation_and_retained_segment_budget_precede_path_growth() {
     .unwrap();
     let result = classified.paths(
         0.4,
-        0.4,
+        0.0,
+        region::HatchAxis::X,
         region::HatchAxis::X,
         &recipe,
         &mut (MAX_DEPOSITION_SEGMENTS as usize),
@@ -639,8 +648,9 @@ fn shared_wall_layout_preserves_paths_and_ownership_across_skin_phases() {
                 regions
                     .paths(
                         0.4 * (index + 1) as f64,
-                        0.4,
+                        0.4 * index as f64,
                         region::HatchAxis::for_policy(recipe.rectilinear_axis, index),
+                        region::HatchAxis::for_policy(recipe.top_skin_axis, index),
                         &recipe,
                         &mut 0,
                         &cancel,
@@ -786,11 +796,15 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: None,
+            bead_width_mm: 0.6,
+            physical_z_mm: [0.0, 0.4],
             points_mm: vec![[2.0, 0.0, 0.4], [2.0, 10.0, 0.4]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: None,
+            bead_width_mm: 0.6,
+            physical_z_mm: [0.0, 0.4],
             points_mm: vec![[8.0, 0.0, 0.4], [8.0, 10.0, 0.4]],
         },
     ];
@@ -811,6 +825,8 @@ fn deposited_footprint_holes_and_sparse_void_are_real_anchor_gaps() {
     let holed = [DepositionPath {
         kind: DepositionKind::Perimeter,
         owner: None,
+        bead_width_mm: 0.6,
+        physical_z_mm: [0.0, 0.4],
         points_mm: vec![
             [4.0, 4.0, 0.4],
             [6.0, 4.0, 0.4],
@@ -843,7 +859,7 @@ fn deposited_solid_non_grid_transition_has_actual_anchors_across_shrinking_wall(
     let section = rectangle(20.0, 10.0);
     let paths = classify(&section, &section, &section, &recipe, &cancel)
         .unwrap()
-        .paths(3.15, 0.35, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
+        .paths(3.15, 2.8, region::HatchAxis::Y, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
         .unwrap()
         .0;
     let gaps = query
@@ -871,6 +887,8 @@ fn exact_deposited_capsules_keep_curved_caps_and_bounded_work() {
     let paths = [DepositionPath {
         kind: DepositionKind::SparseFill,
         owner: None,
+        bead_width_mm: 0.6,
+        physical_z_mm: [0.0, 0.4],
         points_mm: vec![[0.0, 0.0, 0.4], [0.0, 10.0, 0.4]],
     }];
     let gaps = query
@@ -931,6 +949,8 @@ fn support_raster_wall_center_entry_has_positive_previous_bead_overlap() {
     let paths = [20.5, 21.5, 22.5].map(|x| DepositionPath {
         kind: DepositionKind::Support,
         owner: None,
+        bead_width_mm: 0.6,
+        physical_z_mm: [0.4, 0.8],
         points_mm: vec![[x, 0.3, 0.8], [x, 9.7, 0.8]],
     });
     let tangent = query
@@ -977,11 +997,15 @@ fn lower_interface_capsules_do_not_forge_direct_previous_layer_anchors() {
                 skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin,
             },
         ),
+        bead_width_mm: 0.6,
+        physical_z_mm: [0.4, 0.8],
         points_mm: vec![[0.0, 0.0, 0.8], [2.0, 0.0, 0.8]],
     }];
     let contact = [DepositionPath {
         kind: DepositionKind::SupportInterface,
         owner: None,
+        bead_width_mm: 0.6,
+        physical_z_mm: [0.2, 0.6],
         points_mm: vec![[8.0, 0.0, 0.6], [10.0, 0.0, 0.6]],
     }];
     let mut query = super::support::AnchorWorkspace::default();
@@ -1260,6 +1284,8 @@ fn skin_horizon_intersects_varying_local_boundaries_under_cumulative_work_cap() 
                 occupied: None,
                 start: index,
                 end: index + 1,
+                invariant: true,
+                inner_material: None,
                 source_area_mm2: material.unsigned_area(),
                 material: Arc::new(material),
                 process_domains: Vec::new(),
@@ -1321,6 +1347,8 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
                 occupied: None,
                 start: index as u32,
                 end: index as u32 + 1,
+                invariant: true,
+                inner_material: None,
                 source_area_mm2: material.unsigned_area(),
                 material: Arc::new(material),
                 process_domains: Vec::new(),
@@ -1429,7 +1457,8 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
                 let (_, actual_coverage) = actual
                     .paths(
                         schedule[index].z,
-                        schedule[index].height,
+                        schedule[index].lower_z,
+                        axis,
                         axis,
                         &recipe,
                         &mut 0,
@@ -1439,7 +1468,8 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
                 let (_, expected_coverage) = expected
                     .paths(
                         schedule[index].z,
-                        schedule[index].height,
+                        schedule[index].lower_z,
+                        axis,
                         axis,
                         &recipe,
                         &mut 0,
@@ -1508,7 +1538,8 @@ fn sliding_physical_skin_horizons_reuse_varying_annuli_and_protected_holes() {
             let (_, coverage) = classified
                 .paths(
                     schedule[index as usize].z,
-                    schedule[index as usize].height,
+                    schedule[index as usize].lower_z,
+                    axis,
                     axis,
                     &recipe,
                     &mut 0,
@@ -1533,6 +1564,8 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
             occupied: None,
             start: index,
             end: index + 1,
+            invariant: true,
+            inner_material: None,
             material: Arc::new(section.clone()),
             process_domains: Vec::new(),
             source_area_mm2: 200.0,
@@ -1574,7 +1607,7 @@ fn classification_reclaims_optional_ranges_before_refusing_live_scratch() {
     )
     .unwrap();
     let (_, coverage) = classified
-        .paths(0.4, 0.4, region::HatchAxis::X, &recipe, &mut 0, &cancel)
+        .paths(0.4, 0.0, region::HatchAxis::X, region::HatchAxis::X, &recipe, &mut 0, &cancel)
         .unwrap();
     assert!((coverage.solid_interior_area_mm2 - 18.8 * 8.8).abs() < 0.5);
     assert_eq!(coverage.section_area_mm2, 200.0);

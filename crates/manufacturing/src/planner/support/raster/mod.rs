@@ -104,7 +104,7 @@ impl Domains {
         let mut segments = MAX_DEPOSITION_SEGMENTS as usize - allowance;
         let mut paths = Vec::new();
         if interface.0.is_empty() || self.all_interface {
-            region::wall_paths(&self.centers, layer.z, &mut paths, &mut segments, cancel)?;
+            region::wall_paths(&self.centers, layer.z, layer.lower_z, layer.recipe.bead_width_mm, &mut paths, &mut segments, cancel)?;
             for path in &mut paths {
                 path.kind = if self.all_interface {
                     DepositionKind::SupportInterface
@@ -120,7 +120,7 @@ impl Domains {
                     centers: &self.centers,
                     interface,
                 },
-                layer.z,
+                layer,
                 &mut paths,
                 &mut segments,
                 retained,
@@ -219,12 +219,14 @@ struct WallContours<'a> {
 
 struct WallRing {
     z: f64,
+    lower_z: f64,
+    bead_width_mm: f64,
     first_path: usize,
 }
 
 fn walls(
     contours: WallContours<'_>,
-    z: f64,
+    layer: &region::HatchLayer<'_>,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     retained: usize,
@@ -232,12 +234,15 @@ fn walls(
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let WallContours { centers, interface } = contours;
+    let z = layer.z;
     let mut cuts = Vec::new();
     let mut path_points = 0usize;
     for polygon in &centers.0 {
         for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
             let wall_ring = WallRing {
                 z,
+                lower_z: layer.lower_z,
+                bead_width_mm: layer.recipe.bead_width_mm,
                 first_path: paths.len(),
             };
             for edge in ring.0.windows(2) {
@@ -344,7 +349,7 @@ fn wall_piece(
     path_points: &mut usize,
     point_budget: usize,
 ) -> Result<(), ManufacturingError> {
-    let WallRing { z, first_path } = *ring;
+    let WallRing { z, lower_z, bead_width_mm, first_path } = *ring;
     let [start, end] = edge;
     let length = (end.x - start.x).hypot(end.y - start.y);
     if !length.is_finite() || length <= 0.000002 {
@@ -373,6 +378,8 @@ fn wall_piece(
     } else {
         paths.push(DepositionPath {
             kind,
+            bead_width_mm,
+            physical_z_mm: [lower_z, z],
             owner: None,
             points_mm: vec![from, to],
         });
@@ -396,9 +403,9 @@ pub(super) fn failure<'a>(
             for gap in anchors.gaps(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
-                    bead_width_mm: recipe.bead_width_mm,
+                    bead_width_mm: path.bead_width_mm,
                 },
-                previous.clone(),
+                previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
                 std::iter::empty(),
                 work,
                 cancel,
@@ -408,7 +415,7 @@ pub(super) fn failure<'a>(
                     strokes::gap_kind(
                         gap,
                         span,
-                        recipe.bead_width_mm,
+                        path.bead_width_mm,
                         recipe.process.max_bridge_span_mm
                     ),
                     strokes::GapKind::Demand
@@ -487,8 +494,10 @@ mod tests {
                 1.0,
                 &region::HatchLayer {
                     z: 0.575,
+                    lower_z: 0.0,
                     height: 0.575,
                     axis: region::HatchAxis::Y,
+                    top_axis: region::HatchAxis::Y,
                     recipe: &recipe,
                 },
                 0,
@@ -502,8 +511,10 @@ mod tests {
                 1.0,
                 &region::HatchLayer {
                     z: 1.15,
+                    lower_z: 0.575,
                     height: 0.575,
                     axis: region::HatchAxis::X,
+                    top_axis: region::HatchAxis::X,
                     recipe: &recipe,
                 },
                 super::super::path_segments(&previous),
@@ -560,12 +571,20 @@ mod tests {
         let interface = rectangle(4.0, -1.0, 8.0, 2.0);
         let mut paths = Vec::new();
         let mut segments = 0;
+        let recipe = crate::planner::tests::recipe(1.0);
         walls(
             WallContours {
                 centers: &centers,
                 interface: &interface,
             },
-            0.6,
+            &region::HatchLayer {
+                z: 0.6,
+                lower_z: 0.0,
+                height: 0.6,
+                axis: region::HatchAxis::X,
+                top_axis: region::HatchAxis::X,
+                recipe: &recipe,
+            },
             &mut paths,
             &mut segments,
             0,
@@ -608,8 +627,10 @@ mod tests {
         let recipe = crate::planner::tests::recipe(1.0);
         let layer = region::HatchLayer {
             z: 0.4,
+            lower_z: 0.0,
             height: 0.4,
             axis: region::HatchAxis::X,
+            top_axis: region::HatchAxis::X,
             recipe: &recipe,
         };
         assert_eq!(

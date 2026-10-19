@@ -28,6 +28,7 @@ pub use analysis::{
     NativeCriticalCollarCell, NativeCriticalCollarIncidence, NativeCriticalCollarMaterialTarget,
     NativeCriticalCollarPolicy, NativeCriticalCollarTarget, NativeCriticalCollarTargetSide,
     NativeEndpointStratum, NativeInterfaceAttachment, NativeOwnedEndpoint, NativeProjectedVoids,
+    NativeInnerMaterialPrism,
     NativeProtectedVoidEnvelope, NativeSourceLeafProofKind, NativeSourceLeafReceipt,
     NativeUnionBindingLedger, NativeUnionBoundaryEdge, NativeUnionBoundarySource,
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,

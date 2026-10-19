@@ -543,7 +543,7 @@ pub(crate) fn verify_actual(
         let Some(action) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
-        let (target, source, layer_index, deposition_kind) = match action {
+        let (target, source, layer_index, deposition_kind, association) = match action {
             expected::Action::Fan(pwm) => {
                 if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm)) {
                     return Err(failed("missing or mutated process cooling state"));
@@ -639,7 +639,8 @@ pub(crate) fn verify_actual(
                 source,
                 layer,
                 role,
-            } => (target, source, layer, role),
+                association,
+            } => (target, source, layer, role, association),
         };
         if layer_index != volume_layer {
             verify_region_volume(
@@ -738,10 +739,11 @@ pub(crate) fn verify_actual(
             process_speed *= recipe.process.bridge_speed_factor;
             process_flow *= recipe.process.bridge_flow_factor;
         }
-        let height = plan.layers[layer_index as usize].height_mm;
-        let volume_per_mm = ((recipe.bead_width_mm - height) * height
-            + std::f64::consts::PI * (height * 0.5).powi(2))
-            * process_flow;
+        let volume_per_mm = association.map_or(0.0, |association| {
+            let height = association.physical_z[1] - association.physical_z[0];
+            ((association.width - height) * height
+                + std::f64::consts::PI * (height * 0.5).powi(2)) * process_flow
+        });
         let expected_feed = 60.0
             * if source.is_some() {
                 process_speed
@@ -765,6 +767,21 @@ pub(crate) fn verify_actual(
             let from = state
                 .position
                 .ok_or_else(|| failed("deposition before positioning"))?;
+            if matches!(deposition_kind, DepositionKind::BottomSkin | DepositionKind::TopSkin
+                | DepositionKind::SolidFill | DepositionKind::SparseFill) {
+                let policy = if deposition_kind == DepositionKind::TopSkin {
+                    recipe.top_skin_axis
+                } else { recipe.rectilinear_axis };
+                let fixed_axis = match policy {
+                    RectilinearAxisPolicy::X => 1,
+                    RectilinearAxisPolicy::Y => 0,
+                    RectilinearAxisPolicy::AlternatingXY => if layer_index.is_multiple_of(2) { 1 } else { 0 },
+                    RectilinearAxisPolicy::AlternatingYX => if layer_index.is_multiple_of(2) { 0 } else { 1 },
+                };
+                if from[fixed_axis] != position[fixed_axis] {
+                    return Err(failed("actual ordinary deposition violates its authored axis policy"));
+                }
+            }
             let length = distance(from, position);
             let nominal_length = distance(source, target);
             let support = matches!(
@@ -856,13 +873,14 @@ pub(crate) fn verify_actual(
                     DepositionKind::SeparatorWall => 13,
                 }
             };
-            sink.push(
+            sink.push_associated(
                 position,
                 state.extrusion,
                 feed,
                 (line_index + 1) as u32,
                 layer_index,
                 kind,
+                association,
             )?;
         }
         state.position = Some(position);

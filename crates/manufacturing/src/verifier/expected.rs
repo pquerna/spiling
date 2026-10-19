@@ -71,6 +71,13 @@ pub(super) fn validate_preferred_seams(
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct Association {
+    pub width: f64,
+    pub physical_z: [f64; 2],
+    pub owner: Option<DepositionOwner>,
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum Action {
     Fan(u8),
     Move {
@@ -78,6 +85,7 @@ pub(super) enum Action {
         source: Option<[f64; 3]>,
         layer: u16,
         role: DepositionKind,
+        association: Option<Association>,
     },
     Recovery {
         retract: bool,
@@ -127,6 +135,7 @@ impl<'a> Expected<'a> {
                 source: None,
                 layer,
                 role,
+                association: None,
             })
         };
         self.prefix = [None; 8];
@@ -218,6 +227,11 @@ impl Iterator for Expected<'_> {
                     source: Some(source),
                     layer: self.layer as u16,
                     role: path.kind,
+                    association: Some(Association {
+                        width: path.bead_width_mm,
+                        physical_z: path.physical_z_mm,
+                        owner: path.owner,
+                    }),
                 });
             }
             self.path += 1;

@@ -4,7 +4,7 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Durable source-backed project format8
+# Durable source-backed project format9
 
 The executable storage schema is `spiling-contracts::project`; state and storage authority is `spiling-core`. Engine caches are disposable. CLI, desktop and engine-client do not implement this format themselves. Generated protobuf Projects services operate on captured immutable snapshots rather than frontend recipes or external source paths. Long opens/saves are standard Google Operations scoped to the native session; RPC and operation metadata are not persisted project manifest schemas.
 
@@ -55,7 +55,7 @@ An asset contains 1..16 MiB of exact original imported bytes, not normalized or 
 
 Each immutable asset directory is limited to128 files and256MiB, including complete unreferenced assets left by earlier saves; image files additionally remain at most65,551 bytes each. There is **no asset garbage collection**: a concurrent reader may still hold a manifest referring to an old immutable asset. Exhaustion is an explicit resource error, not permission to delete old assets. Scratch permits at most eight entries, with aggregate bytes capped at16MiB for source/manufacturing directories and65,551 bytes for the image directory. Root entries are limited to32 and each temporary manifest to1MiB. A save refuses to exceed scratch capacity, including crash leftovers. These are storage bounds, not certification of arbitrary externally modified directories. First-save crash staging directories live beside the destination and are not published projects.
 
-Manufacturing records bind project identity, source/occurrence records, explicit intent and complete ordered finish/process documents, including disabled/shadowed operations. Manufacturing schema9 captures these inputs and bounded canonical image content. Format8 refuses older manifests/checkpoints without missing-field defaults. Bundles remain capped at16MiB under Core's separate64MiB retained/staged/history allowance. Load checks exact bytes/hash, strict schema, full input/provenance/content agreement and summary. Engine independently replays stored program bytes; persisted `verified` is descriptive. See [manufacturing.md](manufacturing.md).
+Manufacturing records bind project identity, source/occurrence records, explicit intent and complete ordered finish/process documents, including disabled/shadowed operations. Manufacturing schema10 captures these inputs, required deposition limits/sparse/top-skin policies and bounded canonical image content. Format9 refuses older manifests/checkpoints without missing-field defaults. Bundles remain capped at16MiB under Core's separate64MiB retained/staged/history allowance. Load checks exact bytes/hash, strict schema, full input/provenance/content agreement and summary. Engine independently replays stored program bytes; persisted `verified` is descriptive. See [manufacturing.md](manufacturing.md).
 
 ## Identity, transactions and saved state
 

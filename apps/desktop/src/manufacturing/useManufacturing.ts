@@ -77,8 +77,10 @@ export interface ManufacturingController extends ManufacturingReviewState {
   editScalar(key: ScalarField, value: string): void;
   editPolicyScalar(key: string, value: string): void;
   editSeamPolicy(value: SeamPolicy["kind"]): void;
+  editSparseInfill(kind: "fine" | "combine_eligible", maxHeight: string): void;
   editPreferredDirection(axis: 0 | 1, value: string): void;
   editRectilinearAxis(value: RectilinearAxisPolicy): void;
+  editTopSkinAxis(value: RectilinearAxisPolicy): void;
   reloadDraft(): void;
   apply(): Promise<void>;
   compile(): Promise<void>;
@@ -352,6 +354,11 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     setMessage("");
     setDraft(previous => previous ? { ...previous, policyValues: { ...previous.policyValues, [key]: value } } : null);
   }
+  function editSparseInfill(kind: "fine" | "combine_eligible", maxHeight: string) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => previous ? { ...previous, sparseInfillKind: kind, sparseMaxHeight: maxHeight } : null);
+  }
   function editSeamPolicy(value: SeamPolicy["kind"]) {
     setFailure(null);
     setMessage("");
@@ -373,6 +380,14 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     setDraft(previous => previous ? {
       ...previous,
       intent: { ...previous.intent, recipe: { ...previous.intent.recipe, rectilinear_axis: value } },
+    } : null);
+  }
+  function editTopSkinAxis(value: RectilinearAxisPolicy) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => previous ? {
+      ...previous,
+      intent: { ...previous.intent, recipe: { ...previous.intent.recipe, top_skin_axis: value } },
     } : null);
   }
   function reloadDraft() {
@@ -709,8 +724,10 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     editScalar,
     editPolicyScalar,
     editSeamPolicy,
+    editSparseInfill,
     editPreferredDirection,
     editRectilinearAxis,
+    editTopSkinAxis,
     reloadDraft,
     apply: () => perform("apply"),
     compile: () => perform("compile"),

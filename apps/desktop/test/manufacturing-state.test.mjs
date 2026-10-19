@@ -199,6 +199,44 @@ test("seam and every rectilinear choice survive JSON Apply/reload and participat
   }
 });
 
+test("top-skin axis remains independent through Apply, reload and authority replacement", () => {
+  for (const axis of ["x", "y", "alternating_xy", "alternating_yx"]) {
+    const draft = makeDraft(intent, intent);
+    draft.intent.recipe.top_skin_axis = axis;
+    assert.equal(draftChanged(draft), axis !== intent.recipe.top_skin_axis);
+    const applied = draftIntent(draft);
+    const expected = structuredClone(intent);
+    expected.recipe.top_skin_axis = axis;
+    assert.deepEqual(applied, expected, "Changing top skin never changes sparse axis or policy");
+    const reopened = makeDraft(JSON.parse(JSON.stringify(applied)), applied);
+    assert.equal(draftChanged(reopened), false);
+    reopened.values.print_speed_mm_s = "36";
+    assert.equal(draftIntent(reopened).recipe.top_skin_axis, axis);
+    const restored = makeDraft(intent, intent);
+    assert.equal(draftChanged(restored), false, "Authoritative Undo/reload replaces the draft");
+    assert.equal(draftIntent(restored).recipe.top_skin_axis, intent.recipe.top_skin_axis);
+  }
+});
+
+test("sparse combining edits only explicit policy and preserves the fine schedule", () => {
+  const draft = makeDraft(intent, intent);
+  assert.equal(draftChanged(draft), false);
+  draft.sparseInfillKind = "combine_eligible";
+  draft.sparseMaxHeight = "0.3";
+  const combined = draftIntent(draft);
+  assert.deepEqual(combined.recipe.sparse_infill, { kind: "combine_eligible", max_height_mm: 0.3 });
+  const expected = structuredClone(intent);
+  expected.recipe.sparse_infill = combined.recipe.sparse_infill;
+  assert.deepEqual(combined, expected);
+  assert.equal(draftChanged(makeDraft(combined, combined)), false);
+  for (const invalid of ["", "0", "-1", "NaN", "Infinity", "999"]) {
+    draft.sparseMaxHeight = invalid;
+    assert.throws(() => draftIntent(draft), /software deposition envelope/);
+  }
+  draft.sparseInfillKind = "fine";
+  assert.deepEqual(draftIntent(draft), intent, "Inactive combine height is not serialized");
+});
+
 test("enabled support edits retain explicit zero gap and disabled policies are never invented", () => {
   const supported = structuredClone(intent);
   supported.recipe.supports = { kind: "breakaway", density: 0.25, xy_clearance_mm: 0.5,
