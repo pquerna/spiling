@@ -1,0 +1,28 @@
+Appearance fixture provenance and interpretation
+
+palette.json is a converted six-row subset of OpenPrintTag/openprinttag-database
+revision 2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3 (MIT), copyright 2025
+PRUSA RESEARCH A.S. Preserve LICENSE-OpenPrintTag.txt with this data.
+
+Pinned source URLs:
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-prusa-orange.yaml
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-jet-black.yaml
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-chalky-blue.yaml
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-emerald-green.yaml
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-army-green.yaml
+https://github.com/OpenPrintTag/openprinttag-database/blob/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament/prusament-pla-cmyk-cyan.yaml
+
+Conversion spiling-c1a-explicit-color-1 retains UUID and display name, reads ONLY
+three RGB bytes of primary_color.color_rgba, and divides each byte by 255 as f64.
+The values are catalog GUI color estimates, NOT measured filament appearance.
+Source RGB triplets: ff7041, 222f2e, 729eba, 006441, 524f2f, 00acd6.
+Alpha is omitted and confers no opacity, transmission or material-property claim.
+No vendor Lab, photographs, transmission distance, profiles or owned spools are
+imported. No measurement instrument, calibration, geometry, backing, thickness,
+aperture, specular handling or orientation is invented.
+
+Original target and numerical-vector fixtures are Spiling contributions under
+OSL-3.0, copyright 2026 Spiling contributors. Numerical vectors use own input
+pairs, not the Sharma dataset. Independent integration execution used genuine
+Colour 0.4.6, NumPy 2.5.4, SciPy 1.18.1 and Python 3.14.4. Exact functions, the
+explicit CSS D65 convention and runtime caveat are in reference-vectors.json.

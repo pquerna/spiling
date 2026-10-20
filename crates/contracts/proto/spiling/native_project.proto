@@ -6,6 +6,7 @@ package spiling.engine;
 import "google/longrunning/operations.proto";
 import "spiling/native_common.proto";
 import "spiling/native_geometry.proto";
+import "spiling/native_appearance.proto";
 service Projects {
  rpc Execute(ProjectRequest) returns (ProjectReply);
  rpc Open(OpenProjectRequest) returns (google.longrunning.Operation) {
@@ -20,6 +21,15 @@ service Projects {
  rpc GetSurfaceImage(GetSurfaceImageRequest) returns (google.longrunning.Operation) {
   option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
  }
+ rpc ImportAppearancePalette(ImportAppearancePaletteRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+ rpc CompareAppearance(CompareAppearanceRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
+ rpc GetAppearanceReport(GetAppearanceReportRequest) returns (google.longrunning.Operation) {
+  option (google.longrunning.operation_info) = {response_type:"NativeOperationResult" metadata_type:"NativeOperationMetadata"};
+ }
 }
 message ProjectRequest {
  string parent = 1;
@@ -32,6 +42,8 @@ message ProjectRequest {
   RemoveSurfaceFinishRequest remove_surface_finish = 7;
   SetSurfaceFinishEnabledRequest set_surface_finish_enabled = 8;
   EditProcessRequest edit_process = 9;
+  SetAppearanceTargetRequest set_appearance_target = 10;
+  AcceptAppearanceReportRequest accept_appearance_report = 11;
  }
 }
 message GetProjectRequest {}
@@ -109,6 +121,13 @@ message ImportSurfaceImageFinishRequest { string parent = 1; string request_id =
 message GetSurfaceImageRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; string image_hash = 4; }
 message SurfaceImageImportedResult { ProjectInfo info = 1; SurfaceImageRecord image = 2; uint32 layer_id = 3; }
 message SurfaceImagePreparedResult { string project_id = 1; uint32 captured_revision = 2; SurfaceImageRecord record = 3; Artifact resource = 4; }
-message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13;}
+message ProjectInfo {string project_id = 1; uint32 revision = 2; optional uint32 saved_revision = 3; optional string path_label = 4; bool dirty = 5; bool save_uncertain = 6; bool read_only = 7; bool recovered_previous = 8; bool can_undo = 9; bool can_redo = 10; SurfaceOverlays surface_overlays = 11; ProcessDocument process_document = 12; repeated ResolvedOccurrenceProcess resolved_process = 13; AppearanceStudyInfo appearance_study = 14;}
 message ProjectSceneChanged {ProjectInfo info = 1; SceneSummary summary = 2;}
 message ProjectReply {oneof response {ProjectInfo status = 1; ProjectSceneChanged scene_changed = 2;}}
+message ImportAppearancePaletteRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; NativePath source = 4; }
+message CompareAppearanceRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
+message GetAppearanceReportRequest { string parent = 1; string request_id = 2; uint32 base_revision = 3; }
+message SetAppearanceTargetRequest { uint32 base_revision = 1; AppearanceTarget target = 2; AppearanceSearchLimits limits = 3; }
+message AcceptAppearanceReportRequest { uint32 base_revision = 1; string report_hash = 2; optional string selection = 3; }
+message AppearancePaletteImportedResult { ProjectInfo info = 1; AppearancePaletteRecord palette = 2; }
+message AppearanceComparedResult { string project_id = 1; uint32 captured_revision = 2; AppearanceReportRecord record = 3; Artifact resource = 4; }

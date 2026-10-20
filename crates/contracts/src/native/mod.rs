@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 //! Checked protobuf adapters. Persisted JSON and packed display bytes remain separate schemas.
 use crate::{ArtifactView, geometry::*, rpc};
+mod appearance;
 mod bed_pose;
 mod error;
 pub mod geometry;

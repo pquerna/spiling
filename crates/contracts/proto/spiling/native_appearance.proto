@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Spiling contributors
+// SPDX-License-Identifier: OSL-3.0
+// Licensed under the Open Software License version 3.0
+syntax = "proto3";
+package spiling.engine;
+
+message AppearanceChannels { double first = 1; double second = 2; double third = 3; }
+message AppearanceColor {
+ oneof encoding {
+  AppearanceChannels srgb = 1;
+  AppearanceChannels xyz_y1 = 2;
+  AppearanceChannels xyz_y100 = 3;
+  AppearanceChannels d65_lab = 4;
+ }
+}
+enum AppearanceIlluminant { APPEARANCE_ILLUMINANT_UNSPECIFIED = 0; APPEARANCE_ILLUMINANT_D65 = 1; APPEARANCE_ILLUMINANT_D50 = 2; APPEARANCE_ILLUMINANT_UNKNOWN = 3; }
+enum AppearanceObserver { APPEARANCE_OBSERVER_UNSPECIFIED = 0; APPEARANCE_OBSERVER_CIE1931_TWO_DEGREE = 1; APPEARANCE_OBSERVER_CIE1964_TEN_DEGREE = 2; APPEARANCE_OBSERVER_UNKNOWN = 3; }
+message AppearanceConditions {
+ AppearanceIlluminant illuminant = 1;
+ AppearanceObserver observer = 2;
+ optional string geometry = 3;
+ optional string backing = 4;
+ optional double thickness_mm = 5;
+ optional string cohort = 6;
+ optional string instrument = 7;
+ optional string calibration = 8;
+ optional double aperture_mm = 9;
+ optional string specular = 10;
+ optional string orientation = 11;
+ optional string process = 12;
+ optional string construction = 13;
+}
+enum AppearanceEvidenceScope { APPEARANCE_EVIDENCE_SCOPE_UNSPECIFIED = 0; APPEARANCE_EVIDENCE_SCOPE_CATALOG_ESTIMATES = 1; APPEARANCE_EVIDENCE_SCOPE_MEASURED = 2; }
+message AppearanceTarget {
+ AppearanceColor color = 1;
+ double delta_e00_tolerance = 2;
+ optional double lightness_tolerance = 3;
+ AppearanceConditions conditions = 4;
+ AppearanceEvidenceScope evidence_scope = 5;
+}
+message AppearanceSearchLimits { uint32 max_visited = 1; uint32 max_alternatives = 2; }
+message AppearancePaletteRecord {
+ string name = 1;
+ string original_hash = 2;
+ uint32 original_bytes = 3;
+ string canonical_hash = 4;
+ uint32 canonical_bytes = 5;
+ string source_url = 6;
+ string source_revision = 7;
+ string license = 8;
+ string conversion = 9;
+}
+message AppearanceReportRecord {
+ string hash = 1;
+ uint64 byte_count = 2;
+ string input_hash = 3;
+ string producer = 4;
+ bool complete = 5;
+}
+message AppearanceStudyInfo {
+ AppearancePaletteRecord palette = 1;
+ AppearanceTarget target = 2;
+ AppearanceSearchLimits limits = 3;
+ AppearanceReportRecord report = 4;
+ optional string selection = 5;
+}

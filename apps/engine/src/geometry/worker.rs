@@ -69,6 +69,7 @@ pub struct OpenRequest {
     pub retained_manufacturing_bytes: u64,
     pub budget: MeshBudget,
     pub retained_surface_image_bytes: usize,
+    pub retained_appearance_bytes: usize,
 }
 struct Opened {
     project: Project,
@@ -96,6 +97,18 @@ pub enum Work {
     ImportSurfaceImage {
         source: NativePath,
         canonical_budget: usize,
+    },
+    ImportAppearancePalette {
+        source: NativePath,
+        retained_budget: usize,
+    },
+    CompareAppearance {
+        asset: Arc<spiling_core::PaletteAsset>,
+        target: spiling_contracts::appearance::AppearanceTarget,
+        limits: spiling_contracts::appearance::SearchLimits,
+    },
+    GetAppearanceReport {
+        report: Arc<spiling_contracts::appearance::AppearanceReport>,
     },
     GetSurfaceImage {
         asset: Arc<SurfaceImageAsset>,
@@ -179,6 +192,8 @@ pub enum Product {
     },
     Saved(SaveReceipt),
     SurfaceImage(Arc<SurfaceImageAsset>),
+    AppearancePalette(Arc<spiling_core::PaletteAsset>),
+    AppearanceReport(Arc<super::appearance::ReportPublication>),
     Section(EncodedSection),
     Compiled(Arc<ManufacturingAsset>),
     Preflight(PreflightReport),
@@ -282,6 +297,18 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
         let result = match work {
+            Work::ImportAppearancePalette { source, retained_budget } =>
+                super::appearance::import_palette(source, retained_budget, &cancel)
+                    .map(Product::AppearancePalette).map_err(JobError::from),
+            Work::CompareAppearance { asset, target, limits } => {
+                super::appearance::compare_palette(asset, target, limits, &cancel)
+                    .map(Product::AppearanceReport).map_err(JobError::from)
+            }
+            Work::GetAppearanceReport { report } => {
+                check_cancel(&cancel).map_err(super::project_geometry_error)
+                    .and_then(|()| super::appearance::ReportPublication::new(report))
+                    .map(Arc::new).map(Product::AppearanceReport).map_err(JobError::from)
+            }
             Work::ImportSurfaceImage {
                 source,
                 canonical_budget,
@@ -694,6 +721,7 @@ fn open(
         retained_manufacturing_bytes,
         budget,
         retained_surface_image_bytes,
+        retained_appearance_bytes,
     } = request;
     let path = project_path(path)?;
     // Old current/history allocations survive until ACK, even for identical IDs.
@@ -726,6 +754,10 @@ fn open(
                     "retained surface image budget exceeded",
                 )
             })?,
+        spiling_core::MAX_APPEARANCE_RETAINED_BYTES
+            .checked_sub(retained_appearance_bytes)
+            .ok_or_else(|| ProjectError::new(ProjectErrorCode::ResourceLimit,
+                "retained appearance palette budget exceeded"))?,
     )?;
     let mut capacity = Capacity::new(definitions, budget);
     let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {

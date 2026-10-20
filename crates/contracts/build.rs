@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::path::PathBuf::from("proto/spiling/native_geometry.proto"),
             std::path::PathBuf::from("proto/spiling/native_project.proto"),
             std::path::PathBuf::from("proto/spiling/native_manufacturing.proto"),
+            std::path::PathBuf::from("proto/spiling/native_appearance.proto"),
             std::path::PathBuf::from("proto/vendor/google/longrunning/operations.proto"),
             std::path::PathBuf::from("proto/vendor/google/bytestream/bytestream.proto"),
         ],

@@ -1879,3 +1879,136 @@ fn process_box_authoring_persists_explicit_permission_and_uses_shared_history() 
     assert!(rejected["message"].as_str().unwrap().contains("read-only"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+#[ignore = "actual native CLI regression; requires SPILING_TEST_ENGINE"]
+fn appearance_study_source_deleted_readonly_reopen_and_revision_owned_acceptance() {
+    let root = root();
+    let project = root.join("study");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/appearance");
+    let palette = root.join("palette.json");
+    std::fs::copy(fixtures.join("palette.json"), &palette).unwrap();
+    let target = fixtures.join("target-red.json");
+    let created = report(cli("create", &project)
+        .arg("--appearance-palette").arg(&palette)
+        .arg("--appearance-target").arg(&target)
+        .args(["--appearance-compare", "--appearance-accept-report", "--save", "--undo", "--redo"])
+        .output().unwrap());
+    assert_eq!(created["scene"]["occurrence_count"], 0);
+    assert_eq!(created["project"]["dirty"], false);
+    assert_eq!(created["appearance"][0]["record"]["complete"], true);
+    assert!(created["appearance"][0]["report"].is_object());
+    let accepted = created["project"]["appearance_study"]["report"].clone();
+    assert!(accepted.is_object());
+    std::fs::remove_file(&palette).unwrap();
+    let destination = root.join("report.json");
+    let reopened = report(cli("inspect", &project)
+        .arg("--appearance-report").arg(&destination)
+        .arg("--appearance-compare").output().unwrap());
+    assert_ne!(created["hello"]["session_id"], reopened["hello"]["session_id"]);
+    assert_eq!(reopened["project"]["appearance_study"]["report"], accepted);
+    assert_eq!(reopened["project"]["dirty"], false);
+    let exported: Value = serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+    assert_eq!(exported, reopened["appearance"][0]["report"]);
+    assert_eq!(reopened["appearance"][1]["report"], exported);
+
+    // An intervening target transaction, even one undone to equal input, changes
+    // the authoritative revision and cannot authorize acceptance of the old job.
+    let mut changed_target: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+    let old_tolerance = changed_target["delta_e00_tolerance"].as_f64().unwrap();
+    changed_target["delta_e00_tolerance"] = serde_json::json!(if old_tolerance < 199.0 { old_tolerance + 1.0 } else { old_tolerance - 1.0 });
+    let changed_target_path = root.join("changed-target.json");
+    std::fs::write(&changed_target_path, serde_json::to_vec(&changed_target).unwrap()).unwrap();
+    let error = terminal_error(cli("open", &project)
+        .arg("--appearance-compare").arg("--appearance-target").arg(&changed_target_path)
+        .args(["--undo", "--appearance-accept-report"]).output().unwrap());
+    assert!(error["message"].as_str().unwrap().contains("current-revision"));
+    let mismatch = terminal_error(cli("open", &project)
+        .args(["--appearance-compare", "--appearance-accept", "__missing_row__"])
+        .output().unwrap());
+    assert!(mismatch["message"].as_str().unwrap().contains("comparison"));
+    // Publication still refers to the saved accepted report, not transient work.
+    let after = report(cli("inspect", &project).output().unwrap());
+    assert_eq!(after["project"]["appearance_study"]["report"], accepted);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "actual CLI pre-spawn and bounded native failures; requires SPILING_TEST_ENGINE"]
+fn appearance_readonly_preflight_bounds_and_export_rollback() {
+    let root = root();
+    let project = root.join("study");
+    for arguments in [
+        vec!["--appearance-palette", "absent.json"],
+        vec!["--appearance-accept", "none"],
+        vec!["--appearance-accept-report"],
+    ] {
+        let error = terminal_error(Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+            .args(["--engine", "/nonexistent/no-spawn", "project", "inspect"])
+            .arg(&project).args(arguments).output().unwrap());
+        assert!(error["message"].as_str().unwrap().contains("read-only"));
+    }
+    let oversized = root.join("oversized-target.json");
+    std::fs::write(&oversized, vec![b' '; 64 * 1024 + 1]).unwrap();
+    let error = terminal_error(Command::new(env!("CARGO_BIN_EXE_spiling-cli"))
+        .args(["--engine", "/nonexistent/no-spawn", "project", "create"])
+        .arg(&project).arg("--appearance-target").arg(&oversized).output().unwrap());
+    assert!(error["message"].as_str().unwrap().contains("byte limit"));
+    report(cli("create", &project).output().unwrap());
+    let destination = root.join("not-published.json");
+    terminal_error(cli("inspect", &project)
+        .arg("--appearance-report").arg(&destination).output().unwrap());
+    assert!(!destination.exists());
+    let foreign = root.join("foreign.json");
+    std::fs::write(&foreign, b"owned by somebody else").unwrap();
+    terminal_error(cli("inspect", &project)
+        .arg("--appearance-report").arg(&foreign).output().unwrap());
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"owned by somebody else");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/appearance");
+    let limits = root.join("limits.json");
+    std::fs::write(&limits, br#"{"max_visited":1,"max_alternatives":1}"#).unwrap();
+    let bounded = report(cli("edit", &project)
+        .arg("--appearance-palette").arg(fixtures.join("palette.json"))
+        .arg("--appearance-target").arg(fixtures.join("target-red.json"))
+        .arg("--appearance-limits").arg(&limits)
+        .arg("--appearance-compare").output().unwrap());
+    assert_eq!(bounded["appearance"][0]["record"]["complete"], false);
+    assert!(bounded["project"]["appearance_study"]["report"].is_null());
+    let refused = terminal_error(cli("open", &project)
+        .args(["--appearance-compare", "--appearance-accept-report"]).output().unwrap());
+    assert!(refused["message"].as_str().unwrap().contains("complete"));
+    let after = report(cli("inspect", &project).output().unwrap());
+    assert!(after["project"]["appearance_study"]["report"].is_null());
+    // A completed traversal is not a completed no-match claim when a relevant
+    // palette choice has unknown evidence, even alongside assessed mismatches.
+    let mut unknown_palette: Value = serde_json::from_slice(
+        &std::fs::read(fixtures.join("palette.json")).unwrap(),
+    ).unwrap();
+    unknown_palette["rows"][0]["evidence"] = serde_json::json!({
+        "kind": "unknown", "reason": "Catalog estimate intentionally unavailable in this study"
+    });
+    let unknown_path = root.join("unknown-palette.json");
+    std::fs::write(&unknown_path, serde_json::to_vec(&unknown_palette).unwrap()).unwrap();
+    let mut unattainable: Value = serde_json::from_slice(
+        &std::fs::read(fixtures.join("target-red.json")).unwrap(),
+    ).unwrap();
+    unattainable["color"] = serde_json::json!({"encoding":"srgb","channels":[1.0,1.0,1.0]});
+    unattainable["delta_e00_tolerance"] = serde_json::json!(0.0);
+    let unattainable_path = root.join("unattainable-target.json");
+    std::fs::write(&unattainable_path, serde_json::to_vec(&unattainable).unwrap()).unwrap();
+    let uncertain = report(cli("create", &root.join("uncertain-study"))
+        .arg("--appearance-palette").arg(&unknown_path)
+        .arg("--appearance-target").arg(&unattainable_path)
+        .args(["--appearance-compare", "--appearance-accept-report"])
+        .output().unwrap());
+    let comparison = &uncertain["appearance"][0]["report"];
+    assert_eq!(comparison["status"]["kind"], "complete");
+    assert_eq!(comparison["status"]["outcome"], "no_assessed_match");
+    assert_eq!(comparison["visits"].as_array().unwrap().len(), 6);
+    let alternative = &comparison["alternatives"][0];
+    let original = unknown_palette["rows"].as_array().unwrap().iter()
+        .find(|row| row["key"] == alternative["key"]).unwrap();
+    assert_eq!(alternative["name"], original["name"]);
+    assert!(uncertain["project"]["appearance_study"]["selection"].is_null());
+    std::fs::remove_dir_all(root).unwrap();
+}

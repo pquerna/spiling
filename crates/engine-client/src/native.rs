@@ -63,6 +63,28 @@ fn corrupt_manufacturing(message: &str) -> ClientError {
     ManufacturingError::new(ManufacturingErrorCode::CorruptArtifact, message).into()
 }
 impl EngineRpc {
+    /// Retrieve a bounded immutable engine report; never evaluate colors locally.
+    pub async fn fetch_appearance_report(
+        &self,
+        record: &spiling_contracts::appearance::AppearanceReportRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<spiling_contracts::appearance::AppearanceReport, ClientError> {
+        record.validate()?;
+        let limit = spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64;
+        let size = native::validate_artifact_view(descriptor, limit)
+            .map_err(ClientError::Protocol)?;
+        if size != u64::from(record.byte_count)
+            || descriptor.sha256 != record.hash.as_str()
+            || descriptor.name.strip_prefix("artifacts/") != Some(record.hash.as_str())
+            || descriptor.media_type != "application/x-spiling-appearance-report+json"
+        {
+            return Err(ClientError::Protocol("appearance descriptor disagrees with record".into()));
+        }
+        let bytes = self.read_bounded_artifact(
+            &descriptor.name, size, &descriptor.sha256, limit,
+        ).await?;
+        Ok(record.validate_bytes(&bytes)?)
+    }
     pub async fn geometry(
         &self,
         command: GeometryCommand,
@@ -170,9 +192,14 @@ impl EngineRpc {
         if let ProjectCommand::EditProcess { edit, .. } = &command {
             edit.validate()?;
         }
+        if let ProjectCommand::SetAppearanceTarget { target, limits, .. } = &command {
+            target.validate()?;
+            limits.validate()?;
+        }
         match &command {
             ProjectCommand::Open { path, .. } => path.validate(),
-            ProjectCommand::ImportSurfaceImageFinish { source, .. } => source.validate(),
+            ProjectCommand::ImportSurfaceImageFinish { source, .. }
+            | ProjectCommand::ImportAppearancePalette { source, .. } => source.validate(),
             ProjectCommand::Save {
                 target: Some(path), ..
             } => path.validate(),
@@ -184,6 +211,10 @@ impl EngineRpc {
             | ProjectCommand::EditProcess { .. }
             | ProjectCommand::AddSurfaceFinish { .. }
             | ProjectCommand::GetSurfaceImage { .. }
+            | ProjectCommand::SetAppearanceTarget { .. }
+            | ProjectCommand::CompareAppearance { .. }
+            | ProjectCommand::AcceptAppearanceReport { .. }
+            | ProjectCommand::GetAppearanceReport { .. }
             | ProjectCommand::RemoveSurfaceFinish { .. }
             | ProjectCommand::SetSurfaceFinishEnabled { .. } => Ok(()),
         }
@@ -247,6 +278,27 @@ impl EngineRpc {
                 Ok(ProjectResponse::OperationAccepted {
                     operation: native::native_operation_view(&operation)
                         .map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::ImportAppearancePalette(request) => {
+                let operation = client.import_appearance_palette(self.request(bounded(request)?))
+                    .await.map_err(rpc_error)?.into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::CompareAppearance(request) => {
+                let operation = client.compare_appearance(self.request(bounded(request)?))
+                    .await.map_err(rpc_error)?.into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
+                })
+            }
+            ProjectCall::GetAppearanceReport(request) => {
+                let operation = client.get_appearance_report(self.request(bounded(request)?))
+                    .await.map_err(rpc_error)?.into_inner();
+                Ok(ProjectResponse::OperationAccepted {
+                    operation: native::native_operation_view(&operation).map_err(ClientError::Protocol)?,
                 })
             }
         }
@@ -633,6 +685,13 @@ pub(crate) fn decode_manufacturing_artifact(
 }
 
 impl EngineClient {
+    pub async fn fetch_appearance_report(
+        &self,
+        record: &spiling_contracts::appearance::AppearanceReportRecord,
+        descriptor: &ArtifactView,
+    ) -> Result<spiling_contracts::appearance::AppearanceReport, ClientError> {
+        self.rpc.fetch_appearance_report(record, descriptor).await
+    }
     pub async fn geometry(
         &self,
         command: GeometryCommand,

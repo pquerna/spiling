@@ -997,10 +997,11 @@ pub async fn project_control(
         ProjectCommand::Open { .. }
             | ProjectCommand::Save { .. }
             | ProjectCommand::ImportSurfaceImageFinish { .. }
+            | ProjectCommand::ImportAppearancePalette { .. }
     ) {
         return Ok(project_error(
             ProjectErrorCode::InvalidProject,
-            "use the token-only project open/save or image import bridge",
+            "native project paths require a dedicated token-only bridge",
         ));
     }
     state.active().await?.project(command).await
@@ -1186,6 +1187,7 @@ mod tests {
             surface_overlays: spiling_contracts::surface::SurfaceOverlays::empty(),
             process_document: spiling_contracts::process::ProcessDocument::empty(),
             resolved_process: Vec::new(),
+            appearance_study: spiling_contracts::appearance::AppearanceStudy::default().info(),
         }
     }
 

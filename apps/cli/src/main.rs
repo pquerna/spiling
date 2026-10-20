@@ -36,6 +36,7 @@ enum Command {
         manufacturing_output: Option<PathBuf>,
         replay_output: Option<PathBuf>,
         surface_image_output: Option<PathBuf>,
+        appearance_report_output: Option<PathBuf>,
     },
 }
 fn set_once<T>(target: &mut Option<T>, value: T, name: &str) -> Result<(), Error> {
@@ -208,6 +209,11 @@ async fn run(options: Options) -> Result<(), Error> {
         } => Some(output::OutputFile::create(path)?),
         _ => None,
     };
+    let mut appearance_report_output = match &options.command {
+        Command::Project { appearance_report_output: Some(path), .. } =>
+            Some(output::OutputFile::create(path)?),
+        _ => None,
+    };
     let start = Instant::now();
     let mut client = if let Some(store) = &options.store {
         EngineClient::spawn_in(&options.engine, store).await?
@@ -259,13 +265,14 @@ async fn run(options: Options) -> Result<(), Error> {
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
-            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path, surface_image_output: image_path } => {
-                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut(), surface_image_output.as_mut()).await?;
+            Command::Project { workflow, plane, output: output_path, manufacturing_output: manufacturing_path, replay_output: replay_path, surface_image_output: image_path, appearance_report_output: appearance_path } => {
+                let mut report = project::run(&mut client, workflow, plane, output.as_mut(), manufacturing_output.as_mut(), replay_output.as_mut(), surface_image_output.as_mut(), appearance_report_output.as_mut()).await?;
                 report["transfer_and_jobs_us"] = serde_json::json!(transfer.elapsed().as_micros());
                 report["output"] = serde_json::json!(output_path.as_ref().map(|path| path.to_string_lossy()));
                 report["manufacturing_output"] = serde_json::json!(manufacturing_path.as_ref().map(|path| path.to_string_lossy()));
                 report["replay_output"] = serde_json::json!(replay_path.as_ref().map(|path| path.to_string_lossy()));
                 report["surface_image_output"] = serde_json::json!(image_path.as_ref().map(|path| path.to_string_lossy()));
+                report["appearance_report_output"] = serde_json::json!(appearance_path.as_ref().map(|path| path.to_string_lossy()));
                 report
             },
         };
@@ -306,6 +313,9 @@ async fn run(options: Options) -> Result<(), Error> {
         output.commit();
     }
     if let Some(output) = &mut surface_image_output {
+        output.commit();
+    }
+    if let Some(output) = &mut appearance_report_output {
         output.commit();
     }
     Ok(())
@@ -350,6 +360,7 @@ async fn main() -> ExitCode {
         Ok(Some(options)) => run(options).await,
         Ok(None) => {
             println!("{USAGE}");
+            println!("Appearance study flags (ordered; no geometry required): --appearance-palette NATIVE_JSON_PATH --appearance-target TARGET_JSON_FILE --appearance-limits LIMITS_JSON_FILE --appearance-compare --appearance-accept KEY --appearance-accept-report --appearance-report NEW_FILE. Compare/report permit read-only; acceptance requires the latest complete current-revision comparison. Target and limits are bounded inert JSON; reports are fetched from the engine, not evaluated locally.");
             Ok(())
         }
         Err(error) => Err(error),

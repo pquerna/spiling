@@ -143,6 +143,7 @@ fn os_writer_lock_readonly_snapshot_and_reused_writer_are_independent() {
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     assert!(Arc::ptr_eq(&reused.storage, &writer.storage().unwrap()));
@@ -404,6 +405,7 @@ fn same_writer_reopen_keeps_live_identity_high_water_without_dirty_revision_comp
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -749,6 +751,7 @@ fn cancelled_open_and_unattached_save_have_typed_nonmutating_failures() {
             MAX_RETAINED_SOURCE_BYTES,
             MAX_MANUFACTURING_RETAINED_BYTES as usize,
             MAX_SURFACE_IMAGE_RETAINED_BYTES,
+            MAX_APPEARANCE_RETAINED_BYTES,
         )
         .unwrap_err()
         .code,
@@ -789,6 +792,7 @@ fn same_session_reopen_cannot_clear_known_durability_uncertainty() {
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     let mut reopened = Project::from_loaded(loaded).unwrap();
@@ -853,6 +857,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         bytes - 1,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap_err();
     assert_eq!(error.code, ProjectErrorCode::ResourceLimit);
@@ -872,6 +877,7 @@ fn staged_open_enforces_remaining_source_budget_without_releasing_live_writer() 
         bytes,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     assert_eq!(loaded.manifest, project.capture().manifest);
@@ -1176,6 +1182,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
             MAX_RETAINED_SOURCE_BYTES,
             count - 1,
             MAX_SURFACE_IMAGE_RETAINED_BYTES,
+            MAX_APPEARANCE_RETAINED_BYTES,
         )
         .unwrap_err()
         .code,
@@ -1197,6 +1204,7 @@ fn manufacturing_remaining_capture_budget_preserves_live_writer_and_state() {
         MAX_RETAINED_SOURCE_BYTES,
         count,
         MAX_SURFACE_IMAGE_RETAINED_BYTES,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     assert_eq!(
@@ -1867,6 +1875,7 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
             MAX_RETAINED_SOURCE_BYTES,
             MAX_MANUFACTURING_RETAINED_BYTES as usize,
             size - 1,
+            MAX_APPEARANCE_RETAINED_BYTES,
         )
         .unwrap_err()
         .code,
@@ -1892,6 +1901,7 @@ fn staged_image_open_checks_remaining_allocation_before_releasing_live_state() {
         MAX_RETAINED_SOURCE_BYTES,
         MAX_MANUFACTURING_RETAINED_BYTES as usize,
         size,
+        MAX_APPEARANCE_RETAINED_BYTES,
     )
     .unwrap();
     assert_eq!(
@@ -2483,4 +2493,192 @@ fn box_process_intent_persists_explicit_permission_bounds_and_allocator_high_wat
         reopened.capture().manifest.next_process_operation,
         authorized.next_process_operation
     );
+}
+
+fn appearance_project() -> (Project, Arc<PaletteAsset>) {
+    let mut project = crate::tests::manufactured();
+    let asset = crate::tests::palette_asset("palette.json");
+    crate::tests::commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: asset.clone() });
+    let target = crate::tests::appearance_target();
+    crate::tests::commit_appearance(&mut project, Edit::SetAppearanceTarget {
+        target: target.clone(), limits: spiling_contracts::appearance::SearchLimits::default(),
+    });
+    let report = crate::tests::appearance_report(&asset, target);
+    crate::tests::commit_appearance(&mut project, Edit::AcceptAppearanceReport {
+        report, selection: Some("red/catalog".into()),
+    });
+    (project, asset)
+}
+
+#[test]
+fn appearance_original_source_deletion_reopen_and_readonly_preserve_artifact() {
+    let sandbox = Sandbox::new();
+    let (mut project, asset) = appearance_project();
+    let source = sandbox.0.join("palette.json");
+    fs::write(&source, asset.original().as_slice()).unwrap();
+    let imported_bytes = fs::read(&source).unwrap();
+    assert_eq!(imported_bytes.as_slice(), asset.original().as_slice());
+    fs::remove_file(&source).unwrap();
+    let artifact = project.snapshot().manufacturing_artifact.clone().unwrap();
+    let captured = project.capture().manifest;
+    save_project(&mut project, Some(sandbox.target()));
+    assert!(project.info().can_undo);
+    let mut readonly = Project::from_loaded(open(&sandbox.target(), true, false, &flag()).unwrap()).unwrap();
+    assert_eq!(readonly.capture().manifest, captured);
+    let reopened_asset = readonly.snapshot().appearance_palettes.values().next().unwrap().clone();
+    assert_eq!(reopened_asset.original().as_slice(), asset.original().as_slice());
+    assert_eq!(reopened_asset.canonical().as_slice(), asset.canonical().as_slice());
+    assert_eq!(reopened_asset.document(), asset.document());
+    assert_eq!(readonly.snapshot().manufacturing_artifact.as_ref().unwrap().bytes.as_slice(), artifact.bytes.as_slice());
+    assert_eq!(readonly.snapshot().manufacturing_artifact.as_ref().unwrap().record.input_hash, artifact.record.input_hash);
+    assert_eq!(readonly.prepare(Edit::SetAppearanceTarget {
+        target: crate::tests::appearance_target(), limits: spiling_contracts::appearance::SearchLimits::default(),
+    }).unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(readonly.undo().unwrap_err().code, ProjectErrorCode::ReadOnly);
+    assert_eq!(save(readonly.capture(), readonly.storage(), None, &flag(), |_| {}).unwrap_err().code, ProjectErrorCode::ReadOnly);
+}
+
+#[test]
+fn appearance_assets_precede_manifest_and_save_preserves_semantic_history() {
+    let sandbox = Sandbox::new();
+    let (mut project, asset) = appearance_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let saved = project.capture().manifest;
+    let mut target = crate::tests::appearance_target();
+    target.delta_e00_tolerance = 4.0;
+    crate::tests::commit_appearance(&mut project, Edit::SetAppearanceTarget {
+        target, limits: spiling_contracts::appearance::SearchLimits::default(),
+    });
+    let next = project.capture().manifest;
+    let receipt = save(project.capture(), project.storage(), None, &flag(), |stage| {
+        if stage == SaveStage::AssetsSynced {
+            assert_eq!(fs::read(sandbox.target().join(PALETTE_ORIGINALS).join(format!("{}.json", asset.record().original_hash.as_str()))).unwrap(), *asset.original().as_ref());
+            assert_eq!(fs::read(sandbox.target().join(PALETTE_CANONICAL).join(format!("{}.json", asset.record().canonical_hash.as_str()))).unwrap(), *asset.canonical().as_ref());
+            assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap().manifest, saved);
+        }
+    }).unwrap();
+    project.mark_saved(receipt).unwrap();
+    assert!(!project.info().dirty && project.info().can_undo);
+    project.undo().unwrap();
+    assert!(project.info().dirty);
+    assert_eq!(project.appearance_study().selection.as_deref(), Some("red/catalog"));
+    project.redo().unwrap();
+    assert!(!project.info().dirty);
+    assert_eq!(project.capture().manifest.appearance_study, next.appearance_study);
+    let recovered = Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
+    assert_eq!(recovered.appearance_study(), &saved.appearance_study);
+    assert!(recovered.info().dirty && recovered.info().recovered_previous);
+    assert_eq!(recovered.snapshot().manufacturing_artifact.as_ref().unwrap().record, saved.manufacturing_artifact.unwrap());
+}
+
+#[test]
+fn appearance_storage_rejects_corruption_missing_assets_and_producer_mismatch() {
+    for original in [true, false] {
+        let sandbox = Sandbox::new();
+        let (mut project, asset) = appearance_project();
+        save_project(&mut project, Some(sandbox.target()));
+        let (directory, hash) = if original {
+            (PALETTE_ORIGINALS, &asset.record().original_hash)
+        } else { (PALETTE_CANONICAL, &asset.record().canonical_hash) };
+        let path = sandbox.target().join(directory).join(format!("{}.json", hash.as_str()));
+        let bytes = fs::read(&path).unwrap();
+        let mut bad = bytes.clone(); bad[0] ^= 1;
+        fs::write(&path, bad).unwrap();
+        assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::CorruptAsset);
+        assert_eq!(save(project.capture(), project.storage(), None, &flag(), |_| {}).unwrap_err().code, ProjectErrorCode::CorruptAsset);
+        fs::write(&path, bytes).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::MissingAsset);
+    }
+    let sandbox = Sandbox::new();
+    let (mut project, _) = appearance_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let path = sandbox.target().join(CURRENT);
+    let bytes = fs::read(&path).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    manifest["appearance_study"]["report"]["producer"] = "foreign".into();
+    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::InvalidProject);
+}
+
+#[test]
+fn appearance_staged_open_enforces_remaining_budget_without_releasing_writer() {
+    let sandbox = Sandbox::new();
+    let (mut project, _) = appearance_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let before = project.info();
+    assert_eq!(open_reusing(
+        &sandbox.target(), false, false, &flag(), project.storage(), MAX_RETAINED_SOURCE_BYTES,
+        MAX_MANUFACTURING_RETAINED_BYTES as usize, MAX_SURFACE_IMAGE_RETAINED_BYTES, 0,
+    ).unwrap_err().code, ProjectErrorCode::ResourceLimit);
+    assert_eq!(project.info(), before);
+    assert_eq!(open(&sandbox.target(), false, false, &flag()).unwrap_err().code, ProjectErrorCode::ProjectLocked);
+}
+
+#[test]
+fn appearance_directory_attachment_and_exclusive_assets_are_preserved() {
+    for directory in [PALETTE_ORIGINALS, PALETTE_CANONICAL] {
+        let sandbox = Sandbox::new();
+        let (mut project, _) = appearance_project();
+        save_project(&mut project, Some(sandbox.target()));
+        let detached = sandbox.0.join("detached");
+        fs::rename(sandbox.target().join(directory), &detached).unwrap();
+        fs::create_dir(sandbox.target().join(directory)).unwrap();
+        let before = fs::read(sandbox.target().join(CURRENT)).unwrap();
+        assert!(save(project.capture(), project.storage(), None, &flag(), |_| {}).is_err());
+        assert_eq!(fs::read(sandbox.target().join(CURRENT)).unwrap(), before);
+        assert!(detached.exists());
+    }
+}
+
+#[test]
+fn appearance_storage_rejects_hash_valid_original_canonical_semantic_disagreement() {
+    let sandbox = Sandbox::new();
+    let (mut project, asset) = appearance_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let mut document = asset.document().clone();
+    document.rows[0].name = "Different original evidence record".into();
+    let original = serde_json::to_vec(&document).unwrap();
+    let hash = SourceHash::from_bytes(&original);
+    fs::write(
+        sandbox.target().join(PALETTE_ORIGINALS).join(format!("{}.json", hash.as_str())),
+        &original,
+    ).unwrap();
+    let path = sandbox.target().join(CURRENT);
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["appearance_study"]["palette"]["original_hash"] = hash.as_str().into();
+    manifest["appearance_study"]["palette"]["original_bytes"] = original.len().into();
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_eq!(open(&sandbox.target(), true, false, &flag()).unwrap_err().code, ProjectErrorCode::InvalidProject);
+}
+
+#[test]
+fn appearance_save_never_collects_palette_assets_needed_by_previous_or_history() {
+    let sandbox = Sandbox::new();
+    let (mut project, first) = appearance_project();
+    save_project(&mut project, Some(sandbox.target()));
+    let mut document = first.document().clone();
+    document.name = "Second palette".into();
+    let canonical = document.canonical_bytes().unwrap();
+    let original = serde_json::to_vec_pretty(&document).unwrap();
+    let record = spiling_contracts::appearance::PaletteRecord::new(
+        &document, &original, &canonical, "second.json".into(),
+    ).unwrap();
+    let second = Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
+    crate::tests::commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: second.clone() });
+    save_project(&mut project, None);
+    for asset in [&first, &second] {
+        assert_eq!(
+            fs::read(sandbox.target().join(PALETTE_ORIGINALS).join(format!("{}.json", asset.record().original_hash.as_str()))).unwrap(),
+            *asset.original().as_ref(),
+        );
+        assert_eq!(
+            fs::read(sandbox.target().join(PALETTE_CANONICAL).join(format!("{}.json", asset.record().canonical_hash.as_str()))).unwrap(),
+            *asset.canonical().as_ref(),
+        );
+    }
+    let previous = Project::from_loaded(open(&sandbox.target(), true, true, &flag()).unwrap()).unwrap();
+    assert_eq!(previous.appearance_study().palette.as_ref().unwrap(), first.record());
+    project.undo().unwrap();
+    assert_eq!(project.appearance_study().palette.as_ref().unwrap(), first.record());
 }

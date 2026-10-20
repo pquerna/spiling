@@ -75,6 +75,15 @@ pub(crate) enum JobResult {
         captured_revision: ProjectRevision,
         record: spiling_contracts::surface::SurfaceImageRecord,
     },
+    AppearancePaletteImported {
+        info: ProjectInfo,
+        palette: spiling_contracts::appearance::PaletteRecord,
+    },
+    AppearanceCompared {
+        project_id: ProjectId,
+        captured_revision: ProjectRevision,
+        record: spiling_contracts::appearance::AppearanceReportRecord,
+    },
     ManufacturingCompiled {
         info: ProjectInfo,
         record: ManufacturingArtifactRecord,

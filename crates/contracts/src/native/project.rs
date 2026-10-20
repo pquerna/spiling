@@ -10,11 +10,43 @@ pub enum ProjectCall {
     Save(rpc::SaveProjectRequest),
     ImportSurfaceImageFinish(rpc::ImportSurfaceImageFinishRequest),
     GetSurfaceImage(rpc::GetSurfaceImageRequest),
+    ImportAppearancePalette(rpc::ImportAppearancePaletteRequest),
+    CompareAppearance(rpc::CompareAppearanceRequest),
+    GetAppearanceReport(rpc::GetAppearanceReportRequest),
 }
 pub fn project_call(command: ProjectCommand, id: &str) -> Result<ProjectCall, String> {
     request_id(id)?;
     use rpc::project_request::Command as C;
     let (session_id, command) = match command {
+        ProjectCommand::ImportAppearancePalette { session_id, base_revision, source } => {
+            return Ok(ProjectCall::ImportAppearancePalette(rpc::ImportAppearancePaletteRequest {
+                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                base_revision: base_revision.0, source: Some(source.try_into()?),
+            }));
+        }
+        ProjectCommand::CompareAppearance { session_id, base_revision } => {
+            return Ok(ProjectCall::CompareAppearance(rpc::CompareAppearanceRequest {
+                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                base_revision: base_revision.0,
+            }));
+        }
+        ProjectCommand::GetAppearanceReport { session_id, base_revision } => {
+            return Ok(ProjectCall::GetAppearanceReport(rpc::GetAppearanceReportRequest {
+                parent: format!("sessions/{}", session_id.as_str()), request_id: id.into(),
+                base_revision: base_revision.0,
+            }));
+        }
+        ProjectCommand::SetAppearanceTarget { session_id, base_revision, target, limits } => (
+            session_id, C::SetAppearanceTarget(rpc::SetAppearanceTargetRequest {
+                base_revision: base_revision.0, target: Some(target.try_into()?),
+                limits: Some(limits.try_into()?),
+            }),
+        ),
+        ProjectCommand::AcceptAppearanceReport { session_id, base_revision, report_hash, selection } => (
+            session_id, C::AcceptAppearanceReport(rpc::AcceptAppearanceReportRequest {
+                base_revision: base_revision.0, report_hash: report_hash.into(), selection,
+            }),
+        ),
         ProjectCommand::EditProcess {
             session_id,
             base_revision,
@@ -179,6 +211,21 @@ impl TryFrom<rpc::ProjectRequest> for ProjectCommand {
         let session_id = session_parent(&v.parent)?;
         use rpc::project_request::Command as C;
         Ok(match required(v.command, "project command")? {
+            C::SetAppearanceTarget(v) => Self::SetAppearanceTarget {
+                session_id, base_revision: ProjectRevision(v.base_revision),
+                target: required(v.target, "appearance target")?.try_into()?,
+                limits: required(v.limits, "appearance limits")?.try_into()?,
+            },
+            C::AcceptAppearanceReport(v) => {
+                if v.selection.as_ref().is_some_and(|key| key.is_empty() || key.len() > 64 || key.chars().any(char::is_control)) {
+                    return Err("invalid appearance selection key".into());
+                }
+                Self::AcceptAppearanceReport {
+                    session_id, base_revision: ProjectRevision(v.base_revision),
+                    report_hash: SourceHash::parse(v.report_hash).map_err(|error| error.to_string())?,
+                    selection: v.selection,
+                }
+            },
             C::EditProcess(v) => Self::EditProcess {
                 session_id,
                 base_revision: ProjectRevision(v.base_revision),
@@ -288,9 +335,34 @@ impl TryFrom<rpc::GetSurfaceImageRequest> for ProjectCommand {
         })
     }
 }
+impl TryFrom<rpc::ImportAppearancePaletteRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::ImportAppearancePaletteRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::ImportAppearancePalette {
+            session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision),
+            source: required(value.source, "appearance palette source")?.try_into()?,
+        })
+    }
+}
+impl TryFrom<rpc::CompareAppearanceRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::CompareAppearanceRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::CompareAppearance { session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision) })
+    }
+}
+impl TryFrom<rpc::GetAppearanceReportRequest> for ProjectCommand {
+    type Error = String;
+    fn try_from(value: rpc::GetAppearanceReportRequest) -> Result<Self, String> {
+        request_id(&value.request_id)?;
+        Ok(Self::GetAppearanceReport { session_id: session_parent(&value.parent)?, base_revision: ProjectRevision(value.base_revision) })
+    }
+}
 pub fn validate_project_info(v: &ProjectInfo) -> Result<(), String> {
     v.surface_overlays.validate().map_err(|e| e.to_string())?;
     v.process_document.validate().map_err(|e| e.to_string())?;
+    v.appearance_study.validate().map_err(|error| error.to_string())?;
     if v.resolved_process.len() > MAX_OCCURRENCES as usize {
         return Err("resolved process occurrence budget exceeded".into());
     }
@@ -348,6 +420,7 @@ impl TryFrom<rpc::ProjectInfo> for ProjectInfo {
                 .try_into()?,
             process_document: required(v.process_document, "project process document")?
                 .try_into()?,
+            appearance_study: required(v.appearance_study, "project appearance study")?.try_into()?,
             resolved_process: v
                 .resolved_process
                 .into_iter()
@@ -375,6 +448,7 @@ impl TryFrom<ProjectInfo> for rpc::ProjectInfo {
             can_redo: v.can_redo,
             surface_overlays: Some(v.surface_overlays.try_into()?),
             process_document: Some(v.process_document.try_into()?),
+            appearance_study: Some(v.appearance_study.try_into()?),
             resolved_process: v
                 .resolved_process
                 .into_iter()

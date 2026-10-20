@@ -14,6 +14,57 @@ export type NativeOperationView = { name: string, session_id: SessionId, capture
 
 export type Hello = { instance_id: string, engine_build: string, kernel: string, geometry_capabilities: Array<string>, max_control_bytes: number, max_binary_bytes: number, pid: number, session_id: SessionId, kernel_identity: KernelIdentity, geometry_limits: GeometryLimits, manufacturing_capabilities: Array<string>, project_capabilities: Array<string>, };
 
+export type AppearanceColor = { "encoding": "srgb", channels: [number, number, number], } | { "encoding": "xyz_y1", channels: [number, number, number], } | { "encoding": "xyz_y100", channels: [number, number, number], } | { "encoding": "d65_lab", channels: [number, number, number], };
+
+export type AppearanceIlluminant = "d65" | "d50" | "unknown";
+
+export type AppearanceObserver = "cie1931_two_degree" | "cie1964_ten_degree" | "unknown";
+
+export type AppearanceConditions = { illuminant: AppearanceIlluminant, observer: AppearanceObserver, geometry: string | null, backing: string | null, thickness_mm: number | null, cohort: string | null, instrument: string | null, calibration: string | null, aperture_mm: number | null, specular: string | null, orientation: string | null, 
+/**
+ * Declared process/construction context references only. They bind supplied
+ * readings, not execution authority or physical qualification.
+ */
+process: string | null, construction: string | null, };
+
+export type EvidenceScope = "catalog_estimates" | "measured";
+
+export type AppearanceTarget = { color: AppearanceColor, delta_e00_tolerance: number, lightness_tolerance: number | null, conditions: AppearanceConditions, evidence_scope: EvidenceScope, };
+
+export type SearchLimits = { max_visited: number, max_alternatives: number, };
+
+export type AppearanceEvidence = { "kind": "catalog_estimate", srgb: [number, number, number], } | { "kind": "measured", color: AppearanceColor, conditions: AppearanceConditions, 
+/**
+ * Candidate-specific declared lot. Never a target/global filter.
+ */
+material_lot: string | null, } | { "kind": "unknown", reason: string, };
+
+export type PaletteRow = { key: string, material_id: string, evidence_id: string, name: string, evidence: AppearanceEvidence, };
+
+export type PaletteDocument = { name: string, source_url: string, source_revision: string, license: string, conversion: string, rows: Array<PaletteRow>, };
+
+export type PaletteRecord = { name: string, original_hash: SourceHash, original_bytes: number, canonical_hash: SourceHash, canonical_bytes: number, source_url: string, source_revision: string, license: string, conversion: string, };
+
+export type AppearanceOutcome = "assessed_match" | "assessed_mismatch" | "no_assessed_match";
+
+export type AppearanceStatus = { "kind": "complete", outcome: AppearanceOutcome, } | { "kind": "work_limit" } | { "kind": "cancelled" };
+
+export type AssessedEvidence = "c" | "m";
+
+export type RowAssessment = { "k": "f" } | { "k": "i" } | { "k": "u" } | { "k": "a", e: AssessedEvidence, d: number, l: number, m: boolean, };
+
+export type AppearanceVisit = { k: string, e: SourceHash, a: RowAssessment, };
+
+export type AppearanceAlternative = { key: string, name: string, };
+
+export type AppearanceReport = { producer: string, input_hash: SourceHash, palette_hash: SourceHash, target: AppearanceTarget, limits: SearchLimits, total_rows: number, visits: Array<AppearanceVisit>, alternatives: Array<AppearanceAlternative>, alternatives_truncated: boolean, status: AppearanceStatus, };
+
+export type AppearanceReportRecord = { hash: SourceHash, byte_count: bigint, input_hash: SourceHash, producer: string, complete: boolean, };
+
+export type AppearanceStudy = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReport | null, report_record: AppearanceReportRecord | null, selection: string | null, };
+
+export type AppearanceStudyInfo = { palette: PaletteRecord | null, target: AppearanceTarget | null, limits: SearchLimits, report: AppearanceReportRecord | null, selection: string | null, };
+
 export type GeometryErrorCode = "invalid_geometry" | "unsupported_geometry" | "unsupported_units" | "source_io" | "source_changed" | "invalid_pose" | "stale_revision" | "unknown_handle" | "busy" | "resource_limit" | "cancelled" | "degenerate_section" | "kernel_failure" | "conditioning_failure" | "analysis_indeterminate" | "singular_geometry" | "unsupported_conversion" | "unsupported_operation" | "native_intersection_failure" | "parameter_correspondence_unavailable" | "shape_error_exceeded";
 
 export type GeometryError = { code: GeometryErrorCode, message: string, };
@@ -117,7 +168,7 @@ export type ArtifactPageKind = "chunks" | "loops";
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
+export type JobResult = { "kind": "scene", summary: SceneSummary, } | { "kind": "section", artifact_id: ArtifactId, } | { "kind": "bed_pose_prepared", preparation: BedPosePreparation, } | { "kind": "project_saved", info: ProjectInfo, } | { "kind": "surface_image_imported", info: ProjectInfo, image: SurfaceImageRecord, layer_id: SurfaceLayerId, } | { "kind": "surface_image_prepared", project_id: ProjectId, captured_revision: ProjectRevision, record: SurfaceImageRecord, resource: ArtifactView, } | { "kind": "appearance_palette_imported", info: ProjectInfo, palette: PaletteRecord, } | { "kind": "appearance_compared", project_id: ProjectId, captured_revision: ProjectRevision, record: AppearanceReportRecord, resource: ArtifactView, } | { "kind": "manufacturing_preflight", report: PreflightReport, } | { "kind": "manufacturing_compiled", info: ProjectInfo, record: ManufacturingArtifactRecord, resource: ArtifactView, } | { "kind": "manufacturing_verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, };
 
 export type JobError = { "domain": "geometry", error: GeometryError, } | { "domain": "project", error: ProjectError, } | { "domain": "manufacturing", error: ManufacturingError, };
 
@@ -209,11 +260,11 @@ export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_densi
 
 export type ProcessRegionResolution = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, status: ProcessRegionStatus, };
 
-export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
+export type ProjectManifest = { format_version: number, project_id: ProjectId, revision: ProjectRevision, units: ProjectUnits, frame: ProjectFrame, next_occurrence: number, next_surface_layer: number, surface_overlays: SurfaceOverlays, next_process_layer: number, next_process_operation: number, process_document: ProcessDocument, appearance_study: AppearanceStudy, definitions: Array<StoredDefinition>, occurrences: Array<OccurrenceRecord>, manufacturing_intent: ManufacturingIntent | null, manufacturing_artifact: ManufacturingArtifactRecord | null, };
 
-export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, resolved_process: Array<ResolvedOccurrenceProcess>, };
+export type ProjectInfo = { project_id: ProjectId, revision: ProjectRevision, saved_revision: ProjectRevision | null, path_label: string | null, dirty: boolean, save_uncertain: boolean, read_only: boolean, recovered_previous: boolean, can_undo: boolean, can_redo: boolean, surface_overlays: SurfaceOverlays, process_document: ProcessDocument, appearance_study: AppearanceStudyInfo, resolved_process: Array<ResolvedOccurrenceProcess>, };
 
-export type ProjectCommand = { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
+export type ProjectCommand = { "op": "import_appearance_palette", session_id: SessionId, base_revision: ProjectRevision, source: NativePath, } | { "op": "set_appearance_target", session_id: SessionId, base_revision: ProjectRevision, target: AppearanceTarget, limits: SearchLimits, } | { "op": "compare_appearance", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "accept_appearance_report", session_id: SessionId, base_revision: ProjectRevision, report_hash: SourceHash, selection: string | null, } | { "op": "get_appearance_report", session_id: SessionId, base_revision: ProjectRevision, } | { "op": "edit_process", session_id: SessionId, base_revision: ProjectRevision, edit: ProcessEdit, } | { "op": "get", session_id: SessionId, } | { "op": "new", session_id: SessionId, base_revision: SceneRevision, discard_changes: boolean, } | { "op": "open", session_id: SessionId, base_revision: SceneRevision, path: NativePath, read_only: boolean, recover_previous: boolean, discard_changes: boolean, } | { "op": "save", session_id: SessionId, base_revision: SceneRevision, target: NativePath | null, } | { "op": "undo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "redo", session_id: SessionId, base_revision: SceneRevision, } | { "op": "import_surface_image_finish", session_id: SessionId, base_revision: ProjectRevision, reference: FaceRef, scope: SurfaceScopeKind, source: NativePath, parameters: ImageReliefParameters, } | { "op": "get_surface_image", session_id: SessionId, base_revision: ProjectRevision, image_hash: SourceHash, } | { "op": "add_surface_finish", session_id: SessionId, base_revision: ProjectRevision, face_ref: FaceRef, scope: SurfaceScopeKind, finish: SurfaceFinish, } | { "op": "remove_surface_finish", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, } | { "op": "set_surface_finish_enabled", session_id: SessionId, base_revision: ProjectRevision, layer_id: SurfaceLayerId, enabled: boolean, };
 
 export type ProjectResponse = { "type": "status", info: ProjectInfo, } | { "type": "scene_changed", info: ProjectInfo, summary: SceneSummary, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "error", error: ProjectError, };
 
@@ -358,6 +409,10 @@ export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "
 export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_CONTROL_BYTES = 65536 as const;
+export const MAX_PALETTE_BYTES = 16777216 as const;
+export const MAX_PALETTE_ROWS = 4096 as const;
+export const MAX_APPEARANCE_ALTERNATIVES = 256 as const;
+export const MAX_APPEARANCE_REPORT_BYTES = 1048576 as const;
 export const PROCESS_SCHEMA_VERSION = 3 as const;
 export const MAX_PROCESS_LAYERS = 64 as const;
 export const MAX_PROCESS_OPERATIONS = 256 as const;

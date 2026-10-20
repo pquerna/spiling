@@ -23,6 +23,10 @@ Format evolution and the initial release compatibility boundary follow the [cano
     <bundle_sha256>.json        immutable exact compact manufacturing bundle bytes
   images/
     <image_sha256>.pgm          immutable canonical Gray8 height images
+  palette-originals/
+    <original_sha256>.json      immutable exact imported palette JSON
+  palette-canonical/
+    <canonical_sha256>.json     immutable canonical palette JSON
 ```
 
 The initial successful save has no previous checkpoint. Root/assets must be regular, not symlinks/reparse points; asset directories must be real directories. Unknown entries are rejected except bounded internal scratch. No external source paths, session IDs, native objects, display artifacts or undo records are serialized. Manufacturing bundles are durable immutable derived assets, not persisted printer execution. `source_name` is a captured display basename, never a filesystem reference; its retained value participates in manufacturing provenance/fingerprints.
@@ -38,6 +42,7 @@ The initial successful save has no previous checkpoint. Root/assets must be regu
 - `surface_overlays`: required inline `SurfaceOverlays` schema3 document: ordered `layers` and hash-sorted unique `images`, at most64 layers and32KiB serialized/allocated metadata bytes. The image table contains exactly the referenced assets, including disabled layers; pixels never occur inline in ProjectInfo.
 - `next_process_layer`, `next_process_operation`: next free nonzero monotonic `u32` identities; undo does not rewind either allocator.
 - `process_document`: required strict typed schema3 process document, at most64 layers and256 total operations. Core allocates layer/operation IDs. Whole-owned and finite source-box selectors use checked definition/occurrence scope, independent of face finish.
+- `appearance_study`: required strict `AppearanceStudy` with nullable palette/target/accepted report/cached report descriptor/selection and explicit search limits. The accepted report is inline; ProjectInfo exposes only its descriptor. No missing-field compatibility default is supplied.
 - `definitions`: at most 32 `StoredDefinition` records, each with `definition_id` and `provenance`.
 - `occurrences`: at most 256 `OccurrenceRecord` records, each with nonzero `occurrence_id`, referenced `definition_id`, and `pose` (`translation_mm[3]`, `rotation_xyzw[4]`). Translation is finite and the quaternion is a unit quaternion under the shared pose validator.
 - `manufacturing_intent`: explicit `null` or validated `ManufacturingIntent` containing every printer/recipe field.
@@ -75,11 +80,48 @@ Persistent revisions are distinct from the engine's ephemeral `SceneRevision`. T
 
 GetSurfaceImage is a revision-bound read-only native operation, valid in read-only projects. It captures the canonical asset Arc and reserves at most65,551 ledger bytes. After native promotion ACK the engine publishes actual immutable PGM bytes through Jobs/ByteStream and returns `SurfaceImagePrepared` with project ID, captured revision, authoritative record and bound `ArtifactView`. Media type is `image/x-portable-graymap`; descriptor hash/size/resource name must bind the record. A guessed descriptor is not a byte resource. Preview cannot advance the project revision or publish a scene. Clients verify bounded bytes/hash/header/dimensions before constructing borrowed raster views.
 
+## Appearance palette studies
+
+`spiling-contracts::appearance` owns the inert records, `spiling-appearance` owns scalar evaluation, and Core owns study transactions and immutable assets. The library depends only on contracts; an empty project needs no geometry import, Compile, kernel query, manufacturing intent, UI or GPU to compare colors.
+
+Palette import captures bounded regular-file JSON (16MiB, 4096 rows), preserving exact original bytes and a separately hashed canonical document. Stable keys bind material/evidence IDs; evidence hashes exclude display labels. Core retains a shared `PreparedPalette`: sorted validated rows, canonical hash and per-row evidence hashes. Comparisons borrow this proof rather than reparsing, serializing, hashing or sorting unchanged palettes. Original/canonical buffers, parsed records, identity caches, accepted reports and retained history share a separate64MiB allowance. Open reserves the remaining allowance before capture/decode, parses original JSON once and verifies canonical correspondence. Palette assets use their own directories, not image retention or GC.
+
+The current real example is the six-row MIT OpenPrintTag Prusament subset in `fixtures/appearance/`, pinned to commit `2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3` with original upstream license and exact conversion provenance. Its RGB values are **catalog GUI estimates only**: not owned spools, measured printed colors, optical properties or inferred translucency. Vendor Lab claims without acquisition conditions are not promoted to measurements.
+
+Colors declare encoded sRGB, XYZ Y=1, XYZ Y=100 or Lab under the fixed D65 reference white/2-degree convention. The matching CSS Color4 rational sRGB matrix uses D65 xy=(0.3127,0.3290), Y=1. Lab and XYZ admit finite out-of-display-gamut values without clipping; scalar numerical overflow is an explicit error. CIEDE2000 uses kL=kC=kH=1. A match requires both requested ΔE00 and optional absolute lightness tolerances. D50/10-degree or otherwise incompatible readings are not silently adapted.
+
+Measured rows are supplied **declared readings**, identified by exact material/evidence/lot and evidence hashes. Their observation, instrument/calibration, aperture, geometry/specular/orientation, backing, thickness, cohort and process/construction references must be declared and match the requested lookup context; absent references remain unassessed. Lot belongs to each reading, never the target: different candidate lots do not filter one another. Matching strings do not certify lot provenance, printed coupons, calibration quality, optical validity or any manufacturing process. Unknown evidence is never assigned a fabricated zero error.
+
+Enumeration visits stable key order and charges every row, including explicitly filtered or unassessed rows. `visits.len()` is the visited ordinal/count; typed assessments partition filtered, assessed and unknown/incompatible rows. Complete traversal is distinct from its outcome: `assessed_match` establishes at least one assessed tolerance match; `assessed_mismatch` requires every relevant row assessed with no match; `no_assessed_match` also covers assessed mismatches alongside relevant unknown/incompatible evidence. Evidence explicitly excluded by the requested scope is filtered, not silently treated as relevant unknown. Alternatives rank nearest **assessed** candidates by ΔE00 then key and retain their filament names. `alternatives_truncated` limits display only, not search completeness or global optimality.
+
+`work_limit` and `cancelled` are incomplete best-found reports, even when a visited row matched. Their operation can deliver checked transient evidence but they cannot replace the durable report/selection. Typed report JSON is at most1MiB; its compact visit keys are `k`=candidate key, `e`=evidence hash, `a`=assessment. Assessment tags are `a`=assessed, `f`=explicitly filtered, `i`=incompatible conditions and `u`=unknown; assessed fields `e`=catalog(`c`)/declared measured(`m`), `d`=ΔE00, `l`=absolute lightness difference, `m`=within both tolerances. Generated Rust/TypeScript own the executable shape.
+
+Import and target edits clear the active report/selection; explicit acceptance binds the latest complete comparison's exact current project/revision/hash and optional retained candidate key. Undo/redo restores coherent study state. These study-only edits preserve unrelated manufactured artifact bytes/input hashes and native SceneRevision. Core counts the **whole** candidate manifest and recovery envelope before mutation, so a report fitting its artifact cap cannot silently create an unsaveable study. Accepted report descriptors are cached, not re-encoded for ProjectInfo.
+
+`Projects.ImportAppearancePalette`, `CompareAppearance` and `GetAppearanceReport` are standard authenticated native Operations through the existing dispatcher, worker, promotion ACK, Jobs and ByteStream. `Projects.Execute` carries typed target/accept requests; no alternate transport or JSON RPC tunnel exists. Compare/Get are read-only-capable. Returned `AppearanceCompared` binds captured project/revision, report descriptor and `application/x-spiling-appearance-report+json` artifact; engine-client checks exact bytes/hash/size/producer/input identity. Stale queued work cannot publish, and historical operation evidence cannot authorize current acceptance.
+
+The CLI is the current consumed workflow; no appearance workbench form is implied:
+
+```sh
+work="$(mktemp -d)"
+cp fixtures/appearance/palette.json "$work/allowed-palette.json"
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project create "$work/study" \
+  --appearance-palette "$work/allowed-palette.json" \
+  --appearance-target fixtures/appearance/target-orange.json --appearance-compare \
+  --appearance-accept 261ae7e7-20d9-5969-9ed5-dd82eea29bcf/catalog-rgb \
+  --save --appearance-target fixtures/appearance/target-red.json --undo --redo --undo --save
+rm "$work/allowed-palette.json"  # This newly created owned input only.
+target/debug/spiling-cli --engine "$PWD/target/debug/spiling-engine" project inspect "$work/study" \
+  --appearance-report "$work/reopened-report.json" --appearance-compare
+```
+
+`--appearance-accept-report` explicitly accepts a complete report without selecting a candidate; it is not a reserved candidate-key sentinel. `--appearance-limits FILE` supplies strict `max_visited`/`max_alternatives` JSON after a target. Exports use the shared exclusive output transaction and commit only after observed child reap. Inspect opens fresh read-only and uses captured assets after source deletion. Project10/manufacturing11/process3/surface3 and planner16/emitter6/verifier8/SPLR5 remain unchanged.
+
 ## Writer ownership and reader snapshots
 
 A writer holds an exclusive OS `File` lock on `writer.lock` for the entire retained `Storage` lifetime. It never unlinks/recreates that lock. Concurrent writers fail with `ProjectLocked`; process exit releases OS ownership. The storage directory, source directory and lock inode are checked for substitution. A same-writer staged reopen uses `storage::open_reusing` and retains the existing lock until successful engine publication. Failure/cancellation cannot destroy the old live project or lock.
 
-A read-only open never acquires the writer lock. It captures one complete manifest then loads every immutable source, referenced canonical image (including disabled layers) and manufacturing asset referenced by it. Writer replacements cannot mix newer records with older assets. The loaded project owns its bytes without reopening external sources/images. No eager deletion may invalidate concurrently captured snapshots.
+A read-only open never acquires the writer lock. It captures one complete manifest then loads every referenced immutable source, canonical image (including disabled layers), manufacturing asset and original/canonical palette pair. Writer replacements cannot mix newer records with older assets. The loaded project owns its bytes without reopening external source/image/palette files. No eager deletion may invalidate concurrently captured snapshots.
 
 The engine passes the remaining old/current/history byte capacity to `storage::open_reusing` before source capture. The loader bounds each incoming file by the remaining caller budget before allocating its buffer. Old and staged captured allocations coexist through native ACK, even for identical definition IDs; their combined envelope is 64 MiB. Insufficient capacity fails with `ResourceLimit` without first dropping the old state or temporarily capturing a second full budget.
 

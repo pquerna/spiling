@@ -4,6 +4,7 @@
 
 //! Persistent source-backed project contracts, independent of storage and BREP.
 use crate::geometry::*;
+use crate::appearance::{AppearanceStudy, AppearanceStudyInfo, AppearanceTarget, SearchLimits};
 use crate::manufacturing::{ManufacturingArtifactRecord, ManufacturingIntent, input_fingerprint};
 use crate::process::*;
 use crate::surface::*;
@@ -165,6 +166,7 @@ pub struct ProjectManifest {
     pub next_process_layer: u32,
     pub next_process_operation: u32,
     pub process_document: ProcessDocument,
+    pub appearance_study: AppearanceStudy,
     pub definitions: Vec<StoredDefinition>,
     pub occurrences: Vec<OccurrenceRecord>,
     #[serde(deserialize_with = "required_option")]
@@ -246,6 +248,7 @@ impl ProjectManifest {
             self.next_process_layer,
             self.next_process_operation,
         )?;
+        self.appearance_study.validate()?;
         if let Some(intent) = &self.manufacturing_intent {
             intent.validate().map_err(|e| invalid(&e.message))?;
         }
@@ -291,11 +294,37 @@ pub struct ProjectInfo {
     pub can_redo: bool,
     pub surface_overlays: SurfaceOverlays,
     pub process_document: ProcessDocument,
+    pub appearance_study: AppearanceStudyInfo,
     pub resolved_process: Vec<ResolvedOccurrenceProcess>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProjectCommand {
+    ImportAppearancePalette {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        source: NativePath,
+    },
+    SetAppearanceTarget {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        target: AppearanceTarget,
+        limits: SearchLimits,
+    },
+    CompareAppearance {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+    },
+    AcceptAppearanceReport {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+        report_hash: SourceHash,
+        selection: Option<String>,
+    },
+    GetAppearanceReport {
+        session_id: SessionId,
+        base_revision: ProjectRevision,
+    },
     EditProcess {
         session_id: SessionId,
         base_revision: ProjectRevision,

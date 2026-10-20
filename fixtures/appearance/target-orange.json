@@ -1,0 +1,21 @@
+{
+  "color": {"encoding":"srgb","channels":[1,0.4392156862745098,0.2549019607843137]},
+  "delta_e00_tolerance": 0.01,
+  "lightness_tolerance": 0.01,
+  "conditions": {
+    "illuminant":"d65",
+    "observer":"cie1931_two_degree",
+    "geometry":null,
+    "backing":null,
+    "thickness_mm":null,
+    "cohort":null,
+    "instrument":null,
+    "calibration":null,
+    "aperture_mm":null,
+    "specular":null,
+    "orientation":null,
+    "process":null,
+    "construction":null
+  },
+  "evidence_scope":"catalog_estimates"
+}

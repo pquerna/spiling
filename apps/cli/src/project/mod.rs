@@ -16,6 +16,7 @@ use spiling_contracts::surface::{
     SurfaceScopeKind,
 };
 use spiling_contracts::{ArtifactView, geometry::*, manufacturing::*, project::*};
+use spiling_contracts::appearance::{AppearanceTarget, AppearanceReport, AppearanceReportRecord, SearchLimits};
 use spiling_engine_client::EngineClient;
 use std::{env, ffi::OsString, fs::File, io::Read, path::PathBuf, sync::Arc};
 
@@ -61,6 +62,12 @@ pub struct Workflow {
     inspections: Vec<(OccurrenceId, FaceId)>,
 }
 enum Operation {
+    AppearancePalette(NativePath),
+    AppearanceTarget(AppearanceTarget),
+    AppearanceLimits(SearchLimits),
+    AppearanceCompare,
+    AppearanceAccept(Option<String>),
+    AppearanceReport,
     Import(NativePath),
     Add(DefinitionId, RigidPoseMm),
     Pose(OccurrenceId, RigidPoseMm),
@@ -124,6 +131,18 @@ fn intent(args: &mut impl Iterator<Item = OsString>) -> Result<ManufacturingInte
     // The service owns specification validation; this is only bounded inert decoding.
     Ok(serde_json::from_slice(&bytes)?)
 }
+fn appearance_json<T: serde::de::DeserializeOwned>(
+    args: &mut impl Iterator<Item = OsString>, flag: &str,
+) -> Result<T, Error> {
+    let source = args.next().ok_or_else(|| format!("{flag} requires a native JSON path"))?;
+    NativePath::from_os_str(&source)?;
+    let mut bytes = Vec::new();
+    File::open(PathBuf::from(source))?.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 {
+        return Err("appearance input JSON exceeds byte limit".into());
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
 fn process_scope_kind(
     args: &mut impl Iterator<Item = OsString>,
     name: &str,
@@ -154,9 +173,33 @@ pub fn parse(
     let mut manufacturing_output = None;
     let mut replay_output = None;
     let mut surface_image_output = None;
+    let mut appearance_report_output = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--appearance-palette") => operations.push(Operation::AppearancePalette(path(&mut args, "--appearance-palette")?)),
+            Some("--appearance-target") => {
+                let target: AppearanceTarget = appearance_json(&mut args, "--appearance-target")?;
+                target.validate()?;
+                operations.push(Operation::AppearanceTarget(target));
+            }
+            Some("--appearance-limits") => {
+                let limits: SearchLimits = appearance_json(&mut args, "--appearance-limits")?;
+                limits.validate()?;
+                operations.push(Operation::AppearanceLimits(limits));
+            }
+            Some("--appearance-compare") => operations.push(Operation::AppearanceCompare),
+            Some("--appearance-accept") => {
+                let key = text(&mut args, "--appearance-accept")?;
+                operations.push(Operation::AppearanceAccept(Some(key)));
+            }
+            Some("--appearance-accept-report") => operations.push(Operation::AppearanceAccept(None)),
+            Some("--appearance-report") => {
+                let destination = args.next().ok_or("--appearance-report requires a native destination")?;
+                NativePath::from_os_str(&destination)?;
+                set_once(&mut appearance_report_output, PathBuf::from(destination), "--appearance-report")?;
+                operations.push(Operation::AppearanceReport);
+            }
             Some("--help" | "-h") => return Ok(None),
             Some("--engine") => set_once(
                 &mut engine,
@@ -398,6 +441,8 @@ pub fn parse(
                         | Operation::ExportReplay
                         | Operation::ExportSurfaceImage(_)
                         | Operation::ProcessResolve(_)
+                        | Operation::AppearanceCompare
+                        | Operation::AppearanceReport
                 )
             }))
     {
@@ -443,6 +488,7 @@ pub fn parse(
             manufacturing_output,
             replay_output,
             surface_image_output,
+            appearance_report_output,
         },
         engine: engine.unwrap_or(
             env::current_exe()?
@@ -624,6 +670,7 @@ pub async fn run(
     manufacturing_output: Option<&mut OutputDirectory>,
     replay_output: Option<&mut OutputFile>,
     surface_image_output: Option<&mut OutputFile>,
+    appearance_report_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     match execute(
         client,
@@ -633,6 +680,7 @@ pub async fn run(
         manufacturing_output,
         replay_output,
         surface_image_output,
+        appearance_report_output,
     )
     .await
     {
@@ -662,6 +710,7 @@ async fn execute(
     mut manufacturing_output: Option<&mut OutputDirectory>,
     mut replay_output: Option<&mut OutputFile>,
     mut surface_image_output: Option<&mut OutputFile>,
+    mut appearance_report_output: Option<&mut OutputFile>,
 ) -> Result<serde_json::Value, Error> {
     let session = client.hello().session_id.clone();
     let summary = geometry::scene(client, &session).await?;
@@ -697,11 +746,96 @@ async fn execute(
     let mut image_evidence = None;
     let mut process_inspections = Vec::new();
     let mut preflight_report = None;
+    let mut appearance_comparison: Option<(ProjectRevision, AppearanceReportRecord, AppearanceReport)> = None;
+    let mut appearance_evidence = Vec::new();
     for operation in workflow.operations {
         let base_revision = geometry::scene(client, &session).await?.revision;
         let label;
         let mut process_resolution = None;
         match operation {
+            Operation::AppearancePalette(source) => {
+                label = "appearance_palette";
+                let project_revision = info(client).await?.revision;
+                let response = client.project(ProjectCommand::ImportAppearancePalette {
+                    session_id: session.clone(), base_revision: project_revision, source,
+                }).await?;
+                let ProjectResponse::OperationAccepted { operation } = response else {
+                    return Err("palette import did not return an operation".into());
+                };
+                match geometry::wait_operation(client, &session, operation).await? {
+                    JobResult::AppearancePaletteImported { info: receipt, palette } => {
+                        palette.validate()?;
+                        if info(client).await? != receipt {
+                            return Err("palette receipt disagrees with authoritative project".into());
+                        }
+                    }
+                    _ => return Err("unexpected palette import result".into()),
+                }
+            }
+            Operation::AppearanceTarget(_) | Operation::AppearanceLimits(_) => {
+                label = "appearance_target";
+                let captured = info(client).await?;
+                let (target, limits) = match operation {
+                    Operation::AppearanceTarget(target) => (target, captured.appearance_study.limits.clone()),
+                    Operation::AppearanceLimits(limits) => (
+                        captured.appearance_study.target.clone().ok_or("appearance limits require a target first")?, limits,
+                    ),
+                    _ => unreachable!(),
+                };
+                let response = client.project(ProjectCommand::SetAppearanceTarget {
+                    session_id: session.clone(), base_revision: captured.revision, target, limits,
+                }).await?;
+                complete(client, response).await?;
+            }
+            Operation::AppearanceAccept(selection) => {
+                label = "appearance_accept";
+                let captured = info(client).await?;
+                let (revision, record, report) = appearance_comparison.as_ref()
+                    .ok_or("appearance accept requires an earlier complete comparison")?;
+                if *revision != captured.revision || !report.is_complete()
+                    || selection.as_ref().is_some_and(|key| !report.has_selection(key))
+                {
+                    return Err("appearance acceptance does not match the latest complete current-revision comparison".into());
+                }
+                let response = client.project(ProjectCommand::AcceptAppearanceReport {
+                    session_id: session.clone(), base_revision: captured.revision,
+                    report_hash: record.hash.clone(), selection,
+                }).await?;
+                complete(client, response).await?;
+            }
+            Operation::AppearanceCompare | Operation::AppearanceReport => {
+                let export = matches!(operation, Operation::AppearanceReport);
+                label = if export { "appearance_report" } else { "appearance_compare" };
+                let captured = info(client).await?;
+                let command = if export {
+                    ProjectCommand::GetAppearanceReport { session_id: session.clone(), base_revision: captured.revision }
+                } else {
+                    ProjectCommand::CompareAppearance { session_id: session.clone(), base_revision: captured.revision }
+                };
+                let ProjectResponse::OperationAccepted { operation } = client.project(command).await? else {
+                    return Err("appearance comparison did not return an operation".into());
+                };
+                match geometry::wait_operation(client, &session, operation).await? {
+                    JobResult::AppearanceCompared { project_id, captured_revision, record, resource } => {
+                        if project_id != captured.project_id || captured_revision != captured.revision {
+                            return Err("appearance report disagrees with captured project".into());
+                        }
+                        let report = client.fetch_appearance_report(&record, &resource).await?;
+                        if export {
+                            appearance_report_output.as_deref_mut()
+                                .ok_or("appearance report output was not admitted")?.write(&report.encode()?)?;
+                        }
+                        appearance_evidence.push(serde_json::json!({
+                            "operation": label, "project_id": project_id, "captured_revision": captured_revision,
+                            "record": record, "resource": resource, "report": report,
+                        }));
+                        if !export {
+                            appearance_comparison = Some((captured_revision, record, report));
+                        }
+                    }
+                    _ => return Err("unexpected appearance comparison result".into()),
+                }
+            }
             Operation::SurfaceImage(occurrence_id, face_id, scope, source, parameters) => {
                 label = "surface_image";
                 let summary = geometry::scene(client, &session).await?;
@@ -1262,7 +1396,15 @@ async fn execute(
             _ => return Err("unexpected face inspection response".into()),
         }
     }
-    let mut report = geometry::inspect(client, plane, output).await?;
+    let mut report = if summary.occurrence_count == 0 {
+        serde_json::json!({
+            "hello": client.hello(), "scene": summary, "occurrences": [], "definitions": [],
+            "unique_mesh_bytes": 0, "unique_mesh_chunks": 0, "unique_mesh_vertices": 0,
+            "unique_mesh_triangles": 0, "section": null,
+        })
+    } else {
+        geometry::inspect(client, plane, output).await?
+    };
     report["command"] = serde_json::json!("project");
     let project = info(client).await?;
     report["project"] = serde_json::to_value(&project)?;
@@ -1296,6 +1438,7 @@ async fn execute(
     if let Some(evidence) = image_evidence {
         report["surface_image"] = evidence;
     }
+    report["appearance"] = serde_json::json!(appearance_evidence);
     Ok(report)
 }
 
@@ -1304,6 +1447,39 @@ mod tests {
     use super::*;
     fn parse_args(args: &[&str]) -> Result<Option<Options>, Error> {
         parse(args.iter().map(OsString::from), None, None)
+    }
+    #[test]
+    fn appearance_readonly_flags_and_literal_selection_keys_are_ordered() {
+        let options = parse_args(&[
+            "inspect", "project", "--appearance-compare", "--appearance-report", "new.json",
+        ]).unwrap().unwrap();
+        let Command::Project { workflow, appearance_report_output, .. } = options.command else {
+            panic!("project workflow");
+        };
+        assert!(matches!(workflow.operations.as_slice(), [
+            Operation::AppearanceCompare, Operation::AppearanceReport,
+        ]));
+        assert_eq!(appearance_report_output, Some(PathBuf::from("new.json")));
+        for flags in [
+            vec!["--appearance-palette", "palette.json"],
+            vec!["--appearance-accept", "none"],
+            vec!["--appearance-accept-report"],
+        ] {
+            let mut args = vec!["inspect", "project"];
+            args.extend(flags);
+            assert!(parse_args(&args).err().unwrap().to_string().contains("read-only"));
+        }
+        let options = parse_args(&[
+            "open", "project", "--appearance-compare", "--appearance-accept", "none",
+            "--appearance-accept-report", "--undo", "--redo", "--save",
+        ]).unwrap().unwrap();
+        let Command::Project { workflow, .. } = options.command else { panic!("project workflow"); };
+        let [
+            Operation::AppearanceCompare, Operation::AppearanceAccept(Some(key)),
+            Operation::AppearanceAccept(None), Operation::Undo, Operation::Redo,
+            Operation::Save(None),
+        ] = workflow.operations.as_slice() else { panic!("ordered appearance operations"); };
+        assert_eq!(key, "none");
     }
     #[test]
     fn box_process_arguments_are_explicit_typed_ordered_and_readonly_safe() {

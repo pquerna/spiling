@@ -1,0 +1,51 @@
+{
+  "name": "OpenPrintTag Prusament PLA catalog estimates",
+  "source_url": "https://github.com/OpenPrintTag/openprinttag-database/tree/2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3/data/materials/prusament",
+  "source_revision": "2451ae7adc115cfc40cf1892bddbb0b4a2f1b1a3",
+  "license": "MIT",
+  "conversion": "spiling-c1a-explicit-color-1",
+  "rows": [
+    {
+      "key": "0e26ccbd-f4a3-5da1-95c9-3855970d0066/catalog-rgb",
+      "material_id": "0e26ccbd-f4a3-5da1-95c9-3855970d0066",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA Chalky Blue",
+      "evidence": {"kind":"catalog_estimate","srgb":[0.4470588235294118,0.6196078431372549,0.7294117647058823]}
+    },
+    {
+      "key": "261ae7e7-20d9-5969-9ed5-dd82eea29bcf/catalog-rgb",
+      "material_id": "261ae7e7-20d9-5969-9ed5-dd82eea29bcf",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA Prusa Orange",
+      "evidence": {"kind":"catalog_estimate","srgb":[1,0.4392156862745098,0.2549019607843137]}
+    },
+    {
+      "key": "3542fb21-e73b-57a3-b014-6e8452be9c32/catalog-rgb",
+      "material_id": "3542fb21-e73b-57a3-b014-6e8452be9c32",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA Emerald Green",
+      "evidence": {"kind":"catalog_estimate","srgb":[0,0.39215686274509803,0.2549019607843137]}
+    },
+    {
+      "key": "6d8798d1-03c7-5981-8e18-dc282a43679c/catalog-rgb",
+      "material_id": "6d8798d1-03c7-5981-8e18-dc282a43679c",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA Army Green",
+      "evidence": {"kind":"catalog_estimate","srgb":[0.3215686274509804,0.30980392156862746,0.1843137254901961]}
+    },
+    {
+      "key": "cc83a06c-fb87-5648-ab2b-3414b35d0e7d/catalog-rgb",
+      "material_id": "cc83a06c-fb87-5648-ab2b-3414b35d0e7d",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA Jet Black",
+      "evidence": {"kind":"catalog_estimate","srgb":[0.13333333333333333,0.1843137254901961,0.1803921568627451]}
+    },
+    {
+      "key": "d41ec5f1-6054-54cb-813d-e4bc91996c0f/catalog-rgb",
+      "material_id": "d41ec5f1-6054-54cb-813d-e4bc91996c0f",
+      "evidence_id": "catalog-rgb",
+      "name": "PLA CMYK Cyan",
+      "evidence": {"kind":"catalog_estimate","srgb":[0,0.6745098039215687,0.8392156862745098]}
+    }
+  ]
+}

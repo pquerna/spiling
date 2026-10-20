@@ -1225,6 +1225,7 @@ mod public_state_tests {
                 value: document.resolve(&definition_id, occurrence_id, 0.2),
             }],
             process_document: document,
+            appearance_study: crate::appearance::AppearanceStudy::default().info(),
         };
         let wire: crate::rpc::ProjectInfo = info.clone().try_into().unwrap();
         assert_eq!(ProjectInfo::try_from(wire.clone()).unwrap(), info);

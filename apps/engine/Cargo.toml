@@ -17,6 +17,7 @@ spiling-geometry.workspace = true
 spiling-core.workspace = true
 spiling-manufacturing.workspace = true
 spiling-surface-fields = { workspace = true, features = ["png"] }
+spiling-appearance.workspace = true
 serde.workspace = true
 parking_lot = "=0.12.5"
 tokio.workspace = true

@@ -7,7 +7,7 @@ use spiling_contracts::{
     TRIANGLE_HEADER_BYTES, TRIANGLE_INDEX_COUNT, TRIANGLE_SCHEMA_VERSION, TRIANGLE_VERTEX_COUNT,
 };
 use spiling_contracts::{
-    display::*, geometry::*, manufacturing::*, process::*, project::*, surface::*,
+    appearance::*, display::*, geometry::*, manufacturing::*, process::*, project::*, surface::*,
 };
 use std::{env, fs, path::Path};
 use ts_rs::TS;
@@ -26,6 +26,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OperationView::decl(&config),
         NativeOperationView::decl(&config),
         Hello::decl(&config),
+        AppearanceColor::decl(&config),
+        AppearanceIlluminant::decl(&config),
+        AppearanceObserver::decl(&config),
+        AppearanceConditions::decl(&config),
+        EvidenceScope::decl(&config),
+        AppearanceTarget::decl(&config),
+        SearchLimits::decl(&config),
+        AppearanceEvidence::decl(&config),
+        PaletteRow::decl(&config),
+        PaletteDocument::decl(&config),
+        PaletteRecord::decl(&config),
+        AppearanceOutcome::decl(&config),
+        AppearanceStatus::decl(&config),
+        AssessedEvidence::decl(&config),
+        RowAssessment::decl(&config),
+        AppearanceVisit::decl(&config),
+        AppearanceAlternative::decl(&config),
+        AppearanceReport::decl(&config),
+        AppearanceReportRecord::decl(&config),
+        AppearanceStudy::decl(&config),
+        AppearanceStudyInfo::decl(&config),
         GeometryErrorCode::decl(&config),
         GeometryError::decl(&config),
         SessionId::decl(&config),
@@ -180,6 +201,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (name, value) in [
         ("MAX_CONTROL_BYTES", u64::from(MAX_CONTROL_BYTES)),
+        ("MAX_PALETTE_BYTES", MAX_PALETTE_BYTES as u64),
+        ("MAX_PALETTE_ROWS", MAX_PALETTE_ROWS as u64),
+        ("MAX_APPEARANCE_ALTERNATIVES", MAX_APPEARANCE_ALTERNATIVES as u64),
+        ("MAX_APPEARANCE_REPORT_BYTES", MAX_APPEARANCE_REPORT_BYTES as u64),
         ("PROCESS_SCHEMA_VERSION", u64::from(PROCESS_SCHEMA_VERSION)),
         ("MAX_PROCESS_LAYERS", MAX_PROCESS_LAYERS as u64),
         ("MAX_PROCESS_OPERATIONS", MAX_PROCESS_OPERATIONS as u64),

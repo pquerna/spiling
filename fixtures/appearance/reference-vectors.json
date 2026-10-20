@@ -1,0 +1,16 @@
+{
+  "provenance": "Original Spiling input pairs; independent integration oracle executed genuine Colour 0.4.6 delta_E_CIE2000 (k=1,1,1), eotf_sRGB and XYZ_to_Lab with explicit xy D65 and CSS rational matrix; NumPy 2.5.4, SciPy 1.18.1, Python 3.14.4. Isolated installation required --ignore-requires-python for Colour metadata excluding Python 3.14. No oracle code or Sharma dataset copied.",
+  "conversion_reference": "https://www.w3.org/TR/css-color-4/#color-conversion-code; xy D65=(0.3127,0.3290), matching rational sRGB matrix; D65 Lab, not CSS D50 Lab",
+  "delta_e00": [
+    {"lab1":[50,20,1],"lab2":[50,80,-1],"expected":18.50593550244927},
+    {"lab1":[60,30,1],"lab2":[55,60,-1],"expected":10.98056683470676},
+    {"lab1":[50,40,4],"lab2":[50,60,-3],"expected":7.148731516311995},
+    {"lab1":[50,20,0],"lab2":[50,80,-1],"expected":18.475369393044875},
+    {"lab1":[50,0,0],"lab2":[50,40,-5],"expected":23.904986308657264}
+  ],
+  "srgb_to_d65_lab": [
+    {"srgb":[1,0,0],"expected":[53.23711559542937,80.09011352310385,67.20326351172214]},
+    {"srgb":[1,0.4392156862745098,0.2549019607843137],"expected":[64.34940859796116,51.8046501994448,51.77802499881945]},
+    {"srgb":[1,1,1],"expected":[100,0,0]}
+  ]
+}

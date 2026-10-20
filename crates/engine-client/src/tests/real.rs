@@ -868,3 +868,46 @@ async fn manufacturing_bundle_survives_save_restart_and_source_removal() {
     );
     reopened.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "native deep check; requires SPILING_TEST_ENGINE"]
+async fn appearance_descriptor_and_allocation_refusals_preserve_supervised_child() {
+    use spiling_contracts::appearance::{
+        AppearanceReportRecord, APPEARANCE_PRODUCER, MAX_APPEARANCE_REPORT_BYTES,
+    };
+    let mut client = EngineClient::spawn(engine()).await.unwrap();
+    let pid = client.pid();
+    let session = client.hello().session_id.clone();
+    let record = AppearanceReportRecord {
+        hash: SourceHash::from_bytes(b"not retained"),
+        byte_count: 12,
+        input_hash: SourceHash::from_bytes(b"input"),
+        producer: APPEARANCE_PRODUCER.into(),
+        complete: true,
+    };
+    let descriptor = spiling_contracts::ArtifactView {
+        name: format!("artifacts/{}", record.hash.as_str()),
+        size_bytes: record.byte_count.to_string(),
+        sha256: record.hash.as_str().into(),
+        media_type: "application/x-spiling-appearance-report+json".into(),
+    };
+    for invalid in [
+        spiling_contracts::ArtifactView { media_type: "application/json".into(), ..descriptor.clone() },
+        spiling_contracts::ArtifactView { size_bytes: "1".into(), ..descriptor.clone() },
+        spiling_contracts::ArtifactView { name: format!("artifacts/{}", record.input_hash.as_str()), ..descriptor.clone() },
+        spiling_contracts::ArtifactView { sha256: record.input_hash.as_str().into(), ..descriptor.clone() },
+    ] {
+        assert!(client.fetch_appearance_report(&record, &invalid).await.is_err());
+        client.ping().await.unwrap();
+    }
+    let oversized = AppearanceReportRecord {
+        byte_count: MAX_APPEARANCE_REPORT_BYTES as u64 + 1, ..record.clone()
+    };
+    assert!(client.fetch_appearance_report(&oversized, &descriptor).await.is_err());
+    let wrong_producer = AppearanceReportRecord { producer: "foreign".into(), ..record };
+    assert!(client.fetch_appearance_report(&wrong_producer, &descriptor).await.is_err());
+    client.ping().await.unwrap();
+    assert_eq!(client.pid(), pid);
+    assert_eq!(client.hello().session_id, session);
+    client.shutdown().await.unwrap();
+}

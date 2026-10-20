@@ -121,5 +121,7 @@ message NativeOperationResult {
     SurfaceImageImportedResult surface_image_imported = 7;
     SurfaceImagePreparedResult surface_image_prepared = 8;
     BedPosePreparation bed_pose_prepared = 9;
+    AppearancePaletteImportedResult appearance_palette_imported = 10;
+    AppearanceComparedResult appearance_compared = 11;
   }
 }

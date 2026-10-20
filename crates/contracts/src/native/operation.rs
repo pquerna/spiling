@@ -92,6 +92,7 @@ fn native_artifact_limit(media: &str) -> Result<u64, String> {
         }
         "application/x-spiling-replay-motion" => Ok(u64::from(MAX_REPLAY_DISPLAY_BYTES)),
         SURFACE_IMAGE_MEDIA_TYPE => Ok(MAX_SURFACE_IMAGE_BYTES as u64),
+        crate::appearance::APPEARANCE_REPORT_MIME => Ok(crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64),
         _ => Err("unexpected native artifact media type".into()),
     }
 }
@@ -219,6 +220,22 @@ pub fn native_operation_view(
     };
     if let Some(result) = &result {
         match result {
+            JobResult::AppearancePaletteImported { info, palette } => {
+                if info.revision.0 != meta.captured_project_revision.checked_add(1).ok_or("project revision overflow")?
+                    || info.appearance_study.palette.as_ref() != Some(palette)
+                    || !meta.outputs.is_empty()
+                {
+                    return Err("appearance import receipt differs from captured project/palette".into());
+                }
+            }
+            JobResult::AppearanceCompared { captured_revision, record, resource, .. } => {
+                super::appearance::validate_report_resource(record, resource)?;
+                if captured_revision.0 != meta.captured_project_revision || meta.outputs.len() != 1
+                    || !meta.outputs.iter().any(|output| output.name == resource.name
+                        && output.sha256 == resource.sha256 && output.size_bytes == record.byte_count
+                        && output.media_type == resource.media_type)
+                { return Err("appearance report captured revision or outputs mismatch".into()); }
+            }
             JobResult::SurfaceImageImported {
                 info,
                 image,
@@ -356,6 +373,24 @@ impl TryFrom<rpc::NativeOperationResult> for JobResult {
     fn try_from(v: rpc::NativeOperationResult) -> Result<Self, String> {
         use rpc::native_operation_result::Result as R;
         Ok(match required(v.result, "native result")? {
+            R::AppearancePaletteImported(value) => {
+                let info: ProjectInfo = required(value.info, "palette import project info")?.try_into()?;
+                let palette: crate::appearance::PaletteRecord = required(value.palette, "imported palette metadata")?.try_into()?;
+                if info.appearance_study.palette.as_ref() != Some(&palette) {
+                    return Err("imported palette differs from authoritative study".into());
+                }
+                Self::AppearancePaletteImported { info, palette }
+            }
+            R::AppearanceCompared(value) => {
+                let record = required(value.record, "appearance report record")?.try_into()?;
+                let resource = artifact_to_view(required(value.resource, "appearance report resource")?,
+                    crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?;
+                super::appearance::validate_report_resource(&record, &resource)?;
+                Self::AppearanceCompared {
+                    project_id: ProjectId::parse(value.project_id).map_err(|error| error.to_string())?,
+                    captured_revision: ProjectRevision(value.captured_revision), record, resource,
+                }
+            }
             R::Scene(summary) => Self::Scene {
                 summary: summary.try_into()?,
             },
@@ -448,6 +483,22 @@ impl TryFrom<JobResult> for rpc::NativeOperationResult {
     fn try_from(v: JobResult) -> Result<Self, String> {
         use rpc::native_operation_result::Result as R;
         let result = match v {
+            JobResult::AppearancePaletteImported { info, palette } => {
+                if info.appearance_study.palette.as_ref() != Some(&palette) {
+                    return Err("imported palette differs from authoritative study".into());
+                }
+                R::AppearancePaletteImported(rpc::AppearancePaletteImportedResult {
+                    info: Some(info.try_into()?), palette: Some(palette.try_into()?),
+                })
+            }
+            JobResult::AppearanceCompared { project_id, captured_revision, record, resource } => {
+                super::appearance::validate_report_resource(&record, &resource)?;
+                R::AppearanceCompared(rpc::AppearanceComparedResult {
+                    project_id: project_id.as_str().into(), captured_revision: captured_revision.0,
+                    record: Some(record.try_into()?), resource: Some(artifact_from_view(resource,
+                        crate::appearance::MAX_APPEARANCE_REPORT_BYTES as u64)?),
+                })
+            }
             JobResult::Scene { summary } => R::Scene(summary.try_into()?),
             JobResult::Section { artifact_id } => R::SectionArtifactId(artifact_id.get()),
             JobResult::BedPosePrepared { preparation } => {

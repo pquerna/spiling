@@ -73,7 +73,12 @@ impl NativeHost {
                 match command {
                     Command::Capture(command,tx) => {
                         let result = command.as_ref().map_or(Ok(()), |command| {
-                            runtime.validate_image_admission(command).map_err(|error| domain_tonic(error.into()))
+                            runtime.validate_image_admission(command)
+                                .and_then(|()| match command {
+                                    Control::Project(command) => runtime.validate_appearance_admission(command),
+                                    _ => Ok(()),
+                                })
+                                .map_err(|error| domain_tonic(error.into()))
                         }).map(|()| { let (scene,project)=runtime.revisions(); (runtime.session_id.clone(),scene,project) });
                         let _=tx.send(result);
                     }
@@ -83,7 +88,23 @@ impl NativeHost {
                         let _=tx.send(result);
                     }
                     Command::Start(name,command,captured_project,tx) => {
-                        let result=match validate_capture(&runtime,&command,captured_project).map(|_|runtime.execute(command)) {
+                        let initially_cancelled = jobs.with_sync(|s| {
+                            Ok(spiling_contracts::native_metadata(&s.get(&name)?)
+                                .map_err(crate::jobs::internal)?.state
+                                == spiling_contracts::rpc::NativeOperationState::NativeCancelling as i32)
+                        }).unwrap_or_else(fatal);
+                        let result=match validate_capture(&runtime,&command,captured_project).map(|_| {
+                            match command {
+                                Control::Project(spiling_contracts::project::ProjectCommand::CompareAppearance {
+                                    session_id, base_revision,
+                                }) if initially_cancelled => runtime.compare_appearance_with_initial_cancel(
+                                    &session_id, base_revision, true,
+                                ).unwrap_or_else(|error| Reply::Project(
+                                    spiling_contracts::project::ProjectResponse::Error { error }
+                                )),
+                                command => runtime.execute(command),
+                            }
+                        }) {
                             Ok(Reply::Accepted(id)) => Ok(id),
                             Ok(reply) => Err(reply_error(reply)),
                             Err(error) => Err(error),
@@ -139,7 +160,10 @@ impl NativeHost {
                 command @ (spiling_contracts::project::ProjectCommand::ImportSurfaceImageFinish {
                     ..
                 }
-                | spiling_contracts::project::ProjectCommand::GetSurfaceImage { .. }),
+                | spiling_contracts::project::ProjectCommand::GetSurfaceImage { .. }
+                | spiling_contracts::project::ProjectCommand::ImportAppearancePalette { .. }
+                | spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
+                | spiling_contracts::project::ProjectCommand::GetAppearanceReport { .. }),
             ) => Some(Control::Project(command.clone())),
             _ => None,
         };
@@ -280,6 +304,24 @@ fn publish_terminal(
     let private = job
         .result
         .ok_or_else(|| Status::internal("native terminal result missing"))?;
+    if let geometry::JobResult::AppearanceCompared { project_id, captured_revision, record } = &private {
+        let report = runtime.appearance_publication(id)
+            .ok_or_else(|| Status::internal("ACK appearance report missing"))?;
+        if &report.record != record {
+            return Err(Status::data_loss("ACK appearance report metadata mismatch"));
+        }
+        let artifact = jobs.describe_native_artifact(
+            &report.bytes, "application/x-spiling-appearance-report+json",
+            spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
+        )?;
+        let result = spiling_contracts::geometry::JobResult::AppearanceCompared {
+            project_id: project_id.clone(), captured_revision: *captured_revision,
+            record: record.clone(), resource: view(&artifact)?,
+        };
+        jobs.native_finish(name, Ok(result), vec![(artifact, report.bytes.as_slice())])?;
+        runtime.release_appearance_publication(id);
+        return Ok(true);
+    }
     if let geometry::JobResult::SurfaceImagePrepared {
         project_id,
         captured_revision,
@@ -315,7 +357,8 @@ fn publish_terminal(
         runtime.release_image_publication(id);
         return Ok(true);
     }
-    if matches!(&private, geometry::JobResult::SurfaceImageImported { .. }) {
+    if matches!(&private, geometry::JobResult::SurfaceImageImported { .. }
+        | geometry::JobResult::AppearancePaletteImported { .. }) {
         let result = public_result(private, resources, None)?;
         jobs.native_finish(name, Ok(result), vec![])?;
         return Ok(true);
@@ -519,6 +562,10 @@ fn public_result(
             Public::BedPosePrepared { preparation }
         }
         geometry::JobResult::ProjectSaved { info } => Public::ProjectSaved { info },
+        geometry::JobResult::AppearancePaletteImported { info, palette } =>
+            Public::AppearancePaletteImported { info, palette },
+        geometry::JobResult::AppearanceCompared { .. } =>
+            return Err(Status::internal("appearance report requires ACK-bound blob publication")),
         geometry::JobResult::SurfaceImageImported {
             info,
             image,

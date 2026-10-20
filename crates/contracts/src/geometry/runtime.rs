@@ -155,6 +155,16 @@ pub enum JobResult {
         record: crate::surface::SurfaceImageRecord,
         resource: crate::ArtifactView,
     },
+    AppearancePaletteImported {
+        info: crate::project::ProjectInfo,
+        palette: crate::appearance::PaletteRecord,
+    },
+    AppearanceCompared {
+        project_id: crate::project::ProjectId,
+        captured_revision: crate::project::ProjectRevision,
+        record: crate::appearance::AppearanceReportRecord,
+        resource: crate::ArtifactView,
+    },
     ManufacturingPreflight {
         report: crate::manufacturing::PreflightReport,
     },

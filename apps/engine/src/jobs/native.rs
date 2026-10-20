@@ -227,8 +227,13 @@ impl Jobs {
         captured_project: spiling_contracts::project::ProjectRevision,
     ) -> Result<(), Status> {
         let mut updates = self.subscribe(name.clone()).await?;
+        // A cancelled study returns an honest zero/prefix best-found report,
+        // including cancellation before it acquires the existing worker lease.
+        let report_only = matches!(&command, Control::Project(
+            spiling_contracts::project::ProjectCommand::CompareAppearance { .. }
+        ));
         let permit = loop {
-            if native_cancelled(&updates.borrow()) {
+            if native_cancelled(&updates.borrow()) && !report_only {
                 return self.finish_native_cancel(name, &command).await;
             }
             tokio::select! {
@@ -236,7 +241,7 @@ impl Jobs {
                 changed = updates.changed() => { changed.map_err(internal)?; }
             }
         };
-        if native_cancelled(&updates.borrow()) {
+        if native_cancelled(&updates.borrow()) && !report_only {
             return self.finish_native_cancel(name, &command).await;
         }
         let id = host.start(name.clone(), command, captured_project).await?;

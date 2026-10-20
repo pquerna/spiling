@@ -4,8 +4,8 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri"]
-default-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/engine-client", "apps/engine", "apps/cli"]
+members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli", "apps/desktop/src-tauri"]
+default-members = ["crates/contracts", "crates/core", "crates/geometry", "crates/manufacturing", "crates/surface-fields", "crates/appearance", "crates/engine-client", "apps/engine", "apps/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -31,6 +31,7 @@ ts-rs = { version = "=12.0.1", features = ["serde-compat"] }
 spiling-contracts = { path = "crates/contracts" }
 spiling-engine-client = { path = "crates/engine-client" }
 spiling-surface-fields = { path = "crates/surface-fields" }
+spiling-appearance = { path = "crates/appearance" }
 png = "=0.18.1"
 geo = "=0.32.0"
 monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "dae59326248d0d068ca4c3a1e52223bfbf1707e0" }

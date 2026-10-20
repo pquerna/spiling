@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
+mod appearance;
 mod bed_pose;
 mod execution;
 mod manufacturing;
@@ -126,6 +127,9 @@ enum Purpose {
         parameters: ImageReliefParameters,
     },
     GetSurfaceImage,
+    ImportAppearancePalette,
+    CompareAppearance,
+    GetAppearanceReport,
 }
 struct Publication {
     kind: PublicationKind,
@@ -154,6 +158,11 @@ enum PublicationKind {
         layer_id: SurfaceLayerId,
     },
     SurfaceImagePrepared(Arc<spiling_core::SurfaceImageAsset>),
+    AppearancePaletteImported {
+        edit: PreparedEdit,
+        palette: spiling_contracts::appearance::PaletteRecord,
+    },
+    AppearanceCompared(Arc<appearance::ReportPublication>),
     Section,
     Manufacturing {
         edit: PreparedEdit,
@@ -192,6 +201,8 @@ pub struct Runtime {
     // into the terminal ledger transaction after ACK and released immediately.
     replay_publication: Option<(JobId, spiling_manufacturing::EncodedReplayDisplay)>,
     image_publication: Option<(JobId, Arc<spiling_core::SurfaceImageAsset>)>,
+    appearance_publication: Option<(JobId, Arc<appearance::ReportPublication>)>,
+    appearance_comparison: Option<(ProjectId, ProjectRevision, Arc<appearance::ReportPublication>)>,
     released: VecDeque<ArtifactId>,
     jobs: BTreeMap<JobId, EngineJob>,
     terminal: VecDeque<JobId>,
@@ -214,6 +225,8 @@ impl Runtime {
             replay_publication: None,
             released: VecDeque::new(),
             image_publication: None,
+            appearance_publication: None,
+            appearance_comparison: None,
             jobs: BTreeMap::new(),
             terminal: VecDeque::new(),
             next_job: 0,
@@ -338,10 +351,13 @@ impl Runtime {
                 if active.id != job || active.deciding {
                     return Err("native result correlation failure".into());
                 }
+                // Comparing produces evidence only, never a Core transaction. A
+                // cancelled traversal must still deliver its incomplete report.
+                let report_only = matches!(active.purpose, Purpose::CompareAppearance);
                 // A durable save receipt has already crossed its disk commit point.
                 // It must reach core even if cancellation arrived after replacement.
                 let durable = matches!(&result, Ok(Product::Saved(_)));
-                let publication = if !durable && active.cancel.load(Ordering::Acquire) {
+                let publication = if !durable && !report_only && active.cancel.load(Ordering::Acquire) {
                     Err(cancelled(&active.purpose))
                 } else if active.base != self.revision
                     || (matches!(
@@ -352,6 +368,9 @@ impl Runtime {
                             | Purpose::ImportSurfaceImage { .. }
                             | Purpose::GetSurfaceImage
                             | Purpose::PrepareBedPose
+                            | Purpose::ImportAppearancePalette
+                            | Purpose::CompareAppearance
+                            | Purpose::GetAppearanceReport
                     ) && active.project_base != self.project.info().revision)
                 {
                     Err(
@@ -382,7 +401,7 @@ impl Runtime {
                 };
                 match publication {
                     Ok(publication) => {
-                        if durable || self.watchdog.begin_commit(job) {
+                        if durable || report_only || self.watchdog.begin_commit(job) {
                             let snapshot = match &publication.kind {
                                 PublicationKind::Import { edit, .. } => Some(edit.snapshot()),
                                 PublicationKind::Open { project, .. } => Some(project.snapshot()),
@@ -511,6 +530,35 @@ impl Runtime {
                                 record,
                             })
                         }
+                        PublicationKind::AppearancePaletteImported { edit, palette } => {
+                            self.project.commit(edit)
+                                .map_err(|error| format!("core palette ACK invariant: {error}"))?;
+                            self.appearance_comparison = None;
+                            Some(JobResult::AppearancePaletteImported {
+                                info: self.project.info(),
+                                palette,
+                            })
+                        }
+                        PublicationKind::AppearanceCompared(report) => {
+                            if self.appearance_publication.is_some() {
+                                return Err("unreleased appearance report publication".into());
+                            }
+                            if matches!(active.purpose, Purpose::CompareAppearance) {
+                                self.appearance_comparison = if !active.cancel.load(Ordering::Acquire)
+                                    && report.record.complete {
+                                    Some((self.project.info().project_id, active.project_base, report.clone()))
+                                } else {
+                                    None
+                                };
+                            }
+                            let record = report.record.clone();
+                            self.appearance_publication = Some((job, report));
+                            Some(JobResult::AppearanceCompared {
+                                project_id: self.project.info().project_id,
+                                captured_revision: active.project_base,
+                                record,
+                            })
+                        }
                         PublicationKind::Manufacturing { edit, record } => {
                             self.project
                                 .commit(edit)
@@ -588,6 +636,21 @@ impl Runtime {
     }
     fn prepare(&mut self, active: &Active, product: Product) -> Result<Publication, JobError> {
         match (&active.purpose, product) {
+            (Purpose::ImportAppearancePalette, Product::AppearancePalette(asset)) => {
+                let edit = self.project.prepare(Edit::ImportAppearancePalette { asset })?;
+                let palette = edit.snapshot().appearance_study.palette.clone()
+                    .ok_or_else(|| project_error(ProjectErrorCode::InvalidProject, "prepared palette missing"))?;
+                Ok(Publication {
+                    kind: PublicationKind::AppearancePaletteImported { edit, palette },
+                    artifact: None,
+                })
+            }
+            (Purpose::CompareAppearance | Purpose::GetAppearanceReport, Product::AppearanceReport(report)) => {
+                Ok(Publication {
+                    kind: PublicationKind::AppearanceCompared(report),
+                    artifact: None,
+                })
+            }
             (
                 Purpose::ImportSurfaceImage {
                     reference,
@@ -1338,6 +1401,23 @@ impl Runtime {
     }
     fn project_control_inner(&mut self, command: ProjectCommand) -> Result<Reply, ProjectError> {
         match command {
+            ProjectCommand::ImportAppearancePalette { session_id, base_revision, source } => {
+                self.import_appearance_palette(&session_id, base_revision, source)
+            }
+            ProjectCommand::SetAppearanceTarget { session_id, base_revision, target, limits } => {
+                self.metadata_base(&session_id, base_revision)?;
+                self.appearance_comparison = None;
+                self.commit_metadata_edit(Edit::SetAppearanceTarget { target, limits })
+            }
+            ProjectCommand::CompareAppearance { session_id, base_revision } => {
+                self.compare_appearance(&session_id, base_revision)
+            }
+            ProjectCommand::GetAppearanceReport { session_id, base_revision } => {
+                self.get_appearance_report(&session_id, base_revision)
+            }
+            ProjectCommand::AcceptAppearanceReport { session_id, base_revision, report_hash, selection } => {
+                self.accept_appearance_report(&session_id, base_revision, &report_hash, selection)
+            }
             ProjectCommand::Get { session_id } => {
                 if session_id != self.session_id {
                     return Err(project_error(
@@ -1452,6 +1532,7 @@ impl Runtime {
                 let retained_source_bytes = self.retained_source_bytes;
                 let retained_manufacturing_bytes = self.manufacturing_bytes();
                 let retained_surface_image_bytes = self.surface_image_bytes()?;
+                let retained_appearance_bytes = self.project.retained_appearance_bytes()?;
                 let budget = worker::MeshBudget {
                     vertices: MAX_DISPLAY_VERTICES
                         - self.definitions.values().map(|d| d.vertices).sum::<u32>(),
@@ -1472,6 +1553,7 @@ impl Runtime {
                             retained_source_bytes,
                             retained_manufacturing_bytes,
                             retained_surface_image_bytes,
+                            retained_appearance_bytes,
                         })
                     })
                     .map_err(project_geometry_error)?;
@@ -1567,6 +1649,15 @@ impl Runtime {
         reservation: u32,
         work: impl FnOnce(JobId, ArtifactId, &Watchdog) -> Work,
     ) -> Domain<Reply> {
+        self.start_with_cancel(purpose, reservation, false, work)
+    }
+    fn start_with_cancel(
+        &mut self,
+        purpose: Purpose,
+        reservation: u32,
+        initially_cancelled: bool,
+        work: impl FnOnce(JobId, ArtifactId, &Watchdog) -> Work,
+    ) -> Domain<Reply> {
         if reservation > MAX_ENGINE_ARTIFACT_BYTES - self.artifact_bytes() {
             return Err(resource(
                 "encoded artifact staging reservation exceeds budget; release unused artifacts",
@@ -1582,7 +1673,7 @@ impl Runtime {
         }
         let job = JobId::new(allocate(&mut self.next_job, "job ID")?)?;
         let artifact = ArtifactId::new(allocate(&mut self.next_artifact, "artifact ID")?)?;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(initially_cancelled));
         let stage = match &purpose {
             Purpose::Import { .. } => "importing",
             Purpose::Section => "sectioning",
@@ -1594,6 +1685,9 @@ impl Runtime {
             Purpose::Verify => "verifying_manufacturing",
             Purpose::ImportSurfaceImage { .. } => "importing_surface_image",
             Purpose::GetSurfaceImage => "preparing_surface_image",
+            Purpose::ImportAppearancePalette => "importing_appearance_palette",
+            Purpose::CompareAppearance => "comparing_appearance",
+            Purpose::GetAppearanceReport => "preparing_appearance_report",
         };
         self.watchdog.start(job, cancel.clone());
         let work = work(job, artifact, &self.watchdog);
@@ -1696,6 +1790,9 @@ fn cancelled(purpose: &Purpose) -> JobError {
         Purpose::Open
         | Purpose::Save
         | Purpose::ImportSurfaceImage { .. }
+        | Purpose::ImportAppearancePalette
+        | Purpose::CompareAppearance
+        | Purpose::GetAppearanceReport
         | Purpose::GetSurfaceImage => project_error(
             ProjectErrorCode::Cancelled,
             "project job cancelled before publication",

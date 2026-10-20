@@ -7,7 +7,7 @@ mod process;
 pub mod storage;
 use process::apply_process_edit;
 use sha2::{Digest, Sha256};
-use spiling_contracts::{geometry::*, manufacturing::*, process::*, project::*, surface::*};
+use spiling_contracts::{appearance::*, geometry::*, manufacturing::*, process::*, project::*, surface::*};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, Weak},
@@ -22,6 +22,50 @@ pub(crate) fn invalid(message: impl AsRef<str>) -> ProjectError {
 }
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_APPEARANCE_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Immutable exact imported bytes and separately content-addressed canonical JSON.
+#[derive(Debug)]
+pub struct PaletteAsset {
+    record: PaletteRecord,
+    original: Arc<Vec<u8>>,
+    canonical: Arc<Vec<u8>>,
+    prepared: Arc<PreparedPalette>,
+}
+impl PaletteAsset {
+    pub fn new(record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>) -> Result<Self, ProjectError> {
+        record.validate_hashes(&original, &canonical)?;
+        let remaining = MAX_APPEARANCE_RETAINED_BYTES
+            .saturating_sub(original.capacity()).saturating_sub(canonical.capacity())
+            .saturating_sub(record.allocated_bytes());
+        let prepared = PreparedPalette::decode_bounded(&original, &canonical, remaining)?;
+        Self::from_checked_prepared(record, original, canonical, prepared)
+    }
+    pub fn from_document(
+        record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>, document: PaletteDocument,
+    ) -> Result<Self, ProjectError> {
+        record.validate_hashes(&original, &canonical)?;
+        let prepared = PreparedPalette::new(document, &canonical)?;
+        Self::from_checked_prepared(record, original, canonical, prepared)
+    }
+    fn from_checked_prepared(
+        record: PaletteRecord, original: Vec<u8>, canonical: Vec<u8>, prepared: PreparedPalette,
+    ) -> Result<Self, ProjectError> {
+        record.validate_provenance(prepared.document())?;
+        if prepared.canonical_hash() != &record.canonical_hash {
+            return Err(invalid("palette prepared identity differs from record"));
+        }
+        Ok(Self {
+            record, original: Arc::new(original), canonical: Arc::new(canonical),
+            prepared: Arc::new(prepared),
+        })
+    }
+    pub fn record(&self) -> &PaletteRecord { &self.record }
+    pub fn original(&self) -> &Arc<Vec<u8>> { &self.original }
+    pub fn canonical(&self) -> &Arc<Vec<u8>> { &self.canonical }
+    pub fn document(&self) -> &PaletteDocument { self.prepared.document() }
+    pub fn prepared(&self) -> &PreparedPalette { &self.prepared }
+}
 
 /// Checked immutable canonical PGM content. Original encoded paths never enter Core.
 #[derive(Debug)]
@@ -152,9 +196,14 @@ pub struct Snapshot {
     pub surface_overlays: Arc<SurfaceOverlays>,
     pub process_document: Arc<ProcessDocument>,
     pub surface_images: BTreeMap<SourceHash, Arc<SurfaceImageAsset>>,
+    pub appearance_study: Arc<AppearanceStudy>,
+    pub appearance_palettes: BTreeMap<SourceHash, Arc<PaletteAsset>>,
 }
 #[derive(Debug, Clone)]
 pub enum Edit {
+    ImportAppearancePalette { asset: Arc<PaletteAsset> },
+    SetAppearanceTarget { target: AppearanceTarget, limits: SearchLimits },
+    AcceptAppearanceReport { report: Arc<AppearanceReport>, selection: Option<String> },
     Process {
         edit: ProcessEdit,
     },
@@ -233,6 +282,7 @@ struct Content {
     manufacturing_artifact: Option<ManufacturingArtifactRecord>,
     surface_overlays: Arc<SurfaceOverlays>,
     process_document: Arc<ProcessDocument>,
+    appearance_study: AppearanceStudyInfo,
 }
 impl Content {
     fn matches(&self, snapshot: &Snapshot) -> bool {
@@ -240,6 +290,11 @@ impl Content {
             && self.manufacturing_intent == snapshot.manufacturing_intent
             && self.surface_overlays == snapshot.surface_overlays
             && self.process_document == snapshot.process_document
+            && self.appearance_study.palette == snapshot.appearance_study.palette
+            && self.appearance_study.target == snapshot.appearance_study.target
+            && self.appearance_study.limits == snapshot.appearance_study.limits
+            && self.appearance_study.report == snapshot.appearance_study.report_record
+            && self.appearance_study.selection == snapshot.appearance_study.selection
             && self.manufacturing_artifact.as_ref()
                 == snapshot
                     .manufacturing_artifact
@@ -269,6 +324,7 @@ impl Content {
             manufacturing_artifact: manifest.manufacturing_artifact.clone(),
             surface_overlays: Arc::new(manifest.surface_overlays.clone()),
             process_document: Arc::new(manifest.process_document.clone()),
+            appearance_study: manifest.appearance_study.info(),
         }
     }
 }
@@ -286,6 +342,7 @@ pub struct Project {
     redo: Vec<Arc<Snapshot>>,
     staged_images: Mutex<Vec<Weak<Vec<u8>>>>,
     staged_process: Mutex<Vec<Weak<ProcessDocument>>>,
+    staged_appearance: Mutex<Vec<Weak<Snapshot>>>,
     saved: Option<(ProjectRevision, Content)>,
     storage: Option<Arc<Storage>>,
     recovered_previous: bool,
@@ -311,6 +368,7 @@ impl Project {
             redo: Vec::new(),
             staged_images: Mutex::new(Vec::new()),
             staged_process: Mutex::new(Vec::new()),
+            staged_appearance: Mutex::new(Vec::new()),
             saved: None,
             storage: None,
             recovered_previous: false,
@@ -332,6 +390,8 @@ impl Project {
             surface_overlays: Arc::new(loaded.manifest.surface_overlays.clone()),
             process_document: Arc::new(loaded.manifest.process_document.clone()),
             surface_images: loaded.surface_images,
+            appearance_study: Arc::new(loaded.manifest.appearance_study.clone()),
+            appearance_palettes: loaded.appearance_palettes,
         };
         validate_snapshot(&snapshot, &loaded.manifest)?;
         let mut project = Self::new();
@@ -358,7 +418,8 @@ impl Project {
                 !self.current.occurrences.is_empty()
                     || self.current.manufacturing_intent.is_some()
                     || !self.current.surface_overlays.layers.is_empty()
-                    || !self.current.process_document.layers.is_empty(),
+                    || !self.current.process_document.layers.is_empty()
+                    || *self.current.appearance_study != AppearanceStudy::default(),
                 |(_, content)| !content.matches(&self.current),
             );
         ProjectInfo {
@@ -377,6 +438,7 @@ impl Project {
             can_redo: !read_only && !self.redo.is_empty(),
             surface_overlays: (*self.current.surface_overlays).clone(),
             process_document: (*self.current.process_document).clone(),
+            appearance_study: self.current.appearance_study.info(),
             resolved_process: self.current.manufacturing_intent.as_ref().map_or_else(
                 Vec::new,
                 |intent| {
@@ -407,6 +469,21 @@ impl Project {
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.current.clone()
+    }
+    pub fn appearance_study(&self) -> &AppearanceStudy {
+        &self.current.appearance_study
+    }
+    /// Includes live prepared candidates, even after their revision becomes stale.
+    pub fn retained_appearance_bytes(&self) -> Result<usize, ProjectError> {
+        let staged = self.staged_appearance.lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
+        let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        appearance_bytes(
+            std::iter::once(self.current.as_ref())
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(staged.iter().map(Arc::as_ref)),
+        )
     }
     pub fn surface_images(&self) -> &BTreeMap<SourceHash, Arc<SurfaceImageAsset>> {
         &self.current.surface_images
@@ -516,11 +593,62 @@ impl Project {
             Edit::AddImageSurfaceFinish { asset, .. } => Some(asset.bytes().clone()),
             _ => None,
         };
+        let incoming_palette = match &edit {
+            Edit::ImportAppearancePalette { asset } => Some(asset.clone()),
+            _ => None,
+        };
         // Invalidation is part of the same atomic edit; history keeps the coherent old pair.
-        if !matches!(&edit, Edit::PublishManufacturing { .. }) {
+        if !matches!(&edit, Edit::PublishManufacturing { .. }
+            | Edit::ImportAppearancePalette { .. }
+            | Edit::SetAppearanceTarget { .. }
+            | Edit::AcceptAppearanceReport { .. }) {
             snapshot.manufacturing_artifact = None;
         }
         match edit {
+            Edit::ImportAppearancePalette { mut asset } => {
+                let staged = self.staged_appearance.lock()
+                    .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
+                let staged: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+                if let Some(retained) = std::iter::once(self.current.as_ref())
+                    .chain(self.undo.iter().map(Arc::as_ref))
+                    .chain(self.redo.iter().map(Arc::as_ref))
+                    .chain(staged.iter().map(Arc::as_ref))
+                    .find_map(|state| state.appearance_palettes.get(&asset.record.canonical_hash))
+                {
+                    if retained.canonical.as_slice() != asset.canonical.as_slice() {
+                        return Err(error(ProjectErrorCode::CorruptAsset, "conflicting canonical palette identity"));
+                    }
+                    asset = retained.clone();
+                }
+                snapshot.appearance_palettes.clear();
+                snapshot.appearance_palettes.insert(asset.record.canonical_hash.clone(), asset.clone());
+                let study = Arc::make_mut(&mut snapshot.appearance_study);
+                study.palette = Some(asset.record.clone());
+                study.report = None;
+                study.report_record = None;
+                study.selection = None;
+            }
+            Edit::SetAppearanceTarget { target, limits } => {
+                let study = Arc::make_mut(&mut snapshot.appearance_study);
+                study.target = Some(target);
+                study.limits = limits;
+                study.report = None;
+                study.report_record = None;
+                study.selection = None;
+            }
+            Edit::AcceptAppearanceReport { report, selection } => {
+                snapshot.appearance_study.matches_report(&report)?;
+                if !report.is_complete() {
+                    return Err(invalid("incomplete appearance report cannot be accepted"));
+                }
+                if selection.as_ref().is_some_and(|key| !report.has_selection(key)) {
+                    return Err(invalid("appearance selection is not a report alternative"));
+                }
+                let study = Arc::make_mut(&mut snapshot.appearance_study);
+                study.report_record = Some(report.canonical_record()?);
+                study.report = Some(report);
+                study.selection = selection;
+            }
             Edit::Process { edit } => {
                 if let ProcessEdit::AddLayer { scope, .. }
                 | ProcessEdit::SetSparseFraction { scope, .. }
@@ -757,6 +885,7 @@ impl Project {
                 Arc::make_mut(&mut snapshot.surface_overlays).layers[index].enabled = enabled;
             }
         }
+        validate_appearance(&snapshot)?;
         synchronize_surface_images(&mut snapshot)?;
         snapshot.surface_overlays.validate()?;
         for layer in &snapshot.surface_overlays.layers {
@@ -881,10 +1010,41 @@ impl Project {
         {
             staged.push(Arc::downgrade(&bytes));
         }
+        let mut candidate = self.capture().manifest;
+        candidate.revision = self.revision.next()?;
+        candidate.next_occurrence = next_occurrence;
+        candidate.next_surface_layer = next_surface_layer;
+        candidate.next_process_layer = next_process_layer;
+        candidate.next_process_operation = next_process_operation;
+        candidate.definitions = snapshot.sources.values().map(|asset| asset.record.clone()).collect();
+        candidate.occurrences = snapshot.occurrences.values().cloned().collect();
+        candidate.manufacturing_intent = snapshot.manufacturing_intent.clone();
+        candidate.manufacturing_artifact = snapshot.manufacturing_artifact.as_ref().map(|asset| asset.record.clone());
+        candidate.surface_overlays = (*snapshot.surface_overlays).clone();
+        candidate.process_document = (*snapshot.process_document).clone();
+        candidate.appearance_study = (*snapshot.appearance_study).clone();
+        validate_manifest_size(&candidate)?;
+        let snapshot = Arc::new(snapshot);
+        let mut staged = self.staged_appearance.lock()
+            .map_err(|_| error(ProjectErrorCode::Io, "appearance staging lock poisoned"))?;
+        staged.retain(|state| state.strong_count() != 0);
+        let live: Vec<_> = staged.iter().filter_map(Weak::upgrade).collect();
+        let retained = appearance_bytes_with_incoming(
+            std::iter::once(snapshot.as_ref())
+                .chain(std::iter::once(self.current.as_ref()))
+                .chain(self.undo.iter().map(Arc::as_ref))
+                .chain(self.redo.iter().map(Arc::as_ref))
+                .chain(live.iter().map(Arc::as_ref)),
+            incoming_palette.as_deref(),
+        )?;
+        if retained > MAX_APPEARANCE_RETAINED_BYTES {
+            return Err(error(ProjectErrorCode::ResourceLimit, "retained/staged appearance allocation budget exceeded"));
+        }
+        staged.push(Arc::downgrade(&snapshot));
         Ok(PreparedEdit {
             owner: self.owner.clone(),
             revision: self.revision,
-            snapshot: Arc::new(snapshot),
+            snapshot,
             next_occurrence,
             next_surface_layer,
             next_process_layer,
@@ -947,6 +1107,7 @@ impl Project {
                 next_surface_layer: self.next_surface_layer,
                 surface_overlays: (*self.current.surface_overlays).clone(),
                 process_document: (*self.current.process_document).clone(),
+                appearance_study: (*self.current.appearance_study).clone(),
                 next_process_layer: self.next_process_layer,
                 next_process_operation: self.next_process_operation,
                 definitions: self
@@ -1005,6 +1166,114 @@ impl Project {
         self.storage = Some(receipt.storage);
         Ok(())
     }
+}
+
+fn validate_appearance(snapshot: &Snapshot) -> Result<(), ProjectError> {
+    snapshot.appearance_study.validate()?;
+    match &snapshot.appearance_study.palette {
+        Some(record) => {
+            let asset = snapshot.appearance_palettes.get(&record.canonical_hash)
+                .ok_or_else(|| error(ProjectErrorCode::MissingAsset, "appearance palette is missing"))?;
+            if asset.record() != record || snapshot.appearance_palettes.len() != 1 {
+                return Err(error(ProjectErrorCode::CorruptAsset, "appearance palette metadata differs from asset"));
+            }
+            if let Some(report) = &snapshot.appearance_study.report {
+                if report.total_rows as usize != asset.document().rows.len()
+                    || report.visits.iter().any(|visit| {
+                        asset.document().rows.binary_search_by(|row| row.key.cmp(&visit.key))
+                            .ok().is_none_or(|index| asset.prepared().evidence_hashes()[index] != visit.evidence_hash)
+                    })
+                    || report.alternatives.iter().any(|alternative| {
+                        asset.document().rows.binary_search_by(|row| row.key.cmp(&alternative.key))
+                            .ok().is_none_or(|index| asset.document().rows[index].name != alternative.name)
+                    })
+                {
+                    return Err(error(ProjectErrorCode::CorruptAsset, "appearance report evidence differs from retained palette"));
+                }
+            }
+        }
+        None if !snapshot.appearance_palettes.is_empty() => {
+            return Err(invalid("unreferenced appearance palette"));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn appearance_bytes<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<usize, ProjectError> {
+    appearance_bytes_with_incoming(snapshots, None)
+}
+
+fn appearance_bytes_with_incoming<'a>(
+    snapshots: impl Iterator<Item = &'a Snapshot>,
+    incoming: Option<&PaletteAsset>,
+) -> Result<usize, ProjectError> {
+    let mut bytes = BTreeMap::new();
+    let mut studies = BTreeMap::new();
+    let mut reports = BTreeMap::new();
+    let mut documents = BTreeMap::new();
+    let mut assets = BTreeMap::new();
+    for snapshot in snapshots {
+        studies.insert(Arc::as_ptr(&snapshot.appearance_study), snapshot.appearance_study.allocated_bytes());
+        if let Some(report) = &snapshot.appearance_study.report {
+            reports.insert(Arc::as_ptr(report), report.allocated_bytes());
+        }
+        for asset in snapshot.appearance_palettes.values() {
+            bytes.insert(Arc::as_ptr(asset.original()), asset.original().capacity());
+            bytes.insert(Arc::as_ptr(asset.canonical()), asset.canonical().capacity());
+            documents.insert(Arc::as_ptr(&asset.prepared), asset.prepared.allocated_bytes());
+            assets.insert(Arc::as_ptr(asset), asset.record.allocated_bytes());
+        }
+    }
+    if let Some(asset) = incoming {
+        bytes.insert(Arc::as_ptr(asset.original()), asset.original().capacity());
+        bytes.insert(Arc::as_ptr(asset.canonical()), asset.canonical().capacity());
+        documents.insert(Arc::as_ptr(&asset.prepared), asset.prepared.allocated_bytes());
+        assets.insert(asset as *const PaletteAsset, asset.record.allocated_bytes());
+    }
+    bytes.values().chain(assets.values()).chain(documents.values()).chain(studies.values()).chain(reports.values()).try_fold(0usize, |total, size| {
+        total.checked_add(*size).ok_or_else(|| error(ProjectErrorCode::ResourceLimit, "appearance allocation budget overflow"))
+    })
+}
+
+fn validate_manifest_size(manifest: &ProjectManifest) -> Result<(), ProjectError> {
+    struct BoundedWriter(usize);
+    impl std::io::Write for BoundedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("manifest size overflow"))?;
+            if self.0 > MAX_PROJECT_MANIFEST_BYTES as usize {
+                return Err(std::io::Error::other("manifest exceeds 1 MiB"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    // Five persistent revision/allocator u32 values can each grow by at most
+    // nine decimal digits. Reserve this without cloning project documents.
+    const MAX_COUNTER_GROWTH: usize = 5 * 9;
+    serde_json::to_writer_pretty(BoundedWriter(MAX_COUNTER_GROWTH), manifest)
+        .map_err(|e| error(ProjectErrorCode::ResourceLimit, e.to_string()))?;
+    // Mirror storage::RecoveryRecord's exact envelope, including nested pretty
+    // indentation. A valid accepted study must remain checkpoint-saveable.
+    #[derive(serde::Serialize)]
+    struct RecoveryCapacity<'a> {
+        manifest: &'a ProjectManifest,
+        revision_high_water: ProjectRevision,
+        next_occurrence_high_water: u32,
+        next_surface_layer_high_water: u32,
+        next_process_layer_high_water: u32,
+        next_process_operation_high_water: u32,
+    }
+    let recovery = RecoveryCapacity {
+        manifest,
+        revision_high_water: ProjectRevision(u32::MAX),
+        next_occurrence_high_water: u32::MAX,
+        next_surface_layer_high_water: u32::MAX,
+        next_process_layer_high_water: u32::MAX,
+        next_process_operation_high_water: u32::MAX,
+    };
+    serde_json::to_writer_pretty(BoundedWriter(MAX_COUNTER_GROWTH), &recovery)
+        .map_err(|e| error(ProjectErrorCode::ResourceLimit, e.to_string()))
 }
 fn add_occurrence(
     snapshot: &mut Snapshot,
@@ -1141,6 +1410,10 @@ fn validate_surface_image_budget(snapshot: &Snapshot) -> Result<(), ProjectError
     Ok(())
 }
 fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<(), ProjectError> {
+    let snapshots: Vec<_> = snapshots.collect();
+    if appearance_bytes(snapshots.iter().copied())? > MAX_APPEARANCE_RETAINED_BYTES {
+        return Err(error(ProjectErrorCode::ResourceLimit, "retained appearance allocation budget exceeded"));
+    }
     let mut sources: BTreeMap<&DefinitionId, &Arc<SourceAsset>> = BTreeMap::new();
     let mut manufacturing: BTreeMap<&SourceHash, &Arc<ManufacturingAsset>> = BTreeMap::new();
     let mut surface = BTreeMap::new();
@@ -1149,6 +1422,7 @@ fn validate_pins<'a>(snapshots: impl Iterator<Item = &'a Snapshot>) -> Result<()
     let mut image_allocations = BTreeMap::new();
     for snapshot in snapshots {
         validate_surface_images(snapshot)?;
+        validate_appearance(snapshot)?;
         process
             .entry(Arc::as_ptr(&snapshot.process_document))
             .or_insert(snapshot.process_document.as_ref());

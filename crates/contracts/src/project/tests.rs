@@ -12,6 +12,7 @@ fn manifest() -> ProjectManifest {
         next_process_layer: 1,
         next_process_operation: 1,
         process_document: crate::process::ProcessDocument::empty(),
+        appearance_study: AppearanceStudy::default(),
         format_version: PROJECT_FORMAT_VERSION,
         project_id: ProjectId::new(),
         revision: ProjectRevision(7),
@@ -185,4 +186,11 @@ fn surface_manifest_references_counter_and_expected_source_are_authoritative() {
         definition_id: DefinitionId::from_source_sha256(&[1; 32]),
     };
     assert!(changed.validate().is_err());
+}
+
+#[test]
+fn project10_requires_explicit_appearance_study() {
+    let mut value = serde_json::to_value(manifest()).unwrap();
+    value.as_object_mut().unwrap().remove("appearance_study");
+    assert!(serde_json::from_value::<ProjectManifest>(value).is_err());
 }

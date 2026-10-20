@@ -4754,6 +4754,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiling-appearance"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "spiling-contracts",
+]
+
+[[package]]
 name = "spiling-cli"
 version = "0.1.0"
 dependencies = [
@@ -4826,6 +4834,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spiling-appearance",
  "spiling-contracts",
  "spiling-core",
  "spiling-engine-client",

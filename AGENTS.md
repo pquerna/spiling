@@ -83,6 +83,7 @@ B0 establishes contracts and a shared `crates/engine-client` used by the CLI and
 | `crates/core/`                                 | Project transactions, undo, persistence/recovery, artifacts, jobs                |
 | `crates/geometry/`                             | Kernel adapter, import, tessellation, sections, capability contract              |
 | `crates/surface-fields/`                       | Bounded image normalization and shared source-frame scalar-grid evaluation       |
+| `crates/appearance/`                           | Scalar D65 colorimetry and bounded single-filament palette studies              |
 | `crates/manufacturing/`                        | Planning, operations/resources, backend, packaging, emitted-program verification |
 | `packages/protocol/`                           | Generated TypeScript contracts and binary decoder; no UI dependencies            |
 | `packages/viewport/`                           | Scene, picking, GPU resources, mesh/toolpath rendering                           |
@@ -95,6 +96,7 @@ Dependencies flow inward:
 - Contracts have no Tauri, React, kernel, or renderer dependencies.
 - Core depends on contracts; geometry depends on contracts and Monstertruck through its kernel adapter.
 - Surface-fields depends on contracts, not Core, geometry, renderer or planner. Core owns canonical immutable image storage; engine enables the optional image codec; manufacturing consumes borrowed scalar fields and geometry services. Engine composes these services with Core.
+- Appearance depends only on contracts: no Core, kernel, manufacturing, UI or GPU dependency. Core owns immutable original/canonical palettes, prepared identity caches and transactional studies; engine composes the typed Projects/Operations/ByteStream service consumed by engine-client and CLI. See `docs/protocol/project.md#appearance-palette-studies`.
 - Shell and CLI are protocol clients, not owners of geometry or planning logic.
 - Viewport uses display contracts and rendering libraries, never Tauri directly.
 

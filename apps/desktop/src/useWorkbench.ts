@@ -707,8 +707,10 @@ export function useWorkbench(
             case "bed_pose_prepared":
             case "project_saved":
             case "surface_image_prepared":
+            case "appearance_compared":
               return result;
             case "surface_image_imported":
+            case "appearance_palette_imported":
               patch({ project: result.info });
               return result;
             case "manufacturing_compiled":
@@ -888,6 +890,9 @@ export function useWorkbench(
         case "surface_image_prepared":
         case "surface_image_imported":
           throw new Error("image operations require the image-specific workbench workflow");
+        case "appearance_palette_imported":
+        case "appearance_compared":
+          throw new Error("appearance studies are inspected through engine-client or CLI");
         case "manufacturing_compiled":
         case "manufacturing_verified":
         case "manufacturing_preflight":
