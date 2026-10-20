@@ -10,6 +10,8 @@ Licensed under the Open Software License version 3.0
 
 Native control uses typed gRPC services; project format10 and manufacturing schema11 are a strict cutover without old-format decoders, aliases or implicit intent defaults. SPLT/SPLM/SPLS remain schema1; [SPLR actual replay](replay.md) is schema5.
 
+Format evolution, producer invalidation and the initial release compatibility boundary follow the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution).
+
 ## Authoring and trust boundary
 
 An operator may author a TypeScript data module against generated Rust-defined types. Build tooling may execute that explicitly trusted local authoring module to produce JSON; executing authoring code has the operator's permissions and is not a sandbox. The engine never executes TypeScript: it receives bounded inert JSON, rejects unknown/duplicate fields and trailing JSON, and validates it in Rust. A schema capability declaration does not enable unsupported behavior. Ordinary printer data does not require a new backend; genuinely custom behavior requires separately reviewed Rust implementation.
@@ -154,7 +156,7 @@ Preflight admits exact native face metadata and process bounds, expands conserva
 
 `ManufacturingProvenance` contains `project_id`, captured `input_revision`, `input_hash`, `definitions:StoredDefinition[]`, `occurrences:OccurrenceRecord[]`, explicit `intent`, full ordered `surface_overlays` and `process_document`, `surface_images:SurfaceImageContent[]`, `kernel:{name,version,revision}`, and explicit planner/emitter/verifier versions. The bounded unique image content table contains canonical PGM bytes once per referenced image, including disabled layers, making exported provenance self-contained. Immutable capture shares canonical content. Inspection/status provenance contains metadata only. Captured source labels/units/uncertainty remain authoritative; native reimport labels must not replace them.
 
-Planner `13` binds Native M to original-material realization contract `1`:
+The planner binds Native M to original-material realization contract `1`:
 immutable source topology and coefficients, an identity-bound seam/vertex
 realization inside the admitted source uncertainty, and the same versioned
 source-relative recipe across all slab queries. Geometry's compact completed
@@ -169,8 +171,10 @@ interpretation of an older bundle.
 `input_fingerprint(project_id,definitions,occurrences,intent,surface_overlays,process_document)` validates these inputs, sorts definitions/occurrences by identity, then SHA-256 hashes compact UTF-8 Rust serde_json in this field order:
 
 ```text
-{schema_version:9,project_id,units:"mm",frame:"right_handed",definitions,occurrences,intent,surface_overlays,process_document}
+{schema_version:MANUFACTURING_SCHEMA_VERSION,project_id,units:"mm",frame:"right_handed",definitions,occurrences,intent,surface_overlays,process_document}
 ```
+
+`MANUFACTURING_SCHEMA_VERSION` denotes the numeric value of the Rust constant in [`spiling-contracts::manufacturing`](../../crates/contracts/src/manufacturing/mod.rs), not a separate fingerprint revision.
 
 Every record/intent field uses its Rust declaration order and serde spelling, without whitespace. Source bytes enter through source SHA-256 and definition identity; source units, retained labels and declared uncertainty are included. Revision/allocator/history/artifacts/timing are excluded. Algorithm/kernel provenance is additional bundle content identity. This is a Rust-defined canonical serialization algorithm, not a promise that arbitrary JavaScript JSON number formatting is interchangeable. Get/status does not rehash geometry on its hot path.
 
@@ -178,7 +182,7 @@ Every record/intent field uses its Rust declaration order and serde spelling, wi
 
 `ManufacturingSummary` contains schedule layers, paths, object-only deposition/volume/filament, separate support deposition/volume/filament, `surface_resolution` advisory totals and software_only:true. Whole-event/deposition budgets include supports, but reported object material ownership never does.
 
-`ManufacturingBundle` contains exactly `schema_version:10`, provenance, plan, actual program and verification. Immutable asset hash covers exact compact UTF-8 JSON without self-reference. Artifact record hashes, byte count and summary remain bounded checked manifest metadata. Serialized and allocated bundle limits stay16MiB; Core's64MiB active/staging/history capacity accounting and durable source/storage authority are unchanged.
+`ManufacturingBundle` contains exactly `schema_version` (the Rust `spiling-contracts::manufacturing::MANUFACTURING_SCHEMA_VERSION` value), provenance, plan, actual program and verification. Immutable asset hash covers exact compact UTF-8 JSON without self-reference. Artifact record hashes, byte count and summary remain bounded checked manifest metadata. Serialized and allocated bundle limits stay16MiB; Core's64MiB active/staging/history capacity accounting and durable source/storage authority are unchanged.
 
 Public schema APIs are printer/recipe/component/capability/intent `validate()`, plan `validate(&intent)`, provenance/report/summary/artifact/bundle `validate()`, `decode_bundle(bytes)`, bundle `summary()` and `validate_record(&record)`. Summary/record matching require an already validated bundle. Record matching checks semantic input hash and summary; caller separately checks exact actual-byte hash and byte count. Schema validation does not parse/replay the program or confer replay success.
 

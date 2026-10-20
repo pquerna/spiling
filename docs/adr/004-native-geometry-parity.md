@@ -1867,7 +1867,7 @@ Primitive parity and document semantics are separate axes. Initial geometry pari
 4. **Wrappers and uncommon curves:** add exact reachable wrapper/curve conversion in the kernel with provenance, rather than flattening everything into lossy triangles. Compact trimmed domains feed the same geometry services.
 5. **T-spline / remaining kernel families:** qualify an actual extraction/evaluation/conversion path and operation corpus before admission. A modeling enum with no STEP route is tracked as an upstream capability gap, not an advertised importer feature.
 
-For multi-body identity, saved face targets include the root-qualified definition plus canonical source face use; no ambiguity across bodies sharing a file. Do not overload current single-source identity or infer a body by source face count. These later changes require project format and identity cutovers; they are not compatibility aliases for `step-planar-cylindrical-v1`.
+For multi-body identity, saved face targets include the root-qualified definition plus canonical source face use; no ambiguity across bodies sharing a file. Do not overload current single-source identity or infer a body by source face count. These later changes require coherent project references and source-identity cutovers under the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution); they are not compatibility aliases for `step-planar-cylindrical-v1`.
 
 ## 13. Errors, limits and resource discipline
 
@@ -1904,19 +1904,19 @@ receipt-based retirement of superseded profile outputs within the same target.
 Record the actual build profile with runtime evidence; optimization alone is
 not proof of acceptable whole-workflow latency.
 
-## 14. Migration and version cutovers
+## 14. Contract and identity cutovers
 
-This is pre-alpha: clean cutovers, no dual readers or carrier aliases.
+Follow the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution) for format numbers, producer invalidation and compatibility; clean contract cutovers do not imply per-feature version increments.
 
 - Change contracts, geometry facade, engine caches/conversion, protocol views, engine-client, CLI, workbench and generated TypeScript together. Audit exported-symbol references before implementation. Remove exhaustive plane/cylinder matches outside narrow analytic/finish code.
-- New import profile identity is required because definition hashes include the old profile. Geometry-family parity uses a new single-solid profile; multi-root/assembly identity is a separate later profile/format change. Do not silently keep old definition hashes after changing admission semantics.
-- Any project identity/manifest/intent field change requires a new project format and coherent source/overlay/artifact reference handling. Existing saved manifests fail clearly unless a separately requested offline migration tool is designed; no implicit reidentification that leaves overlays dangling.
-- Add required `native_shape_error_mm` to recipe/contracts and native certification policy/provenance to manufacturing bundles; increment manufacturing schema and planner producer. Update fingerprints, saved artifact validation, examples, fixtures and all clients. Emitter/verifier versions need change only if their actual contracts/semantics change, not merely because a new surface is admitted.
-- Keep SPLM/SPLS/SPLR binary versions where layouts and meaning remain unchanged; version new descriptor/profile semantics separately. Geometry-only imported definitions require relaxing today's scene invariant equating zero mesh bytes with zero occurrences, and explicit client handling.
+- Change import/profile identity only when changed source interpretation or admission guarantees would otherwise invalidate existing definition, face or overlay references. A feature or additive capability alone does not require a profile-counter revision. Definition hashes include the profile: keep source identity truthful and update affected references coherently, never leaving overlays dangling. Apply the same condition to later multi-root/assembly source-identity changes.
+- Project identity/manifest/intent field changes require coherent source/overlay/artifact reference handling, not a new project format number during this unreleased period. Do not implicitly reidentify sources while leaving overlays dangling or add migration readers for nonexistent released-file compatibility.
+- Add required `native_shape_error_mm` to recipe/contracts and native certification policy/provenance to manufacturing bundles. Update fingerprints, saved artifact validation, examples, fixtures and all clients together. Preserve producer checks and change planner/emitter/verifier identities only where the affected production or verification semantics require invalidating stale compiled output, not merely because a field or surface is added.
+- Keep SPLM/SPLS/SPLR binary revisions unless their representation, layout or interpretation changes incompatibly. Keep descriptor/profile identities truthful to their guarantees, separately from packed binary revisions. Geometry-only imported definitions require relaxing today's scene invariant equating zero mesh bytes with zero occurrences, and explicit client handling.
 - Rebuild native caches on open/restart. Do not persist interval trees/chart handles as authority. Captured imported source metadata and original asset content remain authoritative provenance.
 - Promote current support claims and local rules only after acceptance. This proposed RFC does not rewrite current support documentation to claim unexecuted features.
 
-Assign concrete next schema numbers at each implementation cutover against then-current main; this RFC names required version boundaries rather than reserving numbers across unrelated concurrent work.
+This RFC does not reserve or require new schema numbers for implementation cutovers; current executable constants remain authoritative.
 
 ## 15. Delivery order and acceptance contracts
 

@@ -92,7 +92,7 @@ CLI adds ordered `--surface-image OCCURRENCE FACE_ID definition|occurrence IMAGE
 
 CompilerInput captures immutable image content by canonical hash. Manufacturing provenance captures metadata-only overlays plus a unique canonical content table in the saved bundle (<=1 MiB payload; JSON expansion remains charged within16 MiB). Fingerprint binds original-source metadata, canonical image identity and exact parameters, including disabled layers. Fresh inspection/control replies include metadata, not pixels; bundle/provenance export includes exact canonical content, not only a filename/hash. Validate correspondence before compile/replay and preserve one image copy per capture, never per section.
 
-Clean cutover: project4, surface3, manufacturing5, planner6; emitter/verifier4 and SPLR3 unchanged. Build identity `PACKAGE_VERSION;project4;manufacturing5;surface3;planner6`; require `source_face_surface_finish_v3`, `surface_image_assets_v1`, `mapped_image_relief_v1`, `varying_z_material_domains_v1`, retain native carrier capabilities. Migrate every caller/fixture/generated model/current governing document; no legacy readers, defaults or compatibility aliases.
+Use the current executable schema, producer and build identities under the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution), not new per-feature format numbers. Require `source_face_surface_finish_v3`, `surface_image_assets_v1`, `mapped_image_relief_v1`, `varying_z_material_domains_v1` and retain native carrier capabilities. Update every caller, fixture, generated model and current governing document together; no legacy readers, defaults or compatibility aliases.
 
 ## Complete acceptance and operating gates
 

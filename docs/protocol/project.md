@@ -4,9 +4,11 @@ SPDX-License-Identifier: OSL-3.0
 Licensed under the Open Software License version 3.0
 -->
 
-# Durable source-backed project format9
+# Durable source-backed project format
 
 The executable storage schema is `spiling-contracts::project`; state and storage authority is `spiling-core`. Engine caches are disposable. CLI, desktop and engine-client do not implement this format themselves. Generated protobuf Projects services operate on captured immutable snapshots rather than frontend recipes or external source paths. Long opens/saves are standard Google Operations scoped to the native session; RPC and operation metadata are not persisted project manifest schemas.
+
+Format evolution and the initial release compatibility boundary follow the [canonical pre-release format policy](../../AGENTS.md#pre-release-format-evolution).
 
 ## Directory and records
 

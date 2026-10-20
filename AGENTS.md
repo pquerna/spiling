@@ -113,6 +113,14 @@ Keep backend, packager, connector interfaces, and verifier as distinct logical m
 - Undo/redo is bounded session transaction history; save does not clear it. Camera and playback state are outside project undo. A drag commits once on release.
 - Recovery yields a complete committed state, never a mixed manifest. Restart never automatically replays printer operations.
 
+### Pre-release format evolution
+
+Before the first **published 0.1.0 release**, keep the current numerical values of unreleased project, process and manufacturing format versions stable—not their data models. Cargo package versions already set to `0.1.0` do not mean that release has happened. Update Rust contracts, protobuf, generated consumers and fixtures in lockstep; do not increment format counters per feature or renumber, unify or roll back existing versions.
+
+Older development files or artifacts may need recreation. Fail clearly rather than reinterpret missing or changed data or weaken validation; do not add backward readers, migrations, aliases or compatibility defaults for nonexistent released-file compatibility. Preserve producer/algorithm identity checks where needed to invalidate stale compiled manufacturing output; change those identities when the affected production or verification semantics require invalidation, not automatically for every data-model edit. Change a binary format revision only for an actual incompatible binary representation, layout or interpretation change. This policy does not introduce a new version or build-ID scheme.
+
+At the initial `0.1.0` release gate, decide the supported on-disk compatibility policy **before publishing the release**; do not assume unlimited backward compatibility.
+
 ### Protocol, resources, and display
 
 - Use authenticated gRPC on ephemeral IPv4 loopback, with standard Google Operations and ByteStream. Inherited pipes carry bounded startup metadata, the per-launch capability and owner liveness; logs go to stderr.
