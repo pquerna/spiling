@@ -651,7 +651,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "project_read_only_v1",
             "source_face_surface_finish_v3",
             "surface_image_assets_v1",
-            "source_bound_process_v2",
+            "source_bound_process_v3",
         ]
         .into_iter()
         .map(str::to_owned)

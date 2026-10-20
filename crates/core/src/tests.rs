@@ -481,24 +481,22 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             + std::f64::consts::PI * (recipe.layer_height_mm / 2.0).powi(2))
         * recipe.flow_multiplier;
     let filament = volume / (std::f64::consts::PI * (recipe.filament_diameter_mm / 2.0).powi(2));
-    let region_coverage = PlanarRegionCoverage {
-        section_area_mm2,
-        source_section_area_mm2: section_area_mm2,
-        surface_added_area_mm2: 0.0,
-        wall_area_mm2: 0.0,
-        bottom_skin_area_mm2: section_area_mm2,
-        top_skin_area_mm2: 0.0,
-        solid_interior_area_mm2: 0.0,
-        sparse_interior_area_mm2: 0.0,
-        intentional_void_area_mm2: 0.0,
-        protected_hole_area_mm2: 0.0,
-        nominal_deposition_volume_mm3: volume,
-        process_regions: vec![],
-        process_interfaces: vec![],
-        separator_area_mm2: 0.0,
-        support_area_mm2: 0.0,
-        support_nominal_deposition_volume_mm3: 0.0,
-    };
+    let region_coverage = PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2,
+    source_section_area_mm2: section_area_mm2,
+    surface_added_area_mm2: 0.0,
+    wall_area_mm2: 0.0,
+    bottom_skin_area_mm2: section_area_mm2,
+    top_skin_area_mm2: 0.0,
+    solid_interior_area_mm2: 0.0,
+    sparse_interior_area_mm2: 0.0,
+    intentional_void_area_mm2: 0.0,
+    protected_hole_area_mm2: 0.0,
+    nominal_deposition_volume_mm3: volume,
+    process_regions: vec![],
+    process_interfaces: vec![],
+    separator_area_mm2: 0.0,
+    support_area_mm2: 0.0,
+    support_nominal_deposition_volume_mm3: 0.0, };
     let end = match recipe.rectilinear_axis {
         RectilinearAxisPolicy::Y | RectilinearAxisPolicy::AlternatingYX => [1.0, 2.0, 0.2],
         RectilinearAxisPolicy::X | RectilinearAxisPolicy::AlternatingXY => [2.0, 1.0, 0.2],

@@ -20,6 +20,7 @@ use spiling_contracts::{
 use std::sync::atomic::AtomicBool;
 
 mod partition;
+pub(super) mod diaphragm;
 
 fn owner_points(owner: &InteriorRegion) -> usize {
     region::point_count(&owner.domain)
@@ -35,6 +36,13 @@ fn owner_points(owner: &InteriorRegion) -> usize {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct Diaphragm {
+    pub source_plane_mm: f64,
+    pub thickness_mm: f64,
+    pub physical_z_mm: [f64; 2],
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct Zone {
     pub axis: usize,
     pub coordinate: f64,
@@ -42,6 +50,17 @@ pub(super) struct Zone {
     pub values: [ResolvedProcessValue; 2],
     pub provenance: ProcessProvenance,
     pub authorized: bool,
+    pub diaphragm: Option<Diaphragm>,
+}
+impl Zone {
+    pub(super) fn z_events(self) -> [f64; 3] {
+        self.diaphragm.map_or([self.coordinate; 3], |plate| [
+            plate.physical_z_mm[0], self.coordinate, plate.physical_z_mm[1],
+        ])
+    }
+    pub(super) fn is_z_invariant(self, lower: f64, upper: f64) -> bool {
+        self.axis != 2 || self.z_events().into_iter().all(|event| event <= lower || event >= upper)
+    }
 }
 
 pub(super) struct Capture {
@@ -56,7 +75,7 @@ struct ActiveBox {
     provenance: ProcessProvenance,
     min: [f64; 3],
     max: [f64; 3],
-    authorized: bool,
+    permission: Option<ProcessInterfacePermission>,
     active: bool,
 }
 
@@ -125,8 +144,7 @@ fn effective_boxes(
                     },
                     min,
                     max,
-                    authorized: operation.interface
-                        == Some(ProcessInterfacePermission::SeparatorWall),
+                    permission: operation.interface,
                     active: false,
                 });
             }
@@ -256,7 +274,7 @@ pub(super) fn capture(
             provenance,
             min,
             max,
-            authorized,
+            permission,
             ..
         } = boxed;
         if (0..3).any(|a| max[a] <= local.min[a] || min[a] >= local.max[a]) {
@@ -266,9 +284,9 @@ pub(super) fn capture(
         for a in 0..3 {
             for face in [min[a], max[a]] {
                 if face >= local.min[a] && face <= local.max[a] {
-                    if a == 2 || cut.replace((a, face)).is_some() {
+                    if cut.replace((a, face)).is_some() {
                         return Err(invalid(
-                            "SourceBoxMm has an extra face intersecting the conservative finished-D enclosure; exactly one X/Y interface is admitted",
+                            "SourceBoxMm has an extra face intersecting the conservative finished-D enclosure; exactly one X/Y/Z interface is admitted",
                         ));
                     }
                 }
@@ -276,23 +294,23 @@ pub(super) fn capture(
         }
         let Some((local_axis, plane)) = cut else {
             return Err(invalid(
-                "SourceBoxMm must expose exactly one internal X/Y boundary",
+                "SourceBoxMm must expose exactly one internal X/Y/Z boundary",
             ));
         };
-        let axis = usize::from(basis[local_axis][1] != 0.);
+        let axis = if local_axis == 2 { 2 } else { usize::from(basis[local_axis][1] != 0.) };
         let mut point = std::array::from_fn(|a| local.min[a] + (local.max[a] - local.min[a]) * 0.5);
         point[local_axis] = plane;
         let coordinate = forward(&occurrence.pose, point)[axis];
-        if selected.is_some_and(|prior: (usize, f64, ProcessProvenance, bool)| {
+        if selected.is_some_and(|prior: (usize, f64, ProcessProvenance, Option<ProcessInterfacePermission>, f64)| {
             prior.0 != axis || prior.1 != coordinate
         }) {
             return Err(invalid(
                 "multiple distinct box interfaces are not supported in one occurrence",
             ));
         }
-        selected = Some((axis, coordinate, provenance, authorized));
+        selected = Some((axis, coordinate, provenance, permission, plane));
     }
-    let Some((axis, coordinate, _, _)) = selected else {
+    let Some((axis, coordinate, _, _, source_plane)) = selected else {
         return Ok(empty(operations));
     };
     let values = [0, 1].map(|side| {
@@ -325,7 +343,7 @@ pub(super) fn capture(
                 .and_then(|o| {
                     matches!(o.selector, ProcessSelector::SourceBoxMm { .. }).then_some((
                         p,
-                        o.interface == Some(ProcessInterfacePermission::SeparatorWall),
+                        o.interface,
                     ))
                 })
         })
@@ -338,7 +356,25 @@ pub(super) fn capture(
             "multiple effective box contributors require unsupported interface composition",
         ));
     }
-    let authorized = winners.iter().flatten().all(|(_, authorized)| *authorized);
+    let permission = winners.iter().flatten().next().and_then(|(_, permission)| *permission);
+    let diaphragm = match (axis, permission) {
+        (2, Some(ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm })) => {
+            let endpoints = [source_plane - thickness_mm * 0.5, source_plane + thickness_mm * 0.5]
+                .map(|z| forward(&occurrence.pose, [0., 0., z])[2]);
+            let physical_z_mm = [endpoints[0].min(endpoints[1]), endpoints[0].max(endpoints[1])];
+            if !physical_z_mm.iter().all(|z| z.is_finite()) || physical_z_mm[0] >= physical_z_mm[1] {
+                return Err(invalid("UnsupportedInterface: diaphragm endpoints are not distinct finite world heights"));
+            }
+            Some(Diaphragm { source_plane_mm: source_plane, thickness_mm, physical_z_mm })
+        }
+        (2, None) if values[0].fraction == values[1].fraction => None,
+        (2, _) => return Err(invalid("UnsupportedInterface: Z density boundary requires explicit HorizontalDiaphragm thickness permission")),
+        (_, Some(ProcessInterfacePermission::HorizontalDiaphragm { .. })) => {
+            return Err(invalid("UnsupportedInterface: horizontal diaphragm permission requires a source-Z interface"));
+        }
+        _ => None,
+    };
+    let authorized = permission == Some(ProcessInterfacePermission::SeparatorWall);
     Ok(Capture {
         occurrence_id,
         zone: Some(Zone {
@@ -351,6 +387,7 @@ pub(super) fn capture(
             values,
             provenance,
             authorized,
+            diaphragm,
         }),
         operations,
         applied: false,
@@ -375,6 +412,10 @@ pub(super) fn partition(
         let Some(zone) = source.zone else {
             continue;
         };
+        if zone.axis == 2 {
+            diaphragm::partition(&mut classified, source, zone, &mut admit, work, cancel)?;
+            continue;
+        }
         if zone.values[0].fraction == zone.values[1].fraction {
             for owner in &classified.interiors {
                 admit(region::point_count(&owner.domain).saturating_mul(4))?;
@@ -694,11 +735,14 @@ pub(super) fn partition(
         .iter()
         .map(|i| i.area_mm2)
         .sum();
+    classified.coverage.diaphragm_area_mm2 = classified.coverage.process_diaphragms.iter().map(|plate| plate.area_mm2).sum();
     classified.coverage.solid_interior_area_mm2 = classified
         .interiors
         .iter()
-        .filter(|i| i.coverage.fraction == 1.)
-        .map(|i| i.coverage.area_mm2)
+        .enumerate()
+        .filter(|(index, i)| i.coverage.fraction == 1.
+            && !classified.coverage.process_diaphragms.iter().any(|plate| usize::from(plate.region_index) == *index))
+        .map(|(_, i)| i.coverage.area_mm2)
         .sum();
     classified.coverage.sparse_interior_area_mm2 = classified
         .interiors

@@ -902,7 +902,11 @@ pub(crate) fn verify_actual(
     for skipped in volume_layer as usize + 1..plan.layers.len() {
         verify_region_volume(&plan.layers[skipped], 0.0, 0.0)?;
     }
-    interfaces::verify_projected_byte_geometry(plan, recipe, cancel)?;
+    let mut geometry_work = 0usize;
+    let mut anchors = crate::planner::support::AnchorWorkspace::default();
+    let mut plate_contacts = Vec::new();
+    interfaces::verify_projected_byte_geometry(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    diaphragms::verify(plan, recipe, &mut geometry_work, &mut anchors, &mut plate_contacts, cancel)?;
     let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
@@ -916,6 +920,8 @@ pub(crate) fn verify_actual(
             "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); preferred perimeter seam direction and deterministic projected tie ordering".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
+            "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
+            "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
             if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
             if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
@@ -946,5 +952,6 @@ pub(crate) fn verify_actual(
 }
 
 mod interfaces;
+mod diaphragms;
 #[cfg(test)]
 mod tests;

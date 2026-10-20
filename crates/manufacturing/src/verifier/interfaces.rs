@@ -12,14 +12,14 @@ use std::sync::atomic::AtomicBool;
 pub(super) fn verify_projected_byte_geometry(
     plan: &NormalizedPrintPlan,
     recipe: &PlanarPrintRecipe,
+    work: &mut usize,
+    anchors: &mut AnchorWorkspace,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    let mut work = 0usize;
-    let mut anchors = AnchorWorkspace::default();
     for (index, layer) in plan.layers.iter().enumerate() {
         let mut affected = false;
         for band in &plan.sparse_bands {
-            charge(&mut work)?;
+            charge(work)?;
             if band.disposition == SparseBandDisposition::Combined
                 && band.first_layer <= layer.index
                 && layer.index <= band.last_layer.saturating_add(1) {
@@ -28,7 +28,7 @@ pub(super) fn verify_projected_byte_geometry(
             }
         }
         if index > 0 && affected {
-            verify_earlier_fine_paths(plan, index, recipe, &mut work, &mut anchors, cancel)?;
+            verify_earlier_fine_paths(plan, index, recipe, work, anchors, cancel)?;
         }
         for path in &layer.paths {
             if path.physical_z_mm[0] == layer.lower_z_mm {
@@ -55,7 +55,7 @@ pub(super) fn verify_projected_byte_geometry(
                         true, p.bead_width_mm)));
                 for gap in anchors.gaps_edges(
                     AnchorCandidate { endpoints_mm: ends, bead_width_mm: path.bead_width_mm },
-                    edges, &mut work, cancel)? {
+                    edges, work, cancel)? {
                     match gap_kind(gap, (gap.end-gap.start)*length,
                         path.bead_width_mm, recipe.process.max_bridge_span_mm) {
                         GapKind::Supported => {},
@@ -115,8 +115,8 @@ pub(super) fn verify_projected_byte_geometry(
                         endpoint,
                         *bond,
                         recipe,
-                        &mut work,
-                        &mut anchors,
+                        work,
+                        anchors,
                         cancel,
                     )?;
                 }
@@ -157,7 +157,7 @@ pub(super) fn verify_projected_byte_geometry(
                         bead_width_mm: separator.bead_width_mm,
                     },
                     edges,
-                    &mut work,
+                    work,
                     cancel,
                 )? {
                     let span = (gap.end - gap.start) * length;
@@ -211,7 +211,7 @@ pub(super) fn verify_projected_byte_geometry(
                         nearest[side] = Some((fill.kind, raw));
                     }
                     for line in &interface.centerlines_mm {
-                        charge(&mut work)?;
+                        charge(work)?;
                         if enters_finite_band(raw, projected(*line, layer.z_mm)?, axis, half) {
                             return Err(failed(format!(
                                 "actual deposition duplicates finite separator ownership at layer {index}, kind {:?}, stroke {raw:?}",
@@ -227,8 +227,8 @@ pub(super) fn verify_projected_byte_geometry(
                             fill.bead_width_mm,
                             recipe,
                             false,
-                            &mut work,
-                            &mut anchors,
+                            work,
+                            anchors,
                             cancel,
                         )?;
                         continue;
@@ -237,7 +237,7 @@ pub(super) fn verify_projected_byte_geometry(
                     let mut connected = false;
                     for endpoint in raw {
                         for line in &interface.centerlines_mm {
-                            charge(&mut work)?;
+                            charge(work)?;
                             connected |= endpoint_bond(
                                 endpoint,
                                 projected(*line, layer.z_mm)?,
@@ -248,7 +248,7 @@ pub(super) fn verify_projected_byte_geometry(
                     if parallel && fill.kind == DepositionKind::Bridge {
                         let along = 1 - axis;
                         for line in &interface.centerlines_mm {
-                            charge(&mut work)?;
+                            charge(work)?;
                             let edge = projected(*line, layer.z_mm)?;
                             let low = raw[0][along]
                                 .min(raw[1][along])
@@ -306,8 +306,8 @@ pub(super) fn verify_projected_byte_geometry(
                                 fill.bead_width_mm,
                                 recipe,
                                 true,
-                                &mut work,
-                                &mut anchors,
+                                work,
+                                anchors,
                                 cancel,
                             )?;
                         }
@@ -329,7 +329,7 @@ pub(super) fn verify_projected_byte_geometry(
                     continue;
                 }
                 for line in &interface.centerlines_mm {
-                    charge(&mut work)?;
+                    charge(work)?;
                     let line = projected(*line, layer.z_mm)?;
                     let along = 1 - axis;
                     if a[along].min(b[along]) < line[0][along].max(line[1][along])
@@ -344,7 +344,7 @@ pub(super) fn verify_projected_byte_geometry(
             }
             for (side, contact) in contacts.iter_mut().enumerate() {
                 if !*contact {
-                    *contact = deferred_sparse_contact(plan, index, interface, side, &mut work, cancel)?;
+                    *contact = deferred_sparse_contact(plan, index, interface, side, work, cancel)?;
                 }
             }
             if contacts != [true, true] {

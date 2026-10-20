@@ -29,24 +29,22 @@ G1 X2 Y6 Z2 E6 F600
 ";
 
 fn coverage() -> PlanarRegionCoverage {
-    PlanarRegionCoverage {
-        section_area_mm2: 16.0,
-        source_section_area_mm2: 16.0,
-        surface_added_area_mm2: 0.0,
-        separator_area_mm2: 0.0,
-        process_interfaces: Vec::new(),
-        wall_area_mm2: 16.0,
-        bottom_skin_area_mm2: 0.0,
-        top_skin_area_mm2: 0.0,
-        solid_interior_area_mm2: 0.0,
-        sparse_interior_area_mm2: 0.0,
-        intentional_void_area_mm2: 0.0,
-        protected_hole_area_mm2: 0.0,
-        nominal_deposition_volume_mm3: 0.0,
-        support_area_mm2: 0.0,
-        support_nominal_deposition_volume_mm3: 0.0,
-        process_regions: vec![],
-    }
+    PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: 16.0,
+    source_section_area_mm2: 16.0,
+    surface_added_area_mm2: 0.0,
+    separator_area_mm2: 0.0,
+    process_interfaces: Vec::new(),
+    wall_area_mm2: 16.0,
+    bottom_skin_area_mm2: 0.0,
+    top_skin_area_mm2: 0.0,
+    solid_interior_area_mm2: 0.0,
+    sparse_interior_area_mm2: 0.0,
+    intentional_void_area_mm2: 0.0,
+    protected_hole_area_mm2: 0.0,
+    nominal_deposition_volume_mm3: 0.0,
+    support_area_mm2: 0.0,
+    support_nominal_deposition_volume_mm3: 0.0,
+    process_regions: vec![], }
 }
 fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
     plan.native_geometry.certified_layer_count = plan.layers.len() as u32;

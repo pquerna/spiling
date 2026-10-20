@@ -528,6 +528,117 @@ fn author_end_zone(scene: &mut Scene, bounds: [[f64; 3]; 2], authorized: bool) {
 }
 
 #[test]
+fn housing_horizontal_plate_is_supported_permanent_construction_with_exact_actual_thickness() {
+    use spiling_contracts::process::ProcessInterfacePermission;
+    let placed: OccurrenceRecord = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/manufacturing/rounded-housing-bed-occurrence.json")).unwrap();
+    let mut scene = Scene::new(include_bytes!(
+        "../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"), &[placed.pose]);
+    scene.set_process_fractions(&[0.60]);
+    scene.process_document.layers[0].scope = SurfaceScope::Definition { definition_id: placed.definition_id };
+    author_end_zone(&mut scene, [[-1., -1., -1.], [25., 19., 5.03]], false);
+    let operation = &mut scene.process_document.layers.last_mut().unwrap().operations[0];
+    operation.action = ProcessAction::Replace { value: ProcessValue::SparseFraction { fraction: 0.20 } };
+    operation.interface = Some(ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm: 0.23 });
+    let recipe = decode_intent(include_bytes!(
+        "../../../fixtures/manufacturing/housing-h1-fine.intent.json")).unwrap();
+    let bundle = scene.compile(&recipe).unwrap();
+    let plates = bundle.plan.layers.iter().filter(|layer| !layer.region_coverage.process_diaphragms.is_empty()).collect::<Vec<_>>();
+    assert!(plates.len() > 1);
+    let first = plates[0];
+    let last = plates.last().unwrap();
+    let requested = &first.region_coverage.process_diaphragms[0];
+    assert_eq!(first.lower_z_mm, requested.physical_z_mm[0]);
+    assert_eq!(last.z_mm, requested.physical_z_mm[1]);
+    assert!(plates.iter().all(|layer| layer.region_coverage.diaphragm_area_mm2 > 0.0
+        && layer.region_coverage.solid_interior_area_mm2 == 0.0));
+    assert!(first.paths.iter().any(|path| path.kind == DepositionKind::Bridge
+        && path.owner == Some(DepositionOwner::Regional { region_index: requested.region_index })));
+    assert!(bundle.plan.layers.iter().any(|layer| layer.region_coverage.process_regions.iter().any(|r| r.fraction == 0.20)));
+    assert!(bundle.plan.layers.iter().any(|layer| layer.region_coverage.process_regions.iter().any(|r| r.fraction == 0.60)));
+    let first_index = first.index as usize;
+    let last_index = last.index as usize;
+    for remove_permission in [true, false] {
+        let mut changed = bundle.clone();
+        if remove_permission {
+            changed.provenance.process_document.layers.last_mut().unwrap().operations[0].interface = None;
+        } else {
+            // Occurrence scope wins over a later definition box. A valid
+            // rehashed document must not lend its old plate the former winner.
+            changed.provenance.process_document.layers[0].scope = SurfaceScope::Occurrence {
+                occurrence_id: scene.occurrences[0].occurrence_id,
+                expected_definition_id: scene.occurrences[0].definition_id.clone(),
+            };
+        }
+        let provenance = &mut changed.provenance;
+        provenance.input_hash = input_fingerprint(&provenance.project_id, &provenance.definitions,
+            &provenance.occurrences, &provenance.intent, &provenance.surface_overlays,
+            &provenance.process_document).unwrap();
+        provenance.validate().unwrap();
+        assert!(changed.validate().is_err());
+    }
+    let mut missing_interval = bundle.plan.clone();
+    let missing = &mut missing_interval.layers[first_index + 1].region_coverage;
+    missing.process_diaphragms.clear();
+    missing.solid_interior_area_mm2 += missing.diaphragm_area_mm2;
+    missing.diaphragm_area_mm2 = 0.0;
+    assert!(missing_interval.validate(&recipe).is_err());
+    let mut hole_crossing = bundle.plan.clone();
+    let bridge = hole_crossing.layers[first_index].paths.iter_mut().find(|path|
+        path.kind == DepositionKind::Bridge && path.owner == Some(DepositionOwner::Regional {
+            region_index: requested.region_index })).unwrap();
+    let shift = scene.occurrences[0].pose.translation_mm;
+    bridge.points_mm[0][0] = shift[0] + 12.;
+    bridge.points_mm[1][0] = shift[0] + 12.;
+    bridge.points_mm[0][1] = shift[1] + 1.;
+    bridge.points_mm[1][1] = shift[1] + 17.;
+    assert_reemitted_interface_refuses(hole_crossing, &recipe);
+    let mut unowned = bundle.plan.clone();
+    unowned.layers[first_index].paths.iter_mut().find(|path|
+        path.kind == DepositionKind::Bridge && path.owner == Some(DepositionOwner::Regional {
+            region_index: requested.region_index })).unwrap().owner = None;
+    assert_reemitted_interface_refuses(unowned, &recipe);
+    let mut unanchored_plate = bundle.plan.clone();
+    unanchored_plate.layers[first_index - 1].paths.retain(|path| path.kind == DepositionKind::Perimeter);
+    assert_reemitted_interface_refuses(unanchored_plate, &recipe);
+    let mut unanchored_upper = bundle.plan.clone();
+    let upper = &mut unanchored_upper.layers[last_index + 1];
+    let row = upper.paths.iter_mut().find(|path| path.kind == DepositionKind::SparseFill).unwrap();
+    row.points_mm[0][0] = shift[0] + 11.;
+    row.points_mm[1][0] = shift[0] + 13.;
+    row.points_mm[0][1] = shift[1] + 9.;
+    row.points_mm[1][1] = shift[1] + 9.;
+    assert_reemitted_interface_refuses(unanchored_upper, &recipe);
+    let mut combined_intent = recipe.clone();
+    combined_intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.30 };
+    let combined = scene.compile(&combined_intent).unwrap();
+    let first_plate = combined.plan.layers.iter().position(|layer|
+        !layer.region_coverage.process_diaphragms.is_empty()).unwrap();
+    let last_plate = combined.plan.layers.iter().rposition(|layer|
+        !layer.region_coverage.process_diaphragms.is_empty()).unwrap();
+    let touching = combined.plan.sparse_bands.iter().filter(|band|
+        band.first_layer as usize <= last_plate + 1 && band.last_layer as usize + 1 >= first_plate)
+        .collect::<Vec<_>>();
+    assert!(!touching.is_empty());
+    assert!(touching.iter().all(|band| matches!(band.disposition,
+        SparseBandDisposition::RetainedFine { reason: SparseBandVeto::ChangingDomain | SparseBandVeto::MandatoryNeighborhood })));
+    assert!(combined.plan.sparse_bands.iter().any(|band| band.disposition ==
+        SparseBandDisposition::RetainedFine { reason: SparseBandVeto::MissingLowerAnchor }));
+    let mut crossing = combined.plan.clone();
+    crossing.sparse_bands.push(SparseBandDecision {
+        first_layer: first_plate as u32 - 1,
+        last_layer: first_plate as u32,
+        owner: Some(DepositionOwner::Regional {
+            region_index: crossing.layers[first_plate].region_coverage.process_diaphragms[0].region_index }),
+        disposition: SparseBandDisposition::Combined,
+    });
+    assert!(crossing.validate(&combined_intent).is_err());
+    scene.process_document.layers.last_mut().unwrap().operations[0].interface =
+        Some(ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm: 0.0001 });
+    assert_eq!(scene.compile(&recipe).unwrap_err().code, ManufacturingErrorCode::UnsupportedGeometry);
+}
+
+#[test]
 fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separator() {
     // Captured actual native center-and-bed result, not a fabricated Z reserve.
     // The child-service regression independently exercises its derivation.
@@ -724,10 +835,7 @@ fn pocketed_housing_end_zone_emits_two_actual_cadences_and_one_bonded_open_separ
 
 fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &ManufacturingIntent) {
     for layer in &mut plan.layers {
-        let h = layer.height_mm;
-        let area = ((intent.recipe.bead_width_mm - h) * h
-            + std::f64::consts::PI * (h * 0.5).powi(2))
-            * intent.recipe.flow_multiplier;
+        // Re-emission mutations retain each actual path's explicit dimensions.
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
             .paths
             .iter()
@@ -738,6 +846,9 @@ fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &Ma
                 )
             })
             .map(|p| {
+                let h = p.height_mm();
+                let area = ((p.bead_width_mm - h) * h
+                    + std::f64::consts::PI * (h * 0.5).powi(2)) * intent.recipe.flow_multiplier;
                 let factor = if p.kind == DepositionKind::Bridge {
                     intent.recipe.process.bridge_flow_factor
                 } else {

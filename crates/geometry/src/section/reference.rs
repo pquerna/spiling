@@ -182,9 +182,11 @@ pub(crate) fn simplify_section_reference(
                 compact(points, &cut);
                 displacement = next;
                 changed = true;
-                // Revisit altered edges without allowing repeated compactions
-                // to enlarge the original quadratic proposal-search inventory.
-                first = 0;
+                // Spend the unchanged proposal inventory on the changed edge
+                // and its suffix, rather than repeatedly rescanning the prefix.
+                // This is not a Jordan/exhaustiveness certificate: rounded cut
+                // construction and every final native material gate still apply.
+                first = if cut.keep_middle { 0 } else { cut.first_edge };
             } else {
                 first += 1;
             }

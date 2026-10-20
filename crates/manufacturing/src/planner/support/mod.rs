@@ -421,6 +421,27 @@ pub(super) fn realize(
         if !interface_bound {
             return Err(super::bonds::unresolved(layer));
         }
+        // Permanent construction and its first upper landing may never be
+        // repaired by temporary support, even when unrelated support is enabled.
+        for path in &layer.paths {
+            let Some(DepositionOwner::Regional { region_index }) = path.owner else { continue; };
+            let plate_owned = layer.region_coverage.process_diaphragms.iter()
+                .any(|plate| plate.region_index == region_index);
+            let landing_owned = prior[index - 1].region_coverage.process_diaphragms.iter()
+                .filter(|plate| plate.physical_z_mm[1] == layer.lower_z_mm)
+                .any(|plate| layer.region_coverage.process_regions.get(usize::from(region_index))
+                    .is_some_and(|region| region.contributions.iter().any(|source|
+                        source.occurrence_id == plate.occurrence_id && source.definition_id == plate.definition_id)));
+            if plate_owned || landing_owned {
+                let proof = strokes::analyze(std::slice::from_ref(path), previous.clone(),
+                    std::iter::empty(), recipe, &mut anchors, &mut anchor_work, cancel)?;
+                if proof.failure.is_some() {
+                    return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
+                        format!("UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
+                            layer.index, layer.z_mm)));
+                }
+            }
+        }
         if let Some(failure) = admission.failure.take() {
             if matches!(recipe.supports, SupportPolicy::Disabled) {
                 return Err(admission_error(
@@ -442,7 +463,6 @@ pub(super) fn realize(
         }
     }
     if demands.is_empty() {
-        object_volumes(layers, recipe);
         return Ok(());
     }
     anchors.set_budget(0);
@@ -1209,7 +1229,6 @@ pub(super) fn realize(
         &mut work,
         cancel,
     )?;
-    object_volumes(layers, recipe);
     Ok(())
 }
 

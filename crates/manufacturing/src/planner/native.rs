@@ -1248,7 +1248,8 @@ fn capture_base(
                         return Err(super::native_error(
                             failure,
                             &format!(
-                                "native slab at layer {index}, occurrence {}",
+                                "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}",
+                                interval[0], interval[1], sample,
                                 occurrence.occurrence_id.get()
                             ),
                         ));
@@ -3206,32 +3207,30 @@ mod actual_deposition_tests {
                     lower_z_mm: lower,
                     height_mm: height,
                     section_z_mm: lower + height * 0.5,
-                    region_coverage: PlanarRegionCoverage {
-                        section_area_mm2: object_area,
-                        source_section_area_mm2: object_area,
-                        surface_added_area_mm2: 0.0,
-                        separator_area_mm2: 0.0,
-                        process_interfaces: Vec::new(),
-                        wall_area_mm2: 0.0,
-                        bottom_skin_area_mm2: 0.0,
-                        top_skin_area_mm2: 0.0,
-                        solid_interior_area_mm2: object_area,
-                        sparse_interior_area_mm2: 0.0,
-                        intentional_void_area_mm2: 0.0,
-                        protected_hole_area_mm2: 0.0,
-                        nominal_deposition_volume_mm3: object_area * volume,
-                        support_area_mm2: support_area,
-                        support_nominal_deposition_volume_mm3: support_area * volume,
-                        process_regions: if object_area > 0.0 {
-                            vec![ProcessRegionCoverage {
-                                area_mm2: object_area,
-                                fraction: 1.0,
-                                contributions: Vec::new(),
-                            }]
-                        } else {
-                            Vec::new()
-                        },
-                    },
+                    region_coverage: PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
+                    source_section_area_mm2: object_area,
+                    surface_added_area_mm2: 0.0,
+                    separator_area_mm2: 0.0,
+                    process_interfaces: Vec::new(),
+                    wall_area_mm2: 0.0,
+                    bottom_skin_area_mm2: 0.0,
+                    top_skin_area_mm2: 0.0,
+                    solid_interior_area_mm2: object_area,
+                    sparse_interior_area_mm2: 0.0,
+                    intentional_void_area_mm2: 0.0,
+                    protected_hole_area_mm2: 0.0,
+                    nominal_deposition_volume_mm3: object_area * volume,
+                    support_area_mm2: support_area,
+                    support_nominal_deposition_volume_mm3: support_area * volume,
+                    process_regions: if object_area > 0.0 {
+                        vec![ProcessRegionCoverage {
+                            area_mm2: object_area,
+                            fraction: 1.0,
+                            contributions: Vec::new(),
+                        }]
+                    } else {
+                        Vec::new()
+                    }, },
                     paths: vec![DepositionPath {
                         kind,
                         owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },

@@ -286,15 +286,23 @@ pub fn parse(
                 ProcessSelector::SourceBoxMm { min, max }.validate()?;
                 let fraction = text(&mut args, "--process-set-box fraction")?.parse()?;
                 ProcessValue::SparseFraction { fraction }.validate()?;
-                let interface =
-                    match text(&mut args, "--process-set-box separator permission")?.as_str() {
-                        "none" => None,
-                        "separator-wall" => Some(ProcessInterfacePermission::SeparatorWall),
-                        _ => return Err(
-                            "--process-set-box requires explicit none or separator-wall permission"
-                                .into(),
-                        ),
-                    };
+                let permission = text(&mut args, "--process-set-box separator permission")?;
+                let interface = match permission.as_str() {
+                    "none" => None,
+                    "separator-wall" => Some(ProcessInterfacePermission::SeparatorWall),
+                    permission => {
+                        let thickness = permission
+                            .strip_prefix("horizontal-diaphragm:")
+                            .ok_or(
+                                "--process-set-box requires explicit none, separator-wall or horizontal-diaphragm:MM permission",
+                            )?;
+                        let interface = ProcessInterfacePermission::HorizontalDiaphragm {
+                            thickness_mm: thickness.parse()?,
+                        };
+                        interface.validate()?;
+                        Some(interface)
+                    }
+                };
                 operations.push(Operation::ProcessSetBox {
                     occurrence,
                     scope,
@@ -1312,7 +1320,19 @@ mod tests {
             "0.6",
             "none",
         ];
-        for permission in ["none", "separator-wall"] {
+        for (permission, expected) in [
+            ("none", None),
+            (
+                "separator-wall",
+                Some(ProcessInterfacePermission::SeparatorWall),
+            ),
+            (
+                "horizontal-diaphragm:0.23",
+                Some(ProcessInterfacePermission::HorizontalDiaphragm {
+                    thickness_mm: 0.23,
+                }),
+            ),
+        ] {
             let mut args = vec!["open", "project"];
             args.extend(flags);
             *args.last_mut().unwrap() = permission;
@@ -1341,14 +1361,7 @@ mod tests {
             assert_eq!(*min, [-1.0, -2.0, -3.0]);
             assert_eq!(*max, [4.0, 5.0, 6.0]);
             assert_eq!(*fraction, 0.6);
-            assert_eq!(
-                *interface,
-                if permission == "none" {
-                    None
-                } else {
-                    Some(ProcessInterfacePermission::SeparatorWall)
-                },
-            );
+            assert_eq!(*interface, expected);
         }
         for (index, invalid) in [
             (1, "0"),
@@ -1364,6 +1377,14 @@ mod tests {
             (9, "NaN"),
             (10, "true"),
             (10, "--approve-separator"),
+            (10, "horizontal-diaphragm"),
+            (10, "horizontal-diaphragm:"),
+            (10, "horizontal-diaphragm:0"),
+            (10, "horizontal-diaphragm:-0.1"),
+            (10, "horizontal-diaphragm:NaN"),
+            (10, "horizontal-diaphragm:inf"),
+            (10, "horizontal-diaphragm:-inf"),
+            (10, "horizontal-diaphragm:abc"),
         ] {
             let mut args = vec!["open", "project"];
             let mut invalid_flags = flags;

@@ -112,10 +112,10 @@ invalidate the complete artifact and pending jobs.
 Native capture retains admitted per-occurrence operands before union, sharing
 unchanged singleton geometry. Finish realization produces occurrence final D
 before global walls/skins. [`zones`](../../crates/manufacturing/src/planner/zones.rs)
-admits one definition-local physical-mm X/Y boundary against the **finished**
+admits one definition-local physical-mm X/Y/Z boundary against the **finished**
 enclosure, including relief; the other five box faces must lie outside it.
-Local Z remains parallel to build Z and the authored hatch axis must be fixed and
-compatible. Empty effective selection reports `NoEligibleInterior`. No-op intent
+Local Z remains parallel to build Z. An XY separator additionally requires a fixed
+compatible hatch axis. Empty effective selection reports `NoEligibleInterior`. No-op intent
 retains the ordinary lattice. Multi-source spatial overlap diagnoses rather than
 lending a different source's density, permission or contributors.
 
@@ -144,6 +144,27 @@ not a rotation/contact waiver. The
 [fresh interface verifier](../../crates/manufacturing/src/verifier/interfaces.rs)
 checks decoded segments, order, flow, ownership and previous-layer anchors.
 Half-bead maximum physical overlap is separate from XYZ6 representation enclosure.
+
+[`diaphragm construction`](../../crates/manufacturing/src/planner/zones/diaphragm.rs)
+owns one explicitly permitted centered physical-thickness horizontal plate.
+The density boundary and both slab edges enter global balancing alongside actual
+native/field stops; downstream process spans split while native M stays borrowed.
+Each actual plate interval carries typed source/permission/slab/extent ownership
+of its exact solid-construction regional index. Authored lower/upper densities
+remain independent, and separate plate area is charged once. Whole-slab strong
+`NativeInnerMaterialPrism` authority includes the full bead/XYZ6 radius and native
+holes; invariant metadata alone is insufficient. A missing capture refuses.
+Checked inward XY construction keeps the original row/axis/phase and raw Z;
+lost/split/sub-printable rows cannot be silently discarded.
+[`fresh plate verification`](../../crates/manufacturing/src/verifier/diaphragms.rs)
+checks actual whole-line raw-extent coverage, protected voids, owners and order,
+direct actual lower anchors for the plate and upper landing, and separate actual
+wall/hole-wall attachment. Plate-owned residual demands refuse before ordinary
+temporary-support generation. H1 retains fine at the plate/intent neighborhood.
+The workbench exposes physical slab and path-derived nominal material cost,
+with source-hidden actual motion and visible native refusal diagnostics.
+See the [owning contract](../protocol/manufacturing.md#centered-permanent-horizontal-plate)
+for exact coverage and bounded schedule-only thickness advice.
 
 Playback's **Show source bodies** control hides opaque native meshes and highlights
 so an interior layer can be inspected directly in actual emitted-program motion.
@@ -181,6 +202,10 @@ future coarse never stabilizes earlier fine walls. Each fine separator interval
 needs strict nominal inner-core contact plus independent outer overlap consent.
 Printing-time fine walls/rows and landing are reproved; a genuine fine landing
 Bridge is counted at its actual process feed/flow, not hidden as unchanged timing.
+Selecting CombineEligible need not produce coarse output: the admitted fixed-X
+plate job records real anchor/neighborhood vetoes, while the separate admitted H1
+reference retains genuine coarse acceptance. Plate-boundary exclusion is a checked
+contract, not a Fine-policy-only observation.
 
 Only known eligibility/support/core-bond failures retain fine with a reason.
 Numerical/topological hatch refusal, indeterminate work, exhaustion, stale work
@@ -300,8 +325,8 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project9/manufacturing10/process2/surface3, planner14,
-emitter/verifier6 and SPLR5; executable constants and exact native pin remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, planner15,
+emitter6/verifier7 and SPLR5; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both
 independent parts also complete the hardware workbench flow with native picking.

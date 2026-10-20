@@ -56,6 +56,16 @@ export function ManufacturingPanel({
     return { strokes, combined, min: strokes ? min : 0, max };
   }, [replay, inspection]);
   const sparseBands = useMemo(() => inspection?.layers.filter(row => row.sparse_band) ?? [], [inspection]);
+  const diaphragms = useMemo(() => {
+    const plates = new Map<string, NonNullable<typeof inspection>["layers"][number]["diaphragms"][number]>();
+    for (const row of inspection?.layers ?? []) for (const plate of row.diaphragms) {
+      const key = `${plate.occurrence_id}:${plate.provenance.operation_id}`;
+      const existing = plates.get(key);
+      if (existing) existing.nominal_path_volume_mm3 += plate.nominal_path_volume_mm3;
+      else plates.set(key, { ...plate });
+    }
+    return [...plates.values()];
+  }, [inspection]);
   const selectedSparseBand = manufacturing.layer === null ? null : sparseBands.find(row =>
     row.sparse_band!.first_layer <= manufacturing.layer! && manufacturing.layer! <= row.index);
   const emptyLayer =
@@ -278,8 +288,10 @@ export function ManufacturingPanel({
                 value={draft.sparseMaxHeight}
                 onChange={(event) => manufacturing.editSparseInfill(draft.sparseInfillKind, event.target.value)} />
             </label>}
-            <p>Global fine layer schedule, walls, skins and bridges are unchanged. Combining is
-              eligibility-gated; declared deposition limits are software envelopes, not physical qualification.</p>
+            <p>The global fine schedule, walls and skins remain protected. Eligible SparseFill
+              spans may combine; only a genuinely anchored coarse gap becomes regional Bridge.
+              Actual band-base/landing proofs and retained-fine reasons remain mandatory.
+              Limits are software envelopes, not physical qualification.</p>
             {policyScalarFields(draft.intent).map(([key, label]) => (
               <label key={key}>
                 {label}
@@ -713,6 +725,26 @@ export function ManufacturingPanel({
             Verified: {String(result.report.verified)}. Bundle {result.record.hash}; input{" "}
             {result.record.input_hash}.
           </p>
+          {diaphragms.length > 0 && (
+            <section data-testid="manufacturing-diaphragms">
+              <h4>Permanent supported transition plates</h4>
+              <ul>{diaphragms.map(plate => (
+                <li key={`${plate.occurrence_id}:${plate.provenance.operation_id}`}>
+                  Body {plate.occurrence_id}, operation {plate.provenance.operation_id}: source-Z plane{" "}
+                  {plate.source_plane_mm} mm, centered thickness {plate.requested_thickness_mm} mm.
+                  {" "}Actual world slab [{plate.physical_z_mm.join(", ")}] mm.
+                  {" "}Reserved interior cross-section {plate.area_mm2.toFixed(3)} mm².
+                  {" "}Nominal path material cost: {plate.nominal_path_volume_mm3.toFixed(3)} mm³
+                  {" "}(explicit bead dimensions and Bridge flow; not measured deposited plastic).
+                </li>
+              ))}</ul>
+              <p>SolidFill / genuine Bridge strokes retain explicit permanent plate ownership.
+                The plate preserves native holes and exterior walls/skins; its first layer and
+                upper landing use actual lower strokes, never hidden temporary scaffolding.
+                Inspect the plate layer with source bodies hidden. These are verified nominal
+                program dimensions, not measured thickness or qualified bonding strength.</p>
+            </section>
+          )}
           <h4>Independent verifier coverage</h4>
           <ul>
             {result.report.coverage.map((item, index) => (

@@ -27,6 +27,7 @@ import type {
   ManufacturingArtifactRecord,
   ReplayDisplayDescriptor,
   SparseBandVeto,
+  ProcessDiaphragmCoverage,
   ProjectRevision,
   FaceRef,
   SurfaceScopeKind,
@@ -68,6 +69,8 @@ export interface ManufacturingLayer {
   height_mm: number;
   section_z_mm: number;
   deposition_segments: number;
+  diaphragms: (Pick<ProcessDiaphragmCoverage, "occurrence_id" | "provenance" | "source_plane_mm" |
+    "requested_thickness_mm" | "physical_z_mm" | "region_index" | "area_mm2"> & { nominal_path_volume_mm3: number })[];
   sparse_band: {
     first_layer: number;
     combined_regions: number[];

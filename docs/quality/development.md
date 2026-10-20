@@ -154,6 +154,25 @@ The manufacturing runner exercises intent/placement/history, Compile, actual-byt
 report/motion, cancellation, export, source-independent reopen and child cleanup.
 `--manufacturing-source RELATIVE_STEP` keeps the entire unchanged complete-sparse
 intent for a real mechanical input; it does not make refused geometry successful.
+For a centered supported plate, use the unchanged rounded housing with
+`housing-h1-fine.intent.json`, whole-owned0.60 and a lower source box
+`[-1,-1,-1]..[25,19,5.03]` at0.20. The final `--process-set-box` token
+`horizontal-diaphragm:0.23` explicitly permits the centered0.23 mm permanent
+plate. Source-Z5.03 is not a world height; the captured pose determines its actual
+world slab. Use `--process-diaphragm` with the named-source hardware smoke to
+exercise thickness authoring/history, source-hidden annular construction,
+physical slab/nominal path cost and an explicit unrepresentable-thickness refusal.
+The same admitted fixed-X plate job also accepts `combine_eligible`/0.30mm and
+truthfully retains fine with actual domain/neighborhood/anchor reasons: some
+parallel coarse rows exceed the declared10mm Bridge span. The hardware runner
+authors this policy explicitly. No band may cross the plate or its fine
+neighborhood; the existing admitted two-area H1 reference separately exercises
+genuine coarse output. Do not infer optimization from selecting CombineEligible,
+nominal layer counts or a changed-axis comparison. A changed ordinary axis has
+its own Compile/support obligations, not an automatic supported alternative.
+Plate Compile requires captured full-height strong native inner-material authority;
+invariant metadata alone is not admission, and unsupported plate/upper attachment
+cannot silently acquire temporary scaffolding.
 Geometry exercises shared definitions, native picking/sections and transfer lifetime.
 `surface-finish`, `cylindrical-finish`, `image-relief` and `image-relief-planar` exercise
 their corresponding authoring/Compile/replay flows. `project-bridge` bypasses GPU

@@ -159,7 +159,7 @@ export type ProcessOperationId = number;
 
 export type ProcessSelector = { "kind": "whole_owned_volume" } | { "kind": "source_box_mm", min: [number, number, number], max: [number, number, number], };
 
-export type ProcessInterfacePermission = "separator_wall";
+export type ProcessInterfacePermission = { "kind": "separator_wall" } | { "kind": "horizontal_diaphragm", thickness_mm: number, };
 
 export type ProcessValue = { "kind": "sparse_fraction", fraction: number, };
 
@@ -198,6 +198,10 @@ export type DepositionOwner = { "kind": "mandatory_skin", skin: ProcessSkinKind,
 export type ProcessEndpointBond = { "kind": "wall", wall_segment_mm: [[number, number], [number, number]], } | { "kind": "skin", skin_kind: ProcessSkinKind, process_kind: DepositionKind, skin_segment_mm: [[number, number], [number, number]], wall_segment_mm: [[number, number], [number, number]], };
 
 export type ProcessInterfaceCoverage = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, region_indices: [number, number], axis: number, coordinate_mm: number, thickness_mm: number, bonding_overlap_mm: number, area_mm2: number, centerlines_mm: Array<[[number, number], [number, number]]>, endpoint_bonds: Array<[ProcessEndpointBond, ProcessEndpointBond]>, };
+
+export type DiaphragmPolygonMm = { outer: Array<[number, number]>, holes: Array<Array<[number, number]>>, };
+
+export type ProcessDiaphragmCoverage = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, source_plane_mm: number, requested_thickness_mm: number, physical_z_mm: [number, number], neighbors: [ResolvedProcessValue, ResolvedProcessValue], region_index: number, area_mm2: number, extent: Array<DiaphragmPolygonMm>, };
 
 export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_density_change";
 
@@ -301,7 +305,7 @@ export type SparseBandDisposition = { "kind": "combined" } | { "kind": "retained
 
 export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "changing_domain" | "missing_lower_anchor" | "unsupported_landing" | "flow_limit" | "interface_bond";
 
-export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, };
+export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, };
 
 export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
 
@@ -352,7 +356,7 @@ export type ManufacturingCommand = { "op": "get", session_id: SessionId, } | { "
 export type ManufacturingResponse = { "type": "status", info: ProjectInfo, intent: ManufacturingIntent | null, artifact: ManufacturingArtifactRecord | null, resource: ArtifactView | null, } | { "type": "operation_accepted", operation: NativeOperationView, } | { "type": "verified", record: ManufacturingArtifactRecord, report: VerificationReport, resource: ArtifactView, provenance: ManufacturingInspectionProvenance, replay_display: ReplayDisplayDescriptor | null, } | { "type": "preflight", report: PreflightReport, } | { "type": "error", error: ManufacturingError, };
 
 export const MAX_CONTROL_BYTES = 65536 as const;
-export const PROCESS_SCHEMA_VERSION = 2 as const;
+export const PROCESS_SCHEMA_VERSION = 3 as const;
 export const MAX_PROCESS_LAYERS = 64 as const;
 export const MAX_PROCESS_OPERATIONS = 256 as const;
 export const MAX_PROCESS_DOCUMENT_BYTES = 65536 as const;
@@ -396,7 +400,7 @@ export const JOB_CANCEL_AFTER_MS = 300000 as const;
 export const JOB_CANCEL_GRACE_MS = 10000 as const;
 export const MAX_ACTIVE_GEOMETRY_JOBS = 1 as const;
 export const MAX_OUTSTANDING_CHUNKS = 1 as const;
-export const PROJECT_FORMAT_VERSION = 9 as const;
+export const PROJECT_FORMAT_VERSION = 10 as const;
 export const MAX_PROJECT_MANIFEST_BYTES = 1048576 as const;
 export const MAX_PROJECT_HISTORY = 64 as const;
 export const MAX_PROJECT_STORED_SOURCE_BYTES = 268435456 as const;
@@ -413,7 +417,7 @@ export const MAX_SURFACE_RESOLUTION_RECORDS = 262144 as const;
 export const MAX_SURFACE_LAYERS = 64 as const;
 export const MAX_SURFACE_DOCUMENT_BYTES = 32768 as const;
 export const MAX_SURFACE_RETAINED_BYTES = 16777216 as const;
-export const MANUFACTURING_SCHEMA_VERSION = 10 as const;
+export const MANUFACTURING_SCHEMA_VERSION = 11 as const;
 export const MAX_MANUFACTURING_BUNDLE_BYTES = 16777216 as const;
 export const MAX_MANUFACTURING_RETAINED_BYTES = 67108864 as const;
 export const MAX_PRINT_LAYERS = 4096 as const;

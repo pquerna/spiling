@@ -20,9 +20,9 @@ use std::sync::{
 };
 
 /// Binds source-owned zones and schedule-contiguous explicit deposition dimensions.
-pub const PLANNER_VERSION: &str = "14";
+pub const PLANNER_VERSION: &str = "15";
 pub const EMITTER_VERSION: &str = "6";
-pub const VERIFIER_VERSION: &str = "6";
+pub const VERIFIER_VERSION: &str = "7";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

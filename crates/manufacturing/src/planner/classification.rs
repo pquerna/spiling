@@ -182,40 +182,38 @@ impl ClassifiedRegions {
         };
         admit_scratch(scratch_points(&[&bottom, &top, &interior])?)?;
         let interior_area = interior.unsigned_area();
-        let coverage = PlanarRegionCoverage {
-            section_area_mm2: layout.section_area_mm2,
-            source_section_area_mm2: layout.section_area_mm2,
-            surface_added_area_mm2: 0.0,
-            wall_area_mm2: layout.wall_area_mm2,
-            bottom_skin_area_mm2: bottom.unsigned_area(),
-            top_skin_area_mm2: top.unsigned_area(),
-            solid_interior_area_mm2: if recipe.infill_fraction == 1.0 {
-                interior_area
-            } else {
-                0.0
-            },
-            sparse_interior_area_mm2: if recipe.infill_fraction < 1.0 {
-                interior_area
-            } else {
-                0.0
-            },
-            intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
-            protected_hole_area_mm2: layout.protected_hole_area_mm2,
-            nominal_deposition_volume_mm3: 0.0,
-            separator_area_mm2: 0.0,
-            process_interfaces: Vec::new(),
-            process_regions: if interior_area > 0.0 {
-                vec![ProcessRegionCoverage {
-                    area_mm2: interior_area,
-                    fraction: recipe.infill_fraction,
-                    contributions: Vec::new(),
-                }]
-            } else {
-                Vec::new()
-            },
-            support_area_mm2: 0.0,
-            support_nominal_deposition_volume_mm3: 0.0,
-        };
+        let coverage = PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: layout.section_area_mm2,
+        source_section_area_mm2: layout.section_area_mm2,
+        surface_added_area_mm2: 0.0,
+        wall_area_mm2: layout.wall_area_mm2,
+        bottom_skin_area_mm2: bottom.unsigned_area(),
+        top_skin_area_mm2: top.unsigned_area(),
+        solid_interior_area_mm2: if recipe.infill_fraction == 1.0 {
+            interior_area
+        } else {
+            0.0
+        },
+        sparse_interior_area_mm2: if recipe.infill_fraction < 1.0 {
+            interior_area
+        } else {
+            0.0
+        },
+        intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
+        protected_hole_area_mm2: layout.protected_hole_area_mm2,
+        nominal_deposition_volume_mm3: 0.0,
+        separator_area_mm2: 0.0,
+        process_interfaces: Vec::new(),
+        process_regions: if interior_area > 0.0 {
+            vec![ProcessRegionCoverage {
+                area_mm2: interior_area,
+                fraction: recipe.infill_fraction,
+                contributions: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        },
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0, };
         Ok(Self {
             layout,
             bottom,

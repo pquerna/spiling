@@ -106,6 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DepositionOwner::decl(&config),
         ProcessEndpointBond::decl(&config),
         ProcessInterfaceCoverage::decl(&config),
+        DiaphragmPolygonMm::decl(&config),
+        ProcessDiaphragmCoverage::decl(&config),
         ProcessRegionStatus::decl(&config),
         ProcessRegionResolution::decl(&config),
         ProjectManifest::decl(&config),

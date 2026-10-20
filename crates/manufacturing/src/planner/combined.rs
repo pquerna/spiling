@@ -79,6 +79,7 @@ pub(super) fn combine(
                 let layer = &plan.layers[i];
                 layer.region_coverage.bottom_skin_area_mm2 > 0.0
                     || layer.region_coverage.top_skin_area_mm2 > 0.0
+                    || !layer.region_coverage.process_diaphragms.is_empty()
                     || layer.region_coverage.surface_added_area_mm2 > 0.0
                     || layer.paths.iter().any(|p| {
                         matches!(
@@ -622,7 +623,7 @@ fn record(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inner_material_admits(
+pub(super) fn inner_material_admits(
     section: &SectionSpan,
     eligible: &geo::MultiPolygon<f64>,
     coverage: &ProcessRegionCoverage,
@@ -699,7 +700,7 @@ fn inner_material_admits(
                 expected, &actual, &candidate, outer_z, radius, byte_limit, work, cancel,
             )
             .map_err(|failure| {
-                super::native_error(failure, "combined sparse full-height inner material")
+                super::native_error(failure, "full-height native inner material")
             })?
             .is_none()
         {

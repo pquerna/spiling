@@ -7,6 +7,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import type {
   OccurrenceRecord,
   ProcessEdit,
+  ProcessInterfacePermission,
   SurfaceScope,
   SurfaceScopeKind,
 } from "@spiling/protocol";
@@ -34,6 +35,10 @@ export function ProcessPanel({
   const [mode, setMode] = useState<"whole" | "box">("whole");
   const [min, setMin] = useState<[string, string, string]>(["", "", ""]);
   const [max, setMax] = useState<[string, string, string]>(["", "", ""]);
+  const [interfaceKind, setInterfaceKind] = useState<
+    "separator_wall" | "horizontal_diaphragm"
+  >("separator_wall");
+  const [diaphragmThickness, setDiaphragmThickness] = useState("");
   const [separatorApproved, setSeparatorApproved] = useState(false);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
@@ -73,6 +78,8 @@ export function ProcessPanel({
   useEffect(() => {
     setMin(["", "", ""]);
     setMax(["", "", ""]);
+    setInterfaceKind("separator_wall");
+    setDiaphragmThickness("");
     setSeparatorApproved(false);
   }, [authority, selected?.occurrence_id, scopeKind]);
 
@@ -85,6 +92,12 @@ export function ProcessPanel({
           occurrence_id: selected.occurrence_id,
           expected_definition_id: selected.definition_id,
         };
+  }
+  function permission(): ProcessInterfacePermission | null {
+    if (!separatorApproved) return null;
+    return interfaceKind === "separator_wall"
+      ? { kind: "separator_wall" }
+      : { kind: "horizontal_diaphragm", thickness_mm: Number(diaphragmThickness) };
   }
   async function apply(event: FormEvent) {
     event.preventDefault();
@@ -108,13 +121,26 @@ export function ProcessPanel({
       setMessage("Enter six finite definition-local mm bounds with min < max on X, Y and Z.");
       return;
     }
+    if (separatorApproved && interfaceKind === "horizontal_diaphragm") {
+      const thickness = Number(diaphragmThickness);
+      if (
+        diaphragmThickness.trim() === "" ||
+        !Number.isFinite(thickness) ||
+        thickness <= 0
+      ) {
+        setMessage(
+          "Horizontal diaphragm thickness must be a finite positive number of millimetres.",
+        );
+        return;
+      }
+    }
     await submit({
       op: "set_box_sparse_fraction",
       scope: target(),
       min: lower,
       max: upper,
       fraction: value,
-      interface: separatorApproved ? "separator_wall" : null,
+      interface: permission(),
     });
   }
   async function submit(change: ProcessEdit) {
@@ -126,7 +152,7 @@ export function ProcessPanel({
         change.op === "reset"
           ? "All local layers in this scope removed, including boxes. The engine's base inherited value is shown below."
           : change.op === "set_box_sparse_fraction" && change.interface === null
-            ? "Box intent saved without separator authorization. Compile blocks nonempty joins. No joined artifact is claimed."
+            ? "Box intent saved without permanent interface authorization. Compile blocks nonempty joins. No joined artifact is claimed."
             : "Local sparse intent applied. Compile and fresh Verify are required before export.",
       );
     } catch (error) {
@@ -211,6 +237,48 @@ export function ProcessPanel({
                   </fieldset>
                 ))}
                 <label>
+                  Permanent interface permission
+                  <select
+                    data-testid="process-interface-kind"
+                    value={interfaceKind}
+                    disabled={!writable}
+                    onChange={(event) =>
+                      setInterfaceKind(
+                        event.target.value as "separator_wall" | "horizontal_diaphragm",
+                      )
+                    }
+                  >
+                    <option value="separator_wall">Separator wall — X/Y density interfaces</option>
+                    <option value="horizontal_diaphragm">
+                      Horizontal diaphragm — source-Z density boundary
+                    </option>
+                  </select>
+                </label>
+                {interfaceKind === "horizontal_diaphragm" && (
+                  <>
+                    <label>
+                      Horizontal diaphragm thickness (mm, greater than 0)
+                      <input
+                        data-testid="process-diaphragm-thickness"
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={diaphragmThickness}
+                        disabled={!writable}
+                        onChange={(event) => setDiaphragmThickness(event.target.value)}
+                      />
+                    </label>
+                    <p data-testid="process-diaphragm-explanation">
+                      The plate is centered on the box's single source-Z density boundary:
+                      source heights at boundary ± thickness / 2 are mapped through the
+                      occurrence placement to actual world heights. Its physical thickness is
+                      permanent deposited material, not removable support and not a strength
+                      qualification. The panel does not infer whether geometry is eligible; the
+                      fresh Compile reports native acceptance or refusal.
+                    </p>
+                  </>
+                )}
+                <label>
                   <input
                     data-testid="process-separator-approval"
                     type="checkbox"
@@ -218,7 +286,9 @@ export function ProcessPanel({
                     disabled={!writable}
                     onChange={(event) => setSeparatorApproved(event.target.checked)}
                   />
-                  I authorize a permanent separator wall at density interfaces.
+                  {interfaceKind === "separator_wall"
+                    ? "I authorize a permanent separator wall at density interfaces."
+                    : "I authorize a permanent horizontal diaphragm across the selected source-Z density boundary."}
                 </label>
                 <p data-testid="process-separator-thickness">
                   Permanent separator rib width / thickness: {beadWidthMm === null
@@ -326,9 +396,11 @@ export function ProcessPanel({
                               box in definition-local mm · min [{operation.selector.min.join(", ")}]
                               {" "}inclusive · max [{operation.selector.max.join(", ")}] exclusive ·{" "}
                               <strong>
-                                {operation.interface === "separator_wall"
-                                  ? "permanent separator wall authorized"
-                                  : "UNAUTHORIZED separator — Compile blocks nonempty joins"}
+                                {operation.interface === null
+                                  ? "UNAUTHORIZED interface — Compile blocks nonempty joins"
+                                  : operation.interface.kind === "separator_wall"
+                                    ? "permanent separator wall authorized (separator_wall)"
+                                    : `permanent horizontal diaphragm authorized (horizontal_diaphragm) · ${operation.interface.thickness_mm} mm centered on the source-Z boundary`}
                               </strong>
                               {" · "}
                             </>

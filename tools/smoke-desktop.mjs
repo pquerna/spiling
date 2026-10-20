@@ -153,14 +153,16 @@ const customManufacturingSource = option("--manufacturing-source");
 const requireHardwareGpu = args.includes("--require-hardware-gpu");
 const processOverrides = args.includes("--process-overrides");
 const processZones = args.includes("--process-zones");
+const processDiaphragm = args.includes("--process-diaphragm");
 const combineSparse = args.includes("--combine-sparse");
 if (combineSparse && (!processZones || !requireHardwareGpu || scenario !== "manufacturing" ||
     !customManufacturingSource || manufacturingDiagnostic))
   throw new Error("--combine-sparse requires --require-hardware-gpu --scenario manufacturing --process-zones --manufacturing-source RELATIVE_STEP");
-if (processZones && processOverrides) throw new Error("Choose within-part zones or separate-copy overrides, not both");
+if ([processZones, processOverrides, processDiaphragm].filter(Boolean).length > 1)
+  throw new Error("Choose one within-part or separate-copy process workflow");
 const evidenceDirectory = option("--evidence-directory");
 if (
-  (processOverrides || processZones) &&
+  (processOverrides || processZones || processDiaphragm) &&
   (scenario !== "manufacturing" || !customManufacturingSource || manufacturingDiagnostic)
 )
   throw new Error(
@@ -203,7 +205,7 @@ const manufacturingSource = customManufacturingSource
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
-    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones (actual hardware named-source manufacturing)] [--combine-sparse (requires hardware manufacturing named source and process zones; preserves fine schedule)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
+    "Usage: pnpm smoke:desktop --executable PATH [--port 9222] [--scenario normal|geometry|project-bridge|manufacturing|surface-finish|cylindrical-finish|image-relief|image-relief-planar|gpu-unavailable|engine-operations] [--diagnostic-no-gpu] [--require-hardware-gpu (normal sandboxed manufacturing only)] [--manufacturing-source RELATIVE_STEP (plain manufacturing only, relative to cwd)] [--process-overrides | --process-zones | --process-diaphragm (actual hardware named-source manufacturing)] [--combine-sparse (requires hardware manufacturing named source and process zones; preserves fine schedule)] [--evidence-directory NEW_DIRECTORY]; provide DISPLAY on Linux or launch under xvfb-run",
   );
 if (
   ![
@@ -243,7 +245,7 @@ if (scenario === "project-bridge" || manufacturingScenario) {
 }
 if (manufacturingScenario) {
   await copyFile(
-    resolve(combineSparse
+    resolve(combineSparse || processDiaphragm
       ? "fixtures/manufacturing/housing-h1-fine.intent.json"
       : "fixtures/manufacturing/complete-sparse.intent.json"),
     resolve(fixtureRoot, "operator.intent.json"),
@@ -1762,7 +1764,7 @@ async function inspectManufacturing() {
     "Core intent restored",
   );
   let q1Intent = null;
-  if (scenario === "manufacturing" && !processZones) {
+  if (scenario === "manufacturing" && !processZones && !processDiaphragm) {
     const beforePolicies = await manufacturingState();
     await input('[data-testid="manufacturing-seam-policy"]', "preferred_build_direction");
     await input('[data-testid="manufacturing-seam-direction-x"]', "0");
@@ -1951,7 +1953,7 @@ async function inspectManufacturing() {
     await click("process-apply");
     const box = document => document.process_document.layers.flatMap(layer => layer.operations).find(operation => operation.selector.kind === "source_box_mm");
     const initial = await until(async () => box(await project()), "Explicit authorized physical box Apply");
-    assert.equal(initial.interface, "separator_wall");
+    assert.deepEqual(initial.interface, { kind: "separator_wall" });
     await input('[data-testid="process-box-max-x"]', "8");
     await input('[data-testid="process-fraction"]', "0.60");
     await click("process-apply");
@@ -1967,6 +1969,47 @@ async function inspectManufacturing() {
     localProcess = (await project()).process_document;
     await evaluate(`document.querySelector('[data-testid="process-panel"]').scrollIntoView({block:'start'})`);
     await screenshot("manufacturing-housing-zone-approval");
+  }
+  if (processDiaphragm) {
+    q1Intent = structuredClone((await manufacturingState()).selected_intent);
+    q1Intent.recipe.sparse_infill = { kind: "combine_eligible", max_height_mm: 0.30 };
+    await input('[data-testid="manufacturing-sparse-infill"]', "combine_eligible");
+    await input('[data-testid="manufacturing-sparse-max-height"]', "0.30");
+    await click("manufacturing-apply");
+    await until(async () => JSON.stringify((await manufacturingState()).selected_intent) === JSON.stringify(q1Intent),
+      "Explicit eligible sparse policy Apply retains the admitted fixed-X ordinary axis");
+    const project = async () => bridgeProject((await manufacturingState()).session_id);
+    const first = (await geometryState()).occurrences[0];
+    await selectOccurrence(first.occurrence_id);
+    await input('[data-testid="process-scope"]', "definition");
+    await input('[data-testid="process-region-mode"]', "whole");
+    await input('[data-testid="process-fraction"]', "0.60");
+    await click("process-apply");
+    await until(async () => (await project()).resolved_process[0].inherited.fraction === 0.60,
+      "Denser upper whole-owned base Apply");
+    await input('[data-testid="process-region-mode"]', "box");
+    for (const [side, values] of [["min", [-1,-1,-1]], ["max", [25,19,5.03]]])
+      for (const [axis, value] of values.entries())
+        await input(`[data-testid="process-box-${side}-${"xyz"[axis]}"]`, String(value));
+    await input('[data-testid="process-fraction"]', "0.20");
+    await input('[data-testid="process-interface-kind"]', "horizontal_diaphragm");
+    await input('[data-testid="process-diaphragm-thickness"]', "0.22");
+    await click("process-separator-approval");
+    await click("process-apply");
+    const box = document => document.process_document.layers.flatMap(layer => layer.operations)
+      .find(operation => operation.selector.kind === "source_box_mm");
+    const initial = await until(async () => box(await project()), "Explicit permanent plate permission Apply");
+    await input('[data-testid="process-diaphragm-thickness"]', "0.23");
+    await click("process-apply");
+    await until(async () => box(await project()).interface.thickness_mm === 0.23, "Physical thickness edit");
+    assert.equal(box(await project()).operation_id, initial.operation_id);
+    await click("project-undo");
+    await until(async () => box(await project()).interface.thickness_mm === 0.22, "Plate thickness Undo");
+    await click("project-redo");
+    await until(async () => box(await project()).interface.thickness_mm === 0.23, "Plate thickness Redo");
+    localProcess = (await project()).process_document;
+    await evaluate("document.querySelector('[data-testid=\"process-panel\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-housing-diaphragm-approval");
   }
   if (combineSparse) {
     const fineIntent = structuredClone((await manufacturingState()).selected_intent);
@@ -2178,19 +2221,22 @@ async function inspectManufacturing() {
   const plan = JSON.parse(exported["plan.json"]);
   assert.ok(
     plan.layers.every((layer) =>
-      layer.region_coverage.process_regions.every((region) =>
-        processOverrides || processZones ? [0.2, 0.6].includes(region.fraction) : region.fraction === 0.25,
+      layer.region_coverage.process_regions.every((region, index) =>
+        processOverrides || processZones || processDiaphragm
+          ? [0.2, 0.6].includes(region.fraction) || processDiaphragm && region.fraction === 1 &&
+            layer.region_coverage.process_diaphragms.some(plate => plate.region_index === index)
+          : region.fraction === 0.25,
       ),
     ),
   );
   if (localProcess) {
     assert.deepEqual(JSON.parse(exported["provenance.json"]).process_document, localProcess);
     assert.ok(
-      plan.layers.some(
-        (layer) =>
-          new Set(layer.region_coverage.process_regions.map((region) => region.fraction)).size ===
-          2,
-      ),
+      processDiaphragm
+        ? [0.20, 0.60].every(fraction => plan.layers.some(layer =>
+          layer.region_coverage.process_regions.some(region => region.fraction === fraction)))
+        : plan.layers.some(layer =>
+          new Set(layer.region_coverage.process_regions.map(region => region.fraction)).size === 2),
       "Both local fractions survive real interior accounting",
     );
   }
@@ -2229,6 +2275,49 @@ async function inspectManufacturing() {
         index: middle.index, z_mm: middle.z_mm, height_mm: middle.height_mm,
         source_bodies_visible: false, show_travel: false,
       }, null, 2), { flag: "wx" });
+  }
+  if (processDiaphragm) {
+    assert.ok(plan.sparse_bands.some(band => band.disposition.kind === "retained_fine" &&
+      band.disposition.reason === "missing_lower_anchor"),
+      "Actual CombineEligible records the admitted fixed-X job's real anchor veto");
+    for (const band of plan.sparse_bands.filter(band => band.disposition.kind === "combined"))
+      assert.ok(plan.layers.slice(Math.max(0, band.first_layer - 1), band.last_layer + 2)
+        .every(layer => layer.region_coverage.process_diaphragms.length === 0),
+      "No actual H1 band crosses the plate or its fine neighborhood");
+    const plates = plan.layers.filter(layer => layer.region_coverage.process_diaphragms.length > 0);
+    assert.ok(plates.length > 1, "Physical plate occupies multiple actual intervals");
+    const first = plates[0], plate = first.region_coverage.process_diaphragms[0];
+    assert.ok(first.paths.some(path => path.kind === "bridge" &&
+      path.owner?.kind === "regional" && path.owner.region_index === plate.region_index));
+    assert.equal(first.lower_z_mm, plate.physical_z_mm[0]);
+    assert.equal(plates.at(-1).z_mm, plate.physical_z_mm[1]);
+    await until(async () => (await text("manufacturing-diaphragms")).includes("5.03"),
+      "Visible source/world permanent plate inspection");
+    await input('[data-testid="manufacturing-layer"]', String(first.index));
+    if (await evaluate("document.querySelector('[data-testid=\"manufacturing-source-bodies\"]').checked"))
+      await click("manufacturing-source-bodies");
+    await until(async () => !(await manufacturingState()).working, "Actual supported plate draw");
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    await screenshot("manufacturing-housing-diaphragm-source-hidden");
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-diaphragms\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-housing-diaphragm-physical-slab-cost");
+    if (evidenceDirectory)
+      await writeFile(resolve(evidenceDirectory, "plate-layer.json"), JSON.stringify(first, null, 2), {flag:"wx"});
+    const retained = plan.sparse_bands.find(band => band.disposition.kind === "retained_fine" &&
+      band.disposition.reason === "missing_lower_anchor");
+    await input('[data-testid="manufacturing-layer"]', String(retained.last_layer));
+    await until(async () => !(await manufacturingState()).working, "Actual retained-fine band inspection");
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-sparse-band-decisions\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-housing-diaphragm-h1-retained-fine");
+    if (evidenceDirectory)
+      await writeFile(resolve(evidenceDirectory, "retained-fine-band.json"), JSON.stringify({
+        policy: state.selected_intent.recipe.sparse_infill,
+        ordinary_axis: state.selected_intent.recipe.rectilinear_axis, decision: retained,
+        visible_inspection: await text("manufacturing-sparse-band-decisions"),
+      }, null, 2), {flag:"wx"});
+    await input('[data-testid="manufacturing-layer"]', String(first.index));
+    await until(async () => !(await manufacturingState()).working, "Permanent plate layer restored");
   }
   if (evidenceDirectory) {
     for (const [name, content] of Object.entries(exported))
@@ -2328,7 +2417,7 @@ async function inspectManufacturing() {
       }, null, 2), { flag: "wx" });
     }
   }
-  if (q1Intent && !processZones) {
+  if (q1Intent && !processZones && !processDiaphragm) {
     const perimeters = plan.layers.flatMap((layer) =>
       layer.paths.filter((path) => path.kind === "perimeter"),
     );
@@ -2496,10 +2585,42 @@ async function inspectManufacturing() {
     await readFile(resolve(fixtureRoot, "export-one", "program.gcode"), "utf8"),
     exported["program.gcode"],
   );
+  if (processDiaphragm) {
+    await input('[data-testid="process-diaphragm-thickness"]', "0.0001");
+    await click("process-apply");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Sub-admissible thickness invalidates the old plate");
+    await click("manufacturing-compile");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && !current.selected_artifact &&
+        await evaluate("!!document.querySelector('#manufacturing-operation-failure')");
+    }, "Actual unrepresentable plate refuses without publication", nativeJobObservationMs);
+    assert.ok((await text("manufacturing-message")).trim().length > 0);
+    await evaluate("document.querySelector('#manufacturing-operation-failure details').open = true");
+    await evaluate("document.querySelector('#manufacturing-operation-failure').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-housing-diaphragm-unsupported-thickness");
+    if (evidenceDirectory)
+      await writeFile(resolve(evidenceDirectory, "unsupported-thickness.txt"), await text("manufacturing-message"), {flag:"wx"});
+    await click("project-undo");
+    await until(async () => (await manufacturingState()).selected_artifact?.hash === record.hash,
+      "Undo restores the admitted physical plate and original artifact");
+    const original = (await geometryState()).occurrences[0];
+    await selectOccurrence(original.occurrence_id);
+    await input('[aria-label="Translation X"]', String(original.pose.translation_mm[0] + 1));
+    await click("apply-pose");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Authored plate pose edit invalidates output");
+    assert.deepEqual((await bridgeProject((await manufacturingState()).session_id)).process_document, localProcess);
+    await click("project-undo");
+    await until(async () => (await manufacturingState()).selected_artifact?.hash === record.hash, "Pose Undo restores matching inputs/artifact");
+    await click("project-redo");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Pose Redo invalidates output again");
+    await click("project-undo");
+    await until(async () => (await manufacturingState()).selected_artifact?.hash === record.hash, "Final original plate pose restored");
+  }
   if (surface) await click(`surface-remove-${surface.layer_id}`);
   else if (localProcess) {
-    await selectOccurrence((await geometryState()).occurrences[processZones ? 0 : 1].occurrence_id);
-    await input('[data-testid="process-scope"]', processZones ? "definition" : "occurrence");
+    await selectOccurrence((await geometryState()).occurrences[processZones || processDiaphragm ? 0 : 1].occurrence_id);
+    await input('[data-testid="process-scope"]', processZones || processDiaphragm ? "definition" : "occurrence");
     await click("process-reset");
   } else {
     await input('[data-testid="manufacturing-flow_multiplier"]', "1.1");
@@ -2555,7 +2676,7 @@ async function inspectManufacturing() {
   );
   if (localProcess) {
     assert.deepEqual((await bridgeProject(state.session_id)).process_document, localProcess);
-    await selectOccurrence((await geometryState()).occurrences[processZones ? 0 : 1].occurrence_id);
+    await selectOccurrence((await geometryState()).occurrences[processZones || processDiaphragm ? 0 : 1].occurrence_id);
     assert.equal(
       await evaluate(`document.querySelector('[data-testid="process-apply"]').disabled`),
       true,
@@ -2572,7 +2693,7 @@ async function inspectManufacturing() {
       "Source-independent reopen retains both authored policies",
     );
     const policyControls = ["manufacturing-seam-policy", "manufacturing-rectilinear-axis"];
-    if (combineSparse)
+    if (combineSparse || processDiaphragm)
       policyControls.push("manufacturing-sparse-infill", "manufacturing-sparse-max-height");
     if (q1Intent.recipe.seam_policy.kind === "preferred_build_direction")
       policyControls.push("manufacturing-seam-direction-x", "manufacturing-seam-direction-y");
@@ -2677,11 +2798,11 @@ async function inspectManufacturing() {
     );
     expected.recipe.seam_policy = q1Intent.recipe.seam_policy;
     expected.recipe.rectilinear_axis = q1Intent.recipe.rectilinear_axis;
-    if (combineSparse) expected.recipe.sparse_infill = q1Intent.recipe.sparse_infill;
+    if (combineSparse || processDiaphragm) expected.recipe.sparse_infill = q1Intent.recipe.sparse_infill;
     assert.deepEqual(
       state.selected_intent,
       expected,
-      "Fresh engine retains the complete-sparse declaration with only the two explicitly authored policies",
+      "Fresh engine retains the complete source declaration and explicitly authored policies",
     );
   }
   if (q1Intent)

@@ -23,6 +23,8 @@ pub(super) fn interface_bytes(interfaces: &Vec<ProcessInterfaceCoverage>) -> usi
 
 pub(super) fn coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
     interface_bytes(&coverage.process_interfaces)
+        + coverage.process_diaphragms.capacity() * std::mem::size_of::<ProcessDiaphragmCoverage>()
+        + coverage.process_diaphragms.iter().map(ProcessDiaphragmCoverage::allocated_bytes).sum::<usize>()
         + coverage.process_regions.capacity() * std::mem::size_of::<ProcessRegionCoverage>()
         + coverage
             .process_regions

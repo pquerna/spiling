@@ -60,14 +60,14 @@
       "deposition_count": 4,
       "event_count": 8,
       "frame": "right_handed_millimetres",
-      "input_hash": "f88ffdff0cd356449320d9b4d38b1e94cbef2908f25eed668519c2ac66eb57e5",
+      "input_hash": "72e3b165682a06eb911b1ce9256708833870296a87d5d023830012ebe7f7bf15",
       "layer_count": 3,
       "lifecycle_count": 0,
       "process_count": 0,
       "program_hash": "ba0d90b41e39418cbb8424b0aca172b1cdb13bdca254d50f2f4a1e14c81df1ca",
       "schema_version": 5,
       "travel_count": 4,
-      "verifier_version": "6"
+      "verifier_version": "7"
     },
     "resource": {
       "media_type": "application/x-spiling-replay-motion",

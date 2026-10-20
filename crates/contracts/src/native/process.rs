@@ -41,28 +41,36 @@ impl TryFrom<ProcessSelector> for rpc::ProcessSelector {
         })
     }
 }
-impl TryFrom<i32> for ProcessInterfacePermission {
+impl TryFrom<rpc::ProcessInterfacePermission> for ProcessInterfacePermission {
     type Error = String;
-    fn try_from(value: i32) -> Result<Self, String> {
-        match rpc::ProcessInterfacePermission::try_from(value)
-            .map_err(|_| "unknown process interface permission")?
-        {
-            rpc::ProcessInterfacePermission::SeparatorWall => Ok(Self::SeparatorWall),
-            rpc::ProcessInterfacePermission::Unspecified => {
-                Err("unspecified process interface permission".into())
+    fn try_from(value: rpc::ProcessInterfacePermission) -> Result<Self, String> {
+        let permission = match required(value.kind, "process interface permission")? {
+            rpc::process_interface_permission::Kind::SeparatorWall(_) => Self::SeparatorWall,
+            rpc::process_interface_permission::Kind::HorizontalDiaphragm(value) => {
+                Self::HorizontalDiaphragm { thickness_mm: value.thickness_mm }
             }
-        }
+        };
+        permission.validate().map_err(|error| error.to_string())?;
+        Ok(permission)
     }
 }
 impl From<ProcessInterfacePermission> for rpc::ProcessInterfacePermission {
     fn from(value: ProcessInterfacePermission) -> Self {
-        match value {
-            ProcessInterfacePermission::SeparatorWall => Self::SeparatorWall,
+        Self {
+            kind: Some(match value {
+                ProcessInterfacePermission::SeparatorWall => {
+                    rpc::process_interface_permission::Kind::SeparatorWall(rpc::SeparatorWallPermission {})
+                }
+                ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm } => {
+                    rpc::process_interface_permission::Kind::HorizontalDiaphragm(
+                        rpc::HorizontalDiaphragmPermission { thickness_mm })
+                }
+            }),
         }
     }
 }
-fn interface_to_wire(value: Option<ProcessInterfacePermission>) -> Option<i32> {
-    value.map(|value| rpc::ProcessInterfacePermission::from(value) as i32)
+fn interface_to_wire(value: Option<ProcessInterfacePermission>) -> Option<rpc::ProcessInterfacePermission> {
+    value.map(Into::into)
 }
 impl TryFrom<rpc::ProcessValue> for ProcessValue {
     type Error = String;

@@ -5,7 +5,7 @@
 import type { PrinterSpecification } from "../../packages/protocol/src/generated.ts";
 
 const printer = {
-  schema_version: 10,
+  schema_version: 11,
   id: "software-cartesian-reference",
   revision: "10",
   name: "Software Cartesian reference — not machine-ready",

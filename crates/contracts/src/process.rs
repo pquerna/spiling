@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use ts_rs::TS;
 
-pub const PROCESS_SCHEMA_VERSION: u32 = 2;
+pub const PROCESS_SCHEMA_VERSION: u32 = 3;
 pub const MAX_PROCESS_LAYERS: usize = 64;
 pub const MAX_PROCESS_OPERATIONS: usize = 256;
 pub const MAX_PROCESS_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -95,10 +95,21 @@ impl<'de> Deserialize<'de> for ProcessSelector {
         Ok(selector)
     }
 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProcessInterfacePermission {
     SeparatorWall,
+    HorizontalDiaphragm { thickness_mm: f64 },
+}
+impl ProcessInterfacePermission {
+    pub fn validate(self) -> Result<(), ProjectError> {
+        if let Self::HorizontalDiaphragm { thickness_mm } = self
+            && (!thickness_mm.is_finite() || thickness_mm <= 0.0)
+        {
+            return Err(invalid("diaphragm thickness must be finite positive millimetres"));
+        }
+        Ok(())
+    }
 }
 fn required_interface<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -111,6 +122,9 @@ fn validate_interface(
     action: ProcessAction,
 ) -> Result<(), ProjectError> {
     selector.validate()?;
+    if let Some(permission) = interface {
+        permission.validate()?;
+    }
     if selector == ProcessSelector::WholeOwnedVolume && interface.is_some() {
         return Err(invalid(
             "interface permission requires a source box selector",
@@ -907,8 +921,12 @@ mod tests {
             interface: forbidden.interface,
         };
         assert!(crate::rpc::ProcessEdit::try_from(invalid_edit).is_err());
-        for permission in [0, -1, 2, i32::MAX] {
-            assert!(ProcessInterfacePermission::try_from(permission).is_err());
+        assert!(ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission { kind: None }).is_err());
+        for thickness_mm in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(ProcessInterfacePermission::try_from(crate::rpc::ProcessInterfacePermission {
+                kind: Some(crate::rpc::process_interface_permission::Kind::HorizontalDiaphragm(
+                    crate::rpc::HorizontalDiaphragmPermission { thickness_mm })),
+            }).is_err());
         }
     }
     #[test]

@@ -36,18 +36,18 @@
           0.4
         ]
       },
-      "bundle_hash": "1722cec500be7c47941cb44da19159ddf4f7028a2095cfce68e9ea9b1c278b50",
+      "bundle_hash": "3e1ab99f2de13c7f67ed955b9ac54abfd65871f64364ea8d8438c2d334ffe9ca",
       "deposition_count": 2,
       "event_count": 4,
       "frame": "right_handed_millimetres",
-      "input_hash": "6476cd36980794e4626e74a39c10dc3d98b3eae961a9b863ac3ed8b2cbbb7afa",
+      "input_hash": "957151852f64fe1c3c24e5ad479d95049fabeddf297fb5f1d98d3f9b47a85333",
       "layer_count": 1,
       "lifecycle_count": 0,
       "process_count": 0,
       "program_hash": "838590a34ec225bb1f3c29c532619937fd32c2bc931fde7cec3544e353af49e4",
       "schema_version": 5,
       "travel_count": 2,
-      "verifier_version": "6"
+      "verifier_version": "7"
     },
     "resource": {
       "media_type": "application/x-spiling-replay-motion",

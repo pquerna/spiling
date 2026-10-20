@@ -22,8 +22,10 @@ pub mod program_coordinates;
 pub use process::*;
 mod resolution;
 pub use resolution::*;
+mod diaphragm;
+pub use diaphragm::*;
 
-pub const MANUFACTURING_SCHEMA_VERSION: u32 = 10;
+pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
 pub const MAX_MANUFACTURING_RETAINED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PRINT_LAYERS: u32 = 4096;
@@ -1360,6 +1362,9 @@ pub struct PlanarRegionCoverage {
     #[serde(deserialize_with = "process_interfaces")]
     pub process_interfaces: Vec<ProcessInterfaceCoverage>,
     pub separator_area_mm2: f64,
+    #[serde(deserialize_with = "diaphragm::process_diaphragms")]
+    pub process_diaphragms: Vec<ProcessDiaphragmCoverage>,
+    pub diaphragm_area_mm2: f64,
 }
 impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
@@ -1405,11 +1410,31 @@ impl PlanarRegionCoverage {
         if centerline_capacity > MAX_DEPOSITION_SEGMENTS as usize {
             return Err(resource("separator centerline allocation limit exceeded"));
         }
+        if self.process_diaphragms.capacity() > MAX_PROCESS_REGIONS {
+            return Err(resource("diaphragm coverage allocation limit exceeded"));
+        }
+        let mut diaphragm = 0.0;
+        let mut plate_owners = BTreeSet::new();
+        for plate in &self.process_diaphragms {
+            plate.validate()?;
+            let region = self.process_regions.get(usize::from(plate.region_index))
+                .ok_or_else(|| invalid("diaphragm owner is outside layer coverage"))?;
+            if !plate_owners.insert(plate.region_index)
+                || region.fraction != 1.0 || region.area_mm2 != plate.area_mm2
+                || region.contributions.len() != 1
+                || region.contributions[0].occurrence_id != plate.occurrence_id
+                || region.contributions[0].definition_id != plate.definition_id
+                || region.contributions[0].provenance != Some(plate.provenance)
+            {
+                return Err(invalid("permanent diaphragm lacks its unique exact construction region"));
+            }
+            diaphragm += plate.area_mm2;
+        }
         let mut contribution_capacity = 0usize;
         let mut solid = 0.0;
         let mut sparse = 0.0;
         let mut void = 0.0;
-        for region in &self.process_regions {
+        for (index, region) in self.process_regions.iter().enumerate() {
             contribution_capacity = contribution_capacity
                 .checked_add(region.contributions.capacity())
                 .ok_or_else(|| resource("process contribution allocation overflow"))?;
@@ -1431,7 +1456,9 @@ impl PlanarRegionCoverage {
                     return Err(invalid("duplicate process region occurrence contribution"));
                 }
             }
-            if region.fraction == 1.0 {
+            if plate_owners.contains(&(index as u16)) {
+                // Permanent construction is not an authored sparse-fraction override.
+            } else if region.fraction == 1.0 {
                 solid += region.area_mm2;
             } else {
                 sparse += region.area_mm2;
@@ -1444,6 +1471,7 @@ impl PlanarRegionCoverage {
             self.surface_added_area_mm2,
             self.wall_area_mm2,
             self.separator_area_mm2,
+            self.diaphragm_area_mm2,
             self.bottom_skin_area_mm2,
             self.top_skin_area_mm2,
             self.solid_interior_area_mm2,
@@ -1459,7 +1487,8 @@ impl PlanarRegionCoverage {
             + self.top_skin_area_mm2
             + self.solid_interior_area_mm2
             + self.sparse_interior_area_mm2
-            + self.separator_area_mm2;
+            + self.separator_area_mm2
+            + self.diaphragm_area_mm2;
         let tolerance = 1e-7 * self.section_area_mm2.max(1.0);
         if values.iter().any(|v| !v.is_finite() || *v < 0.0)
             || (self.section_area_mm2 - self.source_section_area_mm2 - self.surface_added_area_mm2)
@@ -1485,6 +1514,8 @@ impl PlanarRegionCoverage {
             || !separator.is_finite()
             || (separator == 0.0) != (self.separator_area_mm2 == 0.0)
             || (self.separator_area_mm2 - separator).abs() > tolerance
+            || !diaphragm.is_finite()
+            || (self.diaphragm_area_mm2 - diaphragm).abs() > tolerance
             || (solid == 0.0) != (self.solid_interior_area_mm2 == 0.0)
             || (sparse == 0.0) != (self.sparse_interior_area_mm2 == 0.0)
             || (void == 0.0) != (self.intentional_void_area_mm2 == 0.0)
@@ -1719,6 +1750,7 @@ impl NormalizedPrintPlan {
             return Err(invalid("unsupported plan schema"));
         }
         self.native_geometry.validate()?;
+        diaphragm::validate_layers(&self.layers)?;
         validate_process_resolution(&self.process_resolution)?;
         if self.process_resolution.capacity() > MAX_PROCESS_REGIONS {
             return Err(resource("process resolution allocation limit exceeded"));
@@ -1848,6 +1880,12 @@ impl NormalizedPrintPlan {
                 let SparseInfillPolicy::CombineEligible { max_height_mm } = intent.recipe.sparse_infill else {
                     return Err(invalid("fine policy cannot contain combined sparse bands"));
                 };
+                let neighborhood = band.first_layer.saturating_sub(1) as usize
+                    ..=(band.last_layer as usize + 1).min(self.layers.len() - 1);
+                if self.layers[neighborhood].iter().any(|layer|
+                    !layer.region_coverage.process_diaphragms.is_empty()) {
+                    return Err(invalid("combined sparse band crosses a permanent diaphragm or its fine neighborhood"));
+                }
                 let first = &self.layers[band.first_layer as usize];
                 let physical = [first.lower_z_mm, terminal.z_mm];
                 if band.first_layer == band.last_layer || physical[1] - physical[0] > max_height_mm
@@ -2537,11 +2575,8 @@ impl ManufacturingBundle {
                         })
                 })
         });
-        for region in self
-            .plan
-            .layers
-            .iter()
-            .flat_map(|layer| &layer.region_coverage.process_regions)
+        for (layer, index, region) in self.plan.layers.iter().flat_map(|layer|
+            layer.region_coverage.process_regions.iter().enumerate().map(move |(index, region)| (layer, index, region)))
         {
             if region.contributions.is_empty() && has_overrides {
                 return Err(invalid(
@@ -2556,6 +2591,13 @@ impl ManufacturingBundle {
                     return Err(invalid(
                         "process region references an unknown or inconsistent occurrence",
                     ));
+                }
+                if let Some(plate) = layer.region_coverage.process_diaphragms.iter().find(|plate| usize::from(plate.region_index) == index) {
+                    let occurrence = self.provenance.occurrences.iter().find(|occurrence|
+                        occurrence.occurrence_id == plate.occurrence_id && occurrence.definition_id == plate.definition_id)
+                        .ok_or_else(|| invalid("permanent diaphragm references an unknown occurrence"))?;
+                    diaphragm::validate_binding(plate, process, &occurrence.pose, recipe.infill_fraction)?;
+                    continue;
                 }
                 let resolved = process.resolve(
                     &contribution.definition_id,

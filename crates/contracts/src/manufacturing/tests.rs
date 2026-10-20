@@ -111,24 +111,22 @@ fn inputs() -> (ProjectId, Vec<StoredDefinition>, Vec<OccurrenceRecord>) {
     )
 }
 fn coverage() -> PlanarRegionCoverage {
-    PlanarRegionCoverage {
-        section_area_mm2: 50.0,
-        source_section_area_mm2: 50.0,
-        surface_added_area_mm2: 0.0,
-        wall_area_mm2: 50.0,
-        bottom_skin_area_mm2: 0.0,
-        top_skin_area_mm2: 0.0,
-        solid_interior_area_mm2: 0.0,
-        sparse_interior_area_mm2: 0.0,
-        intentional_void_area_mm2: 0.0,
-        protected_hole_area_mm2: 0.0,
-        nominal_deposition_volume_mm3: 0.0,
-        support_area_mm2: 0.0,
-        support_nominal_deposition_volume_mm3: 0.0,
-        process_regions: vec![],
-        process_interfaces: vec![],
-        separator_area_mm2: 0.0,
-    }
+    PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: 50.0,
+    source_section_area_mm2: 50.0,
+    surface_added_area_mm2: 0.0,
+    wall_area_mm2: 50.0,
+    bottom_skin_area_mm2: 0.0,
+    top_skin_area_mm2: 0.0,
+    solid_interior_area_mm2: 0.0,
+    sparse_interior_area_mm2: 0.0,
+    intentional_void_area_mm2: 0.0,
+    protected_hole_area_mm2: 0.0,
+    nominal_deposition_volume_mm3: 0.0,
+    support_area_mm2: 0.0,
+    support_nominal_deposition_volume_mm3: 0.0,
+    process_regions: vec![],
+    process_interfaces: vec![],
+    separator_area_mm2: 0.0, }
 }
 
 fn regional_bundle() -> ManufacturingBundle {

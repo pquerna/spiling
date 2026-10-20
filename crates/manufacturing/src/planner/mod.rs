@@ -129,7 +129,7 @@ pub(crate) fn plan(
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
-    let mut schedule = scheduled_layers(input, &admission, cancel)?;
+    let mut schedule = scheduled_layers(input, &admission, &process_captures, cancel)?;
     let mut count = schedule.len() as u32;
     let mut occurrences = input.occurrences.iter().collect::<Vec<_>>();
     occurrences.sort_by_key(|o| o.occurrence_id);
@@ -299,6 +299,8 @@ pub(crate) fn plan(
                     invariant &= field.is_z_invariant(slab_start, slab_end)?;
                 }
             }
+            invariant &= process_captures.iter().filter_map(|capture| capture.zone)
+                .all(|zone| zone.is_z_invariant(slab_start, slab_end));
             if !invariant {
                 break;
             }
@@ -330,6 +332,7 @@ pub(crate) fn plan(
                     *occurrence_id,
                     Arc::clone(material),
                     *bytes,
+                    [slab_start, schedule[(end - 1) as usize].z],
                 )?);
             }
         }
@@ -372,6 +375,7 @@ pub(crate) fn plan(
                     *occurrence_id,
                     Arc::clone(&finished),
                     finished_bytes,
+                    [slab_start, schedule[(end - 1) as usize].z],
                 )?);
             }
             // Expanded occurrence separation is certified in preflight. Preserve
@@ -712,6 +716,19 @@ pub(crate) fn plan(
                     cancel,
                 )?,
             );
+            for plate in &classified.as_ref().expect("classified process regions").coverage.process_diaphragms {
+                let owned = &classified.as_ref().expect("classified process regions").interiors[usize::from(plate.region_index)];
+                let section = &sections[current];
+                if !combined::inner_material_admits(
+                    section, &owned.domain, &owned.coverage, plate.physical_z_mm,
+                    input.intent, native_coverage.material_proof.sources(),
+                    retained_support_native_bytes.saturating_add(native::output_bytes(&sections, &Vec::new(), retained_section_bytes)),
+                    &mut admission.geometry_work, cancel,
+                )? {
+                    return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
+                        "UnsupportedInterface: complete permanent plate lacks native full-height inner material authority"));
+                }
+            }
             key = Some(next_key);
             for &(occurrence_id, provenance) in &classified
                 .as_ref()
@@ -1120,6 +1137,12 @@ pub(crate) fn plan(
             )
         },
     )?;
+    let coordinate_scratch = skin_retained_points(retained_points, &neighborhoods, &[])?;
+    zones::diaphragm::construct_coordinates(
+        &mut layers, classification::fixed_point_budget(coordinate_scratch),
+        neighborhoods.work_mut(), cancel,
+    )?;
+    support::object_volumes(&mut layers, recipe);
     for layer in &mut layers {
         bonds::refresh_witness_kinds(layer)?;
     }
@@ -1234,6 +1257,7 @@ struct ProcessDomain {
     coverage: ProcessRegionCoverage,
     bytes: usize,
     zone: Option<zones::Zone>,
+    physical_z_mm: [f64; 2],
 }
 
 fn process_domain(
@@ -1242,6 +1266,7 @@ fn process_domain(
     occurrence_id: spiling_contracts::geometry::OccurrenceId,
     material: Arc<MultiPolygon<f64>>,
     bytes: usize,
+    physical_z_mm: [f64; 2],
 ) -> Result<ProcessDomain, ManufacturingError> {
     let occurrence = input
         .occurrences
@@ -1271,6 +1296,7 @@ fn process_domain(
         },
         bytes,
         zone,
+        physical_z_mm,
     })
 }
 
@@ -1523,6 +1549,7 @@ struct LayerElevation {
 fn scheduled_layers(
     input: &CompilerInput<'_>,
     admission: &preflight::Admission,
+    process: &[zones::Capture],
     cancel: &AtomicBool,
 ) -> Result<Vec<LayerElevation>, ManufacturingError> {
     let bed = input.intent.printer.build_envelope.min[2];
@@ -1635,11 +1662,29 @@ fn scheduled_layers(
             events.insert(position, stop);
         }
     }
-    refine_surface_schedule(
-        layer_schedule(bed, top, recipe.layer_height_mm, &events)?,
-        &admission.surface_fields,
-        cancel,
-    )
+    let geometry_event_count = events.len();
+    for zone in process.iter().filter_map(|capture| capture.zone) {
+        if zone.axis == 2 {
+            events.extend(zone.z_events());
+        }
+    }
+    let proposal = layer_schedule(bed, top, recipe.layer_height_mm, &events)
+        .and_then(|schedule| refine_surface_schedule(schedule, &admission.surface_fields, cancel))
+        .and_then(|schedule| {
+            if schedule.iter().any(|layer| !input.intent.printer.deposition_limits.admits(
+                recipe.bead_width_mm, layer.z - layer.lower_z)) {
+                return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
+                    "actual schedule intervals exceed the declared deposition height limits"));
+            }
+            Ok(schedule)
+        });
+    match proposal {
+        Err(failure) if failure.code == ManufacturingErrorCode::UnsupportedGeometry
+            && process.iter().any(|capture| capture.zone.is_some_and(|zone| zone.diaphragm.is_some())) =>
+                Err(zones::diaphragm::schedule_diagnostic(input, admission, process,
+                    &events[..geometry_event_count], failure, cancel)?),
+        result => result,
+    }
 }
 
 fn layer_schedule(
@@ -1749,7 +1794,7 @@ fn layer_schedule(
                 return Err(error(
                     ManufacturingErrorCode::UnsupportedGeometry,
                     format!(
-                        "native event at Z {z:.17e} above {previous:.17e} creates unresolved layer thickness {height:.17e} mm"
+                        "required layer event at Z {z:.17e} above {previous:.17e} creates unresolved layer thickness {height:.17e} mm"
                     ),
                 ));
             }
@@ -1854,24 +1899,22 @@ fn physical_neighbor(
 }
 
 fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
-    PlanarRegionCoverage {
-        section_area_mm2: 0.0,
-        source_section_area_mm2: 0.0,
-        surface_added_area_mm2: 0.0,
-        separator_area_mm2: 0.0,
-        process_interfaces: Vec::new(),
-        wall_area_mm2: 0.0,
-        bottom_skin_area_mm2: 0.0,
-        top_skin_area_mm2: 0.0,
-        solid_interior_area_mm2: 0.0,
-        sparse_interior_area_mm2: 0.0,
-        intentional_void_area_mm2: 0.0,
-        protected_hole_area_mm2: 0.0,
-        nominal_deposition_volume_mm3: 0.0,
-        process_regions: Vec::new(),
-        support_area_mm2: 0.0,
-        support_nominal_deposition_volume_mm3: 0.0,
-    }
+    PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: 0.0,
+    source_section_area_mm2: 0.0,
+    surface_added_area_mm2: 0.0,
+    separator_area_mm2: 0.0,
+    process_interfaces: Vec::new(),
+    wall_area_mm2: 0.0,
+    bottom_skin_area_mm2: 0.0,
+    top_skin_area_mm2: 0.0,
+    solid_interior_area_mm2: 0.0,
+    sparse_interior_area_mm2: 0.0,
+    intentional_void_area_mm2: 0.0,
+    protected_hole_area_mm2: 0.0,
+    nominal_deposition_volume_mm3: 0.0,
+    process_regions: Vec::new(),
+    support_area_mm2: 0.0,
+    support_nominal_deposition_volume_mm3: 0.0, }
 }
 
 fn span_at(sections: &[SectionSpan], index: u32) -> usize {

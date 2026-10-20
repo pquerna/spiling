@@ -311,7 +311,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
             spiling_contracts::PROJECT_FORMAT_CAPABILITY.into(),
             "source_face_surface_finish_v3".into(),
             "surface_image_assets_v1".into(),
-            "source_bound_process_v2".into(),
+            "source_bound_process_v3".into(),
         ],
         manufacturing_capabilities: vec![
             spiling_contracts::MANUFACTURING_SCHEMA_CAPABILITY.into(),
@@ -348,7 +348,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello
         .project_capabilities
-        .push("source_bound_process_v2".into());
+        .push("source_bound_process_v3".into());
     hello.geometry_capabilities.pop();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello

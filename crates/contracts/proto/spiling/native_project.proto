@@ -58,7 +58,14 @@ message SetSurfaceFinishEnabledRequest { uint32 base_revision = 1; uint32 layer_
 message WholeOwnedVolume {}
 message SourceBoxMm { Vec3 min = 1; Vec3 max = 2; }
 message ProcessSelector { oneof kind { WholeOwnedVolume whole_owned_volume = 1; SourceBoxMm source_box_mm = 2; } }
-enum ProcessInterfacePermission { PROCESS_INTERFACE_PERMISSION_UNSPECIFIED = 0; PROCESS_INTERFACE_PERMISSION_SEPARATOR_WALL = 1; }
+message SeparatorWallPermission {}
+message HorizontalDiaphragmPermission { double thickness_mm = 1; }
+message ProcessInterfacePermission {
+ oneof kind {
+  SeparatorWallPermission separator_wall = 1;
+  HorizontalDiaphragmPermission horizontal_diaphragm = 2;
+ }
+}
 message SparseFraction { double fraction = 1; }
 message ProcessValue { oneof kind { SparseFraction sparse_fraction = 1; } }
 message ProcessErase {}
