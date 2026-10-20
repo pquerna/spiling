@@ -29,22 +29,27 @@ G1 X2 Y6 Z2 E6 F600
 ";
 
 fn coverage() -> PlanarRegionCoverage {
-    PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: 16.0,
-    source_section_area_mm2: 16.0,
-    surface_added_area_mm2: 0.0,
-    separator_area_mm2: 0.0,
-    process_interfaces: Vec::new(),
-    wall_area_mm2: 16.0,
-    bottom_skin_area_mm2: 0.0,
-    top_skin_area_mm2: 0.0,
-    solid_interior_area_mm2: 0.0,
-    sparse_interior_area_mm2: 0.0,
-    intentional_void_area_mm2: 0.0,
-    protected_hole_area_mm2: 0.0,
-    nominal_deposition_volume_mm3: 0.0,
-    support_area_mm2: 0.0,
-    support_nominal_deposition_volume_mm3: 0.0,
-    process_regions: vec![], }
+    PlanarRegionCoverage {
+        skin_bridge_domains: Vec::new(),
+        process_diaphragms: Vec::new(),
+        diaphragm_area_mm2: 0.0,
+        section_area_mm2: 16.0,
+        source_section_area_mm2: 16.0,
+        surface_added_area_mm2: 0.0,
+        separator_area_mm2: 0.0,
+        process_interfaces: Vec::new(),
+        wall_area_mm2: 16.0,
+        bottom_skin_area_mm2: 0.0,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: 0.0,
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0,
+        process_regions: vec![],
+    }
 }
 fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan) {
     plan.native_geometry.certified_layer_count = plan.layers.len() as u32;
@@ -61,7 +66,11 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
             let area = ((path.bead_width_mm - height) * height
                 + std::f64::consts::PI * (height / 2.0).powi(2))
                 * r.flow_multiplier
-                * if layer.index == 0 { r.process.first_layer_flow_factor } else { 1.0 };
+                * if layer.index == 0 {
+                    r.process.first_layer_flow_factor
+                } else {
+                    1.0
+                };
             let volume: f64 = path
                 .points_mm
                 .windows(2)
@@ -110,8 +119,10 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 1.0,
             deposition_limits: DepositionLimits {
-                min_bead_width_mm: 0.000001, max_bead_width_mm: 1.0,
-                min_bead_height_mm: 0.000001, max_bead_height_mm: 1.0,
+                min_bead_width_mm: 0.000001,
+                max_bead_width_mm: 1.0,
+                min_bead_height_mm: 0.000001,
+                max_bead_height_mm: 1.0,
             },
             max_feed_mm_s: 100.0,
             max_volumetric_flow_mm3_s: 100.0,
@@ -716,7 +727,10 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
     assert_eq!(report.deposition_segments, 100_000);
     assert_eq!(report.travel_segments, 100_000);
     let (bytes, bounds) = sink.finish().unwrap();
-    assert_eq!(bytes.len(), REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 200_000);
+    assert_eq!(
+        bytes.len(),
+        REPLAY_HEADER_BYTES + REPLAY_RECORD_BYTES * 200_000
+    );
     assert!(
         bytes.capacity() <= spiling_contracts::manufacturing::MAX_REPLAY_DISPLAY_BYTES as usize
     );
@@ -799,7 +813,12 @@ fn complete_job_accounts_priming_separately_and_streams_lifecycle() {
         },
     };
     validate_replay_display(&bytes, &descriptor).unwrap();
-    for offset in [96 + 44, 96 + 46, 96 + REPLAY_RECORD_BYTES + 46, 96 + 11 * REPLAY_RECORD_BYTES + 16] {
+    for offset in [
+        96 + 44,
+        96 + 46,
+        96 + REPLAY_RECORD_BYTES + 46,
+        96 + 11 * REPLAY_RECORD_BYTES + 16,
+    ] {
         let mut corrupt = bytes.clone();
         corrupt[offset] ^= 1;
         let mut rebound = descriptor.clone();
@@ -1287,13 +1306,19 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
     for point in &mut plan.layers[0].paths[0].points_mm {
         point[1] += 9.0;
     }
-    plan.layers[0].paths.push(DepositionPath { kind: DepositionKind::Perimeter, owner: None, bead_width_mm: 1.0, physical_z_mm: [0.0, 1.0], points_mm: vec![
-        [7.0, 1.0, 1.0],
-        [9.0, 1.0, 1.0],
-        [9.0, 5.0, 1.0],
-        [7.0, 5.0, 1.0],
-        [7.0, 1.0, 1.0],
-    ] });
+    plan.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::Perimeter,
+        owner: None,
+        bead_width_mm: 1.0,
+        physical_z_mm: [0.0, 1.0],
+        points_mm: vec![
+            [7.0, 1.0, 1.0],
+            [9.0, 1.0, 1.0],
+            [9.0, 5.0, 1.0],
+            [7.0, 5.0, 1.0],
+            [7.0, 1.0, 1.0],
+        ],
+    });
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
@@ -1388,13 +1413,19 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     plan.layers.truncate(1);
     // The second perimeter's stored seam is distant; the previous end is near
     // its third vertex. The following open stroke should enter its far endpoint.
-    plan.layers[0].paths.push(DepositionPath { kind: DepositionKind::Perimeter, owner: None, bead_width_mm: 1.0, physical_z_mm: [0.0, 1.0], points_mm: vec![
-        [10.0, 10.0, 1.0],
-        [10.0, 2.0, 1.0],
-        [2.0, 2.0, 1.0],
-        [2.0, 10.0, 1.0],
-        [10.0, 10.0, 1.0],
-    ] });
+    plan.layers[0].paths.push(DepositionPath {
+        kind: DepositionKind::Perimeter,
+        owner: None,
+        bead_width_mm: 1.0,
+        physical_z_mm: [0.0, 1.0],
+        points_mm: vec![
+            [10.0, 10.0, 1.0],
+            [10.0, 2.0, 1.0],
+            [2.0, 2.0, 1.0],
+            [2.0, 10.0, 1.0],
+            [10.0, 10.0, 1.0],
+        ],
+    });
     plan.layers[0].paths[1].points_mm = vec![[20.0, 2.0, 1.0], [2.0, 2.0, 1.0]];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -1462,7 +1493,9 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     plan.layers[1].index = 2;
     plan.layers[1].height_mm = 0.25;
     plan.layers[1].lower_z_mm = 1.25;
-    for path in &mut plan.layers[1].paths { path.physical_z_mm = [1.25, 1.5]; }
+    for path in &mut plan.layers[1].paths {
+        path.physical_z_mm = [1.25, 1.5];
+    }
     plan.layers[1].section_z_mm = 1.375;
     plan.layers.insert(1, gap);
     refresh_volumes(&intent, &mut plan);
@@ -1572,14 +1605,18 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     intent.recipe.bead_width_mm = 0.45;
     intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 };
     intent.printer.deposition_limits = DepositionLimits {
-        min_bead_width_mm: 0.45, max_bead_width_mm: 0.45,
-        min_bead_height_mm: 0.000001, max_bead_height_mm: 0.3,
+        min_bead_width_mm: 0.45,
+        max_bead_width_mm: 0.45,
+        min_bead_height_mm: 0.000001,
+        max_bead_height_mm: 0.3,
     };
     plan.layers.truncate(1);
     plan.layers[0].paths.truncate(1);
     plan.layers[0].paths[0] = DepositionPath {
-        kind: DepositionKind::SolidFill, owner: None,
-        bead_width_mm: 0.45, physical_z_mm: [0.0, 0.1],
+        kind: DepositionKind::SolidFill,
+        owner: None,
+        bead_width_mm: 0.45,
+        physical_z_mm: [0.0, 0.1],
         points_mm: vec![[2.0, 2.0, 0.1], [6.0, 2.0, 0.1]],
     };
     plan.layers[0].lower_z_mm = 0.0;
@@ -1596,7 +1633,9 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         path.physical_z_mm = [layer.lower_z_mm, layer.z_mm];
         for point in &mut path.points_mm {
             point[2] = layer.z_mm;
-            if index == 1 { point[1] = 8.0; }
+            if index == 1 {
+                point[1] = 8.0;
+            }
         }
         if index == 2 {
             path.kind = DepositionKind::SparseFill;
@@ -1607,11 +1646,15 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     // The retained intermediate fine row also needs a genuine earlier anchor;
     // the later coarse row is never its support authority.
     let mut fine_anchor = plan.layers[0].paths[0].clone();
-    for point in &mut fine_anchor.points_mm { point[1] = 8.0; }
+    for point in &mut fine_anchor.points_mm {
+        point[1] = 8.0;
+    }
     plan.layers[0].paths.push(fine_anchor);
     intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
     plan.sparse_bands.push(SparseBandDecision {
-        first_layer: 1, last_layer: 2, owner: None,
+        first_layer: 1,
+        last_layer: 2,
+        owner: None,
         disposition: SparseBandDisposition::Combined,
     });
     refresh_volumes(&intent, &mut plan);
@@ -1626,8 +1669,10 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     let (bytes, bounds) = sink.finish().unwrap();
     let descriptor = packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report);
     validate_replay_display(&bytes, &descriptor).unwrap();
-    let sparse = bytes[REPLAY_HEADER_BYTES..].chunks_exact(REPLAY_RECORD_BYTES)
-        .find(|record| record[46] == 5).unwrap();
+    let sparse = bytes[REPLAY_HEADER_BYTES..]
+        .chunks_exact(REPLAY_RECORD_BYTES)
+        .find(|record| record[46] == 5)
+        .unwrap();
     assert_eq!(f64::from_le_bytes(sparse[48..56].try_into().unwrap()), 0.45);
     assert_eq!(f64::from_le_bytes(sparse[56..64].try_into().unwrap()), 0.1);
     assert_eq!(f64::from_le_bytes(sparse[64..72].try_into().unwrap()), 0.3);
@@ -1649,27 +1694,49 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     assert!(verify(&program, &changed_height, &intent, &cancel).is_err());
     let mut limited = intent.clone();
     limited.printer.max_volumetric_flow_mm3_s = 0.6;
-    assert!(limited.validate().is_ok(), "fine recipe remains within flow envelope");
-    assert!(verify(&program, &plan, &limited, &cancel).is_err(), "coarse emitted feed exceeds flow envelope");
+    assert!(
+        limited.validate().is_ok(),
+        "fine recipe remains within flow envelope"
+    );
+    assert!(
+        verify(&program, &plan, &limited, &cancel).is_err(),
+        "coarse emitted feed exceeds flow envelope"
+    );
     let mut blocked_landing = plan.clone();
-    for point in &mut blocked_landing.layers[0].paths[0].points_mm { point[1] = 20.0; }
+    for point in &mut blocked_landing.layers[0].paths[0].points_mm {
+        point[1] = 20.0;
+    }
     refresh_volumes(&intent, &mut blocked_landing);
     let unsupported = crate::backend::emit(&blocked_landing, &intent, &cancel).unwrap();
     assert!(verify(&unsupported, &blocked_landing, &intent, &cancel).is_err());
     use std::fmt::Write;
     let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in &bytes { write!(&mut hex, "{byte:02x}").unwrap(); }
-    let positions: Vec<[f64; 3]> = bytes[REPLAY_HEADER_BYTES..].chunks_exact(REPLAY_RECORD_BYTES)
-        .map(|record| std::array::from_fn(|axis|
-            f64::from_le_bytes(record[axis*8..axis*8+8].try_into().unwrap()))).collect();
+    for byte in &bytes {
+        write!(&mut hex, "{byte:02x}").unwrap();
+    }
+    let positions: Vec<[f64; 3]> = bytes[REPLAY_HEADER_BYTES..]
+        .chunks_exact(REPLAY_RECORD_BYTES)
+        .map(|record| {
+            std::array::from_fn(|axis| {
+                f64::from_le_bytes(record[axis * 8..axis * 8 + 8].try_into().unwrap())
+            })
+        })
+        .collect();
     let fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,
         "data":hex, "actual_positions":positions, "program":program });
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/protocol/replay-sparse.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/protocol/replay-sparse.json"
+    );
     if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
         std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
     } else {
-        let committed: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(committed, fixture, "combined sparse replay ABI golden drift");
+        let committed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            committed, fixture,
+            "combined sparse replay ABI golden drift"
+        );
     }
     let mut regional = plan.clone();
     let mut regional_intent = intent.clone();
@@ -1679,31 +1746,42 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         layer.region_coverage.sparse_interior_area_mm2 = 16.0;
         layer.region_coverage.intentional_void_area_mm2 = 12.8;
         layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
-            area_mm2:16.0,fraction:0.2,contributions:vec![],
+            area_mm2: 16.0,
+            fraction: 0.2,
+            contributions: vec![],
         }];
     }
-    let owner = Some(DepositionOwner::Regional { region_index:0 });
+    let owner = Some(DepositionOwner::Regional { region_index: 0 });
     regional.sparse_bands[0].owner = owner;
     regional.layers[2].paths[0].owner = owner;
     regional.layers[2].paths[0].kind = DepositionKind::Bridge;
     let check = |mut candidate: NormalizedPrintPlan| {
-        refresh_volumes(&regional_intent,&mut candidate);
-        let bytes = crate::backend::emit(&candidate,&regional_intent,&cancel).unwrap();
-        verify(&bytes,&candidate,&regional_intent,&cancel)
+        refresh_volumes(&regional_intent, &mut candidate);
+        let bytes = crate::backend::emit(&candidate, &regional_intent, &cancel).unwrap();
+        verify(&bytes, &candidate, &regional_intent, &cancel)
     };
-    assert!(check(regional.clone()).is_err(), "supported coarse row cannot borrow a Bridge label");
+    assert!(
+        check(regional.clone()).is_err(),
+        "supported coarse row cannot borrow a Bridge label"
+    );
     // A genuine gap uses the band's BASE, not the retained intermediate fine
     // row at y=8 or a fabricated terminal-previous sparse owner.
     regional.layers[0].paths[0].points_mm[1][0] = 3.0;
     let mut right = regional.layers[0].paths[0].clone();
-    right.points_mm = vec![[5.0,2.0,0.1],[6.0,2.0,0.1]];
+    right.points_mm = vec![[5.0, 2.0, 0.1], [6.0, 2.0, 0.1]];
     regional.layers[0].paths.push(right);
     check(regional.clone()).unwrap();
     let mut ordinary = regional.clone();
     ordinary.layers[2].paths[0].kind = DepositionKind::SparseFill;
-    assert!(check(ordinary).is_err(), "coarse ordinary row cannot conceal a genuine base gap");
+    assert!(
+        check(ordinary).is_err(),
+        "coarse ordinary row cannot conceal a genuine base gap"
+    );
     regional.layers[0].paths.pop();
-    assert!(check(regional).is_err(), "coarse Bridge requires both actual direct base anchors");
+    assert!(
+        check(regional).is_err(),
+        "coarse Bridge requires both actual direct base anchors"
+    );
 }
 
 #[test]
@@ -1718,72 +1796,121 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
         operation_id: ProcessOperationId::new(1).unwrap(),
     };
     let region = ProcessRegionCoverage {
-        area_mm2: 4.0, fraction: 0.2,
+        area_mm2: 4.0,
+        fraction: 0.2,
         contributions: vec![ProcessRegionContribution {
-            occurrence_id, definition_id: definition_id.clone(), provenance: Some(provenance),
+            occurrence_id,
+            definition_id: definition_id.clone(),
+            provenance: Some(provenance),
         }],
     };
     let mut other = region.clone();
     other.fraction = 0.4;
     let interface = ProcessInterfaceCoverage {
-        occurrence_id, definition_id, provenance, region_indices: [0, 1],
-        axis: 0, coordinate_mm: 3.0, thickness_mm: 0.45, bonding_overlap_mm: 0.225,
-        area_mm2: 1.5975, centerlines_mm: vec![[[3.0, 1.225], [3.0, 4.775]]],
+        occurrence_id,
+        definition_id,
+        provenance,
+        region_indices: [0, 1],
+        axis: 0,
+        coordinate_mm: 3.0,
+        thickness_mm: 0.45,
+        bonding_overlap_mm: 0.225,
+        area_mm2: 1.5975,
+        centerlines_mm: vec![[[3.0, 1.225], [3.0, 4.775]]],
         endpoint_bonds: vec![[
-            ProcessEndpointBond::Wall { wall_segment_mm: [[1.0, 1.0], [5.0, 1.0]] },
-            ProcessEndpointBond::Wall { wall_segment_mm: [[1.0, 5.0], [5.0, 5.0]] },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[1.0, 1.0], [5.0, 1.0]],
+            },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[1.0, 5.0], [5.0, 5.0]],
+            },
         ]],
     };
     let template = plan.layers[0].clone();
-    plan.layers = (0..4).map(|index| {
-        let mut layer = template.clone();
-        layer.index = index;
-        layer.lower_z_mm = f64::from(index) * 0.1;
-        layer.z_mm = f64::from(index + 1) * 0.1;
-        layer.height_mm = 0.1;
-        layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
-        layer.region_coverage.process_regions = vec![region.clone(), other.clone()];
-        layer.region_coverage.process_interfaces = vec![interface.clone()];
-        layer.paths = vec![DepositionPath {
-            kind: DepositionKind::SeparatorWall, owner: None, bead_width_mm: 0.45,
-            physical_z_mm: [layer.lower_z_mm, layer.z_mm],
-            points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
-        }];
-        layer
-    }).collect();
+    plan.layers = (0..4)
+        .map(|index| {
+            let mut layer = template.clone();
+            layer.index = index;
+            layer.lower_z_mm = f64::from(index) * 0.1;
+            layer.z_mm = f64::from(index + 1) * 0.1;
+            layer.height_mm = 0.1;
+            layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
+            layer.region_coverage.process_regions = vec![region.clone(), other.clone()];
+            layer.region_coverage.process_interfaces = vec![interface.clone()];
+            layer.paths = vec![DepositionPath {
+                kind: DepositionKind::SeparatorWall,
+                owner: None,
+                bead_width_mm: 0.45,
+                physical_z_mm: [layer.lower_z_mm, layer.z_mm],
+                points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
+            }];
+            layer
+        })
+        .collect();
     // Effective region identity is preserved while terminal table indices move.
     plan.layers[3].region_coverage.process_regions.swap(0, 1);
     plan.layers[3].region_coverage.process_interfaces[0].region_indices = [1, 0];
     plan.layers[3].paths.push(DepositionPath {
         kind: DepositionKind::SparseFill,
         owner: Some(DepositionOwner::Regional { region_index: 1 }),
-        bead_width_mm: 0.45, physical_z_mm: [0.1, 0.4],
+        bead_width_mm: 0.45,
+        physical_z_mm: [0.1, 0.4],
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
     });
     plan.sparse_bands = vec![SparseBandDecision {
-        first_layer: 1, last_layer: 3,
+        first_layer: 1,
+        last_layer: 3,
         owner: Some(DepositionOwner::Regional { region_index: 1 }),
         disposition: SparseBandDisposition::Combined,
     }];
     let cancel = AtomicBool::new(false);
-    let contact = |plan: &NormalizedPrintPlan| interfaces::deferred_sparse_contact(
-        plan, 1, &plan.layers[1].region_coverage.process_interfaces[0], 0, &mut 0, &cancel);
-    assert!(contact(&plan).unwrap(), "strict .025mm nominal inner-core margin");
+    let contact = |plan: &NormalizedPrintPlan| {
+        interfaces::deferred_sparse_contact(
+            plan,
+            1,
+            &plan.layers[1].region_coverage.process_interfaces[0],
+            0,
+            &mut 0,
+            &cancel,
+        )
+    };
+    assert!(
+        contact(&plan).unwrap(),
+        "strict .025mm nominal inner-core margin"
+    );
     interfaces::verify_earlier_fine_paths(
-        &plan, 1, &intent.recipe, &mut 0, &mut crate::planner::support::AnchorWorkspace::default(), &cancel).unwrap();
+        &plan,
+        1,
+        &intent.recipe,
+        &mut 0,
+        &mut crate::planner::support::AnchorWorkspace::default(),
+        &cancel,
+    )
+    .unwrap();
     let mut future_only = plan.clone();
     future_only.layers[0].paths.clear();
     assert!(contact(&future_only).unwrap(), "eventual bond still exists");
-    assert!(interfaces::verify_earlier_fine_paths(
-        &future_only, 1, &intent.recipe, &mut 0, &mut crate::planner::support::AnchorWorkspace::default(), &cancel).is_err(),
-        "future coarse deposition cannot support an earlier fine wall");
+    assert!(
+        interfaces::verify_earlier_fine_paths(
+            &future_only,
+            1,
+            &intent.recipe,
+            &mut 0,
+            &mut crate::planner::support::AnchorWorkspace::default(),
+            &cancel
+        )
+        .is_err(),
+        "future coarse deposition cannot support an earlier fine wall"
+    );
     for mutation in 0..6 {
         let mut broken = plan.clone();
         match mutation {
             0 => broken.layers[3].paths[1].physical_z_mm[0] = 0.11,
             1 => broken.layers[2].region_coverage.process_regions[0].fraction = 0.3,
-            2 => broken.layers[3].region_coverage.process_regions[1].contributions[0].occurrence_id =
-                OccurrenceId::new(2).unwrap(),
+            2 => {
+                broken.layers[3].region_coverage.process_regions[1].contributions[0].occurrence_id =
+                    OccurrenceId::new(2).unwrap()
+            }
             3 => broken.layers[3].paths[1].points_mm[1][0] = 2.5,
             4 => {
                 // Preserve a contiguous .3mm band but make one fine interval
@@ -1792,17 +1919,24 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
                 broken.layers[1].height_mm = 0.05;
                 broken.layers[1].section_z_mm = 0.125;
                 broken.layers[1].paths[0].physical_z_mm = [0.1, 0.15];
-                for point in &mut broken.layers[1].paths[0].points_mm { point[2] = 0.15; }
+                for point in &mut broken.layers[1].paths[0].points_mm {
+                    point[2] = 0.15;
+                }
                 broken.layers[2].lower_z_mm = 0.15;
                 broken.layers[2].z_mm = 0.3;
                 broken.layers[2].height_mm = 0.15;
                 broken.layers[2].section_z_mm = 0.225;
                 broken.layers[2].paths[0].physical_z_mm = [0.15, 0.3];
-                for point in &mut broken.layers[2].paths[0].points_mm { point[2] = 0.3; }
+                for point in &mut broken.layers[2].paths[0].points_mm {
+                    point[2] = 0.3;
+                }
             }
             _ => broken.layers[3].paths[1].bead_width_mm = 0.3,
         }
-        assert!(!contact(&broken).unwrap_or(false), "broken full-height/core/source bond {mutation}");
+        assert!(
+            !contact(&broken).unwrap_or(false),
+            "broken full-height/core/source bond {mutation}"
+        );
     }
     // Insert a positive nominal end interval without changing the combined
     // physical extent or any XY/source witness. XYZ6 has no guaranteed vertical
@@ -1813,17 +1947,27 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
     tiny.height_mm = tiny.z_mm - tiny.lower_z_mm;
     tiny.section_z_mm = tiny.lower_z_mm;
     tiny.paths[0].physical_z_mm = [tiny.lower_z_mm, tiny.z_mm];
-    for point in &mut tiny.paths[0].points_mm { point[2] = tiny.z_mm; }
+    for point in &mut tiny.paths[0].points_mm {
+        point[2] = tiny.z_mm;
+    }
     tiny_end.layers[1].lower_z_mm = tiny.z_mm;
     tiny_end.layers[1].paths[0].physical_z_mm[0] = tiny.z_mm;
     tiny_end.layers.insert(1, tiny);
-    for (index, layer) in tiny_end.layers.iter_mut().enumerate() { layer.index = index as u32; }
+    for (index, layer) in tiny_end.layers.iter_mut().enumerate() {
+        layer.index = index as u32;
+    }
     tiny_end.sparse_bands[0].last_layer = 4;
     let interval = [tiny_end.layers[1].lower_z_mm, tiny_end.layers[1].z_mm];
-    assert!(interval[0] < interval[1], "nominal interval is strictly positive");
+    assert!(
+        interval[0] < interval[1],
+        "nominal interval is strictly positive"
+    );
     let inner = program_coordinates::project_xyz6_bead_inner_height_mm(interval).unwrap();
     assert!(inner[0] >= inner[1], "no guaranteed XYZ6 vertical interior");
-    assert!(!contact(&tiny_end).unwrap(), "tiny end interval cannot borrow outer-hull overlap");
+    assert!(
+        !contact(&tiny_end).unwrap(),
+        "tiny end interval cannot borrow outer-hull overlap"
+    );
 }
 
 #[test]
@@ -1844,14 +1988,23 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         operation_id: ProcessOperationId::new(1).unwrap(),
     };
     let interface = ProcessInterfaceCoverage {
-        occurrence_id, definition_id: definition_id.clone(), provenance,
-        region_indices: [0, 1], axis: 0, coordinate_mm: 3.0,
-        thickness_mm: 0.45, bonding_overlap_mm: 0.225,
+        occurrence_id,
+        definition_id: definition_id.clone(),
+        provenance,
+        region_indices: [0, 1],
+        axis: 0,
+        coordinate_mm: 3.0,
+        thickness_mm: 0.45,
+        bonding_overlap_mm: 0.225,
         area_mm2: 0.45 * (end_y - start_y),
         centerlines_mm: vec![[[3.0, start_y], [3.0, end_y]]],
         endpoint_bonds: vec![[
-            ProcessEndpointBond::Wall { wall_segment_mm: [[1.0, 1.0], [5.0, 1.0]] },
-            ProcessEndpointBond::Wall { wall_segment_mm: [[1.0, 5.0], [5.0, 5.0]] },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[1.0, 1.0], [5.0, 1.0]],
+            },
+            ProcessEndpointBond::Wall {
+                wall_segment_mm: [[1.0, 5.0], [5.0, 5.0]],
+            },
         ]],
     };
     for layer in &mut plan.layers {
@@ -1860,23 +2013,32 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         layer.height_mm = 0.1;
         layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
         layer.paths = vec![DepositionPath {
-            kind: DepositionKind::Perimeter, owner: None, bead_width_mm: 0.45,
+            kind: DepositionKind::Perimeter,
+            owner: None,
+            bead_width_mm: 0.45,
             physical_z_mm: [layer.lower_z_mm, layer.z_mm],
             points_mm: vec![
-                [1.0, 1.0, layer.z_mm], [5.0, 1.0, layer.z_mm],
-                [5.0, 5.0, layer.z_mm], [1.0, 5.0, layer.z_mm], [1.0, 1.0, layer.z_mm],
+                [1.0, 1.0, layer.z_mm],
+                [5.0, 1.0, layer.z_mm],
+                [5.0, 5.0, layer.z_mm],
+                [1.0, 5.0, layer.z_mm],
+                [1.0, 1.0, layer.z_mm],
             ],
         }];
     }
     // The lower separator anchor is actual earlier deposition, not a future
     // fill or a synthetic declared band. Keep its explicit closed traversal.
     plan.layers[0].paths.push(DepositionPath {
-        kind: DepositionKind::Perimeter, owner: None, bead_width_mm: 0.45,
+        kind: DepositionKind::Perimeter,
+        owner: None,
+        bead_width_mm: 0.45,
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
     });
     plan.layers[0].paths.push(DepositionPath {
-        kind: DepositionKind::SolidFill, owner: None, bead_width_mm: 0.45,
+        kind: DepositionKind::SolidFill,
+        owner: None,
+        bead_width_mm: 0.45,
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[1.0, 3.0, 0.1], [5.0, 3.0, 0.1]],
     });
@@ -1884,34 +2046,46 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     fine.paths.extend([
         DepositionPath {
             kind: DepositionKind::TopSkin,
-            owner: Some(DepositionOwner::MandatorySkin { skin: ProcessSkinKind::TopSkin }),
-            bead_width_mm: 0.45, physical_z_mm: [0.1, 0.2],
+            owner: Some(DepositionOwner::MandatorySkin {
+                skin: ProcessSkinKind::TopSkin,
+            }),
+            bead_width_mm: 0.45,
+            physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
         },
         DepositionPath {
-            kind: DepositionKind::SeparatorWall, owner: None,
-            bead_width_mm: 0.45, physical_z_mm: [0.1, 0.2],
+            kind: DepositionKind::SeparatorWall,
+            owner: None,
+            bead_width_mm: 0.45,
+            physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 0 }),
-            bead_width_mm: 0.45, physical_z_mm: [0.1, 0.2],
+            bead_width_mm: 0.45,
+            physical_z_mm: [0.1, 0.2],
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 1 }),
-            bead_width_mm: 0.45, physical_z_mm: [0.1, 0.2],
+            bead_width_mm: 0.45,
+            physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.225, 3.0, 0.2], [4.775, 3.0, 0.2]],
         },
     ]);
-    fine.region_coverage.process_regions = [0.2, 0.4].map(|fraction| ProcessRegionCoverage {
-        area_mm2: 4.0, fraction,
-        contributions: vec![ProcessRegionContribution {
-            occurrence_id, definition_id: definition_id.clone(), provenance: None,
-        }],
-    }).to_vec();
+    fine.region_coverage.process_regions = [0.2, 0.4]
+        .map(|fraction| ProcessRegionCoverage {
+            area_mm2: 4.0,
+            fraction,
+            contributions: vec![ProcessRegionContribution {
+                occurrence_id,
+                definition_id: definition_id.clone(),
+                provenance: None,
+            }],
+        })
+        .to_vec();
     fine.region_coverage.separator_area_mm2 = interface.area_mm2;
     fine.region_coverage.top_skin_area_mm2 = 0.5;
     fine.region_coverage.sparse_interior_area_mm2 = 8.0;
@@ -1919,7 +2093,10 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     fine.region_coverage.wall_area_mm2 = 16.0 - 8.0 - 0.5 - interface.area_mm2;
     fine.region_coverage.process_interfaces = vec![interface];
     plan.process_resolution = vec![ProcessRegionResolution {
-        occurrence_id, definition_id, provenance, status: ProcessRegionStatus::Applied,
+        occurrence_id,
+        definition_id,
+        provenance,
+        status: ProcessRegionStatus::Applied,
     }];
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
@@ -1927,20 +2104,34 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
     let actual_touch = project_xyz6_coordinate_mm(start_y).unwrap();
-    assert!(actual_touch > start_y, "raw/XYZ6 mixing would invent a positive overlap");
+    assert!(
+        actual_touch > start_y,
+        "raw/XYZ6 mixing would invent a positive overlap"
+    );
     // Both mutations still match newly emitted bytes. Admission must therefore
     // distinguish projected tangency from actual longitudinal ownership.
     for intrusion in [0.000_001, 0.001] {
         let mut overlapping = plan.clone();
-        let path = overlapping.layers[1].paths.iter_mut()
-            .find(|path| path.kind == DepositionKind::TopSkin).unwrap();
-        let endpoint = path.points_mm.iter_mut().max_by(|a, b| a[1].total_cmp(&b[1])).unwrap();
+        let path = overlapping.layers[1]
+            .paths
+            .iter_mut()
+            .find(|path| path.kind == DepositionKind::TopSkin)
+            .unwrap();
+        let endpoint = path
+            .points_mm
+            .iter_mut()
+            .max_by(|a, b| a[1].total_cmp(&b[1]))
+            .unwrap();
         endpoint[1] = start_y + intrusion;
         refresh_volumes(&intent, &mut overlapping);
         let changed_program = crate::backend::emit(&overlapping, &intent, &cancel).unwrap();
         let error = verify(&changed_program, &overlapping, &intent, &cancel).unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
-        assert!(error.message.contains("mandatory skin/Bridge duplicates longitudinal separator ownership"));
+        assert!(
+            error
+                .message
+                .contains("mandatory skin/Bridge duplicates longitudinal separator ownership")
+        );
     }
 }
 
@@ -1956,7 +2147,9 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
     following.region_coverage.sparse_interior_area_mm2 = 16.0;
     following.region_coverage.intentional_void_area_mm2 = 12.8;
     following.region_coverage.process_regions = vec![ProcessRegionCoverage {
-        area_mm2: 16.0, fraction: 0.2, contributions: vec![],
+        area_mm2: 16.0,
+        fraction: 0.2,
+        contributions: vec![],
     }];
     let cancel = AtomicBool::new(false);
     let check = |intent: &ManufacturingIntent, mut plan: NormalizedPrintPlan| {
@@ -1965,22 +2158,42 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
         // affected-landing consumer directly without inventing a Combined band.
         let program = crate::backend::emit(&plan, intent, &cancel).unwrap();
         verify(&program, &plan, intent, &cancel).unwrap();
-        interfaces::verify_earlier_fine_paths(&plan, 1, &intent.recipe, &mut 0,
-            &mut crate::planner::support::AnchorWorkspace::default(), &cancel)
+        interfaces::verify_earlier_fine_paths(
+            &plan,
+            1,
+            &intent.recipe,
+            &mut 0,
+            &mut crate::planner::support::AnchorWorkspace::default(),
+            &cancel,
+        )
     };
     check(&intent, plan.clone()).unwrap();
     let mut mislabeled = plan.clone();
     mislabeled.layers[1].paths[0].kind = DepositionKind::SparseFill;
-    assert!(check(&intent, mislabeled).is_err(), "ordinary row cannot hide a genuine lower gap");
+    assert!(
+        check(&intent, mislabeled).is_err(),
+        "ordinary row cannot hide a genuine lower gap"
+    );
     let mut fully_supported = plan.clone();
     fully_supported.layers[1].paths[0].points_mm = vec![[2.0, 2.0, 2.0], [2.0, 2.25, 2.0]];
-    assert!(check(&intent, fully_supported).is_err(), "Bridge must have a genuine bounded span");
+    assert!(
+        check(&intent, fully_supported).is_err(),
+        "Bridge must have a genuine bounded span"
+    );
     let mut no_anchors = plan.clone();
     for path in &mut no_anchors.layers[0].paths {
-        for point in &mut path.points_mm { point[0] += 40.0; }
+        for point in &mut path.points_mm {
+            point[0] += 40.0;
+        }
     }
-    assert!(check(&intent, no_anchors).is_err(), "actual immediate-prior anchors are mandatory");
+    assert!(
+        check(&intent, no_anchors).is_err(),
+        "actual immediate-prior anchors are mandatory"
+    );
     let mut too_short = intent.clone();
     too_short.recipe.process.max_bridge_span_mm = 0.25;
-    assert!(check(&too_short, plan).is_err(), "actual span must meet explicit bridge limit");
+    assert!(
+        check(&too_short, plan).is_err(),
+        "actual span must meet explicit bridge limit"
+    );
 }

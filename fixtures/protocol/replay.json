@@ -36,7 +36,7 @@
           0.4
         ]
       },
-      "bundle_hash": "3e1ab99f2de13c7f67ed955b9ac54abfd65871f64364ea8d8438c2d334ffe9ca",
+      "bundle_hash": "7af6a92242ac2a751ad94b7523b8522a4e7463952ae00a6a3a21b48a5949ef7f",
       "deposition_count": 2,
       "event_count": 4,
       "frame": "right_handed_millimetres",
@@ -47,7 +47,7 @@
       "program_hash": "838590a34ec225bb1f3c29c532619937fd32c2bc931fde7cec3544e353af49e4",
       "schema_version": 5,
       "travel_count": 2,
-      "verifier_version": "7"
+      "verifier_version": "8"
     },
     "resource": {
       "media_type": "application/x-spiling-replay-motion",

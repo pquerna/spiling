@@ -3993,16 +3993,17 @@ pub(super) fn prepare_slab_sample(
             })?,
     );
     let source_retained_bytes = crate::MAX_PREPARED_SECTION_BYTES - section_bytes;
-    // Reserve geometric headroom for independent native Boolean, physical G
-    // and actual world-affine arithmetic errors. This is a proposal, not an
-    // aggregate-error certificate: all downstream metric gates remain intact.
-    // Narrow the FIRST query uniformly, never switch precision by sampled
-    // topology or replace an already accepted Hole branch afterward.
-    let maximum_chord_error_mm = spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
+    // Keep the established first uniform sampling proposal. Its actual native
+    // chord bound, not this proposal, is charged with complete 3D reference
+    // displacement in the same NativeSection. Normalization may use the
+    // declared sampling ledger; actual placed/world and native material gates
+    // remain independent and may still refuse the resulting candidate.
+    let sampling_chord_error_mm =
+        spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM * 0.5;
     let section = source.section_for_query(
         &crate::section::SectionQuery {
             plane,
-            maximum_chord_error_mm,
+            maximum_chord_error_mm: sampling_chord_error_mm,
             maximum_plane_error_mm,
         },
         cancel,
@@ -4013,7 +4014,7 @@ pub(super) fn prepare_slab_sample(
     // returned planner material; simplifying only a proof polygon would diverge.
     let section = crate::section::simplify_section_reference(
         section,
-        maximum_chord_error_mm,
+        spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
         section_bytes as u32,
         work,
         cancel,

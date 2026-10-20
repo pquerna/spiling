@@ -23,15 +23,32 @@ pub(super) struct RasterCandidate {
     pub(super) paths: Vec<DepositionPath>,
     pub(super) whole_rows: Vec<DepositionPath>,
     pub(super) process_interfaces: Vec<ProcessInterfaceCoverage>,
+    pub(super) skin_bridge_domains: Vec<SkinBridgeDomain>,
 }
 
-fn authored_component_axis(candidate: &RasterCandidate, index: u32, recipe: &PlanarPrintRecipe) -> region::HatchAxis {
-    let top = !candidate.paths.is_empty() && candidate.paths.iter().all(|path|
-        path.owner == Some(DepositionOwner::MandatorySkin { skin: ProcessSkinKind::TopSkin }));
-    region::HatchAxis::for_policy(if top { recipe.top_skin_axis } else { recipe.rectilinear_axis }, index)
+fn authored_component_axis(
+    candidate: &RasterCandidate,
+    index: u32,
+    recipe: &PlanarPrintRecipe,
+) -> region::HatchAxis {
+    let top = !candidate.paths.is_empty()
+        && candidate.paths.iter().all(|path| {
+            path.owner
+                == Some(DepositionOwner::MandatorySkin {
+                    skin: ProcessSkinKind::TopSkin,
+                })
+        });
+    region::HatchAxis::for_policy(
+        if top {
+            recipe.top_skin_axis
+        } else {
+            recipe.rectilinear_axis
+        },
+        index,
+    )
 }
 
-fn component_admission<'a>(
+pub(super) fn component_admission<'a>(
     (candidate, axis, budget, contact_bridge): (
         &mut RasterCandidate,
         region::HatchAxis,
@@ -45,6 +62,51 @@ fn component_admission<'a>(
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<super::classification::ComponentAnchorAdmission, ManufacturingError> {
+    for path in &mut candidate.paths {
+        let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) = path.owner else {
+            continue;
+        };
+        let [a, transition, b] = path.points_mm.as_slice() else {
+            return Err(error(
+                ManufacturingErrorCode::InvalidSpecification,
+                "mixed Bridge lost its sole transition",
+            ));
+        };
+        let (a, transition, b) = (*a, *transition, *b);
+        let along = if a[0] == b[0] { 1 } else { 0 };
+        let t = (transition[along] - a[along]) / (b[along] - a[along]);
+        anchors.set_budget(budget);
+        let mut endpoint = None;
+        for gap in anchors.gaps(
+            AnchorCandidate {
+                endpoints_mm: [a, b],
+                bead_width_mm: path.bead_width_mm,
+            },
+            previous
+                .clone()
+                .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+            std::iter::empty(),
+            work,
+            cancel,
+        )? {
+            if gap.start < t && t < gap.end {
+                let parameter = if skin_first && gap.left {
+                    Some(gap.start)
+                } else if !skin_first && gap.right {
+                    Some(gap.end)
+                } else {
+                    None
+                };
+                endpoint = parameter.map(|parameter| {
+                    std::array::from_fn(|axis| a[axis] + (b[axis] - a[axis]) * parameter)
+                });
+                break;
+            }
+        }
+        if let Some(endpoint) = endpoint {
+            path.points_mm[if skin_first { 0 } else { 2 }] = endpoint;
+        }
+    }
     if !candidate.whole_rows.is_empty() {
         let owned = candidate
             .paths
@@ -94,14 +156,16 @@ fn component_admission<'a>(
         if path.kind == DepositionKind::Perimeter {
             continue;
         }
-        if path.points_mm.len() != 2 {
+        if path.points_mm.len() != 2
+            && !matches!(path.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
+        {
             return Err(error(
                 ManufacturingErrorCode::InvalidSpecification,
                 "component hatch is not a straight stroke",
             ));
         }
         let a = path.points_mm[0];
-        let b = path.points_mm[1];
+        let b = *path.points_mm.last().expect("validated component");
         let length = (b[0] - a[0]).hypot(b[1] - a[1]);
         anchors.set_budget(query_budget);
         let mut bridge = false;
@@ -111,8 +175,12 @@ fn component_admission<'a>(
                 endpoints_mm: [a, b],
                 bead_width_mm: path.bead_width_mm,
             },
-            previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-            contacts.clone().filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
+            previous
+                .clone()
+                .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+            contacts
+                .clone()
+                .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
             work,
             cancel,
         )? {
@@ -299,7 +367,8 @@ pub(super) fn realize(
     } = *input;
     let width = recipe.bead_width_mm;
     let mut demands: Vec<Demand> = Vec::new();
-    let retained = native_points;
+    let mut retained = native_points;
+    let mut constructed_points = 0usize;
     let mut work = 0usize;
     // Deposited-stroke comparisons are not polygon Boolean work.
     let mut anchor_work = 0usize;
@@ -338,7 +407,8 @@ pub(super) fn realize(
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
                 let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                    let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
+                    let contact_bridge =
+                        axis != authored_component_axis(candidate, index as u32, recipe);
                     component_admission(
                         (
                             candidate,
@@ -360,7 +430,13 @@ pub(super) fn realize(
                     } else {
                         None
                     };
-                let mut candidate = raster(index, axis, &mut staged_segments, 0, recovery)?;
+                let mut candidate = raster(
+                    index,
+                    axis,
+                    &mut staged_segments,
+                    constructed_points,
+                    recovery,
+                )?;
                 let joined = coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
@@ -382,6 +458,12 @@ pub(super) fn realize(
                         // before it can become the next layer's anchor authority.
                         layer.paths = candidate.paths;
                         layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                        replace_skin_bridge_domains(
+                            &mut layer.region_coverage,
+                            candidate.skin_bridge_domains,
+                            &mut retained,
+                            &mut constructed_points,
+                        )?;
                     }
                     continue;
                 }
@@ -408,6 +490,12 @@ pub(super) fn realize(
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths = candidate.paths;
                     layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                    replace_skin_bridge_domains(
+                        &mut layer.region_coverage,
+                        candidate.skin_bridge_domains,
+                        &mut retained,
+                        &mut constructed_points,
+                    )?;
                     interface_bound = true;
                     joined_layers[index] = joined || component_bridges;
                     admission = other;
@@ -424,21 +512,49 @@ pub(super) fn realize(
         // Permanent construction and its first upper landing may never be
         // repaired by temporary support, even when unrelated support is enabled.
         for path in &layer.paths {
-            let Some(DepositionOwner::Regional { region_index }) = path.owner else { continue; };
-            let plate_owned = layer.region_coverage.process_diaphragms.iter()
+            let Some(DepositionOwner::Regional { region_index }) = path.owner else {
+                continue;
+            };
+            let plate_owned = layer
+                .region_coverage
+                .process_diaphragms
+                .iter()
                 .any(|plate| plate.region_index == region_index);
-            let landing_owned = prior[index - 1].region_coverage.process_diaphragms.iter()
+            let landing_owned = prior[index - 1]
+                .region_coverage
+                .process_diaphragms
+                .iter()
                 .filter(|plate| plate.physical_z_mm[1] == layer.lower_z_mm)
-                .any(|plate| layer.region_coverage.process_regions.get(usize::from(region_index))
-                    .is_some_and(|region| region.contributions.iter().any(|source|
-                        source.occurrence_id == plate.occurrence_id && source.definition_id == plate.definition_id)));
+                .any(|plate| {
+                    layer
+                        .region_coverage
+                        .process_regions
+                        .get(usize::from(region_index))
+                        .is_some_and(|region| {
+                            region.contributions.iter().any(|source| {
+                                source.occurrence_id == plate.occurrence_id
+                                    && source.definition_id == plate.definition_id
+                            })
+                        })
+                });
             if plate_owned || landing_owned {
-                let proof = strokes::analyze(std::slice::from_ref(path), previous.clone(),
-                    std::iter::empty(), recipe, &mut anchors, &mut anchor_work, cancel)?;
+                let proof = strokes::analyze(
+                    std::slice::from_ref(path),
+                    previous.clone(),
+                    std::iter::empty(),
+                    recipe,
+                    &mut anchors,
+                    &mut anchor_work,
+                    cancel,
+                )?;
                 if proof.failure.is_some() {
-                    return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
-                        format!("UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
-                            layer.index, layer.z_mm)));
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        format!(
+                            "UnsupportedInterface: permanent diaphragm or upper landing at layer {} Z={} mm lacks actual lower anchors; temporary support is not authorized",
+                            layer.index, layer.z_mm
+                        ),
+                    ));
                 }
             }
         }
@@ -606,7 +722,6 @@ pub(super) fn realize(
             }
         }
         let Some(top) = contact_top else {
-            
             return Err(error(
                 ManufacturingErrorCode::UnsupportedGeometry,
                 format!(
@@ -756,7 +871,7 @@ pub(super) fn realize(
             let previous = &layers[demand.target - 1];
             let nearest_a = nearest_stroke([a[0], a[1]], previous.paths.iter(), &mut work, cancel)?;
             let nearest_b = nearest_stroke([b[0], b[1]], previous.paths.iter(), &mut work, cancel)?;
-            
+
             return Err(error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
                 format!(
@@ -860,7 +975,7 @@ pub(super) fn realize(
         }
     }
     drop(nominal);
-    let retained = base_retained;
+    let mut retained = base_retained;
     // Support centers stay half a bead inside the clipped support region. This
     // gives the nominal bead, not only its centerline, the declared XY clearance.
     for i in 0..layers.len() {
@@ -948,9 +1063,11 @@ pub(super) fn realize(
         layer.region_coverage.support_nominal_deposition_volume_mm3 = paths
             .iter()
             .map(|path| {
-                path.points_mm.windows(2)
+                path.points_mm
+                    .windows(2)
                     .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]))
-                    .sum::<f64>() * bead_area(path, layer.index, recipe)
+                    .sum::<f64>()
+                    * bead_area(path, layer.index, recipe)
             })
             .sum();
         object_start[i] = paths.len();
@@ -962,7 +1079,7 @@ pub(super) fn realize(
     for (index, path, kind) in original_bridge_roles {
         layers[index].paths[object_start[index] + path].kind = kind;
     }
-    let retained_regions = MAX_DEPOSITION_SEGMENTS as usize
+    let mut retained_regions = MAX_DEPOSITION_SEGMENTS as usize
         - remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
     // Raster staging must include these live support/protected domains without
     // counting the caller's object/cache reservation twice.
@@ -990,7 +1107,8 @@ pub(super) fn realize(
             let mut staged_segments = without_old;
             anchors.set_budget(0);
             let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
+                let contact_bridge =
+                    axis != authored_component_axis(candidate, index as u32, recipe);
                 component_admission(
                     (
                         candidate,
@@ -1010,7 +1128,7 @@ pub(super) fn realize(
                 index,
                 authored_axis,
                 &mut staged_segments,
-                retained_support_points,
+                retained_support_points + constructed_points,
                 Some(&mut check_component),
             )?;
             coalesce_bridge_rows(
@@ -1029,12 +1147,26 @@ pub(super) fn realize(
             if !finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)? {
                 layer.paths = candidate.paths;
                 layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
                 return Err(super::bonds::unresolved(layer));
             }
             *segments = without_old + path_segments(&candidate.paths);
             layer.paths.truncate(begin);
             layer.paths.extend(candidate.paths);
             layer.region_coverage.process_interfaces = candidate.process_interfaces;
+            replace_skin_bridge_domains(
+                &mut layer.region_coverage,
+                candidate.skin_bridge_domains,
+                &mut retained,
+                &mut constructed_points,
+            )?;
+            retained_regions = MAX_DEPOSITION_SEGMENTS as usize
+                - remaining_geometry_budget(
+                    retained,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected],
+                )?;
             anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
         }
         let mut admission = strokes::analyze(
@@ -1053,7 +1185,8 @@ pub(super) fn realize(
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
                 let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                    let contact_bridge = axis != authored_component_axis(candidate, index as u32, recipe);
+                    let contact_bridge =
+                        axis != authored_component_axis(candidate, index as u32, recipe);
                     component_admission(
                         (
                             candidate,
@@ -1079,7 +1212,7 @@ pub(super) fn realize(
                     index,
                     axis,
                     &mut staged_segments,
-                    retained_support_points,
+                    retained_support_points + constructed_points,
                     recovery,
                 )?;
                 coalesce_bridge_rows(
@@ -1113,6 +1246,19 @@ pub(super) fn realize(
                     layer.paths.truncate(begin);
                     layer.paths.extend(candidate.paths);
                     layer.region_coverage.process_interfaces = candidate.process_interfaces;
+                    replace_skin_bridge_domains(
+                        &mut layer.region_coverage,
+                        candidate.skin_bridge_domains,
+                        &mut retained,
+                        &mut constructed_points,
+                    )?;
+                    retained_regions = MAX_DEPOSITION_SEGMENTS as usize
+                        - remaining_geometry_budget(
+                            retained,
+                            &support_regions,
+                            &interfaces,
+                            &[&protected],
+                        )?;
                     admission = other;
                     break;
                 }
@@ -1250,6 +1396,7 @@ fn finalize_layer_interface(
         return Ok(true);
     }
     let mut candidate = RasterCandidate {
+        skin_bridge_domains: std::mem::take(&mut layer.region_coverage.skin_bridge_domains),
         paths: std::mem::take(&mut layer.paths),
         whole_rows: Vec::new(),
         process_interfaces: std::mem::take(&mut layer.region_coverage.process_interfaces),
@@ -1257,7 +1404,40 @@ fn finalize_layer_interface(
     let result = finalize(index, &mut candidate, segments, work);
     layer.paths = candidate.paths;
     layer.region_coverage.process_interfaces = candidate.process_interfaces;
+    layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
     result
+}
+
+fn replace_skin_bridge_domains(
+    coverage: &mut PlanarRegionCoverage,
+    domains: Vec<SkinBridgeDomain>,
+    retained: &mut usize,
+    constructed: &mut usize,
+) -> Result<(), ManufacturingError> {
+    let old = super::bonds::skin_bridge_points(&coverage.skin_bridge_domains);
+    let new = super::bonds::skin_bridge_points(&domains);
+    let revised = retained
+        .checked_sub(old)
+        .and_then(|n| n.checked_add(new))
+        .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "retained mixed bridge domain budget exceeded",
+            )
+        })?;
+    *constructed = constructed
+        .checked_sub(old)
+        .and_then(|n| n.checked_add(new))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "mixed bridge domain accounting mismatch",
+            )
+        })?;
+    *retained = revised;
+    coverage.skin_bridge_domains = domains;
+    Ok(())
 }
 
 fn support_role(kind: DepositionKind) -> bool {
@@ -1324,11 +1504,24 @@ fn coalesce_bridge_rows<'a>(
     let mut joined = false;
     for axis in [context.axis, context.axis.orthogonal()] {
         let fixed = usize::from(axis == region::HatchAxis::X);
-        if !candidate.whole_rows.iter().any(|row| row.points_mm.len() == 2
-            && row.points_mm[0][fixed] == row.points_mm[1][fixed]) { continue; }
-        joined |= coalesce_bridge_rows_on_axis(candidate, BridgeRowContext {
-            axis, retained_points: context.retained_points, recipe: context.recipe,
-        }, previous.clone(), contacts.clone(), anchors, work, cancel)?;
+        if !candidate.whole_rows.iter().any(|row| {
+            row.points_mm.len() == 2 && row.points_mm[0][fixed] == row.points_mm[1][fixed]
+        }) {
+            continue;
+        }
+        joined |= coalesce_bridge_rows_on_axis(
+            candidate,
+            BridgeRowContext {
+                axis,
+                retained_points: context.retained_points,
+                recipe: context.recipe,
+            },
+            previous.clone(),
+            contacts.clone(),
+            anchors,
+            work,
+            cancel,
+        )?;
     }
     Ok(joined)
 }
@@ -1440,8 +1633,9 @@ fn coalesce_bridge_rows_on_axis<'a>(
         }
     }
     let mut joined = false;
-    for mut row in candidate.whole_rows.extract_if(.., |row|
-        row.points_mm.len() == 2 && row.points_mm[0][fixed] == row.points_mm[1][fixed]) {
+    for mut row in candidate.whole_rows.extract_if(.., |row| {
+        row.points_mm.len() == 2 && row.points_mm[0][fixed] == row.points_mm[1][fixed]
+    }) {
         check_cancel(cancel)?;
         let key = grid(row.points_mm[0][fixed])?;
         let lo = grid(row.points_mm[0][along])?.min(grid(row.points_mm[1][along])?);
@@ -1497,7 +1691,8 @@ fn coalesce_bridge_rows_on_axis<'a>(
                 if (ownership[index] == Ownership::Frozen
                     || candidate.paths[index].bead_width_mm != row.bead_width_mm
                     || candidate.paths[index].physical_z_mm != row.physical_z_mm)
-                    && stop > lo && start < hi
+                    && stop > lo
+                    && start < hi
                 {
                     // Retain frozen rows as required barriers so a neighbor
                     // cannot consume their geometry as an unrequired extension.
@@ -1610,8 +1805,15 @@ fn coalesce_bridge_rows_on_axis<'a>(
                 let mut start = ((required_start - extension_start) / length).clamp(0.0, 1.0);
                 let mut end = ((required_end - extension_start) / length).clamp(0.0, 1.0);
                 let mut anchored = true;
-                let gaps =
-                    anchors.gaps(whole, previous.clone().filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]), std::iter::empty(), work, cancel)?;
+                let gaps = anchors.gaps(
+                    whole,
+                    previous
+                        .clone()
+                        .filter(|lower| lower.physical_z_mm[1] == row.physical_z_mm[0]),
+                    std::iter::empty(),
+                    work,
+                    cancel,
+                )?;
                 for gap in gaps {
                     if gap.start <= start && start < gap.end {
                         anchored &= gap.left;
@@ -1938,6 +2140,7 @@ mod tests {
     #[test]
     fn genuine_bridge_rows_join_existing_ownership_pieces_without_extra_fill() {
         let mut candidate = RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             paths: vec![
                 row(DepositionKind::SolidFill, 1.0, 3.0, 0.8),
                 row(DepositionKind::BottomSkin, 3.0, 7.0, 0.8),
@@ -2015,6 +2218,7 @@ mod tests {
                     }
                 }
                 let mut candidate = RasterCandidate {
+                    skin_bridge_domains: Vec::new(),
                     paths,
                     whole_rows: vec![row(Bridge, 1.0, 9.0, 0.8)],
                     process_interfaces: Vec::new(),
@@ -2072,6 +2276,7 @@ mod tests {
     #[test]
     fn bridge_row_candidates_cannot_fill_a_missing_sparse_piece() {
         let mut candidate = RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             paths: vec![
                 row(DepositionKind::SparseFill, 1.0, 3.0, 0.8),
                 row(DepositionKind::SparseFill, 7.0, 9.0, 0.8),
@@ -2138,6 +2343,7 @@ mod tests {
                 ),
             ];
             let mut candidate = RasterCandidate {
+                skin_bridge_domains: Vec::new(),
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 0.5, 9.0, 0.8)],
                 process_interfaces: Vec::new(),
@@ -2238,6 +2444,7 @@ mod tests {
                 })
                 .collect();
             let mut candidate = RasterCandidate {
+                skin_bridge_domains: Vec::new(),
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 1.0, 10.0, 0.8)],
                 process_interfaces: Vec::new(),
@@ -2362,6 +2569,7 @@ mod tests {
                         orient(row(DepositionKind::SparseFill, right_start, 6.8, 0.8)),
                     ];
                     let mut candidate = RasterCandidate {
+                        skin_bridge_domains: Vec::new(),
                         paths: required.clone(),
                         whole_rows: vec![orient(row(DepositionKind::Bridge, 1.0, 9.0, 0.8))],
                         process_interfaces: Vec::new(),
@@ -2450,6 +2658,7 @@ mod tests {
         for missing_anchor in [false, true] {
             let previous = prior.iter().filter(|_| !missing_anchor);
             let mut candidate = RasterCandidate {
+                skin_bridge_domains: Vec::new(),
                 whole_rows: region::bridge_rows(&fill, &[], &required, &layer, &mut 0, &cancel)
                     .unwrap(),
                 paths: required.clone(),
@@ -2562,7 +2771,15 @@ mod tests {
             &cancel,
         )
         .unwrap()
-        .paths(0.4, 0.0, region::HatchAxis::X, region::HatchAxis::X, &recipe, &mut 0, &cancel)
+        .paths(
+            0.4,
+            0.0,
+            region::HatchAxis::X,
+            region::HatchAxis::X,
+            &recipe,
+            &mut 0,
+            &cancel,
+        )
         .unwrap()
         .0;
         let upcoming = ClassifiedRegions::new(
@@ -2574,7 +2791,15 @@ mod tests {
             &cancel,
         )
         .unwrap()
-        .paths(0.8, 0.4, region::HatchAxis::Y, region::HatchAxis::Y, &recipe, &mut 0, &cancel)
+        .paths(
+            0.8,
+            0.4,
+            region::HatchAxis::Y,
+            region::HatchAxis::Y,
+            &recipe,
+            &mut 0,
+            &cancel,
+        )
         .unwrap()
         .0
         .into_iter()
@@ -2618,6 +2843,7 @@ mod tests {
             row(DepositionKind::TopSkin, 6.0, 7.0, 0.8),
         ];
         let mut candidate = RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             whole_rows: region::bridge_rows(
                 &fill,
                 &[],

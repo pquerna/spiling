@@ -127,17 +127,21 @@ impl SegmentIndex {
             }
             work.charge(1, cancel)?;
             let s = &rings[rj];
-            if segment_gap(
+            let separation = segment_gap(
                 r.points[edge],
                 r.points[(edge + 1) % r.points.len()],
                 s.points[other],
                 s.points[(other + 1) % s.points.len()],
-            ) <= margin
-            {
+            );
+            if separation <= margin {
                 return Err(error(
                     GeometryErrorCode::AnalysisIndeterminate,
                     format!(
-                        "native union boundary cycle pair {ri}/{rj} has nonincident features meeting native/rounding tubes"
+                        "native union boundary cycle pair {ri}/{rj} has nonincident features meeting native/rounding tubes; edges {edge}/{other}, separation {separation:.17e}, margin {margin:.17e}, first {:?}->{:?}, second {:?}->{:?}",
+                        r.points[edge],
+                        r.points[(edge + 1) % r.points.len()],
+                        s.points[other],
+                        s.points[(other + 1) % s.points.len()],
                     ),
                 ));
             }

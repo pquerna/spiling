@@ -38,7 +38,7 @@ pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
 const MAX_BOOLEAN_PAIRS: usize = 128_000_000;
 // Native interval operations and polygon Boolean pairs are independent resources.
-const MAX_NATIVE_WORK_UNITS: u64 = 128_000_000;
+const MAX_NATIVE_WORK_UNITS: u64 = 512_000_000;
 
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
@@ -299,7 +299,9 @@ pub(crate) fn plan(
                     invariant &= field.is_z_invariant(slab_start, slab_end)?;
                 }
             }
-            invariant &= process_captures.iter().filter_map(|capture| capture.zone)
+            invariant &= process_captures
+                .iter()
+                .filter_map(|capture| capture.zone)
                 .all(|zone| zone.is_z_invariant(slab_start, slab_end));
             if !invariant {
                 break;
@@ -457,7 +459,7 @@ pub(crate) fn plan(
         {
             retained_section_bytes = retained_section_bytes.saturating_add(next_bytes);
         }
-        
+
         sections.push(SectionSpan {
             start: index,
             end,
@@ -627,7 +629,13 @@ pub(crate) fn plan(
             });
             continue;
         }
-        let next_key = (current, below, above, (z - elevation.lower_z).to_bits(), top_axis);
+        let next_key = (
+            current,
+            below,
+            above,
+            (z - elevation.lower_z).to_bits(),
+            top_axis,
+        );
         if key != Some(next_key) {
             // Drop the prior classification before allocating its replacement.
             // The current wall layout survives skin-key changes, not span changes.
@@ -716,17 +724,36 @@ pub(crate) fn plan(
                     cancel,
                 )?,
             );
-            for plate in &classified.as_ref().expect("classified process regions").coverage.process_diaphragms {
-                let owned = &classified.as_ref().expect("classified process regions").interiors[usize::from(plate.region_index)];
+            for plate in &classified
+                .as_ref()
+                .expect("classified process regions")
+                .coverage
+                .process_diaphragms
+            {
+                let owned = &classified
+                    .as_ref()
+                    .expect("classified process regions")
+                    .interiors[usize::from(plate.region_index)];
                 let section = &sections[current];
                 if !combined::inner_material_admits(
-                    section, &owned.domain, &owned.coverage, plate.physical_z_mm,
-                    input.intent, native_coverage.material_proof.sources(),
-                    retained_support_native_bytes.saturating_add(native::output_bytes(&sections, &Vec::new(), retained_section_bytes)),
-                    &mut admission.geometry_work, cancel,
+                    section,
+                    &owned.domain,
+                    &owned.coverage,
+                    plate.physical_z_mm,
+                    input.intent,
+                    native_coverage.material_proof.sources(),
+                    retained_support_native_bytes.saturating_add(native::output_bytes(
+                        &sections,
+                        &Vec::new(),
+                        retained_section_bytes,
+                    )),
+                    &mut admission.geometry_work,
+                    cancel,
                 )? {
-                    return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
-                        "UnsupportedInterface: complete permanent plate lacks native full-height inner material authority"));
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "UnsupportedInterface: complete permanent plate lacks native full-height inner material authority",
+                    ));
                 }
             }
             key = Some(next_key);
@@ -829,8 +856,15 @@ pub(crate) fn plan(
             let classified = classified
                 .as_ref()
                 .expect("region classification initialized");
-            let (paths, proposed) =
-                classified.paths(z, elevation.lower_z, axis, top_axis, recipe, &mut template_segments, cancel)?;
+            let (paths, proposed) = classified.paths(
+                z,
+                elevation.lower_z,
+                axis,
+                top_axis,
+                recipe,
+                &mut template_segments,
+                cancel,
+            )?;
             let base = skin_retained_points(retained_points, &neighborhoods, &[])?
                 + classified.retained_points()
                 + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
@@ -1035,6 +1069,7 @@ pub(crate) fn plan(
                 recipe,
             };
             let recovering_components = recovery.is_some();
+            let mut skin_bridge_domains = Vec::new();
             let paths = if let Some(anchors) = recovery {
                 let query_points = skin_query_retained_points(0, &[&lower, &upper])?;
                 let mut check_component =
@@ -1049,6 +1084,7 @@ pub(crate) fn plan(
                     };
                 classified.paths_with_bridge_recovery(
                     &hatch_layer,
+                    &sections[current].process_domains,
                     segments,
                     |scratch, work| {
                         boolean::charge(neighborhoods.work_mut(), work)?;
@@ -1061,6 +1097,7 @@ pub(crate) fn plan(
                         )
                     },
                     &mut check_component,
+                    &mut skin_bridge_domains,
                     cancel,
                 )?
             } else {
@@ -1079,7 +1116,8 @@ pub(crate) fn plan(
             let base =
                 skin_retained_points(live_retained_points, &neighborhoods, &[&lower, &upper])?
                     + classified.retained_points()
-                    + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
+                    + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
+                    + bonds::skin_bridge_points(&skin_bridge_domains);
             let mut admit = classification::fixed_point_budget(base);
             admit(
                 bonds::interface_bytes(&classified.coverage.process_interfaces)
@@ -1094,6 +1132,7 @@ pub(crate) fn plan(
                 classified.whole_rows(&paths, &hatch_layer, segments, cancel)?
             };
             Ok(support::RasterCandidate {
+                skin_bridge_domains,
                 paths,
                 whole_rows,
                 process_interfaces,
@@ -1118,6 +1157,7 @@ pub(crate) fn plan(
         |index, candidate, segments, work| {
             let current = span_at(&sections, index as u32);
             let base = support_native_points
+                + bonds::skin_bridge_points(&candidate.skin_bridge_domains)
                 + candidate
                     .paths
                     .iter()
@@ -1139,8 +1179,10 @@ pub(crate) fn plan(
     )?;
     let coordinate_scratch = skin_retained_points(retained_points, &neighborhoods, &[])?;
     zones::diaphragm::construct_coordinates(
-        &mut layers, classification::fixed_point_budget(coordinate_scratch),
-        neighborhoods.work_mut(), cancel,
+        &mut layers,
+        classification::fixed_point_budget(coordinate_scratch),
+        neighborhoods.work_mut(),
+        cancel,
     )?;
     support::object_volumes(&mut layers, recipe);
     for layer in &mut layers {
@@ -1227,8 +1269,11 @@ pub(crate) fn plan(
         &mut neighborhoods,
         retained_points,
         &mut admission.geometry_work,
-        retained_support_native_bytes.saturating_add(
-            native::output_bytes(&sections, &Vec::new(), retained_section_bytes)),
+        retained_support_native_bytes.saturating_add(native::output_bytes(
+            &sections,
+            &Vec::new(),
+            retained_section_bytes,
+        )),
         native_coverage.material_proof.sources(),
         cancel,
     )?;
@@ -1671,18 +1716,36 @@ fn scheduled_layers(
     let proposal = layer_schedule(bed, top, recipe.layer_height_mm, &events)
         .and_then(|schedule| refine_surface_schedule(schedule, &admission.surface_fields, cancel))
         .and_then(|schedule| {
-            if schedule.iter().any(|layer| !input.intent.printer.deposition_limits.admits(
-                recipe.bead_width_mm, layer.z - layer.lower_z)) {
-                return Err(error(ManufacturingErrorCode::UnsupportedGeometry,
-                    "actual schedule intervals exceed the declared deposition height limits"));
+            if schedule.iter().any(|layer| {
+                !input
+                    .intent
+                    .printer
+                    .deposition_limits
+                    .admits(recipe.bead_width_mm, layer.z - layer.lower_z)
+            }) {
+                return Err(error(
+                    ManufacturingErrorCode::UnsupportedGeometry,
+                    "actual schedule intervals exceed the declared deposition height limits",
+                ));
             }
             Ok(schedule)
         });
     match proposal {
-        Err(failure) if failure.code == ManufacturingErrorCode::UnsupportedGeometry
-            && process.iter().any(|capture| capture.zone.is_some_and(|zone| zone.diaphragm.is_some())) =>
-                Err(zones::diaphragm::schedule_diagnostic(input, admission, process,
-                    &events[..geometry_event_count], failure, cancel)?),
+        Err(failure)
+            if failure.code == ManufacturingErrorCode::UnsupportedGeometry
+                && process
+                    .iter()
+                    .any(|capture| capture.zone.is_some_and(|zone| zone.diaphragm.is_some())) =>
+        {
+            Err(zones::diaphragm::schedule_diagnostic(
+                input,
+                admission,
+                process,
+                &events[..geometry_event_count],
+                failure,
+                cancel,
+            )?)
+        }
         result => result,
     }
 }
@@ -1899,22 +1962,27 @@ fn physical_neighbor(
 }
 
 fn empty_coverage(_fraction: f64) -> PlanarRegionCoverage {
-    PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: 0.0,
-    source_section_area_mm2: 0.0,
-    surface_added_area_mm2: 0.0,
-    separator_area_mm2: 0.0,
-    process_interfaces: Vec::new(),
-    wall_area_mm2: 0.0,
-    bottom_skin_area_mm2: 0.0,
-    top_skin_area_mm2: 0.0,
-    solid_interior_area_mm2: 0.0,
-    sparse_interior_area_mm2: 0.0,
-    intentional_void_area_mm2: 0.0,
-    protected_hole_area_mm2: 0.0,
-    nominal_deposition_volume_mm3: 0.0,
-    process_regions: Vec::new(),
-    support_area_mm2: 0.0,
-    support_nominal_deposition_volume_mm3: 0.0, }
+    PlanarRegionCoverage {
+        skin_bridge_domains: Vec::new(),
+        process_diaphragms: Vec::new(),
+        diaphragm_area_mm2: 0.0,
+        section_area_mm2: 0.0,
+        source_section_area_mm2: 0.0,
+        surface_added_area_mm2: 0.0,
+        separator_area_mm2: 0.0,
+        process_interfaces: Vec::new(),
+        wall_area_mm2: 0.0,
+        bottom_skin_area_mm2: 0.0,
+        top_skin_area_mm2: 0.0,
+        solid_interior_area_mm2: 0.0,
+        sparse_interior_area_mm2: 0.0,
+        intentional_void_area_mm2: 0.0,
+        protected_hole_area_mm2: 0.0,
+        nominal_deposition_volume_mm3: 0.0,
+        process_regions: Vec::new(),
+        support_area_mm2: 0.0,
+        support_nominal_deposition_volume_mm3: 0.0,
+    }
 }
 
 fn span_at(sections: &[SectionSpan], index: u32) -> usize {

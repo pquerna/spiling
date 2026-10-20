@@ -172,7 +172,7 @@
     "seam_policy": {
       "kind": "nearest"
     },
-    "top_skin_axis": "alternating_xy",
-    "rectilinear_axis": "x"
+    "rectilinear_axis": "x",
+    "top_skin_axis": "alternating_xy"
   }
 }

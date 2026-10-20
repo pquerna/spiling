@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2026 Spiling contributors
+SPDX-License-Identifier: OSL-3.0
+Licensed under the Open Software License version 3.0
+
+Original software-only ordinary rounded-housing evaluation intent. Fine 0.10 mm schedule, ordinary fill and top skin both use AlternatingXY; physical printer/process settings match the separate fixed-axis H1 control. Declared deposition limits are not physical qualification.

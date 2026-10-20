@@ -21,10 +21,29 @@ pub(super) fn interface_bytes(interfaces: &Vec<ProcessInterfaceCoverage>) -> usi
             .sum::<usize>()
 }
 
+pub(super) fn skin_bridge_points(domains: &Vec<SkinBridgeDomain>) -> usize {
+    (domains.capacity() * std::mem::size_of::<SkinBridgeDomain>()
+        + domains
+            .iter()
+            .map(SkinBridgeDomain::allocated_bytes)
+            .sum::<usize>())
+    .div_ceil(std::mem::size_of::<geo::Coord<f64>>())
+}
+
 pub(super) fn coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
     interface_bytes(&coverage.process_interfaces)
         + coverage.process_diaphragms.capacity() * std::mem::size_of::<ProcessDiaphragmCoverage>()
-        + coverage.process_diaphragms.iter().map(ProcessDiaphragmCoverage::allocated_bytes).sum::<usize>()
+        + coverage
+            .process_diaphragms
+            .iter()
+            .map(ProcessDiaphragmCoverage::allocated_bytes)
+            .sum::<usize>()
+        + coverage.skin_bridge_domains.capacity() * std::mem::size_of::<SkinBridgeDomain>()
+        + coverage
+            .skin_bridge_domains
+            .iter()
+            .map(SkinBridgeDomain::allocated_bytes)
+            .sum::<usize>()
         + coverage.process_regions.capacity() * std::mem::size_of::<ProcessRegionCoverage>()
         + coverage
             .process_regions
@@ -225,9 +244,12 @@ fn terminal(
         for edge in paths[index].points_mm.windows(2) {
             check_cancel(cancel)?;
             boolean::charge(work, 1)?;
-            if let Some(point) =
-                support::inward_bond_endpoint(endpoint, other, [edge[0], edge[1]], (width + paths[index].bead_width_mm) * 0.5)?
-            {
+            if let Some(point) = support::inward_bond_endpoint(
+                endpoint,
+                other,
+                [edge[0], edge[1]],
+                (width + paths[index].bead_width_mm) * 0.5,
+            )? {
                 return Ok(Some((
                     point,
                     ProcessEndpointBond::Wall {
@@ -245,7 +267,13 @@ fn terminal(
         let stroke = [skin.points_mm[0], skin.points_mm[1]];
         check_cancel(cancel)?;
         boolean::charge(work, 1)?;
-        let Some(point) = support::inward_bond_endpoint(endpoint, other, stroke, (width + skin.bead_width_mm) * 0.5)? else {
+        let Some(point) = support::inward_bond_endpoint(
+            endpoint,
+            other,
+            stroke,
+            (width + skin.bead_width_mm) * 0.5,
+        )?
+        else {
             continue;
         };
         for &wall in walls {
@@ -253,7 +281,11 @@ fn terminal(
                 for &skin_end in &stroke {
                     check_cancel(cancel)?;
                     boolean::charge(work, 1)?;
-                    if support::endpoint_bond(skin_end, [edge[0], edge[1]], (skin.bead_width_mm + paths[wall].bead_width_mm) * 0.5)? {
+                    if support::endpoint_bond(
+                        skin_end,
+                        [edge[0], edge[1]],
+                        (skin.bead_width_mm + paths[wall].bead_width_mm) * 0.5,
+                    )? {
                         return Ok(Some((point,ProcessEndpointBond::Skin{
                             skin_kind:skin.owner.and_then(DepositionOwner::skin_kind).ok_or_else(||invalid("surrounding stroke lost immutable mandatory-skin ownership"))?,
                             process_kind:skin.kind,
@@ -268,7 +300,6 @@ fn terminal(
 }
 
 pub(super) fn unresolved(layer: &PrintLayer) -> ManufacturingError {
-    
     let endpoint = layer
         .region_coverage
         .process_interfaces

@@ -85,15 +85,24 @@ coverage and oriented material-side checks remain independent authority.
 
 [`section/reference.rs`](../../crates/geometry/src/section/reference.rs) can erase
 sampled crossing cycles only with complete bidirectional 3D Hausdorff bounds,
-cumulatively inside the original chord allowance and without changing the plane
-bound or swallowing another boundary. This is geometric correspondence, not
-Jordan or material authority. Common slab preparation passes the same reference
-to source analysis, world-candidate proof and planner conversion.
+cumulatively inside the declared sampling ledger and without changing the plane
+bound or swallowing another boundary. Each cut's changed edges must also be
+proved clear of the retained same-loop edges; adjacent edges may share only
+their genuine endpoint, never overlap or backtrack. Untouched raw crossings
+need not disappear in one proposal. These checks do not replace the final
+actual-world Jordan or native material proof. Common slab preparation passes
+the same reference to source analysis, world-candidate proof and planner conversion.
 
-Material queries reserve half the frozen chord allowance for independent Boolean,
-source-realization and world-placement error. Raw inspection retains the full
-proposal. Sampling and reference normalization use the same narrowed cap; no
-downstream consumer substitutes a differently sampled Hole.
+The first uniform material sample keeps its established 0.0025 mm proposal,
+half the declared sampling allowance. Reference normalization may use the
+existing 0.005 mm declared sampling ledger: actual original chord plus the sum
+of complete bidirectional 3D cut bounds is charged in the same `NativeSection`.
+This does not guarantee spare world-placement room. Placed sigma times actual
+source chord plus actual arithmetic must still be at most 0.005 mm; the separate
+0.0001 mm plane, 0.00001 mm Boolean and complete actual-G/native-shape 0.1 mm
+gates remain unchanged, as do byte and cumulative work admissions. These are
+distinct certificates, not a claim that all contributors sum to 0.005 mm.
+No topology-conditioned precision retry or differently sampled Hole is allowed.
 
 [`analysis::section_regularity`](../../crates/geometry/src/analysis/mod.rs) uses
 the import-certified native bounds only to exclude empty cuts; literal critical

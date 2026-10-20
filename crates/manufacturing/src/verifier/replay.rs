@@ -134,7 +134,8 @@ impl ReplaySink {
         self.bytes.extend_from_slice(&line.to_le_bytes());
         self.bytes.extend_from_slice(&layer.to_le_bytes());
         self.bytes.push(kind);
-        self.bytes.push(u8::from(self.events != 0) | if association.is_some() { 2 } else { 0 });
+        self.bytes
+            .push(u8::from(self.events != 0) | if association.is_some() { 2 } else { 0 });
         let (width, physical_z, owner) = match association {
             Some(association) => {
                 let physical_z = association.physical_z;
@@ -142,6 +143,11 @@ impl ReplaySink {
                     None => u32::MAX,
                     Some(DepositionOwner::MandatorySkin { .. }) => u32::MAX - 1,
                     Some(DepositionOwner::Regional { region_index }) => u32::from(region_index),
+                    Some(DepositionOwner::RegionalSkinBridge { .. }) => {
+                        return Err(super::failed(
+                            "mixed path ownership must be projected to each actual deposition segment",
+                        ));
+                    }
                 };
                 (association.width, physical_z, owner)
             }

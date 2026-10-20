@@ -240,7 +240,17 @@ struct PathSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
     type Value = DepositionPath;
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        d.deserialize_struct("DepositionPath", &["kind", "owner", "bead_width_mm", "physical_z_mm", "points_mm"], self)
+        d.deserialize_struct(
+            "DepositionPath",
+            &[
+                "kind",
+                "owner",
+                "bead_width_mm",
+                "physical_z_mm",
+                "points_mm",
+            ],
+            self,
+        )
     }
 }
 impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
@@ -291,8 +301,10 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let path = DepositionPath {
             kind: kind.ok_or_else(|| serde::de::Error::missing_field("kind"))?,
             owner: owner.ok_or_else(|| serde::de::Error::missing_field("owner"))?,
-            bead_width_mm: bead_width_mm.ok_or_else(|| serde::de::Error::missing_field("bead_width_mm"))?,
-            physical_z_mm: physical_z_mm.ok_or_else(|| serde::de::Error::missing_field("physical_z_mm"))?,
+            bead_width_mm: bead_width_mm
+                .ok_or_else(|| serde::de::Error::missing_field("bead_width_mm"))?,
+            physical_z_mm: physical_z_mm
+                .ok_or_else(|| serde::de::Error::missing_field("physical_z_mm"))?,
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
         };
         path.validate_owner().map_err(serde::de::Error::custom)?;
@@ -564,18 +576,27 @@ pub struct DepositionLimits {
 }
 impl DepositionLimits {
     pub fn validate(&self) -> Result<(), ManufacturingError> {
-        positive(&[self.min_bead_width_mm, self.max_bead_width_mm,
-            self.min_bead_height_mm, self.max_bead_height_mm])?;
+        positive(&[
+            self.min_bead_width_mm,
+            self.max_bead_width_mm,
+            self.min_bead_height_mm,
+            self.max_bead_height_mm,
+        ])?;
         if self.min_bead_width_mm > self.max_bead_width_mm
-            || self.min_bead_height_mm > self.max_bead_height_mm {
+            || self.min_bead_height_mm > self.max_bead_height_mm
+        {
             return Err(invalid("invalid deposition limits"));
         }
         Ok(())
     }
     pub fn admits(&self, width: f64, height: f64) -> bool {
-        width.is_finite() && height.is_finite() && height <= width
-            && width >= self.min_bead_width_mm && width <= self.max_bead_width_mm
-            && height >= self.min_bead_height_mm && height <= self.max_bead_height_mm
+        width.is_finite()
+            && height.is_finite()
+            && height <= width
+            && width >= self.min_bead_width_mm
+            && width <= self.max_bead_width_mm
+            && height >= self.min_bead_height_mm
+            && height <= self.max_bead_height_mm
     }
 }
 
@@ -783,8 +804,13 @@ impl ManufacturingIntent {
         let p = &self.printer;
         let r = &self.recipe;
         r.process.validate_printer(p)?;
-        if !p.deposition_limits.admits(r.bead_width_mm, r.layer_height_mm) {
-            return Err(invalid("nominal recipe deposition exceeds printer envelope"));
+        if !p
+            .deposition_limits
+            .admits(r.bead_width_mm, r.layer_height_mm)
+        {
+            return Err(invalid(
+                "nominal recipe deposition exceeds printer envelope",
+            ));
         }
         if !matches!(r.supports, SupportPolicy::Disabled) && !p.capabilities.generated_supports {
             return Err(invalid(
@@ -881,14 +907,25 @@ pub enum DepositionKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DepositionOwner {
-    MandatorySkin { skin: ProcessSkinKind },
-    Regional { region_index: u16 },
+    MandatorySkin {
+        skin: ProcessSkinKind,
+    },
+    Regional {
+        region_index: u16,
+    },
+    /// One straight continuous Bridge. Its middle path point is the sole
+    /// Regional/MandatorySkin transition; no other ownership crossing is admitted.
+    RegionalSkinBridge {
+        region_index: u16,
+        skin: ProcessSkinKind,
+        skin_first: bool,
+    },
 }
 impl DepositionOwner {
     pub const fn skin_kind(self) -> Option<ProcessSkinKind> {
         match self {
             Self::MandatorySkin { skin } => Some(skin),
-            Self::Regional { .. } => None,
+            Self::Regional { .. } | Self::RegionalSkinBridge { .. } => None,
         }
     }
 }
@@ -925,8 +962,19 @@ impl DepositionPath {
     }
     fn validate_owner(&self) -> Result<(), ManufacturingError> {
         positive(&[self.bead_width_mm, self.height_mm()])?;
-        if !self.physical_z_mm.iter().all(|z| z.is_finite()) || self.height_mm() > self.bead_width_mm {
+        if !self.physical_z_mm.iter().all(|z| z.is_finite())
+            || self.height_mm() > self.bead_width_mm
+        {
             return Err(invalid("path requires finite positive bead dimensions"));
+        }
+        if self.kind == DepositionKind::Bridge
+            && !matches!(self.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
+            && self.points_mm.first() != self.points_mm.last()
+            && self.points_mm.len() != 2
+        {
+            return Err(invalid(
+                "ordinary open Bridge rows require two points; a transition requires explicit mixed ownership",
+            ));
         }
         let valid = match self.kind {
             DepositionKind::BottomSkin => {
@@ -951,6 +999,34 @@ impl DepositionPath {
             return Err(invalid(
                 "deposition role disagrees with immutable construction ownership",
             ));
+        }
+        if let Some(DepositionOwner::RegionalSkinBridge { .. }) = self.owner {
+            if self.kind != DepositionKind::Bridge || self.points_mm.len() != 3 {
+                return Err(invalid(
+                    "mixed skin bridge requires one three-point continuous Bridge",
+                ));
+            }
+            let points = [
+                program_coordinates::project_xyz6_point_mm(self.points_mm[0])?,
+                program_coordinates::project_xyz6_point_mm(self.points_mm[1])?,
+                program_coordinates::project_xyz6_point_mm(self.points_mm[2])?,
+            ];
+            let along = if points.iter().all(|p| p[0] == points[0][0]) {
+                1
+            } else if points.iter().all(|p| p[1] == points[0][1]) {
+                0
+            } else {
+                return Err(invalid(
+                    "mixed skin bridge must be one straight emitted row",
+                ));
+            };
+            if !(points[0][along].min(points[2][along]) < points[1][along]
+                && points[1][along] < points[0][along].max(points[2][along]))
+            {
+                return Err(invalid(
+                    "mixed skin bridge transition must be strictly interior at XYZ6",
+                ));
+            }
         }
         Ok(())
     }
@@ -1365,9 +1441,26 @@ pub struct PlanarRegionCoverage {
     #[serde(deserialize_with = "diaphragm::process_diaphragms")]
     pub process_diaphragms: Vec<ProcessDiaphragmCoverage>,
     pub diaphragm_area_mm2: f64,
+    #[serde(deserialize_with = "diaphragm::skin_bridge_domains")]
+    pub skin_bridge_domains: Vec<SkinBridgeDomain>,
 }
 impl PlanarRegionCoverage {
     pub fn validate(&self, recipe: &PlanarPrintRecipe) -> Result<(), ManufacturingError> {
+        if self.skin_bridge_domains.len() > MAX_PROCESS_REGIONS {
+            return Err(resource("mixed skin bridge domain limit exceeded"));
+        }
+        for (index, domain) in self.skin_bridge_domains.iter().enumerate() {
+            domain.validate()?;
+            if usize::from(domain.region_index) >= self.process_regions.len()
+                || self.skin_bridge_domains[..index].iter().any(|other| {
+                    other.region_index == domain.region_index && other.skin == domain.skin
+                })
+            {
+                return Err(invalid(
+                    "mixed skin bridge domain has missing or repeated regional ownership",
+                ));
+            }
+        }
         if self.process_regions.len() > MAX_PROCESS_REGIONS
             || self.process_regions.capacity() > MAX_PROCESS_REGIONS
         {
@@ -1417,16 +1510,21 @@ impl PlanarRegionCoverage {
         let mut plate_owners = BTreeSet::new();
         for plate in &self.process_diaphragms {
             plate.validate()?;
-            let region = self.process_regions.get(usize::from(plate.region_index))
+            let region = self
+                .process_regions
+                .get(usize::from(plate.region_index))
                 .ok_or_else(|| invalid("diaphragm owner is outside layer coverage"))?;
             if !plate_owners.insert(plate.region_index)
-                || region.fraction != 1.0 || region.area_mm2 != plate.area_mm2
+                || region.fraction != 1.0
+                || region.area_mm2 != plate.area_mm2
                 || region.contributions.len() != 1
                 || region.contributions[0].occurrence_id != plate.occurrence_id
                 || region.contributions[0].definition_id != plate.definition_id
                 || region.contributions[0].provenance != Some(plate.provenance)
             {
-                return Err(invalid("permanent diaphragm lacks its unique exact construction region"));
+                return Err(invalid(
+                    "permanent diaphragm lacks its unique exact construction region",
+                ));
             }
             diaphragm += plate.area_mm2;
         }
@@ -1686,11 +1784,19 @@ pub struct SparseBandDecision {
     pub owner: Option<DepositionOwner>,
     pub disposition: SparseBandDisposition,
 }
-fn required_band_owner<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<DepositionOwner>, D::Error> {
+fn required_band_owner<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<DepositionOwner>, D::Error> {
     Option::<DepositionOwner>::deserialize(d)
 }
-fn sparse_bands<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SparseBandDecision>, D::Error> {
-    bounded_vec::<D, _, { MAX_MANUFACTURING_BUNDLE_BYTES as usize / std::mem::size_of::<SparseBandDecision>() }>(d)
+fn sparse_bands<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<SparseBandDecision>, D::Error> {
+    bounded_vec::<
+        D,
+        _,
+        { MAX_MANUFACTURING_BUNDLE_BYTES as usize / std::mem::size_of::<SparseBandDecision>() },
+    >(d)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
@@ -1854,8 +1960,12 @@ impl NormalizedPrintPlan {
             ));
         }
         if self.sparse_bands.len() > MAX_SPARSE_BANDS
-            || self.sparse_bands.capacity().checked_mul(std::mem::size_of::<SparseBandDecision>())
-                .is_none_or(|bytes| bytes > MAX_MANUFACTURING_BUNDLE_BYTES as usize) {
+            || self
+                .sparse_bands
+                .capacity()
+                .checked_mul(std::mem::size_of::<SparseBandDecision>())
+                .is_none_or(|bytes| bytes > MAX_MANUFACTURING_BUNDLE_BYTES as usize)
+        {
             return Err(resource("sparse band allocation budget exceeded"));
         }
         let mut band_keys = BTreeSet::new();
@@ -1865,54 +1975,97 @@ impl NormalizedPrintPlan {
                 None => u32::MAX,
                 _ => return Err(invalid("sparse band cannot own mandatory skin")),
             };
-            if band.first_layer > band.last_layer || band.last_layer as usize >= self.layers.len()
-                || !band_keys.insert((band.first_layer, band.last_layer, owner_key)) {
+            if band.first_layer > band.last_layer
+                || band.last_layer as usize >= self.layers.len()
+                || !band_keys.insert((band.first_layer, band.last_layer, owner_key))
+            {
                 return Err(invalid("invalid or duplicate sparse band association"));
             }
             let terminal = &self.layers[band.last_layer as usize];
             let region = match band.owner {
                 Some(DepositionOwner::Regional { region_index }) => Some(
-                    terminal.region_coverage.process_regions.get(usize::from(region_index))
-                        .ok_or_else(|| invalid("sparse band owner is outside terminal layer"))?),
+                    terminal
+                        .region_coverage
+                        .process_regions
+                        .get(usize::from(region_index))
+                        .ok_or_else(|| invalid("sparse band owner is outside terminal layer"))?,
+                ),
                 _ => None,
             };
             if band.disposition == SparseBandDisposition::Combined {
-                let SparseInfillPolicy::CombineEligible { max_height_mm } = intent.recipe.sparse_infill else {
+                let SparseInfillPolicy::CombineEligible { max_height_mm } =
+                    intent.recipe.sparse_infill
+                else {
                     return Err(invalid("fine policy cannot contain combined sparse bands"));
                 };
                 let neighborhood = band.first_layer.saturating_sub(1) as usize
                     ..=(band.last_layer as usize + 1).min(self.layers.len() - 1);
-                if self.layers[neighborhood].iter().any(|layer|
-                    !layer.region_coverage.process_diaphragms.is_empty()) {
-                    return Err(invalid("combined sparse band crosses a permanent diaphragm or its fine neighborhood"));
+                if self.layers[neighborhood]
+                    .iter()
+                    .any(|layer| !layer.region_coverage.process_diaphragms.is_empty())
+                {
+                    return Err(invalid(
+                        "combined sparse band crosses a permanent diaphragm or its fine neighborhood",
+                    ));
                 }
                 let first = &self.layers[band.first_layer as usize];
                 let physical = [first.lower_z_mm, terminal.z_mm];
-                if band.first_layer == band.last_layer || physical[1] - physical[0] > max_height_mm
-                    || !terminal.paths.iter().any(|path| matches!(path.kind, DepositionKind::SparseFill | DepositionKind::Bridge)
-                        && path.owner == band.owner && path.physical_z_mm == physical) {
-                    return Err(invalid("combined sparse band lacks its explicit terminal deposition"));
+                if band.first_layer == band.last_layer
+                    || physical[1] - physical[0] > max_height_mm
+                    || !terminal.paths.iter().any(|path| {
+                        matches!(
+                            path.kind,
+                            DepositionKind::SparseFill | DepositionKind::Bridge
+                        ) && path.owner == band.owner
+                            && path.physical_z_mm == physical
+                    })
+                {
+                    return Err(invalid(
+                        "combined sparse band lacks its explicit terminal deposition",
+                    ));
                 }
                 for layer in &self.layers[band.first_layer as usize..=band.last_layer as usize] {
                     if let Some(region) = region {
-                        if !layer.region_coverage.process_regions.iter().any(|candidate|
-                            candidate.fraction == region.fraction && candidate.contributions == region.contributions) {
-                            return Err(invalid("combined sparse band changes effective source/profile"));
+                        if !layer
+                            .region_coverage
+                            .process_regions
+                            .iter()
+                            .any(|candidate| {
+                                candidate.fraction == region.fraction
+                                    && candidate.contributions == region.contributions
+                            })
+                        {
+                            return Err(invalid(
+                                "combined sparse band changes effective source/profile",
+                            ));
                         }
                     } else if !layer.region_coverage.process_regions.is_empty() {
-                        return Err(invalid("unowned combined sparse band crosses regional ownership"));
+                        return Err(invalid(
+                            "unowned combined sparse band crosses regional ownership",
+                        ));
                     }
                     for path in &layer.paths {
                         let same_owner = match (region, path.owner) {
                             (None, None) => true,
-                            (Some(region), Some(DepositionOwner::Regional { region_index })) =>
-                                layer.region_coverage.process_regions.get(usize::from(region_index))
-                                    .is_some_and(|candidate| candidate.fraction == region.fraction
-                                        && candidate.contributions == region.contributions),
+                            (Some(region), Some(DepositionOwner::Regional { region_index })) => {
+                                layer
+                                    .region_coverage
+                                    .process_regions
+                                    .get(usize::from(region_index))
+                                    .is_some_and(|candidate| {
+                                        candidate.fraction == region.fraction
+                                            && candidate.contributions == region.contributions
+                                    })
+                            }
                             _ => false,
                         };
-                        if same_owner && matches!(path.kind, DepositionKind::SparseFill | DepositionKind::Bridge)
-                            && (layer.index != band.last_layer || path.physical_z_mm != physical) {
+                        if same_owner
+                            && matches!(
+                                path.kind,
+                                DepositionKind::SparseFill | DepositionKind::Bridge
+                            )
+                            && (layer.index != band.last_layer || path.physical_z_mm != physical)
+                        {
                             return Err(invalid("combined sparse band duplicates fine deposition"));
                         }
                     }
@@ -2043,12 +2196,24 @@ impl NormalizedPrintPlan {
                 }
                 if gap_start.is_none() {
                     let preceding = &self.layers[index - 1];
-                    gap_start = Some(preceding.paths.iter()
-                        .filter(|path| matches!(path.kind, DepositionKind::Support | DepositionKind::SupportInterface))
-                        .try_fold(f64::NEG_INFINITY, |top, path| {
-                            program_coordinates::project_xyz6_bead_height_mm(
-                                path.physical_z_mm[1], path.height_mm()).map(|interval| top.max(interval[1]))
-                        })?);
+                    gap_start = Some(
+                        preceding
+                            .paths
+                            .iter()
+                            .filter(|path| {
+                                matches!(
+                                    path.kind,
+                                    DepositionKind::Support | DepositionKind::SupportInterface
+                                )
+                            })
+                            .try_fold(f64::NEG_INFINITY, |top, path| {
+                                program_coordinates::project_xyz6_bead_height_mm(
+                                    path.physical_z_mm[1],
+                                    path.height_mm(),
+                                )
+                                .map(|interval| top.max(interval[1]))
+                            })?,
+                    );
                 }
             } else if let Some(support_top) = gap_start {
                 if !layer.paths.iter().any(|p| {
@@ -2062,11 +2227,21 @@ impl NormalizedPrintPlan {
                 let SupportPolicy::Breakaway { z_gap_mm, .. } = intent.recipe.supports else {
                     return Err(invalid("contact gap requires breakaway support policy"));
                 };
-                let object_bottom = layer.paths.iter()
-                    .filter(|path| !matches!(path.kind, DepositionKind::Support | DepositionKind::SupportInterface))
+                let object_bottom = layer
+                    .paths
+                    .iter()
+                    .filter(|path| {
+                        !matches!(
+                            path.kind,
+                            DepositionKind::Support | DepositionKind::SupportInterface
+                        )
+                    })
                     .try_fold(f64::INFINITY, |bottom, path| {
                         program_coordinates::project_xyz6_bead_height_mm(
-                            path.physical_z_mm[1], path.height_mm()).map(|interval| bottom.min(interval[0]))
+                            path.physical_z_mm[1],
+                            path.height_mm(),
+                        )
+                        .map(|interval| bottom.min(interval[0]))
                     })?;
                 if program_coordinates::enclosed_vertical_gap_mm(object_bottom, support_top)?
                     < z_gap_mm
@@ -2102,39 +2277,71 @@ impl NormalizedPrintPlan {
                 let path_height = path.height_mm();
                 if !physical.iter().all(|z| z.is_finite())
                     || physical[1] != layer.z_mm
-                    || !intent.printer.deposition_limits.admits(path.bead_width_mm, path_height)
-                    || path.bead_width_mm != intent.recipe.bead_width_mm {
+                    || !intent
+                        .printer
+                        .deposition_limits
+                        .admits(path.bead_width_mm, path_height)
+                    || path.bead_width_mm != intent.recipe.bead_width_mm
+                {
                     return Err(invalid(&format!(
                         "path dimensions exceed local deposition limits or owning layer: width={}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",
                         path.bead_width_mm, layer.z_mm, intent.printer.deposition_limits
                     )));
                 }
                 let recipe = &intent.recipe;
-                let first_speed = if layer.index == 0 { recipe.process.first_layer_speed_factor } else { 1.0 };
-                let first_flow = if layer.index == 0 { recipe.process.first_layer_flow_factor } else { 1.0 };
+                let first_speed = if layer.index == 0 {
+                    recipe.process.first_layer_speed_factor
+                } else {
+                    1.0
+                };
+                let first_flow = if layer.index == 0 {
+                    recipe.process.first_layer_flow_factor
+                } else {
+                    1.0
+                };
                 let (bridge_speed, bridge_flow) = if path.kind == DepositionKind::Bridge {
-                    (recipe.process.bridge_speed_factor, recipe.process.bridge_flow_factor)
-                } else { (1.0, 1.0) };
+                    (
+                        recipe.process.bridge_speed_factor,
+                        recipe.process.bridge_flow_factor,
+                    )
+                } else {
+                    (1.0, 1.0)
+                };
                 let area = ((path.bead_width_mm - path_height) * path_height
                     + std::f64::consts::PI * (path_height * 0.5).powi(2))
-                    * recipe.flow_multiplier * first_flow * bridge_flow;
+                    * recipe.flow_multiplier
+                    * first_flow
+                    * bridge_flow;
                 let speed = recipe.print_speed_mm_s * first_speed * bridge_speed;
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
-                if !area.is_finite() || area <= 0.0 || !feed.is_finite() || feed < 0.000001
-                    || area * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s {
-                    return Err(invalid("path dimensions exceed emitted-feed volumetric flow limit"));
+                if !area.is_finite()
+                    || area <= 0.0
+                    || !feed.is_finite()
+                    || feed < 0.000001
+                    || area * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s
+                {
+                    return Err(invalid(
+                        "path dimensions exceed emitted-feed volumetric flow limit",
+                    ));
                 }
                 let ordinary_lower = layer.lower_z_mm;
                 if physical[0] != ordinary_lower {
                     if !(path.kind == DepositionKind::SparseFill
                         || path.kind == DepositionKind::Bridge
                             && matches!(path.owner, Some(DepositionOwner::Regional { .. })))
-                        || !self.sparse_bands.iter().any(|band|
-                            band.last_layer == layer.index && band.owner == path.owner
-                            && band.disposition == SparseBandDisposition::Combined
-                            && self.layers.get(band.first_layer as usize).is_some_and(|first|
-                                physical[0] == first.lower_z_mm)) {
-                        return Err(invalid("coarse interval requires schedule-contiguous combined regional sparse ownership"));
+                        || !self.sparse_bands.iter().any(|band| {
+                            band.last_layer == layer.index
+                                && band.owner == path.owner
+                                && band.disposition == SparseBandDisposition::Combined
+                                && self
+                                    .layers
+                                    .get(band.first_layer as usize)
+                                    .is_some_and(|first| physical[0] == first.lower_z_mm)
+                        })
+                    {
+                        return Err(invalid(
+                            "coarse interval requires schedule-contiguous combined regional sparse ownership",
+                        ));
                     }
                 }
                 if let Some(DepositionOwner::Regional { region_index }) = path.owner {
@@ -2145,6 +2352,21 @@ impl NormalizedPrintPlan {
                     }
                     if path.points_mm.len() != 2 {
                         return Err(invalid("regional deposition is not one open row"));
+                    }
+                }
+                if let Some(DepositionOwner::RegionalSkinBridge {
+                    region_index, skin, ..
+                }) = path.owner
+                {
+                    if !layer
+                        .region_coverage
+                        .skin_bridge_domains
+                        .iter()
+                        .any(|domain| domain.region_index == region_index && domain.skin == skin)
+                    {
+                        return Err(invalid(
+                            "mixed skin bridge is missing its source-classified domains",
+                        ));
                     }
                 }
                 if matches!(
@@ -2183,11 +2405,13 @@ impl NormalizedPrintPlan {
                         | DepositionKind::SolidFill
                         | DepositionKind::SparseFill
                 )
-                .then(|| fixed_axis_for(if path.kind == DepositionKind::TopSkin {
-                    intent.recipe.top_skin_axis
-                } else {
-                    intent.recipe.rectilinear_axis
-                }));
+                .then(|| {
+                    fixed_axis_for(if path.kind == DepositionKind::TopSkin {
+                        intent.recipe.top_skin_axis
+                    } else {
+                        intent.recipe.rectilinear_axis
+                    })
+                });
                 let mut previous_fixed_coordinate = None;
                 for point in &path.points_mm {
                     if (0..3).any(|i| {
@@ -2575,9 +2799,14 @@ impl ManufacturingBundle {
                         })
                 })
         });
-        for (layer, index, region) in self.plan.layers.iter().flat_map(|layer|
-            layer.region_coverage.process_regions.iter().enumerate().map(move |(index, region)| (layer, index, region)))
-        {
+        for (layer, index, region) in self.plan.layers.iter().flat_map(|layer| {
+            layer
+                .region_coverage
+                .process_regions
+                .iter()
+                .enumerate()
+                .map(move |(index, region)| (layer, index, region))
+        }) {
             if region.contributions.is_empty() && has_overrides {
                 return Err(invalid(
                     "process region omits captured override attribution",
@@ -2592,11 +2821,29 @@ impl ManufacturingBundle {
                         "process region references an unknown or inconsistent occurrence",
                     ));
                 }
-                if let Some(plate) = layer.region_coverage.process_diaphragms.iter().find(|plate| usize::from(plate.region_index) == index) {
-                    let occurrence = self.provenance.occurrences.iter().find(|occurrence|
-                        occurrence.occurrence_id == plate.occurrence_id && occurrence.definition_id == plate.definition_id)
-                        .ok_or_else(|| invalid("permanent diaphragm references an unknown occurrence"))?;
-                    diaphragm::validate_binding(plate, process, &occurrence.pose, recipe.infill_fraction)?;
+                if let Some(plate) = layer
+                    .region_coverage
+                    .process_diaphragms
+                    .iter()
+                    .find(|plate| usize::from(plate.region_index) == index)
+                {
+                    let occurrence = self
+                        .provenance
+                        .occurrences
+                        .iter()
+                        .find(|occurrence| {
+                            occurrence.occurrence_id == plate.occurrence_id
+                                && occurrence.definition_id == plate.definition_id
+                        })
+                        .ok_or_else(|| {
+                            invalid("permanent diaphragm references an unknown occurrence")
+                        })?;
+                    diaphragm::validate_binding(
+                        plate,
+                        process,
+                        &occurrence.pose,
+                        recipe.infill_fraction,
+                    )?;
                     continue;
                 }
                 let resolved = process.resolve(

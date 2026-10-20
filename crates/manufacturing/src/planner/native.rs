@@ -105,9 +105,13 @@ pub(super) struct CapturedProtectedVoid {
 }
 
 fn inner_capture_bytes(captures: &Vec<spiling_geometry::NativeInnerMaterialPrism>) -> usize {
-    std::mem::size_of_val(captures) + 2 * std::mem::size_of::<usize>()
+    std::mem::size_of_val(captures)
+        + 2 * std::mem::size_of::<usize>()
         + captures.capacity() * std::mem::size_of::<spiling_geometry::NativeInnerMaterialPrism>()
-        + captures.iter().map(|capture| capture.retained_bytes()).sum::<usize>()
+        + captures
+            .iter()
+            .map(|capture| capture.retained_bytes())
+            .sum::<usize>()
 }
 
 fn void_capture_bytes(captures: &Vec<CapturedProtectedVoid>) -> usize {
@@ -220,8 +224,12 @@ pub(super) fn output_bytes(
         );
     for (index, section) in sections.iter().enumerate() {
         if let Some(captures) = &section.inner_material {
-            if !sections[..index].iter().any(|prior|
-                prior.inner_material.as_ref().is_some_and(|other| Arc::ptr_eq(captures, other))) {
+            if !sections[..index].iter().any(|prior| {
+                prior
+                    .inner_material
+                    .as_ref()
+                    .is_some_and(|other| Arc::ptr_eq(captures, other))
+            }) {
                 bytes = bytes.saturating_add(inner_capture_bytes(captures));
             }
         }
@@ -551,7 +559,11 @@ struct ReadyStage {
 
 impl ReadyStage {
     fn retained_bytes(&self) -> usize {
-        let inner_bytes = self.span.inner_material.as_ref().map_or(0, |value| inner_capture_bytes(value));
+        let inner_bytes = self
+            .span
+            .inner_material
+            .as_ref()
+            .map_or(0, |value| inner_capture_bytes(value));
         self.pending
             .retained_bytes()
             .saturating_add(inner_bytes)
@@ -798,7 +810,6 @@ pub(super) fn collect_span(
                 Err(failure)
                     if failure.code == ManufacturingErrorCode::NativeShapeErrorExceeded =>
                 {
-                    
                     // Every future leaf tied to the old request is discarded.
                     // Rebuild the actual dependency frontier after refinement.
                     settled.clear();
@@ -956,16 +967,38 @@ pub(super) fn collect_span(
             }
             let mut inner_material = Vec::new();
             for material in &current.leaves {
-                if !current.contributions.iter().any(|(id, _, _)| *id == material.leaf.occurrence_id()) {
+                if !current
+                    .contributions
+                    .iter()
+                    .any(|(id, _, _)| *id == material.leaf.occurrence_id())
+                {
                     continue;
                 }
                 if let Some(capture) = material.leaf.capture_constant_inner_prism() {
                     if inner_material.capacity() == 0 {
-                        admit_bytes(resident_bytes, current.leaves.len()
-                            .saturating_mul(std::mem::size_of::<spiling_geometry::NativeInnerMaterialPrism>())
-                            .saturating_add(capture.retained_bytes().saturating_mul(current.leaves.len())), 0)?;
-                        inner_material.try_reserve_exact(current.leaves.len()).map_err(|_| error(
-                            ManufacturingErrorCode::ResourceLimit, "native inner-material capture allocation refused"))?;
+                        admit_bytes(
+                            resident_bytes,
+                            current
+                                .leaves
+                                .len()
+                                .saturating_mul(std::mem::size_of::<
+                                    spiling_geometry::NativeInnerMaterialPrism,
+                                >())
+                                .saturating_add(
+                                    capture
+                                        .retained_bytes()
+                                        .saturating_mul(current.leaves.len()),
+                                ),
+                            0,
+                        )?;
+                        inner_material
+                            .try_reserve_exact(current.leaves.len())
+                            .map_err(|_| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "native inner-material capture allocation refused",
+                                )
+                            })?;
                     }
                     inner_material.push(capture);
                 }
@@ -1068,8 +1101,7 @@ pub(super) fn collect_span(
             "settled native lookahead no longer matches the actual shared schedule",
         ));
     }
-    
-    
+
     let metric = StageMetric {
         layers: ready.span.end - index,
         slabs: occurrences.len() as u32,
@@ -1240,7 +1272,6 @@ fn capture_base(
                 let analysis = match analysis {
                     Ok(analysis) => analysis,
                     Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
-                        
                         refine = true;
                         break;
                     }
@@ -1249,7 +1280,9 @@ fn capture_base(
                             failure,
                             &format!(
                                 "native slab at layer {index}, world interval [{:.17e}, {:.17e}] mm, sample {:.17e} mm, occurrence {}",
-                                interval[0], interval[1], sample,
+                                interval[0],
+                                interval[1],
+                                sample,
                                 occurrence.occurrence_id.get()
                             ),
                         ));
@@ -1384,7 +1417,6 @@ fn capture_base(
             ) {
                 Ok(leaf) => leaf,
                 Err(failure) if failure.code == GeometryErrorCode::ShapeErrorExceeded => {
-                    
                     refine = true;
                     break;
                 }
@@ -1392,8 +1424,12 @@ fn capture_base(
                     return Err(super::native_error(
                         failure,
                         &format!(
-                            "actual source-M leaf at layer {index}, occurrence {}",
-                            occurrence.occurrence_id.get()
+                            "actual source-M leaf at layer {index}, interval [{:.17e}, {:.17e}], sample {:.17e}, occurrence {}, pose {:?}",
+                            interval[0],
+                            interval[1],
+                            sample,
+                            occurrence.occurrence_id.get(),
+                            occurrence.pose
                         ),
                     ));
                 }
@@ -1510,7 +1546,8 @@ fn capture_base(
                     .process_document
                     .layers
                     .iter()
-                    .any(|layer| layer.enabled) || input.intent.recipe.infill_fraction < 1.0;
+                    .any(|layer| layer.enabled)
+                    || input.intent.recipe.infill_fraction < 1.0;
                 if process_enabled {
                     let bytes = material_bytes(&mut placed);
                     contribution_bytes = contribution_bytes
@@ -2891,9 +2928,8 @@ fn certify_polygon_capsules(
             }
             for edge in path.points_mm.windows(2) {
                 charge_support_clearance(support_work, cancel)?;
-                let [lower, upper] = project_xyz6_segment_bead_height_mm(
-                    edge[0][2], edge[1][2], path.height_mm(),
-                )?;
+                let [lower, upper] =
+                    project_xyz6_segment_bead_height_mm(edge[0][2], edge[1][2], path.height_mm())?;
                 let relevant = match scope {
                     spiling_geometry::ProtectedVoidHeightScope::Bounded { lower_mm, upper_mm } => {
                         lower_mm <= upper && upper_mm >= lower
@@ -3207,7 +3243,7 @@ mod actual_deposition_tests {
                     lower_z_mm: lower,
                     height_mm: height,
                     section_z_mm: lower + height * 0.5,
-                    region_coverage: PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
+                    region_coverage: PlanarRegionCoverage { skin_bridge_domains: Vec::new(), process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
                     source_section_area_mm2: object_area,
                     surface_added_area_mm2: 0.0,
                     separator_area_mm2: 0.0,

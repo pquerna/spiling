@@ -741,8 +741,8 @@ pub(crate) fn verify_actual(
         }
         let volume_per_mm = association.map_or(0.0, |association| {
             let height = association.physical_z[1] - association.physical_z[0];
-            ((association.width - height) * height
-                + std::f64::consts::PI * (height * 0.5).powi(2)) * process_flow
+            ((association.width - height) * height + std::f64::consts::PI * (height * 0.5).powi(2))
+                * process_flow
         });
         let expected_feed = 60.0
             * if source.is_some() {
@@ -767,19 +767,40 @@ pub(crate) fn verify_actual(
             let from = state
                 .position
                 .ok_or_else(|| failed("deposition before positioning"))?;
-            if matches!(deposition_kind, DepositionKind::BottomSkin | DepositionKind::TopSkin
-                | DepositionKind::SolidFill | DepositionKind::SparseFill) {
+            if matches!(
+                deposition_kind,
+                DepositionKind::BottomSkin
+                    | DepositionKind::TopSkin
+                    | DepositionKind::SolidFill
+                    | DepositionKind::SparseFill
+            ) {
                 let policy = if deposition_kind == DepositionKind::TopSkin {
                     recipe.top_skin_axis
-                } else { recipe.rectilinear_axis };
+                } else {
+                    recipe.rectilinear_axis
+                };
                 let fixed_axis = match policy {
                     RectilinearAxisPolicy::X => 1,
                     RectilinearAxisPolicy::Y => 0,
-                    RectilinearAxisPolicy::AlternatingXY => if layer_index.is_multiple_of(2) { 1 } else { 0 },
-                    RectilinearAxisPolicy::AlternatingYX => if layer_index.is_multiple_of(2) { 0 } else { 1 },
+                    RectilinearAxisPolicy::AlternatingXY => {
+                        if layer_index.is_multiple_of(2) {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    RectilinearAxisPolicy::AlternatingYX => {
+                        if layer_index.is_multiple_of(2) {
+                            0
+                        } else {
+                            1
+                        }
+                    }
                 };
                 if from[fixed_axis] != position[fixed_axis] {
-                    return Err(failed("actual ordinary deposition violates its authored axis policy"));
+                    return Err(failed(
+                        "actual ordinary deposition violates its authored axis policy",
+                    ));
                 }
             }
             let length = distance(from, position);
@@ -905,8 +926,22 @@ pub(crate) fn verify_actual(
     let mut geometry_work = 0usize;
     let mut anchors = crate::planner::support::AnchorWorkspace::default();
     let mut plate_contacts = Vec::new();
-    interfaces::verify_projected_byte_geometry(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
-    diaphragms::verify(plan, recipe, &mut geometry_work, &mut anchors, &mut plate_contacts, cancel)?;
+    interfaces::verify_projected_byte_geometry(
+        plan,
+        recipe,
+        &mut geometry_work,
+        &mut anchors,
+        cancel,
+    )?;
+    diaphragms::verify(
+        plan,
+        recipe,
+        &mut geometry_work,
+        &mut anchors,
+        &mut plate_contacts,
+        cancel,
+    )?;
+    skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
@@ -922,6 +957,7 @@ pub(crate) fn verify_actual(
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
             "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
+            "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
             if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
             if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
@@ -951,7 +987,8 @@ pub(crate) fn verify_actual(
     })
 }
 
-mod interfaces;
 mod diaphragms;
+mod interfaces;
+mod skin_bridges;
 #[cfg(test)]
 mod tests;

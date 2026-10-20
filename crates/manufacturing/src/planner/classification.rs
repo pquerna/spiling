@@ -182,38 +182,43 @@ impl ClassifiedRegions {
         };
         admit_scratch(scratch_points(&[&bottom, &top, &interior])?)?;
         let interior_area = interior.unsigned_area();
-        let coverage = PlanarRegionCoverage { process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: layout.section_area_mm2,
-        source_section_area_mm2: layout.section_area_mm2,
-        surface_added_area_mm2: 0.0,
-        wall_area_mm2: layout.wall_area_mm2,
-        bottom_skin_area_mm2: bottom.unsigned_area(),
-        top_skin_area_mm2: top.unsigned_area(),
-        solid_interior_area_mm2: if recipe.infill_fraction == 1.0 {
-            interior_area
-        } else {
-            0.0
-        },
-        sparse_interior_area_mm2: if recipe.infill_fraction < 1.0 {
-            interior_area
-        } else {
-            0.0
-        },
-        intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
-        protected_hole_area_mm2: layout.protected_hole_area_mm2,
-        nominal_deposition_volume_mm3: 0.0,
-        separator_area_mm2: 0.0,
-        process_interfaces: Vec::new(),
-        process_regions: if interior_area > 0.0 {
-            vec![ProcessRegionCoverage {
-                area_mm2: interior_area,
-                fraction: recipe.infill_fraction,
-                contributions: Vec::new(),
-            }]
-        } else {
-            Vec::new()
-        },
-        support_area_mm2: 0.0,
-        support_nominal_deposition_volume_mm3: 0.0, };
+        let coverage = PlanarRegionCoverage {
+            skin_bridge_domains: Vec::new(),
+            process_diaphragms: Vec::new(),
+            diaphragm_area_mm2: 0.0,
+            section_area_mm2: layout.section_area_mm2,
+            source_section_area_mm2: layout.section_area_mm2,
+            surface_added_area_mm2: 0.0,
+            wall_area_mm2: layout.wall_area_mm2,
+            bottom_skin_area_mm2: bottom.unsigned_area(),
+            top_skin_area_mm2: top.unsigned_area(),
+            solid_interior_area_mm2: if recipe.infill_fraction == 1.0 {
+                interior_area
+            } else {
+                0.0
+            },
+            sparse_interior_area_mm2: if recipe.infill_fraction < 1.0 {
+                interior_area
+            } else {
+                0.0
+            },
+            intentional_void_area_mm2: interior_area * (1.0 - recipe.infill_fraction),
+            protected_hole_area_mm2: layout.protected_hole_area_mm2,
+            nominal_deposition_volume_mm3: 0.0,
+            separator_area_mm2: 0.0,
+            process_interfaces: Vec::new(),
+            process_regions: if interior_area > 0.0 {
+                vec![ProcessRegionCoverage {
+                    area_mm2: interior_area,
+                    fraction: recipe.infill_fraction,
+                    contributions: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            },
+            support_area_mm2: 0.0,
+            support_nominal_deposition_volume_mm3: 0.0,
+        };
         Ok(Self {
             layout,
             bottom,
@@ -448,7 +453,15 @@ impl ClassifiedRegions {
     ) -> Result<(Vec<DepositionPath>, &PlanarRegionCoverage), ManufacturingError> {
         let mut paths = Vec::new();
         for centers in &self.layout.wall_centers {
-            region::wall_paths(centers, z, lower_z, recipe.bead_width_mm, &mut paths, segments, cancel)?;
+            region::wall_paths(
+                centers,
+                z,
+                lower_z,
+                recipe.bead_width_mm,
+                &mut paths,
+                segments,
+                cancel,
+            )?;
         }
         let layer = region::HatchLayer {
             z,
@@ -471,7 +484,10 @@ impl ClassifiedRegions {
             &self.top,
             DepositionKind::TopSkin,
             1.0,
-            &region::HatchLayer { axis: top_axis, ..layer },
+            &region::HatchLayer {
+                axis: top_axis,
+                ..layer
+            },
             &mut paths,
             segments,
             cancel,
@@ -515,19 +531,30 @@ impl ClassifiedRegions {
     pub(super) fn paths_with_bridge_recovery(
         &self,
         layer: &region::HatchLayer<'_>,
+        source_domains: &[super::ProcessDomain],
         segments: &mut usize,
         mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
         anchors: &mut ComponentAnchorCheck<'_>,
+        constructed_domains: &mut Vec<SkinBridgeDomain>,
         cancel: &AtomicBool,
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         let initial_segments = *segments;
         let mut normal = super::support::RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             paths: Vec::new(),
             whole_rows: Vec::new(),
             process_interfaces: Vec::new(),
         };
         for centers in &self.layout.wall_centers {
-            region::wall_paths(centers, layer.z, layer.lower_z, layer.recipe.bead_width_mm, &mut normal.paths, segments, cancel)?;
+            region::wall_paths(
+                centers,
+                layer.z,
+                layer.lower_z,
+                layer.recipe.bead_width_mm,
+                &mut normal.paths,
+                segments,
+                cancel,
+            )?;
         }
         let wall_count = normal.paths.len();
         let mut normal_points = path_points(&normal.paths);
@@ -538,12 +565,14 @@ impl ClassifiedRegions {
                 .map(|region| region::point_count(&region.domain))
                 .sum::<usize>();
         let mut bridge = super::support::RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             paths: Vec::new(),
             whole_rows: Vec::new(),
             process_interfaces: Vec::new(),
         };
         let mut bridge_points = 0;
         let mut patches: Vec<BridgePatch<'_>> = Vec::new();
+        let mut mandatory_demand = false;
         let mut owners = Vec::new();
         let owner_count = self.bottom.0.len()
             + self.top.0.len()
@@ -553,6 +582,7 @@ impl ClassifiedRegions {
                 .map(|region| region.domain.0.len())
                 .sum::<usize>();
         let mut probe = super::support::RasterCandidate {
+            skin_bridge_domains: Vec::new(),
             paths: Vec::new(),
             whole_rows: Vec::new(),
             process_interfaces: Vec::new(),
@@ -585,11 +615,18 @@ impl ClassifiedRegions {
             )
         })) {
             let role_layer = region::HatchLayer {
-                axis: if kind == DepositionKind::TopSkin { layer.top_axis } else { layer.axis },
+                axis: if kind == DepositionKind::TopSkin {
+                    layer.top_axis
+                } else {
+                    layer.axis
+                },
                 ..*layer
             };
             let layer = &role_layer;
-            let alternate_layer = region::HatchLayer { axis: layer.axis.orthogonal(), ..*layer };
+            let alternate_layer = region::HatchLayer {
+                axis: layer.axis.orthogonal(),
+                ..*layer
+            };
             let normal_along = usize::from(layer.axis == region::HatchAxis::Y);
             let normal_fixed = 1 - normal_along;
             let frame = owner.and_then(|(_, owner)| owner.frame_origin_mm);
@@ -611,6 +648,7 @@ impl ClassifiedRegions {
                 let bound = rows.point_bound()?;
                 admit(point_sum(point_sum(base, workspace)?, bound)?, bound)?;
                 let mut component = super::support::RasterCandidate {
+                    skin_bridge_domains: Vec::new(),
                     paths: Vec::new(),
                     whole_rows: Vec::new(),
                     process_interfaces: Vec::new(),
@@ -633,7 +671,87 @@ impl ClassifiedRegions {
                 }
                 let component_points = path_points(&component.paths);
                 let live = point_sum(base, component_points)?;
-                let original = anchors(&mut component, layer.axis, live)?;
+                let mut original = anchors(&mut component, layer.axis, live)?;
+                mandatory_demand |=
+                    owner.is_none() && !original.supported && !original.demands.is_empty();
+                // Preserve the authored component and its direct demand set.
+                // Stage constructed whole rows separately from that original.
+                if !original.supported && owner.is_some() {
+                    let (region_index, interior) = owner.expect("regional construction");
+                    let mut sources = source_domains.iter().filter(|domain| {
+                        domain.coverage.fraction == interior.coverage.fraction
+                            && domain.coverage.contributions == interior.coverage.contributions
+                    });
+                    let source_owner = match (sources.next(), sources.next()) {
+                        (Some(source), None) => Some(source.material.as_ref()),
+                        (None, None) if self.interiors.len() == 1 => Some(&self.layout.fill),
+                        _ => None,
+                    };
+                    let first_mixed = bridge.paths.len();
+                    let repaired = if let Some(source_owner) = source_owner {
+                        self.repair_skin_terminals(
+                            polygon,
+                            region_index,
+                            interior,
+                            source_owner,
+                            &component.paths,
+                            &original.demands,
+                            layer,
+                            live + original.retained_points() + original.workspace_points,
+                            &mut bridge,
+                            &mut patches,
+                            &mut admit,
+                            anchors,
+                            cancel,
+                        )?
+                    } else {
+                        false
+                    };
+                    if repaired {
+                        let accepted = &bridge.paths[first_mixed..];
+                        let work = original
+                            .demands
+                            .len()
+                            .checked_mul(accepted.len())
+                            .ok_or_else(|| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "mixed covered-demand work overflow",
+                                )
+                            })?;
+                        admit(
+                            live + original.retained_points()
+                                + original.workspace_points
+                                + path_points(&bridge.paths)
+                                + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains),
+                            work,
+                        )?;
+                        original.demands.retain(|gap| {
+                            !accepted.iter().any(|path| {
+                                let Some(DepositionOwner::RegionalSkinBridge {
+                                    skin_first, ..
+                                }) = path.owner
+                                else {
+                                    return false;
+                                };
+                                let (a, b) = if skin_first {
+                                    (path.points_mm[1], path.points_mm[2])
+                                } else {
+                                    (path.points_mm[0], path.points_mm[1])
+                                };
+                                gap[0][normal_fixed] == a[normal_fixed]
+                                    && gap[1][normal_fixed] == a[normal_fixed]
+                                    && gap[0][normal_along].min(gap[1][normal_along])
+                                        >= a[normal_along].min(b[normal_along])
+                                    && gap[0][normal_along].max(gap[1][normal_along])
+                                        <= a[normal_along].max(b[normal_along])
+                            })
+                        });
+                        original.supported = original.demands.is_empty();
+                        bridge_points = path_points(&bridge.paths)
+                            + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains);
+                    }
+                }
                 if !original.supported && !original.demands.is_empty() {
                     let alternate_rows = if let Some(mut origin) = frame {
                         let fixed = usize::from(alternate_layer.axis == region::HatchAxis::X);
@@ -685,6 +803,7 @@ impl ClassifiedRegions {
                         bound,
                     )?;
                     let mut alternative = super::support::RasterCandidate {
+                        skin_bridge_domains: Vec::new(),
                         paths: Vec::new(),
                         whole_rows: Vec::new(),
                         process_interfaces: Vec::new(),
@@ -740,9 +859,10 @@ impl ClassifiedRegions {
                         &mut admit,
                         cancel,
                     )?;
-                    
+
                     let band_points = bands.capacity() * 2;
-                    let patch_base = point_sum(proof_live, band_points)? - patches.capacity() * BRIDGE_PATCH_POINTS;
+                    let patch_base = point_sum(proof_live, band_points)?
+                        - patches.capacity() * BRIDGE_PATCH_POINTS;
                     let selection_work = alternative
                         .paths
                         .len()
@@ -810,7 +930,12 @@ impl ClassifiedRegions {
                             hi = bands[band_index].interval[1];
                         }
                         if index == first {
-                            reserve_recovery_record(&mut patches, BRIDGE_PATCH_POINTS, patch_base, &mut admit)?;
+                            reserve_recovery_record(
+                                &mut patches,
+                                BRIDGE_PATCH_POINTS,
+                                patch_base,
+                                &mut admit,
+                            )?;
                             patches.push(BridgePatch {
                                 owner: Some(polygon),
                                 along_axis: normal_fixed,
@@ -843,139 +968,233 @@ impl ClassifiedRegions {
                 normal_points = point_sum(normal_points, component_points)?;
             }
         }
+        let mut skin_construction_used = false;
         if bridge.paths.is_empty() {
-            return Ok(normal.paths);
-        }
-        let base = recovery_points(
-            class_points,
-            normal_points,
-            bridge_points,
-            owners.capacity(),
-            patches.capacity(),
-        )?;
-        let workspace = anchors(&mut probe, layer.axis, base)?.workspace_points;
-        let bound = whole_row_bound(&self.layout.fill, bridge.paths.len())?;
-        admit(point_sum(point_sum(base, workspace)?, bound)?, bound)?;
-        let mut staged_segments = *segments;
-        bridge.whole_rows = self.whole_rows(
-            &bridge.paths,
-            layer,
-            &mut staged_segments,
-            cancel,
-        )?;
-        let whole_points = path_points(&bridge.whole_rows);
-        let merge = anchors(
-            &mut bridge,
-            layer.axis,
-            point_sum(base, whole_points)?,
-        )?;
-        if !merge.supported || merge.bridges.len() != bridge.paths.len() {
-            return Ok(normal.paths);
-        }
-        bridge_points = path_points(&bridge.paths);
-        let base = point_sum(
-            recovery_points(
+            if !mandatory_demand {
+                return Ok(normal.paths);
+            }
+            let base = recovery_points(
                 class_points,
                 normal_points,
                 bridge_points,
                 owners.capacity(),
-                0,
-            )?,
-            merge.retained_points(),
-        )?;
-        for path in &bridge.paths {
-            reserve_recovery_record(
-                &mut patches,
-                BRIDGE_PATCH_POINTS,
-                point_sum(base, merge.workspace_points)?,
-                &mut admit,
+                patches.capacity(),
             )?;
-            let along_axis = if path.points_mm[0][0] == path.points_mm[1][0] { 1 } else { 0 };
-            let fixed_axis = 1 - along_axis;
-            let coordinate = path.points_mm[0][fixed_axis];
-            patches.push(BridgePatch {
-                owner: None,
-                along_axis,
-                along: [
-                    path.points_mm[0][along_axis].min(path.points_mm[1][along_axis]),
-                    path.points_mm[0][along_axis].max(path.points_mm[1][along_axis]),
-                ],
-                across: [
-                    coordinate - path.bead_width_mm * 0.5,
-                    coordinate + path.bead_width_mm * 0.5,
-                ],
-            });
+            let direct = anchors(&mut normal, layer.axis, base)?;
+            bridge.paths = self.demanded_skin_bridges(
+                &normal.paths,
+                &direct.demands,
+                layer,
+                point_sum(
+                    point_sum(base, direct.retained_points())?,
+                    direct.workspace_points,
+                )?,
+                &mut admit,
+                anchors,
+                cancel,
+            )?;
+            if bridge.paths.is_empty() {
+                return Ok(normal.paths);
+            }
+            bridge_points = path_points(&bridge.paths);
+            skin_construction_used = true;
         }
-        let staged = point_sum(base, patches.capacity() * BRIDGE_PATCH_POINTS)?;
-        let work = normal
-            .paths
-            .len()
-            .checked_mul(patches.len())
-            .and_then(|n| {
-                n.checked_mul(
-                    usize::BITS as usize - patches.len().max(1).leading_zeros() as usize + 3,
-                )
-            })
-            .ok_or_else(|| {
+        let original_patch_count = patches.len();
+        loop {
+            patches.truncate(original_patch_count);
+            let base = recovery_points(
+                class_points,
+                normal_points,
+                bridge_points,
+                owners.capacity(),
+                patches.capacity(),
+            )?;
+            let whole_row_count = bridge
+                .paths
+                .iter()
+                .filter(|path| path.points_mm.len() == 2)
+                .count();
+            if skin_construction_used || whole_row_count == 0 {
+                // Existing bridges and added skin rows already have whole-stroke
+                // proofs. Recheck their union, never construct their corridors twice.
+                bridge.whole_rows.clear();
+            } else {
+                let workspace = anchors(&mut probe, layer.axis, base)?.workspace_points;
+                let bound = whole_row_bound(&self.layout.fill, whole_row_count)?;
+                admit(point_sum(point_sum(base, workspace)?, bound)?, bound)?;
+                let mut staged_segments = *segments;
+                bridge.whole_rows =
+                    self.whole_rows(&bridge.paths, layer, &mut staged_segments, cancel)?;
+            }
+            let whole_points = path_points(&bridge.whole_rows);
+            let merge = anchors(&mut bridge, layer.axis, point_sum(base, whole_points)?)?;
+            if !merge.supported || merge.bridges.len() != bridge.paths.len() {
+                return Ok(normal.paths);
+            }
+            bridge_points = path_points(&bridge.paths)
+                + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains);
+            let base = point_sum(
+                recovery_points(
+                    class_points,
+                    normal_points,
+                    bridge_points,
+                    owners.capacity(),
+                    0,
+                )?,
+                merge.retained_points(),
+            )?;
+            for path in &bridge.paths {
+                if matches!(path.owner, Some(DepositionOwner::RegionalSkinBridge { .. })) {
+                    continue;
+                }
+                reserve_recovery_record(
+                    &mut patches,
+                    BRIDGE_PATCH_POINTS,
+                    point_sum(base, merge.workspace_points)?,
+                    &mut admit,
+                )?;
+                let along_axis = if path.points_mm[0][0] == path.points_mm[1][0] {
+                    1
+                } else {
+                    0
+                };
+                let fixed_axis = 1 - along_axis;
+                let coordinate = path.points_mm[0][fixed_axis];
+                patches.push(BridgePatch {
+                    owner: None,
+                    along_axis,
+                    along: [
+                        path.points_mm[0][along_axis].min(path.points_mm[1][along_axis]),
+                        path.points_mm[0][along_axis].max(path.points_mm[1][along_axis]),
+                    ],
+                    across: [
+                        coordinate - path.bead_width_mm * 0.5,
+                        coordinate + path.bead_width_mm * 0.5,
+                    ],
+                });
+            }
+            let staged = point_sum(base, patches.capacity() * BRIDGE_PATCH_POINTS)?;
+            let work = normal
+                .paths
+                .len()
+                .checked_mul(patches.len())
+                .and_then(|n| {
+                    n.checked_mul(
+                        usize::BITS as usize - patches.len().max(1).leading_zeros() as usize + 3,
+                    )
+                })
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "corridor clipping work overflow",
+                    )
+                })?;
+            admit(
+                point_sum(point_sum(staged, merge.workspace_points)?, patches.len())?,
+                work,
+            )?;
+            let mut intervals: Vec<[f64; 2]> = Vec::new();
+            intervals.try_reserve_exact(patches.len()).map_err(|_| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
-                    "corridor clipping work overflow",
+                    "corridor interval allocation refused",
                 )
             })?;
-        admit(
-            point_sum(point_sum(staged, merge.workspace_points)?, patches.len())?,
-            work,
-        )?;
-        let mut intervals: Vec<[f64; 2]> = Vec::new();
-        intervals.try_reserve_exact(patches.len()).map_err(|_| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "corridor interval allocation refused",
-            )
-        })?;
-        let staged = point_sum(staged, intervals.capacity())?;
-        let mut mixed = super::support::RasterCandidate {
-            paths: Vec::new(),
-            whole_rows: Vec::new(),
-            process_interfaces: Vec::new(),
-        };
-        let mut mixed_points = 0;
-        let mut output_segments = initial_segments;
-        for owner in &owners {
-            for path in &normal.paths[owner.paths.clone()] {
-                check_cancel(cancel)?;
-                intervals.clear();
-                let a = path.points_mm[0];
-                let b = path.points_mm[1];
-                let normal_along = if a[0] == b[0] { 1 } else { 0 };
-                let normal_fixed = 1 - normal_along;
-                let path_layer = region::HatchLayer {
-                    axis: if normal_along == 0 { region::HatchAxis::X } else { region::HatchAxis::Y },
-                    ..*layer
-                };
-                for patch in &patches {
+            let staged = point_sum(staged, intervals.capacity())?;
+            let mut mixed = super::support::RasterCandidate {
+                skin_bridge_domains: Vec::new(),
+                paths: Vec::new(),
+                whole_rows: Vec::new(),
+                process_interfaces: Vec::new(),
+            };
+            let mut mixed_points = 0;
+            let mut output_segments = initial_segments;
+            for owner in &owners {
+                for path in &normal.paths[owner.paths.clone()] {
                     check_cancel(cancel)?;
-                    if patch
-                        .owner
-                        .is_none_or(|polygon| std::ptr::eq(polygon, owner.owner))
-                        && a[normal_fixed] >= if patch.along_axis == normal_fixed { patch.along[0] } else { patch.across[0] }
-                        && a[normal_fixed] <= if patch.along_axis == normal_fixed { patch.along[1] } else { patch.across[1] }
-                    {
-                        intervals.push(if patch.along_axis == normal_along { patch.along } else { patch.across });
+                    intervals.clear();
+                    let a = path.points_mm[0];
+                    let b = path.points_mm[1];
+                    let normal_along = if a[0] == b[0] { 1 } else { 0 };
+                    let normal_fixed = 1 - normal_along;
+                    let path_layer = region::HatchLayer {
+                        axis: if normal_along == 0 {
+                            region::HatchAxis::X
+                        } else {
+                            region::HatchAxis::Y
+                        },
+                        ..*layer
+                    };
+                    for patch in &patches {
+                        check_cancel(cancel)?;
+                        let fixed_bounds = if patch.along_axis == normal_fixed {
+                            patch.along
+                        } else {
+                            patch.across
+                        };
+                        let cut = if patch.along_axis == normal_along {
+                            patch.along
+                        } else {
+                            patch.across
+                        };
+                        let matches_row = if fixed_bounds[0] == fixed_bounds[1] {
+                            program_coordinates::project_xyz6_coordinate_mm(a[normal_fixed])?
+                                == program_coordinates::project_xyz6_coordinate_mm(fixed_bounds[0])?
+                        } else {
+                            a[normal_fixed] >= fixed_bounds[0] && a[normal_fixed] <= fixed_bounds[1]
+                        };
+                        if patch
+                            .owner
+                            .is_none_or(|polygon| std::ptr::eq(polygon, owner.owner))
+                            && matches_row
+                            && cut[0] < cut[1]
+                        {
+                            intervals.push(cut);
+                        }
                     }
-                }
-                intervals
-                    .sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
-                let mut cursor = a[normal_along].min(b[normal_along]);
-                let end = a[normal_along].max(b[normal_along]);
-                for interval in &intervals {
-                    if interval[1] <= cursor {
-                        continue;
+                    intervals
+                        .sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+                    let mut cursor = a[normal_along].min(b[normal_along]);
+                    let end = a[normal_along].max(b[normal_along]);
+                    for interval in &intervals {
+                        if interval[1] <= cursor {
+                            continue;
+                        }
+                        if interval[0] >= end {
+                            break;
+                        }
+                        if interval[0] > cursor {
+                            admit(
+                                point_sum(
+                                    point_sum(
+                                        point_sum(staged, merge.workspace_points)?,
+                                        mixed_points,
+                                    )?,
+                                    2,
+                                )?,
+                                0,
+                            )?;
+                            let before = mixed.paths.len();
+                            region::append_hatch_row(
+                                &[cursor, interval[0].min(end)],
+                                a[normal_fixed],
+                                path.kind,
+                                &path_layer,
+                                a[normal_along] > b[normal_along],
+                                &mut mixed.paths,
+                                &mut output_segments,
+                            )?;
+                            if mixed.paths.len() != before {
+                                mixed.paths.last_mut().unwrap().owner = path.owner;
+                                mixed_points += mixed.paths.last().unwrap().points_mm.capacity();
+                            }
+                        }
+                        cursor = cursor.max(interval[1]);
+                        if cursor >= end {
+                            break;
+                        }
                     }
-                    if interval[0] >= end {
-                        break;
-                    }
-                    if interval[0] > cursor {
+                    if cursor < end {
                         admit(
                             point_sum(
                                 point_sum(
@@ -988,7 +1207,7 @@ impl ClassifiedRegions {
                         )?;
                         let before = mixed.paths.len();
                         region::append_hatch_row(
-                            &[cursor, interval[0].min(end)],
+                            &[cursor, end],
                             a[normal_fixed],
                             path.kind,
                             &path_layer,
@@ -1001,72 +1220,574 @@ impl ClassifiedRegions {
                             mixed_points += mixed.paths.last().unwrap().points_mm.capacity();
                         }
                     }
-                    cursor = cursor.max(interval[1]);
-                    if cursor >= end {
-                        break;
-                    }
-                }
-                if cursor < end {
-                    admit(
-                        point_sum(
-                            point_sum(point_sum(staged, merge.workspace_points)?, mixed_points)?,
-                            2,
-                        )?,
-                        0,
-                    )?;
-                    let before = mixed.paths.len();
-                    region::append_hatch_row(
-                        &[cursor, end],
-                        a[normal_fixed],
-                        path.kind,
-                        &path_layer,
-                        a[normal_along] > b[normal_along],
-                        &mut mixed.paths,
-                        &mut output_segments,
-                    )?;
-                    if mixed.paths.len() != before {
-                        mixed.paths.last_mut().unwrap().owner = path.owner;
-                        mixed_points += mixed.paths.last().unwrap().points_mm.capacity();
-                    }
                 }
             }
-        }
-        output_segments = output_segments
-            .checked_add(
-                bridge
-                    .paths
-                    .iter()
-                    .map(|path| path.points_mm.len() - 1)
-                    .sum::<usize>(),
-            )
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "mixed corridor segment limit exceeded",
-                )
-            })?;
-        mixed.paths.append(&mut bridge.paths);
-        let proof = anchors(&mut mixed, layer.axis, point_sum(staged, mixed_points)?)?;
-        if !proof.supported {
-            return Ok(normal.paths);
-        }
-        let mut result = Vec::with_capacity(wall_count + mixed.paths.len());
-        for path in normal.paths.into_iter().take(wall_count) {
             output_segments = output_segments
-                .checked_add(path.points_mm.len() - 1)
+                .checked_add(
+                    bridge
+                        .paths
+                        .iter()
+                        .map(|path| path.points_mm.len() - 1)
+                        .sum::<usize>(),
+                )
                 .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "mixed corridor wall limit exceeded",
+                        "mixed corridor segment limit exceeded",
                     )
                 })?;
-            result.push(path);
+            let ordinary_count = mixed.paths.len();
+            mixed.paths.append(&mut bridge.paths);
+            let proof = anchors(&mut mixed, layer.axis, point_sum(staged, mixed_points)?)?;
+            if !proof.supported {
+                bridge.paths.extend(mixed.paths.drain(ordinary_count..));
+                drop(mixed);
+                if !skin_construction_used {
+                    let retained = recovery_points(
+                        class_points,
+                        normal_points,
+                        path_points(&bridge.paths)
+                            + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains),
+                        owners.capacity(),
+                        patches.capacity(),
+                    )?;
+                    let mut additional = self.demanded_skin_bridges(
+                        &normal.paths,
+                        &proof.demands,
+                        layer,
+                        point_sum(
+                            point_sum(retained, proof.retained_points())?,
+                            proof.workspace_points,
+                        )?,
+                        &mut admit,
+                        anchors,
+                        cancel,
+                    )?;
+                    if !additional.is_empty() {
+                        admit(
+                            point_sum(retained, path_points(&additional))?,
+                            additional.len(),
+                        )?;
+                        bridge
+                            .paths
+                            .try_reserve_exact(additional.len())
+                            .map_err(|_| {
+                                error(
+                                    ManufacturingErrorCode::ResourceLimit,
+                                    "required skin bridge publication allocation refused",
+                                )
+                            })?;
+                        bridge.paths.append(&mut additional);
+                        bridge_points = path_points(&bridge.paths)
+                            + super::bonds::skin_bridge_points(&bridge.skin_bridge_domains);
+                        skin_construction_used = true;
+                        continue;
+                    }
+                }
+                return Ok(normal.paths);
+            }
+            let mut result = Vec::with_capacity(wall_count + mixed.paths.len());
+            for path in normal.paths.into_iter().take(wall_count) {
+                output_segments = output_segments
+                    .checked_add(path.points_mm.len() - 1)
+                    .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "mixed corridor wall limit exceeded",
+                        )
+                    })?;
+                result.push(path);
+            }
+            result.append(&mut mixed.paths);
+            *segments = output_segments;
+            *constructed_domains = bridge.skin_bridge_domains;
+            return Ok(result);
         }
-        result.append(&mut mixed.paths);
-        *segments = output_segments;
-        Ok(result)
+    }
+
+    /// Extend only genuinely demanded original skin rows, after the existing
+    /// whole candidate has failed. The original rows and demand set stay intact.
+    fn demanded_skin_bridges(
+        &self,
+        required: &[DepositionPath],
+        demands: &[[[f64; 2]; 2]],
+        layer: &region::HatchLayer<'_>,
+        retained: usize,
+        admit: &mut impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
+        anchors: &mut ComponentAnchorCheck<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<DepositionPath>, ManufacturingError> {
+        let mut output = Vec::new();
+        let work = required
+            .len()
+            .checked_mul(demands.len())
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required skin demand selection work overflow",
+                )
+            })?;
+        admit(retained, work)?;
+        for axis in [layer.axis, layer.axis.orthogonal()] {
+            let fixed = usize::from(axis == region::HatchAxis::X);
+            let along = 1 - fixed;
+            let selected = |path: &&DepositionPath| {
+                let Some(DepositionOwner::MandatorySkin { skin }) = path.owner else {
+                    return false;
+                };
+                let authored = if skin == ProcessSkinKind::TopSkin {
+                    layer.top_axis
+                } else {
+                    layer.axis
+                };
+                if authored != axis || path.points_mm.len() != 2 {
+                    return false;
+                }
+                let a = path.points_mm[0];
+                let b = path.points_mm[1];
+                demands.iter().any(|gap| {
+                    gap[0][fixed] == a[fixed]
+                        && gap[1][fixed] == a[fixed]
+                        && gap[0][along].min(gap[1][along]) < a[along].max(b[along])
+                        && a[along].min(b[along]) < gap[0][along].max(gap[1][along])
+                })
+            };
+            let count = required.iter().filter(selected).count();
+            if count == 0 {
+                continue;
+            }
+            let points = count.checked_mul(2).ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required skin construction point overflow",
+                )
+            })?;
+            let live = point_sum(retained, path_points(&output))?;
+            admit(point_sum(live, points)?, points)?;
+            let mut candidate = super::support::RasterCandidate {
+                paths: Vec::new(),
+                whole_rows: Vec::new(),
+                process_interfaces: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+            };
+            candidate.paths.try_reserve_exact(count).map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required skin construction allocation refused",
+                )
+            })?;
+            candidate
+                .paths
+                .extend(required.iter().filter(selected).cloned());
+            let role_layer = region::HatchLayer { axis, ..*layer };
+            let bound = whole_row_bound(&self.layout.fill, count)?;
+            admit(point_sum(point_sum(live, points)?, bound)?, bound)?;
+            candidate.whole_rows =
+                self.whole_rows(&candidate.paths, &role_layer, &mut 0, cancel)?;
+            let candidate_live =
+                point_sum(point_sum(live, points)?, path_points(&candidate.whole_rows))?;
+            let proof = anchors(&mut candidate, axis, candidate_live)?;
+            output.try_reserve_exact(proof.bridges.len()).map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "required skin accepted-row allocation refused",
+                )
+            })?;
+            for (index, mut path) in candidate.paths.into_iter().enumerate() {
+                if proof.bridges.binary_search(&index).is_ok() {
+                    path.kind = DepositionKind::Bridge;
+                    output.push(path);
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    /// Repartition already-required skin at a genuinely demanded regional
+    /// terminal. The authored regional core/lattice never moves or grows.
+    fn repair_skin_terminals<'a>(
+        &'a self,
+        polygon: &'a Polygon<f64>,
+        region_index: u16,
+        interior: &InteriorRegion,
+        source_owner: &MultiPolygon<f64>,
+        required: &[DepositionPath],
+        demands: &[[[f64; 2]; 2]],
+        layer: &region::HatchLayer<'_>,
+        retained: usize,
+        bridge: &mut super::support::RasterCandidate,
+        patches: &mut Vec<BridgePatch<'a>>,
+        admit: &mut impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
+        anchors: &mut ComponentAnchorCheck<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<bool, ManufacturingError> {
+        if demands.is_empty()
+            || !self.separator_bands.is_empty()
+            || self
+                .coverage
+                .process_diaphragms
+                .iter()
+                .any(|plate| plate.region_index == region_index)
+        {
+            return Ok(false);
+        }
+        let along = usize::from(layer.axis == region::HatchAxis::Y);
+        let fixed = 1 - along;
+        let grid = program_coordinates::project_xyz6_coordinate_mm;
+        let source_points = region::point_count(source_owner);
+        let demand_work = required.len().checked_mul(demands.len()).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "mixed bridge demand selection work overflow",
+            )
+        })?;
+        admit(retained, demand_work)?;
+        let mut selected = super::support::RasterCandidate {
+            paths: Vec::new(),
+            whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
+            skin_bridge_domains: Vec::new(),
+        };
+        let mut selected_points = 0usize;
+        let mut hits = Vec::new();
+        let mut source_hits = Vec::new();
+        'rows: for path in required {
+            check_cancel(cancel)?;
+            let relevant = demands
+                .iter()
+                .filter(|gap| {
+                    let a = path.points_mm[0];
+                    let b = path.points_mm[1];
+                    gap[0][fixed] == a[fixed]
+                        && gap[0][along].min(gap[1][along]) >= a[along].min(b[along])
+                        && gap[0][along].max(gap[1][along]) <= a[along].max(b[along])
+                })
+                .count();
+            if relevant == 0 {
+                continue;
+            }
+            let mut chosen = None;
+            for (skin, domain) in [
+                (ProcessSkinKind::BottomSkin, &self.bottom),
+                (ProcessSkinKind::TopSkin, &self.top),
+            ] {
+                for skin_polygon in &domain.0 {
+                    admit(
+                        retained + selected_points + region::point_count(domain) + 3,
+                        skin_polygon.exterior().0.len()
+                            + skin_polygon
+                                .interiors()
+                                .iter()
+                                .map(|r| r.0.len())
+                                .sum::<usize>(),
+                    )?;
+                    hits.clear();
+                    region::row_intersections(
+                        skin_polygon,
+                        path.points_mm[0][fixed],
+                        layer.axis,
+                        &mut hits,
+                        cancel,
+                    )?;
+                    hits.sort_unstable_by(f64::total_cmp);
+                    if !hits.len().is_multiple_of(2) {
+                        continue 'rows;
+                    }
+                    for interval in hits.chunks_exact(2) {
+                        for endpoint in 0..2 {
+                            let transition = path.points_mm[endpoint];
+                            let core = path.points_mm[1 - endpoint];
+                            let far = if grid(transition[along])? == grid(interval[0])?
+                                && core[along] < transition[along]
+                            {
+                                Some(interval[1])
+                            } else if grid(transition[along])? == grid(interval[1])?
+                                && core[along] > transition[along]
+                            {
+                                Some(interval[0])
+                            } else {
+                                None
+                            };
+                            let Some(mut far) = far else {
+                                continue;
+                            };
+                            let mut source_limit = None;
+                            for source_polygon in &source_owner.0 {
+                                source_hits.clear();
+                                admit(
+                                    retained
+                                        + selected_points
+                                        + hits.capacity()
+                                        + source_points
+                                        + 3,
+                                    source_points,
+                                )?;
+                                region::row_intersections(
+                                    source_polygon,
+                                    transition[fixed],
+                                    layer.axis,
+                                    &mut source_hits,
+                                    cancel,
+                                )?;
+                                source_hits.sort_unstable_by(f64::total_cmp);
+                                if !source_hits.len().is_multiple_of(2) {
+                                    continue 'rows;
+                                }
+                                for interval in source_hits.chunks_exact(2) {
+                                    if grid(interval[0])?
+                                        <= grid(core[along].min(transition[along]))?
+                                        && grid(core[along].max(transition[along]))?
+                                            <= grid(interval[1])?
+                                    {
+                                        let limit = if far < transition[along] {
+                                            interval[0].max(far)
+                                        } else {
+                                            interval[1].min(far)
+                                        };
+                                        if source_limit.replace(limit).is_some() {
+                                            continue 'rows;
+                                        }
+                                    }
+                                }
+                            }
+                            let Some(limit) = source_limit else {
+                                continue;
+                            };
+                            far = limit;
+                            if grid(far)? == grid(transition[along])? {
+                                continue;
+                            }
+                            let mut skin_end = transition;
+                            skin_end[along] = far;
+                            let skin_first = endpoint == 0;
+                            let mut proposal = super::support::RasterCandidate {
+                                paths: vec![DepositionPath {
+                                    kind: DepositionKind::Bridge,
+                                    owner: Some(DepositionOwner::RegionalSkinBridge {
+                                        region_index,
+                                        skin,
+                                        skin_first,
+                                    }),
+                                    bead_width_mm: path.bead_width_mm,
+                                    physical_z_mm: path.physical_z_mm,
+                                    points_mm: if skin_first {
+                                        vec![skin_end, transition, core]
+                                    } else {
+                                        vec![core, transition, skin_end]
+                                    },
+                                }],
+                                whole_rows: Vec::new(),
+                                process_interfaces: Vec::new(),
+                                skin_bridge_domains: Vec::new(),
+                            };
+                            let proof =
+                                anchors(&mut proposal, layer.axis, retained + selected_points + 3)?;
+                            if proof.supported && proof.bridges == [0] {
+                                let actual = &proposal.paths[0];
+                                if grid(actual.points_mm[if skin_first { 0 } else { 2 }][along])?
+                                    == grid(transition[along])?
+                                {
+                                    continue;
+                                }
+                                if chosen.is_some() {
+                                    continue 'rows;
+                                }
+                                chosen = Some(proposal.paths.remove(0));
+                            }
+                        }
+                    }
+                }
+            }
+            let Some(chosen) = chosen else {
+                continue;
+            };
+            selected_points = point_sum(selected_points, chosen.points_mm.capacity())?;
+            selected.paths.push(chosen);
+        }
+        if selected.paths.is_empty() {
+            return Ok(false);
+        }
+        let mut staged_patches = Vec::new();
+        for path in &selected.paths {
+            let Some(DepositionOwner::RegionalSkinBridge {
+                skin, skin_first, ..
+            }) = path.owner
+            else {
+                unreachable!()
+            };
+            let skin_domain = if skin == ProcessSkinKind::TopSkin {
+                &self.top
+            } else {
+                &self.bottom
+            };
+            let core_end = path.points_mm[if skin_first { 2 } else { 0 }][along];
+            let transition = path.points_mm[1][along];
+            let skin_end = path.points_mm[if skin_first { 0 } else { 2 }][along];
+            let coordinate = path.points_mm[0][fixed];
+            reserve_recovery_record(
+                &mut staged_patches,
+                BRIDGE_PATCH_POINTS,
+                retained
+                    + selected_points
+                    + super::bonds::skin_bridge_points(&selected.skin_bridge_domains),
+                admit,
+            )?;
+            staged_patches.push(BridgePatch {
+                owner: Some(polygon),
+                along_axis: along,
+                along: [core_end.min(transition), core_end.max(transition)],
+                across: [coordinate, coordinate],
+            });
+            for skin_polygon in &skin_domain.0 {
+                reserve_recovery_record(
+                    &mut staged_patches,
+                    BRIDGE_PATCH_POINTS,
+                    retained
+                        + selected_points
+                        + super::bonds::skin_bridge_points(&selected.skin_bridge_domains),
+                    admit,
+                )?;
+                staged_patches.push(BridgePatch {
+                    owner: Some(skin_polygon),
+                    along_axis: along,
+                    along: [skin_end.min(transition), skin_end.max(transition)],
+                    across: [coordinate, coordinate],
+                });
+            }
+            if !bridge
+                .skin_bridge_domains
+                .iter()
+                .chain(&selected.skin_bridge_domains)
+                .any(|domain| domain.region_index == region_index && domain.skin == skin)
+            {
+                let points = region::point_count(&interior.domain)
+                    + region::point_count(skin_domain)
+                    + source_points;
+                let metadata =
+                    (interior.domain.0.len() + skin_domain.0.len() + source_owner.0.len())
+                        * std::mem::size_of::<DiaphragmPolygonMm>()
+                        / std::mem::size_of::<geo::Coord<f64>>()
+                        + std::mem::size_of::<SkinBridgeDomain>()
+                            .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+                admit(
+                    retained
+                        + selected_points
+                        + points
+                        + metadata
+                        + super::bonds::skin_bridge_points(&selected.skin_bridge_domains)
+                        + staged_patches.capacity() * BRIDGE_PATCH_POINTS,
+                    points,
+                )?;
+                selected
+                    .skin_bridge_domains
+                    .try_reserve_exact(1)
+                    .map_err(|_| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "mixed bridge domain table allocation refused",
+                        )
+                    })?;
+                let encode = |domain: &MultiPolygon<f64>| {
+                    domain
+                        .0
+                        .iter()
+                        .map(|polygon| DiaphragmPolygonMm {
+                            outer: polygon.exterior().0.iter().map(|p| [p.x, p.y]).collect(),
+                            holes: polygon
+                                .interiors()
+                                .iter()
+                                .map(|ring| ring.0.iter().map(|p| [p.x, p.y]).collect())
+                                .collect(),
+                        })
+                        .collect()
+                };
+                selected.skin_bridge_domains.push(SkinBridgeDomain {
+                    region_index,
+                    skin,
+                    regional: encode(&interior.domain),
+                    mandatory: encode(skin_domain),
+                    source_owner: encode(source_owner),
+                });
+                admit(
+                    retained
+                        + selected_points
+                        + super::bonds::skin_bridge_points(&selected.skin_bridge_domains)
+                        + staged_patches.capacity() * BRIDGE_PATCH_POINTS,
+                    0,
+                )?;
+            }
+        }
+        let staged_points = selected_points
+            + super::bonds::skin_bridge_points(&selected.skin_bridge_domains)
+            + staged_patches.capacity() * BRIDGE_PATCH_POINTS;
+        let patch_bound = patches
+            .len()
+            .checked_add(staged_patches.len())
+            .and_then(|count| count.checked_mul(BRIDGE_PATCH_POINTS))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "mixed patch publication size overflow",
+                )
+            })?;
+        let domain_bound = bridge
+            .skin_bridge_domains
+            .len()
+            .checked_add(selected.skin_bridge_domains.len())
+            .and_then(|count| {
+                count.checked_mul(
+                    std::mem::size_of::<SkinBridgeDomain>()
+                        .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                )
+            })
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "mixed domain publication size overflow",
+                )
+            })?;
+        admit(
+            point_sum(
+                point_sum(point_sum(retained, staged_points)?, patch_bound)?,
+                domain_bound,
+            )?,
+            0,
+        )?;
+        patches
+            .try_reserve_exact(staged_patches.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "mixed patch publication allocation refused",
+                )
+            })?;
+        bridge
+            .skin_bridge_domains
+            .try_reserve_exact(selected.skin_bridge_domains.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "mixed domain publication allocation refused",
+                )
+            })?;
+        bridge
+            .paths
+            .try_reserve_exact(selected.paths.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "mixed path publication allocation refused",
+                )
+            })?;
+        patches.append(&mut staged_patches);
+        bridge
+            .skin_bridge_domains
+            .append(&mut selected.skin_bridge_domains);
+        bridge.paths.append(&mut selected.paths);
+        Ok(true)
     }
 
     /// Positive-fill row bounds at the actual classified hatch coordinates.
@@ -1080,62 +1801,66 @@ impl ClassifiedRegions {
     ) -> Result<Vec<DepositionPath>, ManufacturingError> {
         let mut rows = Vec::new();
         for axis in [layer.axis, layer.axis.orthogonal()] {
-        let row_layer = region::HatchLayer { axis, ..*layer };
-        let fixed = usize::from(axis == region::HatchAxis::X);
-        if !required.iter().any(|path| path.points_mm.len() == 2
-            && path.points_mm[0][fixed] == path.points_mm[1][fixed]) { continue; }
-        for (domain, kind, original) in [
-            (
-                &self.bottom,
-                DepositionKind::BottomSkin,
-                Some(DepositionOwner::MandatorySkin {
-                    skin: ProcessSkinKind::BottomSkin,
-                }),
-            ),
-            (
-                &self.top,
-                DepositionKind::TopSkin,
-                Some(DepositionOwner::MandatorySkin {
-                    skin: ProcessSkinKind::TopSkin,
-                }),
-            ),
-        ]
-        .into_iter()
-        .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
-            (
-                &interior.domain,
-                if interior.coverage.fraction == 1.0 {
-                    DepositionKind::SolidFill
+            let row_layer = region::HatchLayer { axis, ..*layer };
+            let fixed = usize::from(axis == region::HatchAxis::X);
+            if !required.iter().any(|path| {
+                path.points_mm.len() == 2 && path.points_mm[0][fixed] == path.points_mm[1][fixed]
+            }) {
+                continue;
+            }
+            for (domain, kind, original) in [
+                (
+                    &self.bottom,
+                    DepositionKind::BottomSkin,
+                    Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::BottomSkin,
+                    }),
+                ),
+                (
+                    &self.top,
+                    DepositionKind::TopSkin,
+                    Some(DepositionOwner::MandatorySkin {
+                        skin: ProcessSkinKind::TopSkin,
+                    }),
+                ),
+            ]
+            .into_iter()
+            .chain(self.interiors.iter().enumerate().map(|(index, interior)| {
+                (
+                    &interior.domain,
+                    if interior.coverage.fraction == 1.0 {
+                        DepositionKind::SolidFill
+                    } else {
+                        DepositionKind::SparseFill
+                    },
+                    Some(DepositionOwner::Regional {
+                        region_index: index as u16,
+                    }),
+                )
+            })) {
+                let mandatory =
+                    matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin);
+                let corridor = if mandatory { &self.layout.fill } else { domain };
+                let excluded = if mandatory {
+                    &self.separator_bands[..]
                 } else {
-                    DepositionKind::SparseFill
-                },
-                Some(DepositionOwner::Regional {
-                    region_index: index as u16,
-                }),
-            )
-        })) {
-            let mandatory = matches!(kind, DepositionKind::BottomSkin | DepositionKind::TopSkin);
-            let corridor = if mandatory { &self.layout.fill } else { domain };
-            let excluded = if mandatory {
-                &self.separator_bands[..]
-            } else {
-                &[]
-            };
-            let owned = region::bridge_rows(
-                corridor,
-                excluded,
-                required.iter().filter(|path| {
-                    (path.kind == kind || path.kind == DepositionKind::Bridge)
-                        && path.owner == original
-                        && path.points_mm.len() == 2
-                        && path.points_mm[0][fixed] == path.points_mm[1][fixed]
-                }),
-                &row_layer,
-                segments,
-                cancel,
-            )?;
-            rows.extend(owned);
-        }
+                    &[]
+                };
+                let owned = region::bridge_rows(
+                    corridor,
+                    excluded,
+                    required.iter().filter(|path| {
+                        (path.kind == kind || path.kind == DepositionKind::Bridge)
+                            && path.owner == original
+                            && path.points_mm.len() == 2
+                            && path.points_mm[0][fixed] == path.points_mm[1][fixed]
+                    }),
+                    &row_layer,
+                    segments,
+                    cancel,
+                )?;
+                rows.extend(owned);
+            }
         }
         Ok(rows)
     }
@@ -1418,8 +2143,8 @@ struct BridgePatch<'a> {
     along: [f64; 2],
     across: [f64; 2],
 }
-const BRIDGE_PATCH_POINTS: usize = std::mem::size_of::<BridgePatch<'static>>()
-    .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+const BRIDGE_PATCH_POINTS: usize =
+    std::mem::size_of::<BridgePatch<'static>>().div_ceil(std::mem::size_of::<geo::Coord<f64>>());
 
 fn recovery_points(
     class: usize,
@@ -1628,4 +2353,186 @@ fn bridge_bands(
         push(band)?;
     }
     Ok(bands)
+}
+
+#[cfg(test)]
+mod skin_bridge_tests {
+    use super::*;
+    use crate::planner::support::{self, AnchorWorkspace};
+    use geo::polygon;
+
+    #[test]
+    fn demanded_sparse_terminal_joins_only_adjacent_required_skin_at_nearest_actual_anchor() {
+        let cancel = AtomicBool::new(false);
+        let mut recipe = crate::planner::tests::recipe(0.20);
+        recipe.bead_width_mm = 0.45;
+        recipe.process.max_bridge_span_mm = 10.;
+        let transition = [106.57809278913417, 108.65631235184321, 3.3422000008334];
+        let floor = 3.243900000808888;
+        let top = MultiPolygon(vec![polygon![
+            (x:106.,y:108.65631235184321),(x:114.,y:108.65631235184321),
+            (x:114.,y:114.),(x:106.,y:114.),(x:106.,y:108.65631235184321)]]);
+        let regional = Polygon::new(
+            polygon![
+            (x:98.9,y:101.9),(x:121.1,y:101.9),(x:121.1,y:118.1),
+            (x:98.9,y:118.1),(x:98.9,y:101.9)]
+            .exterior()
+            .clone(),
+            vec![top.0[0].exterior().clone()],
+        );
+        let interior = InteriorRegion {
+            domain: MultiPolygon(vec![regional.clone()]),
+            coverage: ProcessRegionCoverage {
+                area_mm2: regional.unsigned_area(),
+                fraction: 0.20,
+                contributions: Vec::new(),
+            },
+            frame_origin_mm: None,
+        };
+        let classified = ClassifiedRegions {
+            layout: Arc::new(WallLayout {
+                wall_centers: Vec::new(),
+                fill: MultiPolygon(vec![Polygon::new(regional.exterior().clone(), Vec::new())]),
+                section_area_mm2: 1.,
+                wall_area_mm2: 0.,
+                protected_hole_area_mm2: 0.,
+                retained_points: 0,
+            }),
+            bottom: MultiPolygon(Vec::new()),
+            top,
+            interiors: Vec::new(),
+            separator_bands: Vec::new(),
+            coverage: crate::planner::empty_coverage(0.20),
+            applied_operations: Vec::new(),
+        };
+        let mut previous = [
+            103.14452319728332,
+            105.28904639456687,
+            107.43356959185041,
+            109.57809278913395,
+            111.7226159864175,
+        ]
+        .map(|y| DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: None,
+            bead_width_mm: 0.45,
+            physical_z_mm: [floor - 0.0983, floor],
+            points_mm: vec![[98.9, y, floor], [121.1, y, floor]],
+        })
+        .to_vec();
+        previous.push(DepositionPath {
+            kind: DepositionKind::Perimeter,
+            owner: None,
+            bead_width_mm: 0.45,
+            physical_z_mm: [floor - 0.0983, floor],
+            points_mm: vec![
+                [100., 101.6750000119207, floor],
+                [120., 101.6750000119207, floor],
+            ],
+        });
+        let required = vec![DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: Some(DepositionOwner::Regional { region_index: 0 }),
+            bead_width_mm: 0.45,
+            physical_z_mm: [floor, transition[2]],
+            points_mm: vec![
+                transition,
+                [transition[0], 101.90000000596024, transition[2]],
+            ],
+        }];
+        let mut workspace = AnchorWorkspace::default();
+        let mut work = 0;
+        let mut check = |candidate: &mut support::RasterCandidate, axis, _scratch| {
+            support::component_admission(
+                (candidate, axis, 100_000, true),
+                previous.iter(),
+                std::iter::empty(),
+                &recipe,
+                &mut workspace,
+                &mut work,
+                &cancel,
+            )
+        };
+        let mut probe = support::RasterCandidate {
+            paths: required.clone(),
+            whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
+            skin_bridge_domains: Vec::new(),
+        };
+        let original = check(&mut probe, region::HatchAxis::Y, 0).unwrap();
+        assert!(!original.supported);
+        let layer = region::HatchLayer {
+            z: transition[2],
+            lower_z: floor,
+            height: transition[2] - floor,
+            axis: region::HatchAxis::Y,
+            top_axis: region::HatchAxis::Y,
+            recipe: &recipe,
+        };
+        let mut bridges = support::RasterCandidate {
+            paths: Vec::new(),
+            whole_rows: Vec::new(),
+            process_interfaces: Vec::new(),
+            skin_bridge_domains: Vec::new(),
+        };
+        let mut patches = Vec::new();
+        assert!(
+            classified
+                .repair_skin_terminals(
+                    &regional,
+                    0,
+                    &interior,
+                    &classified.layout.fill,
+                    &required,
+                    &original.demands,
+                    &layer,
+                    0,
+                    &mut bridges,
+                    &mut patches,
+                    &mut |_, _| Ok(()),
+                    &mut check,
+                    &cancel
+                )
+                .unwrap()
+        );
+        assert_eq!(bridges.paths.len(), 1);
+        let bridge = &bridges.paths[0];
+        assert_eq!(bridge.points_mm[1..], required[0].points_mm);
+        assert_eq!(
+            bridge.owner,
+            Some(DepositionOwner::RegionalSkinBridge {
+                region_index: 0,
+                skin: ProcessSkinKind::TopSkin,
+                skin_first: true
+            })
+        );
+        assert!((bridge.points_mm[0][1] - (109.57809278913395 - 0.225)).abs() < 1e-12);
+        assert!(
+            check(&mut bridges, region::HatchAxis::Y, 0)
+                .unwrap()
+                .supported
+        );
+        // No skin-wide bead corridor: only exact coincident commanded rows may
+        // lose their duplicate subsegment; offset skin lattices remain intact.
+        assert!(
+            patches
+                .iter()
+                .all(|patch| patch.across[0] == patch.across[1])
+        );
+        previous.retain(|path| path.points_mm[0][1] != 109.57809278913395);
+        let refusal = support::strokes::analyze(
+            &bridges.paths,
+            previous.iter(),
+            std::iter::empty(),
+            &recipe,
+            &mut workspace,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            refusal.failure.is_some(),
+            "the same constructed Bridge must refuse without its actual lower endpoint anchor"
+        );
+    }
 }

@@ -41,12 +41,16 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
   [viewport resize owner](../../packages/viewport/src/index.ts) retains device-bounded
   drawing-buffer sizing; layout changes do not request geometry or replay again.
 
-Native interval work, deposited-stroke anchor comparisons and planar overlay work
-each have an independent cumulative 128-million-unit ceiling. These bound
-computation, not geometric error. Prepared sources, live query scratch and retained
-outputs still share their existing byte allowances; host-process memory limits
-remain separate. The engine allows five minutes per accepted native job, with a
-separate ten-second cancellation acknowledgement grace.
+Native geometry work has one fixed, whole-job cumulative 512-million-unit CPU
+envelope, including complete original three-dimensional reference-cycle proofs.
+Deposited-stroke anchor comparisons and planar overlay work retain independent
+cumulative 128-million-unit ceilings. These bound computation, not geometric
+error: no per-source override, retry reset or geometric-accuracy relaxation is
+implied. Prepared sources, live query scratch and retained outputs retain their
+existing byte allowances, as do native depth, chord, plane and shape-error gates;
+host-process memory limits remain separate. Work units are heterogeneous, not a
+universal wall-clock estimate. The engine allows five minutes per accepted native
+job, with a separate ten-second cancellation acknowledgement grace.
 
 ## One schedule, two references
 
@@ -296,6 +300,20 @@ This adds accounted Bridge deposition, not material-derived anchor evidence or
 a dense-fill fallback. Protected holes stay excluded; curved unsupported strokes
 do not inherit straight-bridge authority.
 
+[`classification::paths_with_bridge_recovery`](../../crates/manufacturing/src/planner/classification.rs)
+also constructs a finite necessary endpoint joint when an authored sparse row
+terminates on changing mandatory skin without a real lower anchor. The original
+regional core joins adjacent already-required skin only to the nearest actual
+previous capsule, as one three-point Bridge with explicit one-transition ownership.
+The required skin lattice remains intact; only exact coincident commanded
+subsegments are removed. Finite joint overlap and its entire commanded volume
+remain explicit, never hidden sparse densification or a permanent interface.
+[`verifier::skin_bridges`](../../crates/manufacturing/src/verifier/skin_bridges.rs)
+checks actual XYZ6 portions against captured classified domains/holes and the
+complete continuous stroke against actual lower capsules after byte association.
+Ambiguous/multiple crossings, another regional owner or a separator still refuse.
+
+
 ## Program, fresh replay and publication
 
 [`realization::canonicalize`](../../crates/manufacturing/src/realization/mod.rs) fixes
@@ -325,8 +343,8 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner15,
-emitter6/verifier7 and SPLR5; executable constants and exact native pin remain authoritative.
+Current identities are project10/manufacturing11/process3/surface3, planner16,
+emitter6/verifier8 and SPLR5; executable constants and exact native pin remain authoritative.
 Box, independent tapered-fitting and rounded-housing operators complete Compile,
 fresh replay/export, save and source-deleted fresh read-only reopen. Both
 independent parts also complete the hardware workbench flow with native picking.
@@ -356,12 +374,33 @@ labels `base_whole_owned_resolution` separately from `finite_box_intent`.
 
 The bounded within-part reference is the unchanged
 [`occt-rounded-housing-mm.step`](../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step):
-a housing with a denser end and lighter body, **not a bracket**. Its paired
-`housing-h1-fine.intent.ts` and `housing-h1-combined.intent.ts` references share
-one explicit fine schedule/profile/top-skin policy and differ only in sparse
-combination intent. Generate inert data with `pnpm manufacturing:intent
+a housing, **not a bracket**. `housing-ordinary.intent.ts` is the ordinary Fine
+0.10 mm job with both fill and top skin AlternatingXY. Compile it first without
+process edits, then author the lighter lower0.20/upper0.60 interior and centered
+plate without changing the ordinary axes:
+
+```sh
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
+  --import OWNED_SOURCE.step --intent fixtures/manufacturing/housing-ordinary.intent.json --center-on-bed 1 \
+  --process-set 1 definition 0.60 \
+  --process-set-box 1 definition -1 -1 -1 25 19 5.03 0.20 horizontal-diaphragm:0.23 \
+  --preflight --compile --verify --manufacturing-out NEW_EXPORT --replay-out NEW_REPLAY.splr \
+  --engine target/debug/spiling-engine
+```
+
+The hardware `--process-diaphragm` journey uses that ordinary profile, revises
+only lower density0.20→0.25 with Apply/Undo/Redo/recompile, inspects the actual
+required-skin joints and plate, then exercises pose/history/save/source-delete/
+fresh read-only replay/export. Required joint overlap is explicit and all volume
+is charged; these are not densification settings or physical-printability proof.
+
+The separate paired `housing-h1-fine.intent.ts` and `housing-h1-combined.intent.ts`
+controls keep the explicitly fixed-X axis required by their XY separator. They
+share physical process/schedule/phase and differ only in sparse combination intent.
+Do not use that axis-constrained control as the ordinary default or infer coarse
+success from selecting CombineEligible. Generate inert data with `pnpm manufacturing:intent
 fixtures/manufacturing/housing-h1-combined.intent.ts NEW_INTENT.json`. Use an owned
-byte-identical source copy and exclusive output paths:
+byte-identical source copy and exclusive output paths for that control:
 
 ```sh
 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \

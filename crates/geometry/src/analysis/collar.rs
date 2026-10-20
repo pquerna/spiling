@@ -793,7 +793,11 @@ fn split_axis(bounds: Box2, depth: u8, axis: usize) -> Result<[Box2; 2], Geometr
     let mid = bounds[axis][0] * 0.5 + bounds[axis][1] * 0.5;
     if depth >= MAX_DEPTH || mid <= bounds[axis][0] || mid >= bounds[axis][1] {
         return Err(unresolved(
-            "native collar whole-cell material coverage cannot be resolved at binary64 parameter conditioning",
+            format!(
+                "native collar whole-cell material coverage cannot be resolved at binary64 parameter conditioning: reason={}, depth={depth}/{MAX_DEPTH}, axis={axis}, midpoint={mid:.17e}, axis_bounds={:?}",
+                if depth >= MAX_DEPTH { "depth_limit" } else { "selected_axis_collapse" },
+                bounds[axis],
+            ),
         ));
     }
     let mut children = [bounds; 2];

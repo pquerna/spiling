@@ -148,6 +148,11 @@ pub(crate) fn canonicalize(
                 } else if distance(from, path.points_mm[n - 1]) < distance(from, path.points_mm[0])
                 {
                     path.points_mm.reverse();
+                    if let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) =
+                        &mut path.owner
+                    {
+                        *skin_first = !*skin_first;
+                    }
                 }
             }
             position = path.points_mm.last().copied();

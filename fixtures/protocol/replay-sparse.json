@@ -67,7 +67,7 @@
       "program_hash": "ba0d90b41e39418cbb8424b0aca172b1cdb13bdca254d50f2f4a1e14c81df1ca",
       "schema_version": 5,
       "travel_count": 4,
-      "verifier_version": "7"
+      "verifier_version": "8"
     },
     "resource": {
       "media_type": "application/x-spiling-replay-motion",

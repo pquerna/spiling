@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -230,6 +230,12 @@ const fixtureRoot =
   scenario === "project-bridge" || manufacturingScenario
     ? await mkdtemp(resolve(tmpdir(), "spiling-authoring-cef-"))
     : sourceFixtureRoot;
+async function preserveManufacturingExport(name) {
+  if (!evidenceDirectory) return;
+  await mkdir(resolve(evidenceDirectory, name));
+  for (const file of ["plan.json", "provenance.json", "verification.json", "program.gcode"])
+    await copyFile(resolve(fixtureRoot, name, file), resolve(evidenceDirectory, name, file));
+}
 if (scenario === "project-bridge" || manufacturingScenario) {
   const sources =
     scenario === "project-bridge" ? ["box-mm.step", "cylinder.step"] : [manufacturingSource];
@@ -245,8 +251,9 @@ if (scenario === "project-bridge" || manufacturingScenario) {
 }
 if (manufacturingScenario) {
   await copyFile(
-    resolve(combineSparse || processDiaphragm
-      ? "fixtures/manufacturing/housing-h1-fine.intent.json"
+    resolve(processDiaphragm || manufacturingSource === "occt-rounded-housing-mm.step" && !processZones && !combineSparse
+      ? "fixtures/manufacturing/housing-ordinary.intent.json"
+      : combineSparse ? "fixtures/manufacturing/housing-h1-fine.intent.json"
       : "fixtures/manufacturing/complete-sparse.intent.json"),
     resolve(fixtureRoot, "operator.intent.json"),
   );
@@ -348,7 +355,10 @@ async function screenshot(name) {
   const sourceTag = customManufacturingSource
     ? `-${basename(customManufacturingSource).replace(/[^a-zA-Z0-9_-]/g, "-")}`
     : "";
-  await writeFile(`artifacts/${name}${sourceTag}.png`, Buffer.from(capture.data, "base64"));
+  const filename = `${name}${sourceTag}.png`;
+  const artifactPath = resolve("artifacts", filename);
+  await writeFile(artifactPath, Buffer.from(capture.data, "base64"));
+  if (evidenceDirectory) await copyFile(artifactPath, resolve(evidenceDirectory, filename));
 }
 async function geometryState() {
   return JSON.parse(await text("geometry-state"));
@@ -1972,12 +1982,9 @@ async function inspectManufacturing() {
   }
   if (processDiaphragm) {
     q1Intent = structuredClone((await manufacturingState()).selected_intent);
-    q1Intent.recipe.sparse_infill = { kind: "combine_eligible", max_height_mm: 0.30 };
-    await input('[data-testid="manufacturing-sparse-infill"]', "combine_eligible");
-    await input('[data-testid="manufacturing-sparse-max-height"]', "0.30");
-    await click("manufacturing-apply");
-    await until(async () => JSON.stringify((await manufacturingState()).selected_intent) === JSON.stringify(q1Intent),
-      "Explicit eligible sparse policy Apply retains the admitted fixed-X ordinary axis");
+    assert.equal(q1Intent.recipe.rectilinear_axis, "alternating_xy");
+    assert.equal(q1Intent.recipe.top_skin_axis, "alternating_xy");
+    assert.deepEqual(q1Intent.recipe.sparse_infill, {kind:"fine"});
     const project = async () => bridgeProject((await manufacturingState()).session_id);
     const first = (await geometryState()).occurrences[0];
     await selectOccurrence(first.occurrence_id);
@@ -2072,6 +2079,15 @@ async function inspectManufacturing() {
   await expectManufacturingStep("preflight");
   await click("manufacturing-next-action");
   await expectManufacturingStep("compile");
+  if (evidenceDirectory) {
+    const captured = await manufacturingState();
+    await writeFile(resolve(evidenceDirectory, "input-before-compile.json"), JSON.stringify({
+      software_only: true, not_machine_ready: true,
+      geometry: await geometryState(),
+      project: await bridgeProject(captured.session_id),
+      manufacturing: captured,
+    }, null, 2), { flag: "wx" });
+  }
   await click("manufacturing-next-action");
   state = await until(
     async () => {
@@ -2216,6 +2232,7 @@ async function inspectManufacturing() {
       ]),
     ),
   );
+  await preserveManufacturingExport("export-one");
   assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
   assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
   const plan = JSON.parse(exported["plan.json"]);
@@ -2277,13 +2294,10 @@ async function inspectManufacturing() {
       }, null, 2), { flag: "wx" });
   }
   if (processDiaphragm) {
-    assert.ok(plan.sparse_bands.some(band => band.disposition.kind === "retained_fine" &&
-      band.disposition.reason === "missing_lower_anchor"),
-      "Actual CombineEligible records the admitted fixed-X job's real anchor veto");
-    for (const band of plan.sparse_bands.filter(band => band.disposition.kind === "combined"))
-      assert.ok(plan.layers.slice(Math.max(0, band.first_layer - 1), band.last_layer + 2)
-        .every(layer => layer.region_coverage.process_diaphragms.length === 0),
-      "No actual H1 band crosses the plate or its fine neighborhood");
+    assert.deepEqual(state.selected_intent.recipe.sparse_infill, {kind:"fine"});
+    assert.equal(state.selected_intent.recipe.rectilinear_axis, "alternating_xy");
+    assert.equal(state.selected_intent.recipe.top_skin_axis, "alternating_xy");
+    assert.equal(plan.sparse_bands.length, 0, "Ordinary fine job makes no coarse-success claim");
     const plates = plan.layers.filter(layer => layer.region_coverage.process_diaphragms.length > 0);
     assert.ok(plates.length > 1, "Physical plate occupies multiple actual intervals");
     const first = plates[0], plate = first.region_coverage.process_diaphragms[0];
@@ -2304,18 +2318,13 @@ async function inspectManufacturing() {
     await screenshot("manufacturing-housing-diaphragm-physical-slab-cost");
     if (evidenceDirectory)
       await writeFile(resolve(evidenceDirectory, "plate-layer.json"), JSON.stringify(first, null, 2), {flag:"wx"});
-    const retained = plan.sparse_bands.find(band => band.disposition.kind === "retained_fine" &&
-      band.disposition.reason === "missing_lower_anchor");
-    await input('[data-testid="manufacturing-layer"]', String(retained.last_layer));
-    await until(async () => !(await manufacturingState()).working, "Actual retained-fine band inspection");
-    await evaluate("document.querySelector('[data-testid=\"manufacturing-sparse-band-decisions\"]').scrollIntoView({block:'center'})");
-    await screenshot("manufacturing-housing-diaphragm-h1-retained-fine");
+    const joint = plan.layers.find(layer => layer.paths.some(path => path.owner?.kind === "regional_skin_bridge"));
+    assert.ok(joint, "Actual authored sparse terminal has explicit required-skin joint construction");
+    await input('[data-testid="manufacturing-layer"]', String(joint.index));
+    await until(async () => !(await manufacturingState()).working, "Actual mixed skin-joint inspection");
+    await screenshot("manufacturing-housing-ordinary-skin-joint");
     if (evidenceDirectory)
-      await writeFile(resolve(evidenceDirectory, "retained-fine-band.json"), JSON.stringify({
-        policy: state.selected_intent.recipe.sparse_infill,
-        ordinary_axis: state.selected_intent.recipe.rectilinear_axis, decision: retained,
-        visible_inspection: await text("manufacturing-sparse-band-decisions"),
-      }, null, 2), {flag:"wx"});
+      await writeFile(resolve(evidenceDirectory, "mixed-skin-joint-layer.json"), JSON.stringify(joint, null, 2), {flag:"wx"});
     await input('[data-testid="manufacturing-layer"]', String(first.index));
     await until(async () => !(await manufacturingState()).working, "Permanent plate layer restored");
   }
@@ -2586,6 +2595,45 @@ async function inspectManufacturing() {
     exported["program.gcode"],
   );
   if (processDiaphragm) {
+    const beforeDensity = (await manufacturingState()).selected_artifact;
+    await input('[data-testid="process-fraction"]', "0.25");
+    await click("process-apply");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Lower density revision invalidates complete output");
+    await click("project-undo");
+    await until(async () => (await manufacturingState()).selected_artifact?.hash === beforeDensity.hash, "Density Undo restores exact prior inputs/artifact");
+    await click("project-redo");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Density Redo restores changed input without stale output");
+    await click("manufacturing-compile");
+    const revised = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && current.selected_artifact ? current : false;
+    }, "Recompile actual lower .25 upper .60 plate revision", nativeJobObservationMs);
+    await click("manufacturing-verify-motion");
+    await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && current.fresh && current.replay ? current : false;
+    }, "Fresh actual-program replay of density revision", nativeJobObservationMs);
+    await input('[data-testid="manufacturing-export-path"]', "export-lower-density-revision");
+    await click("manufacturing-debug-export");
+    await until(async () => /Committed/.test(await text("manufacturing-message")), "Revision exclusive four-file export");
+    const revisedPlan = JSON.parse(await readFile(resolve(fixtureRoot, "export-lower-density-revision", "plan.json"), "utf8"));
+    const revisedProvenance = JSON.parse(await readFile(resolve(fixtureRoot, "export-lower-density-revision", "provenance.json"), "utf8"));
+    assert.ok(revisedPlan.layers.some(layer => layer.region_coverage.process_regions.some(region => region.fraction === 0.25)));
+    assert.ok(revisedPlan.layers.some(layer => layer.region_coverage.process_regions.some(region => region.fraction === 0.60)));
+    assert.deepEqual(revisedProvenance.intent, JSON.parse(exported["provenance.json"]).intent);
+    if (evidenceDirectory) {
+      await preserveManufacturingExport("export-lower-density-revision");
+      await writeFile(resolve(evidenceDirectory, "density-edit-history.json"), JSON.stringify({
+        software_only:true, not_machine_ready:true, original:record, revised:revised.selected_artifact,
+        process_document:revisedProvenance.process_document, intent:revisedProvenance.intent,
+      }, null, 2), {flag:"wx"});
+    }
+    await click("project-undo");
+    await until(async () => !(await manufacturingState()).selected_artifact, "Undo revision compilation publication");
+    await click("project-undo");
+    await until(async () => (await manufacturingState()).selected_artifact?.hash === record.hash, "Undo density edit restores original .20/.60 plate artifact");
+    await input('[data-testid="manufacturing-export-path"]', "export-one");
+    await input('[data-testid="process-fraction"]', "0.20");
     await input('[data-testid="process-diaphragm-thickness"]', "0.0001");
     await click("process-apply");
     await until(async () => !(await manufacturingState()).selected_artifact, "Sub-admissible thickness invalidates the old plate");
@@ -2659,6 +2707,18 @@ async function inspectManufacturing() {
   );
   await rm(resolve(fixtureRoot, manufacturingSource));
   if (imageReliefScenario) await rm(resolve(fixtureRoot, "operator-relief.png"), { force: true });
+  if (evidenceDirectory) {
+    const savedProject = resolve(evidenceDirectory, "saved-project");
+    await cp(resolve(fixtureRoot, "manufacturing-project"), savedProject, {
+      recursive: true, errorOnExist: true, force: false,
+    });
+    await writeFile(resolve(evidenceDirectory, "saved-project-receipt.json"), JSON.stringify({
+      software_only: true, not_machine_ready: true,
+      original_source_capture_deleted: resolve(fixtureRoot, manufacturingSource),
+      saved_project: savedProject, artifact: record,
+      project: await bridgeProject((await manufacturingState()).session_id),
+    }, null, 2), { flag: "wx" });
+  }
   await click("project-read-only");
   await click("project-debug-open");
   state = await until(
@@ -2693,8 +2753,8 @@ async function inspectManufacturing() {
       "Source-independent reopen retains both authored policies",
     );
     const policyControls = ["manufacturing-seam-policy", "manufacturing-rectilinear-axis"];
-    if (combineSparse || processDiaphragm)
-      policyControls.push("manufacturing-sparse-infill", "manufacturing-sparse-max-height");
+    if (combineSparse || processDiaphragm) policyControls.push("manufacturing-sparse-infill");
+    if (q1Intent.recipe.sparse_infill.kind === "combine_eligible") policyControls.push("manufacturing-sparse-max-height");
     if (q1Intent.recipe.seam_policy.kind === "preferred_build_direction")
       policyControls.push("manufacturing-seam-direction-x", "manufacturing-seam-direction-y");
     for (const testId of policyControls)
@@ -2749,6 +2809,7 @@ async function inspectManufacturing() {
     await readFile(resolve(fixtureRoot, "export-readonly", "program.gcode"), "utf8"),
     exported["program.gcode"],
   );
+  await preserveManufacturingExport("export-readonly");
   const previousSession = state.session_id,
     previousPid = enginePid;
   await click("stop-engine");

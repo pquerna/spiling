@@ -162,6 +162,9 @@ pub(crate) fn simplify_section_reference(
                     if !foreign_clear {
                         continue;
                     }
+                    if !same_loop_changed_edges_clear(points, &cut, &section.frame, work, cancel)? {
+                        continue;
+                    }
                     let distance = super::reference_distance::cycle_distance(
                         points, &cut, remaining, work, cancel,
                     )?;
@@ -392,6 +395,77 @@ fn foreign_boundaries_clear(
         }
     }
     Ok(true)
+}
+
+// A distance witness does not establish topology. Only the two changed edges
+// need comparison: untouched raw crossings can be repaired by later proposals.
+// The virtual candidate borrows the original points and allocates no buffer.
+fn same_loop_changed_edges_clear(
+    points: &[[f64; 3]],
+    cut: &CycleCut,
+    frame: &PlaneFrameMm,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let count = candidate_len(points.len(), cut) - 1;
+    let changed = if cut.keep_middle {
+        [0, count - 1]
+    } else {
+        [cut.first_edge, cut.first_edge + 1]
+    };
+    for (ordinal, &edge) in changed.iter().enumerate() {
+        let a = candidate_point(points, cut, edge);
+        let b = candidate_point(points, cut, (edge + 1) % count);
+        let b2 = project(b, a, frame);
+        for other in 0..count {
+            if other == edge || ordinal == 1 && other == changed[0] {
+                continue;
+            }
+            work.charge(1, cancel)?;
+            let c = candidate_point(points, cut, other);
+            let d = candidate_point(points, cut, (other + 1) % count);
+            if (edge + 1) % count == other {
+                if b != c || !incident_edges_clear(b, a, d, frame) {
+                    return Ok(false);
+                }
+            } else if (other + 1) % count == edge {
+                if d != a || !incident_edges_clear(a, b, c, frame) {
+                    return Ok(false);
+                }
+            } else {
+                let [c2, d2] = [c, d].map(|point| project(point, a, frame));
+                let separated = (0..2).any(|k| {
+                    b2[k].hi.max(0.0) < c2[k].lo.min(d2[k].lo)
+                        || c2[k].hi.max(d2[k].hi) < b2[k].lo.min(0.0)
+                }) || same_strict_side(cross(b2, c2), cross(b2, d2))
+                    || same_strict_side(
+                        cross(subtract(d2, c2), subtract([Interval::point(0.0); 2], c2)),
+                        cross(subtract(d2, c2), subtract(b2, c2)),
+                    );
+                if !separated {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn same_strict_side(a: Interval, b: Interval) -> bool {
+    a.lo > 0.0 && b.lo > 0.0 || a.hi < 0.0 && b.hi < 0.0
+}
+
+fn incident_edges_clear(
+    shared: [f64; 3],
+    a: [f64; 3],
+    b: [f64; 3],
+    frame: &PlaneFrameMm,
+) -> bool {
+    let [a, b] = [a, b].map(|point| project(point, shared, frame));
+    let turn = cross(a, b);
+    // Noncollinear rays meet only at their identical endpoint. Collinear rays
+    // are allowed only in opposite half-planes, never backtracking/overlap.
+    turn.lo > 0.0 || turn.hi < 0.0 || a[0].mul(b[0]).add(a[1].mul(b[1])).hi < 0.0
 }
 
 fn compact(points: &mut Vec<[f64; 3]>, cut: &CycleCut) {

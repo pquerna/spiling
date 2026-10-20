@@ -5,7 +5,7 @@
 import type { ManufacturingIntent } from "../../packages/protocol/src/generated.ts";
 import baseline from "./housing-two-zone.intent.ts";
 
-// Keep the fixed-X separator hatch and source-zone phase of the housing baseline.
+// Explicit fixed-X XY-separator H1 control, not the ordinary housing profile.
 export default {
   ...baseline,
   recipe: {

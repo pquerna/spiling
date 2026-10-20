@@ -108,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProcessInterfaceCoverage::decl(&config),
         DiaphragmPolygonMm::decl(&config),
         ProcessDiaphragmCoverage::decl(&config),
+        SkinBridgeDomain::decl(&config),
         ProcessRegionStatus::decl(&config),
         ProcessRegionResolution::decl(&config),
         ProjectManifest::decl(&config),

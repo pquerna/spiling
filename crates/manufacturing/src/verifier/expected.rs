@@ -220,6 +220,18 @@ impl Iterator for Expected<'_> {
             if self.edge < path.points_mm.len() {
                 let source = path.points_mm[self.edge - 1];
                 let target = path.points_mm[self.edge];
+                let owner = match path.owner {
+                    Some(DepositionOwner::RegionalSkinBridge {
+                        region_index,
+                        skin,
+                        skin_first,
+                    }) => Some(if skin_first == (self.edge == 1) {
+                        DepositionOwner::MandatorySkin { skin }
+                    } else {
+                        DepositionOwner::Regional { region_index }
+                    }),
+                    owner => owner,
+                };
                 self.edge += 1;
                 self.position = Some(target);
                 return Some(Action::Move {
@@ -230,7 +242,7 @@ impl Iterator for Expected<'_> {
                     association: Some(Association {
                         width: path.bead_width_mm,
                         physical_z: path.physical_z_mm,
-                        owner: path.owner,
+                        owner,
                     }),
                 });
             }

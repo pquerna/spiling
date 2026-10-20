@@ -3467,3 +3467,121 @@ fn previous_planner_identity_cannot_acquire_current_fresh_inspection_authority()
         assert_eq!(failure.code, ManufacturingErrorCode::UnsupportedCapability);
     }
 }
+
+#[test]
+fn housing_terminal_native_source_refinement_preserves_closed_material_authority() {
+    let intent: ManufacturingIntent = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/manufacturing/housing-ordinary.intent.json",
+    ))
+    .unwrap();
+    let pose = RigidPoseMm {
+        translation_mm: [98.0, 100.99999999999977, 1.225587472778531e-9],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+    };
+    let mut scene = NativeScene::new(
+        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        &[pose],
+    );
+    scene.process_document = serde_json::from_value(serde_json::json!({
+        "schema_version": 3,
+        "layers": [
+            {"layer_id": 1, "enabled": true,
+                "scope": {"kind": "definition", "definition_id": scene.occurrences[0].definition_id},
+                "operations": [{"operation_id": 1,
+                    "selector": {"kind": "whole_owned_volume"},
+                    "action": {"kind": "replace", "value": {"kind": "sparse_fraction", "fraction": 0.60}},
+                    "interface": null}]},
+            {"layer_id": 2, "enabled": true,
+                "scope": {"kind": "definition", "definition_id": scene.occurrences[0].definition_id},
+                "operations": [{"operation_id": 2,
+                    "selector": {"kind": "source_box_mm", "min": [-1.0,-1.0,-1.0], "max": [25.0,19.0,5.03]},
+                    "action": {"kind": "replace", "value": {"kind": "sparse_fraction", "fraction": 0.20}},
+                    "interface": {"kind": "horizontal_diaphragm", "thickness_mm": 0.23}}]},
+        ],
+    }))
+    .unwrap();
+    let input = scene.input(&intent);
+    let cancel = AtomicBool::new(false);
+    let (mut admission, geometry) = preflight::admit(&input, &cancel).unwrap();
+    let mut proposal_work = 0;
+    preflight::resolve_native_events(&input, &mut admission, &geometry, &mut proposal_work, &cancel)
+        .unwrap();
+    let mut captures = Vec::new();
+    for occurrence in input.occurrences {
+        captures.push(zones::capture(
+            &input,
+            &admission,
+            occurrence.occurrence_id,
+            &mut proposal_work,
+            &cancel,
+        ).unwrap());
+    }
+    let sources = prepare_sources(
+        geometry,
+        admission.native_capture_proposal_bytes(),
+        &mut admission.geometry_work,
+        &cancel,
+    )
+    .unwrap();
+    // Prepare genuine accepted lower material in the ordinary producer before
+    // making the captured terminal request. A state starting only at that
+    // terminal height lacks the production lower-leaf precondition.
+    let interval = [9.98333333474894857, 10.0000000924533996];
+    let mut schedule = scheduled_layers(&input, &admission, &captures, &cancel).unwrap();
+    while schedule.last().unwrap().lower_z >= interval[0] {
+        schedule.pop();
+    }
+    let last = schedule.last_mut().unwrap();
+    assert!(last.lower_z < interval[0]);
+    last.z = interval[0];
+    last.height = last.z - last.lower_z;
+    last.sample = last.lower_z + last.height * 0.5;
+    let occurrences = input.occurrences.iter().collect::<Vec<_>>();
+    let full_interval = [intent.printer.build_envelope.min[2], interval[1]];
+    let mut state = native::NativeStageState::new(full_interval).unwrap();
+    let mut index = 0;
+    let mut covered_upper = full_interval[0];
+    let mut terminal_appended = false;
+    loop {
+        if index as usize == schedule.len() {
+            if terminal_appended {
+                break;
+            }
+            assert_eq!(covered_upper, interval[0]);
+            schedule.push(LayerElevation {
+                lower_z: interval[0],
+                z: interval[1],
+                sample: 9.99166671360117320,
+                height: interval[1] - interval[0],
+            });
+            terminal_appended = true;
+        }
+        let retained = schedule.capacity() * std::mem::size_of::<LayerElevation>()
+            + occurrences.capacity() * std::mem::size_of::<&OccurrenceRecord>();
+        let span = native::collect_span(
+            &native::NativeSourceInputs {
+                input: &input,
+                occurrences: &occurrences,
+                sources: &sources,
+            },
+            &mut admission,
+            &mut schedule,
+            &native::NativeSpanRequest {
+                index,
+                retained_points: 0,
+                retained_output_bytes: retained,
+            },
+            &mut state,
+            &mut proposal_work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(span.end > index);
+        assert_eq!(schedule[index as usize].lower_z, covered_upper);
+        assert!(!span.material.0.is_empty());
+        covered_upper = schedule[span.end as usize - 1].z;
+        index = span.end;
+    }
+    assert_eq!(covered_upper, interval[1]);
+    state.finalize(&mut admission.geometry_work, &cancel).unwrap();
+}

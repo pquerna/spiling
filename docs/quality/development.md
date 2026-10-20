@@ -152,24 +152,27 @@ SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
 
 The manufacturing runner exercises intent/placement/history, Compile, actual-byte
 report/motion, cancellation, export, source-independent reopen and child cleanup.
-`--manufacturing-source RELATIVE_STEP` keeps the entire unchanged complete-sparse
-intent for a real mechanical input; it does not make refused geometry successful.
-For a centered supported plate, use the unchanged rounded housing with
-`housing-h1-fine.intent.json`, whole-owned0.60 and a lower source box
+`--manufacturing-source RELATIVE_STEP` preserves its selected explicit complete
+intent for a real mechanical input; it never turns refused geometry into success.
+For an ordinary fine housing, use `housing-ordinary.intent.json`: the same0.10 mm
+physical schedule/process with fill and top skin both AlternatingXY. Compile the
+uniform0.25 job before authoring whole-owned0.60 and lower source box
 `[-1,-1,-1]..[25,19,5.03]` at0.20. The final `--process-set-box` token
 `horizontal-diaphragm:0.23` explicitly permits the centered0.23 mm permanent
-plate. Source-Z5.03 is not a world height; the captured pose determines its actual
-world slab. Use `--process-diaphragm` with the named-source hardware smoke to
-exercise thickness authoring/history, source-hidden annular construction,
-physical slab/nominal path cost and an explicit unrepresentable-thickness refusal.
-The same admitted fixed-X plate job also accepts `combine_eligible`/0.30mm and
-truthfully retains fine with actual domain/neighborhood/anchor reasons: some
-parallel coarse rows exceed the declared10mm Bridge span. The hardware runner
-authors this policy explicitly. No band may cross the plate or its fine
-neighborhood; the existing admitted two-area H1 reference separately exercises
-genuine coarse output. Do not infer optimization from selecting CombineEligible,
-nominal layer counts or a changed-axis comparison. A changed ordinary axis has
-its own Compile/support obligations, not an automatic supported alternative.
+plate. Source-Z5.03 is not world height; the captured pose determines its actual
+slab. `--process-diaphragm` with the named-source hardware smoke uses this ordinary
+profile and exercises lower-density edit/history/recompile, source-hidden actual
+skin joints/annular plate, slab/material inspection and unrepresentable-thickness
+refusal, then pose/history/save/source-delete/fresh read-only replay/export.
+
+`housing-h1-fine.intent.json` and `housing-h1-combined.intent.json` remain separate
+fixed-X XY-separator controls; alternating XY separator construction is explicitly
+unsupported. Their genuine coarse positive control is not the ordinary default.
+The fixed-X whole-width plate control can truthfully retain every band fine under
+CombineEligible because its actual parallel gap exceeds the10 mm bridge limit.
+Do not compare different axes as an optimization or force coarse deposition.
+The ordinary Fine housing/plate makes no coarse-success claim. Any changed axis or
+CombineEligible request still has its own native/actual-support obligations.
 Plate Compile requires captured full-height strong native inner-material authority;
 invariant metadata alone is not admission, and unsupported plate/upper attachment
 cannot silently acquire temporary scaffolding.
