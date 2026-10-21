@@ -8,6 +8,7 @@ use spiling_contracts::{geometry::*, project::ProjectRevision};
 use spiling_geometry::{BoundsPolicy, Definition, GeometryWorkBudget};
 use std::sync::atomic::AtomicBool;
 
+// One cumulative allowance covers source preparation and all three queries.
 const MAX_CONTACT_WORK: u64 = 20_000_000;
 
 pub(super) struct Request {
@@ -42,6 +43,22 @@ pub(super) fn prepare(
         ));
     }
     let mut work = GeometryWorkBudget::new(MAX_CONTACT_WORK);
+    let source = spiling_geometry::prepare_geometry_source(
+        definition,
+        spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        cancel,
+        &mut work,
+    )?;
+    // Immutable domains and vertex plans are shared; each query's scratch must
+    // fit alongside their retained capacities within the same geometry pool.
+    let query_bytes = spiling_geometry::MAX_PREPARED_SECTION_BYTES
+        .checked_sub(source.retained_bytes())
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "bed preparation source and query geometry exceed simultaneous storage",
+            )
+        })?;
     let mut minimum_lower_mm = [0.0; 3];
     let mut minimum_upper_mm = [0.0; 3];
     let mut maximum_lower_mm = [0.0; 3];
@@ -50,13 +67,13 @@ pub(super) fn prepare(
         check_cancel(cancel)?;
         let mut direction = [0.0; 3];
         direction[axis] = 1.0;
-        let support = spiling_geometry::placed_material_bounds(
-            definition,
+        let support = source.placed_material_bounds(
             request.pose,
             direction,
             BoundsPolicy {
                 maximum_endpoint_uncertainty_mm: request.contact_tolerance_mm * 0.25,
             },
+            query_bytes,
             &mut work,
             cancel,
         )?;

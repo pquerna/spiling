@@ -1257,12 +1257,12 @@ async fn native_bed_contact_is_nonpenetrating_read_only_and_revision_bound() {
         .await;
     assert!(matches!(
         stale,
-        Err(spiling_engine_client::ClientError::Geometry(
-            GeometryError {
+        Ok(GeometryResponse::Error {
+            error: GeometryError {
                 code: GeometryErrorCode::StaleRevision,
                 ..
             }
-        ))
+        })
     ));
     let current_revision = project_revision(&client).await;
     let fresh = client
