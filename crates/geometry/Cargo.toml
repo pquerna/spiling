@@ -19,7 +19,7 @@ monstertruck-io.workspace = true
 monstertruck-topology.workspace = true
 step-p21.workspace = true
 sha2.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
-serde.workspace = true
 serde_json.workspace = true

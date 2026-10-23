@@ -180,7 +180,9 @@ pub(super) fn certify(
             ordinal,
             polygon,
             reserved,
-            prepared: &prepared,
+            prepared: prepared.native(),
+            certified_uv_domain: prepared.certified_uv_domain(),
+            source_chart_error_mm: prepared.source_chart_error_mm(),
             natural_indices: &[],
         },
         work,
@@ -193,7 +195,9 @@ pub(super) struct PreparedCoverageQuery<'a, 'source> {
     pub(super) ordinal: usize,
     pub(super) polygon: &'a PolygonMesh,
     pub(super) reserved: usize,
-    pub(super) prepared: &'a crate::kernel::PreparedFaceTrimDomain<'source>,
+    pub(super) prepared: &'a PreparedFaceParameterDomain<'source>,
+    pub(super) certified_uv_domain: Option<[[f64; 2]; 2]>,
+    pub(super) source_chart_error_mm: f64,
     pub(super) natural_indices: &'a [usize],
 }
 
@@ -208,6 +212,8 @@ pub(super) fn certify_prepared(
         polygon,
         reserved,
         prepared,
+        certified_uv_domain,
+        source_chart_error_mm,
         natural_indices,
     } = query;
     check_memory(reserved.saturating_add(prepared.retained_bytes()))?;
@@ -224,7 +230,7 @@ pub(super) fn certify_prepared(
             work,
             cancel,
             reserved.saturating_add(prepared.retained_bytes()),
-            Some((prepared.native(), natural_indices)),
+            Some((prepared, natural_indices)),
             |uv, _point, position| {
                 Ok(Corner {
                     uv,
@@ -239,7 +245,7 @@ pub(super) fn certify_prepared(
             .saturating_add(prepared.retained_bytes())
             .saturating_add(correspondence_bytes(
                 &circuits,
-                prepared.native().coedges().len(),
+                prepared.coedges().len(),
                 definition.face_boundaries[ordinal].wires.len(),
             )),
     )?;
@@ -254,8 +260,7 @@ pub(super) fn certify_prepared(
             .total_cmp(&circuits[c][d].uv[0])
             .then_with(|| (a, b).cmp(&(c, d)))
     });
-    let domain = prepared.native();
-    let certified_uv_domain = prepared.certified_uv_domain();
+    let domain = prepared;
     work.charge(circuits.len() as u64 + 4, cancel)?;
     let mut used: Vec<Vec<bool>> = circuits
         .iter()
@@ -630,8 +635,10 @@ pub(super) fn certify_prepared(
             [tube.lo, tube.hi]
         });
         let joint_box = source_tube_in_domain(joint_box, certified_uv_domain)?;
+        // A joint consumes only the complete carrier image. It neither needs
+        // nor grants a C1 chart across an actual continuous native knot.
         let image = domain.face().with_surface(|surface| {
-            crate::parametric::surface_enclosure(surface, joint_box, work, cancel)
+            crate::parametric::surface_piecewise_enclosure(surface, joint_box, work, cancel)
         })?;
         let squared = (0..3).fold(Interval::point(0.0), |sum, axis| {
             sum.add(
@@ -654,12 +661,10 @@ pub(super) fn certify_prepared(
             "native trim coverage has missing loops or unmatched boundary segments",
         ));
     }
-    Ok(crate::parametric::up(
-        maximum + prepared.source_chart_error_mm(),
-    ))
+    Ok(crate::parametric::up(maximum + source_chart_error_mm))
 }
 
-fn trim_error(error: TrimDomainError) -> GeometryError {
+pub(super) fn trim_error(error: TrimDomainError) -> GeometryError {
     match error {
         TrimDomainError::Geometry(error) => crate::parametric::native_error(error),
         TrimDomainError::ResourceLimit => {
@@ -876,8 +881,12 @@ fn split_span_error(
             source_box[axis][1].max(chord[0][axis].hi.max(chord[1][axis].hi)),
         ]
     });
+    // This is a first-order Lipschitz transport over the complete source tube,
+    // not a surface Hessian/Taylor or normal proof. Native continuous piecewise
+    // first jets enclose both sides of actual C0 knots. The UV curve's separate
+    // second-order chord proof above still uses strict, knot-partitioned jets.
     let image = domain.face().with_surface(|surface| {
-        crate::parametric::surface_enclosure(surface, uv_box, work, cancel)
+        crate::parametric::surface_piecewise_enclosure(surface, uv_box, work, cancel)
     })?;
     let displacement: [Interval; 3] = std::array::from_fn(|axis| {
         image.du[axis]

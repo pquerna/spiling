@@ -752,7 +752,6 @@ fn prepared_curve_support(
         }
         return Ok(result);
     }
-    let mut support = None;
     let mut covered_until = range.0;
     for span in prepared.parameter_intervals() {
         work.charge(1, cancel)?;
@@ -763,34 +762,6 @@ fn prepared_curve_support(
             ));
         }
         covered_until = span.1;
-        let result = search(
-            [[span.0, span.1], [0.0, 0.0]],
-            1,
-            tolerance,
-            scratch,
-            work,
-            cancel,
-            |cell, work, cancel| {
-                let span = (cell[0][0], cell[0][1]);
-                let enclosure = prepared.jet(span, work, cancel)?;
-                let midpoint = span.0 * 0.5 + span.1 * 0.5;
-                let point = prepared.jet((midpoint, midpoint), work, cancel)?;
-                let h = project(point.position, direction)?;
-                let delta = Interval {
-                    lo: parametric::down(span.0 - midpoint),
-                    hi: parametric::up(span.1 - midpoint),
-                };
-                // Full derivative bounds remain valid across continuous spline knots;
-                // a point derivative plus a piecewise second derivative does not.
-                let centered = h.add(project(enclosure.derivative, direction)?.mul(delta));
-                Ok(Some(Evaluation {
-                    height: intersect(project(enclosure.position, direction)?, centered)?,
-                    witness: Some(h),
-                    split_axis: 0,
-                }))
-            },
-        )?;
-        combine(&mut support, result);
     }
     if covered_until != range.1 {
         return Err(error(
@@ -798,12 +769,35 @@ fn prepared_curve_support(
             "native curve span cover ends before the boundary endpoint",
         ));
     }
-    let mut result = support.ok_or_else(|| {
-        error(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "native boundary has no bounded parameter spans",
-        )
-    })?;
+    // All retained spans belong to one complete boundary. Share its feasible
+    // extrema instead of separately resolving every span's interior extrema.
+    let mut result = search_domains(
+        prepared.parameter_intervals().map(|span| [[span.0, span.1], [0.0, 0.0]]),
+        1,
+        tolerance,
+        scratch,
+        work,
+        cancel,
+        |cell, work, cancel| {
+            let span = (cell[0][0], cell[0][1]);
+            let enclosure = prepared.jet(span, work, cancel)?;
+            let midpoint = span.0 * 0.5 + span.1 * 0.5;
+            let point = prepared.jet((midpoint, midpoint), work, cancel)?;
+            let h = project(point.position, direction)?;
+            let delta = Interval {
+                lo: parametric::down(span.0 - midpoint),
+                hi: parametric::up(span.1 - midpoint),
+            };
+            // Full derivative bounds remain valid across continuous spline knots;
+            // a point derivative plus a piecewise second derivative does not.
+            let centered = h.add(project(enclosure.derivative, direction)?.mul(delta));
+            Ok(Some(Evaluation {
+                height: intersect(project(enclosure.position, direction)?, centered)?,
+                witness: Some(h),
+                split_axis: 0,
+            }))
+        },
+    )?;
     result.achieved_uncertainty_mm = uncertainty(&result);
     Ok(result)
 }
@@ -1115,6 +1109,7 @@ pub(super) fn source_recipe_scalar_support(
     Interval::new(outer_min, outer_max)
 }
 
+#[cfg(test)]
 fn search(
     domain: [[f64; 2]; 2],
     dimensions: usize,

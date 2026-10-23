@@ -3,26 +3,59 @@
 // Licensed under the Open Software License version 3.0
 
 //! Complete native UV coverage survives physical natural-boundary quotients.
-use super::{coverage, invalid};
+use super::{coverage, display_trim::DisplayFace, invalid};
 use crate::{
     GeometryWorkBudget,
     kernel::{Definition, PreparedFaceTrimDomain},
     parametric::Interval,
 };
 use monstertruck_meshing::prelude::PolygonMesh;
-use monstertruck_modeling::TrimJointKind;
+use monstertruck_modeling::{PreparedFaceParameterDomain, TrimJointKind};
 use spiling_contracts::geometry::GeometryError;
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 
 pub(super) struct BoundaryFace<'a> {
-    trim: PreparedFaceTrimDomain<'a>,
+    trim: BoundaryTrim<'a>,
     reserved_bytes: usize,
     natural: Vec<usize>,
+}
+// A display chart cannot be passed to an operation's source-domain preparer.
+enum BoundaryTrim<'a> {
+    Source(PreparedFaceTrimDomain<'a>),
+    Display {
+        native: PreparedFaceParameterDomain<'a>,
+        bounds: [[f64; 2]; 2],
+    },
+}
+impl BoundaryTrim<'_> {
+    fn native(&self) -> &PreparedFaceParameterDomain<'_> {
+        match self {
+            Self::Source(trim) => trim.native(),
+            Self::Display { native, .. } => native,
+        }
+    }
+    fn retained_bytes(&self) -> usize {
+        self.native().retained_bytes()
+    }
+    fn certified_uv_domain(&self) -> Option<[[f64; 2]; 2]> {
+        match self {
+            Self::Source(trim) => trim.certified_uv_domain(),
+            Self::Display { bounds, .. } => Some(*bounds),
+        }
+    }
+    fn source_chart_error_mm(&self) -> f64 {
+        match self {
+            Self::Source(trim) => trim.source_chart_error_mm(),
+            // Exact native coefficient equality, not an original UV receipt.
+            Self::Display { .. } => 0.0,
+        }
+    }
 }
 impl<'a> BoundaryFace<'a> {
     pub(super) fn prepare(
         definition: &'a Definition,
         ordinal: usize,
+        display: Option<&'a DisplayFace<'_>>,
         polygon: &PolygonMesh,
         extra_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -30,13 +63,20 @@ impl<'a> BoundaryFace<'a> {
     ) -> Result<Self, GeometryError> {
         let reserved_bytes = coverage::proof_memory_bound(polygon)?.saturating_add(extra_bytes);
         coverage::check_memory(reserved_bytes)?;
-        let trim = crate::kernel::prepare_face_trim_domain_with_byte_limit(
-            definition,
-            ordinal,
-            coverage::PROOF_BYTES - reserved_bytes,
-            work,
-            cancel,
-        )?;
+        let remaining_bytes = coverage::PROOF_BYTES - reserved_bytes;
+        let trim = match display {
+            Some(display) => BoundaryTrim::Display {
+                native: display.prepare_domain(remaining_bytes, work, cancel)?,
+                bounds: display.bounds(),
+            },
+            None => BoundaryTrim::Source(crate::kernel::prepare_face_trim_domain_with_byte_limit(
+                definition,
+                ordinal,
+                remaining_bytes,
+                work,
+                cancel,
+            )?),
+        };
         let mut natural = Vec::new();
         for (index, joint) in trim.native().joints().iter().enumerate() {
             work.charge(1, cancel)?;
@@ -217,7 +257,9 @@ impl<'a> BoundaryFace<'a> {
                     .reserved_bytes
                     .saturating_add(extra_bytes)
                     .saturating_add(coverage::vector_bytes(&self.natural)),
-                prepared: &self.trim,
+                prepared: self.trim.native(),
+                certified_uv_domain: self.trim.certified_uv_domain(),
+                source_chart_error_mm: self.trim.source_chart_error_mm(),
                 natural_indices: &self.natural,
             },
             work,

@@ -7,6 +7,7 @@
 //! its complete forward physical correspondence must be proved separately.
 
 use super::{conversion_error, error, source_trim, trim_certificate};
+use super::trim_certificate::SelectedMasterReceipt;
 use crate::{GeometryWorkBudget, parametric::Interval};
 use monstertruck_io::step::{
     SurfaceParameterChart,
@@ -52,6 +53,7 @@ struct MasterAssociation<'a> {
     active: Option<(f64, f64)>,
     whole: Option<(f64, f64)>,
     retained: Option<(&'a model::Curve, &'a model::PreparedValidatedCurve<'static>)>,
+    previous: Option<&'a SelectedMasterReceipt>,
     scale: f64,
 }
 
@@ -69,10 +71,14 @@ struct MasterAssociation<'a> {
 /// `retained` borrows the already-owned whole native root and its immutable
 /// continuation in the source carrier frame. It is required for a preferred
 /// PCURVE on a genuine INTERSECTION_CURVE; its explicit guide is not authority.
+/// `completed` is an import-local receipt slot for this stable original owner,
+/// not a validation flag. Every call still resolves the actual selected
+/// association/domain; only exact bound operand equality can reuse its proof.
 pub(super) fn validate_selected_master(
     source: &Curve3D,
     original_range: Option<(f64, f64)>,
     retained: Option<(&model::Curve, &model::PreparedValidatedCurve<'static>)>,
+    completed: &mut Option<SelectedMasterReceipt>,
     scale: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -84,18 +90,21 @@ pub(super) fn validate_selected_master(
         ));
     }
     let original_range = original_range.map(finite_range).transpose()?;
-    visit(
+    let checked = visit(
         source,
         MasterAssociation {
             active: None,
             whole: original_range,
             retained,
+            previous: completed.as_ref(),
             scale,
         },
         0,
         work,
         cancel,
-    )
+    )?;
+    *completed = checked;
+    Ok(())
 }
 
 fn visit(
@@ -104,11 +113,12 @@ fn visit(
     depth: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<Option<SelectedMasterReceipt>, GeometryError> {
     let MasterAssociation {
         active,
         whole,
         retained,
+        previous,
         scale,
     } = association;
     work.charge(1, cancel)?;
@@ -165,6 +175,7 @@ fn visit(
                     active: Some(range),
                     whole,
                     retained,
+                    previous,
                     scale,
                 },
                 depth + 1,
@@ -187,7 +198,7 @@ fn visit(
                     ));
                 };
                 if surface_curve.kind() == SurfaceCurveKind::IntersectionCurve {
-                    prove_retained(source, selected, association, work, cancel)?;
+                    return prove_retained(source, selected, association, work, cancel);
                 } else {
                     prove(
                         surface_curve.leader(),
@@ -200,14 +211,14 @@ fn visit(
                 }
             }
             if surface_curve.kind() == SurfaceCurveKind::IntersectionCurve {
-                return Ok(());
+                return Ok(None);
             }
             visit(surface_curve.leader(), association, depth + 1, work, cancel)
         }
         // The intersection's seed is not its exact world curve, nor a preferred
         // master. Its continuation receipt belongs to the implicit admission gate.
-        Curve3D::IntersectionCurve(_) => Ok(()),
-        _ => Ok(()),
+        Curve3D::IntersectionCurve(_) => Ok(None),
+        _ => Ok(None),
     }
 }
 
@@ -217,10 +228,11 @@ fn prove_retained(
     association: MasterAssociation<'_>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<Option<SelectedMasterReceipt>, GeometryError> {
     let MasterAssociation {
         whole,
         retained,
+        previous,
         scale,
         ..
     } = association;
@@ -242,6 +254,7 @@ fn prove_retained(
     };
     copies.uv(selected.curve(), 0)?;
     copies.surface(selected.surface(), 0)?;
+    let live_copy_bytes = copies.bytes;
     let (surface, conversion) = selected
         .surface()
         .to_modeling_with_parameter_map()
@@ -251,24 +264,145 @@ fn prove_retained(
                 cause.as_ref(),
             )
         })?;
-    let (map, margin) = input_map(conversion, selected.input_parameter_chart())?;
-    let chart = if let StepCurve2D::Line(raw) = selected.curve() {
-        let domain = source_trim::intrinsic_domain(selected.surface(), &surface, conversion);
-        let candidate =
-            match source_trim::native_chart(curve, &surface, None, domain, work, cancel)? {
-                Some(candidate) => Some(candidate),
-                None => source_trim::implicit_guide_chart(
-                    source,
-                    selected.surface(),
-                    &surface,
-                    conversion,
-                    work,
-                    cancel,
-                )?,
+    let (chart, margin) = retained_chart(
+        source, selected, curve, &surface, conversion, range, work, cancel,
+    )?;
+    // Only the original selected UV expression enters this proof. Native chart
+    // extraction and the explicit guide above supply proposals, never receipts.
+    // This certificate borrows the SAME whole branch as every later consumer.
+    if let Some(proof) = prove_reusable_retained_master(
+        trim_certificate::Correspondence {
+            curve,
+            surface: &surface,
+            chart: &chart,
+            maximum_error_mm: 1.0e-7 / scale,
+            margin_uv: margin,
+        },
+        (prepared, 1.0),
+        previous,
+        source,
+        live_copy_bytes,
+        scale,
+        work,
+        cancel,
+    )? {
+        return Ok(Some(proof));
+    }
+    let natural = finite_range(curve.range_tuple())?;
+    if range != natural && !matches!(selected.curve(), StepCurve2D::Line(_)) {
+        // A bounded association may declare the whole basis chart rather than
+        // an edge-active chart. Transport the original expression's proposed
+        // affine correspondence onto the actual retained original restriction.
+        // Never extend the owned branch to the unused natural basis interval.
+        let chart = restrict_chart_proposal(chart, range, natural)?;
+        if let Some(proof) = prove_reusable_retained_master(
+            trim_certificate::Correspondence {
+                curve,
+                surface: &surface,
+                chart: &chart,
+                maximum_error_mm: 1.0e-7 / scale,
+                margin_uv: margin,
+            },
+            (prepared, 1.0),
+            previous,
+            source,
+            live_copy_bytes,
+            scale,
+            work,
+            cancel,
+        )? {
+            return Ok(Some(proof));
+        }
+    }
+    Err(unresolved(
+        "selected original implicit PCURVE lacks whole retained-root forward correspondence",
+    ))
+}
+
+fn prove_reusable_retained_master(
+    input: trim_certificate::Correspondence<'_>,
+    prepared: (&model::PreparedValidatedCurve<'static>, f64),
+    previous: Option<&SelectedMasterReceipt>,
+    source: &Curve3D,
+    live_copy_bytes: usize,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<SelectedMasterReceipt>, GeometryError> {
+    if previous.is_some() || !matches!(input.surface, model::Surface::Plane(_)) {
+        return trim_certificate::certify_selected_master_correspondence(
+            input, prepared, previous, work, cancel,
+        );
+    }
+    let prepared_range = prepared.0.range();
+    let native_range = input.curve.range_tuple();
+    let active = [
+        prepared_range[0].max(native_range.0),
+        prepared_range[1].min(native_range.1),
+    ];
+    // PlaneImage consumes literal native t. Preserve independent chart maps on
+    // the ordinary admission path rather than inventing a periodic alias.
+    let identity = input.chart.try_range_tuple()
+        .is_some_and(|uv| active == [uv.0, uv.1]);
+    if identity {
+        // R is a conditional quality premise, not an achieved source bound.
+        // The inverse traversal only proposes a target; the independent whole
+        // native proof below must discharge A <= q <= R before receipt reuse.
+        let proposed = optional_precision(whole_owner_precision(
+            source, input, prepared.0, input.maximum_error_mm,
+            live_copy_bytes, scale, work, cancel,
+        ))?;
+        if let Some(proposed) = proposed {
+            // Reserve search headroom for the actual periodic/current image.
+            // This policy does not certify its discrepancy or change its goal.
+            let goal = Interval::point(proposed)
+                .mul(Interval::point(0.5)).lo.min(input.maximum_error_mm);
+            if goal.is_finite() && goal > 0.0 {
+                if let Some(proof) = trim_certificate::certify_selected_master_correspondence(
+                    trim_certificate::Correspondence { maximum_error_mm: goal, ..input },
+                    prepared, None, work, cancel,
+                )? {
+                    let achieved = proof.whole().position_error_mm();
+                    if achieved.is_finite() && achieved >= 0.0 && achieved <= goal {
+                        return Ok(Some(proof));
+                    }
+                }
             }
-            .ok_or_else(|| {
-                unresolved("selected implicit UV LINE has no bounded active-branch proposal")
-            })?;
+        }
+    }
+    // One optional quality attempt, then the unchanged ordinary proof. No
+    // inverse proposal grants authority; errors and cumulative work propagate.
+    trim_certificate::certify_selected_master_correspondence(
+        input, prepared, previous, work, cancel,
+    )
+}
+
+/// The selected declaration and optional original associations use exactly the
+/// same chart conversion and finite LINE branch proposal. Neither a guide nor
+/// a declaration becomes residual authority here.
+fn retained_chart(
+    source: &Curve3D,
+    declared: &StepParameterCurve,
+    curve: &model::Curve,
+    surface: &model::Surface,
+    conversion: SurfaceParameterMap,
+    range: (f64, f64),
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(model::Curve2D, [f64; 2]), GeometryError> {
+    let (map, margin) = input_map(conversion, declared.input_parameter_chart())?;
+    let chart = if let StepCurve2D::Line(raw) = declared.curve() {
+        let domain = source_trim::intrinsic_domain(declared.surface(), surface, conversion);
+        let candidate = match source_trim::native_chart(
+            curve, surface, None, domain, work, cancel,
+        )? {
+            Some(candidate) => Some(candidate),
+            None => source_trim::implicit_guide_chart(
+                source, declared.surface(), surface, conversion, work, cancel,
+            )?,
+        }.ok_or_else(|| {
+            unresolved("selected implicit UV LINE has no bounded active-branch proposal")
+        })?;
         let candidate =
             restrict_chart_proposal(candidate, range, finite_range(curve.range_tuple())?)?;
         source_trim::line_branch_proposal(
@@ -276,16 +410,12 @@ fn prove_retained(
             map.affine_transform()
                 .ok_or_else(|| unresolved("selected implicit UV LINE chart is not affine"))?,
             &candidate,
-        )
-        .ok_or_else(|| {
+        ).ok_or_else(|| {
             unresolved("selected implicit UV LINE active-branch proposal is not finite")
         })?
     } else {
-        let chart = model::Curve2D::try_from(selected.curve()).map_err(|cause| {
-            conversion_error(
-                "original selected implicit UV expression refused",
-                cause.as_ref(),
-            )
+        let chart = model::Curve2D::try_from(declared.curve()).map_err(|cause| {
+            conversion_error("original selected implicit UV expression refused", cause.as_ref())
         })?;
         let range = finite_range(chart.range_tuple())?;
         if matches!(map, SurfaceParameterMap::Identity) {
@@ -298,52 +428,137 @@ fn prove_retained(
             ))
         }
     };
-    // Only the original selected UV expression enters this proof. Native chart
-    // extraction and the explicit guide above supply proposals, never receipts.
-    // This certificate borrows the SAME whole branch as every later consumer.
-    if trim_certificate::certify_retained_coedge_correspondence(
-        trim_certificate::Correspondence {
-            curve,
-            surface: &surface,
-            chart: &chart,
-            maximum_error_mm: 1.0e-7 / scale,
-            margin_uv: margin,
-        },
-        (prepared, 1.0),
-        work,
-        cancel,
-    )?
-    .is_some()
-    {
-        return Ok(());
+    Ok((chart, margin))
+}
+
+/// Optional producer quality is not another admission gate for an unused
+/// association. Preserve actual invalid-source, resource and cancellation
+/// errors rather than treating every failure as a declined proposal.
+fn optional_precision<T>(
+    result: Result<Option<T>, GeometryError>,
+) -> Result<Option<T>, GeometryError> {
+    match result {
+        Err(cause) if matches!(
+            cause.code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+                | GeometryErrorCode::UnsupportedConversion
+                | GeometryErrorCode::ConditioningFailure
+                | GeometryErrorCode::SingularGeometry
+                | GeometryErrorCode::AnalysisIndeterminate
+        ) => Ok(None),
+        other => other,
     }
-    let natural = finite_range(curve.range_tuple())?;
-    if range != natural && !matches!(selected.curve(), StepCurve2D::Line(_)) {
-        // A bounded association may declare the whole basis chart rather than
-        // an edge-active chart. Transport the original expression's proposed
-        // affine correspondence onto the actual retained original restriction.
-        // Never extend the owned branch to the unused natural basis interval.
-        let chart = restrict_chart_proposal(chart, range, natural)?;
-        if trim_certificate::certify_retained_coedge_correspondence(
-            trim_certificate::Correspondence {
-                curve,
-                surface: &surface,
-                chart: &chart,
-                maximum_error_mm: 1.0e-7 / scale,
-                margin_uv: margin,
-            },
-            (prepared, 1.0),
-            work,
-            cancel,
-        )?
-        .is_some()
-        {
-            return Ok(());
+}
+
+fn inverse_base_precision(
+    input: trim_certificate::Correspondence<'_>,
+    prepared: &model::PreparedValidatedCurve<'static>,
+    residual: f64,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    let inverse = super::implicit::certify_uv_margin(
+        super::implicit::UvMarginInput {
+            curve: input.curve,
+            prepared,
+            surface: input.surface,
+            chart: input.chart,
+            physical_residual: residual,
+            coefficient_margin: input.margin_uv,
+        },
+        work, cancel,
+    )?;
+    Ok(inverse.refinement_limit(
+        input.maximum_error_mm, super::implicit::original_point_tolerance_native(scale),
+        work, cancel, None,
+    )?.map(|metric| metric.base_limit()))
+}
+
+/// For each usable ORIGINAL carrier i, first prove the whole fixed-forward
+/// selected-plane/current-image discrepancy delta_i. Only then can
+/// E_i = up(R + delta_i) seed that carrier's original-root inverse tube.
+/// R may be hypothetical: no resulting metric supplies completed authority.
+/// Its complete metric gives T_i = down((allowed-B_i-D)/(1+G_i)); the independent
+/// selected proof must discharge A <= its chosen quality target <= R.
+fn whole_owner_precision(
+    source: &Curve3D,
+    input: trim_certificate::Correspondence<'_>,
+    prepared: &model::PreparedValidatedCurve<'static>,
+    residual_envelope: f64,
+    live_copy_bytes: usize,
+    scale: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    let model::Surface::Plane(plane) = input.surface else { return Ok(None) };
+    let mut goal = optional_precision(inverse_base_precision(
+        input, prepared, residual_envelope, scale, work, cancel,
+    ))?;
+    let Curve3D::SurfaceCurve(original) = source else { return Ok(goal) };
+    let selected = match original.master_representation() {
+        SurfaceCurveRepresentation::ParameterCurve0 => 0,
+        SurfaceCurveRepresentation::ParameterCurve1 => 1,
+        SurfaceCurveRepresentation::Curve3D => return Ok(goal),
+    };
+    let active = prepared.range();
+    let range = finite_range((active[0], active[1]))?;
+    for (index, association) in original.associated_geometry().iter().enumerate() {
+        work.charge(1, cancel)?;
+        if index == selected { continue }
+        let SurfaceCurveAssociatedGeometry::ParameterCurve(declared) = association
+        else { continue };
+        let target = optional_precision((|| {
+            // The selected converted surface/chart remain live while this
+            // single candidate and its conversion coexist. No BREP/root copy.
+            let mut copies = CopyBound { bytes: live_copy_bytes, work, cancel };
+            copies.uv(declared.curve(), 0)?;
+            copies.surface(declared.surface(), 0)?;
+            let (surface, conversion) = declared.surface()
+                .to_modeling_with_parameter_map()
+                .map_err(|cause| conversion_error(
+                    "original associated implicit carrier conversion refused", cause.as_ref(),
+                ))?;
+            let (mut chart, margin) = retained_chart(
+                source, declared, input.curve, &surface, conversion, range, work, cancel,
+            )?;
+            let discrepancy = |chart: &model::Curve2D, work: &mut GeometryWorkBudget| {
+                let target = finite_range(chart.range_tuple())?;
+                super::harmonic::certify(
+                    super::harmonic::HarmonicComparison {
+                        source: super::harmonic::HarmonicSource::PlaneImage(plane, input.chart),
+                        surface: &surface, chart, range: active,
+                        target: [target.0, target.1], margin,
+                        tolerance: input.maximum_error_mm, require_tangent: false,
+                    },
+                    work, cancel,
+                    &mut super::harmonic::HarmonicDiagnostic::new(input.maximum_error_mm),
+                )
+            };
+            let mut delta = optional_precision(discrepancy(&chart, work))?;
+            let natural = finite_range(input.curve.range_tuple())?;
+            if delta.is_none() && range != natural
+                && !matches!(declared.curve(), StepCurve2D::Line(_))
+            {
+                chart = restrict_chart_proposal(chart, range, natural)?;
+                delta = optional_precision(discrepancy(&chart, work))?;
+            }
+            let Some(delta) = delta else { return Ok(None) };
+            let residual = Interval::point(residual_envelope).add(Interval::point(delta)).hi;
+            let Some(limit) = inverse_base_precision(
+                trim_certificate::Correspondence {
+                    surface: &surface, chart: &chart, margin_uv: margin, ..input
+                },
+                prepared, residual, scale, work, cancel,
+            )? else { return Ok(None) };
+            let remaining = Interval::point(limit).sub(Interval::point(delta)).lo;
+            Ok((remaining.is_finite() && remaining > 0.0).then_some(remaining))
+        })())?;
+        if let Some(target) = target {
+            goal = Some(goal.map_or(target, |current| current.min(target)));
         }
     }
-    Err(unresolved(
-        "selected original implicit PCURVE lacks whole retained-root forward correspondence",
-    ))
+    Ok(goal)
 }
 
 fn restrict_chart_proposal(
@@ -821,12 +1036,8 @@ mod tests {
     }
     fn validate(source: &Curve3D) -> Result<(), GeometryError> {
         validate_selected_master(
-            source,
-            None,
-            None,
-            1.0,
-            &mut GeometryWorkBudget::new(8_000_000),
-            &AtomicBool::new(false),
+            source, None, None, &mut None, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
         )
     }
     fn refused(source: &Curve3D) {
@@ -860,12 +1071,8 @@ mod tests {
             SurfaceCurveRepresentation::ParameterCurve0,
         );
         validate_selected_master(
-            &matching,
-            None,
-            None,
-            1.0,
-            &mut GeometryWorkBudget::new(50_000),
-            &AtomicBool::new(false),
+            &matching, None, None, &mut None, 1.0,
+            &mut GeometryWorkBudget::new(50_000), &AtomicBool::new(false),
         )
         .unwrap();
         let wrong_carrier = StepParameterCurve::new(Box::new(circle(0.0)), Box::new(plane(1.0)));
@@ -943,23 +1150,185 @@ mod tests {
             guide,
             pcurve(plane(0.0), (7.0, 19.0), Point2::new(1.0, 0.0)),
         );
+        let mut completed = None;
         validate_selected_master(
-            &original,
-            Some((0.0, 1.0)),
-            Some((&root, &prepared)),
-            1.0,
-            &mut GeometryWorkBudget::new(8_000_000),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+            &original, Some((0.0, 1.0)), Some((&root, &prepared)), &mut completed, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
+        ).unwrap();
+        let proof = completed.as_ref().expect("selected whole-original master receipt").whole();
+        assert_eq!(proof.native_range(), [0.0, 1.0]);
+        assert_eq!(proof.uv_range(), [7.0, 19.0]);
+        assert!(proof.position_error_mm() <= 1.0e-7);
+        validate_selected_master(
+            &original.clone(), Some((0.0, 1.0)), Some((&root, &prepared)), &mut completed, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
+        ).unwrap();
         // A genuine intersection cannot fall back to its displaced guide when
         // its already-owned branch is absent.
         refused(&original);
     }
 
     #[test]
+    fn selected_plane_precision_reserves_original_cylinder_image_before_its_inverse() {
+        let range = (0.0, 0.5);
+        let selected = StepParameterCurve::new(
+            Box::new(StepCurve2D::Conic(StepConic2D::Ellipse(
+                model::Processor::with_transform(
+                    model::TrimmedCurve::new(model::UnitCircle::<Point2>::new(), range),
+                    Matrix3::from_scale(2.0),
+                ),
+            ))),
+            Box::new(plane(0.0)),
+        );
+        let mut cylinder = model::Processor::new(model::RevolutionSurface::by_revolution(
+            model::Line(Point3::new(2.0, 0.0, -1.0), Point3::new(2.0, 0.0, 0.0)),
+            Point3::new(0.0, 0.0, -1.0), Vector3::unit_z(),
+        ));
+        cylinder.invert();
+        let associated = StepParameterCurve::new(
+            Box::new(StepCurve2D::Line(model::Line(
+                Point2::new(0.0, 1.0), Point2::new(1.0, 1.0),
+            ))),
+            Box::new(StepSurface::ElementarySurface(
+                ElementarySurface::CylindricalSurface(cylinder),
+            )),
+        );
+        let (selected_surface, selected_map) =
+            selected.surface().to_modeling_with_parameter_map().unwrap();
+        let (current_surface, current_map) =
+            associated.surface().to_modeling_with_parameter_map().unwrap();
+        let selected_chart = model::Curve2D::try_from(selected.curve()).unwrap();
+        let current_chart = model::Curve2D::TrimmedCurve(model::Processor::<_, Matrix3>::new(
+            model::TrimmedCurve::new(
+                Box::new(model::Curve2D::Line(model::Line(
+                    Point2::new(0.0, 1.0), Point2::new(1.0, 1.0),
+                ))),
+                range,
+            ),
+        ));
+        let guide = model::Curve::ParameterCurve(model::ParameterCurve::new(
+            selected_chart.clone(),
+            Box::new(model::Surface::Plane(model::Plane::from_origin_vectors(
+                Point3::new(0.0, 0.0, 0.02), Vector3::unit_x(), Vector3::unit_y(),
+            ))),
+        ));
+        let curve = model::Curve::IntersectionCurve(model::SurfaceCurve::with_boundaries(
+            Box::new(selected_surface.clone()), Box::new(current_surface.clone()),
+            Box::new(guide),
+            Some(model::ParameterCurve::new(
+                selected_chart.clone(), Box::new(selected_surface.clone()),
+            )),
+            Some(model::ParameterCurve::new(
+                current_chart, Box::new(current_surface.clone()),
+            )),
+        ));
+        // The original and native guide are the same displaced circle. Its
+        // angular branch only proposes the unbounded LINE's finite active
+        // interval; the retained root, not this offset guide, proves position.
+        let source_guide = Curve3D::Conic(Conic3D::Ellipse(model::Processor::with_transform(
+            model::TrimmedCurve::new(model::UnitCircle::<Point3>::new(), range),
+            Matrix4::from_translation(Vector3::new(0.0, 0.0, 0.02))
+                * Matrix4::from_scale(2.0),
+        )));
+        let original = Curve3D::SurfaceCurve(SurfaceCurve3D::new(
+            SurfaceCurveKind::IntersectionCurve, Box::new(source_guide.clone()),
+            vec![self::associated(selected.clone()), self::associated(associated.clone())],
+            SurfaceCurveRepresentation::ParameterCurve0,
+        ));
+        let cancel = AtomicBool::new(false);
+        let prepared = model::prepared_validated_curve_owned(
+            curve.clone(), [range.0, range.1], &model::ValidatedCurveOptions::default(),
+            &mut model::ValidatedGeometryBudget::new(8_000_000), &cancel,
+        ).unwrap();
+        let mut work = GeometryWorkBudget::new(128_000_000);
+        let (selected_chart, selected_margin) = retained_chart(
+            &original, &selected, &curve, &selected_surface, selected_map,
+            range, &mut work, &cancel,
+        ).unwrap();
+        let (current_chart, current_margin) = retained_chart(
+            &original, &associated, &curve, &current_surface, current_map,
+            range, &mut work, &cancel,
+        ).unwrap();
+        let selected_input = trim_certificate::Correspondence {
+            curve: &curve, surface: &selected_surface, chart: &selected_chart,
+            maximum_error_mm: 1.0e-7, margin_uv: selected_margin,
+        };
+        let coarse = trim_certificate::certify_selected_master_correspondence(
+            selected_input, (&prepared, 1.0), None, &mut work, &cancel,
+        ).unwrap().unwrap();
+        let model::Surface::Plane(plane) = &selected_surface else { unreachable!() };
+        let current_range = current_chart.range_tuple();
+        let delta = super::super::harmonic::certify(
+            super::super::harmonic::HarmonicComparison {
+                source: super::super::harmonic::HarmonicSource::PlaneImage(
+                    plane, &selected_chart,
+                ),
+                surface: &current_surface, chart: &current_chart,
+                range: [range.0, range.1], target: [current_range.0, current_range.1],
+                margin: current_margin, tolerance: selected_input.maximum_error_mm,
+                require_tangent: false,
+            },
+            &mut work, &cancel,
+            &mut super::super::harmonic::HarmonicDiagnostic::new(
+                selected_input.maximum_error_mm,
+            ),
+        ).unwrap().unwrap();
+        let current_input = trim_certificate::Correspondence {
+            surface: &current_surface, chart: &current_chart,
+            margin_uv: current_margin, ..selected_input
+        };
+        let residual = Interval::point(coarse.whole().position_error_mm())
+            .add(Interval::point(delta)).hi;
+        let current_limit = inverse_base_precision(
+            current_input, &prepared, residual, 1.0, &mut work, &cancel,
+        ).unwrap().unwrap();
+        let selected_limit = inverse_base_precision(
+            selected_input, &prepared, coarse.whole().position_error_mm(),
+            1.0, &mut work, &cancel,
+        ).unwrap().unwrap();
+        assert!(Interval::point(current_limit).sub(Interval::point(delta)).lo < selected_limit);
+        let mut master = None;
+        validate_selected_master(
+            &original, Some(range), Some((&curve, &prepared)), &mut master,
+            1.0, &mut work, &cancel,
+        ).unwrap();
+        let master = master.unwrap();
+        assert!(Interval::point(master.whole().position_error_mm())
+            .add(Interval::point(delta)).hi <= current_limit);
+        let (_, final_proof) = trim_certificate::complete_retained_correspondence(
+            current_input, &prepared, 1.0, Some(&master), &mut work, &cancel, None,
+        ).unwrap().unwrap();
+        assert!(final_proof.position_error_mm() <= current_input.maximum_error_mm);
+
+        // A declared but unrelated unused carrier cannot seed an inverse with
+        // A alone, nor become a new mandatory import capability.
+        let unused = StepParameterCurve::new(
+            Box::new(selected.curve().clone()), Box::new(self::plane(0.5)),
+        );
+        let unrelated = Curve3D::SurfaceCurve(SurfaceCurve3D::new(
+            SurfaceCurveKind::IntersectionCurve, Box::new(source_guide),
+            vec![self::associated(selected), self::associated(unused)],
+            SurfaceCurveRepresentation::ParameterCurve0,
+        ));
+        validate_selected_master(
+            &unrelated, Some(range), Some((&curve, &prepared)), &mut None,
+            1.0, &mut work, &cancel,
+        ).unwrap();
+    }
+
+    #[test]
     fn genuine_master_matching_only_guide_is_refused_against_retained_root() {
         let (guide, root, prepared) = retained_planar_root();
+        let matching = implicit_source(
+            guide.clone(),
+            pcurve(plane(0.0), (7.0, 19.0), Point2::new(1.0, 0.0)),
+        );
+        let mut completed = None;
+        validate_selected_master(
+            &matching, Some((0.0, 1.0)), Some((&root, &prepared)), &mut completed, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
+        ).unwrap();
+        assert!(completed.is_some());
         let delta = 1.0 / 1024.0;
         let selected = StepParameterCurve::new(
             Box::new(StepCurve2D::BsplineCurve(model::BsplineCurve::new(
@@ -974,6 +1343,7 @@ mod tests {
                 &original,
                 Some((0.0, 1.0)),
                 Some((&root, &prepared)),
+                &mut completed,
                 1.0,
                 &mut GeometryWorkBudget::new(8_000_000),
                 &AtomicBool::new(false)
@@ -996,12 +1366,8 @@ mod tests {
         );
         let original = implicit_source(guide, selected);
         validate_selected_master(
-            &original,
-            Some((0.0, 1.0)),
-            Some((&root, &prepared)),
-            1.0,
-            &mut GeometryWorkBudget::new(8_000_000),
-            &AtomicBool::new(false),
+            &original, Some((0.0, 1.0)), Some((&root, &prepared)), &mut None, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
         )
         .unwrap();
     }
@@ -1046,12 +1412,8 @@ mod tests {
             )
             .unwrap();
             validate_selected_master(
-                &source,
-                Some((0.25, 0.75)),
-                Some((&native, &prepared)),
-                1.0,
-                &mut GeometryWorkBudget::new(8_000_000),
-                &AtomicBool::new(false),
+                &source, Some((0.25, 0.75)), Some((&native, &prepared)), &mut None, 1.0,
+                &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
             )
             .unwrap();
         }
@@ -1087,12 +1449,8 @@ mod tests {
         // finite domain from a bare LINE's parameter-range convenience.
         refused(&original);
         validate_selected_master(
-            &original,
-            Some((0.0, 1.0)),
-            None,
-            1.0,
-            &mut GeometryWorkBudget::new(8_000_000),
-            &AtomicBool::new(false),
+            &original, Some((0.0, 1.0)), None, &mut None, 1.0,
+            &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
         )
         .unwrap();
     }
@@ -1138,12 +1496,8 @@ mod tests {
                     SurfaceCurveRepresentation::ParameterCurve0,
                 );
                 let result = validate_selected_master(
-                    &original,
-                    Some((2.0, 8.0)),
-                    None,
-                    1.0,
-                    &mut GeometryWorkBudget::new(8_000_000),
-                    &AtomicBool::new(false),
+                    &original, Some((2.0, 8.0)), None, &mut None, 1.0,
+                    &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
                 );
                 if normal_residual.abs() < 1.0e-7 {
                     result.unwrap();
@@ -1186,12 +1540,8 @@ mod tests {
                     SurfaceCurveRepresentation::ParameterCurve0,
                 );
                 validate_selected_master(
-                    &original,
-                    Some((2.0, 8.0)),
-                    None,
-                    1.0,
-                    &mut GeometryWorkBudget::new(8_000_000),
-                    &AtomicBool::new(false),
+                    &original, Some((2.0, 8.0)), None, &mut None, 1.0,
+                    &mut GeometryWorkBudget::new(8_000_000), &AtomicBool::new(false),
                 )
                 .unwrap();
             }
@@ -1218,6 +1568,7 @@ mod tests {
                 &original,
                 Some((2.0, 8.0)),
                 None,
+                &mut None,
                 1.0,
                 &mut GeometryWorkBudget::new(8_000_000),
                 &AtomicBool::new(false),
@@ -1258,6 +1609,7 @@ mod tests {
                 &prefix,
                 Some((0.0, 1.0)),
                 None,
+                &mut None,
                 1.0,
                 &mut GeometryWorkBudget::new(8_000_000),
                 &AtomicBool::new(false)
@@ -1503,6 +1855,7 @@ mod tests {
                 &leader(),
                 None,
                 None,
+                &mut None,
                 1.0,
                 &mut GeometryWorkBudget::new(1),
                 &cancel
@@ -1524,6 +1877,7 @@ mod tests {
                 &source(leader(), vec![], SurfaceCurveRepresentation::Curve3D),
                 None,
                 None,
+                &mut None,
                 1.0,
                 &mut GeometryWorkBudget::new(1),
                 &AtomicBool::new(false)

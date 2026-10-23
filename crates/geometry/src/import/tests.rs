@@ -729,7 +729,7 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
                 &mut work,
                 &cancel,
             )
-            .unwrap();
+            .unwrap_or_else(|error| panic!("original implicit source {name} axis {axis}: {error}"));
             assert!(
                 bounds.minimum[0] <= minimum[axis] && minimum[axis] <= bounds.minimum[1],
                 "{name} axis {axis}"
@@ -751,7 +751,24 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
             &mut work,
             &cancel,
         )
-        .unwrap();
+        .unwrap_or_else(|error| {
+            let missing = definition.face_boundaries.iter().enumerate().find_map(|(face, boundary)| {
+                boundary.wires.iter().enumerate().find_map(|(wire, coedges)| {
+                    coedges.iter().enumerate().find_map(|(coedge, retained)| {
+                        retained.correspondence.is_none().then(|| (
+                            face, wire, coedge, definition.faces[face].surface_face_entity.as_str(),
+                            definition.source_topology.faces.get(face)
+                                .and_then(|face| face.wires.get(wire))
+                                .and_then(|wire| wire.coedges.get(coedge))
+                                .and_then(|coedge| coedge.source_edge),
+                            &retained.source_chart_certificate, retained.source_chart_declared,
+                            retained.source_chart_parameter_range,
+                        ))
+                    })
+                })
+            });
+            panic!("original implicit source {name} height transport; first_missing_forward={missing:?}: {error}")
+        });
         assert!(height.event_brackets_mm().is_empty());
         drop(height);
         let prepared = crate::prepare_material_source(
@@ -806,16 +823,6 @@ fn original_implicit_carrier_edges_import_display_bound_and_section_without_bran
 #[test]
 fn original_implicit_query_proof_limit_refuses_and_does_not_poison_later_imports() {
     let original = fixture("box-mm.step");
-    let explicit = crate::import_step_with_limits(
-        &original,
-        &cancelled(),
-        crate::ImportLimits {
-            max_query_proof_bytes: 0,
-            ..crate::ImportLimits::FROZEN
-        },
-    )
-    .unwrap();
-    assert_eq!(explicit.retained_query_proof_bytes(), 0);
     let source = corpus::implicit_intersections(
         std::str::from_utf8(&original).unwrap(),
         "proof-budget-implicit-box.step",
@@ -1256,35 +1263,105 @@ fn original_sphere_graph_binding_keeps_cyclic_wire_orders_and_wide_material_sect
     }
 }
 
-/// Failure-only coefficient context stays bounded even if a source has a large
-/// tensor net or deeply nested original wrappers.
-fn bounded_chart_debug(value: &impl std::fmt::Debug) -> String {
-    use std::fmt::Write;
-    struct Context(String);
-    impl std::fmt::Write for Context {
-        fn write_str(&mut self, text: &str) -> std::fmt::Result {
-            let available = 2048_usize.saturating_sub(self.0.len());
-            if text.len() <= available {
-                self.0.push_str(text);
-                return Ok(());
-            }
-            let mut end = available;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            self.0.push_str(&text[..end]);
-            Err(std::fmt::Error)
+/// Read original reference identity, not converted carriers or chart metadata.
+/// Equal surface coefficients cannot bind a foreign PCURVE to this face.
+fn original_unbound_seam_edges(entities: &Entities<'_>, face: u64) -> BTreeSet<u64> {
+    let surface_face = entities
+        .records(face)
+        .unwrap()
+        .iter()
+        .copied()
+        .find(|record| matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE"))
+        .expect("original surface face");
+    let carrier = reference(at(surface_face, 2).unwrap()).unwrap();
+    let mut edge_uses = HashMap::<u64, Vec<bool>>::new();
+    for bound in list(at(surface_face, 1).unwrap()).unwrap() {
+        let bound = entities
+            .records(reference(bound).unwrap())
+            .unwrap()
+            .iter()
+            .copied()
+            .find(|record| matches!(record.name.as_str(), "FACE_BOUND" | "FACE_OUTER_BOUND"))
+            .expect("original face bound");
+        let forward = enumeration(at(bound, 2).unwrap(), "T");
+        let wire = entities
+            .record(reference(at(bound, 1).unwrap()).unwrap(), "EDGE_LOOP")
+            .unwrap();
+        for oriented in list(at(wire, 1).unwrap()).unwrap() {
+            let oriented = entities
+                .record(reference(oriented).unwrap(), "ORIENTED_EDGE")
+                .unwrap();
+            let edge = reference(at(oriented, 3).unwrap()).unwrap();
+            let orientation = enumeration(at(oriented, 4).unwrap(), "T") == forward;
+            edge_uses.entry(edge).or_default().push(orientation);
         }
     }
-    let mut context = Context(String::new());
-    if write!(&mut context, "{value:?}").is_err() {
-        context.0.push_str("...");
+    let mut unbound = BTreeSet::new();
+    for (edge, uses) in edge_uses {
+        if uses.len() == 1 {
+            continue;
+        }
+        assert!(
+            uses.len() == 2 && uses[0] != uses[1],
+            "original face #{face}: repeated edge #{edge} must have opposed seam uses"
+        );
+        let edge_curve = entities.record(edge, "EDGE_CURVE").unwrap();
+        let mut curve = reference(at(edge_curve, 3).unwrap()).unwrap();
+        let mut visited = BTreeSet::new();
+        let associations = loop {
+            assert!(visited.insert(curve), "recursive original seam curve");
+            let records = entities.records(curve).unwrap();
+            if let Some(trimmed) = records.iter().find(|record| record.name == "TRIMMED_CURVE") {
+                curve = reference(at(trimmed, 1).unwrap()).unwrap();
+                continue;
+            }
+            let surface_curve = records
+                .iter()
+                .find(|record| {
+                    matches!(
+                        record.name.as_str(),
+                        "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE"
+                    )
+                })
+                .expect("original repeated seam edge declares its surface associations");
+            break list(at(surface_curve, 2).unwrap()).unwrap();
+        };
+        let mut pcurves = BTreeSet::new();
+        let mut owned = BTreeSet::new();
+        for association in associations {
+            let id = reference(association).unwrap();
+            if let Some(pcurve) = entities
+                .records(id)
+                .unwrap()
+                .iter()
+                .find(|record| record.name == "PCURVE")
+            {
+                pcurves.insert(id);
+                if reference(at(pcurve, 1).unwrap()).unwrap() == carrier {
+                    owned.insert(id);
+                }
+            }
+        }
+        assert!(
+            !pcurves.is_empty(),
+            "original edge #{edge} must actually declare PCURVEs"
+        );
+        if owned.is_empty() {
+            unbound.insert(edge);
+        } else {
+            assert!(
+                owned.len() >= uses.len(),
+                "original edge #{edge} needs distinct face-owned branches for its opposed uses"
+            );
+        }
     }
-    context.0
+    unbound
 }
 
 #[test]
-fn original_tensor_frustum_and_pocket_coedges_retain_whole_native_chart_authority() {
+fn original_face_domain_availability_requires_its_own_source_seam_associations() {
+    use crate::kernel::{SourceChartCertificate, prepare_face_trim_domain_with_byte_limit};
+    use spiling_contracts::geometry::DisplayProfile;
     for name in [
         "native-parity-cone-frustum.step",
         "native-parity-blind-pocket.step",
@@ -1298,39 +1375,126 @@ fn original_tensor_frustum_and_pocket_coedges_retain_whole_native_chart_authorit
             .find(|(candidate, _, _)| *candidate == name)
             .unwrap();
         let source = crate::parity_fixtures::original(name, solid);
-        let definition = import_step(source.as_bytes(), &cancelled()).expect(name);
-        for (face_index, face) in definition.face_boundaries.iter().enumerate() {
+        let cancel = cancelled();
+        let exchange = step_p21::parser::parse(&source).unwrap();
+        let entities = Entities::new(&exchange.data[0], &cancel).unwrap();
+        let shell = entities.named("CLOSED_SHELL", &cancel).unwrap();
+        assert_eq!(shell.len(), 1);
+        let canonical =
+            list(at(entities.record(shell[0], "CLOSED_SHELL").unwrap(), 1).unwrap()).unwrap();
+        let original_faces: Vec<_> = canonical
+            .iter()
+            .map(|face| {
+                let face_use = reference(face).unwrap();
+                let surface_face = resolve_face(&entities, face_use).unwrap();
+                let unbound = original_unbound_seam_edges(&entities, surface_face);
+                (face_use, surface_face, unbound)
+            })
+            .collect();
+        let missing_seam_binding = original_faces.iter().any(|(_, _, seams)| !seams.is_empty());
+        assert_eq!(
+            missing_seam_binding,
+            matches!(
+                name,
+                "native-parity-nurbs-cylinder.step"
+                    | "native-parity-nurbs-torus.step"
+                    | "native-parity-nurbs-torus-independent-parameters.step"
+            ),
+            "{name}: check actual original source associations before consuming runtime metadata"
+        );
+
+        let definition = import_step(source.as_bytes(), &cancel).expect(name);
+        assert_eq!(
+            definition.provenance.source_hash,
+            SourceHash::from_bytes(source.as_bytes())
+        );
+        assert_eq!(definition.faces.len(), original_faces.len());
+        assert_eq!(definition.face_boundaries.len(), original_faces.len());
+        assert_eq!(definition.solid.boundaries()[0].len(), original_faces.len());
+        definition.solid.boundaries()[0]
+            .check_solid_boundary()
+            .expect("inspection retains a closed oriented native solid");
+        if missing_seam_binding {
+            crate::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)
+                .expect("missing operation authority must not remove source-backed display");
+        }
+        let mut work = GeometryWorkBudget::new(50_000_000);
+        for (face_index, (face, (face_use, surface_face, unbound_seams))) in definition
+            .face_boundaries
+            .iter()
+            .zip(&original_faces)
+            .enumerate()
+        {
+            assert_eq!(
+                definition.faces[face_index].face_id,
+                FaceId::from_step_entity(*face_use).unwrap()
+            );
+            assert_eq!(
+                definition.faces[face_index].surface_face_entity,
+                surface_face.to_string()
+            );
+            let native_face = &definition.trimmed_solid.boundaries()[0].faces()[face_index];
+            assert_eq!(native_face.face().id(), face.face);
+            let mut retained_unbound_seams = BTreeSet::new();
             for (wire_index, wire) in face.wires.iter().enumerate() {
                 for (coedge_index, coedge) in wire.iter().enumerate() {
-                    let native_face = &definition.trimmed_solid.boundaries()[0].faces()[face_index];
-                    let native_edge =
-                        &native_face.face().absolute_boundaries()[wire_index][coedge_index];
-                    assert!(
-                        coedge.source_chart_certificate.is_certified(),
-                        "{name}: face {face_index}, wire {wire_index}, coedge {coedge_index}; \
-                         source_kind={} carrier={:?} map={:?} native_range={:?} \
-                         chart_range={:?} chart={:?}; original_native_curve={:?}; \
-                         carrier_coefficients={:?}",
-                        definition.faces[face_index].source_surface_entity_kind,
-                        definition.faces[face_index].geometry.family,
-                        face.parameter.conversion,
-                        native_edge.with_curve(|curve| curve.try_range_tuple()),
-                        coedge.source_chart_parameter_range,
-                        bounded_chart_debug(&native_face.trims()[wire_index][coedge_index]),
-                        native_edge.with_curve(bounded_chart_debug),
-                        native_face.face().with_surface(bounded_chart_debug),
-                    );
-                    assert!(
-                        coedge.source_chart_certificate.has_regular_inverse(),
-                        "{name}: nonsingular original coedge must retain regular chart authority, \
-                         not only a pole-meridian graph: {:?}",
-                        coedge.source_chart_certificate,
-                    );
-                    let (a, b) = coedge
-                        .source_chart_parameter_range
-                        .expect("certified original coedge retains its independent chart range");
+                    if !unbound_seams.is_empty() {
+                        assert_eq!(
+                            coedge.source_chart_certificate,
+                            SourceChartCertificate::Unproved,
+                            "{name} face {face_index}: absent original seam binding cannot authorize a chart"
+                        );
+                        assert!(coedge.correspondence.is_none());
+                        let source_edge = definition.source_topology.faces[face_index].wires
+                            [wire_index]
+                            .coedges[coedge_index]
+                            .source_edge
+                            .expect("original edge identity survives inspection");
+                        if unbound_seams.contains(&source_edge) {
+                            retained_unbound_seams.insert(source_edge);
+                            assert!(native_face.trims()[wire_index][coedge_index].is_none());
+                            assert!(coedge.source_chart_parameter_range.is_none());
+                            assert!(!coedge.source_chart_declared);
+                        }
+                    } else {
+                        assert!(
+                            coedge.source_chart_certificate.has_regular_inverse(),
+                            "{name} face {face_index}: supported original coedge must retain regular chart authority"
+                        );
+                        let (a, b) = coedge
+                            .source_chart_parameter_range
+                            .expect("certified original coedge retains its independent chart range");
+                        assert!(a.is_finite() && b.is_finite() && a < b);
+                        assert!(native_face.trims()[wire_index][coedge_index].is_some());
+                    }
+                }
+            }
+            assert_eq!(
+                &retained_unbound_seams, unbound_seams,
+                "{name} face {face_index}: inspection must retain every original unbound seam edge"
+            );
+            let prepared = prepare_face_trim_domain_with_byte_limit(
+                &definition,
+                face_index,
+                32 * 1024 * 1024,
+                &mut work,
+                &cancel,
+            );
+            if unbound_seams.is_empty() {
+                let prepared = prepared
+                    .unwrap_or_else(|error| panic!("{name} face {face_index}: {error:?}"));
+                for [a, b] in prepared.uv_bounds() {
                     assert!(a.is_finite() && b.is_finite() && a < b);
                 }
+            } else {
+                let failure = prepared
+                    .err()
+                    .expect("whole-face domain preparation must refuse absent original seam authority");
+                assert_eq!(
+                    failure.code,
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "{name} face {face_index}: {failure:?}"
+                );
             }
         }
     }

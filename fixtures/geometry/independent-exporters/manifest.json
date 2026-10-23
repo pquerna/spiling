@@ -180,6 +180,56 @@
           }
         ]
       }
+    },
+    {
+      "path": "occt-ribbed-bracket-mm.step",
+      "bytes": 131080,
+      "sha256": "a471bfcebb598415aa457988b1fb95dd2d8c947a2b3fdec3998414687332caed",
+      "analytic_oracle": {
+        "nominal_bounds_mm": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            30.0,
+            22.0,
+            7.6
+          ]
+        ],
+        "base_top_z_mm": 1.2,
+        "rib_top_and_roof_lower_z_mm": 6.4,
+        "rib_width_range_mm": [
+          0.55,
+          1.2
+        ],
+        "junction": {
+          "kind": "T",
+          "center_xy_mm": [
+            13.0,
+            11.0
+          ],
+          "cross_arm_width_mm": 0.6
+        },
+        "functional_bore": {
+          "center_xy_mm": [
+            24.0,
+            11.0
+          ],
+          "radius_mm": 1.3
+        },
+        "roof_extent_xy_mm": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            8.0,
+            22.0
+          ]
+        ]
+      }
     }
   ]
 }

@@ -14,6 +14,7 @@ use crate::{
     GeometryError, GeometryWorkBudget,
     parametric::{self, Interval},
 };
+use monstertruck_io::step::load::step_geometry::CurveParameterDomain;
 use monstertruck_modeling::{self as model, base::*};
 use std::sync::atomic::AtomicBool;
 
@@ -339,6 +340,80 @@ pub(super) enum ProfileParameterDomain {
     Unbounded,
 }
 
+/// Numerical relative phase of complete coefficient pairs, never a receipt.
+fn relative_phase_proposal(
+    source_cosine: Vector<3>,
+    source_sine: Vector<3>,
+    target_cosine: Vector<3>,
+    target_sine: Vector<3>,
+) -> Option<(f64, f64)> {
+    let mids = |values: Vector<3>| values.map(Interval::mid);
+    let (a, b, x, y) = (
+        mids(target_cosine), mids(target_sine), mids(source_cosine), mids(source_sine),
+    );
+    let dot = |x: [f64; 3], y: [f64; 3]| (0..3).map(|i| x[i] * y[i]).sum::<f64>();
+    let (aa, ab, bb) = (dot(a, a), dot(a, b), dot(b, b));
+    let determinant = aa * bb - ab * ab;
+    if !determinant.is_finite() || determinant <= 0.0 {
+        return None;
+    }
+    let (ax, bx) = (dot(a, x), dot(b, x));
+    let cosine = (ax * bb - bx * ab) / determinant;
+    let sine = (bx * aa - ax * ab) / determinant;
+    let phase = sine.atan2(cosine);
+    let quadrature = std::array::from_fn(|i| -a[i] * sine + b[i] * cosine);
+    let orientation = dot(y, quadrature);
+    if !phase.is_finite() || !orientation.is_finite() || orientation == 0.0 {
+        None
+    } else {
+        Some((phase, if orientation > 0.0 { 1.0 } else { -1.0 }))
+    }
+}
+
+/// One original planar-conic window, preserving stored phase/reflection anchors.
+/// No period translation or orientation search authorizes this proposal.
+/// Original bare analytic support may continue beyond its convenience window;
+/// an original finite trim still bounds the complete proposed interval. The
+/// caller supplies this distinction from source declarations, not native shape.
+pub(super) fn planar_conic_interval_proposal(
+    source: &super::source_conic::SourceConic,
+    surface: &model::Surface,
+    chart: &model::Curve2D,
+    source_domain: CurveParameterDomain,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<(f64, f64)>, GeometryError> {
+    let model::Surface::Plane(plane) = surface else {
+        return Ok(None);
+    };
+    let Some(uv) = uv_harmonic(chart, 0, work, cancel)? else {
+        return Ok(None);
+    };
+    work.charge(128, cancel)?;
+    let target = plane_harmonic(plane, uv, [0.0; 2]);
+    let Some((phase, sense)) = relative_phase_proposal(
+        source.u, source.v, target.cosine, target.sine,
+    ) else {
+        return Ok(None);
+    };
+    let parameter = |t| {
+        (sense * (source.phase_offset.mid() + source.orientation * t)
+            + phase - target.offset.mid()) / target.sense
+    };
+    let (front, back) = (parameter(source.range.0), parameter(source.range.1));
+    let Some((a, b)) = chart.try_range_tuple() else {
+        return Ok(None);
+    };
+    if ![front, back, a, b].into_iter().all(f64::is_finite)
+        || front == back || a >= b
+        || (source_domain == CurveParameterDomain::Bounded
+            && (front.min(back) < a || front.max(back) > b))
+    {
+        return Ok(None);
+    }
+    Ok(Some((front, back)))
+}
+
 /// Propose the affine phase relation of two complete borrowed expressions.
 /// Numerical coefficient collection selects search coordinates only; the
 /// ordinary whole coefficient/position/tangent certificate must still pass.
@@ -359,29 +434,12 @@ pub(super) fn extrusion_profile_chart_proposal(
         return Ok(None);
     };
     work.charge(128, cancel)?;
-    let mids = |values: Vector<3>| values.map(Interval::mid);
-    let (a, b, x, y) = (
-        mids(profile.cosine),
-        mids(profile.sine),
-        mids(source.cosine),
-        mids(source.sine),
-    );
+    let Some((phase, orientation)) = relative_phase_proposal(
+        source.cosine, source.sine, profile.cosine, profile.sine,
+    ) else {
+        return Ok(None);
+    };
     let dot = |x: [f64; 3], y: [f64; 3]| (0..3).map(|i| x[i] * y[i]).sum::<f64>();
-    let (aa, ab, bb) = (dot(a, a), dot(a, b), dot(b, b));
-    let determinant = aa * bb - ab * ab;
-    if !determinant.is_finite() || determinant <= 0.0 {
-        return Ok(None);
-    }
-    let (ax, bx) = (dot(a, x), dot(b, x));
-    let cosine = (ax * bb - bx * ab) / determinant;
-    let sine = (bx * aa - ax * ab) / determinant;
-    let phase = sine.atan2(cosine);
-    let quadrature = std::array::from_fn(|i| -a[i] * sine + b[i] * cosine);
-    let orientation = dot(y, quadrature);
-    if !orientation.is_finite() || orientation == 0.0 {
-        return Ok(None);
-    }
-    let orientation = if orientation > 0.0 { 1.0 } else { -1.0 };
     let (start, end) = curve.range_tuple();
     let u = |q| {
         (orientation * (source.sense * q + source.offset.mid()) + phase - profile.offset.mid())
@@ -623,8 +681,13 @@ impl std::fmt::Display for HarmonicDiagnostic {
     }
 }
 
+pub(super) enum HarmonicSource<'a> {
+    Curve(&'a model::Curve),
+    PlaneImage(&'a model::Plane, &'a model::Curve2D),
+}
+
 pub(super) struct HarmonicComparison<'a> {
-    pub curve: &'a model::Curve,
+    pub source: HarmonicSource<'a>,
     pub surface: &'a model::Surface,
     pub chart: &'a model::Curve2D,
     pub range: [f64; 2],
@@ -641,7 +704,7 @@ pub(super) fn certify(
     diagnostic: &mut HarmonicDiagnostic,
 ) -> Result<Option<f64>, GeometryError> {
     let HarmonicComparison {
-        curve,
+        source,
         surface,
         chart,
         range,
@@ -653,7 +716,13 @@ pub(super) fn certify(
     *diagnostic = HarmonicDiagnostic::new(tolerance);
     diagnostic.stage = "source-coefficients";
     work.charge(512, cancel)?;
-    let Some(mut source) = spatial_harmonic(curve, 0, work, cancel)? else {
+    let source_operand = source;
+    let source = match &source_operand {
+        HarmonicSource::Curve(curve) => spatial_harmonic(curve, 0, work, cancel)?,
+        HarmonicSource::PlaneImage(plane, chart) =>
+            uv_harmonic(chart, 0, work, cancel)?.map(|uv| plane_harmonic(plane, uv, [0.0; 2])),
+    };
+    let Some(mut source) = source else {
         return Ok(None);
     };
     diagnostic.source_arithmetic_scale = Some(source.arithmetic_scale.hi);
@@ -834,7 +903,21 @@ pub(super) fn certify(
             );
             parametric::debit_native_work(work, chart_budget.consumed(), cancel)?;
             chart_admission.map_err(parametric::native_error)?;
-            parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)?;
+            match &source_operand {
+                HarmonicSource::Curve(curve) => {
+                    parametric::curve_enclosure(curve, (range[0], range[1]), work, cancel)?;
+                }
+                HarmonicSource::PlaneImage(_, chart) => {
+                    let mut source_budget = model::ValidatedGeometryBudget::new(
+                        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+                    );
+                    let admission = model::validated_curve2d_jet(
+                        chart, range, &mut source_budget, cancel,
+                    );
+                    parametric::debit_native_work(work, source_budget.consumed(), cancel)?;
+                    admission.map_err(parametric::native_error)?;
+                }
+            }
             parametric::surface_enclosure(surface, domain, work, cancel)?;
             let angle = uv.offset[azimuth].add(Interval {
                 lo: -margin[azimuth],
@@ -1277,7 +1360,7 @@ mod tests {
     ) -> Option<f64> {
         certify(
             HarmonicComparison {
-                curve: source,
+                source: HarmonicSource::Curve(source),
                 surface: carrier,
                 chart,
                 range,

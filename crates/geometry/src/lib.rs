@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "dae59326248d0d068ca4c3a1e52223bfbf1707e0";
+pub const KERNEL_REVISION: &str = "bb7d6000af95e489ed76803bfd1ac5917da446f5";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
@@ -244,9 +244,11 @@ impl PreparedSectionSource<'_> {
     }
 }
 
-/// Admission limits only narrow the frozen native face and retained-query-proof
-/// caps. Proof storage includes pinned curve payloads, continuation pieces and
-/// their retained indices, not the complete BREP or process RSS.
+/// Admission limits only narrow the frozen native face and retained-source/query
+/// proof caps. Storage includes pinned curves, continuation pieces, original
+/// coedge binding records/inline receipts and retained indices. Even explicit
+/// geometry owns such records; this is not an implicit-only auxiliary allowance,
+/// the complete BREP, or a process RSS cap.
 #[derive(Debug, Clone, Copy)]
 pub struct ImportLimits {
     pub max_faces: u32,

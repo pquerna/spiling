@@ -2010,6 +2010,29 @@ impl<'source> PreparedCurveEnclosure<'source> {
         })
     }
 
+    /// Piecewise first derivatives of this exact retained owner, not position,
+    /// Hessian or C1 authority. Crossing a prepared projection joint declines.
+    /// Mapped owners retain the ordinary fresh query's reflected-range checks.
+    pub(crate) fn retained_first_enclosure(
+        &self,
+        range: (f64, f64),
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<[Interval; 3]>, GeometryError> {
+        check_cancel(cancel)?;
+        self.check_range(range)?;
+        work.charge(1, cancel)?;
+        if self.native.mapped_basis().is_some() {
+            return Ok(None);
+        }
+        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
+            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+        );
+        let result = self.retained_with_native_budget(range, &mut native_work, cancel, true);
+        debit_native_work(work, native_work.consumed(), cancel)?;
+        result.map(|jet| jet.map(|jet| jet.derivative))
+    }
+
     /// Borrow a finite whole-piece certificate on a contained smooth query.
     /// The caller separately qualifies C1; a retained Hessian is not that proof.
     fn retained_with_native_budget(
@@ -2017,6 +2040,7 @@ impl<'source> PreparedCurveEnclosure<'source> {
         range: (f64, f64),
         native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
         cancel: &AtomicBool,
+        single_piece: bool,
     ) -> Result<Option<CurveEnclosure>, GeometryError> {
         if range.0 == range.1 {
             native_work.charge(1, cancel).map_err(native_error)?;
@@ -2051,6 +2075,9 @@ impl<'source> PreparedCurveEnclosure<'source> {
                     GeometryErrorCode::InvalidGeometry,
                     "retained native curve partition has an uncovered query interval",
                 ));
+            }
+            if single_piece && result.is_some() {
+                return Ok(None);
             }
             let jet = CurveEnclosure {
                 position: piece.jet.position.map(scaled),
@@ -2295,7 +2322,7 @@ impl<'source> PreparedCurveEnclosure<'source> {
                         // Only query a tighter native bound when the parent's
                         // qualified enclosure cannot meet this child's policy.
                         let coarse =
-                            self.retained_with_native_budget(range, &mut native_work, cancel)?;
+                            self.retained_with_native_budget(range, &mut native_work, cancel, false)?;
                         match coarse {
                             Some(jet)
                                 if chord_error(&jet)? <= SECTION_SAMPLING_TOLERANCE_MM => jet,
@@ -2451,9 +2478,35 @@ fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
     })
 }
 fn regular_jet(jet: &SurfaceEnclosure) -> bool {
-    cross(jet.du, jet.dv).into_iter().any(|component| {
+    regular_derivatives(jet.du, jet.dv)
+}
+fn regular_derivatives(du: [Interval; 3], dv: [Interval; 3]) -> bool {
+    cross(du, dv).into_iter().any(|component| {
         component.lo.is_finite() && component.hi.is_finite() && !component.contains_zero()
     })
+}
+
+/// Recenter the SAME original Cartesian coordinate functions before rational
+/// division. Any finite constant origin is valid: its derivative is zero.
+/// The native coefficient-first first jets retain every one-sided source span,
+/// denominator and interval error; this is not C1 or Hessian authority.
+fn correlated_surface_regular(
+    surface: &Surface,
+    domain: [[f64; 2]; 2],
+    root: &SurfaceEnclosure,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let origin = root.position.map(|value| Interval::point(value.mid()));
+    let functionals = std::array::from_fn(|axis| SurfaceFunctional {
+        direction: std::array::from_fn(|coordinate| Interval::point(
+            if coordinate == axis { 1.0 } else { 0.0 },
+        )),
+        origin,
+        offset: Interval::point(0.0),
+    });
+    let jets = surface_functional_enclosures::<3>(surface, domain, &functionals, work, cancel)?;
+    Ok(regular_derivatives(jets.map(|jet| jet.du), jets.map(|jet| jet.dv)))
 }
 fn certify_surface_regular(
     surface: &Surface,
@@ -2462,7 +2515,7 @@ fn certify_surface_regular(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    if regular_jet(root) {
+    if regular_jet(root) || correlated_surface_regular(surface, domain, root, work, cancel)? {
         return Ok(());
     }
     // Geometric regularity need not imply a regular choice of UV chart.
@@ -2486,14 +2539,17 @@ fn certify_surface_regular(
         live -= 1;
         let (cell, depth) = stack[live];
         work.charge(1, cancel)?;
-        let jet = surface_enclosure(surface, cell, work, cancel)?;
-        if regular_jet(&jet) {
+        let jet = surface_piecewise_enclosure(surface, cell, work, cancel)?;
+        if regular_jet(&jet) || correlated_surface_regular(surface, cell, &jet, work, cancel)? {
             continue;
         }
         if depth == 24 {
             return Err(GeometryError::new(
                 GeometryErrorCode::AnalysisIndeterminate,
-                "native display patch Jacobian cannot be separated from zero",
+                format!(
+                    "native display patch Jacobian cannot be separated from zero: original_box={domain:?} terminal_box={cell:?} du={:?} dv={:?} normal={:?}",
+                    jet.du, jet.dv, cross(jet.du, jet.dv),
+                ),
             ));
         }
         let axis = if cell[0][1] - cell[0][0] >= cell[1][1] - cell[1][0] {
@@ -2524,6 +2580,7 @@ fn certify_surface_regular(
 /// separately enclosed. The same barycentric weights pair every mesh point
 /// with a point of the complete native UV-triangle image and conversely, so
 /// the bound controls both metric directions. Trim coverage is a separate proof.
+#[cfg(test)]
 pub(crate) fn triangle_error_bound(
     surface: &Surface,
     uv: &[[f64; 2]; 3],
@@ -2542,6 +2599,674 @@ pub(crate) fn triangle_error_bound(
     triangle_interpolation_error(surface, uv, points, domain, &bound, work, cancel)
 }
 
+/// Face-borrowed audit ownership. Original UV indices retain point enclosures,
+/// and exact inventoried mesh boxes retain completed proofs without eviction.
+/// Auxiliary comparison boxes/points use bounded keyed scratch. Triangle
+/// residuals are always recomputed against the current physical mesh vertices.
+pub(crate) struct DisplayTriangleProof<'a> {
+    surface: &'a Surface,
+    boxes: [Option<DisplayAuxBox>; 64],
+    vertices: [Option<DisplayVertexProof>; 256],
+    mesh_uvs: &'a [monstertruck_modeling::Vector2],
+    mesh_vertices: Vec<Option<[Interval; 3]>>,
+    triangle_boxes: Vec<u32>,
+    mesh_boxes: Vec<DisplayMeshBox>,
+}
+struct DisplayBoxProof {
+    du: [Interval; 3],
+    dv: [Interval; 3],
+    full: Option<DisplayFullBoxProof>,
+}
+struct DisplayAuxBox {
+    key: [u64; 4],
+    proof: DisplayBoxProof,
+}
+pub(crate) struct DisplayMeshBox {
+    key: [u64; 4],
+    proof: Option<DisplayBoxProof>,
+    conditioned: Option<DisplayConditionedHessian>,
+}
+impl DisplayMeshBox {
+    pub(crate) fn new(key: [u64; 4]) -> Self {
+        Self { key, proof: None, conditioned: None }
+    }
+}
+/// Copied only from a completed same-source auxiliary rank/smooth-span proof.
+/// The enclosing mesh slot binds the source owner and original box; this key
+/// additionally binds the exact comparison box. No triangle output is retained.
+struct DisplayConditionedHessian {
+    key: [u64; 4],
+    hessian: [[Interval; 3]; 3],
+}
+#[derive(Clone, Copy, Debug)]
+enum DisplayBoxIndex {
+    Mesh(usize),
+    Auxiliary(usize),
+}
+struct DisplayFullBoxProof {
+    bound: SurfaceEnclosure,
+    smooth: bool,
+    partitioned: bool,
+}
+struct DisplayVertexProof {
+    key: [u64; 2],
+    position: [Interval; 3],
+}
+/// Fixed proof-only workspace; no mesh vertices, UVs or source data are changed.
+struct DisplayHessianScratch {
+    boxes: [[[f64; 2]; 2]; 4],
+    hull: Option<[[Interval; 3]; 3]>,
+    child: Option<SurfaceEnclosure>,
+}
+/// One proof-only subdivision of the unchanged affine triangle. Midpoint
+/// intervals enclose exact convex averages; no rounded child mesh is created.
+struct DisplaySubdivisionScratch {
+    uv: [[Interval; 2]; 6],
+    points: [[Interval; 3]; 6],
+    positions: [[Interval; 3]; 6],
+    domain: [[f64; 2]; 2],
+    remainder: [Interval; 3],
+    residual: [Interval; 3],
+}
+impl<'a> DisplayTriangleProof<'a> {
+    pub(crate) fn base_retained_bytes_for_vertices(count: usize) -> Result<usize, GeometryError> {
+        count.checked_mul(std::mem::size_of::<Option<[Interval; 3]>>())
+            .and_then(|bytes| bytes.checked_add(
+                std::mem::size_of::<Self>() + std::mem::size_of::<DisplayHessianScratch>()
+                    + std::mem::size_of::<DisplaySubdivisionScratch>(),
+            ))
+            .ok_or_else(|| GeometryError::new(
+                GeometryErrorCode::ResourceLimit, "display UV-point proof storage overflow",
+            ))
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        (std::mem::size_of::<Self>() + std::mem::size_of::<DisplayHessianScratch>()
+            + std::mem::size_of::<DisplaySubdivisionScratch>()).saturating_add(
+                self.mesh_vertices.capacity().saturating_mul(std::mem::size_of::<Option<[Interval; 3]>>()),
+            )
+            .saturating_add(self.triangle_boxes.capacity().saturating_mul(std::mem::size_of::<u32>()))
+            .saturating_add(self.mesh_boxes.capacity().saturating_mul(std::mem::size_of::<DisplayMeshBox>()))
+    }
+    #[cfg(test)]
+    pub(crate) fn new(
+        surface: &'a Surface,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        Self::with_mesh_inventory(surface, &[], Vec::new(), Vec::new(), work, cancel)
+    }
+    pub(crate) fn with_mesh_inventory(
+        surface: &'a Surface,
+        mesh_uvs: &'a [monstertruck_modeling::Vector2],
+        triangle_boxes: Vec<u32>,
+        mesh_boxes: Vec<DisplayMeshBox>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let uv_count = mesh_uvs.len();
+        work.charge((64 + 256 + 1_u64).saturating_add(uv_count as u64), cancel)?;
+        let mut mesh_vertices = Vec::new();
+        mesh_vertices.try_reserve_exact(uv_count).map_err(|_| GeometryError::new(
+            GeometryErrorCode::ResourceLimit, "display UV-point proof allocation failed",
+        ))?;
+        for index in 0..uv_count {
+            if index % 1024 == 0 {
+                check_cancel(cancel)?;
+            }
+            mesh_vertices.push(None);
+        }
+        Ok(Self {
+            surface,
+            boxes: [const { None }; 64],
+            vertices: [const { None }; 256],
+            mesh_uvs,
+            mesh_vertices,
+            triangle_boxes,
+            mesh_boxes,
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn triangle_error_bound(
+        &mut self,
+        uv: &[[f64; 2]; 3],
+        points: &[[f64; 3]; 3],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<f64, GeometryError> {
+        self.triangle_error_bound_at(uv, points, None, true, work, cancel)
+    }
+    pub(crate) fn indexed_triangle_error_bound(
+        &mut self,
+        uv: &[[f64; 2]; 3],
+        points: &[[f64; 3]; 3],
+        triangle_ordinal: usize,
+        uv_indices: &[usize; 3],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<f64, GeometryError> {
+        self.triangle_error_bound_at(uv, points, Some((triangle_ordinal, uv_indices)), true, work, cancel)
+    }
+    fn triangle_error_bound_at(
+        &mut self,
+        uv: &[[f64; 2]; 3],
+        points: &[[f64; 3]; 3],
+        uv_indices: Option<(usize, &[usize; 3])>,
+        allow_auxiliary: bool,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<f64, GeometryError> {
+        work.charge(1, cancel)?;
+        if uv.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "display triangle proof requires finite native UV coordinates",
+            ));
+        }
+        let domain = std::array::from_fn(|axis| [
+            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
+            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
+        ]);
+        let key = [
+            domain[0][0].to_bits(), domain[0][1].to_bits(),
+            domain[1][0].to_bits(), domain[1][1].to_bits(),
+        ];
+        let box_index = if let Some((ordinal, _)) = uv_indices {
+            let index = *self.triangle_boxes.get(ordinal).ok_or_else(|| GeometryError::new(
+                GeometryErrorCode::InvalidGeometry, "display triangle is outside its captured UV-box inventory",
+            ))? as usize;
+            let entry = self.mesh_boxes.get(index).ok_or_else(|| GeometryError::new(
+                GeometryErrorCode::InvalidGeometry, "display triangle references an absent UV-box slot",
+            ))?;
+            if entry.key != key {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry, "display triangle changed its exact captured UV box",
+                ));
+            }
+            DisplayBoxIndex::Mesh(index)
+        } else {
+            let slot = display_proof_slot(&key, self.boxes.len());
+            if self.boxes[slot].as_ref().is_some_and(|entry| entry.key != key) {
+                self.boxes[slot] = None;
+            }
+            DisplayBoxIndex::Auxiliary(slot)
+        };
+        if self.box_proof(box_index).is_none() {
+            let anchor = std::array::from_fn(|axis| {
+                let low = points.iter().map(|point| point[axis]).fold(f64::INFINITY, f64::min);
+                let high = points.iter().map(|point| point[axis]).fold(f64::NEG_INFINITY, f64::max);
+                low * 0.5 + high * 0.5
+            });
+            let first = surface_coordinate_first(self.surface, domain, anchor, work, cancel)
+                .map_err(|cause| display_proof_failure(cause, "box first jets", box_index, domain))?;
+            let du = first.map(|jet| jet.du);
+            let dv = first.map(|jet| jet.dv);
+            let full = if regular_derivatives(du, dv) {
+                None
+            } else {
+                let bound = surface_piecewise_enclosure(self.surface, domain, work, cancel)
+                    .map_err(|cause| display_proof_failure(cause, "box rank Jet2", box_index, domain))?;
+                certify_surface_regular(self.surface, domain, &bound, work, cancel).map_err(|cause| {
+                    GeometryError::new(cause.code, format!(
+                        "obligation=box rank cache={box_index:?} triangle_uv={uv:?} triangle_points={points:?}: {}", cause.message,
+                    ))
+                })?;
+                let smooth = surface_parameter_span_smooth(self.surface, domain, work, cancel)
+                    .map_err(|cause| display_proof_failure(cause, "box rank smooth span", box_index, domain))?;
+                Some(DisplayFullBoxProof { bound, smooth, partitioned: false })
+            };
+            let proof = DisplayBoxProof { du, dv, full };
+            match box_index {
+                DisplayBoxIndex::Mesh(index) => self.mesh_boxes[index].proof = Some(proof),
+                DisplayBoxIndex::Auxiliary(slot) => self.boxes[slot] = Some(DisplayAuxBox { key, proof }),
+            }
+        }
+        let positions = self.triangle_positions(uv, uv_indices, box_index, work, cancel)?;
+        let proof = self.box_proof(box_index).expect("completed same-box rank proof");
+        let first_error = first_jet_triangle_error(points, domain, proof.du, proof.dv, &positions)?;
+        if first_error <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+            return Ok(first_error);
+        }
+        // A first-order bound/rank decline is not an error. Only then request
+        // the existing Hessian/smooth-span proof. Native failures stay terminal.
+        if self.box_proof(box_index).expect("same box").full.is_none() {
+            let bound = surface_piecewise_enclosure(self.surface, domain, work, cancel)
+                .map_err(|cause| display_proof_failure(cause, "box Hessian jets", box_index, domain))?;
+            // This exact box already has a completed first-jet rank proof.
+            let smooth = surface_parameter_span_smooth(self.surface, domain, work, cancel)
+                .map_err(|cause| display_proof_failure(cause, "box Hessian smooth span", box_index, domain))?;
+            self.box_proof_mut(box_index).expect("same box").full =
+                Some(DisplayFullBoxProof { bound, smooth, partitioned: false });
+        }
+        let proof = self.box_proof(box_index).expect("same box").full.as_ref()
+            .expect("completed Hessian/smooth-span proof");
+        let mut error = first_error.min(triangle_interpolation_error_prepared(
+            uv, points, domain, &proof.bound, proof.smooth, &positions, (&mut *work, cancel),
+        )?);
+        if !allow_auxiliary && proof.smooth && !proof.partitioned
+            && error > spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM
+        {
+            // Tighten only the single auxiliary comparison's Hessian, once,
+            // over four closed subboxes covering this SAME qualified box.
+            let hessian = partition_display_hessian(self.surface, domain, proof, work, cancel)
+                .map_err(|cause| display_proof_failure(cause, "four-child Hessian", box_index, domain))?;
+            let proof = self.box_proof_mut(box_index).expect("same box").full.as_mut()
+                .expect("same smooth-span proof");
+            [proof.bound.duu, proof.bound.duv, proof.bound.dvv] = hessian;
+            proof.partitioned = true;
+            error = first_error.min(triangle_interpolation_error_prepared(
+                uv, points, domain, &proof.bound, proof.smooth, &positions, (&mut *work, cancel),
+            )?);
+        }
+        if !allow_auxiliary || error <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+            return Ok(error);
+        }
+        let Some(auxiliary) = auxiliary_smooth_triangle(self.surface, uv, domain, work, cancel)
+            .map_err(|cause| display_proof_failure(cause, "auxiliary span qualification", box_index, domain))?
+        else {
+            work.charge(1, cancel)?;
+            let proof = self.box_proof(box_index).expect("same box").full.as_ref()
+                .expect("completed same-box derivative proof");
+            if proof.smooth
+                && let Some(refined) = subdivide_display_triangle(
+                    self.surface, uv, points, domain,
+                    [&proof.bound.duu, &proof.bound.duv, &proof.bound.dvv], &positions,
+                    (work, cancel),
+                ).map_err(|cause| display_proof_failure(
+                    cause, "filled-triangle subdivision", box_index, domain,
+                ))?
+            {
+                error = error.min(refined);
+            }
+            return Ok(error);
+        };
+        let proof = self.box_proof(box_index).expect("same box").full.as_ref()
+            .expect("completed same-box derivative proof");
+        // The same barycentric weights pair every original UV point with an
+        // auxiliary UV point. Convexity bounds the entire displacement by the
+        // largest vertex displacement on each axis. Both triangles remain in
+        // the ORIGINAL closed box, whose continuous piecewise first jets bound
+        // the complete transport; no C1 claim is made at its crossed knots.
+        let delta: [f64; 2] = std::array::from_fn(|axis| {
+            (0..3).map(|vertex| Interval::point(uv[vertex][axis])
+                .sub(Interval::point(auxiliary[vertex][axis])).abs_upper())
+                .fold(0.0_f64, f64::max)
+        });
+        let transport = norm_upper(std::array::from_fn(|axis| {
+            Interval::point(proof.bound.du[axis].abs_upper()).mul(Interval::point(delta[0]))
+                .add(Interval::point(proof.bound.dv[axis].abs_upper()).mul(Interval::point(delta[1])))
+        }))?;
+        let auxiliary_domain: [[f64; 2]; 2] = std::array::from_fn(|axis| [
+            auxiliary.iter().map(|point| point[axis]).fold(f64::INFINITY, f64::min),
+            auxiliary.iter().map(|point| point[axis]).fold(f64::NEG_INFINITY, f64::max),
+        ]);
+        let auxiliary_key = [
+            auxiliary_domain[0][0].to_bits(), auxiliary_domain[0][1].to_bits(),
+            auxiliary_domain[1][0].to_bits(), auxiliary_domain[1][1].to_bits(),
+        ];
+        work.charge(1, cancel)?;
+        let parent_index = match box_index {
+            DisplayBoxIndex::Mesh(index) => Some(index),
+            DisplayBoxIndex::Auxiliary(_) => None,
+        };
+        let mut retained_error = None;
+        if let Some(index) = parent_index
+            && self.mesh_boxes[index].conditioned.as_ref()
+                .is_some_and(|receipt| receipt.key == auxiliary_key)
+        {
+            let positions = self.triangle_positions(&auxiliary, None, box_index, work, cancel)?;
+            let receipt = self.mesh_boxes[index].conditioned.as_ref()
+                .expect("matching completed auxiliary smooth-span proof");
+            let bound = smooth_triangle_interpolation_error(
+                &auxiliary, points, auxiliary_domain,
+                [&receipt.hessian[0], &receipt.hessian[1], &receipt.hessian[2]], &positions,
+                work, cancel,
+            )?;
+            let complete = up(bound + transport);
+            if complete <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+                return Ok(error.min(complete));
+            }
+            // Retaining a valid Hessian must not discard another existing
+            // certificate when this triangle's fresh residual still declines.
+            retained_error = Some(bound);
+        }
+        // Exactly one independently qualified comparison. Even if its bound
+        // remains too large, there is no precision or conditioning ladder.
+        let auxiliary_error = self.triangle_error_bound_at(
+            &auxiliary, points, None, false, work, cancel,
+        )?;
+        if let Some(index) = parent_index {
+            let slot = display_proof_slot(&auxiliary_key, self.boxes.len());
+            let receipt = self.boxes[slot].as_ref().filter(|entry| entry.key == auxiliary_key)
+                .and_then(|entry| entry.proof.full.as_ref().filter(|full| full.smooth))
+                .map(|full| DisplayConditionedHessian {
+                    key: auxiliary_key,
+                    hessian: [full.bound.duu, full.bound.duv, full.bound.dvv],
+                });
+            if let Some(receipt) = receipt {
+                self.mesh_boxes[index].conditioned = Some(receipt);
+            }
+        }
+        let auxiliary_error = retained_error.map_or(auxiliary_error, |old: f64| old.min(auxiliary_error));
+        let mut complete = error.min(up(auxiliary_error + transport));
+        if complete <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+            return Ok(complete);
+        }
+        // All existing scalar/conditioning paths have declined. At most ONE
+        // exact filled-triangle proof subdivision may now use an already
+        // completed smooth Hessian, preferably the actual auxiliary box.
+        work.charge(4, cancel)?;
+        let slot = display_proof_slot(&auxiliary_key, self.boxes.len());
+        let has_retained = parent_index.is_some_and(|index| {
+            self.mesh_boxes[index].conditioned.as_ref()
+                .is_some_and(|receipt| receipt.key == auxiliary_key)
+        });
+        let has_auxiliary = self.boxes[slot].as_ref().filter(|entry| entry.key == auxiliary_key)
+            .and_then(|entry| entry.proof.full.as_ref()).is_some_and(|full| full.smooth);
+        if has_retained || has_auxiliary {
+            let positions = self.triangle_positions(&auxiliary, None, box_index, work, cancel)?;
+            let hessian = parent_index.and_then(|index| self.mesh_boxes[index].conditioned.as_ref())
+                .filter(|receipt| receipt.key == auxiliary_key)
+                .map(|receipt| [&receipt.hessian[0], &receipt.hessian[1], &receipt.hessian[2]])
+                .or_else(|| {
+                    self.boxes[slot].as_ref().filter(|entry| entry.key == auxiliary_key)
+                        .and_then(|entry| entry.proof.full.as_ref().filter(|full| full.smooth))
+                        .map(|full| [&full.bound.duu, &full.bound.duv, &full.bound.dvv])
+                }).expect("completed same-source auxiliary smooth Hessian");
+            if let Some(refined) = subdivide_display_triangle(
+                self.surface, &auxiliary, points, auxiliary_domain, hessian, &positions,
+                (work, cancel),
+            ).map_err(|cause| display_proof_failure(
+                cause, "auxiliary filled-triangle subdivision", box_index, auxiliary_domain,
+            ))? {
+                // This is still the original affine physical triangle. Pair
+                // every original UV point with its auxiliary point only once.
+                complete = complete.min(up(refined + transport));
+            }
+        } else if let Some(proof) = self.box_proof(box_index)
+            .and_then(|proof| proof.full.as_ref()).filter(|full| full.smooth)
+            && let Some(refined) = subdivide_display_triangle(
+                self.surface, uv, points, domain,
+                [&proof.bound.duu, &proof.bound.duv, &proof.bound.dvv], &positions,
+                (work, cancel),
+            ).map_err(|cause| display_proof_failure(
+                cause, "filled-triangle subdivision", box_index, domain,
+            ))?
+        {
+            complete = complete.min(refined);
+        }
+        Ok(complete)
+    }
+    fn triangle_positions(
+        &mut self,
+        uv: &[[f64; 2]; 3],
+        uv_indices: Option<(usize, &[usize; 3])>,
+        box_index: DisplayBoxIndex,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 3], GeometryError> {
+        let mut positions = [[Interval::point(0.0); 3]; 3];
+        for vertex in 0..3 {
+            work.charge(1, cancel)?;
+            let key = uv[vertex].map(f64::to_bits);
+            let index = if let Some((_, indices)) = uv_indices {
+                let index = indices[vertex];
+                let captured = self.mesh_uvs.get(index).ok_or_else(|| GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry, "display UV proof index is outside its captured mesh",
+                ))?;
+                if [captured.x.to_bits(), captured.y.to_bits()] != key {
+                    return Err(GeometryError::new(
+                        GeometryErrorCode::InvalidGeometry, "display UV index changed its exact parameter bits",
+                    ));
+                }
+                Some(index)
+            } else {
+                None
+            };
+            let auxiliary_slot = if index.is_none() {
+                display_proof_slot(&key, self.vertices.len())
+            } else {
+                0
+            };
+            let cached = match index {
+                Some(index) => self.mesh_vertices[index],
+                None => self.vertices[auxiliary_slot].as_ref()
+                    .filter(|proof| proof.key == key).map(|proof| proof.position),
+            };
+            let position = if let Some(position) = cached {
+                position
+            } else {
+                let position = surface_position_enclosure(
+                    self.surface, [[uv[vertex][0]; 2], [uv[vertex][1]; 2]], work, cancel,
+                ).map_err(|cause| GeometryError::new(cause.code, format!(
+                    "obligation=point position cache={box_index:?} uv={:?}: {}", uv[vertex], cause.message,
+                )))?;
+                match index {
+                    Some(index) => self.mesh_vertices[index] = Some(position),
+                    None => self.vertices[auxiliary_slot] = Some(DisplayVertexProof { key, position }),
+                }
+                position
+            };
+            positions[vertex] = position;
+        }
+        Ok(positions)
+    }
+    fn box_proof(&self, index: DisplayBoxIndex) -> Option<&DisplayBoxProof> {
+        match index {
+            DisplayBoxIndex::Mesh(index) => self.mesh_boxes[index].proof.as_ref(),
+            DisplayBoxIndex::Auxiliary(index) => self.boxes[index].as_ref().map(|entry| &entry.proof),
+        }
+    }
+    fn box_proof_mut(&mut self, index: DisplayBoxIndex) -> Option<&mut DisplayBoxProof> {
+        match index {
+            DisplayBoxIndex::Mesh(index) => self.mesh_boxes[index].proof.as_mut(),
+            DisplayBoxIndex::Auxiliary(index) => self.boxes[index].as_mut().map(|entry| &mut entry.proof),
+        }
+    }
+    /// Failure-only inspection of the captured original triangle/box binding.
+    pub(crate) fn smooth_span_for_triangle(&self, ordinal: usize, uv: &[[f64; 2]; 3]) -> Option<bool> {
+        let domain: [[f64; 2]; 2] = std::array::from_fn(|axis| [
+            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
+            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
+        ]);
+        let key = [
+            domain[0][0].to_bits(), domain[0][1].to_bits(),
+            domain[1][0].to_bits(), domain[1][1].to_bits(),
+        ];
+        let index = *self.triangle_boxes.get(ordinal)? as usize;
+        self.mesh_boxes.get(index).filter(|entry| entry.key == key)?
+            .proof.as_ref()?.full.as_ref().map(|full| full.smooth)
+    }
+}
+
+fn display_proof_failure(
+    cause: GeometryError,
+    obligation: &str,
+    index: DisplayBoxIndex,
+    domain: [[f64; 2]; 2],
+) -> GeometryError {
+    GeometryError::new(cause.code, format!(
+        "obligation={obligation} cache={index:?} uv_box={domain:?}: {}", cause.message,
+    ))
+}
+
+fn partition_display_hessian(
+    surface: &Surface,
+    domain: [[f64; 2]; 2],
+    parent: &DisplayFullBoxProof,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[Interval; 3]; 3], GeometryError> {
+    if !parent.smooth {
+        return Err(GeometryError::new(
+            GeometryErrorCode::SingularGeometry,
+            "display Hessian partition requires a qualified original smooth span",
+        ));
+    }
+    let middle = domain.map(|range| range[0] * 0.5 + range[1] * 0.5);
+    let mut scratch = DisplayHessianScratch {
+        boxes: std::array::from_fn(|index| {
+            let u = index / 2;
+            let v = index % 2;
+            [
+                [if u == 0 { domain[0][0] } else { middle[0] },
+                 if u == 0 { middle[0] } else { domain[0][1] }],
+                [if v == 0 { domain[1][0] } else { middle[1] },
+                 if v == 0 { middle[1] } else { domain[1][1] }],
+            ]
+        }),
+        hull: None,
+        child: None,
+    };
+    for index in 0..4 {
+        work.charge(1, cancel)?;
+        scratch.child = None;
+        scratch.child = Some(surface_piecewise_enclosure(surface, scratch.boxes[index], work, cancel)
+            .map_err(|cause| GeometryError::new(cause.code, format!(
+                "Hessian child={index} uv_box={:?}: {}", scratch.boxes[index], cause.message,
+            )))?);
+        let child = scratch.child.as_ref().expect("completed closed-subbox enclosure");
+        if let Some(hull) = &mut scratch.hull {
+            for derivative in 0..3 {
+                let current = match derivative {
+                    0 => &child.duu,
+                    1 => &child.duv,
+                    _ => &child.dvv,
+                };
+                for axis in 0..3 {
+                    hull[derivative][axis] = hull[derivative][axis].hull(current[axis]);
+                }
+            }
+        } else {
+            scratch.hull = Some([child.duu, child.duv, child.dvv]);
+        }
+    }
+    let mut hull = scratch.hull.expect("four closed subboxes cover the parent");
+    for derivative in 0..3 {
+        let original = match derivative {
+            0 => &parent.bound.duu,
+            1 => &parent.bound.duv,
+            _ => &parent.bound.dvv,
+        };
+        for axis in 0..3 {
+            hull[derivative][axis] = Interval::new(
+                hull[derivative][axis].lo.max(original[axis].lo),
+                hull[derivative][axis].hi.min(original[axis].hi),
+            )?;
+        }
+    }
+    Ok(hull)
+}
+
+/// Subtract the mathematical midpoint of each derivative interval. Its constant
+/// linear term cancels in barycentric interpolation. The weighted mean absolute
+/// deviation of scalar vertex coordinates is at most half their span, so each
+/// first-jet interval width contributes span*width/4. Continuous piecewise first
+/// jets suffice; this grants neither C1 nor Hessian authority.
+fn first_jet_triangle_error(
+    points: &[[f64; 3]; 3],
+    domain: [[f64; 2]; 2],
+    du: [Interval; 3],
+    dv: [Interval; 3],
+    positions: &[[Interval; 3]; 3],
+) -> Result<f64, GeometryError> {
+    let span = domain.map(|range| Interval::point(range[1])
+        .sub(Interval::point(range[0])).abs_upper());
+    norm_upper(std::array::from_fn(|axis| {
+        let vertex_error = (0..3).map(|vertex| positions[vertex][axis]
+            .sub(Interval::point(points[vertex][axis])).abs_upper()).fold(0.0_f64, f64::max);
+        Interval::point(vertex_error)
+            .add(Interval::point(du[axis].width()).mul(Interval::point(span[0]))
+                .mul(Interval::point(0.25)))
+            .add(Interval::point(dv[axis].width()).mul(Interval::point(span[1]))
+                .mul(Interval::point(0.25)))
+    }))
+}
+
+/// Evaluate only the native source position; derivatives and regularity remain
+/// separate obligations. Debit completed work even if evaluation fails.
+pub(crate) fn surface_position_enclosure(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 3], GeometryError> {
+    check_cancel(cancel)?;
+    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
+        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
+    );
+    let result = monstertruck_modeling::validated_surface_position_bounds(
+        surface, uv, &mut native_work, cancel,
+    );
+    debit_native_work(work, native_work.consumed(), cancel)?;
+    Ok(result.map_err(native_error)?.map(adapt))
+}
+fn surface_coordinate_first(
+    surface: &Surface,
+    domain: [[f64; 2]; 2],
+    anchor: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[SurfaceFunctionalEnclosure; 3], GeometryError> {
+    let origin = anchor.map(Interval::point);
+    let functionals = std::array::from_fn(|axis| SurfaceFunctional {
+        direction: std::array::from_fn(|coordinate| Interval::point(
+            if coordinate == axis { 1.0 } else { 0.0 },
+        )),
+        origin,
+        offset: Interval::point(0.0),
+    });
+    surface_functional_enclosures::<3>(surface, domain, &functionals, work, cancel)
+}
+
+/// Propose one actual knot-span interior, not an epsilon-nearness waiver.
+/// Even a large projection is permitted only as comparison geometry: its full
+/// first-jet transport is subsequently charged to the unchanged physical error.
+fn auxiliary_smooth_triangle(
+    surface: &Surface,
+    uv: &[[f64; 2]; 3],
+    domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[[f64; 2]; 3]>, GeometryError> {
+    let axes = surface_knots(surface, work, cancel)?;
+    let mut interior = [[0.0; 2]; 2];
+    for axis in 0..2 {
+        work.charge(axes[axis].len() as u64 + 1, cancel)?;
+        let mut selected: Option<[f64; 2]> = None;
+        for span in AxisSpans::new(axes[axis], domain[axis]) {
+            work.charge(1, cancel)?;
+            if selected.is_none_or(|old| span[1] - span[0] > old[1] - old[0]) {
+                selected = Some(span);
+            }
+        }
+        let Some(span) = selected else { return Ok(None) };
+        let low = span[0].next_up();
+        let high = span[1].next_down();
+        if !low.is_finite() || !high.is_finite() || low >= high {
+            return Ok(None);
+        }
+        interior[axis] = [low, high];
+    }
+    work.charge(6, cancel)?;
+    let auxiliary = uv.map(|point| std::array::from_fn(|axis| {
+        point[axis].clamp(interior[axis][0], interior[axis][1])
+    }));
+    let auxiliary_domain = std::array::from_fn(|axis| [
+        auxiliary.iter().map(|point| point[axis]).fold(f64::INFINITY, f64::min),
+        auxiliary.iter().map(|point| point[axis]).fold(f64::NEG_INFINITY, f64::max),
+    ]);
+    if !surface_parameter_span_smooth(surface, auxiliary_domain, work, cancel)? {
+        return Ok(None);
+    }
+    Ok(Some(auxiliary))
+}
+fn display_proof_slot(key: &[u64], slots: usize) -> usize {
+    let hash = key.iter().fold(0_u64, |hash, bits| {
+        (hash ^ *bits).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(27)
+    });
+    ((hash ^ (hash >> 32)) as usize) & (slots - 1)
+}
+
 fn triangle_interpolation_error(
     surface: &Surface,
     uv: &[[f64; 2]; 3],
@@ -2554,18 +3279,54 @@ fn triangle_interpolation_error(
     // A second-derivative Taylor theorem cannot cross an unqualified C0 knot.
     // For a multi-span triangle use a complete image/vertex enclosure instead;
     // it is coarser but needs neither continuity nor sampled derivative claims.
-    if !surface_parameter_span_smooth(surface, domain, work, cancel)? {
+    let smooth = surface_parameter_span_smooth(surface, domain, work, cancel)?;
+    let mut positions = [[Interval::point(0.0); 3]; 3];
+    for vertex in 0..if smooth { 3 } else { 1 } {
+        positions[vertex] = surface_enclosure(
+            surface, [[uv[vertex][0]; 2], [uv[vertex][1]; 2]], work, cancel,
+        )?.position;
+    }
+    triangle_interpolation_error_prepared(
+        uv, points, domain, bound, smooth, &positions, (work, cancel),
+    )
+}
+
+fn triangle_interpolation_error_prepared(
+    uv: &[[f64; 2]; 3],
+    points: &[[f64; 3]; 3],
+    domain: [[f64; 2]; 2],
+    bound: &SurfaceEnclosure,
+    smooth: bool,
+    positions: &[[Interval; 3]; 3],
+    (work, cancel): (&mut GeometryWorkBudget, &AtomicBool),
+) -> Result<f64, GeometryError> {
+    if !smooth {
         let mut error = norm_upper(std::array::from_fn(|axis| {
             bound.position[axis].sub(Interval::point(points[0][axis]))
         }))?;
-        let native = surface_enclosure(surface, [[uv[0][0]; 2], [uv[0][1]; 2]], work, cancel)?;
         for point in points {
             error = error.max(norm_upper(std::array::from_fn(|axis| {
-                native.position[axis].sub(Interval::point(point[axis]))
+                positions[0][axis].sub(Interval::point(point[axis]))
             }))?);
         }
         return Ok(error);
     }
+    smooth_triangle_interpolation_error(
+        uv, points, domain, [&bound.duu, &bound.duv, &bound.dvv], positions, work, cancel,
+    )
+}
+
+/// The caller supplies completed same-box smoothness and source Hessian proof.
+/// This is the common interpolation theorem, not a synthetic first/position jet.
+fn smooth_triangle_interpolation_error(
+    uv: &[[f64; 2]; 3],
+    points: &[[f64; 3]; 3],
+    domain: [[f64; 2]; 2],
+    hessian: [&[Interval; 3]; 3],
+    positions: &[[Interval; 3]; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
     let du = Interval::point(domain[0][1])
         .sub(Interval::point(domain[0][0]))
         .abs_upper();
@@ -2576,31 +3337,243 @@ fn triangle_interpolation_error(
     // most width^2/4 (Popoviciu); the absolute mixed covariance is at most
     // du*dv/4 by Cauchy--Schwarz. First derivatives cancel in the barycentric
     // Taylor sum, leaving one half of these variances, not half of width^2.
-    let remainder: [Interval; 3] = std::array::from_fn(|axis| {
-        Interval::point(bound.duu[axis].abs_upper())
+    let remainder = rectangle_triangle_remainder([du, dv], hessian);
+    let mut vertex_error = 0.0_f64;
+    let mut component_vertex_error = [0.0_f64; 3];
+    for vertex in 0..3 {
+        let residual = std::array::from_fn(|axis| {
+            positions[vertex][axis].sub(Interval::point(points[vertex][axis]))
+        });
+        for axis in 0..3 {
+            component_vertex_error[axis] =
+                component_vertex_error[axis].max(residual[axis].abs_upper());
+        }
+        vertex_error = vertex_error.max(norm_upper(residual)?);
+    }
+    let rectangle_error = up(norm_upper(remainder)? + vertex_error);
+    if rectangle_error <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+        return Ok(rectangle_error);
+    }
+    let Some(metric_remainder) =
+        triangle_metric_remainder(uv, [du, dv], hessian, work, cancel)?
+    else {
+        return Ok(rectangle_error);
+    };
+    let component_error = std::array::from_fn(|axis| {
+        metric_remainder[axis].add(Interval::point(component_vertex_error[axis]))
+    });
+    // This optional local arithmetic has no native calls. Overflow declines
+    // only this proposal; every native proof failure remains terminal above.
+    Ok(match norm_upper(component_error) {
+        Ok(error) => rectangle_error.min(error),
+        Err(_) => rectangle_error,
+    })
+}
+
+fn rectangle_triangle_remainder(
+    [du, dv]: [f64; 2],
+    hessian: [&[Interval; 3]; 3],
+) -> [Interval; 3] {
+    std::array::from_fn(|axis| {
+        Interval::point(hessian[0][axis].abs_upper())
             .mul(Interval::point(du).square())
             .add(
-                Interval::point(bound.duv[axis].abs_upper())
+                Interval::point(hessian[1][axis].abs_upper())
                     .mul(Interval::point(du))
                     .mul(Interval::point(dv))
                     .mul(Interval::point(2.0)),
             )
-            .add(Interval::point(bound.dvv[axis].abs_upper()).mul(Interval::point(dv).square()))
+            .add(Interval::point(hessian[2][axis].abs_upper()).mul(Interval::point(dv).square()))
             .mul(Interval::point(0.125))
-    });
-    let mut vertex_error = 0.0_f64;
+    })
+}
+
+/// Exactly one proof subdivision, not a rounded replacement mesh. The caller
+/// supplies a completed C1/Hessian proof on the whole parent box. Exact symbolic
+/// midpoint children cover the same UV triangle and the SAME affine physical
+/// plane. Interval vertices only enclose those exact objects.
+fn subdivide_display_triangle(
+    surface: &Surface,
+    uv: &[[f64; 2]; 3],
+    points: &[[f64; 3]; 3],
+    domain: [[f64; 2]; 2],
+    hessian: [&[Interval; 3]; 3],
+    positions: &[[Interval; 3]; 3],
+    (work, cancel): (&mut GeometryWorkBudget, &AtomicBool),
+) -> Result<Option<f64>, GeometryError> {
+    work.charge(54, cancel)?;
+    let zero = Interval::point(0.0);
+    let half = Interval::point(0.5);
+    let mut scratch = DisplaySubdivisionScratch {
+        uv: [[zero; 2]; 6],
+        points: [[zero; 3]; 6],
+        positions: [[zero; 3]; 6],
+        domain: [[0.0; 2]; 2],
+        remainder: [zero; 3],
+        residual: [zero; 3],
+    };
     for vertex in 0..3 {
-        let enclosure = surface_enclosure(
-            surface,
-            [[uv[vertex][0]; 2], [uv[vertex][1]; 2]],
-            work,
-            cancel,
-        )?;
-        vertex_error = vertex_error.max(norm_upper(std::array::from_fn(|axis| {
-            enclosure.position[axis].sub(Interval::point(points[vertex][axis]))
-        }))?);
+        work.charge(1, cancel)?;
+        for axis in 0..2 {
+            if !uv[vertex][axis].is_finite()
+                || !domain[axis][0].is_finite() || !domain[axis][1].is_finite()
+                || uv[vertex][axis] < domain[axis][0] || uv[vertex][axis] > domain[axis][1]
+            {
+                return Ok(None);
+            }
+            scratch.uv[vertex][axis] = Interval::point(uv[vertex][axis]);
+        }
+        scratch.points[vertex] = points[vertex].map(Interval::point);
+        scratch.positions[vertex] = positions[vertex];
     }
-    Ok(up(norm_upper(remainder)? + vertex_error))
+    let edges = [[0, 1], [1, 2], [2, 0]];
+    for (edge, [a, b]) in edges.into_iter().enumerate() {
+        work.charge(1, cancel)?;
+        let midpoint = 3 + edge;
+        for axis in 0..2 {
+            let average = scratch.uv[a][axis].mul(half).add(scratch.uv[b][axis].mul(half));
+            // The exact average lies in BOTH the endpoint hull and the parent
+            // box. This algebraic intersection is not source/chart authority.
+            let lo = average.lo.max(uv[a][axis].min(uv[b][axis])).max(domain[axis][0]);
+            let hi = average.hi.min(uv[a][axis].max(uv[b][axis])).min(domain[axis][1]);
+            let Ok(average) = Interval::new(lo, hi) else {
+                return Ok(None);
+            };
+            scratch.uv[midpoint][axis] = average;
+        }
+        for axis in 0..3 {
+            // Never substitute F(midpoint): these are the exact averages on
+            // the original affine physical triangle, enclosed outward.
+            let average = scratch.points[a][axis].mul(half).add(scratch.points[b][axis].mul(half));
+            if !average.lo.is_finite() || !average.hi.is_finite() {
+                return Ok(None);
+            }
+            scratch.points[midpoint][axis] = average;
+        }
+    }
+    for midpoint in 3..6 {
+        work.charge(1, cancel)?;
+        scratch.domain = scratch.uv[midpoint].map(|range| [range.lo, range.hi]);
+        scratch.positions[midpoint] = surface_position_enclosure(
+            surface, scratch.domain, work, cancel,
+        ).map_err(|cause| GeometryError::new(cause.code, format!(
+            "triangle proof midpoint={} uv_box={:?}: {}",
+            midpoint - 3, scratch.domain, cause.message,
+        )))?;
+    }
+    let mut complete = 0.0_f64;
+    // 3=01, 4=12, 5=20. These EXACT conceptual children partition the parent;
+    // their interval bounding boxes merely enclose them.
+    for child in [[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]] {
+        work.charge(1, cancel)?;
+        scratch.domain = std::array::from_fn(|axis| [
+            child.iter().map(|&vertex| scratch.uv[vertex][axis].lo)
+                .fold(f64::INFINITY, f64::min).max(domain[axis][0]),
+            child.iter().map(|&vertex| scratch.uv[vertex][axis].hi)
+                .fold(f64::NEG_INFINITY, f64::max).min(domain[axis][1]),
+        ]);
+        let spans = scratch.domain.map(|range| {
+            Interval::point(range[1]).sub(Interval::point(range[0])).abs_upper()
+        });
+        scratch.remainder = rectangle_triangle_remainder(spans, hessian);
+        let mut vertex_error = 0.0_f64;
+        for vertex in child {
+            work.charge(1, cancel)?;
+            scratch.residual = std::array::from_fn(|axis| {
+                scratch.positions[vertex][axis].sub(scratch.points[vertex][axis])
+            });
+            let Ok(error) = norm_upper(scratch.residual) else {
+                return Ok(None); // Local interval arithmetic only.
+            };
+            vertex_error = vertex_error.max(error);
+        }
+        let Ok(remainder) = norm_upper(scratch.remainder) else {
+            return Ok(None); // No native errors are caught here.
+        };
+        let bound = up(remainder + vertex_error);
+        if !bound.is_finite() {
+            return Ok(None);
+        }
+        complete = complete.max(bound);
+    }
+    Ok(Some(complete))
+}
+
+/// One actual-triangle variance bound using the same completed box Hessian.
+/// Young's inequality supplies a constant diagonal majorant A per component.
+/// For every barycentric U and ANY center c:
+/// sum(lambda_i * |Ui-U|_A^2) <= max_i |Ui-c|_A^2.
+/// Centers are proposals only; no native evaluation or new smoothness claim.
+fn triangle_metric_remainder(
+    uv: &[[f64; 2]; 3],
+    spans: [f64; 2],
+    hessian: [&[Interval; 3]; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Interval; 3]>, GeometryError> {
+    work.charge(1, cancel)?;
+    let r = spans[1] / spans[0];
+    if !r.is_finite() || r <= 0.0 || spans.into_iter().any(|span| !span.is_finite() || span <= 0.0) {
+        return Ok(None);
+    }
+    // The chosen floating-point r is an exact positive constant; its computed
+    // reciprocal, unlike its selection, must be enclosed outward.
+    let Ok(inverse_r) = Interval::point(1.0).div(Interval::point(r)) else {
+        return Ok(None);
+    };
+    if !inverse_r.lo.is_finite() || !inverse_r.hi.is_finite() {
+        return Ok(None);
+    }
+    let mut remainder = [Interval::point(0.0); 3];
+    for axis in 0..3 {
+        work.charge(1, cancel)?;
+        let mixed = Interval::point(hessian[1][axis].abs_upper());
+        let diagonal = [
+            Interval::point(hessian[0][axis].abs_upper()).add(mixed.mul(Interval::point(r))),
+            Interval::point(hessian[2][axis].abs_upper()).add(mixed.mul(inverse_r)),
+        ];
+        if diagonal.iter().any(|value| !value.hi.is_finite() || value.hi < 0.0) {
+            return Ok(None);
+        }
+        let diagonal = diagonal.map(|value| Interval::point(value.hi));
+        let distance = |a: [f64; 2], b: [f64; 2]| {
+            Interval::point(a[0]).sub(Interval::point(b[0])).square().mul(diagonal[0])
+                .add(Interval::point(a[1]).sub(Interval::point(b[1])).square().mul(diagonal[1]))
+        };
+        let edges = [[0, 1], [1, 2], [2, 0]];
+        let mut selected = edges[0];
+        let mut longest = -1.0_f64;
+        for edge in edges {
+            work.charge(1, cancel)?;
+            let length = distance(uv[edge[0]], uv[edge[1]]).hi;
+            if !length.is_finite() {
+                return Ok(None);
+            }
+            if length > longest {
+                longest = length;
+                selected = edge;
+            }
+        }
+        // The rounded midpoint is itself an exact finite center. The variance
+        // identity does not require that it be the exact geometric midpoint.
+        let center = std::array::from_fn(|coordinate| {
+            uv[selected[0]][coordinate] * 0.5 + uv[selected[1]][coordinate] * 0.5
+        });
+        if center.into_iter().any(|value| !value.is_finite()) {
+            return Ok(None);
+        }
+        let mut radius = 0.0_f64;
+        for vertex in uv {
+            work.charge(1, cancel)?;
+            let squared_distance = distance(*vertex, center).hi;
+            if !squared_distance.is_finite() {
+                return Ok(None);
+            }
+            radius = radius.max(squared_distance);
+        }
+        remainder[axis] = Interval::point(radius).mul(Interval::point(0.5));
+    }
+    Ok(Some(remainder))
 }
 
 /// The native source boundary joint supplies quotient topology. This proof
@@ -2907,6 +3880,172 @@ mod tests {
                 assert!(u * v <= bound);
             }
         }
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let mut memo = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
+        for _ in 0..2 {
+            let cached = memo.triangle_error_bound(&uv, &triangle, &mut work, &cancel).unwrap();
+            assert!((0.25..=0.25000001).contains(&cached));
+        }
+        // Cached native point enclosures must not cache a previous mesh
+        // triangle's residual or authorize a different interpolation.
+        let mut displaced = triangle;
+        displaced[0][2] = 1.0;
+        let displaced_bound = memo.triangle_error_bound(&uv, &displaced, &mut work, &cancel).unwrap();
+        // The unit physical vertex residual remains mandatory even when the
+        // filled-triangle proof tightens the former 1.25 Taylor estimate.
+        assert!((1.0..=1.25000001).contains(&displaced_bound));
+        let narrowed_uv = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
+        let narrowed_triangle = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]];
+        let narrowed_bound = memo.triangle_error_bound(
+            &narrowed_uv, &narrowed_triangle, &mut work, &cancel,
+        ).unwrap();
+        assert!((0.0625..=0.06250001).contains(&narrowed_bound));
+        assert!(memo.triangle_error_bound(
+            &uv, &triangle, &mut work, &AtomicBool::new(true),
+        ).is_err());
+        let mesh_uvs = uv.map(|point| monstertruck_modeling::Vector2::new(point[0], point[1]));
+        let mesh_boxes = vec![DisplayMeshBox::new([
+            0.0_f64.to_bits(), 1.0_f64.to_bits(), 0.0_f64.to_bits(), 1.0_f64.to_bits(),
+        ])];
+        let mut indexed = DisplayTriangleProof::with_mesh_inventory(
+            &surface, &mesh_uvs, vec![0], mesh_boxes, &mut work, &cancel,
+        ).unwrap();
+        let indexed_bound = indexed.indexed_triangle_error_bound(
+            &uv, &triangle, 0, &[0, 1, 2], &mut work, &cancel,
+        ).unwrap();
+        assert!((0.25..=0.25000001).contains(&indexed_bound));
+        let displaced_indexed = indexed.indexed_triangle_error_bound(
+            &uv, &displaced, 0, &[0, 1, 2], &mut work, &cancel,
+        ).unwrap();
+        // A retained conditioned Hessian is a source proof, not the former
+        // triangle's error: this actual displaced vertex has unit residual.
+        assert!((1.0..=1.25000001).contains(&displaced_indexed));
+        // A captured mesh index cannot lend its native point proof to changed
+        // parameter bits, even on the same carrier and within the same box.
+        let changed_uv = [[0.0, 0.0], [1.0, 0.25], [0.0, 1.0]];
+        let changed_triangle = [[0.0, 0.0, 0.0], [1.0, 0.25, 0.25], [0.0, 1.0, 0.0]];
+        assert_eq!(indexed.indexed_triangle_error_bound(
+            &changed_uv, &changed_triangle, 0, &[0, 1, 2], &mut work, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry);
+        assert_eq!(indexed.indexed_triangle_error_bound(
+            &narrowed_uv, &narrowed_triangle, 0, &[0, 1, 2], &mut work, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry);
+    }
+
+    #[test]
+    fn display_triangle_variance_encloses_actual_quadratic_boundary_fan() {
+        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
+        let u = [0.0, 0.5, 1.0];
+        let v = [-1.0, 0.0, 1.0];
+        let u_square = [0.0, 0.0, 1.0];
+        let v_square = [1.0, -1.0, 1.0];
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (
+                KnotVector::bezier_knot(2),
+                KnotVector::from(vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]),
+            ),
+            (0..3).map(|i| {
+                (0..3).map(|j| Point3::new(u[i], v[j], u_square[i] + v_square[j])).collect()
+            }).collect(),
+        ));
+        // This original polynomial is F(u,v)=(u,v,u²+v²). The actual affine
+        // triangle has z=2u, with error 2u-u²-v² attaining one at (1,0).
+        let uv = [[0.0, 0.0], [1.0, -1.0], [1.0, 1.0]];
+        let triangle = [[0.0, 0.0, 0.0], [1.0, -1.0, 2.0], [1.0, 1.0, 2.0]];
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let mut proof = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
+        let bound = proof.triangle_error_bound(&uv, &triangle, &mut work, &cancel).unwrap();
+        // The rectangle variance estimate is 1.25; this actual fan permits
+        // one, without discarding its boundary midpoint or any interior point.
+        // A proof subdivision must retain that actual midpoint residual:
+        // replacing its physical midpoint by F(midpoint) would underbound one.
+        assert!((1.0..=1.00000001).contains(&bound));
+        for i in 0..=20 {
+            for j in 0..=20 {
+                let u = f64::from(i) / 20.0;
+                let v = u * (f64::from(j) / 10.0 - 1.0);
+                assert!((2.0 * u - u * u - v * v).abs() <= bound);
+            }
+        }
+    }
+
+    #[test]
+    fn display_triangle_memo_preserves_nonsmooth_whole_image_proof() {
+        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (
+                KnotVector::from(vec![0.0, 0.0, 1.0, 2.0, 2.0]),
+                KnotVector::bezier_knot(1),
+            ),
+            vec![
+                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
+                vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+                vec![Point3::new(2.0, 0.0, 1.0), Point3::new(2.0, 1.0, 1.0)],
+            ],
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let domain = [[0.0, 2.0], [0.0, 1.0]];
+        assert!(!surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap());
+        let uv = [[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]];
+        let points = [[0.0, 0.0, 0.0], [2.0, 0.0, 1.0], [0.0, 1.0, 0.0]];
+        let mut memo = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
+        // Warm a smooth planar span of the same immutable face first.
+        let smooth_uv = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
+        let smooth_points = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]];
+        assert!(memo.triangle_error_bound(
+            &smooth_uv, &smooth_points, &mut work, &cancel,
+        ).unwrap() < 1.0e-9);
+        for _ in 0..2 {
+            let bound = memo.triangle_error_bound(&uv, &points, &mut work, &cancel).unwrap();
+            // At u=1 the actual kink and affine triangle differ by 1/2.
+            assert!((0.5..=3.0).contains(&bound));
+        }
+        // A roundoff-sized straddle is still NOT a smooth source span. The
+        // independently planar right-side comparison plus charged transport
+        // can nevertheless prove the original unchanged triangle accurately.
+        let sliver_uv = [
+            [1.0_f64.next_down(), 0.0],
+            [1.03125, 0.0],
+            [1.0, 0.03125],
+        ];
+        let sliver_points = sliver_uv.map(|point| [
+            point[0], point[1], (point[0] - 1.0).max(0.0),
+        ]);
+        assert!(!surface_parameter_span_smooth(
+            &surface, [[sliver_uv[0][0], sliver_uv[1][0]], [0.0, 0.03125]],
+            &mut work, &cancel,
+        ).unwrap());
+        assert!(memo.triangle_error_bound(
+            &sliver_uv, &sliver_points, &mut work, &cancel,
+        ).unwrap() <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM);
+    }
+
+    #[test]
+    fn display_hessian_partition_encloses_complete_cubic_patch() {
+        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
+        // z=u^3: its exact u-Hessian ranges over the COMPLETE [0,6].
+        let surface = Surface::BsplineSurface(BsplineSurface::new(
+            (KnotVector::bezier_knot(3), KnotVector::bezier_knot(1)),
+            [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].into_iter().enumerate().map(|(i, x)| {
+                let z = if i == 3 { 1.0 } else { 0.0 };
+                vec![Point3::new(x, 0.0, z), Point3::new(x, 1.0, z)]
+            }).collect(),
+        ));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let domain = [[0.0, 1.0]; 2];
+        let smooth = surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap();
+        assert!(smooth);
+        let parent = DisplayFullBoxProof {
+            bound: surface_piecewise_enclosure(&surface, domain, &mut work, &cancel).unwrap(),
+            smooth,
+            partitioned: false,
+        };
+        let hessian = partition_display_hessian(&surface, domain, &parent, &mut work, &cancel).unwrap();
+        assert!(hessian[0][2].lo <= 0.0 && hessian[0][2].hi >= 6.0);
     }
 
     fn collapsed_row_surface() -> Surface {
@@ -3306,6 +4445,15 @@ mod tests {
                 .is_smooth_on((0.0, 1.0), &mut work, &cancel)
                 .unwrap()
         );
+        // Piecewise first derivatives can enclose both one-sided slopes
+        // without granting the rejected whole-span C1/Taylor qualification.
+        let both = prepared.retained_first_enclosure((0.0, 1.0), &mut work, &cancel)
+            .unwrap().unwrap();
+        assert!(both[2].lo <= -2.0 && both[2].hi >= 2.0);
+        let first = prepared.retained_first_enclosure((0.0, 0.25), &mut work, &cancel)
+            .unwrap().unwrap();
+        assert!(first[0].lo <= 1.0 && first[0].hi >= 1.0);
+        assert!(first[2].lo <= 2.0 && first[2].hi >= 2.0);
         let frame = PlaneFrameMm {
             origin_mm: [0.0; 3],
             x_axis: [1.0, 0.0, 0.0],
@@ -3621,6 +4769,24 @@ mod tests {
         let child = mm.jet((0.25, 0.75), &mut work, &cancel).unwrap();
         assert!(child.derivative[1].lo <= 25.4 && child.derivative[1].hi >= 25.4);
         assert!(child.position[0].abs_upper() < 1.0e-7);
+        let piece = prepared.pieces().iter()
+            .find(|piece| piece.parameter[0] < piece.parameter[1]).unwrap();
+        let [a, b] = piece.parameter;
+        let range = (a * 0.75 + b * 0.25, a * 0.25 + b * 0.75);
+        let tangent = mm.retained_first_enclosure(range, &mut work, &cancel).unwrap().unwrap();
+        assert!(tangent[0].contains_zero() && tangent[2].contains_zero());
+        assert!(tangent[1].lo <= 25.4 && tangent[1].hi >= 25.4);
+        assert_eq!(
+            mm.retained_first_enclosure(range, &mut GeometryWorkBudget::new(0), &cancel)
+                .unwrap_err().code,
+            GeometryErrorCode::ResourceLimit,
+        );
+        assert_eq!(
+            mm.retained_first_enclosure(
+                range, &mut GeometryWorkBudget::new(1_000_000), &AtomicBool::new(true),
+            ).unwrap_err().code,
+            GeometryErrorCode::Cancelled,
+        );
         let first = PreparedCurveEnclosure::borrowed_restricted(&prepared, 25.4, (0.0, 0.5));
         let second = PreparedCurveEnclosure::borrowed_restricted(&prepared, 25.4, (0.5, 1.0));
         assert!(
@@ -3647,6 +4813,11 @@ mod tests {
                 .unwrap_err()
                 .code,
             GeometryErrorCode::InvalidGeometry
+        );
+        assert_eq!(
+            first.retained_first_enclosure((0.25, 0.75), &mut work, &cancel)
+                .unwrap_err().code,
+            GeometryErrorCode::InvalidGeometry,
         );
     }
 

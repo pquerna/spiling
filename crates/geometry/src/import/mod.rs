@@ -47,6 +47,19 @@ use std::{
 use step_p21::ast::Parameter;
 pub(crate) use trim_certificate::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
 
+/// Display-only native coefficient equality; this does not bind an original
+/// source PCURVE or make an unproved coedge available to operation preparers.
+pub(crate) fn certify_display_native_chart(
+    curve: &Curve,
+    surface: &monstertruck_modeling::Surface,
+    chart: &monstertruck_modeling::Curve2D,
+    domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    source_trim::certify_display_native_chart(curve, surface, chart, domain, work, cancel)
+}
+
 pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMPORT_CHART_WORK: u64 = 128_000_000;
 
@@ -1231,6 +1244,10 @@ pub(crate) fn import_step(
     let mut boundary_parameters = Vec::with_capacity(shell.edges.len());
     let mut chart_work = GeometryWorkBudget::new(MAX_IMPORT_CHART_WORK);
     let mut chart_diagnostic = trim_certificate::CorrespondenceDiagnostic::default();
+    // Fixed failure-only work partition; no per-query trace or success output.
+    let mut preparation_work = 0u64;
+    let mut source_coedge_work = 0u64;
+    let mut periodic_wire_work = 0u64;
     let mut continuation_owners = HashMap::new();
     for (index, edge) in shell.edges.iter().enumerate() {
         if implicit::is_original_implicit(&edge.curve, &mut chart_work, cancel)? {
@@ -1297,6 +1314,33 @@ pub(crate) fn import_step(
         })?;
     let mut boundary_continuations = Vec::with_capacity(continuation_slots);
     let mut original_continuations = Vec::with_capacity(continuation_owners.len());
+    // One import-only whole-original master receipt per precharged owner.
+    // Owners never reallocate (implicit::prepare refuses capacity growth), so
+    // exact branch bindings remain live/stable through all native children.
+    let master_slot_size = std::mem::size_of::<Option<
+        trim_certificate::SelectedMasterReceipt,
+    >>();
+    let master_slot_bytes = continuation_owners.len().checked_mul(master_slot_size)
+        .ok_or_else(|| error(
+            GeometryErrorCode::ResourceLimit, "selected master receipt capacity overflow",
+        ))?;
+    if master_slot_bytes > query_proof_byte_limit - continuation_bytes {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit, "selected master receipt capacity exhausted",
+        ));
+    }
+    chart_work.charge(continuation_owners.len() as u64, cancel)?;
+    let mut selected_master_receipts: Vec<Option<trim_certificate::SelectedMasterReceipt>> =
+        vec![None; continuation_owners.len()];
+    let master_slot_bytes = selected_master_receipts.capacity().checked_mul(master_slot_size)
+        .ok_or_else(|| error(
+            GeometryErrorCode::ResourceLimit, "selected master receipt capacity overflow",
+        ))?;
+    continuation_bytes = continuation_bytes.checked_add(master_slot_bytes)
+        .filter(|bytes| *bytes <= query_proof_byte_limit)
+        .ok_or_else(|| error(
+            GeometryErrorCode::ResourceLimit, "selected master receipt capacity exhausted",
+        ))?;
     let mut modeled_edges = Vec::with_capacity(shell.edges.len());
     for (edge_index, edge) in shell.edges.iter().enumerate() {
         // Candidate decomposition has a hard 32-wrapper structural bound.
@@ -1308,7 +1352,8 @@ pub(crate) fn import_step(
         let key = (source_id, if source_id.is_some() { 0 } else { edge_index });
         if let Some(&(owner, _)) = continuation_owners.get(&key) {
             let shared = (owner < original_continuations.len()).then_some(owner);
-            let (curve, mut branch, witness) = implicit::prepare(
+            let preparation_started = chart_work.consumed();
+            let prepared = implicit::prepare(
                 implicit::ContinuationInput {
                     source: &edge.curve,
                     whole: original_range,
@@ -1320,7 +1365,9 @@ pub(crate) fn import_step(
                 query_proof_byte_limit,
                 &mut chart_work,
                 cancel,
-            )
+            );
+            preparation_work += chart_work.consumed() - preparation_started;
+            let (curve, mut branch, witness) = prepared
             .map_err(|cause| {
                 admission_error(
                     cause,
@@ -1336,6 +1383,7 @@ pub(crate) fn import_step(
                 original,
                 Some(original_range),
                 Some((original_native, &original_continuations[branch.prepared])),
+                &mut selected_master_receipts[branch.prepared],
                 scale,
                 &mut chart_work,
                 cancel,
@@ -1358,12 +1406,7 @@ pub(crate) fn import_step(
             continue;
         }
         master::validate_selected_master(
-            &edge.curve,
-            Some(original_range),
-            None,
-            scale,
-            &mut chart_work,
-            cancel,
+            &edge.curve, Some(original_range), None, &mut None, scale, &mut chart_work, cancel,
         )
         .map_err(|cause| {
             admission_error(
@@ -1384,6 +1427,7 @@ pub(crate) fn import_step(
             curve,
         });
     }
+    let edge_phase_work = chart_work.consumed();
     drop((continuation_owners, original_edge_ids, original_edge_ranges));
     for point in &shell.vertices {
         let p = array(Point3::from_vec(point.to_vec() * scale));
@@ -1471,6 +1515,7 @@ pub(crate) fn import_step(
         .enumerate()
     {
         check_cancel(cancel)?;
+        let face_started_work = chart_work.consumed();
         let (surface, conversion) =
             source
                 .surface
@@ -1494,6 +1539,14 @@ pub(crate) fn import_step(
         info.geometry.domain.inner_loop_count = source.boundaries.len().saturating_sub(1) as u32;
         info.validate()?;
         let native_uv_domain = source_trim::intrinsic_domain(&source.surface, &surface, conversion);
+        // Count actual face occurrences, including different original bounds.
+        // Coincident carrier coefficients never establish a seam association.
+        let mut face_edge_uses = HashMap::<usize, u8>::new();
+        for coedge in source.boundaries.iter().flatten() {
+            chart_work.charge(1, cancel)?;
+            let count = face_edge_uses.entry(coedge.index).or_default();
+            *count = count.saturating_add(1);
+        }
         let mut trim_wires = Vec::with_capacity(source.boundaries.len());
         let mut metadata_wires = Vec::with_capacity(source.boundaries.len());
         if declared.len() != source.boundaries.len() {
@@ -1510,11 +1563,25 @@ pub(crate) fn import_step(
                 ));
             }
             let mut witnesses = Vec::with_capacity(wire.len());
+            let mut unavailable_seam_binding = false;
             for (coedge_index, (coedge, declared_trim)) in
                 wire.iter().zip(&declared_wire).enumerate()
             {
                 check_cancel(cancel)?;
-                let witness = source_trim::retain_with_continuation(
+                let missing_required_branch = declared_trim.is_none()
+                    && source_trim::requires_bound_seam(
+                        &shell.edges[coedge.index].curve,
+                        face_edge_uses[&coedge.index] > 1,
+                        &mut chart_work, cancel,
+                    )?;
+                unavailable_seam_binding |= missing_required_branch;
+                let coedge_started = chart_work.consumed();
+                let retained = if missing_required_branch {
+                    // Preserve 3D inspection, never synthesize the absent
+                    // original seam branch through native or neighbor UV.
+                    Ok(source_trim::SourceTrim::retained(None))
+                } else {
+                    source_trim::retain_with_continuation(
                     source_trim::TrimInput {
                         source_curve: &shell.edges[coedge.index].curve,
                         native_curve: &modeled_edges[coedge.index].curve,
@@ -1530,29 +1597,34 @@ pub(crate) fn import_step(
                         .get(coedge.index)
                         .and_then(Option::as_ref)
                         .map(|branch| &original_continuations[branch.prepared]),
+                    boundary_continuations
+                        .get(coedge.index)
+                        .and_then(Option::as_ref)
+                        .and_then(|branch| selected_master_receipts[branch.prepared].as_ref()),
                     &mut chart_work,
                     cancel,
-                )
-                .map_err(|cause| {
-                    admission_error(
-                        cause,
-                        "source-chart",
-                        &chart_work,
-                        format_args!(
-                            "face {} (source #{}), wire {wire_index}, coedge {coedge_index}, source edge {:?}, native edge {}",
-                            info.face_id.as_str(),
-                            info.surface_face_entity,
-                            source_topology.faces[face_index].wires[wire_index].coedges
-                                [coedge_index].source_edge,
-                            coedge.index,
-                        ),
                     )
+                };
+                source_coedge_work += chart_work.consumed() - coedge_started;
+                let witness = retained
+                .map_err(|cause| {
+                    error(cause.code, &format!(
+                        "source-chart f={} s#{} w={wire_index} c={coedge_index} e={}/orig{:?};work={}/{} fs={face_started_work} fw={} prep={preparation_work} edge={edge_phase_work} init={source_coedge_work} per={periodic_wire_work} oth={}: {}",
+                        info.face_id.as_str(), info.surface_face_entity, coedge.index,
+                        source_topology.faces[face_index].wires[wire_index].coedges
+                            [coedge_index].source_edge,
+                        chart_work.consumed(), chart_work.remaining(),
+                        chart_work.consumed() - face_started_work,
+                        chart_work.consumed() - edge_phase_work - source_coedge_work - periodic_wire_work,
+                        cause.message,
+                    ))
                 })?;
                 if boundary_continuations
                     .get(coedge.index)
                     .and_then(Option::as_ref)
                     .is_some()
                     && !witness.certificate.is_certified()
+                    && !missing_required_branch
                 {
                     return Err(error(
                         GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -1561,7 +1633,9 @@ pub(crate) fn import_step(
                 }
                 witnesses.push(witness);
             }
-            source_trim::bind_periodic_wire(
+            if !unavailable_seam_binding {
+            let periodic_started = chart_work.consumed();
+            let periodic_result = source_trim::bind_periodic_wire(
                 &mut witnesses,
                 |index| {
                     let coedge = wire[index];
@@ -1580,6 +1654,10 @@ pub(crate) fn import_step(
                             .get(coedge.index)
                             .and_then(Option::as_ref)
                             .map(|branch| &original_continuations[branch.prepared]),
+                        master: boundary_continuations
+                            .get(coedge.index)
+                            .and_then(Option::as_ref)
+                            .and_then(|branch| selected_master_receipts[branch.prepared].as_ref()),
                         orientation: coedge.orientation,
                         vertices: shell.edges[coedge.index].vertices,
                         front_vertex: shell.vertices[if coedge.orientation {
@@ -1598,15 +1676,79 @@ pub(crate) fn import_step(
                 &mut chart_work,
                 cancel,
                 &mut chart_diagnostic,
-            )
+            );
+            periodic_wire_work += chart_work.consumed() - periodic_started;
+            periodic_result
             .map_err(|cause| {
+                // Failure-only signatures: the saved whole master is not a
+                // child receipt. Keep its paid slot alive while collecting
+                // actual affine anchors/ranges and wrapper frames below.
+                let active = chart_diagnostic.active_source;
+                let branch = active.and_then(|use_| boundary_continuations
+                    .get(use_.native_edge).and_then(Option::as_ref));
+                let master = branch.and_then(|branch|
+                    selected_master_receipts[branch.prepared].as_ref().map(|receipt| receipt.whole()));
+                let child = active.and_then(|use_| witnesses.get(use_.coedge))
+                    .and_then(|witness| witness.correspondence.as_ref());
+                let signature = |proof: &OriginalCoedgeCorrespondence| {
+                    let slope = proof.uv_parameter_derivative();
+                    (proof.native_range(), proof.uv_range(), [slope.lo, slope.hi],
+                        proof.margin_uv(), proof.position_error_mm())
+                };
+                let contained = master.zip(child).map(|(whole, child)| {
+                    let whole = whole.native_range();
+                    let child = child.native_range();
+                    whole[0] <= child[0] && child[1] <= whole[1]
+                });
+                let root = branch.map(|branch| {
+                    let owner = &original_continuations[branch.prepared];
+                    let mut leaf = owner;
+                    let mut depth = 0;
+                    while depth < 32 {
+                        let Some(basis) = leaf.mapped_basis() else { break };
+                        leaf = basis;
+                        depth += 1;
+                    }
+                    (owner.range(), leaf.range(), depth)
+                });
+                let native_outer = active.and_then(|use_| {
+                    match &modeled_edges[use_.native_edge].curve {
+                        Curve::TrimmedCurve(wrapper) => Some((
+                            wrapper.entity().range_tuple(), wrapper.orientation(),
+                            *wrapper.transform() == Matrix4::identity(),
+                        )),
+                        _ => None,
+                    }
+                });
+                let uv_outer = active.and_then(|use_| witnesses.get(use_.coedge))
+                    .and_then(|witness| witness.curve.as_ref())
+                    .and_then(|chart| match chart {
+                        monstertruck_modeling::Curve2D::TrimmedCurve(wrapper) => Some((
+                            wrapper.entity().range_tuple(), wrapper.orientation(),
+                            *wrapper.transform() == Matrix3::identity(),
+                        )),
+                        _ => None,
+                    });
+                let current_joint = chart_diagnostic.retained_joint.as_ref().map(|joint| (
+                    joint.phase, chart_work.consumed().checked_sub(joint.phase_started_work),
+                    joint.initial_achieved_native, joint.metric.derived_limit,
+                    joint.refined_achieved_native, joint.final_margin_uv,
+                ));
                 let (current, wrappers) = cause.message.split_once(" | wrappers:")
                     .unwrap_or((&cause.message, ""));
                 error(cause.code, &format!(
-                    "admit periodic-wire face={} source=#{} wire={wire_index}: {current}; {chart_diagnostic} | wrappers:{wrappers}",
+                    "span={:?};current-joint(phase,work,base,goal,refined,proposed_uv)={current_joint:?} eval={:?} use={:?}; face={} source=#{} wire={wire_index} face-start-work={face_started_work} current-face-work={} work-partition preparation={preparation_work} edge-phase={edge_phase_work} initial-coedges={source_coedge_work} periodic={periodic_wire_work} current-periodic={} other={}; old-master={:?} old-witness-child={:?} contained={contained:?} root={root:?} native_outer={native_outer:?} old-witness-uv_outer={uv_outer:?}: {current}; {chart_diagnostic} | wrappers:{wrappers}",
+                    chart_diagnostic.failed_span,
+                    chart_diagnostic.evaluation,
+                    active.map(|use_| (use_.coedge, use_.native_edge, use_.source_edge, use_.shift)),
                     info.face_id.as_str(), info.surface_face_entity,
+                    chart_work.consumed() - face_started_work,
+                    chart_work.consumed() - periodic_started,
+                    chart_work.consumed() - edge_phase_work - source_coedge_work - periodic_wire_work,
+                    master.map(signature), child.map(signature),
                 ))
             })?;
+            }
             let mut metadata = Vec::with_capacity(wire.len());
             let trims = witnesses
                 .into_iter()
@@ -1638,6 +1780,8 @@ pub(crate) fn import_step(
             surface,
         });
     }
+    drop(selected_master_receipts);
+    continuation_bytes -= master_slot_bytes;
     // Move compressed topology once; exact conversion does not clone an entire
     // source BREP or infer correspondence from equal source/native UV samples.
     let source_edge_count = modeled_edges.len();
@@ -1848,10 +1992,10 @@ pub(crate) fn import_step(
                     &mut native_vertices,
                 )?;
                 let metadata = source_trim_metadata[face_index][wire_index][coedge_index];
-                // The final native coefficients have been normalized, and an
-                // implicit/periodic inverse may have widened the UV tube after
-                // its first forward proof. Reprove the FULL final tube against
-                // these actual operands; scaling an old residual is not proof.
+                // Normalization can change coefficients AND chart ranges.
+                // Recompute retained base/tube position on these actual final
+                // operands and independently prove expanded-tube tangents;
+                // no scaled pre-normalization residual supplies authority.
                 let correspondence = if let Some(previous) = metadata.5 {
                     let chart = trims[wire_index][coedge_index].as_ref().ok_or_else(|| {
                         kernel("completed original correspondence lost its UV coefficients")
@@ -1877,9 +2021,10 @@ pub(crate) fn import_step(
                             margin_uv: metadata.0,
                         };
                         let proof = if let Some(branch) = continuation {
-                            trim_certificate::certify_retained_coedge_correspondence(
+                            trim_certificate::certify_normalized_retained_correspondence(
                                 input, (&original_continuations[branch.prepared], scale),
-                                &mut chart_work, cancel,
+                                Some(&previous),
+                                &mut chart_work, cancel, None,
                             )?
                         } else {
                             trim_certificate::certify_declared_coedge_correspondence(
@@ -1887,7 +2032,19 @@ pub(crate) fn import_step(
                             )?
                         };
                         Ok(proof)
-                    }))?;
+                    })).map_err(|cause| admission_error(
+                        cause,
+                        "normalized-correspondence",
+                        &chart_work,
+                        format_args!(
+                            "face {} (source #{}), wire {wire_index}, coedge {coedge_index}, source edge {:?}, native edge {}",
+                            faces[face_index].face_id.as_str(),
+                            faces[face_index].surface_face_entity,
+                            source_topology.faces[face_index].wires[wire_index].coedges
+                                [coedge_index].source_edge,
+                            slot.index,
+                        ),
+                    ))?;
                     if previous.provenance() == OriginalCorrespondenceProvenance::CompletedPoleGraph
                         && let Some(receipt) = proof.as_mut()
                     {

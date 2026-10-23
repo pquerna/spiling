@@ -12,12 +12,12 @@ import tempfile
 
 import OCP
 from OCP.APIHeaderSection import APIHeaderSection_MakeHeader
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCP.BRepCheck import BRepCheck_Analyzer
-from OCP.BRepBuilderAPI import BRepBuilderAPI_NurbsConvert
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon, BRepBuilderAPI_NurbsConvert
 from OCP.BRepFilletAPI import BRepFilletAPI_MakeFillet
-from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCone, BRepPrimAPI_MakeCylinder
-from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCone, BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakePrism
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Vec
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.Interface import Interface_Static
 from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
@@ -28,6 +28,50 @@ from OCP.TopoDS import TopoDS
 from OCP.TopTools import TopTools_IndexedMapOfShape
 
 NOTICE = "SPDX-FileCopyrightText: 2026 Spiling contributors\nSPDX-License-Identifier: OSL-3.0\nLicensed under the Open Software License version 3.0\n\nOriginal Spiling analytic inputs exported by independent OCCT tooling; no third-party CAD source.\n"
+
+
+def polygon_prism(points, lower_z, height):
+    wire = BRepBuilderAPI_MakePolygon()
+    for x, y in points:
+        wire.Add(gp_Pnt(x, y, lower_z))
+    wire.Close()
+    if not wire.IsDone():
+        raise RuntimeError("original ribbed bracket polygon construction failed")
+    return BRepPrimAPI_MakePrism(
+        BRepBuilderAPI_MakeFace(wire.Wire()).Face(), gp_Vec(0.0, 0.0, height)
+    ).Shape()
+
+
+def ribbed_bracket():
+    """Original 30 x 22 mm bracket: useful FDM ribs, not a numerical torture case."""
+    outline = [(0, 0), (30, 0), (30, 22), (20, 22),
+               (20, 20), (15, 20), (15, 22), (0, 22)]
+    body = polygon_prism(outline, 0.0, 7.6)
+    pocket = BRepPrimAPI_MakeBox(gp_Pnt(1.8, 1.8, 1.2), 26.4, 18.4, 7.0).Shape()
+    body = BRepAlgoAPI_Cut(body, pocket).Shape()
+    # A long finite taper changes feasible bead count. Its cross-arm creates a
+    # true connected T junction; the right end bonds into the functional boss.
+    additions = [
+        polygon_prism([(1.5, 10.725), (23.0, 10.4),
+                       (23.0, 11.6), (1.5, 11.275)], 1.2, 5.2),
+        BRepPrimAPI_MakeBox(gp_Pnt(12.7, 10.7, 1.2), 0.6, 9.8, 5.2).Shape(),
+        BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(24.0, 11.0, 1.2), gp_Dir(0, 0, 1)), 2.5, 5.2
+        ).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 6.4), 8.0, 22.0, 1.2).Shape(),
+    ]
+    for addition in additions:
+        fused = BRepAlgoAPI_Fuse(body, addition)
+        if not fused.IsDone():
+            raise RuntimeError("original ribbed bracket union failed")
+        body = fused.Shape()
+    bore = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(24.0, 11.0, -1.0), gp_Dir(0, 0, 1)), 1.3, 10.0
+    ).Shape()
+    result = BRepAlgoAPI_Cut(body, bore)
+    if not result.IsDone():
+        raise RuntimeError("original ribbed bracket bore failed")
+    return result.Shape()
 
 
 def mechanical_shapes():
@@ -64,10 +108,22 @@ def mechanical_shapes():
         ("occt-rounded-housing-mm.step", housing.Shape()),
         ("occt-spline-housing-mm.step", spline_housing.Shape()),
         ("occt-narrow-pocket-mm.step", narrow_pocket.Shape()),
+        ("occt-ribbed-bracket-mm.step", ribbed_bracket()),
     ]
 
 
 def mechanical_oracle(name):
+    if name == "occt-ribbed-bracket-mm.step":
+        return {
+            "nominal_bounds_mm": [[0.0, 0.0, 0.0], [30.0, 22.0, 7.6]],
+            "base_top_z_mm": 1.2,
+            "rib_top_and_roof_lower_z_mm": 6.4,
+            "rib_width_range_mm": [0.55, 1.2],
+            "junction": {"kind": "T", "center_xy_mm": [13.0, 11.0],
+                         "cross_arm_width_mm": 0.6},
+            "functional_bore": {"center_xy_mm": [24.0, 11.0], "radius_mm": 1.3},
+            "roof_extent_xy_mm": [[0.0, 0.0], [8.0, 22.0]],
+        }
     if name == "occt-tapered-fitting-mm.step":
         return {
             "nominal_bounds_mm": [[-6.0, -6.0, 0.0], [6.0, 6.0, 12.0]],

@@ -141,7 +141,15 @@ C1, posed metric, incidence or signed-census authority.
 
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
 `coverage` / `boundary` modules and the display protocol own whole-triangle
-coverage and packed-mesh checks. Display is not a slicing representation.
+coverage and packed-mesh checks. `display_trim` can supply an ephemeral native
+covering rectangle for source-unbound tensor seams only after complete original
+oriented boundary/natural-row/knot equivalence, ordered closure and the same
+filled triangle-chain, boundary-bijection, error and normal proofs. Retained UV
+expressions are borrowed unchanged. Its single-wire lane refuses additional
+wires/holes rather than omitting them. It neither fabricates original PCURVE
+bindings nor changes `Unproved`/absent source metadata: operation-domain
+preparation still returns `ParameterCorrespondenceUnavailable`. Display is not a
+slicing representation.
 [`apps/engine/src/geometry/worker.rs`](../../apps/engine/src/geometry/worker.rs)
 keeps native admission independent of display failure: `DefinitionDisplay::Unavailable`
 means no mesh artifact or GPU face picking, not an empty successful mesh.
@@ -206,6 +214,33 @@ must never be converted into display unavailability.
   source-material anchor or precise Hole origin.
   Native material reuse does not establish realized finish or deposited support;
   those remain independent [manufacturing obligations](../protocol/manufacturing.md).
+
+## Original source correspondence
+
+[`import/master.rs`](../../crates/geometry/src/import/master.rs) retains at most
+one import-local selected-master receipt per original continuation owner.
+Each current face still resolves its actual source association. Position reuse
+requires the same function, original range, affine map and frame: independently
+certify selected/current image discrepancy, then fit the achieved root error
+and discrepancy inside the actual remaining allowance. This grants no UV or
+relative-tangent authority; those proofs remain on the complete actual tube.
+
+A new selected-plane owner may derive one conditional quality target from the
+original carrier metrics before requesting its independent whole proof.
+The hypothetical residual and half-budget search headroom are not certificates
+or bounds on a later periodic image. Only an achieved whole proof discharges
+that premise; ordinary nonproof uses the original admission path. This avoids
+duplicating coarse and strong whole-root proofs without relaxing work limits.
+The original implicit import/display/bounds/section gate and piecewise-C0
+counterexample are reproducible independently:
+
+```sh
+cargo test --locked -p spiling-geometry --lib \
+  import::tests::original_implicit_carrier_edges_import_display_bound_and_section_without_branch_reselection \
+  -- --exact --test-threads=1
+cargo test --locked -p spiling-geometry --lib \
+  c0_carrier_bumps_cannot_use_a_hull_of_piecewise_zero_hessians -- --test-threads=1
+```
 
 ## Refusals and support boundary
 
