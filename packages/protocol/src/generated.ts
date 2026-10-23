@@ -244,7 +244,7 @@ export type ProcessRegionCoverage = { area_mm2: number, fraction: number, contri
 
 export type ProcessSkinKind = "bottom_skin" | "top_skin";
 
-export type DepositionOwner = { "kind": "mandatory_skin", skin: ProcessSkinKind, } | { "kind": "regional", region_index: number, } | { "kind": "regional_skin_bridge", region_index: number, skin: ProcessSkinKind, skin_first: boolean, };
+export type DepositionOwner = { "kind": "mandatory_skin", skin: ProcessSkinKind, } | { "kind": "regional", region_index: number, } | { "kind": "wall" } | { "kind": "regional_skin_bridge", region_index: number, skin: ProcessSkinKind, skin_first: boolean, };
 
 export type ProcessEndpointBond = { "kind": "wall", wall_segment_mm: [[number, number], [number, number]], } | { "kind": "skin", skin_kind: ProcessSkinKind, process_kind: DepositionKind, skin_segment_mm: [[number, number], [number, number]], wall_segment_mm: [[number, number], [number, number]], };
 
@@ -255,6 +255,10 @@ export type DiaphragmPolygonMm = { outer: Array<[number, number]>, holes: Array<
 export type ProcessDiaphragmCoverage = { occurrence_id: OccurrenceId, definition_id: DefinitionId, provenance: ProcessProvenance, source_plane_mm: number, requested_thickness_mm: number, physical_z_mm: [number, number], neighbors: [ResolvedProcessValue, ResolvedProcessValue], region_index: number, area_mm2: number, extent: Array<DiaphragmPolygonMm>, };
 
 export type SkinBridgeDomain = { region_index: number, skin: ProcessSkinKind, regional: Array<DiaphragmPolygonMm>, mandatory: Array<DiaphragmPolygonMm>, source_owner: Array<DiaphragmPolygonMm>, };
+
+export type SkinCommandFit = { required_mm: [[number, number, number], [number, number, number]], fitted_mm: [[number, number, number], [number, number, number]], };
+
+export type SkinCommandFitDomain = { region_index: number, region: ProcessRegionCoverage, skin: ProcessSkinKind, regional: Array<DiaphragmPolygonMm>, mandatory: Array<DiaphragmPolygonMm>, source_owner: Array<DiaphragmPolygonMm>, fits: Array<SkinCommandFit>, };
 
 export type ProcessRegionStatus = "applied" | "no_eligible_interior" | "no_density_change";
 
@@ -342,11 +346,13 @@ export type ManufacturingIntent = { printer: PrinterSpecification, recipe: Plana
 
 export type DepositionKind = "perimeter" | "solid_fill" | "bottom_skin" | "top_skin" | "sparse_fill" | "bridge" | "support" | "support_interface" | "separator_wall";
 
+export type WidthProfile = { "kind": "constant", width_mm: number, } | { "kind": "per_edge", widths_mm: Array<number>, };
+
 export type DepositionPath = { kind: DepositionKind, 
 /**
  * Immutable original construction purpose, never inferred from Bridge shape.
  */
-owner: DepositionOwner | null, bead_width_mm: number, 
+owner: DepositionOwner | null, width: WidthProfile, 
 /**
  * Explicit occupied interval; upper endpoint belongs to the owning layer.
  */
@@ -360,7 +366,12 @@ export type SparseBandVeto = "process_height" | "mandatory_neighborhood" | "chan
 
 export type PlanarRegionCoverage = { section_area_mm2: number, source_section_area_mm2: number, surface_added_area_mm2: number, wall_area_mm2: number, bottom_skin_area_mm2: number, top_skin_area_mm2: number, solid_interior_area_mm2: number, sparse_interior_area_mm2: number, intentional_void_area_mm2: number, protected_hole_area_mm2: number, nominal_deposition_volume_mm3: number, support_area_mm2: number, support_nominal_deposition_volume_mm3: number, process_regions: Array<ProcessRegionCoverage>, process_interfaces: Array<ProcessInterfaceCoverage>, separator_area_mm2: number, process_diaphragms: Array<ProcessDiaphragmCoverage>, diaphragm_area_mm2: number, skin_bridge_domains: Array<SkinBridgeDomain>, };
 
-export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, };
+export type PrintLayer = { index: number, z_mm: number, lower_z_mm: number, height_mm: number, section_z_mm: number, paths: Array<DepositionPath>, region_coverage: PlanarRegionCoverage, 
+/**
+ * Source-owned minimum-length realization, distinct from skin classification
+ * and independently qualified Bridge/permanent-interface construction.
+ */
+skin_command_fits: Array<SkinCommandFitDomain>, };
 
 export type SkinCoverageScope = "scheduled_material_distance";
 

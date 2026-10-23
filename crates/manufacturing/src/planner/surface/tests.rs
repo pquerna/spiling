@@ -287,17 +287,57 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     let native = material();
     let cancel = AtomicBool::new(false);
     let realized = realize(native.clone(), &fields, 2.0, 0, &mut 0, &cancel).unwrap();
-    let first = region::offset(&realized, -0.2, &cancel).unwrap();
+    let associate = |centers: MultiPolygon<f64>| {
+        use super::super::walls::{BoundaryCorrespondence, WallPlan};
+        use spiling_contracts::manufacturing::{
+            DepositionKind, DepositionOwner, DepositionPath, WidthProfile,
+        };
+        let mut paths = Vec::new();
+        let mut correspondence = Vec::new();
+        let mut boundary = 0u32;
+        for polygon in &centers.0 {
+            for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                let path_index = paths.len();
+                for edge_index in 0..ring.0.len() - 1 {
+                    correspondence.push(BoundaryCorrespondence {
+                        path_index,
+                        edge_index,
+                        supports: [boundary, boundary],
+                        facing_boundary: Some(boundary),
+                        ordinal: 0,
+                    });
+                }
+                paths.push(DepositionPath {
+                    kind: DepositionKind::Perimeter,
+                    owner: Some(DepositionOwner::Wall),
+                    width: WidthProfile::Constant { width_mm: 0.4 },
+                    physical_z_mm: [1.8, 2.0],
+                    points_mm: ring.0.iter().map(|p| [p.x, p.y, 2.0]).collect(),
+                });
+                boundary += 1;
+            }
+        }
+        WallPlan {
+            paths,
+            correspondence,
+            fill: MultiPolygon(Vec::new()),
+            retained_points: 0,
+            retained_bytes: 0,
+            section_area_mm2: 0.0,
+            wall_area_mm2: 0.0,
+            protected_hole_area_mm2: 0.0,
+        }
+    };
+    let first = associate(region::offset(&realized, -0.2, &cancel).unwrap());
     let good = collect_resolution(
         ResolutionGeometry {
-            firstwall: &first,
+            wall: &first,
             material: &realized,
             native: &native,
         },
         &fields,
         2.0,
         0,
-        0.4,
         &mut 0,
         &cancel,
     )
@@ -321,17 +361,16 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
             .fold(0.0f64, f64::max)
     };
     assert!((peak(&realized) - peak(&shifted_material)).abs() < SURFACE_TOLERANCE_MM);
-    let wrong_wall = region::offset(&shifted_material, -0.2, &cancel).unwrap();
+    let wrong_wall = associate(region::offset(&shifted_material, -0.2, &cancel).unwrap());
     let bad = collect_resolution(
         ResolutionGeometry {
-            firstwall: &wrong_wall,
+            wall: &wrong_wall,
             material: &realized,
             native: &native,
         },
         &fields,
         2.0,
         0,
-        0.4,
         &mut 0,
         &cancel,
     )
@@ -344,14 +383,13 @@ fn actual_first_wall_diagnostics_detect_displaced_lobes_with_identical_extrema()
     let mut exhausted_work = super::super::MAX_BOOLEAN_PAIRS;
     let incomplete = collect_resolution(
         ResolutionGeometry {
-            firstwall: &first,
+            wall: &first,
             material: &realized,
             native: &native,
         },
         &fields,
         2.0,
         0,
-        0.4,
         &mut exhausted_work,
         &cancel,
     )

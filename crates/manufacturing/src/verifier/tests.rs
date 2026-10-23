@@ -63,19 +63,20 @@ fn refresh_volumes(intent: &ManufacturingIntent, plan: &mut NormalizedPrintPlan)
         let mut support = 0.0;
         for path in &layer.paths {
             let height = path.height_mm();
-            let area = ((path.bead_width_mm - height) * height
-                + std::f64::consts::PI * (height / 2.0).powi(2))
-                * r.flow_multiplier
+            let flow = r.flow_multiplier
                 * if layer.index == 0 {
                     r.process.first_layer_flow_factor
                 } else {
                     1.0
                 };
             let volume: f64 = path
-                .points_mm
-                .windows(2)
-                .map(|e| {
-                    distance(e[0], e[1])
+                .checked_edges()
+                .unwrap()
+                .map(|edge| {
+                    let area = ((edge.width_mm - height) * height
+                        + std::f64::consts::PI * (height / 2.0).powi(2))
+                        * flow;
+                    distance(edge.points_mm[0], edge.points_mm[1])
                         * area
                         * if path.kind == DepositionKind::Bridge {
                             r.process.bridge_flow_factor
@@ -120,7 +121,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             nozzle_diameter_mm: 1.0,
             deposition_limits: DepositionLimits {
                 min_bead_width_mm: 0.000001,
-                max_bead_width_mm: 1.0,
+                max_bead_width_mm: 1.01,
                 min_bead_height_mm: 0.000001,
                 max_bead_height_mm: 1.0,
             },
@@ -190,6 +191,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         layer_quantization_mm: 0.000_001,
         layers: vec![
             PrintLayer {
+                skin_command_fits: Vec::new(),
                 index: 0,
                 z_mm: 1.0,
                 lower_z_mm: 0.0,
@@ -199,8 +201,8 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 paths: vec![
                     DepositionPath {
                         kind: DepositionKind::Perimeter,
-                        owner: None,
-                        bead_width_mm: 1.0,
+                        owner: Some(DepositionOwner::Wall),
+                        width: WidthProfile::Constant { width_mm: 1.0 },
                         physical_z_mm: [0.0, 1.0],
                         points_mm: vec![
                             [1.0, 1.0, 1.0],
@@ -213,13 +215,14 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                     DepositionPath {
                         kind: DepositionKind::SolidFill,
                         owner: None,
-                        bead_width_mm: 1.0,
+                        width: WidthProfile::Constant { width_mm: 1.0 },
                         physical_z_mm: [0.0, 1.0],
                         points_mm: vec![[2.0, 2.0, 1.0], [6.0, 2.0, 1.0]],
                     },
                 ],
             },
             PrintLayer {
+                skin_command_fits: Vec::new(),
                 index: 1,
                 z_mm: 2.0,
                 lower_z_mm: 1.0,
@@ -229,7 +232,7 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
                 paths: vec![DepositionPath {
                     kind: DepositionKind::SolidFill,
                     owner: None,
-                    bead_width_mm: 1.0,
+                    width: WidthProfile::Constant { width_mm: 1.0 },
                     physical_z_mm: [1.0, 2.0],
                     points_mm: vec![[2.0, 2.0, 2.0], [2.0, 6.0, 2.0]],
                 }],
@@ -243,6 +246,52 @@ fn fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
 fn replay(program: &str) -> Result<VerificationReport, ManufacturingError> {
     let (intent, plan) = fixture();
     verify(program, &plan, &intent, &AtomicBool::new(false))
+}
+
+#[test]
+fn open_immutable_wall_survives_normalization_emission_and_fresh_replay() {
+    let cancel = AtomicBool::new(false);
+    for varying in [false, true] {
+        let (intent, mut plan) = fixture();
+        let wall = &mut plan.layers[0].paths[0];
+        wall.points_mm.pop();
+        if varying {
+            wall.width = WidthProfile::PerEdge {
+                widths_mm: vec![1.0, 1.005, 1.01],
+            };
+        }
+        refresh_volumes(&intent, &mut plan);
+        plan.validate(&intent).unwrap();
+        let mut unowned = plan.clone();
+        unowned.layers[0].paths[0].owner = None;
+        assert!(
+            unowned.validate(&intent).is_err(),
+            "Open strokes cannot acquire wall authority from a Perimeter label"
+        );
+        crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+        let wall = plan.layers[0]
+            .paths
+            .iter()
+            .find(|path| path.owner == Some(DepositionOwner::Wall))
+            .unwrap();
+        assert_eq!(wall.kind, DepositionKind::Perimeter);
+        assert_ne!(
+            wall.points_mm.first(),
+            wall.points_mm.last(),
+            "Realization must not invent a closing edge or relabel an open wall Bridge"
+        );
+        let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+        let mut sink = ReplaySink::new(&plan, &intent).unwrap();
+        let report = verify_actual(&program, &plan, &intent, &cancel, Some(&mut sink)).unwrap();
+        assert!(report.verified);
+        assert_eq!(report.deposition_segments, 5);
+        let (bytes, bounds) = sink.finish().unwrap();
+        validate_replay_display(
+            &bytes,
+            &packed_process_descriptor(&bytes, bounds, &program, &intent, &plan, &report),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -270,6 +319,7 @@ fn replay_rejects_omitted_intermediate_and_final_fixed_height_layers() {
         omitted.layers.insert(
             empty_index,
             PrintLayer {
+                skin_command_fits: Vec::new(),
                 index: empty_index as u32,
                 z_mm: (empty_index + 1) as f64,
                 lower_z_mm: empty_index as f64,
@@ -322,7 +372,7 @@ fn actual_backend_program_is_independently_replayed() {
         layer.height_mm = 0.2;
         layer.section_z_mm = (f64::from(layer.index) + 0.5) * 0.2;
         for path in &mut layer.paths {
-            path.bead_width_mm = 0.45;
+            path.width = WidthProfile::Constant { width_mm: 0.45 };
             path.physical_z_mm = [layer.lower_z_mm, layer.z_mm];
             for point in &mut path.points_mm {
                 point[0] += 0.123_456_789;
@@ -447,8 +497,8 @@ fn diagonal_numeric_golden_measures_euclidean_length() {
     plan.layers.truncate(1);
     plan.layers[0].paths = vec![DepositionPath {
         kind: DepositionKind::Perimeter,
-        owner: None,
-        bead_width_mm: 1.0,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![
             [1.0, 1.0, 1.0],
@@ -635,7 +685,7 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
     plan.layers[0].paths = vec![DepositionPath {
         kind: DepositionKind::SolidFill,
         owner: None,
-        bead_width_mm: 1.0,
+        width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![[2.0, 2.0, 1.0], [2.000_000_1, 2.0, 1.0]],
     }];
@@ -646,6 +696,168 @@ fn zero_length_after_serialization_is_not_positive_deposition() {
         verify(program, &plan, &intent, &AtomicBool::new(false))
             .unwrap_err()
             .code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+}
+
+fn wall_command_fixture(path: DepositionPath) -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.layer_height_mm = path.height_mm();
+    intent.recipe.bead_width_mm = 0.45;
+    plan.layers.truncate(1);
+    let layer = &mut plan.layers[0];
+    layer.lower_z_mm = path.physical_z_mm[0];
+    layer.z_mm = path.physical_z_mm[1];
+    layer.height_mm = path.height_mm();
+    layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
+    layer.paths = vec![path];
+    refresh_volumes(&intent, &mut plan);
+    (intent, plan)
+}
+
+#[test]
+fn variable_width_wall_bridge_keeps_rotated_edge_associations_and_bridge_process() {
+    let (mut intent, mut plan) = wall_command_fixture(DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::PerEdge {
+            widths_mm: vec![0.45, 0.46, 0.47, 0.48],
+        },
+        physical_z_mm: [0.0, 0.2],
+        points_mm: vec![
+            [1.0, 1.0, 0.2],
+            [5.0, 1.0, 0.2],
+            [5.0, 5.0, 0.2],
+            [1.0, 5.0, 0.2],
+            [1.0, 1.0, 0.2],
+        ],
+    });
+    intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
+    intent.recipe.process.first_layer_flow_factor = 1.1;
+    intent.recipe.process.bridge_flow_factor = 0.8;
+    refresh_volumes(&intent, &mut plan);
+    let cancel = AtomicBool::new(false);
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    let path = &plan.layers[0].paths[0];
+    assert_eq!(path.points_mm[0], [5.0, 1.0, 0.2]);
+    assert_eq!(
+        path.checked_edges()
+            .unwrap()
+            .map(|edge| edge.width_mm)
+            .collect::<Vec<_>>(),
+        vec![0.46, 0.47, 0.48, 0.45]
+    );
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    let expected_volume =
+        4.0 * (0.265 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) * 4.0 * 1.1 * 0.8;
+    assert_eq!(report.deposition_segments, 4);
+    assert!((report.deposited_volume_mm3 - expected_volume).abs() < 2e-8);
+    assert!(program.contains("M106 S255\n"));
+    assert!(
+        program
+            .lines()
+            .filter(|line| line.starts_with("G1 "))
+            .all(|line| line.ends_with("F300.000000"))
+    );
+
+    // Actual bytes retain their original edge-local widths, not whichever
+    // width association a later in-memory consumer happens to attach.
+    if let WidthProfile::PerEdge { widths_mm } = &mut plan.layers[0].paths[0].width {
+        widths_mm.rotate_left(1);
+    }
+    refresh_volumes(&intent, &mut plan);
+    assert_eq!(
+        verify(&program, &plan, &intent, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+}
+
+#[test]
+fn minimum_deposition_length_is_the_decoded_xyz6_segment_not_the_raw_edge() {
+    let (intent, plan) = wall_command_fixture(DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 0.45 },
+        physical_z_mm: [0.0, 0.2],
+        points_mm: vec![[1.0, 1.0, 0.2], [1.011_999_49, 1.016_000_49, 0.2]],
+    });
+    let length = distance(
+        plan.layers[0].paths[0].points_mm[0],
+        plan.layers[0].paths[0].points_mm[1],
+    );
+    assert!(length > program_coordinates::MIN_DEPOSITION_COMMAND_MM);
+    assert!(
+        distance([1.0, 1.0, 0.2], [1.011_999, 1.016, 0.2])
+            < program_coordinates::MIN_DEPOSITION_COMMAND_MM
+    );
+    let e = length * (0.25 * 0.2 + std::f64::consts::PI * 0.1_f64.powi(2)) / std::f64::consts::PI;
+    let program = format!(
+        "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.011999 Y1.016 Z0.2 E{e:.8} F300\n"
+    );
+    assert_eq!(
+        verify(&program, &plan, &intent, &AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+}
+
+#[test]
+fn actual_e8_width_cannot_borrow_the_nominal_width_association() {
+    let (intent, plan) = wall_command_fixture(DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 0.45 },
+        physical_z_mm: [0.0, 0.000_01],
+        points_mm: vec![[1.0, 1.0, 0.000_01], [1.02, 1.0, 0.000_01]],
+    });
+    // E=3e-8 is the ordinary E8 rounding of this nominal stroke, but its
+    // independently inverted width is about 0.47124 rather than 0.45 mm.
+    let program = "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.00001 F1200\nG1 X1.02 Y1 Z0.00001 E0.00000003 F300\n";
+    let error = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
+}
+
+#[test]
+fn wall_gradient_uses_actual_e8_widths_and_checks_the_closed_seam() {
+    let cancel = AtomicBool::new(false);
+    let (intent, plan) = wall_command_fixture(DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::PerEdge {
+            widths_mm: vec![0.451, 0.455],
+        },
+        physical_z_mm: [0.0, 0.2],
+        points_mm: vec![[1.0, 1.0, 0.2], [1.02, 1.0, 0.2], [1.0, 1.0, 0.2]],
+    });
+    // Nominal widths meet 0.20/mm. Actual E8 commands invert to about
+    // 0.450997545 and 0.455003076: their gradient exceeds the frozen limit.
+    let program = "G21\nG90\nM82\nG92 E0\nM106 S255\nG0 X1 Y1 Z0.2 F1200\nG1 X1.02 Y1 Z0.2 E0.00051958 F300\nG1 X1 Y1 Z0.2 E0.00104426 F300\n";
+    assert_eq!(
+        verify(program, &plan, &intent, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+
+    let (intent, plan) = wall_command_fixture(DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::PerEdge {
+            widths_mm: vec![0.45, 0.455, 0.46],
+        },
+        physical_z_mm: [0.0, 0.2],
+        points_mm: vec![
+            [1.0, 1.0, 0.2],
+            [1.03, 1.0, 0.2],
+            [1.015, 1.025_981, 0.2],
+            [1.0, 1.0, 0.2],
+        ],
+    });
+    // Both stored interior transitions are below 0.20/mm; only last→first
+    // violates it. Emission matching the same bad plan is not independent proof.
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    assert_eq!(
+        verify(&program, &plan, &intent, &cancel).unwrap_err().code,
         ManufacturingErrorCode::VerificationFailed
     );
 }
@@ -713,7 +925,7 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
         spiling_contracts::manufacturing::DepositionPath {
             kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
             owner: None,
-            bead_width_mm: 1.0,
+            width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [5.0, 1.0, 1.0]],
         };
@@ -742,7 +954,7 @@ fn packed_sink_admits_two_hundred_thousand_actual_events_once() {
 }
 
 fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
-    let (mut intent, plan) = fixture();
+    let (mut intent, mut plan) = fixture();
     intent.printer.capabilities.output_dialect = OutputDialect::Marlin2SingleExtruderGcodeV1;
     intent.printer.workflow = JobWorkflow::CompleteMarlin {
         job: SingleExtruderJob {
@@ -768,6 +980,7 @@ fn complete_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
             park_position_mm: [0.0, 0.0, 10.0],
         },
     };
+    crate::realization::canonicalize(&mut plan, &intent, &AtomicBool::new(false)).unwrap();
     (intent, plan)
 }
 
@@ -965,6 +1178,8 @@ fn priming_exclusion_accounts_for_emitted_rounding_at_boundary() {
         }
         assert_eq!(plan.validate(&candidate).is_ok(), admissible, "{y}");
         if admissible {
+            let mut plan = plan.clone();
+            crate::realization::canonicalize(&mut plan, &candidate, &cancel).unwrap();
             let program = crate::backend::emit(&plan, &candidate, &cancel).unwrap();
             verify(&program, &plan, &candidate, &cancel).unwrap();
             let mutated = program.replace("Y0.499998", "Y0.500000");
@@ -1002,21 +1217,21 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
         DepositionPath {
             kind: DepositionKind::SolidFill,
             owner: None,
-            bead_width_mm: 1.0,
+            width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[9.0, 1.0, 1.0], [11.0, 1.0, 1.0]],
         },
         DepositionPath {
             kind: DepositionKind::SupportInterface,
             owner: None,
-            bead_width_mm: 1.0,
+            width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[5.0, 1.0, 1.0], [7.0, 1.0, 1.0]],
         },
         DepositionPath {
             kind: DepositionKind::Support,
             owner: None,
-            bead_width_mm: 1.0,
+            width: WidthProfile::Constant { width_mm: 1.0 },
             physical_z_mm: [0.0, 1.0],
             points_mm: vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0]],
         },
@@ -1028,7 +1243,7 @@ fn process_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
     plan.layers[1].paths = vec![DepositionPath {
         kind: DepositionKind::Bridge,
         owner: None,
-        bead_width_mm: 1.0,
+        width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [1.0, 1.5],
         points_mm: vec![[11.0, 1.0, 1.5], [15.0, 1.0, 1.5]],
     }];
@@ -1274,10 +1489,7 @@ fn preferred_seam_rejects_a_matching_policy_ignoring_plan_and_program() {
             .verified
     );
     assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.0, 5.0, 1.0]);
-    let points = &mut plan.layers[0].paths[0].points_mm;
-    points.pop();
-    points.rotate_left(2);
-    points.push(points[0]);
+    plan.layers[0].paths[0].rotate_closed(2).unwrap();
     plan.validate(&intent).unwrap();
     let policy_ignoring_program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     assert_ne!(policy_ignoring_program, canonical_program);
@@ -1308,8 +1520,8 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
     }
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Perimeter,
-        owner: None,
-        bead_width_mm: 1.0,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![
             [7.0, 1.0, 1.0],
@@ -1326,11 +1538,8 @@ fn preferred_seam_ties_follow_the_previous_actual_contour_endpoint() {
     assert_eq!(plan.layers[0].paths[1].points_mm[0], [9.0, 5.0, 1.0]);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
-    let points = &mut plan.layers[0].paths[1].points_mm;
-    points.pop();
-    points.rotate_left(3);
-    points.push(points[0]);
-    assert_eq!(points[0], [9.0, 1.0, 1.0]);
+    plan.layers[0].paths[1].rotate_closed(3).unwrap();
+    assert_eq!(plan.layers[0].paths[1].points_mm[0], [9.0, 1.0, 1.0]);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
@@ -1354,8 +1563,13 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
         // Both right vertices project to X5. Raw X must not defeat the exact
         // command-space tie: absent prior motion choose Y1, with high prime
         // choose Y5. A prime just above raw Y3 projects to Y3 and ties at Y1.
-        plan.layers[0].paths[0].points_mm[1][0] = 5.000_000_1;
-        plan.layers[0].paths[0].points_mm[2][0] = 5.000_000_4;
+        plan.layers[0].paths[0].points_mm = vec![
+            [1.0, 1.0, 1.0],
+            [5.000_000_1, 1.0, 1.0],
+            [5.000_000_4, 5.0, 1.0],
+            [1.0, 5.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
         refresh_volumes(&intent, &mut plan);
         crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
         let expected_y = if prime_y == Some(10.0) { 5.0 } else { 1.0 };
@@ -1363,14 +1577,11 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
         let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
         assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 
-        let points = &mut plan.layers[0].paths[0].points_mm;
-        points.pop();
-        let other = points
+        let other = plan.layers[0].paths[0].points_mm[..4]
             .iter()
             .position(|p| p[0] > 5.0 && p[1] != expected_y)
             .unwrap();
-        points.rotate_left(other);
-        points.push(points[0]);
+        plan.layers[0].paths[0].rotate_closed(other).unwrap();
         let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
         let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
         assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
@@ -1378,12 +1589,16 @@ fn preferred_seam_exact_ties_use_projected_coordinates_and_prime_position() {
 }
 
 #[test]
-fn preferred_seam_score_has_no_proximity_epsilon_and_bridge_contours_are_exempt() {
+fn preferred_seam_score_has_no_proximity_epsilon_for_wall_bridges() {
     let (mut intent, mut plan) = complete_fixture();
     intent.recipe.seam_policy = SeamPolicy::PreferredBuildDirection { xy: [1.0, 0.0] };
     // A one-XYZ6-step score advantage wins even though the prime endpoint is
     // much closer to the lower-scoring upper vertex.
-    plan.layers[0].paths[0].points_mm[1][0] = 5.000_001;
+    for point in &mut plan.layers[0].paths[0].points_mm {
+        if point[0] == 5.0 && point[1] == 1.0 {
+            point[0] = 5.000_001;
+        }
+    }
     refresh_volumes(&intent, &mut plan);
     let cancel = AtomicBool::new(false);
     crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
@@ -1391,20 +1606,25 @@ fn preferred_seam_score_has_no_proximity_epsilon_and_bridge_contours_are_exempt(
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
 
-    let points = &mut plan.layers[0].paths[0].points_mm;
-    points.pop();
-    points.rotate_left(1);
-    points.push(points[0]);
+    plan.layers[0].paths[0].rotate_closed(1).unwrap();
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
     let error = verify(&program, &plan, &intent, &cancel).unwrap_err();
     assert_eq!(error.code, ManufacturingErrorCode::VerificationFailed);
 
-    // The same closed geometry under an admitted bridge role is not a
-    // perimeter seam request. Its separate process semantics still replay.
+    // Relabelling construction to Bridge preserves the closed-wall seam
+    // obligation while retaining its separate feed, flow and cooling policy.
     plan.layers[0].paths[0].kind = DepositionKind::Bridge;
     refresh_volumes(&intent, &mut plan);
     let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
-    assert!(verify(&program, &plan, &intent, &cancel).unwrap().verified);
+    assert_eq!(
+        verify(&program, &plan, &intent, &cancel).unwrap_err().code,
+        ManufacturingErrorCode::VerificationFailed
+    );
+    crate::realization::canonicalize(&mut plan, &intent, &cancel).unwrap();
+    assert_eq!(plan.layers[0].paths[0].points_mm[0], [5.000_001, 1.0, 1.0]);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let report = verify(&program, &plan, &intent, &cancel).unwrap();
+    assert_eq!(report.deposition_segments, 6);
 }
 
 #[test]
@@ -1415,8 +1635,8 @@ fn nearest_seam_and_open_direction_are_useful_and_deterministic() {
     // its third vertex. The following open stroke should enter its far endpoint.
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Perimeter,
-        owner: None,
-        bead_width_mm: 1.0,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 1.0 },
         physical_z_mm: [0.0, 1.0],
         points_mm: vec![
             [10.0, 10.0, 1.0],
@@ -1479,6 +1699,7 @@ fn real_contact_gap_admits_larger_than_minimum_but_rejects_insufficient_gap_or_m
     plan.layers[0].region_coverage.source_section_area_mm2 = 0.0;
     plan.layers[0].region_coverage.wall_area_mm2 = 0.0;
     let mut gap = PrintLayer {
+        skin_command_fits: Vec::new(),
         index: 1,
         z_mm: 1.25,
         lower_z_mm: 1.0,
@@ -1605,8 +1826,8 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     intent.recipe.bead_width_mm = 0.45;
     intent.recipe.sparse_infill = SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 };
     intent.printer.deposition_limits = DepositionLimits {
-        min_bead_width_mm: 0.45,
-        max_bead_width_mm: 0.45,
+        min_bead_width_mm: 0.449,
+        max_bead_width_mm: 0.451,
         min_bead_height_mm: 0.000001,
         max_bead_height_mm: 0.3,
     };
@@ -1615,7 +1836,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     plan.layers[0].paths[0] = DepositionPath {
         kind: DepositionKind::SolidFill,
         owner: None,
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[2.0, 2.0, 0.1], [6.0, 2.0, 0.1]],
     };
@@ -1681,7 +1902,7 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
         let path = &mut invalid.layers[2].paths[0];
         match mutation {
             0 => path.kind = DepositionKind::Bridge,
-            1 => path.bead_width_mm = 0.46,
+            1 => path.width = WidthProfile::Constant { width_mm: 0.46 },
             2 => path.physical_z_mm[0] = 0.11,
             _ => invalid.sparse_bands.clear(),
         }
@@ -1731,11 +1952,20 @@ fn coarse_sparse_dimensions_are_verified_and_packed() {
     if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
         std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
     } else {
-        let committed: serde_json::Value =
+        let mut committed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut actual = fixture.clone();
+        // Producer freshness is validated against captured provenance elsewhere;
+        // an ABI golden owns motion bytes, dimensions, association and layout,
+        // not an incidental producer literal or its semantic-input fingerprint.
+        for value in [&mut committed, &mut actual] {
+            let info = value["descriptor"]["info"].as_object_mut().unwrap();
+            info.remove("input_hash");
+            info.remove("verifier_version");
+        }
         assert_eq!(
-            committed, fixture,
-            "combined sparse replay ABI golden drift"
+            committed, actual,
+            "combined sparse replay motion/dimension/association ABI drift"
         );
     }
     let mut regional = plan.clone();
@@ -1840,7 +2070,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
             layer.paths = vec![DepositionPath {
                 kind: DepositionKind::SeparatorWall,
                 owner: None,
-                bead_width_mm: 0.45,
+                width: WidthProfile::Constant { width_mm: 0.45 },
                 physical_z_mm: [layer.lower_z_mm, layer.z_mm],
                 points_mm: vec![[3.0, 1.225, layer.z_mm], [3.0, 4.775, layer.z_mm]],
             }];
@@ -1853,7 +2083,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
     plan.layers[3].paths.push(DepositionPath {
         kind: DepositionKind::SparseFill,
         owner: Some(DepositionOwner::Regional { region_index: 1 }),
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.1, 0.4],
         points_mm: vec![[1.0, 3.0, 0.4], [2.775, 3.0, 0.4]],
     });
@@ -1931,7 +2161,7 @@ fn deferred_sparse_bonds_cover_every_fine_interval_but_never_support_earlier_wal
                     point[2] = 0.3;
                 }
             }
-            _ => broken.layers[3].paths[1].bead_width_mm = 0.3,
+            _ => broken.layers[3].paths[1].width = WidthProfile::Constant { width_mm: 0.3 },
         }
         assert!(
             !contact(&broken).unwrap_or(false),
@@ -2014,8 +2244,8 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
         layer.section_z_mm = (layer.lower_z_mm + layer.z_mm) * 0.5;
         layer.paths = vec![DepositionPath {
             kind: DepositionKind::Perimeter,
-            owner: None,
-            bead_width_mm: 0.45,
+            owner: Some(DepositionOwner::Wall),
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [layer.lower_z_mm, layer.z_mm],
             points_mm: vec![
                 [1.0, 1.0, layer.z_mm],
@@ -2030,15 +2260,15 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
     // fill or a synthetic declared band. Keep its explicit closed traversal.
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Perimeter,
-        owner: None,
-        bead_width_mm: 0.45,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[3.0, 1.0, 0.1], [3.0, 5.0, 0.1], [3.0, 1.0, 0.1]],
     });
     plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::SolidFill,
         owner: None,
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [0.0, 0.1],
         points_mm: vec![[1.0, 3.0, 0.1], [5.0, 3.0, 0.1]],
     });
@@ -2049,28 +2279,28 @@ fn emitted_top_skin_touching_fractional_separator_boundary_is_not_longitudinal_o
             owner: Some(DepositionOwner::MandatorySkin {
                 skin: ProcessSkinKind::TopSkin,
             }),
-            bead_width_mm: 0.45,
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, 1.0, 0.2], [3.0, start_y, 0.2]],
         },
         DepositionPath {
             kind: DepositionKind::SeparatorWall,
             owner: None,
-            bead_width_mm: 0.45,
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.0, start_y, 0.2], [3.0, end_y, 0.2]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 0 }),
-            bead_width_mm: 0.45,
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[1.225, 3.0, 0.2], [2.775, 3.0, 0.2]],
         },
         DepositionPath {
             kind: DepositionKind::SparseFill,
             owner: Some(DepositionOwner::Regional { region_index: 1 }),
-            bead_width_mm: 0.45,
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [0.1, 0.2],
             points_mm: vec![[3.225, 3.0, 0.2], [4.775, 3.0, 0.2]],
         },
@@ -2195,5 +2425,486 @@ fn affected_fine_regional_rows_require_actual_support_or_genuine_bounded_bridge(
     assert!(
         check(&too_short, plan).is_err(),
         "actual span must meet explicit bridge limit"
+    );
+}
+
+fn skin_fit_box(x: [f64; 2], y: [f64; 2]) -> DiaphragmPolygonMm {
+    DiaphragmPolygonMm {
+        outer: vec![
+            [x[0], y[0]],
+            [x[1], y[0]],
+            [x[1], y[1]],
+            [x[0], y[1]],
+            [x[0], y[0]],
+        ],
+        holes: Vec::new(),
+    }
+}
+
+fn minimum_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+    use spiling_contracts::geometry::{DefinitionId, OccurrenceId};
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    intent.recipe.top_skin_axis = RectilinearAxisPolicy::X;
+    plan.layers.truncate(1);
+    let layer = &mut plan.layers[0];
+    let region = ProcessRegionCoverage {
+        area_mm2: 15.98,
+        fraction: 1.0,
+        contributions: vec![ProcessRegionContribution {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            definition_id: DefinitionId::from_source_sha256(&[13; 32]),
+            provenance: None,
+        }],
+    };
+    let fit = SkinCommandFit {
+        required_mm: [[2.0, 2.0, 1.0], [2.01, 2.0, 1.0]],
+        fitted_mm: [[2.0, 2.0, 1.0], [2.020003, 2.0, 1.0]],
+    };
+    layer.paths = vec![DepositionPath {
+        kind: DepositionKind::BottomSkin,
+        owner: Some(DepositionOwner::MandatorySkin {
+            skin: ProcessSkinKind::BottomSkin,
+        }),
+        width: WidthProfile::Constant { width_mm: 1.0 },
+        physical_z_mm: [0.0, 1.0],
+        points_mm: fit.fitted_mm.to_vec(),
+    }];
+    layer.skin_command_fits = vec![SkinCommandFitDomain {
+        region_index: 0,
+        region: region.clone(),
+        skin: ProcessSkinKind::BottomSkin,
+        regional: vec![skin_fit_box([2.01, 5.0], [0.0, 4.0])],
+        mandatory: vec![skin_fit_box([2.0, 2.01], [1.0, 3.0])],
+        source_owner: vec![skin_fit_box([1.0, 5.0], [0.0, 4.0])],
+        fits: vec![fit],
+    }];
+    layer.region_coverage.wall_area_mm2 = 0.0;
+    layer.region_coverage.bottom_skin_area_mm2 = 0.02;
+    layer.region_coverage.solid_interior_area_mm2 = 15.98;
+    layer.region_coverage.process_regions = vec![region];
+    refresh_volumes(&intent, &mut plan);
+    (intent, plan)
+}
+
+fn replay_skin_fit(
+    intent: &ManufacturingIntent,
+    mut plan: NormalizedPrintPlan,
+) -> Result<VerificationReport, ManufacturingError> {
+    let cancel = AtomicBool::new(false);
+    refresh_volumes(intent, &mut plan);
+    let program = crate::backend::emit(&plan, intent, &cancel)?;
+    verify(&program, &plan, intent, &cancel)
+}
+
+#[test]
+fn minimum_skin_command_preserves_required_material_and_replays_actual_extra_volume() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    // Independent circular-bead numeric golden: E = commanded length / 4.
+    let program =
+        "G21\nG90\nM82\nG92 E0\nM106 S0\nG0 X2 Y2 Z1 F1200\nG1 X2.020003 Y2 Z1 E0.00500075 F600\n";
+    let report = verify(program, &plan, &intent, &AtomicBool::new(false)).unwrap();
+    assert!((report.deposited_volume_mm3 - 0.020003 * std::f64::consts::PI / 4.0).abs() < 1e-12);
+    assert!(report.deposited_volume_mm3 > 0.01 * std::f64::consts::PI / 4.0);
+    assert_eq!(plan.layers[0].region_coverage.bottom_skin_area_mm2, 0.02);
+    plan.layers[0].paths[0].points_mm.reverse();
+    replay_skin_fit(&intent, plan).unwrap();
+}
+
+#[test]
+fn minimum_skin_replay_rejects_lost_requirement_holes_winner_escape_and_missing_construction() {
+    let (intent, plan) = minimum_skin_fixture();
+    for mutation in 0..8 {
+        let mut bad = plan.clone();
+        let layer = &mut bad.layers[0];
+        match mutation {
+            0 => layer.skin_command_fits[0].fits[0].required_mm[0][0] = 2.001,
+            1 => layer.skin_command_fits[0].source_owner[0]
+                .holes
+                .push(skin_fit_box([2.015, 2.016], [1.5, 2.5]).outer),
+            2 => layer.skin_command_fits[0].regional = vec![skin_fit_box([2.015, 5.0], [0.0, 4.0])],
+            3 => {
+                layer.paths[0].points_mm[0][0] += 0.001;
+                layer.paths[0].points_mm[1][0] += 0.001;
+            }
+            4 => layer.skin_command_fits[0].region_index = 1,
+            5 => layer.paths[0].owner = Some(DepositionOwner::Regional { region_index: 0 }),
+            6 => {
+                layer.skin_command_fits[0].fits[0].fitted_mm[1][0] = 2.03;
+                layer.paths[0].points_mm[1][0] = 2.03;
+            }
+            7 => {
+                layer.region_coverage.process_regions[0].area_mm2 = 7.99;
+                layer.skin_command_fits[0].region =
+                    layer.region_coverage.process_regions[0].clone();
+                let mut other = layer.region_coverage.process_regions[0].clone();
+                other.contributions[0].occurrence_id =
+                    spiling_contracts::geometry::OccurrenceId::new(2).unwrap();
+                layer.region_coverage.process_regions.push(other);
+                layer.skin_command_fits[0].region_index = 1;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            replay_skin_fit(&intent, bad).is_err(),
+            "minimum-command construction must not authorize lost skin, void/winner escape or a missing actual stroke: {mutation}"
+        );
+    }
+}
+
+#[test]
+fn minimum_skin_replay_rejects_duplicate_witnesses_and_positive_collinear_extrusion() {
+    let (intent, plan) = minimum_skin_fixture();
+    let mut repeated = plan.clone();
+    let fit = repeated.layers[0].skin_command_fits[0].fits[0].clone();
+    repeated.layers[0].skin_command_fits[0].fits.push(fit);
+    assert!(replay_skin_fit(&intent, repeated).is_err());
+    let mut duplicate = plan.clone();
+    let mut other = duplicate.layers[0].paths[0].clone();
+    other.kind = DepositionKind::SolidFill;
+    other.owner = Some(DepositionOwner::Regional { region_index: 0 });
+    other.points_mm = vec![[2.015, 2.0, 1.0], [2.035003, 2.0, 1.0]];
+    duplicate.layers[0].paths.push(other);
+    assert!(replay_skin_fit(&intent, duplicate).is_err());
+}
+
+#[test]
+fn fitted_skin_bridge_still_requires_genuine_direct_lower_anchors_and_bounded_span() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    let mut upper = plan.layers[0].clone();
+    upper.index = 1;
+    upper.lower_z_mm = 1.0;
+    upper.z_mm = 2.0;
+    upper.section_z_mm = 1.5;
+    let domain = &mut upper.skin_command_fits[0];
+    domain.mandatory = vec![skin_fit_box([4.0, 4.01], [1.0, 3.0])];
+    domain.regional = vec![
+        skin_fit_box([1.0, 4.0], [0.0, 4.0]),
+        skin_fit_box([4.01, 9.0], [0.0, 4.0]),
+    ];
+    domain.source_owner = vec![skin_fit_box([1.0, 9.0], [0.0, 4.0])];
+    domain.fits[0] = SkinCommandFit {
+        required_mm: [[4.0, 2.0, 2.0], [4.01, 2.0, 2.0]],
+        fitted_mm: [[4.0, 2.0, 2.0], [4.020003, 2.0, 2.0]],
+    };
+    upper.paths[0].kind = DepositionKind::Bridge;
+    upper.paths[0].physical_z_mm = [1.0, 2.0];
+    upper.paths[0].points_mm = vec![[2.0, 2.0, 2.0], [6.0, 2.0, 2.0]];
+    let lower = &mut plan.layers[0];
+    lower.skin_command_fits.clear();
+    lower.paths[0].kind = DepositionKind::SolidFill;
+    lower.paths[0].owner = Some(DepositionOwner::Regional { region_index: 0 });
+    lower.paths[0].points_mm = vec![[2.0, 2.0, 1.0], [2.1, 2.0, 1.0]];
+    let mut right = lower.paths[0].clone();
+    right.points_mm = vec![[5.9, 2.0, 1.0], [6.0, 2.0, 1.0]];
+    lower.paths.push(right);
+    plan.layers.push(upper);
+    replay_skin_fit(&intent, plan.clone()).unwrap();
+    let mut supported = plan.clone();
+    supported.layers[0].paths[0].points_mm[1][0] = 6.0;
+    supported.layers[0].paths.pop();
+    assert!(
+        replay_skin_fit(&intent, supported).is_err(),
+        "a fit does not excuse a false Bridge label"
+    );
+    let mut floating = plan.clone();
+    for path in &mut floating.layers[0].paths {
+        for point in &mut path.points_mm {
+            point[1] = 40.0;
+        }
+    }
+    assert!(
+        replay_skin_fit(&intent, floating).is_err(),
+        "a fit is never lower-anchor authority"
+    );
+    let mut short_span = intent.clone();
+    short_span.recipe.process.max_bridge_span_mm = 1.0;
+    assert!(
+        replay_skin_fit(&short_span, plan).is_err(),
+        "a fit never relaxes maximum bridge span"
+    );
+}
+
+#[test]
+fn ordinary_fitted_skin_uses_actual_lower_strokes_not_source_material_as_support() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    let mut upper = plan.layers[0].clone();
+    upper.index = 1;
+    upper.lower_z_mm = 1.0;
+    upper.z_mm = 2.0;
+    upper.section_z_mm = 1.5;
+    upper.paths[0].physical_z_mm = [1.0, 2.0];
+    for point in &mut upper.paths[0].points_mm {
+        point[2] = 2.0;
+    }
+    let fit = &mut upper.skin_command_fits[0].fits[0];
+    for point in fit.required_mm.iter_mut().chain(&mut fit.fitted_mm) {
+        point[2] = 2.0;
+    }
+    plan.layers[0].skin_command_fits.clear();
+    plan.layers[0].paths[0].kind = DepositionKind::SolidFill;
+    plan.layers[0].paths[0].owner = Some(DepositionOwner::Regional { region_index: 0 });
+    plan.layers.push(upper);
+    replay_skin_fit(&intent, plan.clone()).unwrap();
+    for point in &mut plan.layers[0].paths[0].points_mm {
+        point[1] = 40.0;
+    }
+    assert!(
+        replay_skin_fit(&intent, plan).is_err(),
+        "captured source material cannot replace an earlier deposited anchor"
+    );
+}
+
+#[test]
+fn projected_skin_just_below_command_minimum_still_receives_complete_fitted_material() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    let layer = &mut plan.layers[0];
+    let domain = &mut layer.skin_command_fits[0];
+    domain.fits[0] = SkinCommandFit {
+        required_mm: [[4.0, 2.0, 1.0], [4.02, 2.0, 1.0]],
+        fitted_mm: [[4.0, 2.0, 1.0], [4.020003, 2.0, 1.0]],
+    };
+    domain.mandatory = vec![skin_fit_box([4.0, 4.02], [1.0, 3.0])];
+    domain.regional = vec![skin_fit_box([4.02, 9.0], [0.0, 4.0])];
+    domain.source_owner = vec![skin_fit_box([1.0, 9.0], [0.0, 4.0])];
+    layer.paths[0].points_mm = domain.fits[0].fitted_mm.to_vec();
+    layer.region_coverage.bottom_skin_area_mm2 = 0.04;
+    layer.region_coverage.solid_interior_area_mm2 = 15.96;
+    layer.region_coverage.process_regions[0].area_mm2 = 15.96;
+    domain.region = layer.region_coverage.process_regions[0].clone();
+    let required = domain.fits[0].required_mm;
+    let a = project_xyz6_point_mm(required[0]).unwrap();
+    let b = project_xyz6_point_mm(required[1]).unwrap();
+    assert!((b[0] - a[0]).abs() < program_coordinates::MIN_DEPOSITION_COMMAND_MM);
+    let mut unfitted = plan.clone();
+    unfitted.layers[0].skin_command_fits.clear();
+    unfitted.layers[0].paths[0].points_mm = required.to_vec();
+    assert!(
+        replay_skin_fit(&intent, unfitted).is_err(),
+        "the original projected stroke must still fail the unchanged command minimum"
+    );
+    replay_skin_fit(&intent, plan).unwrap();
+}
+
+#[test]
+fn minimum_skin_replay_rejects_off_lattice_rows_inside_unchanged_captured_masks() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    let layer = &mut plan.layers[0];
+    let fit = &mut layer.skin_command_fits[0].fits[0];
+    // The rectangle's centered three-row lattice includes Y=2, not Y=2.001.
+    // Required material, added corridor and source masks all still contain the
+    // shifted interval; only the independent authored-phase proof can veto it.
+    for point in fit.required_mm.iter_mut().chain(&mut fit.fitted_mm) {
+        point[1] += 0.001;
+    }
+    for point in &mut layer.paths[0].points_mm {
+        point[1] += 0.001;
+    }
+    assert!(
+        replay_skin_fit(&intent, plan).is_err(),
+        "jointly shifting the requirement, fit and actual construction must not invent a new hatch phase"
+    );
+}
+
+#[test]
+fn minimum_skin_projects_the_authored_slanted_interval_but_rechecks_actual_source_ownership() {
+    let (intent, mut plan) = minimum_skin_fixture();
+    let row = 2.0000004;
+    let y = [row - 0.2, row + 0.2];
+    let layer = &mut plan.layers[0];
+    let domain = &mut layer.skin_command_fits[0];
+    domain.mandatory = vec![DiaphragmPolygonMm {
+        outer: vec![
+            [1.4, y[0]],
+            [1.41, y[0]],
+            [2.61, y[1]],
+            [2.6, y[1]],
+            [1.4, y[0]],
+        ],
+        holes: Vec::new(),
+    }];
+    domain.regional = vec![DiaphragmPolygonMm {
+        outer: vec![
+            [1.41, y[0]],
+            [5.0, y[0]],
+            [5.0, y[1]],
+            [2.61, y[1]],
+            [1.41, y[0]],
+        ],
+        holes: Vec::new(),
+    }];
+    let fit = &mut domain.fits[0];
+    for point in fit.required_mm.iter_mut().chain(&mut fit.fitted_mm) {
+        point[1] = row;
+    }
+    for point in &mut layer.paths[0].points_mm {
+        point[1] = row;
+    }
+    layer.region_coverage.bottom_skin_area_mm2 = 0.004;
+    layer.region_coverage.solid_interior_area_mm2 = 15.996;
+    layer.region_coverage.process_regions[0].area_mm2 = 15.996;
+    domain.region = layer.region_coverage.process_regions[0].clone();
+    // Q(Y) is below the authored row: re-sectioning the slanted mandatory
+    // mask there loses a micron from Q(required), despite correct projection.
+    replay_skin_fit(&intent, plan.clone()).unwrap();
+    let source = &mut plan.layers[0].skin_command_fits[0].source_owner;
+    *source = vec![DiaphragmPolygonMm {
+        outer: vec![
+            [1.0, y[0]],
+            [1.420003, y[0]],
+            [2.620003, y[1]],
+            [1.0, y[1]],
+            [1.0, y[0]],
+        ],
+        holes: Vec::new(),
+    }];
+    assert!(
+        replay_skin_fit(&intent, plan).is_err(),
+        "authored classification projection cannot authorize escape from the independently evaluated actual source row"
+    );
+}
+
+fn mixed_skin_fixture() -> (ManufacturingIntent, NormalizedPrintPlan) {
+    let (mut intent, mut plan) = fixture();
+    intent.recipe.rectilinear_axis = RectilinearAxisPolicy::X;
+    let row = 2.0000004;
+    let y = [row - 0.2, row + 0.2];
+    let boundary = 3.4 + (row - y[0]) * (4.6 - 3.4) / (y[1] - y[0]);
+    plan.layers[0].paths = [[2.0, 2.1], [5.9, 6.0]]
+        .into_iter()
+        .map(|x| DepositionPath {
+            kind: DepositionKind::SolidFill,
+            owner: None,
+            width: WidthProfile::Constant { width_mm: 1.0 },
+            physical_z_mm: [0.0, 1.0],
+            points_mm: vec![[x[0], row, 1.0], [x[1], row, 1.0]],
+        })
+        .collect();
+    let layer = &mut plan.layers[1];
+    layer.paths = vec![DepositionPath {
+        kind: DepositionKind::Bridge,
+        owner: Some(DepositionOwner::RegionalSkinBridge {
+            region_index: 0,
+            skin: ProcessSkinKind::BottomSkin,
+            skin_first: false,
+        }),
+        width: WidthProfile::Constant { width_mm: 1.0 },
+        physical_z_mm: [1.0, 2.0],
+        points_mm: vec![[2.0, row, 2.0], [boundary, row, 2.0], [5.4, row, 2.0]],
+    }];
+    layer.region_coverage.wall_area_mm2 = 14.0;
+    layer.region_coverage.bottom_skin_area_mm2 = 1.2;
+    layer.region_coverage.solid_interior_area_mm2 = 0.8;
+    layer.region_coverage.process_regions = vec![ProcessRegionCoverage {
+        area_mm2: 0.8,
+        fraction: 1.0,
+        contributions: Vec::new(),
+    }];
+    layer.region_coverage.skin_bridge_domains = vec![SkinBridgeDomain {
+        region_index: 0,
+        skin: ProcessSkinKind::BottomSkin,
+        regional: vec![DiaphragmPolygonMm {
+            outer: vec![
+                [2.0, y[0]],
+                [3.4, y[0]],
+                [4.6, y[1]],
+                [2.0, y[1]],
+                [2.0, y[0]],
+            ],
+            holes: Vec::new(),
+        }],
+        mandatory: vec![DiaphragmPolygonMm {
+            outer: vec![
+                [3.4, y[0]],
+                [7.0, y[0]],
+                [7.0, y[1]],
+                [4.6, y[1]],
+                [3.4, y[0]],
+            ],
+            holes: Vec::new(),
+        }],
+        source_owner: vec![skin_fit_box([1.0, 8.0], [0.0, 4.0])],
+    }];
+    refresh_volumes(&intent, &mut plan);
+    (intent, plan)
+}
+
+#[test]
+fn mixed_skin_projects_original_classified_intervals_without_rehatching_the_rounded_row() {
+    let (intent, plan) = mixed_skin_fixture();
+    // Q(Y) is below the authored row. Re-sectioning these original slanted
+    // masks at Q(Y) moves their shared boundary to Q(X)=3.999999, although
+    // the complete captured regional interval correctly projects to [2, 4].
+    replay_skin_fit(&intent, plan.clone()).unwrap();
+    let mut reversed = plan.clone();
+    reversed.layers[1].paths[0].reverse();
+    replay_skin_fit(&intent, reversed).unwrap();
+    let cancel = AtomicBool::new(false);
+    let program = crate::backend::emit(&plan, &intent, &cancel).unwrap();
+    let alternate = program.replacen("Y2.000000 ", "Y2.000001 ", 1);
+    assert_ne!(alternate, program);
+    assert!(
+        verify(&alternate, &plan, &intent, &cancel).is_err(),
+        "captured-row projection never authorizes an alternate actual XYZ6 neighbor"
+    );
+    let mut escaped = plan;
+    let row = escaped.layers[1].paths[0].points_mm[0][1];
+    let y = [row - 0.2, row + 0.2];
+    escaped.layers[1].region_coverage.skin_bridge_domains[0].source_owner =
+        vec![DiaphragmPolygonMm {
+            outer: vec![
+                [1.0, y[0]],
+                [4.8, y[0]],
+                [6.0, y[1]],
+                [1.0, y[1]],
+                [1.0, y[0]],
+            ],
+            holes: Vec::new(),
+        }];
+    assert!(
+        replay_skin_fit(&intent, escaped).is_err(),
+        "physical source confinement must still use the actual emitted row, not its authored preimage"
+    );
+}
+
+#[test]
+fn mixed_skin_replay_keeps_complete_regional_rows_mandatory_masks_and_direct_lower_anchors() {
+    let (intent, plan) = mixed_skin_fixture();
+    for mutation in 0..7 {
+        let mut bad = plan.clone();
+        match mutation {
+            0 => bad.layers[1].paths[0].points_mm[0][0] = 2.01,
+            1 => bad.layers[1].region_coverage.skin_bridge_domains[0].mandatory[0]
+                .holes
+                .push(skin_fit_box([4.5, 4.6], [1.9, 2.1]).outer),
+            2 => bad.layers[1].region_coverage.skin_bridge_domains[0].source_owner[0]
+                .holes
+                .push(skin_fit_box([3.0, 3.1], [1.9, 2.1]).outer),
+            3 => {
+                for path in &mut bad.layers[0].paths {
+                    for point in &mut path.points_mm {
+                        point[1] = 40.0;
+                    }
+                }
+            }
+            4 => bad.layers[1].paths[0].points_mm[2][0] += 0.05,
+            5 => bad.layers[1].paths[0].points_mm[1][1] += 0.0000001,
+            6 => {
+                for point in &mut bad.layers[1].paths[0].points_mm {
+                    point[2] += 0.0000001;
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            replay_skin_fit(&intent, bad).is_err(),
+            "authored-row projection must not excuse missing material, holes, changed raw row/height or false anchors: {mutation}"
+        );
+    }
+    let mut wrong_axis = intent.clone();
+    wrong_axis.recipe.rectilinear_axis = RectilinearAxisPolicy::Y;
+    assert!(
+        replay_skin_fit(&wrong_axis, plan).is_err(),
+        "a mixed regional row must retain its declared authored hatch axis"
     );
 }

@@ -876,13 +876,13 @@ fn realize_with_policy(
     Ok(material)
 }
 
-/// The first ordinary wall must retain a resolvable rib peak after erosion.
-/// This bounded offset check does not claim exact swept-bead surface physics.
+/// Required ribs consume the actual boundary-associated outer bead edges.
+/// Nominal widths are software command associations, not measured bead physics.
 pub(super) fn certify_first_wall(
-    centers: &MultiPolygon<f64>,
+    wall: &super::walls::WallPlan,
+    material: &MultiPolygon<f64>,
     fields: &[PreparedFinish],
     sample: f64,
-    bead: f64,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     check_cancel(cancel)?;
@@ -893,7 +893,11 @@ pub(super) fn certify_first_wall(
     if strict_fields == 0 {
         return Ok(());
     }
-    let comparisons = region::point_count(centers)
+    let comparisons = wall
+        .paths
+        .iter()
+        .map(|path| path.points_mm.len())
+        .sum::<usize>()
         .checked_mul(strict_fields)
         .ok_or_else(|| {
             error(
@@ -906,10 +910,16 @@ pub(super) fn certify_first_wall(
         if field.image().is_some() {
             continue;
         } // Image feature loss is reported by attributed resolution witnesses.
+        let boundary = resolution::owning_boundary(material, field, cancel)?.ok_or_else(|| {
+            unsupported(
+                field.face_id(),
+                "required finish lost actual material boundary correspondence",
+            )
+        })?;
         let field = match &field.shape {
             PreparedShape::Planar(field) => field,
             PreparedShape::Cylindrical(field) => {
-                cylindrical::certify_first_wall(centers, field, sample, bead, cancel)?;
+                cylindrical::certify_first_wall(wall, boundary, field, sample, cancel)?;
                 continue;
             }
         };
@@ -926,25 +936,24 @@ pub(super) fn certify_first_wall(
             ));
         }
         let mut realized_peak = f64::NEG_INFINITY;
-        for polygon in &centers.0 {
-            for point in &polygon.exterior().0 {
+        wall.visit_boundary_edges(boundary, |edge| {
+            for point in edge.points_mm {
                 check_cancel(cancel)?;
-                let dx = point.x - field.origin[0];
-                let dy = point.y - field.origin[1];
+                let dx = point[0] - field.origin[0];
+                let dy = point[1] - field.origin[1];
                 let s = dx * field.horizontal[0] + dy * field.horizontal[1];
                 let distance = dx * field.normal[0] + dy * field.normal[1];
                 if s >= field.margin
                     && s <= field.width - field.margin
-                    && distance >= -bead
+                    && distance >= -edge.width_mm
                     && distance <= field.depth + error_bound
                 {
-                    realized_peak = realized_peak.max(distance);
+                    realized_peak = realized_peak.max(distance + edge.width_mm * 0.5);
                 }
             }
-        }
-        if realized_peak < peak - bead / 2.0 - error_bound
-            || realized_peak > peak - bead / 2.0 + error_bound
-        {
+            Ok(())
+        })?;
+        if realized_peak < peak - error_bound || realized_peak > peak + error_bound {
             return Err(unsupported(
                 &field.face_id,
                 "requested rib peak bounds did not survive the ordinary first-wall offset",

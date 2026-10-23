@@ -547,11 +547,53 @@ pub async fn manufacturing_layers(
     check_active(&mut supervisor, &session, &record, Some(&capture.operation)).await?;
     drop(supervisor);
     let recipe = &bundle.provenance.intent.recipe;
-    let mut layers = bundle
-        .plan
-        .layers
-        .iter()
-        .map(|layer| ManufacturingLayer {
+    let mut layers = Vec::with_capacity(bundle.plan.layers.len());
+    for layer in &bundle.plan.layers {
+        let first_layer_factor = if layer.index == 0 {
+            recipe.process.first_layer_flow_factor
+        } else {
+            1.0
+        };
+        let mut diaphragms = Vec::with_capacity(layer.region_coverage.process_diaphragms.len());
+        for plate in &layer.region_coverage.process_diaphragms {
+            let mut nominal_path_volume_mm3 = 0.0;
+            for path in layer.paths.iter().filter(|path| {
+                path.owner
+                    == Some(DepositionOwner::Regional {
+                        region_index: plate.region_index,
+                    })
+            }) {
+                let height = path.height_mm();
+                let factor =
+                    if path.kind == spiling_contracts::manufacturing::DepositionKind::Bridge {
+                        recipe.process.bridge_flow_factor
+                    } else {
+                        1.0
+                    } * first_layer_factor;
+                for edge in path
+                    .checked_edges()
+                    .map_err(|error| format!("{:?}: {}", error.code, error.message))?
+                {
+                    let length = (edge.points_mm[1][0] - edge.points_mm[0][0])
+                        .hypot(edge.points_mm[1][1] - edge.points_mm[0][1]);
+                    let area = ((edge.width_mm - height) * height
+                        + std::f64::consts::PI * (height * 0.5).powi(2))
+                        * recipe.flow_multiplier;
+                    nominal_path_volume_mm3 += length * area * factor;
+                }
+            }
+            diaphragms.push(ManufacturingDiaphragm {
+                occurrence_id: plate.occurrence_id,
+                provenance: plate.provenance,
+                source_plane_mm: plate.source_plane_mm,
+                requested_thickness_mm: plate.requested_thickness_mm,
+                physical_z_mm: plate.physical_z_mm,
+                region_index: plate.region_index,
+                area_mm2: plate.area_mm2,
+                nominal_path_volume_mm3,
+            });
+        }
+        layers.push(ManufacturingLayer {
             index: layer.index,
             z_mm: layer.z_mm,
             lower_z_mm: layer.lower_z_mm,
@@ -563,24 +605,9 @@ pub async fn manufacturing_layers(
                 .map(|path| path.points_mm.len() - 1)
                 .sum(),
             sparse_band: None,
-            diaphragms: layer.region_coverage.process_diaphragms.iter().map(|plate| ManufacturingDiaphragm {
-                occurrence_id: plate.occurrence_id, provenance: plate.provenance,
-                source_plane_mm: plate.source_plane_mm, requested_thickness_mm: plate.requested_thickness_mm,
-                physical_z_mm: plate.physical_z_mm, region_index: plate.region_index, area_mm2: plate.area_mm2,
-                nominal_path_volume_mm3: layer.paths.iter().filter(|path| path.owner == Some(
-                    DepositionOwner::Regional { region_index: plate.region_index })).map(|path| {
-                    let height = path.height_mm();
-                    let area = ((path.bead_width_mm - height) * height
-                        + std::f64::consts::PI * (height * 0.5).powi(2)) * recipe.flow_multiplier;
-                    let factor = if path.kind == spiling_contracts::manufacturing::DepositionKind::Bridge {
-                        recipe.process.bridge_flow_factor
-                    } else { 1.0 } * if layer.index == 0 { recipe.process.first_layer_flow_factor } else { 1.0 };
-                    path.points_mm.windows(2).map(|edge| (edge[1][0] - edge[0][0])
-                        .hypot(edge[1][1] - edge[0][1]) * area * factor).sum::<f64>()
-                }).sum(),
-            }).collect(),
-        })
-        .collect::<Vec<_>>();
+            diaphragms,
+        });
+    }
     // One bounded summary per terminal layer, not per-stroke JSON metadata.
     // Its earliest start also lets intermediate fine layers explain deferral.
     for band in &bundle.plan.sparse_bands {

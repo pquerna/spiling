@@ -16,8 +16,11 @@ pub(crate) enum Event {
     Extrusion(f64, f64), // stationary absolute E, speed
     Deposit([f64; 3], f64, f64),
 }
-fn rank(kind: DepositionKind) -> u8 {
-    match kind {
+fn rank(path: &DepositionPath) -> u8 {
+    if path.owner == Some(DepositionOwner::Wall) {
+        return 2;
+    }
+    match path.kind {
         DepositionKind::Support => 0,
         DepositionKind::SupportInterface => 1,
         DepositionKind::Perimeter => 2,
@@ -44,7 +47,7 @@ fn xy_compare(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
 
 /// Compare only existing vertices in command coordinates. Raw coordinates and
 /// cyclic index break exact projected ties without merging nearby candidates.
-fn perimeter_seam(
+fn wall_seam(
     points: &[[f64; 3]],
     policy: SeamPolicy,
     position: Option<[f64; 3]>,
@@ -102,8 +105,8 @@ pub(crate) fn canonicalize(
     for layer in &mut plan.layers {
         check_cancel(cancel)?;
         layer.paths.sort_unstable_by(|a, b| {
-            rank(a.kind)
-                .cmp(&rank(b.kind))
+            rank(a)
+                .cmp(&rank(b))
                 .then_with(|| a.points_mm[0][0].total_cmp(&b.points_mm[0][0]))
                 .then_with(|| a.points_mm[0][1].total_cmp(&b.points_mm[0][1]))
                 .then_with(|| a.points_mm.len().cmp(&b.points_mm.len()))
@@ -122,17 +125,16 @@ pub(crate) fn canonicalize(
         for path in &mut layer.paths {
             check_cancel(cancel)?;
             let n = path.points_mm.len();
-            if path.kind == DepositionKind::Perimeter && path.points_mm[0] == path.points_mm[n - 1]
+            if path.owner == Some(DepositionOwner::Wall)
+                && path.points_mm[0] == path.points_mm[n - 1]
             {
-                let seam = perimeter_seam(
+                let seam = wall_seam(
                     &path.points_mm,
                     intent.recipe.seam_policy,
                     position.map(project_xyz6_point_mm).transpose()?,
                     cancel,
                 )?;
-                let _ = path.points_mm.pop();
-                path.points_mm.rotate_left(seam);
-                path.points_mm.push(path.points_mm[0]);
+                path.rotate_closed(seam)?;
             } else if let Some(from) = position {
                 if path.points_mm[0] == path.points_mm[n - 1] {
                     let mut seam = 0;
@@ -142,17 +144,10 @@ pub(crate) fn canonicalize(
                             seam = i;
                         }
                     }
-                    let _ = path.points_mm.pop();
-                    path.points_mm.rotate_left(seam);
-                    path.points_mm.push(path.points_mm[0]);
+                    path.rotate_closed(seam)?;
                 } else if distance(from, path.points_mm[n - 1]) < distance(from, path.points_mm[0])
                 {
-                    path.points_mm.reverse();
-                    if let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) =
-                        &mut path.owner
-                    {
-                        *skin_first = !*skin_first;
-                    }
+                    path.reverse();
                 }
             }
             position = path.points_mm.last().copied();
@@ -271,13 +266,31 @@ pub(crate) fn stream(
                 flow *= recipe.process.bridge_flow_factor;
             }
             let height = path.height_mm();
-            let area = ((path.bead_width_mm - height) * height
-                + std::f64::consts::PI * (height * 0.5).powi(2))
-                * flow;
-            for edge in path.points_mm.windows(2) {
+            for edge in path.checked_edges()? {
                 check_cancel(cancel)?;
-                extrusion += distance(edge[0], edge[1]) * area / filament_area;
-                emit(Event::Deposit(edge[1], extrusion, speed))?;
+                let from = project_xyz6_point_mm(edge.points_mm[0])?;
+                let to = project_xyz6_point_mm(edge.points_mm[1])?;
+                let command_length = distance(from, to);
+                if command_length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        &format!(
+                            "deposition edge is below the declared software minimum command length: layer={} kind={:?} source={:?} xyz6={from:?}->{to:?} length_mm={command_length:.17e} minimum_mm={:.17e}",
+                            layer.index,
+                            path.kind,
+                            edge.points_mm,
+                            program_coordinates::MIN_DEPOSITION_COMMAND_MM,
+                        ),
+                    ));
+                }
+                let area = ((edge.width_mm - height) * height
+                    + std::f64::consts::PI * (height * 0.5).powi(2))
+                    * flow;
+                // Constant-section G1 deposits along the actual XYZ6 chord,
+                // not its unrounded source proposal. Otherwise a circular bead
+                // can become wholly sub-circular merely through XY rounding.
+                extrusion += command_length * area / filament_area;
+                emit(Event::Deposit(edge.points_mm[1], extrusion, speed))?;
             }
             position = path.points_mm.last().copied();
         }

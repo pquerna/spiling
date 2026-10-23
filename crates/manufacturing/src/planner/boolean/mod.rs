@@ -4,14 +4,18 @@
 //! Carrier-independent conservative overlay work admission. Coarse safe inputs
 //! allocate nothing; sampled boundary neighborhoods use an explicitly charged
 //! edge sweep, not whole-capsule Cartesian products. No material is changed.
-use super::MAX_BOOLEAN_PAIRS;
+use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS};
 use crate::{check_cancel, error};
 use geo::{MultiPolygon, Polygon};
 use spiling_contracts::manufacturing::{
-    MAX_DEPOSITION_SEGMENTS, ManufacturingError, ManufacturingErrorCode,
+    MAX_MANUFACTURING_RETAINED_BYTES, ManufacturingError, ManufacturingErrorCode,
 };
 use std::sync::atomic::AtomicBool;
 
+mod prepared;
+pub(super) use prepared::{Prepared, Workspace};
+
+#[derive(Clone, Copy)]
 struct EdgeBounds {
     min: [f64; 2],
     max: [f64; 2],
@@ -153,17 +157,79 @@ pub(super) fn budget_polygon_accumulated(
 }
 
 /// Borrowed required-material pieces share the ordinary Boolean admission proof.
-pub(super) fn budget_parts(
+pub(super) fn budget_parts_accumulated(
     parts: &[&Polygon<f64>],
     other: &MultiPolygon<f64>,
+    work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     polygon_budget(
         parts.iter().copied().chain(other.0.iter()),
-        &mut 0,
-        MAX_BOOLEAN_PAIRS,
+        work,
+        256,
         cancel,
     )
+}
+
+#[derive(Clone, Copy)]
+struct Inventory {
+    count: usize,
+    points: usize,
+    min: [f64; 2],
+    max: [f64; 2],
+}
+impl Inventory {
+    fn empty() -> Self {
+        Self {
+            count: 0,
+            points: 0,
+            min: [f64::INFINITY; 2],
+            max: [f64::NEG_INFINITY; 2],
+        }
+    }
+}
+
+fn inspect<'a>(
+    polygons: impl Iterator<Item = &'a Polygon<f64>>,
+    work: &mut usize,
+    cancel: &AtomicBool,
+) -> Result<Inventory, ManufacturingError> {
+    check_cancel(cancel)?;
+    let mut inventory = Inventory::empty();
+    for polygon in polygons {
+        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+            inventory.count = inventory
+                .count
+                .checked_add(ring.0.len().saturating_sub(1))
+                .ok_or_else(|| resource("Boolean boundary count overflow"))?;
+            for point in &ring.0 {
+                check_cancel(cancel)?;
+                charge(work, 1)?;
+                inventory.points = inventory
+                    .points
+                    .checked_add(1)
+                    .ok_or_else(|| resource("Boolean point count overflow"))?;
+                if !point.x.is_finite() || !point.y.is_finite() {
+                    return Err(error(
+                        ManufacturingErrorCode::UnsupportedGeometry,
+                        "Boolean boundary is nonfinite",
+                    ));
+                }
+                for (axis, value) in [point.x, point.y].into_iter().enumerate() {
+                    inventory.min[axis] = inventory.min[axis].min(value);
+                    inventory.max[axis] = inventory.max[axis].max(value);
+                }
+            }
+        }
+    }
+    Ok(inventory)
+}
+
+fn sort_work(count: usize) -> Result<usize, ManufacturingError> {
+    let levels = usize::BITS as usize - count.leading_zeros() as usize;
+    count
+        .checked_mul(6 * levels + 8)
+        .ok_or_else(|| resource("Boolean broad-phase sort work overflow"))
 }
 
 fn polygon_budget<'a>(
@@ -172,31 +238,9 @@ fn polygon_budget<'a>(
     coarse_pair_limit: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
-    check_cancel(cancel)?;
-    let mut count = 0usize;
-    let mut min = [f64::INFINITY; 2];
-    let mut max = [f64::NEG_INFINITY; 2];
-    for polygon in polygons.clone() {
-        for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
-            count = count
-                .checked_add(ring.0.len().saturating_sub(1))
-                .ok_or_else(|| resource("Boolean boundary count overflow"))?;
-            for point in &ring.0 {
-                check_cancel(cancel)?;
-                charge(work, 1)?;
-                if !point.x.is_finite() || !point.y.is_finite() {
-                    return Err(error(
-                        ManufacturingErrorCode::UnsupportedGeometry,
-                        "Boolean boundary is nonfinite",
-                    ));
-                }
-                for (axis, v) in [point.x, point.y].into_iter().enumerate() {
-                    min[axis] = min[axis].min(v);
-                    max[axis] = max[axis].max(v);
-                }
-            }
-        }
-    }
+    let Inventory {
+        count, min, max, ..
+    } = inspect(polygons.clone(), work, cancel)?;
     if count == 0 {
         return Ok(());
     }
@@ -210,7 +254,7 @@ fn polygon_budget<'a>(
         charge(work, pairs)?;
         return Ok(()); // Every unordered candidate is covered by this coarse bound.
     }
-    if count > MAX_DEPOSITION_SEGMENTS as usize {
+    if count > MAX_RETAINED_GEOMETRY_UNITS {
         return Err(resource("Boolean broad-phase staging point limit exceeded"));
     }
     // Two bounded scratch arrays only: edge bounds and active indices. Their
@@ -219,11 +263,9 @@ fn polygon_budget<'a>(
     // charged operations per level plus extraction, with generous linear slack.
     count
         .checked_mul(std::mem::size_of::<EdgeBounds>() + std::mem::size_of::<usize>())
-        .ok_or_else(|| resource("Boolean broad-phase scratch byte overflow"))?;
-    let levels = usize::BITS as usize - count.leading_zeros() as usize;
-    let sort_bound = count
-        .checked_mul(6 * levels + 8)
-        .ok_or_else(|| resource("Boolean broad-phase sort work overflow"))?;
+        .filter(|bytes| *bytes <= MAX_MANUFACTURING_RETAINED_BYTES as usize)
+        .ok_or_else(|| resource("Boolean broad-phase scratch byte limit exceeded"))?;
+    let sort_bound = sort_work(count)?;
     if work
         .checked_add(sort_bound)
         .is_none_or(|v| v > MAX_BOOLEAN_PAIRS)
@@ -315,10 +357,21 @@ mod tests {
                     )))
                     .collect(),
             );
+            // Exercise a real remaining-work boundary, not an incidental
+            // historical global ceiling. Leave enough for preparation; dense
+            // intra-operand pairs must still exhaust the cumulative allowance.
+            let edges: usize = dense.0.iter().map(|p| p.exterior().0.len() - 1).sum();
+            let allowance = (edges * edges / 4).min(MAX_BOOLEAN_PAIRS / 2);
+            let mut work = MAX_BOOLEAN_PAIRS - allowance;
             assert_eq!(
-                budget(&dense, &MultiPolygon(Vec::new()), &AtomicBool::new(false))
-                    .unwrap_err()
-                    .code,
+                budget_accumulated(
+                    &dense,
+                    &MultiPolygon(Vec::new()),
+                    &mut work,
+                    &AtomicBool::new(false)
+                )
+                .unwrap_err()
+                .code,
                 ManufacturingErrorCode::ResourceLimit
             );
             assert_eq!(

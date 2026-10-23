@@ -116,6 +116,186 @@ impl SkinBridgeDomain {
         Ok(())
     }
 }
+
+/// One minimum-command realization of a complete original mandatory-skin row.
+/// The fitted stroke does not redefine the classified mandatory domain.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkinCommandFit {
+    pub required_mm: [[f64; 3]; 2],
+    pub fitted_mm: [[f64; 3]; 2],
+}
+impl SkinCommandFit {
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if self
+            .required_mm
+            .iter()
+            .chain(&self.fitted_mm)
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return Err(invalid("skin command fitting requires finite coordinates"));
+        }
+        let along = if self.required_mm[0][0] == self.required_mm[1][0]
+            && self.required_mm[0][1] != self.required_mm[1][1]
+        {
+            1
+        } else if self.required_mm[0][1] == self.required_mm[1][1]
+            && self.required_mm[0][0] != self.required_mm[1][0]
+        {
+            0
+        } else {
+            return Err(invalid("skin command fitting requires one straight XY row"));
+        };
+        let fixed = 1 - along;
+        if self.required_mm[0][2] != self.required_mm[1][2]
+            || self.fitted_mm.iter().any(|point| {
+                point[fixed] != self.required_mm[0][fixed] || point[2] != self.required_mm[0][2]
+            })
+        {
+            return Err(invalid("skin command fitting changes its row or height"));
+        }
+        let required = [
+            self.required_mm[0][along].min(self.required_mm[1][along]),
+            self.required_mm[0][along].max(self.required_mm[1][along]),
+        ];
+        let fitted = [
+            self.fitted_mm[0][along].min(self.fitted_mm[1][along]),
+            self.fitted_mm[0][along].max(self.fitted_mm[1][along]),
+        ];
+        if fitted[0] > required[0]
+            || fitted[1] < required[1]
+            || fitted == required
+            || (self.required_mm[0][along] < self.required_mm[1][along])
+                != (self.fitted_mm[0][along] < self.fitted_mm[1][along])
+        {
+            return Err(invalid(
+                "skin command fitting must retain its complete directed requirement",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Captured source/process ownership for minimum-length skin construction.
+/// This is separate from mixed-Bridge and permanent-interface authority.
+/// Decoding charges every nested retained capacity to one plan-wide allowance.
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SkinCommandFitDomain {
+    pub region_index: u16,
+    pub region: ProcessRegionCoverage,
+    pub skin: ProcessSkinKind,
+    pub regional: Vec<DiaphragmPolygonMm>,
+    pub mandatory: Vec<DiaphragmPolygonMm>,
+    pub source_owner: Vec<DiaphragmPolygonMm>,
+    pub fits: Vec<SkinCommandFit>,
+}
+impl<'de> Deserialize<'de> for SkinCommandFitDomain {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::DeserializeSeed;
+        super::skin_fit_decode::SkinCommandFitDomainSeed(&mut SegmentBudget::new()).deserialize(d)
+    }
+}
+impl SkinCommandFitDomain {
+    pub fn allocated_bytes(&self) -> usize {
+        self.fits.capacity() * std::mem::size_of::<SkinCommandFit>()
+            + self.region.contributions.capacity()
+                * std::mem::size_of::<ProcessRegionContribution>()
+            + self
+                .region
+                .contributions
+                .iter()
+                .map(|source| source.definition_id.allocated_bytes())
+                .sum::<usize>()
+            + [&self.regional, &self.mandatory, &self.source_owner]
+                .into_iter()
+                .map(|domain| {
+                    domain.capacity() * std::mem::size_of::<DiaphragmPolygonMm>()
+                        + domain
+                            .iter()
+                            .map(|polygon| {
+                                polygon.outer.capacity() * std::mem::size_of::<[f64; 2]>()
+                                    + polygon.holes.capacity()
+                                        * std::mem::size_of::<Vec<[f64; 2]>>()
+                                    + polygon
+                                        .holes
+                                        .iter()
+                                        .map(|ring| {
+                                            ring.capacity() * std::mem::size_of::<[f64; 2]>()
+                                        })
+                                        .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+    pub fn validate(&self) -> Result<(), ManufacturingError> {
+        if !self.region.area_mm2.is_finite()
+            || self.region.area_mm2 <= 0.0
+            || !self.region.fraction.is_finite()
+            || self.region.fraction <= 0.0
+            || self.region.fraction > 1.0
+            || self.region.contributions.is_empty()
+            || self.region.contributions.len() > MAX_PROCESS_REGION_CONTRIBUTIONS
+        {
+            return Err(invalid(
+                "skin command fitting requires captured effective region ownership",
+            ));
+        }
+        if self.fits.is_empty() || self.fits.len() > MAX_DEPOSITION_SEGMENTS as usize {
+            return Err(invalid(
+                "skin command fitting requires bounded actual witnesses",
+            ));
+        }
+        let mut points = 0usize;
+        for domain in [&self.regional, &self.mandatory, &self.source_owner] {
+            if domain.is_empty() || domain.len() > MAX_PROCESS_REGIONS {
+                return Err(invalid(
+                    "skin command fitting requires classified and source-owner domains",
+                ));
+            }
+            for polygon in domain {
+                for ring in std::iter::once(&polygon.outer).chain(&polygon.holes) {
+                    points = points
+                        .checked_add(ring.len())
+                        .ok_or_else(|| resource("skin command fitting point overflow"))?;
+                    if points > MAX_DEPOSITION_SEGMENTS as usize {
+                        return Err(resource("skin command fitting domain point limit exceeded"));
+                    }
+                    if ring.len() < 4
+                        || ring.first() != ring.last()
+                        || ring.iter().flatten().any(|value| !value.is_finite())
+                    {
+                        return Err(invalid(
+                            "skin command fitting requires finite closed domains",
+                        ));
+                    }
+                }
+            }
+        }
+        for fit in &self.fits {
+            fit.validate()?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn skin_command_fits<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<SkinCommandFitDomain>, D::Error> {
+    use serde::de::DeserializeSeed;
+    SkinCommandFitDomainsSeed(&mut SegmentBudget::new()).deserialize(d)
+}
+
+pub(super) struct SkinCommandFitDomainsSeed<'a>(pub(super) &'a mut SegmentBudget);
+impl<'de> serde::de::DeserializeSeed<'de> for SkinCommandFitDomainsSeed<'_> {
+    type Value = Vec<SkinCommandFitDomain>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        super::skin_fit_decode::domains(self.0, d)
+    }
+}
+
 impl ProcessDiaphragmCoverage {
     pub fn allocated_bytes(&self) -> usize {
         self.definition_id.allocated_bytes()

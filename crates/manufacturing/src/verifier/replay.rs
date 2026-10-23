@@ -142,6 +142,7 @@ impl ReplaySink {
                 let owner = match association.owner {
                     None => u32::MAX,
                     Some(DepositionOwner::MandatorySkin { .. }) => u32::MAX - 1,
+                    Some(DepositionOwner::Wall) => u32::MAX - 2,
                     Some(DepositionOwner::Regional { region_index }) => u32::from(region_index),
                     Some(DepositionOwner::RegionalSkinBridge { .. }) => {
                         return Err(super::failed(

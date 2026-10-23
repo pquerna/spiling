@@ -5,8 +5,10 @@ use super::anchors::AnchorGap;
 use super::{AnchorCandidate, AnchorWorkspace};
 use crate::check_cancel;
 use crate::planner::OFFSET_TOLERANCE_MM;
+#[cfg(test)]
+use spiling_contracts::manufacturing::WidthProfile;
 use spiling_contracts::manufacturing::{
-    DepositionKind, DepositionPath, ManufacturingError, PlanarPrintRecipe,
+    DepositionEdges, DepositionKind, DepositionPath, ManufacturingError, PlanarPrintRecipe,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -45,6 +47,7 @@ pub(in crate::planner) struct Failure {
     pub(in crate::planner) path: usize,
     pub(in crate::planner) first: usize,
     pub(in crate::planner) last: usize,
+    pub(in crate::planner) width_mm: f64,
     pub(in crate::planner) start: f64,
     pub(in crate::planner) end: f64,
     pub(in crate::planner) span: f64,
@@ -70,7 +73,7 @@ pub(in crate::planner) fn analyze<'a>(
     for (path_index, path) in paths.iter().enumerate() {
         check_cancel(cancel)?;
         let mut has_bridge = false;
-        for (first, last) in StrokeRuns::new(&path.points_mm) {
+        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
             let a = path.points_mm[first];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
@@ -79,10 +82,14 @@ pub(in crate::planner) fn analyze<'a>(
             for gap in anchors.gaps(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
-                    bead_width_mm: path.bead_width_mm,
+                    bead_width_mm: width_mm,
                 },
-                previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
-                contacts.clone().filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
+                previous
+                    .clone()
+                    .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                contacts
+                    .clone()
+                    .filter(|lower| lower.physical_z_mm[1] <= path.physical_z_mm[0]),
                 work,
                 cancel,
             )? {
@@ -91,12 +98,7 @@ pub(in crate::planner) fn analyze<'a>(
                 let span = (end - start) * length;
                 if path.kind == DepositionKind::SeparatorWall
                     && !matches!(
-                        gap_kind(
-                            gap,
-                            span,
-                            path.bead_width_mm,
-                            recipe.process.max_bridge_span_mm
-                        ),
+                        gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
                         GapKind::Supported
                     )
                 {
@@ -105,12 +107,7 @@ pub(in crate::planner) fn analyze<'a>(
                         "UnsupportedInterface: permanent separator needs actual lower strokes; Bridge/support substitution is not authorized",
                     ));
                 }
-                match gap_kind(
-                    gap,
-                    span,
-                    path.bead_width_mm,
-                    recipe.process.max_bridge_span_mm,
-                ) {
+                match gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm) {
                     GapKind::Supported => {}
                     // Preserve eligible contact provenance. Only a consumed,
                     // explicitly constructed Bridge uses bridge process here;
@@ -124,6 +121,7 @@ pub(in crate::planner) fn analyze<'a>(
                                 path: path_index,
                                 first,
                                 last,
+                                width_mm,
                                 start,
                                 end,
                                 span,
@@ -148,35 +146,45 @@ pub(in crate::planner) fn analyze<'a>(
 /// in the two-product cross product admits collinearity; curved edges stay distinct.
 pub(crate) struct StrokeRuns<'a> {
     points: &'a [[f64; 3]],
+    widths: DepositionEdges<'a>,
     closed: bool,
     seam: usize,
     consumed: usize,
     segments: usize,
 }
 impl<'a> StrokeRuns<'a> {
-    pub(crate) fn new(points: &'a [[f64; 3]]) -> Self {
-        let segments = points.len().saturating_sub(1);
-        let closed = segments > 1 && points.first() == points.last();
-        let seam = if closed {
-            (0..segments)
-                .find(|&i| {
-                    !straight(
-                        points[(i + segments - 1) % segments],
-                        points[i],
-                        points[(i + 1) % segments],
-                    )
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        Self {
+    pub(crate) fn for_path(path: &'a DepositionPath) -> Result<Self, ManufacturingError> {
+        let widths = path.checked_edges()?;
+        let points = &path.points_mm;
+        let segments = widths.len();
+        let mut result = Self {
             points,
-            closed,
-            seam,
-            consumed: 0,
+            widths,
             segments,
+            closed: segments > 1 && points.first() == points.last(),
+            seam: 0,
+            consumed: 0,
+        };
+        if result.closed {
+            result.seam = (0..result.segments)
+                .find(|&i| {
+                    let previous = (i + result.segments - 1) % result.segments;
+                    result.width(previous) != result.width(i)
+                        || !straight(
+                            result.points[previous],
+                            result.points[i],
+                            result.points[(i + 1) % result.segments],
+                        )
+                })
+                .unwrap_or(0);
         }
+        Ok(result)
+    }
+    fn width(&self, edge: usize) -> f64 {
+        self.widths
+            .edge(edge)
+            .expect("stroke run stays within its validated edge view")
+            .width_mm
     }
     fn vertex(&self, offset: usize) -> usize {
         if self.closed {
@@ -187,23 +195,26 @@ impl<'a> StrokeRuns<'a> {
     }
 }
 impl Iterator for StrokeRuns<'_> {
-    type Item = (usize, usize);
+    type Item = (usize, usize, f64);
     fn next(&mut self) -> Option<Self::Item> {
         if self.consumed == self.segments {
             return None;
         }
         let first = self.vertex(self.consumed);
+        let width_mm = self.width(first);
         self.consumed += 1;
         let mut last = self.vertex(self.consumed);
         while self.consumed < self.segments {
             let next = self.vertex(self.consumed + 1);
-            if !straight(self.points[first], self.points[last], self.points[next]) {
+            if self.width(last) != width_mm
+                || !straight(self.points[first], self.points[last], self.points[next])
+            {
                 break;
             }
             self.consumed += 1;
             last = next;
         }
-        Some((first, last))
+        Some((first, last, width_mm))
     }
 }
 fn straight(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> bool {
@@ -230,20 +241,27 @@ mod tests {
             [20.0, 0.3, 8.4],
             [21.0, 0.3, 8.4],
         ];
-        let runs: Vec<_> = StrokeRuns::new(&points).collect();
-        assert_eq!(runs, [(2, 3), (3, 4), (4, 5), (5, 2)]);
+        let path = DepositionPath {
+            kind: DepositionKind::Perimeter,
+            owner: Some(spiling_contracts::manufacturing::DepositionOwner::Wall),
+            width: WidthProfile::Constant { width_mm: 0.6 },
+            physical_z_mm: [8.0, 8.4],
+            points_mm: points.to_vec(),
+        };
+        let runs: Vec<_> = StrokeRuns::for_path(&path).unwrap().collect();
+        assert_eq!(runs, [(2, 3, 0.6), (3, 4, 0.6), (4, 5, 0.6), (5, 2, 0.6)]);
         assert_eq!(points.first(), points.last());
         let anchors = [
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
-                bead_width_mm: 0.6,
+                width: WidthProfile::Constant { width_mm: 0.6 },
                 physical_z_mm: [7.6, 8.0],
                 owner: None,
                 points_mm: vec![[0.3, 0.3, 8.0], [19.7, 0.3, 8.0]],
             },
             DepositionPath {
                 kind: spiling_contracts::manufacturing::DepositionKind::SolidFill,
-                bead_width_mm: 0.6,
+                width: WidthProfile::Constant { width_mm: 0.6 },
                 physical_z_mm: [7.6, 8.0],
                 owner: None,
                 points_mm: vec![[23.3, 0.3, 8.0], [42.7, 0.3, 8.0]],
@@ -270,9 +288,16 @@ mod tests {
     #[test]
     fn curved_strokes_are_not_flattened_by_native_sample_aggregation() {
         let points = [[0.0, 0.0, 0.4], [1.0, 0.001, 0.4], [2.0, 0.0, 0.4]];
+        let path = DepositionPath {
+            kind: DepositionKind::Perimeter,
+            owner: Some(spiling_contracts::manufacturing::DepositionOwner::Wall),
+            width: WidthProfile::Constant { width_mm: 0.6 },
+            physical_z_mm: [0.0, 0.4],
+            points_mm: points.to_vec(),
+        };
         assert_eq!(
-            StrokeRuns::new(&points).collect::<Vec<_>>(),
-            [(0, 1), (1, 2)]
+            StrokeRuns::for_path(&path).unwrap().collect::<Vec<_>>(),
+            [(0, 1, 0.6), (1, 2, 0.6)]
         );
     }
 
@@ -319,14 +344,14 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
-            bead_width_mm: 0.5,
+            width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
         });
         let path = DepositionPath {
             kind: DepositionKind::TopSkin,
-            bead_width_mm: 0.5,
+            width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.4, 0.8],
             owner: Some(
                 spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
@@ -403,7 +428,7 @@ mod tests {
         use spiling_contracts::manufacturing::DepositionKind;
         let previous = [0.0, 2.0].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
-            bead_width_mm: 0.5,
+            width: WidthProfile::Constant { width_mm: 0.5 },
             physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -2.0, 0.4], [x, 2.0, 0.4]],
@@ -416,7 +441,7 @@ mod tests {
         for (a, b) in [(0.5, 1.5), (0.51, 1.49)] {
             let path = DepositionPath {
                 kind: DepositionKind::TopSkin,
-                bead_width_mm: 0.5,
+                width: WidthProfile::Constant { width_mm: 0.5 },
                 physical_z_mm: [0.4, 0.8],
                 owner: Some(
                     spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
@@ -467,36 +492,64 @@ mod dimension_tests {
         recipe.bead_width_mm = 0.8;
         let path = DepositionPath {
             kind: DepositionKind::SparseFill,
-            owner: None,
-            bead_width_mm: 0.2,
-            physical_z_mm: [0.4, 0.7],
-            points_mm: vec![[0.0, 0.0, 0.7], [0.4, 0.0, 0.7]],
+            owner: Some(
+                spiling_contracts::manufacturing::DepositionOwner::Regional { region_index: 0 },
+            ),
+            width: WidthProfile::Constant { width_mm: 0.2 },
+            physical_z_mm: [0.4, 0.5],
+            points_mm: vec![[0.0, 0.0, 0.5], [0.4, 0.0, 0.5]],
         };
         let mut lower = DepositionPath {
             kind: DepositionKind::SparseFill,
-            owner: None,
-            bead_width_mm: 0.2,
-            physical_z_mm: [0.0, 0.4],
+            owner: Some(
+                spiling_contracts::manufacturing::DepositionOwner::Regional { region_index: 0 },
+            ),
+            width: WidthProfile::Constant { width_mm: 0.2 },
+            physical_z_mm: [0.3, 0.4],
             points_mm: vec![[0.0, -1.0, 0.4], [0.0, 1.0, 0.4]],
         };
         let mut anchors = AnchorWorkspace::default();
         let first = analyze(
-            std::slice::from_ref(&path), std::iter::once(&lower),
-            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
-        ).unwrap();
-        assert!(first.failure.is_some(), "recipe width must not authorize a narrower stroke's overhang");
-        lower.bead_width_mm = 1.0;
+            std::slice::from_ref(&path),
+            std::iter::once(&lower),
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            first.failure.is_some(),
+            "recipe width must not authorize a narrower stroke's overhang"
+        );
+        lower.width = WidthProfile::Constant { width_mm: 1.0 };
         let adjacent = analyze(
-            std::slice::from_ref(&path), std::iter::once(&lower),
-            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
-        ).unwrap();
+            std::slice::from_ref(&path),
+            std::iter::once(&lower),
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
         assert!(adjacent.failure.is_none());
-        lower.physical_z_mm = [0.0, 0.3];
+        lower.physical_z_mm = [0.2, 0.3];
         lower.points_mm.iter_mut().for_each(|point| point[2] = 0.3);
         let separated = analyze(
-            std::slice::from_ref(&path), std::iter::once(&lower),
-            std::iter::empty(), &recipe, &mut anchors, &mut 0, &cancel,
-        ).unwrap();
-        assert!(separated.failure.is_some(), "a nonadjacent previous capsule is not a direct anchor");
+            std::slice::from_ref(&path),
+            std::iter::once(&lower),
+            std::iter::empty(),
+            &recipe,
+            &mut anchors,
+            &mut 0,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            separated.failure.is_some(),
+            "a nonadjacent previous capsule is not a direct anchor"
+        );
     }
 }

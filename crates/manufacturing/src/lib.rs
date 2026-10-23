@@ -19,10 +19,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds demand-rooted mixed regional/mandatory-skin Bridge construction.
-pub const PLANNER_VERSION: &str = "16";
-pub const EMITTER_VERSION: &str = "6";
-pub const VERIFIER_VERSION: &str = "8";
+/// Binds automatic source-associated walls, finite counts and residual ownership.
+pub const PLANNER_VERSION: &str = "17";
+pub const EMITTER_VERSION: &str = "7";
+pub const VERIFIER_VERSION: &str = "9";
 
 pub struct CompilerInput<'a> {
     pub project_id: &'a ProjectId,

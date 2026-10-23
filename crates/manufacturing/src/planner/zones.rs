@@ -19,8 +19,8 @@ use spiling_contracts::{
 };
 use std::sync::atomic::AtomicBool;
 
-mod partition;
 pub(super) mod diaphragm;
+mod partition;
 
 fn owner_points(owner: &InteriorRegion) -> usize {
     region::point_count(&owner.domain)
@@ -33,6 +33,28 @@ fn owner_points(owner: &InteriorRegion) -> usize {
                 .map(|c| c.definition_id.allocated_bytes())
                 .sum::<usize>())
         .div_ceil(std::mem::size_of::<geo::Coord<f64>>())
+}
+
+fn owner_bytes(owner: &mut InteriorRegion) -> usize {
+    super::native::material_bytes(&mut owner.domain)
+        + classification::process_coverage_bytes(&owner.coverage)
+}
+
+fn partition_bytes(
+    classified: &mut ClassifiedRegions,
+    pending: &mut [InteriorRegion],
+    next: &mut Vec<InteriorRegion>,
+    old_records: usize,
+) -> Result<usize, ManufacturingError> {
+    let mut bytes = classification::byte_sum(classified.retained_bytes(), old_records)?;
+    bytes = classification::byte_sum(
+        bytes,
+        next.capacity() * std::mem::size_of::<InteriorRegion>(),
+    )?;
+    for owner in pending.iter_mut().chain(next.iter_mut()) {
+        bytes = classification::byte_sum(bytes, owner_bytes(owner))?;
+    }
+    Ok(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -54,12 +76,20 @@ pub(super) struct Zone {
 }
 impl Zone {
     pub(super) fn z_events(self) -> [f64; 3] {
-        self.diaphragm.map_or([self.coordinate; 3], |plate| [
-            plate.physical_z_mm[0], self.coordinate, plate.physical_z_mm[1],
-        ])
+        self.diaphragm.map_or([self.coordinate; 3], |plate| {
+            [
+                plate.physical_z_mm[0],
+                self.coordinate,
+                plate.physical_z_mm[1],
+            ]
+        })
     }
     pub(super) fn is_z_invariant(self, lower: f64, upper: f64) -> bool {
-        self.axis != 2 || self.z_events().into_iter().all(|event| event <= lower || event >= upper)
+        self.axis != 2
+            || self
+                .z_events()
+                .into_iter()
+                .all(|event| event <= lower || event >= upper)
     }
 }
 
@@ -297,13 +327,23 @@ pub(super) fn capture(
                 "SourceBoxMm must expose exactly one internal X/Y/Z boundary",
             ));
         };
-        let axis = if local_axis == 2 { 2 } else { usize::from(basis[local_axis][1] != 0.) };
+        let axis = if local_axis == 2 {
+            2
+        } else {
+            usize::from(basis[local_axis][1] != 0.)
+        };
         let mut point = std::array::from_fn(|a| local.min[a] + (local.max[a] - local.min[a]) * 0.5);
         point[local_axis] = plane;
         let coordinate = forward(&occurrence.pose, point)[axis];
-        if selected.is_some_and(|prior: (usize, f64, ProcessProvenance, Option<ProcessInterfacePermission>, f64)| {
-            prior.0 != axis || prior.1 != coordinate
-        }) {
+        if selected.is_some_and(
+            |prior: (
+                usize,
+                f64,
+                ProcessProvenance,
+                Option<ProcessInterfacePermission>,
+                f64,
+            )| { prior.0 != axis || prior.1 != coordinate },
+        ) {
             return Err(invalid(
                 "multiple distinct box interfaces are not supported in one occurrence",
             ));
@@ -341,10 +381,8 @@ pub(super) fn capture(
                         .find(|o| o.operation_id == p.operation_id)
                 })
                 .and_then(|o| {
-                    matches!(o.selector, ProcessSelector::SourceBoxMm { .. }).then_some((
-                        p,
-                        o.interface,
-                    ))
+                    matches!(o.selector, ProcessSelector::SourceBoxMm { .. })
+                        .then_some((p, o.interface))
                 })
         })
     });
@@ -356,21 +394,44 @@ pub(super) fn capture(
             "multiple effective box contributors require unsupported interface composition",
         ));
     }
-    let permission = winners.iter().flatten().next().and_then(|(_, permission)| *permission);
+    let permission = winners
+        .iter()
+        .flatten()
+        .next()
+        .and_then(|(_, permission)| *permission);
     let diaphragm = match (axis, permission) {
         (2, Some(ProcessInterfacePermission::HorizontalDiaphragm { thickness_mm })) => {
-            let endpoints = [source_plane - thickness_mm * 0.5, source_plane + thickness_mm * 0.5]
-                .map(|z| forward(&occurrence.pose, [0., 0., z])[2]);
-            let physical_z_mm = [endpoints[0].min(endpoints[1]), endpoints[0].max(endpoints[1])];
-            if !physical_z_mm.iter().all(|z| z.is_finite()) || physical_z_mm[0] >= physical_z_mm[1] {
-                return Err(invalid("UnsupportedInterface: diaphragm endpoints are not distinct finite world heights"));
+            let endpoints = [
+                source_plane - thickness_mm * 0.5,
+                source_plane + thickness_mm * 0.5,
+            ]
+            .map(|z| forward(&occurrence.pose, [0., 0., z])[2]);
+            let physical_z_mm = [
+                endpoints[0].min(endpoints[1]),
+                endpoints[0].max(endpoints[1]),
+            ];
+            if !physical_z_mm.iter().all(|z| z.is_finite()) || physical_z_mm[0] >= physical_z_mm[1]
+            {
+                return Err(invalid(
+                    "UnsupportedInterface: diaphragm endpoints are not distinct finite world heights",
+                ));
             }
-            Some(Diaphragm { source_plane_mm: source_plane, thickness_mm, physical_z_mm })
+            Some(Diaphragm {
+                source_plane_mm: source_plane,
+                thickness_mm,
+                physical_z_mm,
+            })
         }
         (2, None) if values[0].fraction == values[1].fraction => None,
-        (2, _) => return Err(invalid("UnsupportedInterface: Z density boundary requires explicit HorizontalDiaphragm thickness permission")),
+        (2, _) => {
+            return Err(invalid(
+                "UnsupportedInterface: Z density boundary requires explicit HorizontalDiaphragm thickness permission",
+            ));
+        }
         (_, Some(ProcessInterfacePermission::HorizontalDiaphragm { .. })) => {
-            return Err(invalid("UnsupportedInterface: horizontal diaphragm permission requires a source-Z interface"));
+            return Err(invalid(
+                "UnsupportedInterface: horizontal diaphragm permission requires a source-Z interface",
+            ));
         }
         _ => None,
     };
@@ -404,7 +465,7 @@ pub(super) fn partition(
     mut classified: ClassifiedRegions,
     domains: &[super::ProcessDomain],
     recipe: &PlanarPrintRecipe,
-    mut admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
+    mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<ClassifiedRegions, ManufacturingError> {
@@ -417,13 +478,17 @@ pub(super) fn partition(
             continue;
         }
         if zone.values[0].fraction == zone.values[1].fraction {
-            for owner in &classified.interiors {
-                admit(region::point_count(&owner.domain).saturating_mul(4))?;
-                let eligible = classification::intersection_accumulated(
-                    &owner.domain,
+            for index in 0..classified.interiors.len() {
+                let mut eligible = classification::intersection_accumulated(
+                    &classified.interiors[index].domain,
                     &source.material,
                     work,
                     cancel,
+                )?;
+                let eligible_bytes = super::native::material_bytes(&mut eligible);
+                admit(
+                    classified.retained_points() + region::point_count(&eligible),
+                    classification::byte_sum(classified.retained_bytes(), eligible_bytes)?,
                 )?;
                 let Some(bounds) = eligible.bounding_rect() else {
                     continue;
@@ -443,7 +508,16 @@ pub(super) fn partition(
                 if min[zone.axis] >= max[zone.axis] {
                     continue;
                 }
-                let mask = MultiPolygon(vec![
+                let mask_bound = std::mem::size_of::<geo::Polygon<f64>>()
+                    + 5 * std::mem::size_of::<geo::Coord<f64>>();
+                admit(
+                    classified.retained_points() + region::point_count(&eligible) + 5,
+                    classification::byte_sum(
+                        classified.retained_bytes(),
+                        classification::byte_sum(eligible_bytes, mask_bound)?,
+                    )?,
+                )?;
+                let mut mask = MultiPolygon(vec![
                     Rect::new(
                         geo::Coord {
                             x: min[0],
@@ -456,10 +530,42 @@ pub(super) fn partition(
                     )
                     .to_polygon(),
                 ]);
-                if !classification::intersection_accumulated(&eligible, &mask, work, cancel)?
-                    .0
-                    .is_empty()
-                {
+                let mask_bytes = super::native::material_bytes(&mut mask);
+                let mut selected =
+                    classification::intersection_accumulated(&eligible, &mask, work, cancel)?;
+                let selected_bytes = super::native::material_bytes(&mut selected);
+                admit(
+                    classified.retained_points()
+                        + region::point_count(&eligible)
+                        + region::point_count(&mask)
+                        + region::point_count(&selected),
+                    classification::byte_sum(
+                        classified.retained_bytes(),
+                        classification::byte_sum(
+                            eligible_bytes,
+                            classification::byte_sum(mask_bytes, selected_bytes)?,
+                        )?,
+                    )?,
+                )?;
+                if !selected.0.is_empty() {
+                    let extra = std::mem::size_of::<(OccurrenceId, ProcessProvenance)>();
+                    admit(
+                        classified.retained_points()
+                            + region::point_count(&eligible)
+                            + region::point_count(&mask)
+                            + region::point_count(&selected),
+                        classification::byte_sum(
+                            classified.retained_bytes(),
+                            classification::byte_sum(
+                                eligible_bytes,
+                                classification::byte_sum(
+                                    mask_bytes,
+                                    classification::byte_sum(selected_bytes, extra)?,
+                                )?,
+                            )?,
+                        )?,
+                    )?;
+                    classified.applied_operations.reserve_exact(1);
                     classified.applied_operations.push((
                         source.coverage.contributions[0].occurrence_id,
                         zone.provenance,
@@ -473,7 +579,7 @@ pub(super) fn partition(
         let old_records = old.capacity() * std::mem::size_of::<InteriorRegion>();
         let mut owners = old.into_iter();
         let mut next: Vec<InteriorRegion> = Vec::new();
-        while let Some(owner) = owners.next() {
+        while let Some(mut owner) = owners.next() {
             crate::check_cancel(cancel)?;
             let original_points = region::point_count(&owner.domain);
             let other_points = classified.retained_points()
@@ -481,6 +587,13 @@ pub(super) fn partition(
                 + next.iter().map(owner_points).sum::<usize>()
                 + (old_records + next.capacity() * std::mem::size_of::<InteriorRegion>())
                     .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+            let live_bytes = partition_bytes(
+                &mut classified,
+                owners.as_mut_slice(),
+                &mut next,
+                old_records,
+            )?;
+            let original_bytes = owner_bytes(&mut owner);
             admit(
                 other_points
                     .checked_add(
@@ -489,9 +602,57 @@ pub(super) fn partition(
                             .ok_or_else(|| invalid("zone point bound overflow"))?,
                     )
                     .ok_or_else(|| invalid("zone live point bound overflow"))?,
+                classification::byte_sum(live_bytes, original_bytes)?,
             )?;
-            let (eligible, outside, _) =
-                classification::split_process_region(owner.domain, &source.material, work, cancel)?;
+            let outside_owner_bytes = classification::byte_sum(
+                live_bytes,
+                classification::process_coverage_bytes(&owner.coverage),
+            )?;
+            let (mut eligible, mut outside, _) = classification::split_process_region(
+                owner.domain,
+                &source.material,
+                |units, bytes| {
+                    admit(
+                        other_points
+                            .checked_add(units)
+                            .ok_or_else(|| invalid("zone split units overflow"))?,
+                        classification::byte_sum(outside_owner_bytes, bytes)?,
+                    )
+                },
+                work,
+                cancel,
+            )?;
+            let eligible_bytes = super::native::material_bytes(&mut eligible);
+            let outside_bytes = super::native::material_bytes(&mut outside);
+            // Reserve the maximum three owner records this source cut can add,
+            // and their copied contribution metadata, before publication.
+            let target = classification::record_target(&next, 3);
+            let extra_records = (target - next.capacity()) * std::mem::size_of::<InteriorRegion>();
+            let copies = classification::contribution_clone_bytes(&owner.coverage.contributions)
+                + 2 * classification::contribution_clone_bytes(&source.coverage.contributions);
+            let live_bytes = partition_bytes(
+                &mut classified,
+                owners.as_mut_slice(),
+                &mut next,
+                old_records,
+            )?;
+            admit(
+                other_points + region::point_count(&eligible) + region::point_count(&outside),
+                classification::byte_sum(
+                    live_bytes,
+                    classification::byte_sum(
+                        eligible_bytes,
+                        classification::byte_sum(
+                            outside_bytes,
+                            classification::byte_sum(
+                                classification::process_coverage_bytes(&owner.coverage),
+                                classification::byte_sum(extra_records, copies)?,
+                            )?,
+                        )?,
+                    )?,
+                )?,
+            )?;
+            next.reserve_exact(target - next.len());
             if !outside.0.is_empty() {
                 next.push(InteriorRegion {
                     coverage: ProcessRegionCoverage {
@@ -501,8 +662,26 @@ pub(super) fn partition(
                     domain: outside,
                     frame_origin_mm: owner.frame_origin_mm,
                 });
+            } else {
+                drop(outside);
             }
             if eligible.0.is_empty() {
+                let bytes = partition_bytes(
+                    &mut classified,
+                    owners.as_mut_slice(),
+                    &mut next,
+                    old_records,
+                )?;
+                admit(
+                    classified.retained_points() + next.iter().map(owner_points).sum::<usize>(),
+                    classification::byte_sum(
+                        bytes,
+                        classification::byte_sum(
+                            eligible_bytes,
+                            classification::process_coverage_bytes(&owner.coverage),
+                        )?,
+                    )?,
+                )?;
                 continue;
             }
             let bounds = eligible
@@ -524,6 +703,26 @@ pub(super) fn partition(
                 let side = usize::from(c <= low);
                 let value = zone.values[side];
                 if value.provenance == Some(zone.provenance) {
+                    let bytes = partition_bytes(
+                        &mut classified,
+                        owners.as_mut_slice(),
+                        &mut next,
+                        old_records,
+                    )?;
+                    admit(
+                        other_points + region::point_count(&eligible),
+                        classification::byte_sum(
+                            bytes,
+                            classification::byte_sum(
+                                eligible_bytes,
+                                classification::byte_sum(
+                                    classification::process_coverage_bytes(&owner.coverage),
+                                    std::mem::size_of::<(OccurrenceId, ProcessProvenance)>(),
+                                )?,
+                            )?,
+                        )?,
+                    )?;
+                    classified.applied_operations.reserve_exact(1);
                     classified.applied_operations.push((
                         source.coverage.contributions[0].occurrence_id,
                         zone.provenance,
@@ -542,6 +741,19 @@ pub(super) fn partition(
                     domain: eligible,
                     frame_origin_mm: Some(zone.frame_origin_mm),
                 });
+                let bytes = partition_bytes(
+                    &mut classified,
+                    owners.as_mut_slice(),
+                    &mut next,
+                    old_records,
+                )?;
+                admit(
+                    classified.retained_points() + next.iter().map(owner_points).sum::<usize>(),
+                    classification::byte_sum(
+                        bytes,
+                        classification::process_coverage_bytes(&owner.coverage),
+                    )?,
+                )?;
                 continue;
             }
             if !zone.authorized {
@@ -582,27 +794,93 @@ pub(super) fn partition(
                         .map(|c| c.definition_id.allocated_bytes())
                         .sum::<usize>())
                 .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
-            let pieces = partition::split(
+            let borrowed_bytes = classification::byte_sum(
+                partition_bytes(
+                    &mut classified,
+                    owners.as_mut_slice(),
+                    &mut next,
+                    old_records,
+                )?,
+                classification::byte_sum(
+                    eligible_bytes,
+                    classification::process_coverage_bytes(&owner.coverage),
+                )?,
+            )?;
+            let mut pieces = partition::split(
                 &eligible,
                 zone.axis,
                 [c - half, c + half],
-                |scratch| {
+                |scratch, scratch_bytes| {
                     admit(
                         borrowed_points
                             .checked_add(scratch)
                             .ok_or_else(|| invalid("zone partition live storage overflow"))?,
+                        classification::byte_sum(borrowed_bytes, scratch_bytes)?,
                     )
                 },
                 work,
                 cancel,
             )?;
+            let mut pieces_bytes = 0;
+            for piece in &mut pieces {
+                pieces_bytes =
+                    classification::byte_sum(pieces_bytes, super::native::material_bytes(piece))?;
+            }
+            let points = region::point_count(&eligible);
+            let metadata_bytes = points
+                * (std::mem::size_of::<f64>() + std::mem::size_of::<[[f64; 2]; 2]>())
+                + std::mem::size_of::<ProcessInterfaceCoverage>()
+                + std::mem::size_of::<MultiPolygon<f64>>()
+                + std::mem::size_of::<(OccurrenceId, ProcessProvenance)>()
+                + source.coverage.contributions[0]
+                    .definition_id
+                    .allocated_bytes()
+                + 2 * classification::contribution_clone_bytes(&source.coverage.contributions);
+            admit(
+                borrowed_points
+                    + pieces.iter().map(region::point_count).sum::<usize>()
+                    + points * 3,
+                classification::byte_sum(
+                    borrowed_bytes,
+                    classification::byte_sum(pieces_bytes, metadata_bytes)?,
+                )?,
+            )?;
+            classified.coverage.process_interfaces.reserve_exact(1);
+            classified.applied_operations.reserve_exact(1);
             let mut hits = Vec::new();
-            let mut centerlines = Vec::new();
+            let mut centerlines = Vec::with_capacity(points);
             let hatch_axis = if zone.axis == 0 {
                 region::HatchAxis::Y
             } else {
                 region::HatchAxis::X
             };
+            hits.reserve_exact(points);
+            let actual_staging = hits.capacity() * std::mem::size_of::<f64>()
+                + centerlines.capacity() * std::mem::size_of::<[[f64; 2]; 2]>();
+            let bytes = partition_bytes(
+                &mut classified,
+                owners.as_mut_slice(),
+                &mut next,
+                old_records,
+            )?;
+            admit(
+                borrowed_points
+                    + pieces.iter().map(region::point_count).sum::<usize>()
+                    + points * 3,
+                classification::byte_sum(
+                    bytes,
+                    classification::byte_sum(
+                        eligible_bytes,
+                        classification::byte_sum(
+                            pieces_bytes,
+                            classification::byte_sum(
+                                actual_staging,
+                                classification::process_coverage_bytes(&owner.coverage),
+                            )?,
+                        )?,
+                    )?,
+                )?,
+            )?;
             for polygon in &eligible.0 {
                 hits.clear();
                 region::row_intersections(polygon, c, hatch_axis, &mut hits, cancel)?;
@@ -690,7 +968,39 @@ pub(super) fn partition(
                     frame_origin_mm: Some(zone.frame_origin_mm),
                 });
             }
+            let bytes = partition_bytes(
+                &mut classified,
+                owners.as_mut_slice(),
+                &mut next,
+                old_records,
+            )?;
+            admit(
+                classified.retained_points()
+                    + next.iter().map(owner_points).sum::<usize>()
+                    + region::point_count(&eligible)
+                    + hits.capacity(),
+                classification::byte_sum(
+                    bytes,
+                    classification::byte_sum(
+                        eligible_bytes,
+                        classification::byte_sum(
+                            hits.capacity() * std::mem::size_of::<f64>(),
+                            classification::process_coverage_bytes(&owner.coverage),
+                        )?,
+                    )?,
+                )?,
+            )?;
         }
+        let live_bytes = partition_bytes(
+            &mut classified,
+            owners.as_mut_slice(),
+            &mut next,
+            old_records,
+        )?;
+        admit(
+            classified.retained_points() + next.iter().map(owner_points).sum::<usize>(),
+            live_bytes,
+        )?;
         classified.interiors = next;
     }
     if !classified.separator_bands.is_empty() && domains.len() > 1 {
@@ -724,6 +1034,19 @@ pub(super) fn partition(
             }
         }
     }
+    let clone_bytes = classified.interiors.iter().try_fold(
+        classified.interiors.len() * std::mem::size_of::<ProcessRegionCoverage>(),
+        |bytes, owner| {
+            classification::byte_sum(
+                bytes,
+                classification::contribution_clone_bytes(&owner.coverage.contributions),
+            )
+        },
+    )?;
+    admit(
+        classified.retained_points(),
+        classification::byte_sum(classified.retained_bytes(), clone_bytes)?,
+    )?;
     classified.coverage.process_regions = classified
         .interiors
         .iter()
@@ -735,13 +1058,24 @@ pub(super) fn partition(
         .iter()
         .map(|i| i.area_mm2)
         .sum();
-    classified.coverage.diaphragm_area_mm2 = classified.coverage.process_diaphragms.iter().map(|plate| plate.area_mm2).sum();
+    classified.coverage.diaphragm_area_mm2 = classified
+        .coverage
+        .process_diaphragms
+        .iter()
+        .map(|plate| plate.area_mm2)
+        .sum();
     classified.coverage.solid_interior_area_mm2 = classified
         .interiors
         .iter()
         .enumerate()
-        .filter(|(index, i)| i.coverage.fraction == 1.
-            && !classified.coverage.process_diaphragms.iter().any(|plate| usize::from(plate.region_index) == *index))
+        .filter(|(index, i)| {
+            i.coverage.fraction == 1.
+                && !classified
+                    .coverage
+                    .process_diaphragms
+                    .iter()
+                    .any(|plate| usize::from(plate.region_index) == *index)
+        })
         .map(|(_, i)| i.coverage.area_mm2)
         .sum();
     classified.coverage.sparse_interior_area_mm2 = classified
@@ -755,5 +1089,6 @@ pub(super) fn partition(
         .iter()
         .map(|i| i.coverage.area_mm2 * (1. - i.coverage.fraction))
         .sum();
+    admit(classified.retained_points(), classified.retained_bytes())?;
     Ok(classified)
 }

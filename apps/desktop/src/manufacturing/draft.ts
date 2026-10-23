@@ -11,8 +11,8 @@ import type {
 export const scalarFields = [
   ["layer_height_mm", "Layer height (mm)"],
   ["native_shape_error_mm", "Native shape error budget (mm)"],
-  ["bead_width_mm", "Bead width (mm)"],
-  ["perimeter_count", "Perimeters"],
+  ["bead_width_mm", "Preferred wall width (mm)"],
+  ["perimeter_count", "Nominal contour depth"],
   ["top_skin_thickness_mm", "Top skin thickness (mm)"],
   ["bottom_skin_thickness_mm", "Bottom skin thickness (mm)"],
   ["infill_fraction", "Interior infill fraction (0–1]"],
@@ -64,6 +64,7 @@ export interface IntentDraft {
   preferredDirection: [string, string];
   sparseInfillKind: "fine" | "combine_eligible";
   sparseMaxHeight: string;
+  widthLimits: { minimum: string; maximum: string };
 }
 export const intentIdentity = (intent: ManufacturingIntent | null) => JSON.stringify(intent);
 export function makeDraft(
@@ -73,6 +74,10 @@ export function makeDraft(
   return {
     intent: structuredClone(intent),
     base: intentIdentity(base),
+    widthLimits: {
+      minimum: String(intent.printer.deposition_limits.min_bead_width_mm),
+      maximum: String(intent.printer.deposition_limits.max_bead_width_mm),
+    },
     seamPolicyKind: intent.recipe.seam_policy.kind,
     sparseInfillKind: intent.recipe.sparse_infill.kind,
     sparseMaxHeight: String(intent.recipe.sparse_infill.kind === "combine_eligible"
@@ -104,6 +109,13 @@ function preferredBuildDirection(draft: IntentDraft): [number, number] {
 }
 export function draftIntent(draft: IntentDraft): ManufacturingIntent {
   const intent = structuredClone(draft.intent);
+  const minimumWidth = Number(draft.widthLimits.minimum), maximumWidth = Number(draft.widthLimits.maximum);
+  if (!draft.widthLimits.minimum.trim() || !draft.widthLimits.maximum.trim()
+      || !Number.isFinite(minimumWidth) || !Number.isFinite(maximumWidth)
+      || minimumWidth <= 0 || maximumWidth < minimumWidth)
+    throw new Error("Software bead width limits must be finite, positive and ordered.");
+  intent.printer.deposition_limits.min_bead_width_mm = minimumWidth;
+  intent.printer.deposition_limits.max_bead_width_mm = maximumWidth;
   for (const [key, label] of scalarFields) {
     const text = draft.values[key],
       value = Number(text);

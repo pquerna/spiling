@@ -34,6 +34,21 @@ test("unchanged full intent does not submit; failed scalar admission retains dra
   assert.deepEqual(applied.printer, intent.printer);
   assert.equal(intent.recipe.layer_height_mm, 0.2);
 });
+test("consumed width-bound drafts preserve the rest of the full intent and reload through authority", () => {
+  const original = structuredClone(intent);
+  const draft = makeDraft(original, original);
+  draft.widthLimits.maximum = "0.72";
+  assert.equal(draftChanged(draft), true);
+  const applied = draftIntent(draft);
+  assert.equal(applied.printer.deposition_limits.max_bead_width_mm, 0.72);
+  assert.equal(applied.printer.deposition_limits.min_bead_width_mm, original.printer.deposition_limits.min_bead_width_mm);
+  assert.deepEqual(applied.recipe, original.recipe);
+  assert.deepEqual(applied.printer.workflow, original.printer.workflow);
+  assert.deepEqual(original, intent, "transient limit edits never mutate captured intent");
+  assert.equal(draftChanged(makeDraft(applied, applied)), false);
+  draft.widthLimits.minimum = "0.8";
+  assert.throws(() => draftIntent(draft), /positive and ordered/);
+});
 test("freshness uses selected content, not captured revision; session, reopen and invalidation remain binding", () => {
   const record = { hash: "bundle", input_hash: "input" };
   const inspection = {

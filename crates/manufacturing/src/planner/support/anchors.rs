@@ -131,6 +131,44 @@ impl Default for AnchorWorkspace {
     }
 }
 
+/// Borrow every local-width capsule, propagating a malformed path before any
+/// of its edges rather than dropping a failed checked iterator.
+pub(crate) fn nominal_edges<'a>(
+    paths: impl Iterator<Item = &'a DepositionPath>,
+    direct: bool,
+) -> impl Iterator<Item = (Result<[[f64; 3]; 2], ManufacturingError>, bool, f64)> {
+    paths.flat_map(move |path| {
+        let (edges, failure) = match path.checked_edges() {
+            Ok(edges) => (Some(edges), None),
+            Err(failure) => (None, Some(failure)),
+        };
+        failure
+            .into_iter()
+            .map(move |failure| (Err(failure), direct, 0.0))
+            .chain(edges.into_iter().flatten().map(move |edge| {
+                (
+                    Ok([edge.points_mm[0], edge.points_mm[1]]),
+                    direct,
+                    edge.width_mm,
+                )
+            }))
+    })
+}
+
+pub(crate) fn projected_edges<'a>(
+    paths: impl Iterator<Item = &'a DepositionPath>,
+    direct: bool,
+) -> impl Iterator<Item = (Result<[[f64; 3]; 2], ManufacturingError>, bool, f64)> {
+    let project = spiling_contracts::manufacturing::program_coordinates::project_xyz6_point_mm;
+    nominal_edges(paths, direct).map(move |(points, direct, width)| {
+        (
+            points.and_then(|[a, b]| Ok([project(a)?, project(b)?])),
+            direct,
+            width,
+        )
+    })
+}
+
 impl AnchorWorkspace {
     pub(in crate::planner) fn set_budget(&mut self, remaining_records: usize) {
         self.intervals.clear();
@@ -140,6 +178,11 @@ impl AnchorWorkspace {
 
     pub(in crate::planner) fn retained_records(&self) -> usize {
         self.intervals.capacity() + self.uncovered.capacity()
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.intervals.capacity() * std::mem::size_of::<(f64, f64, bool)>()
+            + self.uncovered.capacity() * std::mem::size_of::<AnchorGap>()
     }
 
     /// Uncovered normalized centerline intervals with actual endpoint-anchor presence
@@ -156,13 +199,7 @@ impl AnchorWorkspace {
     ) -> Result<&[AnchorGap], ManufacturingError> {
         self.gaps_edges(
             candidate,
-            previous
-                .flat_map(|path| path.points_mm.windows(2).map(move |e| (Ok([e[0], e[1]]), true, path.bead_width_mm)))
-                .chain(
-                    contacts.flat_map(|path| {
-                        path.points_mm.windows(2).map(move |e| (Ok([e[0], e[1]]), false, path.bead_width_mm))
-                    }),
-                ),
+            nominal_edges(previous, true).chain(nominal_edges(contacts, false)),
             work,
             cancel,
         )
@@ -584,12 +621,14 @@ mod dimension_tests {
             bead_width_mm: 0.8,
         };
         for (width, start, end) in [(0.4, 0.4, 0.6), (1.2, 0.2, 0.8)] {
-            let gaps = workspace.gaps_edges(
-                candidate,
-                std::iter::once((Ok([[1.0, -1.0, 0.4], [1.0, 1.0, 0.4]]), true, width)),
-                &mut 0,
-                &cancel,
-            ).unwrap();
+            let gaps = workspace
+                .gaps_edges(
+                    candidate,
+                    std::iter::once((Ok([[1.0, -1.0, 0.4], [1.0, 1.0, 0.4]]), true, width)),
+                    &mut 0,
+                    &cancel,
+                )
+                .unwrap();
             assert_eq!(gaps.len(), 2);
             assert!((gaps[0].end - start).abs() < 1e-12);
             assert!((gaps[1].start - end).abs() < 1e-12);

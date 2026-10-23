@@ -2,7 +2,7 @@
   "printer": {
     "schema_version": 11,
     "id": "software-marlin2-reference",
-    "revision": "9",
+    "revision": "10",
     "name": "Complete Marlin 2 software reference — physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
@@ -117,7 +117,12 @@
       }
     },
     "nozzle_diameter_mm": 0.4,
-    "deposition_limits": { "min_bead_width_mm": 0.45, "max_bead_width_mm": 0.45, "min_bead_height_mm": 0.000001, "max_bead_height_mm": 0.30 },
+    "deposition_limits": {
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
+      "min_bead_height_mm": 0.000001,
+      "max_bead_height_mm": 0.3
+    },
     "max_feed_mm_s": 150,
     "max_volumetric_flow_mm3_s": 12
   },
@@ -132,7 +137,9 @@
     "bead_width_mm": 0.45,
     "perimeter_count": 2,
     "infill_fraction": 0.25,
-    "sparse_infill": { "kind": "fine" },
+    "sparse_infill": {
+      "kind": "fine"
+    },
     "top_skin_thickness_mm": 0.8,
     "bottom_skin_thickness_mm": 0.8,
     "print_speed_mm_s": 35,
@@ -165,7 +172,7 @@
     "seam_policy": {
       "kind": "nearest"
     },
-    "top_skin_axis": "x",
-    "rectilinear_axis": "x"
+    "rectilinear_axis": "x",
+    "top_skin_axis": "x"
   }
 }

@@ -23,6 +23,13 @@ fn failed(message: impl AsRef<str>) -> ManufacturingError {
     ManufacturingError::new(ManufacturingErrorCode::VerificationFailed, message)
 }
 
+fn constant_width(path: &DepositionPath) -> Result<f64, ManufacturingError> {
+    path.checked_edges()?;
+    path.width
+        .constant_width_mm()
+        .ok_or_else(|| failed("straight-row verification received a varying-width profile"))
+}
+
 fn cancelled(cancel: &AtomicBool) -> Result<(), ManufacturingError> {
     if cancel.load(Ordering::Relaxed) {
         Err(ManufacturingError::new(
@@ -40,6 +47,52 @@ fn arithmetic_slack(value: f64) -> f64 {
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1]).hypot(a[2] - b[2])
+}
+
+fn xyz_endpoint_error(point: [f64; 3]) -> Result<f64, ManufacturingError> {
+    let [x, y, z] = point;
+    Ok(program_coordinates::xyz6_coordinate_error_mm(x)?
+        .hypot(program_coordinates::xyz6_coordinate_error_mm(y)?)
+        .hypot(program_coordinates::xyz6_coordinate_error_mm(z)?)
+        .next_up())
+}
+
+/// Binary parsing uncertainty of an actual decoded E8 endpoint, not the
+/// quantization bin of the producer's intended unrounded accumulator.
+/// G92 E0 and exactly represented stationary recovery remain exact.
+fn e8_endpoint_error(value: f64) -> f64 {
+    if value.abs() <= (1_u64 << 52) as f64 / 100_000_000.0 && (value * 256.0).fract() == 0.0 {
+        0.0
+    } else {
+        (value.next_up() - value)
+            .max(value - value.next_down())
+            .next_up()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CommandedWallEdge {
+    width: [f64; 2],
+    length_lower: f64,
+}
+
+fn verify_wall_gradient(
+    previous: CommandedWallEdge,
+    next: CommandedWallEdge,
+) -> Result<(), ManufacturingError> {
+    // Compare every possible E-derived width across the half-edge transition.
+    // Lower actual-length bounds and outward arithmetic cannot grant extra slope.
+    let change = (previous.width[1] - next.width[0])
+        .max(next.width[1] - previous.width[0])
+        .next_up();
+    let transition = ((previous.length_lower + next.length_lower).next_down() * 0.5).next_down();
+    let allowed = (program_coordinates::MAX_WALL_WIDTH_GRADIENT * transition).next_down();
+    if change > allowed {
+        return Err(failed(
+            "decoded continuing wall width exceeds the maximum command-space gradient",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_region_volume(
@@ -398,7 +451,7 @@ pub(crate) fn verify_actual(
         JobWorkflow::CompleteMarlin { job } => Some(project_xyz6_point_mm(job.prime_end_mm)?),
         JobWorkflow::DiagnosticBodyOnly => None,
     };
-    expected::validate_preferred_seams(plan, recipe, initial_position, cancel)?;
+    expected::validate_wall_seams(plan, recipe, initial_position, cancel)?;
     let mut expected = expected::Expected::new(plan, recipe, initial_position).peekable();
     let setup = [
         Command::Millimetres,
@@ -434,6 +487,8 @@ pub(crate) fn verify_actual(
     let mut retracted_endpoint = None;
     let mut fan_state = None;
     let mut recovery_moves = 0u8;
+    let mut first_wall_edge = None;
+    let mut previous_wall_edge = None;
 
     for (line_index, line) in program.lines().enumerate() {
         cancelled(cancel)?;
@@ -543,7 +598,8 @@ pub(crate) fn verify_actual(
         let Some(action) = expected.next() else {
             return Err(failed("extra command after final normalized motion"));
         };
-        let (target, source, layer_index, deposition_kind, association) = match action {
+        let (target, source, layer_index, deposition_kind, association, closes_wall) = match action?
+        {
             expected::Action::Fan(pwm) => {
                 if decoded.command != Command::Fan || decoded.fields[5] != Some(f64::from(pwm)) {
                     return Err(failed("missing or mutated process cooling state"));
@@ -640,7 +696,8 @@ pub(crate) fn verify_actual(
                 layer,
                 role,
                 association,
-            } => (target, source, layer, role, association),
+                closes_wall,
+            } => (target, source, layer, role, association, closes_wall),
         };
         if layer_index != volume_layer {
             verify_region_volume(
@@ -819,7 +876,9 @@ pub(crate) fn verify_actual(
             }
             let next_e = decoded.fields[3].ok_or_else(|| failed("missing extrusion"))?;
             let delta_e = next_e - state.extrusion;
-            let nominal_e = nominal_length * volume_per_mm / filament_area;
+            // Independently decoded XYZ6 chord length owns constant-section
+            // extrusion. Source endpoints separately own positional fidelity.
+            let nominal_e = length * volume_per_mm / filament_area;
             expected_e += nominal_e;
             if !expected_e.is_finite()
                 || length <= 0.0
@@ -841,6 +900,62 @@ pub(crate) fn verify_actual(
                 return Err(failed(
                     "absolute or incremental extrusion differs from nominal volume",
                 ));
+            }
+            let association = association
+                .ok_or_else(|| failed("deposition lost its local width/interval association"))?;
+            if length < program_coordinates::MIN_DEPOSITION_COMMAND_MM {
+                return Err(failed(
+                    "deposition command is below the declared software minimum length",
+                ));
+            }
+            let length_error = (xyz_endpoint_error(from)?
+                + xyz_endpoint_error(position)?
+                + arithmetic_slack(length))
+            .next_up();
+            let extrusion_error = (e8_endpoint_error(next_e)
+                + e8_endpoint_error(state.extrusion)
+                + 2.0 * f64::EPSILON * delta_e.abs())
+            .next_up();
+            let bounds = program_coordinates::commanded_stadium_width_enclosure_mm(
+                length,
+                length_error,
+                delta_e,
+                extrusion_error,
+                filament_area,
+                association.physical_z[1] - association.physical_z[0],
+                process_flow,
+            )?;
+            // Quantized E8 can give a width-equivalent value below height even
+            // for an admitted circular nominal target. Nominal geometry and the
+            // independent forward E8 volume check above own that model domain;
+            // keep the FULL actual algebraic interval for all checks below.
+            let width_error = (bounds[0] - association.width)
+                .abs()
+                .max((bounds[1] - association.width).abs())
+                * 0.5;
+            let center_error = distance(source, from).max(distance(target, position));
+            if bounds[0] < printer.deposition_limits.min_bead_width_mm
+                || bounds[1] > printer.deposition_limits.max_bead_width_mm
+                || width_error + center_error
+                    > program_coordinates::MAX_BEAD_COMMAND_LATERAL_ERROR_MM
+            {
+                return Err(failed(
+                    "decoded XYZ6/E8 nominal bead width exceeds its process or lateral command enclosure",
+                ));
+            }
+            if association.owner == Some(DepositionOwner::Wall) {
+                let edge = CommandedWallEdge {
+                    width: bounds,
+                    length_lower: (length - length_error).next_down(),
+                };
+                if let Some(previous) = previous_wall_edge {
+                    verify_wall_gradient(previous, edge)?;
+                }
+                let first = *first_wall_edge.get_or_insert(edge);
+                if closes_wall {
+                    verify_wall_gradient(edge, first)?;
+                }
+                previous_wall_edge = Some(edge);
             }
             let speed = feed / 60.0;
             let flow = delta_e * filament_area * speed / length;
@@ -873,6 +988,10 @@ pub(crate) fn verify_actual(
                 return Err(failed("whole deposition budget exceeded"));
             }
         } else {
+            // Every stored path has an explicit entry travel; wall continuity
+            // never crosses a travel, even if endpoints happen to coincide.
+            first_wall_edge = None;
+            previous_wall_edge = None;
             travel_segments += 1;
             if travel_segments > MAX_DEPOSITION_SEGMENTS {
                 return Err(failed("travel event budget exceeded"));
@@ -907,8 +1026,9 @@ pub(crate) fn verify_actual(
         state.position = Some(position);
     }
     cancelled(cancel)?;
+    let remaining = expected.next().transpose()?;
     if setup_index != setup.len()
-        || expected.next().is_some()
+        || remaining.is_some()
         || deposition_segments + support_deposition_segments == 0
         || retracted_endpoint.is_some()
         || (job.is_some() && (lifecycle_index != 11 || finish_index != 8))
@@ -941,7 +1061,9 @@ pub(crate) fn verify_actual(
         &mut plate_contacts,
         cancel,
     )?;
+    drop(plate_contacts);
     skin_bridges::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
+    skin_commands::verify(plan, recipe, &mut geometry_work, &mut anchors, cancel)?;
     let deposited_volume_mm3 = object_filament * filament_area;
     if !deposited_volume_mm3.is_finite() {
         return Err(failed("decoded deposited volume is nonfinite"));
@@ -952,12 +1074,14 @@ pub(crate) fn verify_actual(
             "Independent decoding of actual bytes; required ordered workflow, strict millimetre/absolute XYZ/E modes and lifecycle/object command field masks".into(),
             "Ordered travel/deposition completeness; XYZ6 <=0.0000005 mm/axis, E8 <=0.000000005 mm absolute / 0.00000001 mm delta, F6 <=0.0000005 mm/min; scale-aware floating roundoff only".into(),
             "Command-space build envelope, explicit feeds, printer speed and nominal volumetric flow limits".into(),
-            "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); preferred perimeter seam direction and deterministic projected tie ordering".into(),
+            "Authored ordinary hatch axis at actual scheduled layer index in the XYZ6 build/command frame (Bridge/support excluded); immutable closed-wall seam policy and deterministic projected tie ordering".into(),
             "Rounded nominal bead area (width-height)*height + pi*(height/2)^2, explicit flow multiplier and actual decoded extrusion totals".into(),
+            "Actual XYZ6 minimum deposition length and independently inverted XYZ6/E8 nominal-width/process/lateral enclosures; continuing immutable-wall width gradient, including closed seams".into(),
             "True scheduled layer thickness, first-layer and bridge speed/flow overrides, actual queued cooling PWM and separate object/support deposited material".into(),
             "Permanent plate coverage (when present): source permission/winner, exact slab/layer/region bijection, separate area, actual XYZ6 whole-line raw-extent/protected-hole coverage and no ordinary duplicate material".into(),
             "Permanent plate support (when present): actual base/later intervals and first upper landing use direct lower strokes/genuine Bridge; separate exterior/hole-wall attachment and order are checked without temporary-support substitution".into(),
             "Mixed skin bridges: demanded regional terminal, actual XYZ6 transition/domains/holes, minimal nominal join, whole-stroke lower anchors, charged joint overlap and per-event ownership; no duplicate extrusion".into(),
+            "Minimum skin commands: complete original required interval, same-row minimum-only construction, captured ordinary winner/source/holes and actual final-stroke bijection; added volume is stroke-derived, not enlarged mandatory area".into(),
             "Conditional stationary E-only retraction, declared distance/feed, bounded travel Z-hop and exact recovery; recovered extrusion is not deposited material".into(),
             if job.is_some() { "Marlin 2 typed complete job: scale/volumetric reset, native homing declaration, heating/cooling waits, bounded priming, final barriers/lift/park/heater/fan/motor shutdown".into() } else { "Explicit diagnostic body-only workflow; no executable lifecycle".into() },
             if job.is_some() { "Explicit M149 C and integral firmware Celsius targets; actual priming excluded from conservatively expanded whole-object XY ownership bounds, including coordinate serialization padding".into() } else { "Diagnostic workflow has no thermal or priming obligations".into() },
@@ -990,5 +1114,6 @@ pub(crate) fn verify_actual(
 mod diaphragms;
 mod interfaces;
 mod skin_bridges;
+mod skin_commands;
 #[cfg(test)]
 mod tests;

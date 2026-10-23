@@ -34,6 +34,7 @@ spiling-surface-fields = { path = "crates/surface-fields" }
 spiling-appearance = { path = "crates/appearance" }
 png = "=0.18.1"
 geo = "=0.32.0"
+boostvoronoi = { version = "=0.12.1", default-features = false }
 monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "dae59326248d0d068ca4c3a1e52223bfbf1707e0" }
 monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "dae59326248d0d068ca4c3a1e52223bfbf1707e0" }
 monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "dae59326248d0d068ca4c3a1e52223bfbf1707e0" }
@@ -48,11 +49,14 @@ spiling-manufacturing = { path = "crates/manufacturing" }
 debug = 0
 incremental = false
 
-# Keep certified numerical work practical without optimizing the desktop stack.
+# Keep geometry/manufacturing numerical work practical without optimizing the desktop stack.
 [profile.dev.package.monstertruck-modeling]
 opt-level = 2
 
 [profile.dev.package.spiling-geometry]
+opt-level = 2
+
+[profile.dev.package.spiling-manufacturing]
 opt-level = 2
 
 [profile.release]

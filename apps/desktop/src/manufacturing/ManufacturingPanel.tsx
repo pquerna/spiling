@@ -55,6 +55,18 @@ export function ManufacturingPanel({
     }
     return { strokes, combined, min: strokes ? min : 0, max };
   }, [replay, inspection]);
+  const wallMetrics = useMemo(() => {
+    if (!replay) return null;
+    let strokes = 0, min = Infinity, max = 0;
+    for (let index = 0; index < replay.eventCount; index++) {
+      const association = replay.association(index);
+      if (association?.regionalOwner !== "wall") continue;
+      strokes++;
+      min = Math.min(min, association.beadWidthMm);
+      max = Math.max(max, association.beadWidthMm);
+    }
+    return strokes ? { strokes, min, max } : null;
+  }, [replay]);
   const sparseBands = useMemo(() => inspection?.layers.filter(row => row.sparse_band) ?? [], [inspection]);
   const diaphragms = useMemo(() => {
     const plates = new Map<string, NonNullable<typeof inspection>["layers"][number]["diaphragms"][number]>();
@@ -273,6 +285,16 @@ export function ManufacturingPanel({
                 />
               </label>
             ))}
+            <p>Automatic source-associated walls choose local widths/counts within the captured
+              software envelope; preferred width and contour depth are needs, not an algorithm
+              switch or a promise of complete closed loops. Finite transitions, source/void
+              protection and actual-command qualification remain mandatory.</p>
+            {(["minimum", "maximum"] as const).map(bound => <label key={bound}>
+              {bound === "minimum" ? "Minimum" : "Maximum"} software bead width (mm)
+              <input type="number" step="any" data-testid={`manufacturing-width-${bound}`}
+                value={draft.widthLimits[bound]}
+                onChange={event => manufacturing.editWidthLimit(bound, event.target.value)} />
+            </label>)}
             <label>
               Sparse infill schedule
               <select data-testid="manufacturing-sparse-infill"
@@ -838,6 +860,15 @@ export function ManufacturingPanel({
                 {replay.layerCount} object layers. Positions, E and F come from decoded program
                 bytes, not planned paths.
               </p>
+              {wallMetrics && <p data-testid="manufacturing-wall-association-metrics">
+                Automatic Wall strokes: {wallMetrics.strokes}; nominal associated width range{" "}
+                {wallMetrics.min.toFixed(6)}–{wallMetrics.max.toFixed(6)} mm.
+                {wallMetrics.min === wallMetrics.max
+                  ? " These inspected commands share one locally constant width."
+                  : " Constant-section commands realize a variable local allocation; they are not ideal continuous tapers."}
+                {" "}Wall ownership survives genuine Bridge roles. Dimensions are verified
+                plan associations, not measured physical beads.
+              </p>}
               {sparseMetrics && <p data-testid="manufacturing-sparse-association-metrics">
                 Sparse strokes: {sparseMetrics.strokes}; associated height exceeds owning fine layer:
                 {" "}{sparseMetrics.combined}; nominal associated height range {sparseMetrics.min.toFixed(6)}

@@ -3,7 +3,7 @@
 
 # Boolean work admission rules
 
-Own carrier-independent conservative work admission before the existing geo overlay/buffer consumers. Never alter source vertices, polygon/ring ownership or offset/native/finish error bounds. The planner's declared cumulative planar-work ceiling is 128 million units, independent of native interval and anchor work; no per-source or retry-triggered cap changes. Admission is a resource proof, not a geometry operation or alternative Boolean kernel.
+Own carrier-independent conservative work admission before the existing geo overlay/buffer consumers. Never alter source vertices, polygon/ring ownership or offset/native/finish error bounds. The planner's declared cumulative planar-work ceiling is 16,384,000,000 units, independent of native interval and anchor work; no per-source or retry-triggered cap changes. Admission is a resource proof, not a geometry operation or alternative Boolean kernel.
 
 Small coarse-safe inputs remain allocation-free. When a whole-ring Cartesian upper bound is too coarse, use the bounded boundary-edge sweep. Charge input/index construction, every heapsort comparison/swap, every active scan including expired/disjoint/same-operand entries, and every admitted boundary predicate candidate. Cancellation is checked throughout. Keep scratch counts/byte products and conservative construction/sort allowance checked before growth; do not hide an uncharged quadratic broad phase. Unary calls may borrow the same owner once but must count its complete intra-operand candidate work.
 

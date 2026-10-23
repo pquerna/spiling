@@ -18,6 +18,8 @@ pub(super) struct Domains {
     interface: Option<MultiPolygon<f64>>,
     all_interface: bool,
     retained: usize,
+    owned_bytes: usize,
+    anchor_owned_bytes: usize,
 }
 
 impl Domains {
@@ -27,27 +29,59 @@ impl Domains {
         all_interface: bool,
         width: f64,
         retained: usize,
+        owned_bytes: usize,
+        anchor_owned_bytes: usize,
         work: &mut usize,
         cancel: &AtomicBool,
     ) -> Result<Self, ManufacturingError> {
+        let owned_bytes = owned_bytes.saturating_add(anchor_owned_bytes);
         charge_boolean(support, support, work, cancel)?;
-        let centers = region::offset(support, -width * 0.5, cancel)?;
+        let mut centers = region::offset_admitted(
+            support,
+            -width * 0.5,
+            |scratch, scratch_bytes, overlay| {
+                super::super::remaining_geometry_units(
+                    retained.saturating_add(scratch),
+                    owned_bytes.saturating_add(scratch_bytes),
+                )?;
+                if let Some((a, b)) = overlay {
+                    super::super::boolean_budget(a, b, cancel)?;
+                }
+                Ok(())
+            },
+            cancel,
+        )?;
+        let center_bytes = super::super::native::material_bytes(&mut centers);
         let mut result = Self {
             centers,
             ordinary: None,
             interface: None,
             all_interface,
             retained,
+            owned_bytes: owned_bytes.saturating_add(center_bytes),
+            anchor_owned_bytes,
         };
         result.admit()?;
         if !interface.0.is_empty() && !all_interface {
             charge_boolean(&result.centers, interface, work, cancel)?;
             result.interface = Some(result.centers.intersection(interface));
             region::check_size(result.interface.as_ref().unwrap())?;
+            result.owned_bytes =
+                result
+                    .owned_bytes
+                    .saturating_add(super::super::native::material_bytes(
+                        result.interface.as_mut().unwrap(),
+                    ));
             result.admit()?;
             charge_boolean(&result.centers, interface, work, cancel)?;
             result.ordinary = Some(result.centers.difference(interface));
             region::check_size(result.ordinary.as_ref().unwrap())?;
+            result.owned_bytes =
+                result
+                    .owned_bytes
+                    .saturating_add(super::super::native::material_bytes(
+                        result.ordinary.as_mut().unwrap(),
+                    ));
             result.admit()?;
         }
         check_cancel(cancel)?;
@@ -61,12 +95,25 @@ impl Domains {
             .try_fold(self.retained, |total, domain| {
                 total
                     .checked_add(region::point_count(domain))
-                    .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .filter(|n| *n <= super::super::MAX_RETAINED_GEOMETRY_UNITS)
                     .ok_or_else(|| {
                         resource("combined support centerline ownership budget exceeded")
                     })
             })?;
+        super::super::remaining_geometry_units(points, self.owned_bytes)?;
         Ok(points)
+    }
+
+    pub(super) fn owned_bytes(&self) -> usize {
+        self.owned_bytes
+    }
+
+    pub(super) fn set_anchor_owned_bytes(&mut self, bytes: usize) {
+        self.owned_bytes = self
+            .owned_bytes
+            .saturating_sub(self.anchor_owned_bytes)
+            .saturating_add(bytes);
+        self.anchor_owned_bytes = bytes;
     }
 
     pub(super) fn paths(
@@ -94,24 +141,45 @@ impl Domains {
         let retained = self
             .admit()?
             .checked_add(region::point_count(ordinary).max(region::point_count(interface_centers)))
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|n| *n <= super::super::MAX_RETAINED_GEOMETRY_UNITS)
             .ok_or_else(|| resource("combined support hatch scratch budget exceeded"))?;
         // Every path has at most twice as many points as segments. Reserve the
         // live geometry allowance before wall/hatch allocation, independently
         // of the combined published object/support segment allowance.
+        // Region producers grow Vecs internally. Reserve their known worst
+        // simultaneous old/new path-record and point-buffer capacities before
+        // entering them; release this reservation when actual capacities return.
+        let scratch_bytes = region::point_count(ordinary)
+            .max(region::point_count(interface_centers))
+            .saturating_mul(std::mem::size_of::<f64>());
+        let live_bytes = self
+            .owned_bytes
+            .saturating_add(scratch_bytes)
+            .saturating_add(4 * std::mem::size_of::<DepositionPath>());
+        super::super::remaining_geometry_units(retained, live_bytes)?;
+        let output_stride =
+            3 * std::mem::size_of::<DepositionPath>() + 6 * std::mem::size_of::<[f64; 3]>();
         let allowance = (MAX_DEPOSITION_SEGMENTS as usize - existing_segments)
-            .min((MAX_DEPOSITION_SEGMENTS as usize - retained) / 2);
+            .min((super::super::MAX_RETAINED_GEOMETRY_UNITS - retained) / 2)
+            .min((MAX_MANUFACTURING_RETAINED_BYTES as usize - live_bytes) / output_stride);
         let mut segments = MAX_DEPOSITION_SEGMENTS as usize - allowance;
         let mut paths = Vec::new();
         if interface.0.is_empty() || self.all_interface {
-            region::wall_paths(&self.centers, layer.z, layer.lower_z, layer.recipe.bead_width_mm, &mut paths, &mut segments, cancel)?;
-            for path in &mut paths {
-                path.kind = if self.all_interface {
-                    DepositionKind::SupportInterface
-                } else {
-                    DepositionKind::Support
-                };
-            }
+            let kind = if self.all_interface {
+                DepositionKind::SupportInterface
+            } else {
+                DepositionKind::Support
+            };
+            region::support_contour_paths(
+                &self.centers,
+                layer.z,
+                layer.lower_z,
+                layer.recipe.bead_width_mm,
+                kind,
+                &mut paths,
+                &mut segments,
+                cancel,
+            )?;
         } else {
             // Preserve the complete exterior/hole wall, including every original
             // vertex. Only process-role crossings split it; no seam is offset.
@@ -124,6 +192,7 @@ impl Domains {
                 &mut paths,
                 &mut segments,
                 retained,
+                self.owned_bytes,
                 work,
                 cancel,
             )?;
@@ -143,15 +212,21 @@ impl Domains {
                 cancel,
             )?;
         }
-        candidate_budget(&paths, retained)?;
+        candidate_budget(&paths, self.admit()?, self.owned_bytes)?;
         Ok(paths)
     }
 
     pub(super) fn anchor_budget(
         &self,
-        paths: &[DepositionPath],
+        paths: &Vec<DepositionPath>,
     ) -> Result<usize, ManufacturingError> {
-        candidate_budget(paths, self.admit()?)
+        // The active query reservation owns the whole reusable workspace;
+        // its existing capacity must not also remain in the outside pool.
+        candidate_budget(
+            paths,
+            self.admit()?,
+            self.owned_bytes.saturating_sub(self.anchor_owned_bytes),
+        )
     }
 }
 
@@ -230,6 +305,7 @@ fn walls(
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     retained: usize,
+    owned_bytes: usize,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -264,11 +340,17 @@ fn walls(
                         ));
                     }
                     if t > 0.0 && t < 1.0 {
-                        if cuts.len() + path_points >= MAX_DEPOSITION_SEGMENTS as usize - retained {
+                        if cuts.len() + path_points
+                            >= super::super::MAX_RETAINED_GEOMETRY_UNITS - retained
+                        {
                             return Err(resource(
                                 "combined support wall/crossing point budget exceeded",
                             ));
                         }
+                        let live = owned_bytes
+                            .saturating_add(super::super::bonds::path_bytes(paths))
+                            .saturating_add(super::vec_bytes(&cuts));
+                        super::reserve_owned(&mut cuts, 1, live)?;
                         cuts.push((t, point));
                     }
                     Ok(())
@@ -316,7 +398,8 @@ fn walls(
                             paths,
                             segments,
                             &mut path_points,
-                            MAX_DEPOSITION_SEGMENTS as usize - retained - cuts.len(),
+                            super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - cuts.len(),
+                            owned_bytes.saturating_add(super::vec_bytes(&cuts)),
                         )?;
                         owned_start = start;
                     }
@@ -332,7 +415,8 @@ fn walls(
                     paths,
                     segments,
                     &mut path_points,
-                    MAX_DEPOSITION_SEGMENTS as usize - retained - cuts.len(),
+                    super::super::MAX_RETAINED_GEOMETRY_UNITS - retained - cuts.len(),
+                    owned_bytes.saturating_add(super::vec_bytes(&cuts)),
                 )?;
             }
         }
@@ -348,8 +432,14 @@ fn wall_piece(
     segments: &mut usize,
     path_points: &mut usize,
     point_budget: usize,
+    owned_bytes: usize,
 ) -> Result<(), ManufacturingError> {
-    let WallRing { z, lower_z, bead_width_mm, first_path } = *ring;
+    let WallRing {
+        z,
+        lower_z,
+        bead_width_mm,
+        first_path,
+    } = *ring;
     let [start, end] = edge;
     let length = (end.x - start.x).hypot(end.y - start.y);
     if !length.is_finite() || length <= 0.000002 {
@@ -373,12 +463,25 @@ fn wall_piece(
     *path_points += additional;
     let from = [start.x, start.y, z];
     let to = [end.x, end.y, z];
+    let mut live_bytes = owned_bytes.saturating_add(super::super::bonds::path_bytes(paths));
+    if continuation {
+        super::reserve_owned(&mut paths.last_mut().unwrap().points_mm, 1, live_bytes)?;
+    } else {
+        super::reserve_owned(paths, 1, live_bytes)?;
+        live_bytes = owned_bytes.saturating_add(super::super::bonds::path_bytes(paths));
+        super::super::remaining_geometry_units(
+            0,
+            live_bytes.saturating_add(2 * std::mem::size_of::<[f64; 3]>()),
+        )?;
+    }
     if continuation {
         paths.last_mut().unwrap().points_mm.push(to);
     } else {
         paths.push(DepositionPath {
             kind,
-            bead_width_mm,
+            width: WidthProfile::Constant {
+                width_mm: bead_width_mm,
+            },
             physical_z_mm: [lower_z, z],
             owner: None,
             points_mm: vec![from, to],
@@ -396,34 +499,32 @@ pub(super) fn failure<'a>(
     cancel: &AtomicBool,
 ) -> Result<Option<strokes::Failure>, ManufacturingError> {
     for (path_index, path) in paths.iter().enumerate() {
-        for (first, last) in StrokeRuns::new(&path.points_mm) {
+        for (first, last, width_mm) in StrokeRuns::for_path(path)? {
             let a = path.points_mm[first];
             let b = path.points_mm[last];
             let length = (b[0] - a[0]).hypot(b[1] - a[1]);
             for gap in anchors.gaps(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
-                    bead_width_mm: path.bead_width_mm,
+                    bead_width_mm: width_mm,
                 },
-                previous.clone().filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
+                previous
+                    .clone()
+                    .filter(|lower| lower.physical_z_mm[1] == path.physical_z_mm[0]),
                 std::iter::empty(),
                 work,
                 cancel,
             )? {
                 let span = (gap.end - gap.start) * length;
                 if matches!(
-                    strokes::gap_kind(
-                        gap,
-                        span,
-                        path.bead_width_mm,
-                        recipe.process.max_bridge_span_mm
-                    ),
+                    strokes::gap_kind(gap, span, width_mm, recipe.process.max_bridge_span_mm),
                     strokes::GapKind::Demand
                 ) {
                     return Ok(Some(strokes::Failure {
                         path: path_index,
                         first,
                         last,
+                        width_mm,
                         start: gap.start,
                         end: gap.end,
                         span,
@@ -439,6 +540,41 @@ pub(super) fn failure<'a>(
 mod tests {
     use super::*;
     use geo::{LineString, Polygon};
+
+    #[test]
+    fn support_domain_retention_is_not_a_command_count() {
+        let support = rectangle(0.0, 0.0, 2.0, 2.0);
+        let interface = MultiPolygon(Vec::new());
+        let cancel = AtomicBool::new(false);
+        assert!(
+            Domains::new(
+                &support,
+                &interface,
+                false,
+                0.6,
+                MAX_DEPOSITION_SEGMENTS as usize + 1,
+                0,
+                0,
+                &mut 0,
+                &cancel
+            )
+            .is_ok()
+        );
+        assert!(
+            Domains::new(
+                &support,
+                &interface,
+                false,
+                0.6,
+                0,
+                MAX_MANUFACTURING_RETAINED_BYTES as usize,
+                0,
+                &mut 0,
+                &cancel
+            )
+            .is_err()
+        );
+    }
 
     fn rectangle(x: f64, y: f64, width: f64, height: f64) -> MultiPolygon<f64> {
         MultiPolygon(vec![Polygon::new(
@@ -474,6 +610,8 @@ mod tests {
             false,
             0.6,
             0,
+            0,
+            0,
             &mut work,
             &cancel,
         )
@@ -483,6 +621,8 @@ mod tests {
             &upper_interface,
             false,
             0.6,
+            0,
+            0,
             0,
             &mut work,
             &cancel,
@@ -588,6 +728,7 @@ mod tests {
             &mut paths,
             &mut segments,
             0,
+            0,
             &mut 0,
             &AtomicBool::new(false),
         )
@@ -623,7 +764,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let support = rectangle(0.0, 0.0, 20.0, 5.0);
         let interface = MultiPolygon(Vec::new());
-        let domains = Domains::new(&support, &interface, false, 0.6, 0, &mut 0, &cancel).unwrap();
+        let domains =
+            Domains::new(&support, &interface, false, 0.6, 0, 0, 0, &mut 0, &cancel).unwrap();
         let recipe = crate::planner::tests::recipe(1.0);
         let layer = region::HatchLayer {
             z: 0.4,

@@ -709,6 +709,7 @@ fn plan() -> NormalizedPrintPlan {
         surface_resolution: vec![],
         native_geometry: native_geometry(),
         layers: vec![PrintLayer {
+            skin_command_fits: Vec::new(),
             index: 0,
             z_mm: 5.2,
             lower_z_mm: 5.0,
@@ -717,8 +718,8 @@ fn plan() -> NormalizedPrintPlan {
             region_coverage: coverage(),
             paths: vec![DepositionPath {
                 kind: DepositionKind::Perimeter,
-                owner: None,
-                bead_width_mm: 0.45,
+                owner: Some(DepositionOwner::Wall),
+                width: WidthProfile::Constant { width_mm: 0.45 },
                 physical_z_mm: [5.0, 5.2],
                 points_mm: vec![
                     [10.0, 10.0, 5.2],
@@ -1010,14 +1011,11 @@ fn profiles_reject_nonfinite_ranges_capabilities_flow_and_duplicate_components()
 }
 
 #[test]
-fn fixed_layer_paths_reject_implicit_closure_zero_nonfinite_and_out_of_frame_moves() {
+fn fixed_layer_paths_reject_zero_nonfinite_and_out_of_frame_moves() {
     let intent = intent();
     let valid = plan();
     valid.validate(&intent).unwrap();
     let mut changed = valid.clone();
-    changed.layers[0].paths[0].points_mm.pop();
-    assert!(changed.validate(&intent).is_err());
-    changed = valid.clone();
     changed.layers[0].paths[0].points_mm[1] = changed.layers[0].paths[0].points_mm[0];
     assert!(changed.validate(&intent).is_err());
     changed = valid.clone();
@@ -1170,7 +1168,7 @@ fn ordinary_axis_uses_scheduled_index_and_excludes_bridge_support_and_perimeters
         let mut accepted = plan();
         accepted.layers[0].paths.push(DepositionPath {
             kind,
-            bead_width_mm: 0.45,
+            width: WidthProfile::Constant { width_mm: 0.45 },
             physical_z_mm: [5.0, 5.2],
             owner: match kind {
                 DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
@@ -1478,6 +1476,7 @@ fn resource_and_utf8_error_boundaries_are_enforced() {
     );
     let mut segments = plan();
     segments.layers[0].paths[0].kind = DepositionKind::SolidFill;
+    segments.layers[0].paths[0].owner = None;
     segments.layers[0].paths[0].points_mm =
         vec![[10.0, 10.0, 5.2]; MAX_DEPOSITION_SEGMENTS as usize + 2];
     assert_eq!(
@@ -1507,6 +1506,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
         .map(|(index, counts)| {
             let z_mm = 5.0 + (index + 1) as f64 * 0.2;
             PrintLayer {
+                skin_command_fits: Vec::new(),
                 index: index as u32,
                 z_mm,
                 lower_z_mm: 5.0 + index as f64 * 0.2,
@@ -1518,7 +1518,7 @@ fn segmented_plan(segment_counts: &[&[usize]]) -> NormalizedPrintPlan {
                     .map(|count| DepositionPath {
                         kind: DepositionKind::SolidFill,
                         owner: None,
-                        bead_width_mm: 0.45,
+                        width: WidthProfile::Constant { width_mm: 0.45 },
                         physical_z_mm: [5.0 + index as f64 * 0.2, z_mm],
                         points_mm: (0..=*count)
                             .map(|point| {
@@ -1678,13 +1678,7 @@ fn nested_plan_fields_are_order_independent_but_strictly_required_and_unique() {
         ),
         (
             2,
-            &[
-                "kind",
-                "owner",
-                "bead_width_mm",
-                "physical_z_mm",
-                "points_mm",
-            ][..],
+            &["kind", "owner", "width", "physical_z_mm", "points_mm"][..],
         ),
     ] {
         for field in fields {
@@ -1844,7 +1838,7 @@ fn true_layer_height_and_support_ownership_are_not_nominal_grid_aliases() {
     mixed.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::Support,
         owner: None,
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[30.0, 30.0, 5.2], [31.0, 30.0, 5.2]],
     });
@@ -2032,8 +2026,10 @@ fn durable_contact_gaps_enforce_minimum_and_real_interface_context() {
         .support_nominal_deposition_volume_mm3 = 1.0;
     for path in &mut support.paths {
         path.kind = DepositionKind::SupportInterface;
+        path.owner = None;
     }
     scheduled.layers.push(PrintLayer {
+        skin_command_fits: Vec::new(),
         index: 1,
         z_mm: 5.5,
         lower_z_mm: 5.5 - 0.25,
@@ -2605,7 +2601,7 @@ fn separator_accounting_is_distinct_and_actual_centerlines_are_bijective() {
     planned.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::SeparatorWall,
         owner: None,
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
     });
@@ -2761,7 +2757,7 @@ fn separator_bundle_requires_explicit_permission_and_consistent_source_binding()
     captured.plan.layers[0].paths.push(DepositionPath {
         kind: DepositionKind::SeparatorWall,
         owner: None,
-        bead_width_mm: 0.45,
+        width: WidthProfile::Constant { width_mm: 0.45 },
         physical_z_mm: [5.0, 5.2],
         points_mm: vec![[15.0, 10.0, 5.2], [15.0, 20.0, 5.2]],
     });
@@ -2901,7 +2897,7 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         ("sparse_fill", "bottom_skin", false),
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"mandatory_skin","skin":"{origin}"}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(serde_json::from_str::<DepositionPath>(&json).is_ok(), valid);
     }
@@ -2913,14 +2909,14 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "top_skin",
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":null,"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":null,"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
-            !matches!(kind, "bottom_skin" | "top_skin")
+            !matches!(kind, "bottom_skin" | "top_skin" | "perimeter")
         );
         let missing = format!(
-            r#"{{"kind":"{kind}","bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert!(serde_json::from_str::<DepositionPath>(&missing).is_err());
     }
@@ -2932,7 +2928,7 @@ fn immutable_construction_owner_is_required_and_role_checked() {
         "separator_wall",
     ] {
         let json = format!(
-            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"bead_width_mm":0.45,"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+            r#"{{"kind":"{kind}","owner":{{"kind":"regional","region_index":0}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
         );
         assert_eq!(
             serde_json::from_str::<DepositionPath>(&json).is_ok(),
@@ -3036,4 +3032,251 @@ fn xyz6_nominal_bead_inner_interval_proves_only_guaranteed_vertical_overlap() {
         "positive nominal height does not imply guaranteed emitted interior"
     );
     assert!(project_xyz6_bead_inner_height_mm([0.0, f64::NAN]).is_err());
+}
+
+fn varying_width_path() -> DepositionPath {
+    DepositionPath {
+        kind: DepositionKind::Perimeter,
+        owner: Some(DepositionOwner::Wall),
+        width: WidthProfile::PerEdge {
+            widths_mm: vec![0.40, 0.45, 0.50, 0.55],
+        },
+        physical_z_mm: [5.0, 5.2],
+        points_mm: vec![
+            [10.0, 10.0, 5.2],
+            [20.0, 10.0, 5.2],
+            [20.0, 20.0, 5.2],
+            [10.0, 20.0, 5.2],
+            [10.0, 10.0, 5.2],
+        ],
+    }
+}
+
+fn edge_metadata(path: &DepositionPath) -> Vec<(&[[f64; 3]], f64)> {
+    let view = path.checked_edges().unwrap();
+    assert_eq!(view.len(), path.points_mm.len() - 1);
+    (0..view.len())
+        .map(|index| {
+            let edge = view.edge(index).unwrap();
+            (edge.points_mm, edge.width_mm)
+        })
+        .collect()
+}
+
+#[test]
+fn width_metadata_follows_actual_edges_reversal_and_closed_rotation() {
+    let mut path = varying_width_path();
+    let forward = edge_metadata(&path);
+    assert_eq!(
+        forward.iter().map(|edge| edge.1).collect::<Vec<_>>(),
+        vec![0.40, 0.45, 0.50, 0.55]
+    );
+    assert_eq!(forward[0].0, &[[10.0, 10.0, 5.2], [20.0, 10.0, 5.2]][..]);
+    let view = path.checked_edges().unwrap();
+    assert_eq!(
+        view.rev().map(|edge| edge.width_mm).collect::<Vec<_>>(),
+        vec![0.55, 0.50, 0.45, 0.40]
+    );
+    let mut consumed = path.checked_edges().unwrap();
+    assert_eq!(consumed.next().unwrap().width_mm, 0.40);
+    assert_eq!(consumed.len(), 3);
+    assert_eq!(consumed.edge(3).unwrap().width_mm, 0.55);
+    assert_eq!(consumed.next_back().unwrap().width_mm, 0.55);
+    assert_eq!(consumed.next_back().unwrap().width_mm, 0.50);
+    let mut indexed = path.checked_edges().unwrap();
+    assert_eq!(indexed.nth(2).unwrap().width_mm, 0.50);
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed.next_back().unwrap().width_mm, 0.55);
+    let mut indexed_back = path.checked_edges().unwrap();
+    assert_eq!(indexed_back.nth_back(1).unwrap().width_mm, 0.50);
+    assert_eq!(indexed_back.len(), 2);
+    path.reverse();
+    let reversed = edge_metadata(&path);
+    assert_eq!(
+        reversed.iter().map(|edge| edge.1).collect::<Vec<_>>(),
+        vec![0.55, 0.50, 0.45, 0.40]
+    );
+    assert_eq!(reversed[0].0, &[[10.0, 10.0, 5.2], [10.0, 20.0, 5.2]][..]);
+    let mut rotated = varying_width_path();
+    rotated.rotate_closed(2).unwrap();
+    let rotated_edges = edge_metadata(&rotated);
+    assert_eq!(
+        rotated_edges.iter().map(|edge| edge.1).collect::<Vec<_>>(),
+        vec![0.50, 0.55, 0.40, 0.45]
+    );
+    assert_eq!(
+        rotated_edges[0].0,
+        &[[20.0, 20.0, 5.2], [10.0, 20.0, 5.2]][..]
+    );
+    assert_eq!(rotated_edges.last().unwrap().0[1], [20.0, 20.0, 5.2]);
+    assert!(rotated.rotate_closed(4).is_err());
+    assert!(path.checked_edges().unwrap().edge(4).is_none());
+    assert_eq!(
+        varying_width_path().width.constant_width_mm(),
+        None,
+        "a varying profile never reports its first edge as a single width"
+    );
+    assert_eq!(
+        WidthProfile::Constant { width_mm: 0.45 }.constant_width_mm(),
+        Some(0.45)
+    );
+}
+
+#[test]
+fn width_profiles_admit_cardinality_dimensions_and_malformed_json_once() {
+    let mut path = varying_width_path();
+    path.width = WidthProfile::PerEdge {
+        widths_mm: vec![0.45; 3],
+    };
+    assert!(path.checked_edges().is_err());
+    path.width = WidthProfile::PerEdge {
+        widths_mm: vec![0.45, f64::INFINITY, 0.45, 0.45],
+    };
+    assert!(path.checked_edges().is_err());
+    path.width = WidthProfile::PerEdge {
+        widths_mm: vec![0.45, -0.45, 0.45, 0.45],
+    };
+    assert!(path.checked_edges().is_err());
+    path.width = WidthProfile::PerEdge {
+        widths_mm: vec![0.45, 0.45, 0.45, 0.19],
+    };
+    assert!(path.checked_edges().is_err());
+    path.width = WidthProfile::Constant {
+        width_mm: path.height_mm(),
+    };
+    assert_eq!(path.checked_edges().unwrap().count(), 4);
+    path.width = WidthProfile::Constant { width_mm: 0.19 };
+    assert!(path.checked_edges().is_err());
+    path.width = WidthProfile::Constant { width_mm: 0.0 };
+    assert!(path.checked_edges().is_err());
+    let malformed = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"per_edge","widths_mm":[0.45,0.45]},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    assert!(serde_json::from_str::<DepositionPath>(malformed).is_err());
+    let negative = r#"{"kind":"solid_fill","owner":null,"width":{"kind":"constant","width_mm":-0.45},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    assert!(serde_json::from_str::<DepositionPath>(negative).is_err());
+}
+
+#[test]
+fn unit_wall_ownership_is_limited_to_immutable_walls() {
+    for (kind, valid) in [
+        ("perimeter", true),
+        ("bridge", true),
+        ("solid_fill", false),
+        ("sparse_fill", false),
+        ("separator_wall", false),
+        ("support", false),
+        ("bottom_skin", false),
+        ("top_skin", false),
+    ] {
+        let json = format!(
+            r#"{{"kind":"{kind}","owner":{{"kind":"wall"}},"width":{{"kind":"constant","width_mm":0.45}},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<DepositionPath>(&json).is_ok(),
+            valid,
+            "{kind}"
+        );
+    }
+    let no_wall = r#"{"kind":"perimeter","owner":null,"width":{"kind":"constant","width_mm":0.45},"physical_z_mm":[0.9,1],"points_mm":[[0,0,1],[1,0,1]]}"#;
+    assert!(serde_json::from_str::<DepositionPath>(no_wall).is_err());
+    let mut missing_owner = plan();
+    missing_owner.layers[0].paths[0].owner = None;
+    assert!(missing_owner.validate(&intent()).is_err());
+}
+
+#[test]
+fn plan_json_shares_one_cumulative_width_allowance_without_halving_segments() {
+    let mut exact = segmented_plan(&[&[50_000], &[50_000]]);
+    for path in exact.layers.iter_mut().flat_map(|layer| &mut layer.paths) {
+        path.width = WidthProfile::PerEdge {
+            widths_mm: vec![0.45; path.points_mm.len() - 1],
+        };
+    }
+    let encoded = serde_json::to_vec(&exact).unwrap();
+    let decoded: NormalizedPrintPlan = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, exact);
+    assert_eq!(
+        decoded
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.paths)
+            .map(|path| match &path.width {
+                WidthProfile::PerEdge { widths_mm } => widths_mm.len(),
+                WidthProfile::Constant { .. } => 0,
+            })
+            .sum::<usize>(),
+        MAX_DEPOSITION_SEGMENTS as usize
+    );
+    decoded.validate(&intent()).unwrap();
+    let mut exceeded = exact.clone();
+    if let WidthProfile::PerEdge { widths_mm } = &mut exceeded.layers[1].paths[0].width {
+        widths_mm.push(0.45);
+    }
+    let error =
+        serde_json::from_slice::<NormalizedPrintPlan>(&serde_json::to_vec(&exceeded).unwrap())
+            .unwrap_err();
+    assert!(error.is_data(), "{error:?}");
+}
+
+#[test]
+fn skin_witness_deserialization_shares_remaining_allowance_across_domains() {
+    use serde::de::DeserializeSeed;
+    let (_, _, occurrences) = inputs();
+    let polygon = |x: [f64; 2]| DiaphragmPolygonMm {
+        outer: vec![
+            [x[0], 0.0],
+            [x[1], 0.0],
+            [x[1], 1.0],
+            [x[0], 1.0],
+            [x[0], 0.0],
+        ],
+        holes: Vec::new(),
+    };
+    let fit = SkinCommandFit {
+        required_mm: [[0.0, 0.5, 0.4], [0.01, 0.5, 0.4]],
+        fitted_mm: [[0.0, 0.5, 0.4], [0.020003, 0.5, 0.4]],
+    };
+    let domain = SkinCommandFitDomain {
+        region_index: 0,
+        region: ProcessRegionCoverage {
+            area_mm2: 0.99,
+            fraction: 1.0,
+            contributions: vec![ProcessRegionContribution {
+                occurrence_id: occurrences[0].occurrence_id,
+                definition_id: occurrences[0].definition_id.clone(),
+                provenance: None,
+            }],
+        },
+        skin: ProcessSkinKind::BottomSkin,
+        regional: vec![polygon([0.01, 1.0])],
+        mandatory: vec![polygon([0.0, 0.01])],
+        source_owner: vec![polygon([0.0, 1.0])],
+        fits: vec![fit.clone()],
+    };
+    // Model the remaining allowance after earlier layers without allocating
+    // a second large fixture or reducing the separate deposition allowance.
+    let mut budget = SegmentBudget::new();
+    budget.remaining_skin_fits = 2;
+    let mut second = domain.clone();
+    second.region_index = 1;
+    let encoded = serde_json::to_string(&[domain.clone(), second.clone()]).unwrap();
+    let decoded = diaphragm::SkinCommandFitDomainsSeed(&mut budget)
+        .deserialize(&mut serde_json::Deserializer::from_str(&encoded))
+        .unwrap();
+    assert_eq!(
+        decoded
+            .iter()
+            .map(|domain| domain.fits.len())
+            .sum::<usize>(),
+        2
+    );
+    assert_eq!(budget.remaining_skin_fits, 0);
+    second.fits.push(fit);
+    let encoded = serde_json::to_string(&[domain, second]).unwrap();
+    let mut budget = SegmentBudget::new();
+    budget.remaining_skin_fits = 2;
+    let error = diaphragm::SkinCommandFitDomainsSeed(&mut budget)
+        .deserialize(&mut serde_json::Deserializer::from_str(&encoded))
+        .unwrap_err();
+    assert!(error.is_data());
+    assert_eq!(budget.remaining_skin_fits, 0);
 }

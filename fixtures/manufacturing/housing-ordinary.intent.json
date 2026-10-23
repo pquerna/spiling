@@ -2,7 +2,7 @@
   "printer": {
     "schema_version": 11,
     "id": "software-marlin2-reference",
-    "revision": "9",
+    "revision": "10",
     "name": "Complete Marlin 2 software reference — physically unqualified",
     "coordinate_frame": "right_handed_millimetres",
     "build_envelope": {
@@ -118,8 +118,8 @@
     },
     "nozzle_diameter_mm": 0.4,
     "deposition_limits": {
-      "min_bead_width_mm": 0.45,
-      "max_bead_width_mm": 0.45,
+      "min_bead_width_mm": 0.3,
+      "max_bead_width_mm": 0.75,
       "min_bead_height_mm": 0.000001,
       "max_bead_height_mm": 0.3
     },

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Spiling contributors
 // SPDX-License-Identifier: OSL-3.0
-//! Advisory nominal-bead diagnostics over the one production D and first erosion.
+//! Advisory nominal-bead diagnostics over final D and actual associated walls.
 use super::*;
-use geo::{Intersects, LineString, Point, Polygon};
+use geo::Polygon;
 
 struct FeatureWitness {
     point: Coord<f64>,
@@ -24,7 +24,7 @@ fn segment_distance(p: Coord<f64>, a: Coord<f64>, b: Coord<f64>) -> f64 {
     .clamp(0.0, 1.0);
     (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
 }
-fn owning_material<'a>(
+pub(super) fn owning_material<'a>(
     material: &'a MultiPolygon<f64>,
     field: &PreparedFinish,
     cancel: &AtomicBool,
@@ -56,34 +56,30 @@ fn owning_material<'a>(
     }
     Ok(owner)
 }
-fn attributed_wall<'a>(
-    wall: &'a MultiPolygon<f64>,
-    owner: &Polygon<f64>,
+
+pub(super) fn owning_boundary(
+    material: &MultiPolygon<f64>,
+    field: &PreparedFinish,
     cancel: &AtomicBool,
-) -> Result<Option<&'a LineString<f64>>, ManufacturingError> {
-    let mut result = None;
-    for polygon in &wall.0 {
-        let mut valid = true;
-        for edge in polygon.exterior().0.windows(2) {
-            check_cancel(cancel)?;
-            if !owner.intersects(&Point(edge[0]))
-                || !owner.intersects(&Point(Coord {
-                    x: (edge[0].x + edge[1].x) / 2.0,
-                    y: (edge[0].y + edge[1].y) / 2.0,
-                }))
-            {
-                valid = false;
-                break;
-            }
+) -> Result<Option<u32>, ManufacturingError> {
+    let Some(owner) = owning_material(material, field, cancel)? else {
+        return Ok(None);
+    };
+    let mut boundary = 0u32;
+    for polygon in &material.0 {
+        if std::ptr::eq(polygon, owner) {
+            return Ok(Some(boundary));
         }
-        if valid {
-            if result.is_some() {
-                return Ok(None);
-            }
-            result = Some(polygon.exterior());
-        }
+        boundary = boundary
+            .checked_add(1 + polygon.interiors().len() as u32)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "finish boundary correspondence overflow",
+                )
+            })?;
     }
-    Ok(result)
+    Ok(None)
 }
 fn residual(distance: f64, bead: f64, uncertainty: f64) -> (SurfaceFeatureClass, f64, f64) {
     let low = (distance - bead / 2.0 - uncertainty).max(0.0);
@@ -103,15 +99,14 @@ fn residual(distance: f64, bead: f64, uncertainty: f64) -> (SurfaceFeatureClass,
 fn emit(
     record: &mut SurfaceResolution,
     w: FeatureWitness,
-    wall: Option<&LineString<f64>>,
-    bead: f64,
+    wall: Option<(&super::super::walls::WallPlan, u32)>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<bool, ManufacturingError> {
     check_cancel(cancel)?;
     let (classification, lower, upper) =
-        if let Some(wall) = wall.filter(|_| w.native_edge_parameter.is_some()) {
-            let cost = wall.0.len().saturating_sub(1);
+        if let Some((wall, boundary)) = wall.filter(|_| w.native_edge_parameter.is_some()) {
+            let cost = wall.correspondence.len();
             if work
                 .checked_add(cost)
                 .is_none_or(|n| n > super::super::MAX_BOOLEAN_PAIRS)
@@ -121,10 +116,19 @@ fn emit(
             }
             proof::charge(work, cost)?;
             let mut distance = f64::INFINITY;
-            for edge in wall.0.windows(2) {
+            wall.visit_boundary_edges(boundary, |edge| {
                 check_cancel(cancel)?;
-                distance = distance.min(segment_distance(w.point, edge[0], edge[1]));
-            }
+                let a = Coord {
+                    x: edge.points_mm[0][0],
+                    y: edge.points_mm[0][1],
+                };
+                let b = Coord {
+                    x: edge.points_mm[1][0],
+                    y: edge.points_mm[1][1],
+                };
+                distance = distance.min(segment_distance(w.point, a, b) - edge.width_mm * 0.5);
+                Ok(())
+            })?;
             let scale = w.point.x.abs().max(w.point.y.abs()).max(distance).max(1.0);
             let uncertainty = SURFACE_TOLERANCE_MM
                 + super::super::OFFSET_TOLERANCE_MM
@@ -132,7 +136,7 @@ fn emit(
             if !distance.is_finite() {
                 (SurfaceFeatureClass::Unavailable, 0.0, 0.0)
             } else {
-                residual(distance, bead, uncertainty)
+                residual(distance, 0.0, uncertainty)
             }
         } else {
             (SurfaceFeatureClass::Unavailable, 0.0, 0.0)
@@ -165,7 +169,7 @@ fn emit(
     Ok(true)
 }
 pub(in crate::planner) struct ResolutionGeometry<'a> {
-    pub firstwall: &'a MultiPolygon<f64>,
+    pub wall: &'a super::super::walls::WallPlan,
     pub material: &'a MultiPolygon<f64>,
     pub native: &'a MultiPolygon<f64>,
 }
@@ -175,12 +179,11 @@ pub(in crate::planner) fn collect_resolution(
     fields: &[PreparedFinish],
     sample: f64,
     layer_index: u32,
-    bead: f64,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<SurfaceResolution>, ManufacturingError> {
     let ResolutionGeometry {
-        firstwall,
+        wall: wall_plan,
         material,
         native,
     } = geometry;
@@ -215,7 +218,9 @@ pub(in crate::planner) fn collect_resolution(
             .checked_add(1)
             .and_then(|n| {
                 n.checked_mul(
-                    region::point_count(firstwall)
+                    wall_plan
+                        .correspondence
+                        .len()
                         .saturating_add(region::point_count(native))
                         .saturating_add(1),
                 )
@@ -232,11 +237,7 @@ pub(in crate::planner) fn collect_resolution(
         proof::charge(work, scan.expect("admitted diagnostic scan"))?;
         let owner = owning_material(material, field, cancel)?;
         let native_owner = owning_material(native, field, cancel)?;
-        let wall = if let Some(owner) = owner {
-            attributed_wall(firstwall, owner, cancel)?
-        } else {
-            None
-        };
+        let wall = owning_boundary(material, field, cancel)?.map(|boundary| (wall_plan, boundary));
         if let Some(owner) = owner {
             'edges: for edge in owner.exterior().0.windows(2) {
                 check_cancel(cancel)?;
@@ -295,7 +296,6 @@ pub(in crate::planner) fn collect_resolution(
                             native_edge_parameter,
                         },
                         wall,
-                        bead,
                         work,
                         cancel,
                     )? {
@@ -316,7 +316,6 @@ pub(in crate::planner) fn collect_resolution(
                     native_edge_parameter: None,
                 },
                 None,
-                bead,
                 work,
                 cancel,
             )?;

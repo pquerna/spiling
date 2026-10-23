@@ -4,7 +4,9 @@
 //! Invoked after the emitted-byte/path bijection. The middle actual path point
 //! binds the sole ownership transition; each portion retains its captured domain.
 use super::{cancelled, failed, project_xyz6_point_mm};
-use crate::planner::support::{AnchorCandidate, AnchorWorkspace, GapKind, gap_kind};
+use crate::planner::support::{
+    AnchorCandidate, AnchorWorkspace, GapKind, gap_kind, projected_edges,
+};
 use spiling_contracts::manufacturing::*;
 use std::sync::atomic::AtomicBool;
 
@@ -21,13 +23,15 @@ fn charge(work: &mut usize, n: usize) -> Result<(), ManufacturingError> {
     Ok(())
 }
 
-/// Intersect the ORIGINAL classified rings at the actual emitted row, including
-/// holes, then project their interval endpoints by the sole XYZ6 contract. This
-/// explicitly encloses command-grid boundary construction, not native tolerance.
+/// Reconstruct an ORIGINAL classified row, including holes, then project that
+/// interval's endpoints by the sole XYZ6 contract. Classification uses its raw
+/// authored row; physical source confinement separately uses the emitted row.
 fn contains_portion(
     domain: &[DiaphragmPolygonMm],
+    row: f64,
     a: [f64; 3],
     b: [f64; 3],
+    complete_raw: bool,
     hits: &mut Vec<f64>,
     work: &mut usize,
     cancel: &AtomicBool,
@@ -40,6 +44,11 @@ fn contains_portion(
         return Ok(false);
     };
     let fixed = 1 - along;
+    let required = [a[along].min(b[along]), a[along].max(b[along])];
+    let actual = [
+        program_coordinates::project_xyz6_coordinate_mm(required[0])?,
+        program_coordinates::project_xyz6_coordinate_mm(required[1])?,
+    ];
     for polygon in domain {
         cancelled(cancel)?;
         let edges = polygon.outer.len() + polygon.holes.iter().map(Vec::len).sum::<usize>();
@@ -56,11 +65,13 @@ fn contains_portion(
             for edge in ring.windows(2) {
                 cancelled(cancel)?;
                 let (c, d) = (edge[0], edge[1]);
-                if (c[fixed] <= a[fixed] && a[fixed] < d[fixed])
-                    || (d[fixed] <= a[fixed] && a[fixed] < c[fixed])
-                {
-                    let t = (a[fixed] - c[fixed]) / (d[fixed] - c[fixed]);
-                    hits.push(c[along] + t * (d[along] - c[along]));
+                if (c[fixed] <= row && row < d[fixed]) || (d[fixed] <= row && row < c[fixed]) {
+                    // Preserve the defined raw hatch construction's operation
+                    // order. Reassociating division can move a boundary one ULP
+                    // and select the other XYZ6 neighbor at a rounding tie.
+                    hits.push(
+                        c[along] + (row - c[fixed]) * (d[along] - c[along]) / (d[fixed] - c[fixed]),
+                    );
                 }
             }
         }
@@ -74,9 +85,12 @@ fn contains_portion(
             return Err(failed("mixed bridge domain row is ambiguous"));
         }
         for pair in hits.chunks_exact(2) {
+            if complete_raw && [pair[0], pair[1]] != required {
+                continue;
+            }
             let lo = program_coordinates::project_xyz6_coordinate_mm(pair[0])?;
             let hi = program_coordinates::project_xyz6_coordinate_mm(pair[1])?;
-            if lo <= a[along].min(b[along]) && a[along].max(b[along]) <= hi {
+            if lo <= actual[0] && actual[1] <= hi {
                 return Ok(true);
             }
         }
@@ -103,6 +117,7 @@ pub(super) fn verify(
                 continue;
             };
             cancelled(cancel)?;
+            let width_mm = super::constant_width(path)?;
             if index == 0
                 || path.kind != DepositionKind::Bridge
                 || path.points_mm.len() != 3
@@ -110,6 +125,27 @@ pub(super) fn verify(
             {
                 return Err(failed(
                     "mixed skin bridge requires an ordinary interval and one actual transition",
+                ));
+            }
+            let fixed = match recipe.rectilinear_axis {
+                RectilinearAxisPolicy::X => 1,
+                RectilinearAxisPolicy::Y => 0,
+                RectilinearAxisPolicy::AlternatingXY => usize::from(layer.index.is_multiple_of(2)),
+                RectilinearAxisPolicy::AlternatingYX => usize::from(!layer.index.is_multiple_of(2)),
+            };
+            let along = 1 - fixed;
+            let raw_a = path.points_mm[0];
+            let raw_transition = path.points_mm[1];
+            let raw_b = path.points_mm[2];
+            if path
+                .points_mm
+                .iter()
+                .any(|point| point[fixed] != raw_a[fixed] || point[2] != layer.z_mm)
+                || !(raw_a[along] < raw_transition[along] && raw_transition[along] < raw_b[along]
+                    || raw_b[along] < raw_transition[along] && raw_transition[along] < raw_a[along])
+            {
+                return Err(failed(
+                    "mixed bridge changes its authored regional row, axis or height",
                 ));
             }
             let a = project_xyz6_point_mm(path.points_mm[0])?;
@@ -121,62 +157,65 @@ pub(super) fn verify(
                 .iter()
                 .find(|domain| domain.region_index == region_index && domain.skin == skin)
                 .ok_or_else(|| failed("mixed bridge lost captured source-domain ownership"))?;
-            let (skin_end, regional_end) = if skin_first { (a, b) } else { (b, a) };
-            if !contains_portion(&domain.source_owner, a, b, &mut hits, work, cancel)?
-                || !contains_portion(
-                    &domain.regional,
-                    regional_end,
-                    transition,
-                    &mut hits,
-                    work,
-                    cancel,
-                )?
-                || !contains_portion(
-                    &domain.mandatory,
-                    transition,
-                    skin_end,
-                    &mut hits,
-                    work,
-                    cancel,
-                )?
-            {
+            let regional_end = if skin_first { b } else { a };
+            let (raw_skin_end, raw_regional_end) = if skin_first {
+                (raw_a, raw_b)
+            } else {
+                (raw_b, raw_a)
+            };
+            if !contains_portion(
+                &domain.source_owner,
+                a[fixed],
+                raw_a,
+                raw_b,
+                false,
+                &mut hits,
+                work,
+                cancel,
+            )? || !contains_portion(
+                &domain.regional,
+                raw_a[fixed],
+                raw_regional_end,
+                raw_transition,
+                true,
+                &mut hits,
+                work,
+                cancel,
+            )? || !contains_portion(
+                &domain.mandatory,
+                raw_a[fixed],
+                raw_transition,
+                raw_skin_end,
+                false,
+                &mut hits,
+                work,
+                cancel,
+            )? {
                 return Err(failed(format!(
                     "actual mixed bridge portions escape their classified regional/mandatory domains: layer {}, {:?} -> {:?} -> {:?}",
                     layer.index, a, transition, b
                 )));
             }
-            let along = if a[0] == b[0] { 1 } else { 0 };
-            let fixed = 1 - along;
             let length = (b[along] - a[along]).abs();
             let previous = &plan.layers[index - 1];
             let actual = || {
-                previous
-                    .paths
-                    .iter()
-                    .filter(|lower| {
+                projected_edges(
+                    previous.paths.iter().filter(|lower| {
                         lower.physical_z_mm[1] == path.physical_z_mm[0]
                             && !matches!(
                                 lower.kind,
                                 DepositionKind::Support | DepositionKind::SupportInterface
                             )
-                    })
-                    .flat_map(|lower| {
-                        lower.points_mm.windows(2).map(move |edge| {
-                            (
-                                project_xyz6_point_mm(edge[0])
-                                    .and_then(|a| project_xyz6_point_mm(edge[1]).map(|b| [a, b])),
-                                true,
-                                lower.bead_width_mm,
-                            )
-                        })
-                    })
+                    }),
+                    true,
+                )
             };
             let core_length = (regional_end[along] - transition[along]).abs();
             let demanded_terminal = anchors
                 .gaps_edges(
                     AnchorCandidate {
                         endpoints_mm: [regional_end, transition],
-                        bead_width_mm: path.bead_width_mm,
+                        bead_width_mm: width_mm,
                     },
                     actual(),
                     work,
@@ -189,7 +228,7 @@ pub(super) fn verify(
                             gap_kind(
                                 gap,
                                 (gap.end - gap.start) * core_length,
-                                path.bead_width_mm,
+                                width_mm,
                                 recipe.process.max_bridge_span_mm
                             ),
                             GapKind::Demand
@@ -203,8 +242,6 @@ pub(super) fn verify(
             // The captured nominal lower strokes are already bijected to actual
             // commands above. Recheck minimal nominal endpoint construction;
             // the separate whole-stroke XYZ6 proof below owns actual anchoring.
-            let raw_transition = path.points_mm[1];
-            let raw_skin_end = path.points_mm[if skin_first { 0 } else { 2 }];
             let skin_length = (raw_skin_end[along] - raw_transition[along]).abs();
             let nominal = previous.paths.iter().filter(|lower| {
                 lower.physical_z_mm[1] == path.physical_z_mm[0]
@@ -216,7 +253,7 @@ pub(super) fn verify(
             let nearest = anchors.gaps(
                 AnchorCandidate {
                     endpoints_mm: [raw_transition, raw_skin_end],
-                    bead_width_mm: path.bead_width_mm,
+                    bead_width_mm: width_mm,
                 },
                 nominal,
                 std::iter::empty(),
@@ -238,7 +275,7 @@ pub(super) fn verify(
             for gap in anchors.gaps_edges(
                 AnchorCandidate {
                     endpoints_mm: [a, b],
-                    bead_width_mm: path.bead_width_mm,
+                    bead_width_mm: width_mm,
                 },
                 actual(),
                 work,
@@ -247,7 +284,7 @@ pub(super) fn verify(
                 match gap_kind(
                     gap,
                     (gap.end - gap.start) * length,
-                    path.bead_width_mm,
+                    width_mm,
                     recipe.process.max_bridge_span_mm,
                 ) {
                     GapKind::Supported => {}
@@ -294,4 +331,56 @@ pub(super) fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_row_reconstruction_preserves_the_original_raw_interpolation_order() {
+        let domain = [DiaphragmPolygonMm {
+            outer: vec![
+                [2.0, 0.0],
+                [10.0, 0.0],
+                [210.0, 3.0],
+                [2.0, 3.0],
+                [2.0, 0.0],
+            ],
+            holes: Vec::new(),
+        }];
+        let original = 10.0 + 200.0 / 3.0;
+        let reassociated = 10.0 + (1.0 / 3.0) * 200.0;
+        assert_ne!(original, reassociated);
+        let cancel = AtomicBool::new(false);
+        let mut hits = Vec::new();
+        let mut work = 0;
+        assert!(
+            contains_portion(
+                &domain,
+                1.0,
+                [2.0, 1.0, 2.0],
+                [original, 1.0, 2.0],
+                true,
+                &mut hits,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !contains_portion(
+                &domain,
+                1.0,
+                [2.0, 1.0, 2.0],
+                [reassociated, 1.0, 2.0],
+                true,
+                &mut hits,
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            "even a one-ULP alternate is not the complete original classified interval"
+        );
+    }
 }

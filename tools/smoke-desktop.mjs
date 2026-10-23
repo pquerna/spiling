@@ -2097,7 +2097,7 @@ async function inspectManufacturing() {
     "native immutable compile",
     nativeJobObservationMs,
   );
-  const record = state.selected_artifact;
+  let record = state.selected_artifact;
   assert.equal(state.fresh, false, "Stored verified flags confer no fresh authority");
   await expectManufacturingStep("verify");
   await click("manufacturing-verify-report");
@@ -2144,6 +2144,87 @@ async function inspectManufacturing() {
       q1Intent,
       "Fresh actual replay retains the authored policies",
     );
+  if (scenario === "manufacturing" && !manufacturingDiagnostic &&
+      manufacturingSource === "occt-rounded-housing-mm.step" && !combineSparse) {
+    const originalIntent = structuredClone(state.selected_intent);
+    assert.equal(originalIntent.recipe.bead_width_mm, 0.45);
+    assert.equal(originalIntent.printer.deposition_limits.min_bead_width_mm, 0.30);
+    assert.equal(originalIntent.printer.deposition_limits.max_bead_width_mm, 0.75);
+    const inspectWidths = async (maximum) => {
+      const summary = await text("manufacturing-wall-association-metrics");
+      const match = summary.match(/Automatic Wall strokes: (\d+); nominal associated width range\s+([\d.]+)–([\d.]+) mm/);
+      assert.ok(match, "Fresh decoded actual Wall associations have a visible width summary");
+      assert.ok(Number(match[1]) > 0);
+      assert.ok(Number(match[2]) >= 0.30 - 0.000001);
+      assert.ok(Number(match[3]) <= maximum + 0.000001);
+      return summary;
+    };
+    const beforeWidths = await inspectWidths(0.75);
+    await input('[data-testid="manufacturing-width-maximum"]', "0.70");
+    await click("manufacturing-apply");
+    const revisedIntent = structuredClone(originalIntent);
+    revisedIntent.printer.deposition_limits.max_bead_width_mm = 0.70;
+    const appliedWidth = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && !current.draft_changed &&
+        current.selected_intent?.printer.deposition_limits.max_bead_width_mm === 0.70
+        ? current : false;
+    }, "Consumed software width maximum Apply");
+    assert.deepEqual(appliedWidth.selected_intent, revisedIntent,
+      "Only maximum changes; preferred/minimum widths and authored process remain intact");
+    assert.equal(appliedWidth.fresh, false, "Previous artifact loses fresh authority on width Apply");
+    await click("project-undo");
+    const undoneWidth = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working &&
+        current.selected_intent?.printer.deposition_limits.max_bead_width_mm === 0.75
+        ? current : false;
+    }, "Width Undo restores original intent/artifact");
+    assert.deepEqual(undoneWidth.selected_intent, originalIntent);
+    assert.deepEqual(undoneWidth.selected_artifact, record);
+    await click("project-redo");
+    const redoneWidth = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working &&
+        current.selected_intent?.printer.deposition_limits.max_bead_width_mm === 0.70
+        ? current : false;
+    }, "Width Redo restores revised intent/stale artifact");
+    assert.deepEqual(redoneWidth.selected_intent, revisedIntent);
+    assert.equal(redoneWidth.fresh, false);
+    await click("manufacturing-compile");
+    state = await until(async () => {
+      const current = await manufacturingState();
+      if (!current.working &&
+          await evaluate("!!document.querySelector('#manufacturing-operation-failure')"))
+        throw new Error(`Revised-width Compile refused: ${await text("manufacturing-message")}`);
+      return !current.working && current.selected_artifact &&
+        current.selected_artifact.input_hash !== record.input_hash ? current : false;
+    }, "Compile revised consumed width bound", nativeJobObservationMs);
+    record = state.selected_artifact;
+    assert.equal(state.fresh, false);
+    await click("manufacturing-verify-motion");
+    state = await until(async () => {
+      const current = await manufacturingState();
+      return !current.working && current.fresh && current.report?.verified &&
+        current.replay?.byte_count > 0 ? current : false;
+    }, "Fresh independent revised-width report and actual replay", nativeJobObservationMs);
+    assert.deepEqual(state.selected_intent, revisedIntent);
+    const afterWidths = await inspectWidths(0.70);
+    if (q1Intent) q1Intent = revisedIntent;
+    await input('[data-testid="manufacturing-events"]', String(state.replay.event_count));
+    await evaluate("document.querySelector('[data-testid=\"viewport\"]').scrollIntoView({block:'center'})");
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+    await screenshot("manufacturing-revised-width-actual-replay");
+    await evaluate("document.querySelector('[data-testid=\"manufacturing-wall-association-metrics\"]').scrollIntoView({block:'center'})");
+    await screenshot("manufacturing-revised-width-associations");
+    if (evidenceDirectory)
+      await writeFile(resolve(evidenceDirectory, "width-revision.json"), JSON.stringify({
+        software_only: true, not_machine_ready: true,
+        before: { intent: originalIntent, summary: beforeWidths },
+        after: { intent: revisedIntent, summary: afterWidths, artifact: record,
+          report: state.report, replay: state.replay, provenance: state.provenance },
+      }, null, 2), { flag: "wx" });
+  }
   await expectManufacturingStep("ready");
   await evaluate(
     `document.querySelector('[data-testid="manufacturing-next-step"]').scrollIntoView({block:'start'})`,
@@ -2236,6 +2317,19 @@ async function inspectManufacturing() {
   assert.deepEqual(JSON.parse(exported["verification.json"]), state.report);
   assert.equal(JSON.parse(exported["provenance.json"]).input_hash, record.input_hash);
   const plan = JSON.parse(exported["plan.json"]);
+  const widthLimits = state.selected_intent.printer.deposition_limits;
+  for (const layer of plan.layers) for (const path of layer.paths) {
+    const widths = path.width.kind === "constant"
+      ? [path.width.width_mm] : path.width.widths_mm;
+    assert.ok(widths.length > 0, "Export preserves consumed actual path widths");
+    if (path.width.kind === "per_edge")
+      assert.equal(widths.length, path.points_mm.length - 1);
+    for (const width of widths)
+      assert.ok(Number.isFinite(width) &&
+        width >= widthLimits.min_bead_width_mm - 0.000001 &&
+        width <= widthLimits.max_bead_width_mm + 0.000001,
+      "Fresh independently verified export respects consumed width envelope");
+  }
   assert.ok(
     plan.layers.every((layer) =>
       layer.region_coverage.process_regions.every((region, index) =>
@@ -2344,7 +2438,7 @@ async function inspectManufacturing() {
     ].includes(band.disposition.reason)), "Retained fine decisions explain an actual eligibility veto");
     for (const layer of plan.layers) {
       for (const path of layer.paths) {
-        assert.ok(path.bead_width_mm > 0 && path.physical_z_mm.length === 2);
+        assert.ok(path.physical_z_mm.length === 2);
         if (["perimeter", "bottom_skin", "top_skin", "separator_wall"].includes(path.kind))
           assert.deepEqual(path.physical_z_mm, [layer.lower_z_mm, layer.z_mm],
             "Walls, skins and separator keep explicit fine intervals");
@@ -2386,7 +2480,8 @@ async function inspectManufacturing() {
       if (event.kind === "sparse_fill" && association?.physicalZMm[0] < coarse.lower_z_mm) {
         assert.ok(coarse.paths.some(path => path.kind === "sparse_fill" &&
           JSON.stringify(path.physical_z_mm) === JSON.stringify(association.physicalZMm) &&
-          path.bead_width_mm === association.beadWidthMm),
+          path.width.kind === "constant" &&
+          path.width.width_mm === association.beadWidthMm),
         "Actual emitted event carries the genuine coarse expected-plan association");
         associated = event;
         break;
@@ -2428,7 +2523,9 @@ async function inspectManufacturing() {
   }
   if (q1Intent && !processZones && !processDiaphragm) {
     const perimeters = plan.layers.flatMap((layer) =>
-      layer.paths.filter((path) => path.kind === "perimeter"),
+      layer.paths.filter((path) => path.kind === "perimeter" &&
+        path.owner?.kind === "wall" &&
+        JSON.stringify(path.points_mm[0]) === JSON.stringify(path.points_mm.at(-1))),
     );
     assert.ok(perimeters.length > 0);
     for (const path of perimeters) {
@@ -2606,6 +2703,9 @@ async function inspectManufacturing() {
     await click("manufacturing-compile");
     const revised = await until(async () => {
       const current = await manufacturingState();
+      if (!current.working &&
+          await evaluate("!!document.querySelector('#manufacturing-operation-failure')"))
+        throw new Error(`Density-revision Compile refused: ${await text("manufacturing-message")}`);
       return !current.working && current.selected_artifact ? current : false;
     }, "Recompile actual lower .25 upper .60 plate revision", nativeJobObservationMs);
     await click("manufacturing-verify-motion");
@@ -2860,6 +2960,8 @@ async function inspectManufacturing() {
     expected.recipe.seam_policy = q1Intent.recipe.seam_policy;
     expected.recipe.rectilinear_axis = q1Intent.recipe.rectilinear_axis;
     if (combineSparse || processDiaphragm) expected.recipe.sparse_infill = q1Intent.recipe.sparse_infill;
+    expected.printer.deposition_limits.max_bead_width_mm =
+      q1Intent.printer.deposition_limits.max_bead_width_mm;
     assert.deepEqual(
       state.selected_intent,
       expected,

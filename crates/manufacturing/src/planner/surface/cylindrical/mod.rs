@@ -648,10 +648,10 @@ pub(super) fn realize(
 }
 
 pub(super) fn certify_first_wall(
-    centers: &MultiPolygon<f64>,
+    wall: &super::super::walls::WallPlan,
+    boundary: u32,
     field: &CylinderField,
     sample: f64,
-    bead: f64,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     if sample <= field.bounds.min[2] || sample >= field.bounds.max[2] {
@@ -659,50 +659,50 @@ pub(super) fn certify_first_wall(
     }
     let error_bound =
         SECTION_SAMPLING_TOLERANCE_MM + SURFACE_TOLERANCE_MM + super::super::OFFSET_TOLERANCE_MM;
-    let expected = field.radius + field.depth - bead / 2.0;
-    let mut matching = None;
-    for polygon in &centers.0 {
+    let expected = field.radius + field.depth;
+    let mut turn = 0.0;
+    let mut maximum = f64::NEG_INFINITY;
+    let mut count = 0usize;
+    wall.visit_boundary_edges(boundary, |edge| {
         check_cancel(cancel)?;
-        let ring = polygon.exterior();
-        // Attribute a full angular exterior, not an unrelated island supplying
-        // a convenient maximum. The axis may lie in an unchanged protected hole.
-        let mut turn = 0.0;
-        let mut maximum = 0.0f64;
-        let mut valid = true;
-        for edge in ring.0.windows(2) {
-            check_cancel(cancel)?;
-            let a = sub(edge[0], field.center);
-            let b = sub(edge[1], field.center);
-            let delta = cross(a, b).atan2(a.x * b.x + a.y * b.y);
-            valid &= delta > 0.0
-                && delta < PI / 2.0
-                && RobustKernel::orient2d(edge[0], edge[1], field.center)
-                    == Orientation::CounterClockwise
-                && norm(a) >= field.radius - bead / 2.0 - error_bound - field.arithmetic
-                && norm(a) <= expected + error_bound + field.arithmetic;
-            turn += delta;
-            maximum = maximum.max(norm(a));
-        }
-        valid &= (turn - TAU).abs() <= 256.0 * f64::EPSILON * ring.0.len() as f64;
-        if valid && matching.replace(maximum).is_some() {
+        let a = Coord {
+            x: edge.points_mm[0][0],
+            y: edge.points_mm[0][1],
+        };
+        let b = Coord {
+            x: edge.points_mm[1][0],
+            y: edge.points_mm[1][1],
+        };
+        let a = sub(a, field.center);
+        let b = sub(b, field.center);
+        let delta = cross(a, b).atan2(a.x * b.x + a.y * b.y).abs();
+        let half = edge.width_mm * 0.5;
+        if delta >= PI / 2.0
+            || norm(a) < field.radius - half - error_bound - field.arithmetic
+            || norm(a) + half > expected + error_bound + field.arithmetic
+        {
             return Err(unsupported(
                 &field.face_id,
-                "ordinary first wall has ambiguous cylindrical exterior attribution",
+                "actual boundary-associated cylindrical wall exceeds its radial enclosure",
             ));
         }
-    }
-    let peak = matching.ok_or_else(|| {
-        unsupported(
-            &field.face_id,
-            "ordinary first wall lost the attributed full cylindrical exterior",
-        )
+        turn += delta;
+        maximum = maximum.max(norm(a) + half).max(norm(b) + half);
+        count += 1;
+        Ok(())
     })?;
-    if peak - field.arithmetic < expected - error_bound
-        || peak + field.arithmetic > expected + error_bound
+    if count == 0 || (turn - TAU).abs() > 256.0 * f64::EPSILON * count as f64 {
+        return Err(unsupported(
+            &field.face_id,
+            "actual wall lost the attributed full cylindrical exterior",
+        ));
+    }
+    if maximum - field.arithmetic < expected - error_bound
+        || maximum + field.arithmetic > expected + error_bound
     {
         return Err(unsupported(
             &field.face_id,
-            "requested cylindrical radial peak did not survive the ordinary first-wall offset",
+            "requested cylindrical radial peak did not survive actual wall allocation",
         ));
     }
     Ok(())

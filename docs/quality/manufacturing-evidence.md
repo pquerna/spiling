@@ -43,12 +43,21 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 
 Native geometry work has one fixed, whole-job cumulative 512-million-unit CPU
 envelope, including complete original three-dimensional reference-cycle proofs.
-Deposited-stroke anchor comparisons and planar overlay work retain independent
-cumulative 128-million-unit ceilings. These bound computation, not geometric
+Deposited-stroke anchor comparisons retain their cumulative 128-million-unit
+ceiling; planar construction/overlay work uses 16,384,000,000 cumulative units.
+These bound computation, not geometric
 error: no per-source override, retry reset or geometric-accuracy relaxation is
-implied. Prepared sources, live query scratch and retained outputs retain their
-existing byte allowances, as do native depth, chord, plane and shape-error gates;
-host-process memory limits remain separate. Work units are heterogeneous, not a
+implied. The 100,000 emitted-segment limit is separate from the 64 MiB
+manufacturing retained-geometry/staging allowance. A coordinate-equivalent
+inventory bound derived from that byte allowance is an early arithmetic guard,
+not a command count or a substitute for allocated-capacity accounting. Physical
+skin queries reserve all outside owners separately from their own caches and
+temporary outputs; pinned shared payloads are charged once and only optional,
+unpinned cache entries may be reclaimed. Known old/new containers, path/profile
+buffers and metadata coexistence are admitted before growth or publication.
+Opaque Boolean-kernel transients and host-process memory remain distinct from
+these application-owned receipts. Native byte allowances and depth, chord,
+plane and shape-error gates are unchanged. Work units are heterogeneous, not a
 universal wall-clock estimate. The engine allows five minutes per accepted native
 job, with a separate ten-second cancellation acknowledgement grace.
 
@@ -343,14 +352,14 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner16,
-emitter6/verifier8 and SPLR5; executable constants and exact native pin remain authoritative.
-Box, independent tapered-fitting and rounded-housing operators complete Compile,
-fresh replay/export, save and source-deleted fresh read-only reopen. Both
-independent parts also complete the hardware workbench flow with native picking.
-Cylinder/through-hole replay retains nominal material and protected voids;
-mapped image consumers exercise final-D walls, fill, skin and actual programs.
-These are **not** general manufacturing or G0–G3 qualification.
+Current identities are project10/manufacturing11/process3/surface3, planner17,
+emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
+Native geometry admission, actual wall/skin/support construction, independent
+emitted-byte verification and source-backed recovery are separate obligations.
+Raw inspection, an older producer's successful job or historical hardware
+evidence does not qualify the current producer. Current software admission is
+not general manufacturing or G0–G3 qualification; the executable refusal
+boundaries and freshly verified outputs remain authoritative.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader

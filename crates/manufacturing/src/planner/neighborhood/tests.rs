@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: OSL-3.0
 
 use super::*;
-use geo::{Area, Contains, LineString, Point, Polygon};
+use geo::{Area, Contains, Distance, Euclidean, LineString, Point, Polygon};
 use std::sync::atomic::Ordering;
 
 fn rectangle(left: f64, right: f64) -> MultiPolygon<f64> {
@@ -17,21 +17,46 @@ fn rectangle(left: f64, right: f64) -> MultiPolygon<f64> {
         Vec::new(),
     )])
 }
-fn sections(materials: impl IntoIterator<Item = MultiPolygon<f64>>) -> Vec<SectionSpan> {
-    materials
+struct Sections {
+    spans: Vec<SectionSpan>,
+    owned_bytes: usize,
+}
+impl Deref for Sections {
+    type Target = [SectionSpan];
+    fn deref(&self) -> &Self::Target {
+        &self.spans
+    }
+}
+impl std::ops::DerefMut for Sections {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.spans
+    }
+}
+fn sections(materials: impl IntoIterator<Item = MultiPolygon<f64>>) -> Sections {
+    let mut owned_bytes = 0;
+    let spans = materials
         .into_iter()
         .enumerate()
-        .map(|(i, material)| SectionSpan {
-            occupied: None,
-            start: i as u32,
-            end: i as u32 + 1,
-            invariant: true,
-            inner_material: None,
-            source_area_mm2: material.unsigned_area(),
-            material: Arc::new(material),
-            process_domains: Vec::new(),
+        .map(|(i, mut material)| {
+            owned_bytes += super::super::native::material_bytes(&mut material)
+                + super::super::native::MATERIAL_ARC_BYTES;
+            SectionSpan {
+                occupied: None,
+                start: i as u32,
+                end: i as u32 + 1,
+                invariant: true,
+                inner_material: None,
+                source_area_mm2: material.unsigned_area(),
+                material: Arc::new(material),
+                process_domains: Vec::new(),
+            }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    owned_bytes += spans.capacity() * std::mem::size_of::<SectionSpan>();
+    Sections { spans, owned_bytes }
+}
+fn source_bytes(sections: &Sections) -> usize {
+    sections.owned_bytes
 }
 fn source_points(sections: &[SectionSpan]) -> usize {
     sections
@@ -105,7 +130,13 @@ fn growing_shrinking_and_sliding_horizons_intersect_every_realized_span() {
             .map(|s| s.material.0[0].exterior().0[1].x)
             .fold(f64::INFINITY, f64::min);
         let material = index
-            .survival(a, Some(b), source_points(&spans), &cancel)
+            .survival(
+                a,
+                Some(b),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap();
         assert!((material.unsigned_area() - ((right - left) * 10.0 - 8.0)).abs() < 1e-5);
         assert_eq!(material.0.len(), 1);
@@ -115,13 +146,20 @@ fn growing_shrinking_and_sliding_horizons_intersect_every_realized_span() {
     }
     // Inclusive exact endpoint changes the surviving right boundary from 10 to 9.
     let before = index
-        .survival(1, Some(3), source_points(&spans), &cancel)
+        .survival(
+            1,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     let at = index
         .survival(
             1,
             Some(4),
             source_points(&spans) + before.temporary_points(),
+            source_bytes(&spans) + before.temporary_bytes(),
             &cancel,
         )
         .unwrap();
@@ -141,9 +179,6 @@ fn sliding_512_vertex_annuli_keep_expected_minimum_radius_and_protected_hole() {
     let spans = sections(dimensions.iter().map(|&(outer, hole)| annulus(outer, hole)));
     let cancel = AtomicBool::new(false);
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 73).unwrap();
-    // Sources plus all 93 aligned internal domains would exceed100k.
-    // Reclaiming older unpinned ranges must preserve each exact horizon.
-    assert!((96 + 93) * (513 + 65) > MAX_DEPOSITION_SEGMENTS as usize);
     for start in 0..=64 {
         let end = start + 31;
         let outer = dimensions[start..=end]
@@ -155,7 +190,13 @@ fn sliding_512_vertex_annuli_keep_expected_minimum_radius_and_protected_hole() {
             .map(|d| d.1)
             .fold(f64::NEG_INFINITY, f64::max);
         let material = index
-            .survival(start, Some(end), source_points(&spans), &cancel)
+            .survival(
+                start,
+                Some(end),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap();
         let outer_area = 256.0 * outer.powi(2) * (std::f64::consts::TAU / 512.0).sin();
         let hole_area = 32.0 * hole.powi(2) * (std::f64::consts::TAU / 64.0).sin();
@@ -172,7 +213,7 @@ fn sliding_512_vertex_annuli_keep_expected_minimum_radius_and_protected_hole() {
         assert!(material.contains(&Point::new((outer + hole) * 0.5, 0.0)));
         assert!(
             source_points(&spans) + index.retained_points() + material.temporary_points()
-                <= MAX_DEPOSITION_SEGMENTS as usize
+                <= MAX_RETAINED_GEOMETRY_UNITS
         );
     }
     assert!(*index.work_mut() < MAX_BOOLEAN_PAIRS);
@@ -185,24 +226,48 @@ fn leaves_borrow_aligned_ranges_reuse_and_lower_lives_across_upper_query() {
     let cancel = AtomicBool::new(false);
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let leaf = index
-        .survival(3, Some(3), source_points(&spans), &cancel)
+        .survival(
+            3,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!(std::ptr::eq(&*leaf, &*spans[3].material));
     assert_eq!(leaf.temporary_points(), 0);
     assert_eq!(index.retained_points(), 0);
     let aligned = index
-        .survival(0, Some(3), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     let retained = index.retained_points();
     let work = *index.work_mut();
     let reverse = index
-        .survival(3, Some(0), source_points(&spans), &cancel)
+        .survival(
+            3,
+            Some(0),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!(std::ptr::eq(&*aligned, &*reverse));
     assert_eq!(index.retained_points(), retained);
     assert!(*index.work_mut() - work < 16);
     let lower = index
-        .survival(1, Some(5), source_points(&spans), &cancel)
+        .survival(
+            1,
+            Some(5),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(lower.temporary_points(), 5);
     let upper = index
@@ -210,6 +275,7 @@ fn leaves_borrow_aligned_ranges_reuse_and_lower_lives_across_upper_query() {
             2,
             Some(6),
             source_points(&spans) + lower.temporary_points(),
+            source_bytes(&spans) + lower.temporary_bytes(),
             &cancel,
         )
         .unwrap();
@@ -222,9 +288,13 @@ fn empty_identity_absent_and_non_power_of_two_ranges_are_safe() {
     let cancel = AtomicBool::new(false);
     let empty_spans = Vec::new();
     let mut empty = SkinNeighborhoods::new(&empty_spans, 0.0, 0).unwrap();
-    assert!(empty.survival(0, None, 0, &cancel).unwrap().0.is_empty());
+    assert!(empty.survival(0, None, 0, 0, &cancel).unwrap().0.is_empty());
     assert_eq!(
-        empty.survival(0, Some(0), 0, &cancel).err().unwrap().code,
+        empty
+            .survival(0, Some(0), 0, 0, &cancel)
+            .err()
+            .unwrap()
+            .code,
         ManufacturingErrorCode::ResourceLimit
     );
     let spans = sections([
@@ -235,7 +305,13 @@ fn empty_identity_absent_and_non_power_of_two_ranges_are_safe() {
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     assert!(
         index
-            .survival(0, Some(2), source_points(&spans), &cancel)
+            .survival(
+                0,
+                Some(2),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel
+            )
             .unwrap()
             .0
             .is_empty()
@@ -243,7 +319,13 @@ fn empty_identity_absent_and_non_power_of_two_ranges_are_safe() {
     let work = *index.work_mut();
     assert!(
         index
-            .survival(1, Some(0), source_points(&spans), &cancel)
+            .survival(
+                1,
+                Some(0),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel
+            )
             .unwrap()
             .0
             .is_empty()
@@ -251,19 +333,25 @@ fn empty_identity_absent_and_non_power_of_two_ranges_are_safe() {
     assert!(*index.work_mut() - work < 16);
     assert_eq!(index.retained_points(), 0);
     let last = index
-        .survival(2, Some(2), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(2),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!(std::ptr::eq(&*last, &*spans[2].material));
     assert!(
         index
-            .survival(usize::MAX, None, 0, &cancel)
+            .survival(usize::MAX, None, 0, source_bytes(&spans), &cancel)
             .unwrap()
             .0
             .is_empty()
     );
     assert_eq!(
         index
-            .survival(0, Some(usize::MAX), 0, &cancel)
+            .survival(0, Some(usize::MAX), 0, source_bytes(&spans), &cancel)
             .err()
             .unwrap()
             .code,
@@ -284,15 +372,36 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
     let cancel = AtomicBool::new(false);
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let lower = index
-        .survival(0, Some(2), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(2),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(index.retained_points(), 5);
     assert_eq!(lower.temporary_points(), 5);
     let pinned = index
-        .survival(0, Some(1), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    let external = MAX_DEPOSITION_SEGMENTS as usize - 15 + lower.temporary_points();
-    let failure = index.survival(1, Some(3), external, &cancel).err().unwrap();
+    let external = MAX_RETAINED_GEOMETRY_UNITS - 15 + lower.temporary_points();
+    let failure = index
+        .survival(
+            1,
+            Some(3),
+            external,
+            source_bytes(&spans) + lower.temporary_bytes(),
+            &cancel,
+        )
+        .err()
+        .unwrap();
     assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
     assert!(failure.message.contains("retained"));
     // The new aligned range fits; only its simultaneously live folded query
@@ -302,16 +411,42 @@ fn cache_and_live_query_temporary_share_retained_point_admission() {
     assert!((pinned.unsigned_area() - 110.0).abs() < 1e-5);
     assert_eq!(
         index
-            .survival(0, Some(1), MAX_DEPOSITION_SEGMENTS as usize - 4, &cancel)
+            .survival(
+                0,
+                Some(1),
+                MAX_RETAINED_GEOMETRY_UNITS - 4,
+                source_bytes(&spans) + lower.temporary_bytes(),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
     let cached = index
-        .survival(0, Some(1), MAX_DEPOSITION_SEGMENTS as usize - 5, &cancel)
+        .survival(
+            0,
+            Some(1),
+            MAX_RETAINED_GEOMETRY_UNITS - 5,
+            source_bytes(&spans) + lower.temporary_bytes(),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(cached.temporary_points(), 0);
+    assert!(lower.temporary_bytes() > 0);
+    assert_eq!(cached.temporary_bytes(), 0);
+    let byte_failure = index
+        .admit_retained(
+            0,
+            MAX_MANUFACTURING_RETAINED_BYTES as usize
+                - index.nodes.capacity() * std::mem::size_of::<Cached>()
+                - 1,
+            &cancel,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(byte_failure.code, ManufacturingErrorCode::ResourceLimit);
+    assert!((pinned.unsigned_area() - 110.0).abs() < 1e-5);
 }
 
 fn comb(teeth: usize, transpose: bool) -> MultiPolygon<f64> {
@@ -336,7 +471,13 @@ fn genuine_dense_comb_intersections_exhaust_shared_work_without_cache_publicatio
     let spans = sections([comb(2300, false), comb(2300, true)]);
     let mut index = SkinNeighborhoods::new(&spans, 0.0, MAX_BOOLEAN_PAIRS - 1_000_000).unwrap();
     let failure = index
-        .survival(0, Some(1), source_points(&spans), &AtomicBool::new(false))
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &AtomicBool::new(false),
+        )
         .err()
         .unwrap();
     assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
@@ -359,7 +500,13 @@ fn attribution_and_neighborhoods_keep_one_counter_and_cancel_warm_state() {
     .unwrap();
     assert!(*index.work_mut() > initial);
     let result = index
-        .survival(0, Some(1), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     let retained = index.retained_points();
     let work = *index.work_mut();
@@ -367,7 +514,13 @@ fn attribution_and_neighborhoods_keep_one_counter_and_cancel_warm_state() {
     for neighbor in [None, Some(0), Some(1)] {
         assert_eq!(
             index
-                .survival(0, neighbor, source_points(&spans), &cancel)
+                .survival(
+                    0,
+                    neighbor,
+                    source_points(&spans),
+                    source_bytes(&spans),
+                    &cancel
+                )
                 .err()
                 .unwrap()
                 .code,
@@ -386,41 +539,77 @@ fn charged_lru_eviction_skips_pins_and_recomputed_ranges_keep_exact_geometry() {
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     for first in [0, 2, 4] {
         let material = index
-            .survival(first, Some(first + 1), source_points(&spans), &cancel)
+            .survival(
+                first,
+                Some(first + 1),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap();
         assert!((material.unsigned_area() - (11 - first) as f64 * 10.0).abs() < 1e-5);
     }
     assert_eq!(index.retained_points(), 15);
     drop(
         index
-            .survival(2, Some(3), source_points(&spans), &cancel)
+            .survival(
+                2,
+                Some(3),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap(),
     );
     let work = *index.work_mut();
     index
-        .survival(0, None, MAX_DEPOSITION_SEGMENTS as usize - 10, &cancel)
+        .survival(
+            0,
+            None,
+            MAX_RETAINED_GEOMETRY_UNITS - 10,
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    assert_eq!(*index.work_mut() - work, index.nodes.len());
+    assert!(*index.work_mut() - work >= index.nodes.len());
     assert!(matches!(index.nodes[4], Cached::Missing));
-    assert!(matches!(index.nodes[5], Cached::Geometry(_, _, _)));
-    assert!(matches!(index.nodes[6], Cached::Geometry(_, _, _)));
+    assert!(matches!(index.nodes[5], Cached::Geometry(_, _, _, _)));
+    assert!(matches!(index.nodes[6], Cached::Geometry(_, _, _, _)));
     let pinned = index
-        .survival(2, Some(3), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(
         index
-            .survival(0, None, MAX_DEPOSITION_SEGMENTS as usize - 4, &cancel)
+            .survival(
+                0,
+                None,
+                MAX_RETAINED_GEOMETRY_UNITS - 4,
+                source_bytes(&spans),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
     assert_eq!(index.retained_points(), 5);
-    assert!(matches!(index.nodes[5], Cached::Geometry(_, _, _)));
+    assert!(matches!(index.nodes[5], Cached::Geometry(_, _, _, _)));
     assert!(matches!(index.nodes[6], Cached::Missing));
     assert!((pinned.unsigned_area() - 90.0).abs() < 1e-5);
     let rebuilt = index
-        .survival(0, Some(1), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!((rebuilt.unsigned_area() - 110.0).abs() < 1e-5);
 }
@@ -431,18 +620,36 @@ fn frozen_pool_uses_owned_operands_when_pinned_and_reclaims_after_release() {
     let cancel = AtomicBool::new(false);
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let pinned = index
-        .survival(0, Some(1), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(index.freeze_retained_capacity(), 5);
     let other = index
-        .survival(2, Some(3), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(other.temporary_points(), 5);
     assert_eq!(index.retained_points(), 5);
     assert!((other.unsigned_area() - 90.0).abs() < 1e-5);
     drop(other);
     let entire = index
-        .survival(0, Some(3), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(entire.temporary_points(), 5);
     assert!((entire.unsigned_area() - 90.0).abs() < 1e-5);
@@ -452,7 +659,13 @@ fn frozen_pool_uses_owned_operands_when_pinned_and_reclaims_after_release() {
     // aggregate, not the frozen cache allowance alone, must fit the global cap.
     assert_eq!(
         index
-            .survival(0, Some(3), MAX_DEPOSITION_SEGMENTS as usize - 14, &cancel)
+            .survival(
+                0,
+                Some(3),
+                MAX_RETAINED_GEOMETRY_UNITS - 14,
+                source_bytes(&spans),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
@@ -461,12 +674,18 @@ fn frozen_pool_uses_owned_operands_when_pinned_and_reclaims_after_release() {
     assert_eq!(index.retained_points(), 5);
     drop(pinned);
     let cached = index
-        .survival(2, Some(3), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(cached.temporary_points(), 0);
     assert_eq!(index.retained_points(), 5);
     assert!(matches!(index.nodes[2], Cached::Missing));
-    assert!(matches!(index.nodes[3], Cached::Geometry(_, _, _)));
+    assert!(matches!(index.nodes[3], Cached::Geometry(_, _, _, _)));
 }
 
 #[test]
@@ -476,22 +695,39 @@ fn zero_frozen_pool_counts_both_recursive_temporary_operands_and_output() {
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     assert_eq!(index.freeze_retained_capacity(), 0);
     let material = index
-        .survival(0, Some(3), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    assert_eq!(material.temporary_points(), 5);
     assert!((material.unsigned_area() - 90.0).abs() < 1e-5);
     assert_eq!(index.retained_points(), 0);
     drop(material);
     assert_eq!(
         index
-            .survival(0, Some(3), MAX_DEPOSITION_SEGMENTS as usize - 14, &cancel)
+            .survival(
+                0,
+                Some(3),
+                MAX_RETAINED_GEOMETRY_UNITS - 14,
+                source_bytes(&spans),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
     let fits = index
-        .survival(0, Some(3), MAX_DEPOSITION_SEGMENTS as usize - 15, &cancel)
+        .survival(
+            0,
+            Some(3),
+            MAX_RETAINED_GEOMETRY_UNITS - 15,
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!((fits.unsigned_area() - 90.0).abs() < 1e-5);
     assert_eq!(index.retained_points(), 0);
@@ -503,7 +739,13 @@ fn cancellation_at_eviction_scan_keeps_retained_geometry_and_work_unchanged() {
     let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     drop(
         index
-            .survival(0, Some(1), source_points(&spans), &AtomicBool::new(false))
+            .survival(
+                0,
+                Some(1),
+                source_points(&spans),
+                source_bytes(&spans),
+                &AtomicBool::new(false),
+            )
             .unwrap(),
     );
     let work = *index.work_mut();
@@ -519,7 +761,13 @@ fn cancellation_at_eviction_scan_keeps_retained_geometry_and_work_unchanged() {
     assert_eq!(*index.work_mut(), work);
     assert_eq!(index.retained_points(), retained);
     let material = index
-        .survival(0, Some(1), source_points(&spans), &AtomicBool::new(false))
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &AtomicBool::new(false),
+        )
         .unwrap();
     assert!((material.unsigned_area() - 100.0).abs() < 1e-5);
 }
@@ -554,7 +802,13 @@ fn derived_final_d_horizons_match_brute_force_insets_with_protected_holes() {
                 classification::intersection(&value, leaf, &cancel).unwrap()
             });
         let actual = index
-            .survival(first, Some(last), source_points(&spans), &cancel)
+            .survival(
+                first,
+                Some(last),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap();
         assert!((actual.unsigned_area() - expected.unsigned_area()).abs() < 1e-5);
         assert!(geo::BooleanOps::xor(&*actual, &expected).unsigned_area() < 1e-5);
@@ -564,49 +818,47 @@ fn derived_final_d_horizons_match_brute_force_insets_with_protected_holes() {
 }
 
 #[test]
-fn derived_leaves_share_reclaimable_range_pool_and_survive_pinned_eviction() {
+fn cleared_horizons_survive_shared_pool_eviction_and_frozen_recomputation() {
     let cancel = AtomicBool::new(false);
     let spans = sections((0..4).map(|i| rectangle(i as f64 * 0.1, 12.0)));
     let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
-    let leaf = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
+    let lower = index
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    assert!(!std::ptr::eq(&*leaf, &*spans[0].material));
-    assert_eq!(leaf.temporary_points(), 0);
-    assert_eq!(index.retained_points(), region::point_count(&leaf));
-    let again = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
-        .unwrap();
-    assert!(std::ptr::eq(&*leaf, &*again));
-    drop(again);
+    let expected_lower = region::offset(&spans[1].material, -0.6, &cancel).unwrap();
+    assert!(geo::BooleanOps::xor(&*lower, &expected_lower).unsigned_area() < 1e-5);
     drop(
         index
-            .survival(1, Some(1), source_points(&spans), &cancel)
+            .survival(
+                2,
+                Some(3),
+                source_points(&spans) + lower.temporary_points(),
+                source_bytes(&spans) + lower.temporary_bytes(),
+                &cancel,
+            )
             .unwrap(),
     );
     assert!(index.evict_oldest(&cancel).unwrap());
-    assert_eq!(index.retained_points(), region::point_count(&leaf));
-    let again = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
+    let frozen = index.freeze_retained_capacity();
+    let upper = index
+        .survival(
+            0,
+            Some(3),
+            source_points(&spans) + lower.temporary_points(),
+            source_bytes(&spans) + lower.temporary_bytes(),
+            &cancel,
+        )
         .unwrap();
-    assert!(std::ptr::eq(&*leaf, &*again));
-    let pool = index.freeze_retained_capacity();
-    let other = index
-        .survival(1, Some(1), source_points(&spans), &cancel)
-        .unwrap();
-    assert_eq!(other.temporary_points(), region::point_count(&other));
-    assert_eq!(index.retained_points(), pool);
-    let expected = region::offset(&spans[1].material, -0.6, &cancel).unwrap();
-    assert_eq!(&*other, &expected);
-    drop(other);
-    drop(again);
-    drop(leaf);
-    let rebuilt = index
-        .survival(1, Some(1), source_points(&spans), &cancel)
-        .unwrap();
-    assert_eq!(rebuilt.temporary_points(), 0);
-    assert_eq!(&*rebuilt, &expected);
-    assert!(index.retained_points() <= pool);
+    let expected_upper = region::offset(&spans[3].material, -0.6, &cancel).unwrap();
+    assert!(geo::BooleanOps::xor(&*upper, &expected_upper).unsigned_area() < 1e-5);
+    assert!(geo::BooleanOps::xor(&*lower, &expected_lower).unsigned_area() < 1e-5);
+    assert!(index.retained_points() <= frozen);
 }
 
 #[test]
@@ -616,7 +868,13 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
     let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
     assert_eq!(index.freeze_retained_capacity(), 0);
     let result = index
-        .survival(0, Some(1), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(result.temporary_points(), region::point_count(&result));
     assert_eq!(index.retained_points(), 0);
@@ -624,7 +882,8 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
         .survival(
             0,
             Some(0),
-            MAX_DEPOSITION_SEGMENTS as usize - result.temporary_points(),
+            MAX_RETAINED_GEOMETRY_UNITS - result.temporary_points(),
+            source_bytes(&spans) + result.temporary_bytes(),
             &cancel,
         )
         .err()
@@ -636,7 +895,13 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
     *spent.work_mut() = MAX_BOOLEAN_PAIRS;
     assert_eq!(
         spent
-            .survival(0, Some(0), source_points(&spans), &cancel)
+            .survival(
+                0,
+                Some(0),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
@@ -645,24 +910,45 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
     assert_eq!(spent.retained_points(), 0);
     let mut warm = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
     let leaf = warm
-        .survival(0, Some(0), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(0),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
+    let warm_retained = warm.retained_points();
+    let warm_work = *warm.work_mut();
     cancel.store(true, Ordering::Relaxed);
     assert_eq!(
-        warm.survival(0, Some(0), source_points(&spans), &cancel)
-            .err()
-            .unwrap()
-            .code,
+        warm.survival(
+            0,
+            Some(0),
+            source_points(&spans) + leaf.temporary_points(),
+            source_bytes(&spans) + leaf.temporary_bytes(),
+            &cancel
+        )
+        .err()
+        .unwrap()
+        .code,
         ManufacturingErrorCode::Cancelled,
     );
-    assert_eq!(warm.retained_points(), region::point_count(&leaf));
+    assert_eq!(warm.retained_points(), warm_retained);
+    assert_eq!(*warm.work_mut(), warm_work);
     let mut invalid = sections([rectangle(0.0, 12.0)]);
     Arc::get_mut(&mut invalid[0].material).unwrap().0[0]
         .exterior_mut(|ring| ring.0[0].x = f64::NAN);
     let mut refused = SkinNeighborhoods::new(&invalid, 0.6, 0).unwrap();
     assert_eq!(
         refused
-            .survival(0, Some(0), 0, &AtomicBool::new(false))
+            .survival(
+                0,
+                Some(0),
+                0,
+                source_bytes(&invalid),
+                &AtomicBool::new(false)
+            )
             .err()
             .unwrap()
             .code,
@@ -672,32 +958,162 @@ fn derived_leaf_zero_pool_work_retention_and_cancellation_refuse_honestly() {
 }
 
 #[test]
-fn returning_final_d_leaves_share_only_the_exact_derived_geometry() {
+fn returning_final_d_leaves_share_only_the_exact_source_geometry() {
     let cancel = AtomicBool::new(false);
     let spans = sections([
         rectangle(0.0, 12.0),
         rectangle(2.0, 10.0),
         rectangle(0.0, 12.0),
     ]);
-    let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
+    let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let first = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(0),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    let retained = index.retained_points();
-    let work = *index.work_mut();
     let returning = index
-        .survival(2, Some(2), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(2),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert!(std::ptr::eq(&*first, &*returning));
-    assert_eq!(index.retained_points(), retained);
-    assert!(*index.work_mut() - work < 16);
     // Returning to D says nothing about intervening physical material.
-    let horizon = index
-        .survival(0, Some(2), source_points(&spans), &cancel)
+    let mut cleared = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
+    let horizon = cleared
+        .survival(
+            0,
+            Some(2),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     let expected = region::offset(&spans[1].material, -0.6, &cancel).unwrap();
     assert!(geo::BooleanOps::xor(&*horizon, &expected).unsigned_area() < 1e-5);
     assert!(horizon.unsigned_area() < first.unsigned_area());
+}
+
+#[test]
+fn curved_sliding_clearance_matches_raw_horizon_offset_with_protected_holes() {
+    let cancel = AtomicBool::new(false);
+    let inset = 0.675;
+    let spans = sections((0..6).map(|i| {
+        let dx = if i % 2 == 0 { -0.25 } else { 0.25 };
+        let dy = (i % 3) as f64 * 0.2;
+        let mut outer = ring(12.0, 64, false);
+        for point in &mut outer.0 {
+            point.x += dx;
+            point.y = point.y * 0.75 + dy;
+        }
+        let mut hole = ring(1.5, 16, true);
+        for point in &mut hole.0 {
+            point.x += 0.3 + (i % 3) as f64 * 0.1;
+            point.y += -0.5 + (i % 2) as f64 * 0.1;
+        }
+        MultiPolygon(vec![Polygon::new(outer, vec![hole])])
+    }));
+    let mut index = SkinNeighborhoods::new(&spans, inset, 0).unwrap();
+    for (first, last) in [(0, 0), (0, 3), (1, 4), (5, 2), (0, 5)] {
+        let low = first.min(last);
+        let high = first.max(last);
+        // Independent evaluation: intersect complete raw D first, then offset
+        // that result, rather than invoking the derived-leaf cache as oracle.
+        let raw = spans[low + 1..high + 1]
+            .iter()
+            .fold((*spans[low].material).clone(), |value, leaf| {
+                classification::intersection(&value, &leaf.material, &cancel).unwrap()
+            });
+        let expected = region::offset(&raw, -inset, &cancel).unwrap();
+        let actual = index
+            .survival(
+                first,
+                Some(last),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
+            .unwrap();
+        assert!(!actual.contains(&Point::new(0.4, -0.4)));
+        assert!(actual.contains(&Point::new(4.0, 0.0)));
+        // Reordering ordinary pinned Booleans need not preserve coordinate bits.
+        // Compare both directed sampled boundaries under the existing policy.
+        for (source, target) in [(&*actual, &expected), (&expected, &*actual)] {
+            for polygon in &source.0 {
+                for ring in std::iter::once(polygon.exterior()).chain(polygon.interiors()) {
+                    for edge in ring.0.windows(2) {
+                        for point in [
+                            edge[0],
+                            Coord {
+                                x: (edge[0].x + edge[1].x) * 0.5,
+                                y: (edge[0].y + edge[1].y) * 0.5,
+                            },
+                        ] {
+                            assert!(
+                                Euclidean.distance(&Point::from(point), target)
+                                    <= super::super::OFFSET_TOLERANCE_MM
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cleared_pins_keep_geometry_and_shared_byte_admission_after_reclamation() {
+    let cancel = AtomicBool::new(false);
+    let spans = sections((0..4).map(|i| rectangle(i as f64 * 0.1, 12.0)));
+    let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
+    let lower = index
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
+        .unwrap();
+    let expected = region::offset(&spans[1].material, -0.6, &cancel).unwrap();
+    let outside_points = MAX_RETAINED_GEOMETRY_UNITS - lower.points;
+    index
+        .admit_retained(
+            outside_points,
+            source_bytes(&spans) + lower.temporary_bytes(),
+            &cancel,
+        )
+        .unwrap();
+    let failure = index
+        .admit_retained(
+            0,
+            MAX_MANUFACTURING_RETAINED_BYTES as usize - index.retained_bytes() + 1,
+            &cancel,
+        )
+        .unwrap_err();
+    assert_eq!(failure.code, ManufacturingErrorCode::ResourceLimit);
+    assert!(geo::BooleanOps::xor(&*lower, &expected).unsigned_area() < 1e-5);
+    let frozen = index.freeze_retained_capacity();
+    let upper = index
+        .survival(
+            2,
+            Some(3),
+            source_points(&spans) + lower.temporary_points(),
+            source_bytes(&spans) + lower.temporary_bytes(),
+            &cancel,
+        )
+        .unwrap();
+    assert!(index.retained_points() <= frozen);
+    let expected_upper = region::offset(&spans[3].material, -0.6, &cancel).unwrap();
+    assert!(geo::BooleanOps::xor(&*upper, &expected_upper).unsigned_area() < 1e-5);
+    assert!(geo::BooleanOps::xor(&*lower, &expected).unsigned_area() < 1e-5);
 }
 
 #[test]
@@ -754,13 +1170,25 @@ fn canonical_leaf_identity_preserves_holes_frame_order_and_coordinate_bits() {
         polygon_order,
         original,
     ]);
-    let mut index = SkinNeighborhoods::new(&spans, 0.2, 0).unwrap();
+    let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let first = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(0),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     for position in 1..spans.len() - 1 {
         let other = index
-            .survival(position, Some(position), source_points(&spans), &cancel)
+            .survival(
+                position,
+                Some(position),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap();
         assert!(!std::ptr::eq(&*first, &*other), "identity {position}");
     }
@@ -769,6 +1197,7 @@ fn canonical_leaf_identity_preserves_holes_frame_order_and_coordinate_bits() {
             spans.len() - 1,
             Some(spans.len() - 1),
             source_points(&spans),
+            source_bytes(&spans),
             &cancel,
         )
         .unwrap();
@@ -778,7 +1207,7 @@ fn canonical_leaf_identity_preserves_holes_frame_order_and_coordinate_bits() {
 }
 
 #[test]
-fn canonical_leaves_remain_reclaimable_and_recompute_inside_frozen_pool() {
+fn canonical_raw_ranges_remain_reclaimable_and_recompute_inside_frozen_pool() {
     let cancel = AtomicBool::new(false);
     let spans = sections([
         rectangle(0.0, 12.0),
@@ -786,49 +1215,133 @@ fn canonical_leaves_remain_reclaimable_and_recompute_inside_frozen_pool() {
         rectangle(0.0, 12.0),
         rectangle(1.0, 11.0),
     ]);
-    let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
+    let mut index = SkinNeighborhoods::new(&spans, 0.0, 0).unwrap();
     let pinned = index
-        .survival(2, Some(2), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     drop(
         index
-            .survival(1, Some(1), source_points(&spans), &cancel)
+            .survival(
+                2,
+                Some(3),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel,
+            )
             .unwrap(),
     );
     let pool = index.freeze_retained_capacity();
     index
-        .admit_retained(MAX_DEPOSITION_SEGMENTS as usize - pinned.points, &cancel)
+        .admit_retained(
+            MAX_RETAINED_GEOMETRY_UNITS - pinned.points,
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
     assert_eq!(index.retained_points(), pinned.points);
     let again = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
+        .survival(
+            0,
+            Some(1),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    assert!(std::ptr::eq(&*pinned, &*again));
+    assert!(geo::BooleanOps::xor(&*pinned, &*again).unsigned_area() < 1e-5);
     let expected_area = pinned.unsigned_area();
+    assert_eq!(
+        index
+            .admit_retained(MAX_RETAINED_GEOMETRY_UNITS, source_bytes(&spans), &cancel)
+            .err()
+            .unwrap()
+            .code,
+        ManufacturingErrorCode::ResourceLimit
+    );
     drop(pinned);
     drop(again);
     index
-        .admit_retained(MAX_DEPOSITION_SEGMENTS as usize, &cancel)
+        .admit_retained(MAX_RETAINED_GEOMETRY_UNITS, source_bytes(&spans), &cancel)
         .unwrap();
     assert_eq!(index.retained_points(), 0);
     let rebuilt = index
-        .survival(2, Some(2), source_points(&spans), &cancel)
+        .survival(
+            2,
+            Some(3),
+            source_points(&spans),
+            source_bytes(&spans),
+            &cancel,
+        )
         .unwrap();
-    let canonical = index
-        .survival(0, Some(0), source_points(&spans), &cancel)
-        .unwrap();
-    assert!(std::ptr::eq(&*rebuilt, &*canonical));
     assert!((rebuilt.unsigned_area() - expected_area).abs() < 1e-5);
     assert!(index.retained_points() <= pool);
     let work = *index.work_mut();
     cancel.store(true, Ordering::Relaxed);
     assert_eq!(
         index
-            .survival(2, Some(2), source_points(&spans), &cancel)
+            .survival(
+                2,
+                Some(3),
+                source_points(&spans),
+                source_bytes(&spans),
+                &cancel
+            )
             .err()
             .unwrap()
             .code,
         ManufacturingErrorCode::Cancelled
     );
     assert_eq!(*index.work_mut(), work);
+}
+
+#[test]
+fn frozen_support_snapshot_bounds_cache_bytes_when_header_capacity_grows() {
+    let cancel = AtomicBool::new(false);
+    let spans = sections([rectangle(0.0, 12.0)]);
+    let mut index = SkinNeighborhoods::new(&spans, 0.6, 0).unwrap();
+    let external = Usage {
+        points: source_points(&spans),
+        bytes: source_bytes(&spans),
+    };
+    let seed = index
+        .survival(0, Some(0), external.points, external.bytes, &cancel)
+        .unwrap();
+    let expected = (*seed).clone();
+    let node = index
+        .nodes
+        .iter()
+        .position(|slot| matches!(slot, Cached::Geometry(..)))
+        .unwrap();
+    let frozen_points = index.freeze_retained_capacity();
+    // Support captures this complete byte receipt once, not just coordinate
+    // lengths. Metadata allocation stays fixed while cache entries are replaced.
+    let frozen_bytes = index.retained_bytes();
+    drop(seed);
+    assert!(index.evict_oldest(&cancel).unwrap());
+
+    let mut candidate = expected.clone();
+    let points = region::point_count(&candidate);
+    assert!(points <= frozen_points);
+    // Preserve geometry and point count while increasing polygon-record capacity.
+    // Real replacement buffers may likewise retain more headers or coordinates.
+    candidate
+        .0
+        .reserve_exact(frozen_bytes / std::mem::size_of::<Polygon<f64>>() + 1);
+    let candidate = Material::owned(candidate, points);
+    assert!(candidate.owned_bytes > frozen_bytes);
+    index
+        .admit(external, candidate.temporary_usage(), &cancel)
+        .unwrap();
+    let returned = index
+        .cache_material(node, candidate, external, Usage::default(), &cancel)
+        .unwrap();
+    assert!(index.retained_bytes() <= frozen_bytes);
+    assert!(index.retained_points() <= frozen_points);
+    assert!(geo::BooleanOps::xor(&*returned, &expected).unsigned_area() < 1e-5);
 }

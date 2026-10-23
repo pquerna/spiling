@@ -127,6 +127,8 @@ fn project_job_attaches(job: &NativeOperationView, replacing: bool) -> bool {
         | Some(JobResult::ManufacturingPreflight { .. })
         | Some(JobResult::SurfaceImageImported { .. })
         | Some(JobResult::SurfaceImagePrepared { .. })
+        | Some(JobResult::AppearancePaletteImported { .. })
+        | Some(JobResult::AppearanceCompared { .. })
         | None => false,
     }
 }
@@ -1280,6 +1282,7 @@ mod tests {
             byte_count: 2,
             summary: ManufacturingSummary {
                 layers: 1,
+                process_resolution: Vec::new(),
                 paths: 1,
                 deposition_segments: 1,
                 deposited_volume_mm3: 1.0,

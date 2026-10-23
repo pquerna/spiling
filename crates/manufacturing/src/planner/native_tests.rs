@@ -1433,13 +1433,34 @@ fn certified_native_ribs_change_closed_perimeters_actual_replay_and_added_accoun
             .map(projected)
             .fold(f64::NEG_INFINITY, f64::max);
         assert!((peak - (0.1 - intent.recipe.bead_width_mm / 2.0)).abs() <= 0.006);
-        let area = (intent.recipe.bead_width_mm - textured.height_mm) * textured.height_mm
-            + std::f64::consts::PI * (textured.height_mm / 2.0).powi(2);
         let volume = textured
             .paths
             .iter()
-            .flat_map(|path| path.points_mm.windows(2))
-            .map(|p| (p[1][0] - p[0][0]).hypot(p[1][1] - p[0][1]) * area)
+            .map(|path| {
+                let height = path.height_mm();
+                let factor = intent.recipe.flow_multiplier
+                    * if textured.index == 0 {
+                        intent.recipe.process.first_layer_flow_factor
+                    } else {
+                        1.0
+                    }
+                    * if path.kind == DepositionKind::Bridge {
+                        intent.recipe.process.bridge_flow_factor
+                    } else {
+                        1.0
+                    };
+                path.checked_edges()
+                    .unwrap()
+                    .map(|edge| {
+                        let area = (edge.width_mm - height) * height
+                            + std::f64::consts::PI * (height * 0.5).powi(2);
+                        (edge.points_mm[1][0] - edge.points_mm[0][0])
+                            .hypot(edge.points_mm[1][1] - edge.points_mm[0][1])
+                            * area
+                            * factor
+                    })
+                    .sum::<f64>()
+            })
             .sum::<f64>();
         assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
     }
@@ -3479,7 +3500,9 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
         rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
     };
     let mut scene = NativeScene::new(
-        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
         &[pose],
     );
     scene.process_document = serde_json::from_value(serde_json::json!({
@@ -3504,17 +3527,26 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
     let cancel = AtomicBool::new(false);
     let (mut admission, geometry) = preflight::admit(&input, &cancel).unwrap();
     let mut proposal_work = 0;
-    preflight::resolve_native_events(&input, &mut admission, &geometry, &mut proposal_work, &cancel)
-        .unwrap();
+    preflight::resolve_native_events(
+        &input,
+        &mut admission,
+        &geometry,
+        &mut proposal_work,
+        &cancel,
+    )
+    .unwrap();
     let mut captures = Vec::new();
     for occurrence in input.occurrences {
-        captures.push(zones::capture(
-            &input,
-            &admission,
-            occurrence.occurrence_id,
-            &mut proposal_work,
-            &cancel,
-        ).unwrap());
+        captures.push(
+            zones::capture(
+                &input,
+                &admission,
+                occurrence.occurrence_id,
+                &mut proposal_work,
+                &cancel,
+            )
+            .unwrap(),
+        );
     }
     let sources = prepare_sources(
         geometry,
@@ -3583,5 +3615,7 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
         index = span.end;
     }
     assert_eq!(covered_upper, interval[1]);
-    state.finalize(&mut admission.geometry_work, &cancel).unwrap();
+    state
+        .finalize(&mut admission.geometry_work, &cancel)
+        .unwrap();
 }

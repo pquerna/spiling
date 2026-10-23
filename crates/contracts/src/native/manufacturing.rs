@@ -744,7 +744,8 @@ impl TryFrom<rpc::PrinterSpecification> for PrinterSpecification {
                     .collect::<Result<_, String>>()?,
                 capabilities: required(value.capabilities, "printer capabilities")?.try_into()?,
                 nozzle_diameter_mm: value.nozzle_diameter_mm,
-                deposition_limits: required(value.deposition_limits, "deposition limits")?.try_into()?,
+                deposition_limits: required(value.deposition_limits, "deposition limits")?
+                    .try_into()?,
                 max_feed_mm_s: value.max_feed_mm_s,
                 max_volumetric_flow_mm3_s: value.max_volumetric_flow_mm3_s,
                 workflow: required(value.workflow, "job workflow")?.try_into()?,
@@ -781,12 +782,15 @@ impl TryFrom<PrinterSpecification> for rpc::PrinterSpecification {
 impl TryFrom<rpc::DepositionLimits> for DepositionLimits {
     type Error = String;
     fn try_from(value: rpc::DepositionLimits) -> Result<Self, String> {
-        valid(Self {
-            min_bead_width_mm: value.min_bead_width_mm,
-            max_bead_width_mm: value.max_bead_width_mm,
-            min_bead_height_mm: value.min_bead_height_mm,
-            max_bead_height_mm: value.max_bead_height_mm,
-        }, Self::validate)
+        valid(
+            Self {
+                min_bead_width_mm: value.min_bead_width_mm,
+                max_bead_width_mm: value.max_bead_width_mm,
+                min_bead_height_mm: value.min_bead_height_mm,
+                max_bead_height_mm: value.max_bead_height_mm,
+            },
+            Self::validate,
+        )
     }
 }
 impl TryFrom<DepositionLimits> for rpc::DepositionLimits {
@@ -805,12 +809,15 @@ impl TryFrom<rpc::SparseInfillPolicy> for SparseInfillPolicy {
     type Error = String;
     fn try_from(value: rpc::SparseInfillPolicy) -> Result<Self, String> {
         use rpc::sparse_infill_policy::Policy;
-        valid(match required(value.policy, "sparse infill policy selection")? {
-            Policy::Fine(_) => Self::Fine,
-            Policy::CombineEligible(policy) => Self::CombineEligible {
-                max_height_mm: policy.max_height_mm,
+        valid(
+            match required(value.policy, "sparse infill policy selection")? {
+                Policy::Fine(_) => Self::Fine,
+                Policy::CombineEligible(policy) => Self::CombineEligible {
+                    max_height_mm: policy.max_height_mm,
+                },
             },
-        }, Self::validate)
+            Self::validate,
+        )
     }
 }
 impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
@@ -818,11 +825,14 @@ impl TryFrom<SparseInfillPolicy> for rpc::SparseInfillPolicy {
     fn try_from(value: SparseInfillPolicy) -> Result<Self, String> {
         use rpc::sparse_infill_policy::Policy;
         value.validate().map_err(|e| e.to_string())?;
-        Ok(Self { policy: Some(match value {
-            SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
-            SparseInfillPolicy::CombineEligible { max_height_mm } =>
-                Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm }),
-        }) })
+        Ok(Self {
+            policy: Some(match value {
+                SparseInfillPolicy::Fine => Policy::Fine(rpc::FineSparseInfill {}),
+                SparseInfillPolicy::CombineEligible { max_height_mm } => {
+                    Policy::CombineEligible(rpc::CombineEligibleSparseInfill { max_height_mm })
+                }
+            }),
+        })
     }
 }
 impl TryFrom<rpc::SeamPolicy> for SeamPolicy {
@@ -1378,15 +1388,29 @@ mod tests {
             assert!(ManufacturingIntent::try_from(invalid).is_err());
         }
         let mut invalid = wire.clone();
-        invalid.printer.as_mut().unwrap().deposition_limits.as_mut().unwrap()
+        invalid
+            .printer
+            .as_mut()
+            .unwrap()
+            .deposition_limits
+            .as_mut()
+            .unwrap()
             .min_bead_width_mm = 0.5;
         assert!(ManufacturingIntent::try_from(invalid).is_err());
         let mut invalid = wire.clone();
-        invalid.printer.as_mut().unwrap().deposition_limits.as_mut().unwrap()
+        invalid
+            .printer
+            .as_mut()
+            .unwrap()
+            .deposition_limits
+            .as_mut()
+            .unwrap()
             .max_bead_height_mm = 0.1;
         assert!(ManufacturingIntent::try_from(invalid).is_err());
-        for policy in [SparseInfillPolicy::Fine,
-            SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 }] {
+        for policy in [
+            SparseInfillPolicy::Fine,
+            SparseInfillPolicy::CombineEligible { max_height_mm: 0.3 },
+        ] {
             let mut value = intent();
             value.recipe.sparse_infill = policy;
             let encoded = rpc::ManufacturingIntent::try_from(value.clone()).unwrap();
@@ -1681,14 +1705,13 @@ mod tests {
         let mut missing = wire.clone();
         missing.summary.as_mut().unwrap().native_geometry = None;
         assert!(ManufacturingArtifactRecord::try_from(missing).is_err());
-        let coverage = wire
+        let coverage = *wire
             .summary
             .as_ref()
             .unwrap()
             .native_geometry
             .as_ref()
-            .unwrap()
-            .clone();
+            .unwrap();
         for (disjoint, invariant, interface) in [(3, 0, 0), (0, 3, 0), (0, 0, 3), (1, 1, 1)] {
             let mut expected = record.summary.native_geometry.clone();
             expected.certified_layer_count = 3;
@@ -1705,11 +1728,11 @@ mod tests {
                 expected
             );
         }
-        let mut missing = coverage.clone();
+        let mut missing = coverage;
         missing.source_feature_coverage = None;
         assert!(NativeGeometryCoverageSummary::try_from(missing).is_err());
         for field in 0..4 {
-            let mut missing = coverage.clone();
+            let mut missing = coverage;
             let feature = missing.source_feature_coverage.as_mut().unwrap();
             match field {
                 0 => feature.disjoint_source_layer_count = None,
@@ -1726,7 +1749,7 @@ mod tests {
             (1, 0, 0, 2),
             (u32::MAX, 0, 1, 0),
         ] {
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.source_feature_coverage = Some(rpc::NativeFeatureCoverageSummary {
                 disjoint_source_layer_count: Some(disjoint),
                 invariant_source_union_layer_count: Some(invariant),
@@ -1744,13 +1767,13 @@ mod tests {
             assert!(rpc::NativeGeometryCoverageSummary::try_from(invalid).is_err());
         }
         for value in [0, -1, i32::MAX] {
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.evidence = value;
             assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.skin_coverage = value;
             assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.support_clearance = value;
             assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
         }
@@ -1760,12 +1783,12 @@ mod tests {
             rpc::PreflightEvidence::PreflightIndeterminate,
             rpc::PreflightEvidence::PreflightFailed,
         ] {
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.evidence = evidence as i32;
             assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
         }
         for achieved in [-0.001, 0.021, f64::NAN, f64::INFINITY] {
-            let mut invalid = coverage.clone();
+            let mut invalid = coverage;
             invalid.achieved_shape_error_mm = achieved;
             assert!(NativeGeometryCoverageSummary::try_from(invalid).is_err());
         }

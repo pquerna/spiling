@@ -7,7 +7,7 @@ import type { PrinterSpecification } from "../../packages/protocol/src/generated
 const printer = {
   schema_version: 11,
   id: "software-cartesian-reference",
-  revision: "10",
+  revision: "11",
   name: "Software Cartesian reference — not machine-ready",
   coordinate_frame: "right_handed_millimetres",
   build_envelope: { min: [0, 0, 0], max: [220, 220, 220] },
@@ -33,7 +33,8 @@ const printer = {
   },
   workflow: { kind: "diagnostic_body_only" },
   nozzle_diameter_mm: 0.4,
-  deposition_limits: { min_bead_width_mm: 0.45, max_bead_width_mm: 0.45, min_bead_height_mm: 0.000001, max_bead_height_mm: 0.30 },
+  // Software-only local allocation envelope, not measured nozzle calibration.
+  deposition_limits: { min_bead_width_mm: 0.30, max_bead_width_mm: 0.75, min_bead_height_mm: 0.000001, max_bead_height_mm: 0.30 },
   max_feed_mm_s: 150,
   max_volumetric_flow_mm3_s: 12,
 } satisfies PrinterSpecification;

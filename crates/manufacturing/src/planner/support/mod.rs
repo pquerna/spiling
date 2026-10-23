@@ -9,7 +9,7 @@ use spiling_contracts::manufacturing::*;
 use std::sync::{Arc, Weak, atomic::AtomicBool};
 mod anchors;
 pub(super) use anchors::inward_bond_endpoint;
-pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond};
+pub(crate) use anchors::{AnchorCandidate, AnchorWorkspace, endpoint_bond, projected_edges};
 pub(in crate::planner) mod strokes;
 pub(crate) use strokes::StrokeRuns;
 pub(crate) use strokes::{GapKind, gap_kind};
@@ -24,6 +24,7 @@ pub(super) struct RasterCandidate {
     pub(super) whole_rows: Vec<DepositionPath>,
     pub(super) process_interfaces: Vec<ProcessInterfaceCoverage>,
     pub(super) skin_bridge_domains: Vec<SkinBridgeDomain>,
+    pub(super) skin_command_fits: Vec<SkinCommandFitDomain>,
 }
 
 fn authored_component_axis(
@@ -80,7 +81,7 @@ pub(super) fn component_admission<'a>(
         for gap in anchors.gaps(
             AnchorCandidate {
                 endpoints_mm: [a, b],
-                bead_width_mm: path.bead_width_mm,
+                bead_width_mm: region::constant_width(path)?,
             },
             previous
                 .clone()
@@ -114,7 +115,7 @@ pub(super) fn component_admission<'a>(
             .chain(&candidate.whole_rows)
             .map(|path| path.points_mm.capacity())
             .sum::<usize>();
-        let retained = (MAX_DEPOSITION_SEGMENTS as usize)
+        let retained = (super::MAX_RETAINED_GEOMETRY_UNITS)
             .checked_sub(budget)
             .and_then(|total| total.checked_sub(owned))
             .ok_or_else(|| {
@@ -127,7 +128,9 @@ pub(super) fn component_admission<'a>(
             candidate,
             BridgeRowContext {
                 axis,
+                demanded_reorientation: contact_bridge,
                 retained_points: retained,
+                owned_bytes: 0,
                 recipe,
             },
             previous.clone(),
@@ -150,6 +153,7 @@ pub(super) fn component_admission<'a>(
         bridges: Vec::new(),
         demands: Vec::new(),
         workspace_points: anchors.retained_records(),
+        workspace_bytes: anchors.retained_bytes(),
     };
     for (index, path) in paths.iter().enumerate() {
         check_cancel(cancel)?;
@@ -173,7 +177,7 @@ pub(super) fn component_admission<'a>(
         for gap in anchors.gaps(
             AnchorCandidate {
                 endpoints_mm: [a, b],
-                bead_width_mm: path.bead_width_mm,
+                bead_width_mm: region::constant_width(path)?,
             },
             previous
                 .clone()
@@ -187,7 +191,7 @@ pub(super) fn component_admission<'a>(
             match strokes::gap_kind(
                 gap,
                 (gap.end - gap.start) * length,
-                path.bead_width_mm,
+                region::constant_width(path)?,
                 recipe.process.max_bridge_span_mm,
             ) {
                 strokes::GapKind::Supported => {}
@@ -223,19 +227,46 @@ pub(super) fn component_admission<'a>(
         }
     }
     proof.workspace_points = anchors.retained_records();
+    proof.workspace_bytes = anchors.retained_bytes();
     Ok(proof)
 }
 
-fn component_budget(retained: usize, scratch: usize) -> Result<usize, ManufacturingError> {
-    (MAX_DEPOSITION_SEGMENTS as usize)
-        .checked_sub(retained)
-        .and_then(|budget| budget.checked_sub(scratch))
-        .ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "component raster and anchor scratch exceed retained budget",
-            )
-        })
+fn component_budget(
+    retained: usize,
+    owned_bytes: usize,
+    scratch: usize,
+    scratch_owned_bytes: usize,
+) -> Result<usize, ManufacturingError> {
+    workspace_budget(
+        retained.saturating_add(scratch),
+        owned_bytes.saturating_add(scratch_owned_bytes),
+    )
+}
+
+fn stroke_proof_reservation(paths: usize) -> usize {
+    // The existing stroke analyzer grows only a Vec<usize> of bridge indices.
+    // Reserve its old/new growth arrays; use actual capacity once returned.
+    if paths == 0 {
+        0
+    } else {
+        paths
+            .saturating_mul(3)
+            .max(4)
+            .saturating_mul(std::mem::size_of::<usize>())
+    }
+}
+
+fn workspace_budget(units: usize, bytes: usize) -> Result<usize, ManufacturingError> {
+    let remaining = super::remaining_geometry_units(units, bytes)?;
+    // Reserve both old/new workspace arrays during growth. These record
+    // reservations are separate from measured persistent payload receipts.
+    let stride = 2 * std::mem::size_of::<anchors::AnchorGap>().max(std::mem::size_of::<(
+        f64,
+        f64,
+        f64,
+        usize,
+    )>());
+    Ok(remaining.min((MAX_MANUFACTURING_RETAINED_BYTES as usize - bytes) / stride))
 }
 
 fn reserve_component_record<T>(
@@ -273,24 +304,63 @@ pub(super) struct ProtectedVoidSet {
 /// Admission inputs shared by whole-row ownership and deposited-anchor proof.
 struct BridgeRowContext<'a> {
     axis: region::HatchAxis,
+    demanded_reorientation: bool,
     retained_points: usize,
+    owned_bytes: usize,
     recipe: &'a PlanarPrintRecipe,
+}
+
+/// Exact payload receipt captured before immutable sharing.
+struct OwnedMaterial {
+    material: MultiPolygon<f64>,
+    bytes: usize,
+    units: usize,
+    header_bytes: usize,
+    counted: std::cell::Cell<bool>,
+}
+
+impl OwnedMaterial {
+    fn new(mut material: MultiPolygon<f64>) -> Self {
+        let bytes = super::native::material_bytes(&mut material);
+        let units = material_units(&material);
+        Self {
+            material,
+            bytes,
+            units,
+            header_bytes: 0,
+            counted: std::cell::Cell::new(false),
+        }
+    }
+
+    fn into_shared(mut self) -> Arc<Self> {
+        self.header_bytes = std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>();
+        Arc::new(self)
+    }
+}
+
+impl std::ops::Deref for OwnedMaterial {
+    type Target = MultiPolygon<f64>;
+    fn deref(&self) -> &Self::Target {
+        &self.material
+    }
 }
 
 /// One union for an incoming owner and the fixed column at this cache's scope.
 /// The weak source key must not keep an old contour array alive.
 struct SharedUnion {
-    source: Weak<MultiPolygon<f64>>,
-    result: Arc<MultiPolygon<f64>>,
+    source: Weak<OwnedMaterial>,
+    result: Arc<OwnedMaterial>,
 }
 
 // Identical fixed-XY columns share immutable contours between layers. Reuse a
 // union for identical incoming owners; a weak key retains no old point arrays.
 // Each cache is scoped to one fixed immutable `other` column below.
 fn merge_shared(
-    into: &mut Arc<MultiPolygon<f64>>,
-    other: &Arc<MultiPolygon<f64>>,
+    into: &mut Arc<OwnedMaterial>,
+    other: &Arc<OwnedMaterial>,
     cached: &mut Option<SharedUnion>,
+    live_units: usize,
+    live_bytes: usize,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
@@ -309,11 +379,20 @@ fn merge_shared(
         return Ok(());
     }
     charge_boolean(into, other, work, cancel)?;
-    let mut result = into.as_ref().union(other.as_ref());
+    let mut result = into.material.union(&other.material);
     region::check_size(&result)?;
     region::canonicalize(&mut result);
     check_cancel(cancel)?;
-    let result = Arc::new(result);
+    let result = OwnedMaterial::new(result);
+    // Stock overlay output is opaque until returned. Admit all known old/new
+    // owners before allocating its Arc header or publishing either reference.
+    super::remaining_geometry_units(
+        live_units.saturating_add(result.units),
+        live_bytes.saturating_add(result.bytes).saturating_add(
+            std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+        ),
+    )?;
+    let result = result.into_shared();
     *cached = Some(SharedUnion {
         source: Arc::downgrade(into),
         result: Arc::clone(&result),
@@ -327,6 +406,9 @@ pub(super) struct SupportInput<'a> {
     pub(super) sections: &'a [SectionSpan],
     pub(super) schedule: &'a [super::LayerElevation],
     pub(super) native_points: usize,
+    /// Fixed outside owners, including the frozen cache and layer record array,
+    /// but excluding every layer's mutable path and coverage payloads.
+    pub(super) native_owned_bytes: usize,
     pub(super) recipe: &'a PlanarPrintRecipe,
 }
 
@@ -344,6 +426,8 @@ pub(super) fn realize(
         region::HatchAxis,
         &mut usize,
         usize,
+        usize,
+        usize,
         Option<&mut super::classification::ComponentAnchorCheck<'_>>,
     ) -> Result<RasterCandidate, ManufacturingError>,
     mut project_voids: impl FnMut(
@@ -357,38 +441,102 @@ pub(super) fn realize(
         &mut RasterCandidate,
         &mut usize,
         &mut usize,
+        usize,
     ) -> Result<bool, ManufacturingError>,
 ) -> Result<(), ManufacturingError> {
     let SupportInput {
         sections,
         schedule,
         native_points,
+        native_owned_bytes,
         recipe,
     } = *input;
     let width = recipe.bead_width_mm;
     let mut demands: Vec<Demand> = Vec::new();
-    let mut retained = native_points;
-    let mut constructed_points = 0usize;
+    let mut constructed_points = layers.iter().try_fold(0usize, |total, layer| {
+        total
+            .checked_add(super::bonds::skin_command_fit_points(
+                &layer.skin_command_fits,
+            ))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "initial skin command fit accounting overflow",
+                )
+            })
+    })?;
+    let mut retained = native_points
+        .checked_add(constructed_points)
+        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "initial skin command fit retained budget exceeded",
+            )
+        })?;
     let mut work = 0usize;
     // Deposited-stroke comparisons are not polygon Boolean work.
     let mut anchor_work = 0usize;
     let mut anchors = AnchorWorkspace::default();
+    super::remaining_geometry_units(
+        retained,
+        native_owned_bytes
+            .saturating_add(layer_payload_bytes(layers.iter()))
+            .saturating_add(layers.len().saturating_mul(std::mem::size_of::<bool>())),
+    )?;
     let mut joined_layers = vec![false; layers.len()];
     let mut original_bridge_roles = Vec::new();
-    anchors.set_budget(remaining_geometry_budget(retained, &[], &[], &[])?);
+    let mut owned_bytes = native_owned_bytes
+        .saturating_add(layer_payload_bytes(layers.iter()))
+        .saturating_add(joined_layers.capacity() * std::mem::size_of::<bool>());
+    anchors.set_budget(workspace_budget(retained, owned_bytes)?);
     if let Some(first) = layers.first_mut() {
-        if !finalize_layer_interface(0, first, segments, &mut work, &mut finalize_interface)? {
+        if !finalize_layer_interface(
+            0,
+            first,
+            segments,
+            &mut work,
+            owned_bytes.saturating_add(anchors.retained_bytes()),
+            &mut finalize_interface,
+        )? {
             return Err(super::bonds::unresolved(first));
         }
     }
     for index in 1..layers.len() {
+        owned_bytes = native_owned_bytes
+            + layer_payload_bytes(layers.iter())
+            + vec_bytes(&joined_layers)
+            + vec_bytes(&demands)
+            + vec_bytes(&original_bridge_roles);
+        anchors.set_budget(workspace_budget(retained, owned_bytes)?);
         let (prior, remaining) = layers.split_at_mut(index);
-        let layer = &mut remaining[0];
+        let (layer, following) = remaining.split_first_mut().expect("current support layer");
         check_cancel(cancel)?;
-        let mut interface_bound =
-            finalize_layer_interface(index, layer, segments, &mut work, &mut finalize_interface)?;
+        let mut interface_bound = finalize_layer_interface(
+            index,
+            layer,
+            segments,
+            &mut work,
+            owned_bytes.saturating_add(anchors.retained_bytes()),
+            &mut finalize_interface,
+        )?;
+        owned_bytes = native_owned_bytes
+            + layer_payload_bytes(
+                prior
+                    .iter()
+                    .chain(std::iter::once(&*layer))
+                    .chain(following.iter()),
+            )
+            + vec_bytes(&joined_layers)
+            + vec_bytes(&demands)
+            + vec_bytes(&original_bridge_roles);
+        anchors.set_budget(workspace_budget(retained, owned_bytes)?);
         let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
         let previous = prior[index - 1].paths.iter();
+        anchors.set_budget(workspace_budget(
+            retained,
+            owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len())),
+        )?);
         let mut admission = strokes::analyze(
             &layer.paths,
             previous.clone(),
@@ -406,24 +554,40 @@ pub(super) fn realize(
                 let axis = authored_axis;
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                    let contact_bridge =
-                        axis != authored_component_axis(candidate, index as u32, recipe);
-                    component_admission(
-                        (
-                            candidate,
-                            axis,
-                            component_budget(retained, scratch)?,
-                            contact_bridge,
-                        ),
-                        previous.clone(),
-                        std::iter::empty(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )
-                };
+                let extra_owned_bytes = layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                ) + vec_bytes(&joined_layers)
+                    + vec_bytes(&demands)
+                    + vec_bytes(&original_bridge_roles)
+                    + vec_bytes(&admission.bridges);
+                owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+                let staged_anchor_bytes = anchors.retained_bytes();
+                let mut check_component =
+                    |candidate: &mut RasterCandidate,
+                     axis,
+                     scratch: usize,
+                     scratch_owned_bytes: usize| {
+                        let contact_bridge =
+                            axis != authored_component_axis(candidate, index as u32, recipe);
+                        let budget = component_budget(
+                            retained,
+                            owned_bytes,
+                            scratch.saturating_add(candidate_units(candidate)),
+                            scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
+                        )?;
+                        component_admission(
+                            (candidate, axis, budget, contact_bridge),
+                            previous.clone(),
+                            std::iter::empty(),
+                            recipe,
+                            &mut anchors,
+                            &mut anchor_work,
+                            cancel,
+                        )
+                    };
                 let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
                     if recover_components {
                         Some(&mut check_component)
@@ -435,13 +599,17 @@ pub(super) fn realize(
                     axis,
                     &mut staged_segments,
                     constructed_points,
+                    extra_owned_bytes,
+                    staged_anchor_bytes,
                     recovery,
                 )?;
                 let joined = coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
                         axis,
+                        demanded_reorientation: false,
                         retained_points: retained,
+                        owned_bytes,
                         recipe,
                     },
                     previous.clone(),
@@ -450,24 +618,43 @@ pub(super) fn realize(
                     &mut anchor_work,
                     cancel,
                 )?;
-                let candidate_bound =
-                    finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)?;
+                let candidate_bound = finalize_interface(
+                    index,
+                    &mut candidate,
+                    &mut staged_segments,
+                    &mut work,
+                    owned_bytes.saturating_add(anchors.retained_bytes()),
+                )?;
                 if !candidate_bound {
                     if recover_components && !interface_bound {
                         // Diagnostic only: an unresolved layer always refuses
                         // before it can become the next layer's anchor authority.
                         layer.paths = candidate.paths;
                         layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                        replace_skin_bridge_domains(
-                            &mut layer.region_coverage,
-                            candidate.skin_bridge_domains,
-                            &mut retained,
-                            &mut constructed_points,
-                        )?;
+                        {
+                            replace_skin_command_fits(
+                                &mut layer.skin_command_fits,
+                                candidate.skin_command_fits,
+                                &mut retained,
+                                &mut constructed_points,
+                            )?;
+                            replace_skin_bridge_domains(
+                                &mut layer.region_coverage,
+                                candidate.skin_bridge_domains,
+                                &mut retained,
+                                &mut constructed_points,
+                            )?;
+                        };
                     }
                     continue;
                 }
-                anchors.set_budget(candidate_budget(&candidate.paths, retained)?);
+                anchors.set_budget(candidate_budget(
+                    &candidate.paths,
+                    retained,
+                    owned_bytes
+                        .saturating_add(candidate_aux_bytes(&candidate))
+                        .saturating_add(stroke_proof_reservation(candidate.paths.len())),
+                )?);
                 let other = strokes::analyze(
                     &candidate.paths,
                     previous.clone(),
@@ -490,12 +677,20 @@ pub(super) fn realize(
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths = candidate.paths;
                     layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                    replace_skin_bridge_domains(
-                        &mut layer.region_coverage,
-                        candidate.skin_bridge_domains,
-                        &mut retained,
-                        &mut constructed_points,
-                    )?;
+                    {
+                        replace_skin_command_fits(
+                            &mut layer.skin_command_fits,
+                            candidate.skin_command_fits,
+                            &mut retained,
+                            &mut constructed_points,
+                        )?;
+                        replace_skin_bridge_domains(
+                            &mut layer.region_coverage,
+                            candidate.skin_bridge_domains,
+                            &mut retained,
+                            &mut constructed_points,
+                        )?;
+                    };
                     interface_bound = true;
                     joined_layers[index] = joined || component_bridges;
                     admission = other;
@@ -504,7 +699,17 @@ pub(super) fn realize(
                     }
                 }
             }
-            anchors.set_budget(remaining_geometry_budget(retained, &[], &[], &[])?);
+            owned_bytes = native_owned_bytes
+                + layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                )
+                + vec_bytes(&joined_layers)
+                + vec_bytes(&demands)
+                + vec_bytes(&original_bridge_roles);
+            anchors.set_budget(workspace_budget(retained, owned_bytes)?);
         }
         if !interface_bound {
             return Err(super::bonds::unresolved(layer));
@@ -538,6 +743,12 @@ pub(super) fn realize(
                         })
                 });
             if plate_owned || landing_owned {
+                anchors.set_budget(workspace_budget(
+                    retained,
+                    owned_bytes
+                        .saturating_add(vec_bytes(&admission.bridges))
+                        .saturating_add(stroke_proof_reservation(1)),
+                )?);
                 let proof = strokes::analyze(
                     std::slice::from_ref(path),
                     previous.clone(),
@@ -568,11 +779,37 @@ pub(super) fn realize(
                     recipe,
                 ));
             }
+            let live = native_owned_bytes
+                + layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                )
+                + vec_bytes(&joined_layers)
+                + vec_bytes(&demands)
+                + vec_bytes(&original_bridge_roles)
+                + anchors.retained_bytes()
+                + vec_bytes(&admission.bridges);
+            reserve_owned(&mut demands, 1, live)?;
             demands.push(Demand {
                 target: index,
                 failure,
             });
         }
+        let live = native_owned_bytes
+            + layer_payload_bytes(
+                prior
+                    .iter()
+                    .chain(std::iter::once(&*layer))
+                    .chain(following.iter()),
+            )
+            + vec_bytes(&joined_layers)
+            + vec_bytes(&demands)
+            + vec_bytes(&original_bridge_roles)
+            + anchors.retained_bytes()
+            + vec_bytes(&admission.bridges);
+        reserve_owned(&mut original_bridge_roles, admission.bridges.len(), live)?;
         for path in admission.bridges {
             original_bridge_roles.push((index, path, layer.paths[path].kind));
             layer.paths[path].kind = DepositionKind::Bridge;
@@ -593,7 +830,22 @@ pub(super) fn realize(
     };
     // Native all-Z void branches are projected only after actual strokes prove
     // demand. Scheduled hole samples cannot certify a protected projection.
+    owned_bytes = native_owned_bytes
+        + layer_payload_bytes(layers.iter())
+        + vec_bytes(&joined_layers)
+        + vec_bytes(&demands)
+        + vec_bytes(&original_bridge_roles)
+        + anchors.retained_bytes();
+    super::remaining_geometry_units(
+        retained,
+        owned_bytes.saturating_add(
+            demands
+                .len()
+                .saturating_mul(std::mem::size_of::<[[f64; 2]; 2]>()),
+        ),
+    )?;
     let mut demand_bounds = Vec::with_capacity(demands.len());
+    owned_bytes = owned_bytes.saturating_add(vec_bytes(&demand_bounds));
     // Enclose the half-bead placement search with the existing offset
     // construction allowance before querying any nearby protected void.
     let search_bound = (width / 2.0 + super::OFFSET_TOLERANCE_MM * 0.5).next_up();
@@ -619,7 +871,7 @@ pub(super) fn realize(
     }
     let projected = project_voids(
         &demand_bounds,
-        remaining_geometry_budget(retained, &[], &[], &[])?,
+        remaining_geometry_budget(retained, owned_bytes, &[], &[], &[])?,
         &mut work,
         native_work,
     )?;
@@ -627,6 +879,7 @@ pub(super) fn realize(
         regions: protected,
         scopes,
     } = projected;
+    let protected = OwnedMaterial::new(protected);
     if protected.0.len() != scopes.len() {
         return Err(error(
             ManufacturingErrorCode::NativeAnalysisIndeterminate,
@@ -634,22 +887,71 @@ pub(super) fn realize(
         ));
     }
     region::check_size(&protected)?;
-    let empty = Arc::new(MultiPolygon(Vec::new()));
+    let layer_metadata_bytes = layers.len().saturating_mul(
+        2 * std::mem::size_of::<Arc<OwnedMaterial>>()
+            + std::mem::size_of::<usize>()
+            + std::mem::size_of::<Option<usize>>(),
+    );
+    super::remaining_geometry_units(
+        retained,
+        owned_bytes
+            .saturating_add(vec_bytes(&scopes))
+            .saturating_add(protected.bytes)
+            .saturating_add(layer_metadata_bytes)
+            .saturating_add(
+                std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+            ),
+    )?;
+    let empty = OwnedMaterial::new(MultiPolygon(Vec::new())).into_shared();
     let mut support_regions = vec![Arc::clone(&empty); layers.len()];
     let mut interfaces = vec![empty; layers.len()];
     let mut object_start = vec![0; layers.len()];
     let mut contact_tops = vec![None; layers.len()];
-    remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    let mut support_metadata_bytes = vec_bytes(&joined_layers)
+        + vec_bytes(&demands)
+        + vec_bytes(&original_bridge_roles)
+        + vec_bytes(&demand_bounds)
+        + vec_bytes(&scopes)
+        + vec_bytes(&support_regions)
+        + vec_bytes(&interfaces)
+        + vec_bytes(&object_start)
+        + vec_bytes(&contact_tops);
+    owned_bytes = native_owned_bytes
+        + layer_payload_bytes(layers.iter())
+        + support_metadata_bytes
+        + anchors.retained_bytes();
+    remaining_geometry_budget(
+        retained,
+        owned_bytes,
+        &support_regions,
+        &interfaces,
+        &[&protected],
+    )?;
     // Borrow each final-D owner once. Its nominal bead prism remains an outer
     // exclusion after any later re-hatching; it never supplies an anchor.
-    let available =
-        remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    let available = remaining_geometry_budget(
+        retained,
+        owned_bytes,
+        &support_regions,
+        &interfaces,
+        &[&protected],
+    )?;
     if sections.len() > available {
         return Err(error(
             ManufacturingErrorCode::ResourceLimit,
             "nominal object scope retention exceeded",
         ));
     }
+    super::remaining_geometry_units(
+        retained,
+        owned_bytes
+            .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1)
+            .saturating_add(
+                sections
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(usize, f64)>()),
+            ),
+    )?;
     let mut nominal: Vec<(usize, f64)> = Vec::new();
     nominal.try_reserve_exact(sections.len()).map_err(|_| {
         error(
@@ -657,6 +959,7 @@ pub(super) fn realize(
             "nominal object scope allocation refused",
         )
     })?;
+    owned_bytes = owned_bytes.saturating_add(vec_bytes(&nominal));
     for (index, section) in sections.iter().enumerate() {
         check_cancel(cancel)?;
         if section.material.0.is_empty() {
@@ -694,14 +997,20 @@ pub(super) fn realize(
     let base_retained = retained;
     let retained = retained
         .checked_add(nominal.capacity())
-        .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
                 "nominal object scope retention exceeded",
             )
         })?;
-    remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    remaining_geometry_budget(
+        retained,
+        owned_bytes,
+        &support_regions,
+        &interfaces,
+        &[&protected],
+    )?;
     for demand in &demands {
         check_cancel(cancel)?;
         let demanded_path = &layers[demand.target].paths[demand.failure.path];
@@ -731,7 +1040,7 @@ pub(super) fn realize(
                     demanded_path.points_mm[demand.failure.first],
                     demanded_path.points_mm[demand.failure.last],
                     demanded_path.physical_z_mm,
-                    demanded_path.bead_width_mm,
+                    demand.failure.width_mm,
                     demand.failure.start,
                     demand.failure.end,
                     demand.failure.span,
@@ -749,22 +1058,25 @@ pub(super) fn realize(
         let candidate = &sections[span_at(sections, demand.target as u32)].material;
         remaining_geometry_budget(
             retained,
+            owned_bytes,
             &support_regions,
             &interfaces,
-            &[&protected, candidate],
+            &[&protected],
         )?;
         charge_boolean(candidate, candidate, &mut work, cancel)?;
         // Beveled corners bound this placement search without constructing a
         // fine round-disk Minkowski sum. Search geometry is never occupied C.
-        let mut column =
-            candidate.buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel));
+        let mut column = OwnedMaterial::new(
+            candidate.buffer_with_style(BufferStyle::new(width / 2.0).line_join(LineJoin::Bevel)),
+        );
         check_cancel(cancel)?;
         region::check_size(&column)?;
         remaining_geometry_budget(
             retained,
+            owned_bytes,
             &support_regions,
             &interfaces,
-            &[&protected, candidate, &column],
+            &[&protected, &column],
         )?;
         // Certify a fixed-XY corridor all the way to the bed before publishing.
         // Top-down publication before lower clipping leaves floating components.
@@ -797,18 +1109,37 @@ pub(super) fn realize(
                 // each expanded operand instead, borrowing its original rings.
                 super::boolean::budget_polygon_accumulated(occupied, &mut work, cancel)?;
                 let distance = candidate_clearance_distance(occupied, &column, xy_clearance_mm)?;
-                let clearance = region::offset_polygon(occupied, distance, cancel)?;
+                let clearance = OwnedMaterial::new(offset_polygon_owned(
+                    occupied,
+                    distance,
+                    retained,
+                    owned_bytes,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column],
+                    cancel,
+                )?);
                 remaining_geometry_budget(
                     retained,
+                    owned_bytes,
                     &support_regions,
                     &interfaces,
                     &[&protected, &column, &clearance],
                 )?;
                 charge_boolean(&column, &clearance, &mut work, cancel)?;
-                column = column.difference(&clearance);
+                let next = OwnedMaterial::new(column.material.difference(&clearance.material));
+                remaining_geometry_budget(
+                    retained,
+                    owned_bytes,
+                    &support_regions,
+                    &interfaces,
+                    &[&protected, &column, &clearance, &next],
+                )?;
+                column = next;
                 region::check_size(&column)?;
                 remaining_geometry_budget(
                     retained,
+                    owned_bytes,
                     &support_regions,
                     &interfaces,
                     &[&protected, &column, &clearance],
@@ -844,18 +1175,37 @@ pub(super) fn realize(
             }
             super::boolean::budget_polygon_accumulated(mask, &mut work, cancel)?;
             let distance = candidate_clearance_distance(mask, &column, xy_clearance_mm)?;
-            let clearance = region::offset_polygon(mask, distance, cancel)?;
+            let clearance = OwnedMaterial::new(offset_polygon_owned(
+                mask,
+                distance,
+                retained,
+                owned_bytes,
+                &support_regions,
+                &interfaces,
+                &[&protected, &column],
+                cancel,
+            )?);
             remaining_geometry_budget(
                 retained,
+                owned_bytes,
                 &support_regions,
                 &interfaces,
                 &[&protected, &column, &clearance],
             )?;
             charge_boolean(&column, &clearance, &mut work, cancel)?;
-            column = column.difference(&clearance);
+            let next = OwnedMaterial::new(column.material.difference(&clearance.material));
+            remaining_geometry_budget(
+                retained,
+                owned_bytes,
+                &support_regions,
+                &interfaces,
+                &[&protected, &column, &clearance, &next],
+            )?;
+            column = next;
             region::check_size(&column)?;
             remaining_geometry_budget(
                 retained,
+                owned_bytes,
                 &support_regions,
                 &interfaces,
                 &[&protected, &column, &clearance],
@@ -871,7 +1221,6 @@ pub(super) fn realize(
             let previous = &layers[demand.target - 1];
             let nearest_a = nearest_stroke([a[0], a[1]], previous.paths.iter(), &mut work, cancel)?;
             let nearest_b = nearest_stroke([b[0], b[1]], previous.paths.iter(), &mut work, cancel)?;
-
             return Err(error(
                 ManufacturingErrorCode::NativeAnalysisIndeterminate,
                 format!(
@@ -895,10 +1244,27 @@ pub(super) fn realize(
                 ),
             ));
         }
-        region::canonicalize(&mut column);
-        let mut column = Arc::new(column);
+        region::canonicalize(&mut column.material);
+        column.bytes = super::native::material_bytes(&mut column.material);
+        column.units = material_units(&column.material);
+        remaining_geometry_budget(
+            retained,
+            owned_bytes.saturating_add(
+                std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+            ),
+            &support_regions,
+            &interfaces,
+            &[&protected, &column],
+        )?;
+        let mut column = column.into_shared();
         let mut shared_union = None;
         let mut next_nominal = 0;
+        // A weak source can outlive its last strong geometry owner. Reserve
+        // old/new Arc header records across cache replacement, including offsets
+        // performed while the previous cache entry is still live.
+        let weak_header_reservation =
+            2 * (std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>());
+        owned_bytes = owned_bytes.saturating_add(weak_header_reservation);
         for i in 0..=top {
             check_cancel(cancel)?;
             let upper = program_coordinates::project_xyz6_segment_bead_height_mm(
@@ -920,9 +1286,19 @@ pub(super) fn realize(
                     }
                     super::boolean::budget_polygon_accumulated(polygon, &mut work, cancel)?;
                     let distance = candidate_clearance_distance(polygon, &column, xy_clearance_mm)?;
-                    let clearance = region::offset_polygon(polygon, distance, cancel)?;
+                    let clearance = OwnedMaterial::new(offset_polygon_owned(
+                        polygon,
+                        distance,
+                        retained,
+                        owned_bytes,
+                        &support_regions,
+                        &interfaces,
+                        &[&protected, &column],
+                        cancel,
+                    )?);
                     remaining_geometry_budget(
                         retained,
+                        owned_bytes,
                         &support_regions,
                         &interfaces,
                         &[&protected, &column, &clearance],
@@ -934,15 +1310,18 @@ pub(super) fn realize(
                         );
                         e
                     })?;
-                    let next = column.difference(&clearance);
+                    let next = OwnedMaterial::new(column.material.difference(&clearance.material));
                     region::check_size(&next)?;
                     remaining_geometry_budget(
                         retained,
+                        owned_bytes.saturating_add(
+                            std::mem::size_of::<OwnedMaterial>() + 2 * std::mem::size_of::<usize>(),
+                        ),
                         &support_regions,
                         &interfaces,
                         &[&protected, &column, &clearance, &next],
                     )?;
-                    column = Arc::new(next);
+                    column = next.into_shared();
                     shared_union = None;
                 }
                 next_nominal += 1;
@@ -950,47 +1329,62 @@ pub(super) fn realize(
             if column.0.is_empty() {
                 break;
             }
+            let (live_units, live_bytes) =
+                geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
             merge_shared(
                 &mut support_regions[i],
                 &column,
                 &mut shared_union,
+                retained.saturating_add(live_units),
+                owned_bytes.saturating_add(live_bytes),
                 &mut work,
                 cancel,
             )?;
             if layers[i].z_mm > interface_bottom {
+                let (live_units, live_bytes) =
+                    geometry_receipt(&support_regions, &interfaces, &[&protected, &column]);
                 merge_shared(
                     &mut interfaces[i],
                     &column,
                     &mut shared_union,
+                    retained.saturating_add(live_units),
+                    owned_bytes.saturating_add(live_bytes),
                     &mut work,
                     cancel,
                 )?;
             }
             remaining_geometry_budget(
                 retained,
+                owned_bytes,
                 &support_regions,
                 &interfaces,
                 &[&protected, &column],
             )?;
         }
+        owned_bytes = owned_bytes.saturating_sub(weak_header_reservation);
     }
     drop(nominal);
     let mut retained = base_retained;
     // Support centers stay half a bead inside the clipped support region. This
     // gives the nominal bead, not only its centerline, the declared XY clearance.
     for i in 0..layers.len() {
+        owned_bytes =
+            native_owned_bytes + layer_payload_bytes(layers.iter()) + support_metadata_bytes;
         anchors.set_budget(0);
         let (prior, remaining) = layers.split_at_mut(i);
-        let layer = &mut remaining[0];
+        let (layer, _following) = remaining.split_first_mut().expect("current support layer");
         let interface = interfaces[i].as_ref();
-        let retained_domains = MAX_DEPOSITION_SEGMENTS as usize
-            - remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
-        let domains = raster::Domains::new(
+        let retained_domains =
+            retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+        let mut domains = raster::Domains::new(
             &support_regions[i],
             interface,
             Arc::ptr_eq(&support_regions[i], &interfaces[i]),
             width,
             retained_domains,
+            owned_bytes
+                .saturating_add(geometry_receipt(&support_regions, &interfaces, &[&protected]).1),
+            anchors.retained_bytes(),
             &mut work,
             cancel,
         )?;
@@ -999,6 +1393,7 @@ pub(super) fn realize(
         let mut paths = Vec::new();
         for axis in [preferred, preferred.orthogonal()] {
             anchors.set_budget(0);
+            domains.set_anchor_owned_bytes(anchors.retained_bytes());
             paths = domains.paths(
                 interface,
                 density,
@@ -1059,28 +1454,31 @@ pub(super) fn realize(
         }
         *segments += path_segments(&paths);
         anchors.set_budget(0);
+        domains.set_anchor_owned_bytes(anchors.retained_bytes());
         layer.region_coverage.support_area_mm2 = support_regions[i].unsigned_area();
-        layer.region_coverage.support_nominal_deposition_volume_mm3 = paths
-            .iter()
-            .map(|path| {
-                path.points_mm
-                    .windows(2)
-                    .map(|edge| (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]))
-                    .sum::<f64>()
-                    * bead_area(path, layer.index, recipe)
-            })
-            .sum();
+        layer.region_coverage.support_nominal_deposition_volume_mm3 =
+            paths.iter().try_fold(0.0, |sum, path| {
+                Ok::<_, ManufacturingError>(
+                    sum + region::nominal_volume(path, layer.index, recipe)?,
+                )
+            })?;
         object_start[i] = paths.len();
+        let live_bytes = domains
+            .owned_bytes()
+            .saturating_add(super::bonds::path_bytes(&paths));
+        reserve_owned(&mut paths, layer.paths.len(), live_bytes)?;
         paths.append(&mut layer.paths);
         layer.paths = paths;
     }
     // Restore original object roles before reevaluating the actual emitted
     // support/contact strokes. A supported contour is not a fake Bridge.
+    support_metadata_bytes =
+        support_metadata_bytes.saturating_sub(vec_bytes(&original_bridge_roles));
     for (index, path, kind) in original_bridge_roles {
         layers[index].paths[object_start[index] + path].kind = kind;
     }
-    let mut retained_regions = MAX_DEPOSITION_SEGMENTS as usize
-        - remaining_geometry_budget(retained, &support_regions, &interfaces, &[&protected])?;
+    let mut retained_regions =
+        retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
     // Raster staging must include these live support/protected domains without
     // counting the caller's object/cache reservation twice.
     let retained_support_points = retained_regions.checked_sub(retained).ok_or_else(|| {
@@ -1089,10 +1487,18 @@ pub(super) fn realize(
             "support retained point accounting underflow",
         )
     })?;
-    anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
     for index in 1..layers.len() {
         let (prior, remaining) = layers.split_at_mut(index);
-        let layer = &mut remaining[0];
+        let (layer, following) = remaining.split_first_mut().expect("current support layer");
+        let extra_owned_bytes = layer_payload_bytes(
+            prior
+                .iter()
+                .chain(std::iter::once(&*layer))
+                .chain(following.iter()),
+        ) + support_metadata_bytes
+            + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+        owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+        anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
         let authored_axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, layer.index);
         let begin = object_start[index];
         let previous = prior[index - 1].paths.iter();
@@ -1106,36 +1512,53 @@ pub(super) fn realize(
             let without_old = *segments - path_segments(&layer.paths[begin..]);
             let mut staged_segments = without_old;
             anchors.set_budget(0);
-            let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                let contact_bridge =
-                    axis != authored_component_axis(candidate, index as u32, recipe);
-                component_admission(
-                    (
-                        candidate,
-                        axis,
-                        component_budget(retained_regions, scratch)?,
-                        contact_bridge,
-                    ),
-                    previous.clone(),
-                    contact.clone(),
-                    recipe,
-                    &mut anchors,
-                    &mut anchor_work,
-                    cancel,
-                )
-            };
+            let extra_owned_bytes = layer_payload_bytes(
+                prior
+                    .iter()
+                    .chain(std::iter::once(&*layer))
+                    .chain(following.iter()),
+            ) + support_metadata_bytes
+                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+            let staged_anchor_bytes = anchors.retained_bytes();
+            let mut check_component =
+                |candidate: &mut RasterCandidate,
+                 axis,
+                 scratch: usize,
+                 scratch_owned_bytes: usize| {
+                    let contact_bridge =
+                        axis != authored_component_axis(candidate, index as u32, recipe);
+                    let budget = component_budget(
+                        retained_regions,
+                        native_owned_bytes + extra_owned_bytes,
+                        scratch.saturating_add(candidate_units(candidate)),
+                        scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
+                    )?;
+                    component_admission(
+                        (candidate, axis, budget, contact_bridge),
+                        previous.clone(),
+                        contact.clone(),
+                        recipe,
+                        &mut anchors,
+                        &mut anchor_work,
+                        cancel,
+                    )
+                };
             let mut candidate = raster(
                 index,
                 authored_axis,
                 &mut staged_segments,
                 retained_support_points + constructed_points,
+                extra_owned_bytes,
+                staged_anchor_bytes,
                 Some(&mut check_component),
             )?;
             coalesce_bridge_rows(
                 &mut candidate,
                 BridgeRowContext {
                     axis: authored_axis,
+                    demanded_reorientation: false,
                     retained_points: retained_regions,
+                    owned_bytes: native_owned_bytes + extra_owned_bytes,
                     recipe,
                 },
                 previous.clone(),
@@ -1144,31 +1567,69 @@ pub(super) fn realize(
                 &mut anchor_work,
                 cancel,
             )?;
-            if !finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)? {
+            if !finalize_interface(
+                index,
+                &mut candidate,
+                &mut staged_segments,
+                &mut work,
+                owned_bytes.saturating_add(anchors.retained_bytes()),
+            )? {
                 layer.paths = candidate.paths;
                 layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
+                {
+                    layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
+                    layer.skin_command_fits = candidate.skin_command_fits;
+                };
                 return Err(super::bonds::unresolved(layer));
             }
             *segments = without_old + path_segments(&candidate.paths);
             layer.paths.truncate(begin);
+            let live_bytes = native_owned_bytes
+                + support_metadata_bytes
+                + layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                )
+                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                + super::bonds::path_bytes(&candidate.paths)
+                + candidate_aux_bytes(&candidate)
+                + anchors.retained_bytes();
+            reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
             layer.paths.extend(candidate.paths);
             layer.region_coverage.process_interfaces = candidate.process_interfaces;
-            replace_skin_bridge_domains(
-                &mut layer.region_coverage,
-                candidate.skin_bridge_domains,
-                &mut retained,
-                &mut constructed_points,
-            )?;
-            retained_regions = MAX_DEPOSITION_SEGMENTS as usize
-                - remaining_geometry_budget(
-                    retained,
-                    &support_regions,
-                    &interfaces,
-                    &[&protected],
+            {
+                replace_skin_command_fits(
+                    &mut layer.skin_command_fits,
+                    candidate.skin_command_fits,
+                    &mut retained,
+                    &mut constructed_points,
                 )?;
-            anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
+                replace_skin_bridge_domains(
+                    &mut layer.region_coverage,
+                    candidate.skin_bridge_domains,
+                    &mut retained,
+                    &mut constructed_points,
+                )?;
+            };
+            retained_regions =
+                retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
+            owned_bytes = native_owned_bytes
+                + support_metadata_bytes
+                + layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                )
+                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+            anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
         }
+        anchors.set_budget(workspace_budget(
+            retained_regions,
+            owned_bytes.saturating_add(stroke_proof_reservation(layer.paths.len() - begin)),
+        )?);
         let mut admission = strokes::analyze(
             &layer.paths[begin..],
             previous.clone(),
@@ -1184,24 +1645,39 @@ pub(super) fn realize(
                 let axis = authored_axis;
                 let mut staged_segments = without_old;
                 anchors.set_budget(0);
-                let mut check_component = |candidate: &mut RasterCandidate, axis, scratch| {
-                    let contact_bridge =
-                        axis != authored_component_axis(candidate, index as u32, recipe);
-                    component_admission(
-                        (
-                            candidate,
-                            axis,
-                            component_budget(retained_regions, scratch)?,
-                            contact_bridge,
-                        ),
-                        previous.clone(),
-                        contact.clone(),
-                        recipe,
-                        &mut anchors,
-                        &mut anchor_work,
-                        cancel,
-                    )
-                };
+                let extra_owned_bytes = layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                ) + support_metadata_bytes
+                    + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                    + vec_bytes(&admission.bridges);
+                owned_bytes = native_owned_bytes.saturating_add(extra_owned_bytes);
+                let staged_anchor_bytes = anchors.retained_bytes();
+                let mut check_component =
+                    |candidate: &mut RasterCandidate,
+                     axis,
+                     scratch: usize,
+                     scratch_owned_bytes: usize| {
+                        let contact_bridge =
+                            axis != authored_component_axis(candidate, index as u32, recipe);
+                        let budget = component_budget(
+                            retained_regions,
+                            owned_bytes,
+                            scratch.saturating_add(candidate_units(candidate)),
+                            scratch_owned_bytes.saturating_add(candidate_owned_bytes(candidate)),
+                        )?;
+                        component_admission(
+                            (candidate, axis, budget, contact_bridge),
+                            previous.clone(),
+                            contact.clone(),
+                            recipe,
+                            &mut anchors,
+                            &mut anchor_work,
+                            cancel,
+                        )
+                    };
                 let recovery: Option<&mut super::classification::ComponentAnchorCheck<'_>> =
                     if recover_components {
                         Some(&mut check_component)
@@ -1213,13 +1689,17 @@ pub(super) fn realize(
                     axis,
                     &mut staged_segments,
                     retained_support_points + constructed_points,
+                    extra_owned_bytes,
+                    staged_anchor_bytes,
                     recovery,
                 )?;
                 coalesce_bridge_rows(
                     &mut candidate,
                     BridgeRowContext {
                         axis,
+                        demanded_reorientation: false,
                         retained_points: retained_regions,
+                        owned_bytes,
                         recipe,
                     },
                     previous.clone(),
@@ -1228,10 +1708,22 @@ pub(super) fn realize(
                     &mut anchor_work,
                     cancel,
                 )?;
-                if !finalize_interface(index, &mut candidate, &mut staged_segments, &mut work)? {
+                if !finalize_interface(
+                    index,
+                    &mut candidate,
+                    &mut staged_segments,
+                    &mut work,
+                    owned_bytes.saturating_add(anchors.retained_bytes()),
+                )? {
                     continue;
                 }
-                anchors.set_budget(candidate_budget(&candidate.paths, retained_regions)?);
+                anchors.set_budget(candidate_budget(
+                    &candidate.paths,
+                    retained_regions,
+                    owned_bytes
+                        .saturating_add(candidate_aux_bytes(&candidate))
+                        .saturating_add(stroke_proof_reservation(candidate.paths.len())),
+                )?);
                 let other = strokes::analyze(
                     &candidate.paths,
                     previous.clone(),
@@ -1244,26 +1736,51 @@ pub(super) fn realize(
                 if other.failure.is_none() {
                     *segments = without_old + path_segments(&candidate.paths);
                     layer.paths.truncate(begin);
+                    let live_bytes = native_owned_bytes
+                        + support_metadata_bytes
+                        + layer_payload_bytes(
+                            prior
+                                .iter()
+                                .chain(std::iter::once(&*layer))
+                                .chain(following.iter()),
+                        )
+                        + geometry_receipt(&support_regions, &interfaces, &[&protected]).1
+                        + super::bonds::path_bytes(&candidate.paths)
+                        + candidate_aux_bytes(&candidate)
+                        + anchors.retained_bytes();
+                    reserve_owned(&mut layer.paths, candidate.paths.len(), live_bytes)?;
                     layer.paths.extend(candidate.paths);
                     layer.region_coverage.process_interfaces = candidate.process_interfaces;
-                    replace_skin_bridge_domains(
-                        &mut layer.region_coverage,
-                        candidate.skin_bridge_domains,
-                        &mut retained,
-                        &mut constructed_points,
-                    )?;
-                    retained_regions = MAX_DEPOSITION_SEGMENTS as usize
-                        - remaining_geometry_budget(
-                            retained,
-                            &support_regions,
-                            &interfaces,
-                            &[&protected],
+                    {
+                        replace_skin_command_fits(
+                            &mut layer.skin_command_fits,
+                            candidate.skin_command_fits,
+                            &mut retained,
+                            &mut constructed_points,
                         )?;
+                        replace_skin_bridge_domains(
+                            &mut layer.region_coverage,
+                            candidate.skin_bridge_domains,
+                            &mut retained,
+                            &mut constructed_points,
+                        )?;
+                    };
+                    retained_regions =
+                        retained + geometry_receipt(&support_regions, &interfaces, &[&protected]).0;
                     admission = other;
                     break;
                 }
             }
-            anchors.set_budget(MAX_DEPOSITION_SEGMENTS as usize - retained_regions);
+            owned_bytes = native_owned_bytes
+                + support_metadata_bytes
+                + layer_payload_bytes(
+                    prior
+                        .iter()
+                        .chain(std::iter::once(&*layer))
+                        .chain(following.iter()),
+                )
+                + geometry_receipt(&support_regions, &interfaces, &[&protected]).1;
+            anchors.set_budget(workspace_budget(retained_regions, owned_bytes)?);
         }
         if let Some(failure) = admission.failure {
             let path = &layer.paths[begin + failure.path];
@@ -1385,26 +1902,38 @@ fn finalize_layer_interface(
     layer: &mut PrintLayer,
     segments: &mut usize,
     work: &mut usize,
+    outside_owned_bytes: usize,
     finalize: &mut impl FnMut(
         usize,
         &mut RasterCandidate,
         &mut usize,
         &mut usize,
+        usize,
     ) -> Result<bool, ManufacturingError>,
 ) -> Result<bool, ManufacturingError> {
     if layer.region_coverage.process_interfaces.is_empty() {
         return Ok(true);
     }
     let mut candidate = RasterCandidate {
+        skin_command_fits: std::mem::take(&mut layer.skin_command_fits),
         skin_bridge_domains: std::mem::take(&mut layer.region_coverage.skin_bridge_domains),
         paths: std::mem::take(&mut layer.paths),
         whole_rows: Vec::new(),
         process_interfaces: std::mem::take(&mut layer.region_coverage.process_interfaces),
     };
-    let result = finalize(index, &mut candidate, segments, work);
+    let result = match outside_owned_bytes.checked_sub(candidate_owned_bytes(&candidate)) {
+        Some(outside) => finalize(index, &mut candidate, segments, work, outside),
+        None => Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "moved interface candidate exceeds its live ownership receipt",
+        )),
+    };
     layer.paths = candidate.paths;
     layer.region_coverage.process_interfaces = candidate.process_interfaces;
-    layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
+    {
+        layer.region_coverage.skin_bridge_domains = candidate.skin_bridge_domains;
+        layer.skin_command_fits = candidate.skin_command_fits;
+    };
     result
 }
 
@@ -1419,7 +1948,7 @@ fn replace_skin_bridge_domains(
     let revised = retained
         .checked_sub(old)
         .and_then(|n| n.checked_add(new))
-        .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -1440,6 +1969,39 @@ fn replace_skin_bridge_domains(
     Ok(())
 }
 
+fn replace_skin_command_fits(
+    current: &mut Vec<SkinCommandFitDomain>,
+    domains: Vec<SkinCommandFitDomain>,
+    retained: &mut usize,
+    constructed: &mut usize,
+) -> Result<(), ManufacturingError> {
+    let old = super::bonds::skin_command_fit_points(current);
+    let new = super::bonds::skin_command_fit_points(&domains);
+    let revised = retained
+        .checked_sub(old)
+        .and_then(|n| n.checked_add(new))
+        .filter(|n| *n <= super::MAX_RETAINED_GEOMETRY_UNITS)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "retained skin command fit budget exceeded",
+            )
+        })?;
+    let revised_constructed = constructed
+        .checked_sub(old)
+        .and_then(|n| n.checked_add(new))
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "skin command fit accounting mismatch",
+            )
+        })?;
+    *retained = revised;
+    *constructed = revised_constructed;
+    *current = domains;
+    Ok(())
+}
+
 fn support_role(kind: DepositionKind) -> bool {
     matches!(
         kind,
@@ -1452,23 +2014,37 @@ fn path_segments(paths: &[DepositionPath]) -> usize {
 }
 
 fn candidate_budget(
-    paths: &[DepositionPath],
+    paths: &Vec<DepositionPath>,
     retained: usize,
+    owned_bytes: usize,
 ) -> Result<usize, ManufacturingError> {
-    paths
-        .iter()
-        .try_fold(retained, |total, path| {
-            total
-                .checked_add(path.points_mm.capacity())
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-                .ok_or_else(|| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "retained native/support/alternative raster point budget exceeded",
-                    )
-                })
-        })
-        .map(|total| MAX_DEPOSITION_SEGMENTS as usize - total)
+    let units = paths.iter().fold(retained, |total, path| {
+        total.saturating_add(path.points_mm.capacity())
+    });
+    workspace_budget(
+        units,
+        owned_bytes.saturating_add(super::bonds::path_bytes(paths)),
+    )
+}
+
+fn candidate_aux_bytes(candidate: &RasterCandidate) -> usize {
+    super::bonds::interface_owned_bytes(&candidate.process_interfaces)
+        + vec_bytes(&candidate.skin_bridge_domains)
+        + candidate
+            .skin_bridge_domains
+            .iter()
+            .map(SkinBridgeDomain::allocated_bytes)
+            .sum::<usize>()
+        + super::bonds::skin_command_fit_bytes(&candidate.skin_command_fits)
+        + super::bonds::path_bytes(&candidate.whole_rows)
+}
+
+fn candidate_owned_bytes(candidate: &RasterCandidate) -> usize {
+    super::bonds::path_bytes(&candidate.paths).saturating_add(candidate_aux_bytes(candidate))
+}
+
+fn candidate_units(candidate: &RasterCandidate) -> usize {
+    candidate_owned_bytes(candidate).div_ceil(std::mem::size_of::<geo::Coord<f64>>())
 }
 
 fn matches_skin_witness(path: &DepositionPath, bond: &ProcessEndpointBond) -> bool {
@@ -1513,7 +2089,9 @@ fn coalesce_bridge_rows<'a>(
             candidate,
             BridgeRowContext {
                 axis,
+                demanded_reorientation: context.demanded_reorientation,
                 retained_points: context.retained_points,
+                owned_bytes: context.owned_bytes,
                 recipe: context.recipe,
             },
             previous.clone(),
@@ -1537,7 +2115,9 @@ fn coalesce_bridge_rows_on_axis<'a>(
 ) -> Result<bool, ManufacturingError> {
     let BridgeRowContext {
         axis,
+        demanded_reorientation,
         retained_points,
+        owned_bytes,
         recipe,
     } = context;
     if candidate.whole_rows.is_empty() {
@@ -1548,9 +2128,18 @@ fn coalesce_bridge_rows_on_axis<'a>(
     // Compare actual emitted-grid coordinates, not a widened anchor radius or
     // native tolerance. Whole rows themselves come from authoritative fill.
     let grid = program_coordinates::project_xyz6_coordinate_mm;
-    let budget = candidate_budget(&candidate.paths, retained_points)?;
-    let staged = MAX_DEPOSITION_SEGMENTS as usize - budget;
-    let budget = candidate_budget(&candidate.whole_rows, staged)?;
+    let row_units = candidate
+        .whole_rows
+        .iter()
+        .map(|path| path.points_mm.capacity())
+        .sum::<usize>();
+    let budget = candidate_budget(
+        &candidate.paths,
+        retained_points.saturating_add(row_units),
+        owned_bytes
+            .saturating_add(candidate_aux_bytes(candidate))
+            .saturating_add(2 * std::mem::size_of::<[f64; 3]>() + 2 * stroke_proof_reservation(1)),
+    )?;
     let original_len = candidate.paths.len();
     let workspace_budget = budget.checked_sub(original_len).ok_or_else(|| {
         error(
@@ -1661,7 +2250,7 @@ fn coalesce_bridge_rows_on_axis<'a>(
             check_cancel(cancel)?;
             let (_, start, stop, index) = pieces[cursor];
             if ownership[index] == Ownership::Frozen
-                || candidate.paths[index].bead_width_mm != row.bead_width_mm
+                || candidate.paths[index].width != row.width
                 || candidate.paths[index].physical_z_mm != row.physical_z_mm
             {
                 if stop > lo && start < hi {
@@ -1689,7 +2278,7 @@ fn coalesce_bridge_rows_on_axis<'a>(
                 check_cancel(cancel)?;
                 let (_, start, stop, index) = pieces[cursor];
                 if (ownership[index] == Ownership::Frozen
-                    || candidate.paths[index].bead_width_mm != row.bead_width_mm
+                    || candidate.paths[index].width != row.width
                     || candidate.paths[index].physical_z_mm != row.physical_z_mm)
                     && stop > lo
                     && start < hi
@@ -1723,10 +2312,12 @@ fn coalesce_bridge_rows_on_axis<'a>(
                     // connector still needs independent previous-anchor proof.
                     if !(AnchorCandidate {
                         endpoints_mm: [previous_piece.points_mm[0], previous_piece.points_mm[1]],
-                        bead_width_mm: previous_piece.bead_width_mm,
+                        bead_width_mm: region::constant_width(previous_piece)?,
                     })
-                    .emitted_endpoint_footprint_overlaps(endpoint, current_piece.bead_width_mm)?
-                    {
+                    .emitted_endpoint_footprint_overlaps(
+                        endpoint,
+                        region::constant_width(current_piece)?,
+                    )? {
                         break;
                     }
                 }
@@ -1781,9 +2372,18 @@ fn coalesce_bridge_rows_on_axis<'a>(
                 work,
                 cancel,
             )?;
-            let proof = if let Some(failure) = &required_proof.failure {
+            // A short one-ended overhang may already satisfy ordinary support.
+            // In a staged orthogonal proposal it still needs a real second
+            // anchor before demand-bound band selection can consume it as Bridge.
+            let construct_ends = required_proof.failure.is_some()
+                || (demanded_reorientation && required_proof.bridges.is_empty());
+            let proof = if construct_ends {
                 // End extension cannot repair an over-limit interior span.
-                if failure.start > 0.0 && failure.end < 1.0 {
+                if required_proof
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.start > 0.0 && failure.end < 1.0)
+                {
                     continue;
                 }
                 let whole = AnchorCandidate {
@@ -1799,7 +2399,7 @@ fn coalesce_bridge_rows_on_axis<'a>(
                             p
                         },
                     ],
-                    bead_width_mm: row.bead_width_mm,
+                    bead_width_mm: region::constant_width(&row)?,
                 };
                 let length = extension_end - extension_start;
                 let mut start = ((required_start - extension_start) / length).clamp(0.0, 1.0);
@@ -1852,14 +2452,14 @@ fn coalesce_bridge_rows_on_axis<'a>(
             if let Some(left) = left_emitted_end
                 && emitted_start < grid(required_start)?
                 && anchors::emitted_coordinate_separation_lower_mm(emitted_start, left)?
-                    <= row.bead_width_mm
+                    <= region::constant_width(&row)?
             {
                 continue;
             }
             if let Some(right) = next_required_start
                 && emitted_end > grid(required_end)?
                 && anchors::emitted_coordinate_separation_lower_mm(grid(right)?, emitted_end)?
-                    <= row.bead_width_mm
+                    <= region::constant_width(&row)?
             {
                 continue;
             }
@@ -1914,28 +2514,22 @@ fn admission_error(
     )
 }
 
-pub(in crate::planner) fn object_volumes(layers: &mut [PrintLayer], recipe: &PlanarPrintRecipe) {
+pub(in crate::planner) fn object_volumes(
+    layers: &mut [PrintLayer],
+    recipe: &PlanarPrintRecipe,
+) -> Result<(), ManufacturingError> {
     for layer in layers {
         layer.region_coverage.nominal_deposition_volume_mm3 = layer
             .paths
             .iter()
             .filter(|path| !support_role(path.kind))
-            .map(|path| {
-                let area = bead_area(path, layer.index, recipe);
-                let factor = if path.kind == DepositionKind::Bridge {
-                    recipe.process.bridge_flow_factor
-                } else {
-                    1.0
-                };
-                path.points_mm
-                    .windows(2)
-                    .map(|edge| {
-                        (edge[1][0] - edge[0][0]).hypot(edge[1][1] - edge[0][1]) * area * factor
-                    })
-                    .sum::<f64>()
-            })
-            .sum();
+            .try_fold(0.0, |sum, path| {
+                Ok::<_, ManufacturingError>(
+                    sum + region::nominal_volume(path, layer.index, recipe)?,
+                )
+            })?;
     }
+    Ok(())
 }
 
 struct NearestStroke {
@@ -2002,17 +2596,6 @@ fn nearest_stroke<'a>(
     Ok(nearest)
 }
 
-fn bead_area(path: &DepositionPath, index: u32, recipe: &PlanarPrintRecipe) -> f64 {
-    let h = path.physical_z_mm[1] - path.physical_z_mm[0];
-    ((path.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
-        * recipe.flow_multiplier
-        * if index == 0 {
-            recipe.process.first_layer_flow_factor
-        } else {
-            1.0
-        }
-}
-
 fn charge_boolean(
     a: &MultiPolygon<f64>,
     b: &MultiPolygon<f64>,
@@ -2040,38 +2623,155 @@ fn charge_boolean(
     Ok(())
 }
 
-fn remaining_geometry_budget(
-    native: usize,
-    support: &[Arc<MultiPolygon<f64>>],
-    interfaces: &[Arc<MultiPolygon<f64>>],
-    temporary: &[&MultiPolygon<f64>],
-) -> Result<usize, ManufacturingError> {
-    let mut total = native;
-    // Counting shared owners repeatedly is conservative and allocation-free.
-    for region in support
-        .iter()
-        .chain(interfaces)
-        .map(|region| region.as_ref())
-        .chain(temporary.iter().copied())
-    {
-        total = total
-            .checked_add(region::point_count(region))
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "combined retained native/support/temporary contour budget exceeded",
-                )
-            })?;
+fn reserve_owned<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    live_bytes: usize,
+) -> Result<(), ManufacturingError> {
+    let needed = values.len().checked_add(additional).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "support capacity overflow",
+        )
+    })?;
+    if needed <= values.capacity() {
+        return Ok(());
     }
-    (MAX_DEPOSITION_SEGMENTS as usize)
-        .checked_sub(total)
+    let capacity = needed.max(values.capacity().saturating_mul(2)).max(4);
+    let old_bytes = vec_bytes(values);
+    let requested_bytes = capacity
+        .checked_mul(std::mem::size_of::<T>())
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
-                "combined retained contour budget exceeded",
+                "support allocation byte overflow",
             )
+        })?;
+    // Both old and replacement arrays may coexist during reallocation.
+    super::remaining_geometry_units(0, live_bytes.saturating_add(requested_bytes))?;
+    values
+        .try_reserve_exact(capacity - values.len())
+        .map_err(|_| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "support allocation refused",
+            )
+        })?;
+    super::remaining_geometry_units(
+        0,
+        live_bytes
+            .saturating_sub(old_bytes)
+            .saturating_add(vec_bytes(values)),
+    )?;
+    Ok(())
+}
+
+fn offset_polygon_owned(
+    polygon: &Polygon<f64>,
+    distance: f64,
+    retained: usize,
+    owned_bytes: usize,
+    support: &[Arc<OwnedMaterial>],
+    interfaces: &[Arc<OwnedMaterial>],
+    temporary: &[&OwnedMaterial],
+    cancel: &AtomicBool,
+) -> Result<MultiPolygon<f64>, ManufacturingError> {
+    let (units, bytes) = geometry_receipt(support, interfaces, temporary);
+    region::offset_polygon_admitted(
+        polygon,
+        distance,
+        |scratch, scratch_bytes, overlay| {
+            super::remaining_geometry_units(
+                retained.saturating_add(units).saturating_add(scratch),
+                owned_bytes
+                    .saturating_add(bytes)
+                    .saturating_add(scratch_bytes),
+            )?;
+            if let Some((a, b)) = overlay {
+                boolean_budget(a, b, cancel)?;
+            }
+            Ok(())
+        },
+        cancel,
+    )
+}
+
+fn vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+fn material_units(material: &MultiPolygon<f64>) -> usize {
+    material
+        .0
+        .iter()
+        .map(|polygon| {
+            polygon.exterior().0.capacity()
+                + polygon
+                    .interiors()
+                    .iter()
+                    .map(|ring| ring.0.capacity())
+                    .sum::<usize>()
         })
+        .sum()
+}
+
+fn layer_payload_bytes<'a>(layers: impl Iterator<Item = &'a PrintLayer>) -> usize {
+    layers
+        .map(|layer| {
+            super::bonds::path_bytes(&layer.paths)
+                .saturating_add(super::bonds::coverage_owned_bytes(&layer.region_coverage))
+                .saturating_add(super::bonds::skin_command_fit_bytes(
+                    &layer.skin_command_fits,
+                ))
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+fn geometry_receipt(
+    support: &[Arc<OwnedMaterial>],
+    interfaces: &[Arc<OwnedMaterial>],
+    temporary: &[&OwnedMaterial],
+) -> (usize, usize) {
+    // Owner-local marks avoid an allocating pointer set and all-pairs scans.
+    for owner in support
+        .iter()
+        .chain(interfaces)
+        .map(Arc::as_ref)
+        .chain(temporary.iter().copied())
+    {
+        owner.counted.set(false);
+    }
+    let mut units = 0usize;
+    let mut bytes = 0usize;
+    for owner in support
+        .iter()
+        .chain(interfaces)
+        .map(Arc::as_ref)
+        .chain(temporary.iter().copied())
+    {
+        if owner.counted.replace(true) {
+            continue;
+        }
+        units = units.saturating_add(owner.units);
+        bytes = bytes
+            .saturating_add(owner.bytes)
+            .saturating_add(owner.header_bytes);
+    }
+    (units, bytes)
+}
+
+fn remaining_geometry_budget(
+    native: usize,
+    owned_bytes: usize,
+    support: &[Arc<OwnedMaterial>],
+    interfaces: &[Arc<OwnedMaterial>],
+    temporary: &[&OwnedMaterial],
+) -> Result<usize, ManufacturingError> {
+    let (units, bytes) = geometry_receipt(support, interfaces, temporary);
+    super::remaining_geometry_units(
+        native.saturating_add(units),
+        owned_bytes.saturating_add(bytes),
+    )
 }
 
 fn candidate_clearance_distance(
@@ -2119,10 +2819,40 @@ mod tests {
     use super::*;
     use geo::{line_string, polygon};
 
+    #[test]
+    fn retained_support_capacity_is_byte_bounded_and_shared_once() {
+        let owner = || {
+            OwnedMaterial::new(MultiPolygon(vec![Polygon::new(
+                geo::LineString(Vec::with_capacity(60_001)),
+                Vec::new(),
+            )]))
+            .into_shared()
+        };
+        let a = owner();
+        let b = owner();
+        let support = vec![Arc::clone(&a), Arc::clone(&a), Arc::clone(&b)];
+        let interfaces = vec![Arc::clone(&b), Arc::clone(&a)];
+        let (units, bytes) = geometry_receipt(&support, &interfaces, &[]);
+        assert!(units > MAX_DEPOSITION_SEGMENTS as usize);
+        assert_eq!(units, a.units + b.units);
+        assert_eq!(bytes, a.bytes + a.header_bytes + b.bytes + b.header_bytes);
+        assert!(remaining_geometry_budget(0, 0, &support, &interfaces, &[]).is_ok());
+        assert!(
+            remaining_geometry_budget(
+                0,
+                MAX_MANUFACTURING_RETAINED_BYTES as usize,
+                &support,
+                &interfaces,
+                &[]
+            )
+            .is_err()
+        );
+    }
+
     fn row(kind: DepositionKind, a: f64, b: f64, z: f64) -> DepositionPath {
         DepositionPath {
             kind,
-            bead_width_mm: 0.6,
+            width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [z - 0.4, z],
             owner: match kind {
                 DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
@@ -2140,6 +2870,7 @@ mod tests {
     #[test]
     fn genuine_bridge_rows_join_existing_ownership_pieces_without_extra_fill() {
         let mut candidate = RasterCandidate {
+            skin_command_fits: Vec::new(),
             skin_bridge_domains: Vec::new(),
             paths: vec![
                 row(DepositionKind::SolidFill, 1.0, 3.0, 0.8),
@@ -2160,7 +2891,9 @@ mod tests {
                 &mut candidate,
                 BridgeRowContext {
                     axis: region::HatchAxis::X,
+                    demanded_reorientation: false,
                     retained_points: 0,
+                    owned_bytes: 0,
                     recipe: &recipe,
                 },
                 previous.iter(),
@@ -2218,6 +2951,7 @@ mod tests {
                     }
                 }
                 let mut candidate = RasterCandidate {
+                    skin_command_fits: Vec::new(),
                     skin_bridge_domains: Vec::new(),
                     paths,
                     whole_rows: vec![row(Bridge, 1.0, 9.0, 0.8)],
@@ -2228,7 +2962,9 @@ mod tests {
                         &mut candidate,
                         BridgeRowContext {
                             axis: region::HatchAxis::X,
+                            demanded_reorientation: false,
                             retained_points: 0,
+                            owned_bytes: 0,
                             recipe: &recipe,
                         },
                         previous.iter(),
@@ -2276,6 +3012,7 @@ mod tests {
     #[test]
     fn bridge_row_candidates_cannot_fill_a_missing_sparse_piece() {
         let mut candidate = RasterCandidate {
+            skin_command_fits: Vec::new(),
             skin_bridge_domains: Vec::new(),
             paths: vec![
                 row(DepositionKind::SparseFill, 1.0, 3.0, 0.8),
@@ -2295,7 +3032,9 @@ mod tests {
                 &mut candidate,
                 BridgeRowContext {
                     axis: region::HatchAxis::X,
+                    demanded_reorientation: false,
                     retained_points: 0,
+                    owned_bytes: 0,
                     recipe: &recipe,
                 },
                 previous.iter(),
@@ -2321,7 +3060,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let previous = [3.0, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
-            bead_width_mm: 0.6,
+            width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
@@ -2343,6 +3082,7 @@ mod tests {
                 ),
             ];
             let mut candidate = RasterCandidate {
+                skin_command_fits: Vec::new(),
                 skin_bridge_domains: Vec::new(),
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 0.5, 9.0, 0.8)],
@@ -2355,7 +3095,9 @@ mod tests {
                     &mut candidate,
                     BridgeRowContext {
                         axis: region::HatchAxis::X,
+                        demanded_reorientation: false,
                         retained_points: 0,
+                        owned_bytes: 0,
                         recipe: &recipe,
                     },
                     previous.iter(),
@@ -2437,13 +3179,14 @@ mod tests {
                 .flatten()
                 .map(|x| DepositionPath {
                     kind: DepositionKind::SparseFill,
-                    bead_width_mm: 0.6,
+                    width: WidthProfile::Constant { width_mm: 0.6 },
                     physical_z_mm: [0.0, 0.4],
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
                 })
                 .collect();
             let mut candidate = RasterCandidate {
+                skin_command_fits: Vec::new(),
                 skin_bridge_domains: Vec::new(),
                 paths: required.clone(),
                 whole_rows: vec![row(DepositionKind::Bridge, 1.0, 10.0, 0.8)],
@@ -2470,7 +3213,9 @@ mod tests {
                 &mut candidate,
                 BridgeRowContext {
                     axis: region::HatchAxis::X,
+                    demanded_reorientation: false,
                     retained_points: 0,
+                    owned_bytes: 0,
                     recipe: &recipe,
                 },
                 previous.iter(),
@@ -2531,7 +3276,7 @@ mod tests {
         ] {
             recipe.bead_width_mm = width;
             let orient = |mut path: DepositionPath| {
-                path.bead_width_mm = width;
+                path.width = WidthProfile::Constant { width_mm: width };
                 if axis == region::HatchAxis::Y {
                     for point in &mut path.points_mm {
                         point.swap(0, 1);
@@ -2542,7 +3287,7 @@ mod tests {
             let previous = [2.5, 7.5].map(|x| {
                 orient(DepositionPath {
                     kind: DepositionKind::SparseFill,
-                    bead_width_mm: width,
+                    width: WidthProfile::Constant { width_mm: width },
                     physical_z_mm: [0.0, 0.4],
                     owner: None,
                     points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
@@ -2569,6 +3314,7 @@ mod tests {
                         orient(row(DepositionKind::SparseFill, right_start, 6.8, 0.8)),
                     ];
                     let mut candidate = RasterCandidate {
+                        skin_command_fits: Vec::new(),
                         skin_bridge_domains: Vec::new(),
                         paths: required.clone(),
                         whole_rows: vec![orient(row(DepositionKind::Bridge, 1.0, 9.0, 0.8))],
@@ -2595,7 +3341,9 @@ mod tests {
                         &mut candidate,
                         BridgeRowContext {
                             axis,
+                            demanded_reorientation: false,
                             retained_points: 0,
+                            owned_bytes: 0,
                             recipe: &recipe,
                         },
                         prior.clone(),
@@ -2632,6 +3380,96 @@ mod tests {
     }
 
     #[test]
+    fn demanded_reorientation_constructs_real_bridges_from_supported_overhangs() {
+        let cancel = AtomicBool::new(false);
+        let fill = MultiPolygon(vec![polygon![
+            (x: 1.1, y: -2.0), (x: 4.0, y: -2.0),
+            (x: 4.0, y: 2.0), (x: 1.1, y: 2.0), (x: 1.1, y: -2.0),
+        ]]);
+        // Ordinary admission allows this short one-ended overhang. Reorienting
+        // another demanded row cannot simply relabel that supported alternative.
+        let required = vec![row(DepositionKind::TopSkin, 1.1, 1.355, 0.8)];
+        let prior = [0.75, 3.0].map(|x| DepositionPath {
+            kind: DepositionKind::SparseFill,
+            owner: None,
+            width: WidthProfile::PerEdge {
+                widths_mm: vec![0.6],
+            },
+            physical_z_mm: [0.0, 0.4],
+            points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
+        });
+        for (reorientation, missing_anchor, limit) in [
+            (false, false, 6.0),
+            (true, false, 6.0),
+            (true, true, 6.0),
+            (true, false, 1.0),
+        ] {
+            let mut recipe = crate::planner::tests::recipe(0.1);
+            recipe.process.max_bridge_span_mm = limit;
+            let layer = region::HatchLayer {
+                z: 0.8,
+                lower_z: 0.4,
+                height: 0.4,
+                axis: region::HatchAxis::X,
+                top_axis: region::HatchAxis::X,
+                recipe: &recipe,
+            };
+            let previous = prior
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !missing_anchor || *index == 0)
+                .map(|(_, path)| path);
+            let mut candidate = RasterCandidate {
+                paths: required.clone(),
+                whole_rows: region::bridge_rows(&fill, &[], &required, &layer, &mut 0, &cancel)
+                    .unwrap(),
+                process_interfaces: Vec::new(),
+                skin_bridge_domains: Vec::new(),
+                skin_command_fits: Vec::new(),
+            };
+            let mut anchors = AnchorWorkspace::default();
+            let mut work = 0;
+            let proof = component_admission(
+                (&mut candidate, region::HatchAxis::X, 100_000, reorientation),
+                previous.clone(),
+                std::iter::empty(),
+                &recipe,
+                &mut anchors,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(proof.supported);
+            if reorientation && !missing_anchor && limit == 6.0 {
+                assert_eq!(proof.bridges, [0]);
+                let path = &candidate.paths[0];
+                assert_eq!(path.kind, DepositionKind::Bridge);
+                assert_eq!(path.owner, required[0].owner);
+                assert_eq!(path.width, required[0].width);
+                assert_eq!(path.physical_z_mm, required[0].physical_z_mm);
+                assert_eq!(path.points_mm[0], required[0].points_mm[0]);
+                assert!(path.points_mm[1][0] > required[0].points_mm[1][0]);
+                assert!(path.points_mm[1][0] < prior[1].points_mm[0][0]);
+                let actual = strokes::analyze(
+                    &candidate.paths,
+                    previous,
+                    std::iter::empty(),
+                    &recipe,
+                    &mut anchors,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap();
+                assert!(actual.failure.is_none());
+                assert_eq!(actual.bridges, [0]);
+            } else {
+                assert!(proof.bridges.is_empty());
+                assert_eq!(candidate.paths, required);
+            }
+        }
+    }
+
+    #[test]
     fn top_skin_rows_extend_only_to_actual_sparse_anchors() {
         let cancel = AtomicBool::new(false);
         let recipe = crate::planner::tests::recipe(0.1);
@@ -2642,7 +3480,7 @@ mod tests {
         let required = vec![row(DepositionKind::TopSkin, 3.2, 6.8, 0.8)];
         let prior = [2.5, 7.5].map(|x| DepositionPath {
             kind: DepositionKind::SparseFill,
-            bead_width_mm: 0.6,
+            width: WidthProfile::Constant { width_mm: 0.6 },
             physical_z_mm: [0.0, 0.4],
             owner: None,
             points_mm: vec![[x, -1.0, 0.4], [x, 1.0, 0.4]],
@@ -2658,6 +3496,7 @@ mod tests {
         for missing_anchor in [false, true] {
             let previous = prior.iter().filter(|_| !missing_anchor);
             let mut candidate = RasterCandidate {
+                skin_command_fits: Vec::new(),
                 skin_bridge_domains: Vec::new(),
                 whole_rows: region::bridge_rows(&fill, &[], &required, &layer, &mut 0, &cancel)
                     .unwrap(),
@@ -2684,7 +3523,9 @@ mod tests {
                 &mut candidate,
                 BridgeRowContext {
                     axis: region::HatchAxis::X,
+                    demanded_reorientation: false,
                     retained_points: 0,
+                    owned_bytes: 0,
                     recipe: &recipe,
                 },
                 previous.clone(),
@@ -2733,14 +3574,14 @@ mod tests {
 
     #[test]
     fn pre_floor_skin_deposits_anchors_under_upcoming_pocket_perimeters() {
-        use crate::planner::classification::{ClassifiedRegions, WallLayout, fixed_point_budget};
+        use crate::planner::classification::{ClassifiedRegions, fixed_owned_budget};
         let cancel = AtomicBool::new(false);
         let recipe = crate::planner::tests::recipe(0.25);
-        let section = MultiPolygon(vec![polygon![
+        let mut section = MultiPolygon(vec![polygon![
             (x: 0.0, y: 0.0), (x: 10.0, y: 0.0),
             (x: 10.0, y: 10.0), (x: 0.0, y: 10.0), (x: 0.0, y: 0.0),
         ]]);
-        let upper = MultiPolygon(vec![Polygon::new(
+        let mut upper = MultiPolygon(vec![Polygon::new(
             section.0[0].exterior().clone(),
             vec![line_string![
                 (x: 4.0, y: 4.0), (x: 4.0, y: 6.0),
@@ -2749,7 +3590,7 @@ mod tests {
         )]);
         let layout = |material: &MultiPolygon<f64>| {
             Arc::new(
-                WallLayout::new(
+                crate::planner::tests::wall_plan(
                     material,
                     &region::RequiredMaterial::from_section(material),
                     &recipe,
@@ -2760,51 +3601,88 @@ mod tests {
             )
         };
         let inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
-        let section_inset = region::offset(&section, -inset, &cancel).unwrap();
-        let upper_inset = region::offset(&upper, -inset, &cancel).unwrap();
-        let previous = ClassifiedRegions::new(
-            layout(&section),
+        let mut section_inset = region::offset(&section, -inset, &cancel).unwrap();
+        let mut upper_inset = region::offset(&upper, -inset, &cancel).unwrap();
+        let fixture_bytes = crate::planner::native::material_bytes(&mut section)
+            + crate::planner::native::material_bytes(&mut upper)
+            + crate::planner::native::material_bytes(&mut section_inset)
+            + crate::planner::native::material_bytes(&mut upper_inset);
+        let fixture_units = material_units(&section)
+            + material_units(&upper)
+            + material_units(&section_inset)
+            + material_units(&upper_inset);
+        let previous_layout = layout(&section);
+        let previous_units = fixture_units + previous_layout.retained_points;
+        let previous_bytes =
+            fixture_bytes + previous_layout.retained_bytes + 2 * std::mem::size_of::<usize>();
+        let mut previous_regions = ClassifiedRegions::new(
+            previous_layout,
             &section_inset,
             &upper_inset,
-            fixed_point_budget(0),
+            fixed_owned_budget(previous_units, previous_bytes),
             &recipe,
             &cancel,
         )
-        .unwrap()
-        .paths(
-            0.4,
-            0.0,
-            region::HatchAxis::X,
-            region::HatchAxis::X,
-            &recipe,
-            &mut 0,
-            &cancel,
-        )
-        .unwrap()
-        .0;
-        let upcoming = ClassifiedRegions::new(
-            layout(&upper),
+        .unwrap();
+        let classified_bytes = previous_regions.retained_bytes();
+        let previous = previous_regions
+            .paths(
+                0.4,
+                0.0,
+                region::HatchAxis::X,
+                region::HatchAxis::X,
+                &recipe,
+                classified_bytes,
+                &[],
+                &mut 0,
+                |units, bytes, _| {
+                    crate::planner::remaining_geometry_units(units, bytes).map(|_| ())
+                },
+                &cancel,
+            )
+            .unwrap()
+            .0;
+        let upcoming_layout = layout(&upper);
+        let upcoming_units = fixture_units
+            + upcoming_layout.retained_points
+            + previous
+                .iter()
+                .map(|path| path.points_mm.capacity())
+                .sum::<usize>();
+        let upcoming_bytes = fixture_bytes
+            + upcoming_layout.retained_bytes
+            + 2 * std::mem::size_of::<usize>()
+            + crate::planner::bonds::path_bytes(&previous);
+        let mut upcoming_regions = ClassifiedRegions::new(
+            upcoming_layout,
             &section_inset,
             &upper_inset,
-            fixed_point_budget(0),
+            fixed_owned_budget(upcoming_units, upcoming_bytes),
             &recipe,
             &cancel,
         )
-        .unwrap()
-        .paths(
-            0.8,
-            0.4,
-            region::HatchAxis::Y,
-            region::HatchAxis::Y,
-            &recipe,
-            &mut 0,
-            &cancel,
-        )
-        .unwrap()
-        .0
-        .into_iter()
-        .filter(|path| path.kind == DepositionKind::Perimeter)
-        .collect::<Vec<_>>();
+        .unwrap();
+        let classified_bytes = upcoming_regions.retained_bytes();
+        let upcoming = upcoming_regions
+            .paths(
+                0.8,
+                0.4,
+                region::HatchAxis::Y,
+                region::HatchAxis::Y,
+                &recipe,
+                classified_bytes,
+                &[],
+                &mut 0,
+                |units, bytes, _| {
+                    crate::planner::remaining_geometry_units(units, bytes).map(|_| ())
+                },
+                &cancel,
+            )
+            .unwrap()
+            .0
+            .into_iter()
+            .filter(|path| path.kind == DepositionKind::Perimeter)
+            .collect::<Vec<_>>();
         let admission = strokes::analyze(
             &upcoming,
             previous.iter(),
@@ -2843,6 +3721,7 @@ mod tests {
             row(DepositionKind::TopSkin, 6.0, 7.0, 0.8),
         ];
         let mut candidate = RasterCandidate {
+            skin_command_fits: Vec::new(),
             skin_bridge_domains: Vec::new(),
             whole_rows: region::bridge_rows(
                 &fill,
@@ -2874,7 +3753,9 @@ mod tests {
                 &mut candidate,
                 BridgeRowContext {
                     axis: region::HatchAxis::X,
+                    demanded_reorientation: false,
                     retained_points: 0,
+                    owned_bytes: 0,
                     recipe: &recipe,
                 },
                 previous.iter(),
@@ -2916,7 +3797,9 @@ mod tests {
         };
         let required = vec![DepositionPath {
             kind: DepositionKind::TopSkin,
-            bead_width_mm: recipe.bead_width_mm,
+            width: WidthProfile::Constant {
+                width_mm: recipe.bead_width_mm,
+            },
             physical_z_mm: [0.4, 0.8],
             owner: Some(DepositionOwner::MandatorySkin {
                 skin: ProcessSkinKind::TopSkin,

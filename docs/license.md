@@ -20,6 +20,8 @@ Keep the license's own Lawrence Rosen copyright notice intact. Do not insert Spi
 
 Third-party dependencies, vendored code, fonts, fixtures, and other imported assets retain their own licensing and attribution. This project declaration does not relicense them. Check provenance and compatibility before incorporating or distributing them; a dependency's SPDX label alone does not establish compatibility.
 
+Manufacturing's exact-pinned `boostvoronoi` segment constructor uses BSL-1.0; the Spiling adapter is independently authored OSL-3.0 code. Preserve the constructor's Andrii Sydorchuk/Eadf notices and Boost license text, and collect every locked transitive dependency's own notices through the existing release provenance tool. The constructor supplies planar proposals only, not an alternate native kernel. Dependency versions/checksums belong to Cargo manifests/lockfiles, and distribution still requires reviewing the complete collected notices rather than assuming one top-level license covers its dependency graph.
+
 ## Standard file header
 
 Use this three-line notice in the file's native comment syntax:

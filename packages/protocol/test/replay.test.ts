@@ -64,6 +64,22 @@ test("native actual replay exposes borrowed strided f64 bytes and unknown first 
   assert.throws(() => replay.layer(0.5), ReplayDecodeError);
 });
 
+test("native replay preserves actual program absolute E and source lines", async () => {
+  const replay = await decodeReplayDisplay(golden, descriptor);
+  const motion = fixture.program.split("\n")
+    .map((line, index) => ({ line, sourceLine: index + 1 }))
+    .filter(({ line }) => line.startsWith("G0 X") || line.startsWith("G1 X"));
+  assert.equal(motion.length, replay.eventCount);
+  let extrusion = 0;
+  for (let event = 0; event < motion.length; event++) {
+    const command = motion[event]!;
+    const token = command.line.match(/(?:^| )E(-?\d+(?:\.\d+)?)(?= |$)/);
+    if (token) extrusion = Number(token[1]);
+    assert.equal(replay.extrusion(event), extrusion);
+    assert.equal(replay.sourceLine(event), command.sourceLine);
+  }
+});
+
 test("native coarse sparse golden distinguishes associated stroke height from fine schedule", async () => {
   const fixture: {
     encoding: string; descriptor: ReplayDisplayDescriptor; data: string;

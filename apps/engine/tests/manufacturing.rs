@@ -975,22 +975,38 @@ async fn actual_motion_read_only_publication_cancel_and_corrupt_transfer_boundar
             .iter()
             .any(|layer| { layer.region_coverage.top_skin_area_mm2 > 0.0 })
     );
-    let bead_area = ((requested.recipe.bead_width_mm - requested.recipe.layer_height_mm)
-        * requested.recipe.layer_height_mm
-        + std::f64::consts::PI * (requested.recipe.layer_height_mm / 2.0).powi(2))
-        * requested.recipe.flow_multiplier;
     let nominal_volume: f64 = bundle
         .plan
         .layers
         .iter()
         .map(|layer| {
-            let path_length: f64 = layer
+            let first_layer_factor = if layer.index == 0 {
+                requested.recipe.process.first_layer_flow_factor
+            } else {
+                1.0
+            };
+            let volume: f64 = layer
                 .paths
                 .iter()
-                .flat_map(|path| path.points_mm.windows(2))
-                .map(|points| (points[1][0] - points[0][0]).hypot(points[1][1] - points[0][1]))
+                .map(|path| {
+                    let height = path.height_mm();
+                    let mut factor = requested.recipe.flow_multiplier;
+                    factor *= first_layer_factor;
+                    if path.kind == DepositionKind::Bridge {
+                        factor *= requested.recipe.process.bridge_flow_factor;
+                    }
+                    path.checked_edges()
+                        .unwrap()
+                        .map(|edge| {
+                            let length = (edge.points_mm[1][0] - edge.points_mm[0][0])
+                                .hypot(edge.points_mm[1][1] - edge.points_mm[0][1]);
+                            let area = (edge.width_mm - height) * height
+                                + std::f64::consts::PI * (height * 0.5).powi(2);
+                            length * area * factor
+                        })
+                        .sum::<f64>()
+                })
                 .sum();
-            let volume = path_length * bead_area;
             assert!((layer.region_coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-8);
             volume
         })

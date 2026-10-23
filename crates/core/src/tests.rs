@@ -569,6 +569,7 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
             layer_quantization_mm: 0.000001,
             surface_resolution: vec![],
             layers: vec![PrintLayer {
+                skin_command_fits: Vec::new(),
                 index: 0,
                 lower_z_mm: 0.0,
                 z_mm: 0.2,
@@ -576,7 +577,9 @@ pub(crate) fn manufacturing_bundle(project: &Project) -> ManufacturingBundle {
                 section_z_mm: 0.1,
                 paths: vec![DepositionPath {
                     kind: DepositionKind::BottomSkin,
-                    bead_width_mm: 0.4,
+                    width: spiling_contracts::manufacturing::WidthProfile::Constant {
+                        width_mm: 0.4,
+                    },
                     physical_z_mm: [0.0, 0.2],
                     owner: Some(
                         spiling_contracts::manufacturing::DepositionOwner::MandatorySkin {
@@ -2463,8 +2466,13 @@ pub(crate) fn palette_asset(name: &str) -> Arc<PaletteAsset> {
         license: "CC0-1.0".into(),
         conversion: PALETTE_CONVERSION.into(),
         rows: vec![PaletteRow {
-            key: "red/catalog".into(), material_id: "red".into(), evidence_id: "catalog".into(),
-            name: "Red".into(), evidence: AppearanceEvidence::CatalogEstimate { srgb: [1.0, 0.0, 0.0] },
+            key: "red/catalog".into(),
+            material_id: "red".into(),
+            evidence_id: "catalog".into(),
+            name: "Red".into(),
+            evidence: AppearanceEvidence::CatalogEstimate {
+                srgb: [1.0, 0.0, 0.0],
+            },
         }],
     };
     let original = serde_json::to_vec_pretty(&document).unwrap();
@@ -2475,28 +2483,47 @@ pub(crate) fn palette_asset(name: &str) -> Arc<PaletteAsset> {
 
 pub(crate) fn appearance_target() -> AppearanceTarget {
     AppearanceTarget {
-        color: AppearanceColor::Srgb { channels: [1.0, 0.0, 0.0] },
-        delta_e00_tolerance: 2.0, lightness_tolerance: None,
-        conditions: AppearanceConditions::default(), evidence_scope: EvidenceScope::CatalogEstimates,
+        color: AppearanceColor::Srgb {
+            channels: [1.0, 0.0, 0.0],
+        },
+        delta_e00_tolerance: 2.0,
+        lightness_tolerance: None,
+        conditions: AppearanceConditions::default(),
+        evidence_scope: EvidenceScope::CatalogEstimates,
     }
 }
 
-pub(crate) fn appearance_report(asset: &PaletteAsset, target: AppearanceTarget) -> Arc<AppearanceReport> {
+pub(crate) fn appearance_report(
+    asset: &PaletteAsset,
+    target: AppearanceTarget,
+) -> Arc<AppearanceReport> {
     let limits = SearchLimits::default();
     let row = &asset.document().rows[0];
     Arc::new(AppearanceReport {
         producer: APPEARANCE_PRODUCER.into(),
         input_hash: appearance_input_hash(&asset.record().canonical_hash, &target, limits).unwrap(),
-        palette_hash: asset.record().canonical_hash.clone(), target, limits, total_rows: 1,
+        palette_hash: asset.record().canonical_hash.clone(),
+        target,
+        limits,
+        total_rows: 1,
         visits: vec![AppearanceVisit {
-            key: row.key.clone(), evidence_hash: row.evidence_hash().unwrap(),
+            key: row.key.clone(),
+            evidence_hash: row.evidence_hash().unwrap(),
             assessment: RowAssessment::Assessed {
-                evidence: AssessedEvidence::CatalogEstimate, delta_e00: 0.0,
-                delta_lightness: 0.0, within_tolerance: true,
+                evidence: AssessedEvidence::CatalogEstimate,
+                delta_e00: 0.0,
+                delta_lightness: 0.0,
+                within_tolerance: true,
             },
         }],
-        alternatives: vec![AppearanceAlternative { key: row.key.clone(), name: row.name.clone() }], alternatives_truncated: false,
-        status: AppearanceStatus::Complete { outcome: AppearanceOutcome::AssessedMatch },
+        alternatives: vec![AppearanceAlternative {
+            key: row.key.clone(),
+            name: row.name.clone(),
+        }],
+        alternatives_truncated: false,
+        status: AppearanceStatus::Complete {
+            outcome: AppearanceOutcome::AssessedMatch,
+        },
     })
 }
 
@@ -2511,49 +2538,139 @@ fn appearance_transactions_preserve_manufacturing_and_restore_exact_history() {
     let before = project.snapshot();
     let artifact = before.manufacturing_artifact.as_ref().unwrap().clone();
     let asset = palette_asset("first.json");
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: asset.clone() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: asset.clone(),
+        },
+    );
     assert!(project.appearance_study().report.is_none());
     let imported_state = project.snapshot();
     let target = appearance_target();
-    commit_appearance(&mut project, Edit::SetAppearanceTarget { target: target.clone(), limits: SearchLimits::default() });
+    commit_appearance(
+        &mut project,
+        Edit::SetAppearanceTarget {
+            target: target.clone(),
+            limits: SearchLimits::default(),
+        },
+    );
     assert!(project.appearance_study().selection.is_none());
     let report = appearance_report(&asset, target);
-    commit_appearance(&mut project, Edit::AcceptAppearanceReport { report: report.clone(), selection: Some("red/catalog".into()) });
+    commit_appearance(
+        &mut project,
+        Edit::AcceptAppearanceReport {
+            report: report.clone(),
+            selection: Some("red/catalog".into()),
+        },
+    );
     let selected = project.snapshot();
-    assert!(Arc::ptr_eq(selected.appearance_study.report.as_ref().unwrap(), &report));
+    assert!(Arc::ptr_eq(
+        selected.appearance_study.report.as_ref().unwrap(),
+        &report
+    ));
     for state in [&imported_state, &selected, &project.snapshot()] {
-        assert!(Arc::ptr_eq(state.manufacturing_artifact.as_ref().unwrap(), &artifact));
-        assert_eq!(state.manufacturing_artifact.as_ref().unwrap().record.input_hash, artifact.record.input_hash);
-        assert_eq!(state.manufacturing_artifact.as_ref().unwrap().bytes.as_slice(), artifact.bytes.as_slice());
+        assert!(Arc::ptr_eq(
+            state.manufacturing_artifact.as_ref().unwrap(),
+            &artifact
+        ));
+        assert_eq!(
+            state
+                .manufacturing_artifact
+                .as_ref()
+                .unwrap()
+                .record
+                .input_hash,
+            artifact.record.input_hash
+        );
+        assert_eq!(
+            state
+                .manufacturing_artifact
+                .as_ref()
+                .unwrap()
+                .bytes
+                .as_slice(),
+            artifact.bytes.as_slice()
+        );
         assert_eq!(state.occurrences, before.occurrences);
     }
     project.undo().unwrap();
     assert!(project.appearance_study().report.is_none());
     project.redo().unwrap();
-    assert!(Arc::ptr_eq(&project.snapshot().appearance_study, &selected.appearance_study));
+    assert!(Arc::ptr_eq(
+        &project.snapshot().appearance_study,
+        &selected.appearance_study
+    ));
     let mut changed = appearance_target();
     changed.delta_e00_tolerance = 3.0;
-    commit_appearance(&mut project, Edit::SetAppearanceTarget { target: changed, limits: SearchLimits::default() });
+    commit_appearance(
+        &mut project,
+        Edit::SetAppearanceTarget {
+            target: changed,
+            limits: SearchLimits::default(),
+        },
+    );
     assert!(project.appearance_study().report.is_none());
     assert!(project.appearance_study().report_record.is_none());
     assert!(project.appearance_study().selection.is_none());
-    assert!(project.prepare(Edit::AcceptAppearanceReport { report, selection: None }).is_err());
+    assert!(
+        project
+            .prepare(Edit::AcceptAppearanceReport {
+                report,
+                selection: None
+            })
+            .is_err()
+    );
 }
 
 #[test]
 fn appearance_first_admission_staleness_and_retained_prepared_capacity() {
     let mut project = Project::new();
     let first = palette_asset("first.json");
-    let prepared = project.prepare(Edit::ImportAppearancePalette { asset: first.clone() }).unwrap();
+    let prepared = project
+        .prepare(Edit::ImportAppearancePalette {
+            asset: first.clone(),
+        })
+        .unwrap();
     let retained = project.retained_appearance_bytes().unwrap();
-    assert!(retained >= first.original().capacity() + first.canonical().capacity() + first.prepared().allocated_bytes());
-    let candidate = project.prepare(Edit::ImportAppearancePalette { asset: palette_asset("later.json") }).unwrap();
-    assert!(Arc::ptr_eq(candidate.snapshot().appearance_palettes.values().next().unwrap(), &first));
+    assert!(
+        retained
+            >= first.original().capacity()
+                + first.canonical().capacity()
+                + first.prepared().allocated_bytes()
+    );
+    let candidate = project
+        .prepare(Edit::ImportAppearancePalette {
+            asset: palette_asset("later.json"),
+        })
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        candidate
+            .snapshot()
+            .appearance_palettes
+            .values()
+            .next()
+            .unwrap(),
+        &first
+    ));
     project.commit(candidate).unwrap();
-    assert_eq!(project.appearance_study().palette.as_ref().unwrap().name, "first.json");
-    assert_eq!(project.commit(prepared).unwrap_err().code, ProjectErrorCode::StaleRevision);
-    let foreign = Project::new().prepare(Edit::SetAppearanceTarget { target: appearance_target(), limits: SearchLimits::default() }).unwrap();
-    assert_eq!(project.commit(foreign).unwrap_err().code, ProjectErrorCode::StaleRevision);
+    assert_eq!(
+        project.appearance_study().palette.as_ref().unwrap().name,
+        "first.json"
+    );
+    assert_eq!(
+        project.commit(prepared).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
+    let foreign = Project::new()
+        .prepare(Edit::SetAppearanceTarget {
+            target: appearance_target(),
+            limits: SearchLimits::default(),
+        })
+        .unwrap();
+    assert_eq!(
+        project.commit(foreign).unwrap_err().code,
+        ProjectErrorCode::StaleRevision
+    );
     project.undo().unwrap();
     assert!(project.appearance_study().palette.is_none());
     assert!(project.retained_appearance_bytes().unwrap() >= retained);
@@ -2564,20 +2681,62 @@ fn appearance_rejects_corrupt_assets_incomplete_reports_and_unknown_selection() 
     let asset = palette_asset("palette.json");
     let mut bytes = asset.original().as_ref().clone();
     bytes[0] ^= 1;
-    assert_eq!(PaletteAsset::new(asset.record().clone(), bytes, asset.canonical().as_ref().clone()).unwrap_err().code, ProjectErrorCode::CorruptAsset);
+    assert_eq!(
+        PaletteAsset::new(
+            asset.record().clone(),
+            bytes,
+            asset.canonical().as_ref().clone()
+        )
+        .unwrap_err()
+        .code,
+        ProjectErrorCode::CorruptAsset
+    );
     let mut project = Project::new();
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: asset.clone() });
-    commit_appearance(&mut project, Edit::SetAppearanceTarget { target: appearance_target(), limits: SearchLimits::default() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: asset.clone(),
+        },
+    );
+    commit_appearance(
+        &mut project,
+        Edit::SetAppearanceTarget {
+            target: appearance_target(),
+            limits: SearchLimits::default(),
+        },
+    );
     let report = appearance_report(&asset, appearance_target());
     let original = project.info();
-    assert!(project.prepare(Edit::AcceptAppearanceReport { report: report.clone(), selection: Some("missing".into()) }).is_err());
+    assert!(
+        project
+            .prepare(Edit::AcceptAppearanceReport {
+                report: report.clone(),
+                selection: Some("missing".into())
+            })
+            .is_err()
+    );
     let mut incomplete = (*report).clone();
     incomplete.status = AppearanceStatus::Cancelled;
-    incomplete.visits.clear(); incomplete.alternatives.clear();
-    assert!(project.prepare(Edit::AcceptAppearanceReport { report: Arc::new(incomplete), selection: None }).is_err());
+    incomplete.visits.clear();
+    incomplete.alternatives.clear();
+    assert!(
+        project
+            .prepare(Edit::AcceptAppearanceReport {
+                report: Arc::new(incomplete),
+                selection: None
+            })
+            .is_err()
+    );
     let mut bad = (*report).clone();
     bad.producer = "foreign".into();
-    assert!(project.prepare(Edit::AcceptAppearanceReport { report: Arc::new(bad), selection: None }).is_err());
+    assert!(
+        project
+            .prepare(Edit::AcceptAppearanceReport {
+                report: Arc::new(bad),
+                selection: None
+            })
+            .is_err()
+    );
     assert_eq!(project.info(), original);
 }
 
@@ -2585,61 +2744,127 @@ fn appearance_rejects_corrupt_assets_incomplete_reports_and_unknown_selection() 
 fn appearance_budget_charges_incoming_capacity_even_when_identity_is_retained() {
     let mut project = Project::new();
     let asset = palette_asset("first.json");
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: asset.clone() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: asset.clone(),
+        },
+    );
     let mut original = Vec::with_capacity(MAX_APPEARANCE_RETAINED_BYTES);
     original.extend_from_slice(asset.original());
-    let oversized = Arc::new(PaletteAsset::from_document(asset.record().clone(), original, asset.canonical().as_ref().clone(), asset.document().clone()).unwrap());
+    let oversized = Arc::new(
+        PaletteAsset::from_document(
+            asset.record().clone(),
+            original,
+            asset.canonical().as_ref().clone(),
+            asset.document().clone(),
+        )
+        .unwrap(),
+    );
     let before = project.info();
-    assert_eq!(project.prepare(Edit::ImportAppearancePalette { asset: oversized }).unwrap_err().code, ProjectErrorCode::ResourceLimit);
+    assert_eq!(
+        project
+            .prepare(Edit::ImportAppearancePalette { asset: oversized })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
     assert_eq!(project.info(), before);
 }
 
 #[test]
 fn appearance_acceptance_rejects_complete_report_that_exceeds_aggregate_manifest_budget() {
     let mut document = palette_asset("template.json").document().clone();
-    document.rows = (0..MAX_PALETTE_ROWS).map(|index| {
-        let material_id = format!("material-{index:04}-abcdefghijklmnop");
-        let evidence_id = "evidence-abcdefghijklmnop".to_owned();
-        PaletteRow {
-            key: format!("{material_id}/{evidence_id}"), material_id, evidence_id,
-            name: "Synthetic catalog capacity row".into(),
-            evidence: AppearanceEvidence::CatalogEstimate { srgb: [0.0; 3] },
-        }
-    }).collect();
+    document.rows = (0..MAX_PALETTE_ROWS)
+        .map(|index| {
+            let material_id = format!("material-{index:04}-abcdefghijklmnop");
+            let evidence_id = "evidence-abcdefghijklmnop".to_owned();
+            PaletteRow {
+                key: format!("{material_id}/{evidence_id}"),
+                material_id,
+                evidence_id,
+                name: "Synthetic catalog capacity row".into(),
+                evidence: AppearanceEvidence::CatalogEstimate { srgb: [0.0; 3] },
+            }
+        })
+        .collect();
     let canonical = document.canonical_bytes().unwrap();
     let original = canonical.clone();
     let record = PaletteRecord::new(&document, &original, &canonical, "large.json".into()).unwrap();
-    let asset = Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
+    let asset =
+        Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
     let mut project = Project::new();
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: asset.clone() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: asset.clone(),
+        },
+    );
     let target = appearance_target();
     let limits = SearchLimits::default();
-    commit_appearance(&mut project, Edit::SetAppearanceTarget { target: target.clone(), limits });
+    commit_appearance(
+        &mut project,
+        Edit::SetAppearanceTarget {
+            target: target.clone(),
+            limits,
+        },
+    );
     let report = Arc::new(AppearanceReport {
         producer: APPEARANCE_PRODUCER.into(),
         input_hash: appearance_input_hash(&asset.record().canonical_hash, &target, limits).unwrap(),
-        palette_hash: asset.record().canonical_hash.clone(), target, limits,
+        palette_hash: asset.record().canonical_hash.clone(),
+        target,
+        limits,
         total_rows: MAX_PALETTE_ROWS as u32,
-        visits: asset.document().rows.iter().map(|row| AppearanceVisit {
-            key: row.key.clone(), evidence_hash: row.evidence_hash().unwrap(),
-            assessment: RowAssessment::Assessed {
-                evidence: AssessedEvidence::CatalogEstimate, delta_e00: 123.456,
-                delta_lightness: 50.0, within_tolerance: false,
-            },
-        }).collect(),
-        alternatives: asset.document().rows.iter().take(MAX_APPEARANCE_ALTERNATIVES)
-            .map(|row| AppearanceAlternative { key: row.key.clone(), name: row.name.clone() }).collect(),
+        visits: asset
+            .document()
+            .rows
+            .iter()
+            .map(|row| AppearanceVisit {
+                key: row.key.clone(),
+                evidence_hash: row.evidence_hash().unwrap(),
+                assessment: RowAssessment::Assessed {
+                    evidence: AssessedEvidence::CatalogEstimate,
+                    delta_e00: 123.456,
+                    delta_lightness: 50.0,
+                    within_tolerance: false,
+                },
+            })
+            .collect(),
+        alternatives: asset
+            .document()
+            .rows
+            .iter()
+            .take(MAX_APPEARANCE_ALTERNATIVES)
+            .map(|row| AppearanceAlternative {
+                key: row.key.clone(),
+                name: row.name.clone(),
+            })
+            .collect(),
         alternatives_truncated: true,
-        status: AppearanceStatus::Complete { outcome: AppearanceOutcome::AssessedMismatch },
+        status: AppearanceStatus::Complete {
+            outcome: AppearanceOutcome::AssessedMismatch,
+        },
     });
     let encoded = report.encode().unwrap();
     assert!(encoded.len() <= MAX_APPEARANCE_REPORT_BYTES);
     let mut candidate = project.capture().manifest;
     candidate.appearance_study.report = Some(report.clone());
     candidate.appearance_study.report_record = Some(report.record(&encoded).unwrap());
-    assert!(serde_json::to_vec_pretty(&candidate).unwrap().len() > MAX_PROJECT_MANIFEST_BYTES as usize);
+    assert!(
+        serde_json::to_vec_pretty(&candidate).unwrap().len() > MAX_PROJECT_MANIFEST_BYTES as usize
+    );
     let before = project.info();
-    assert_eq!(project.prepare(Edit::AcceptAppearanceReport { report, selection: None }).unwrap_err().code, ProjectErrorCode::ResourceLimit);
+    assert_eq!(
+        project
+            .prepare(Edit::AcceptAppearanceReport {
+                report,
+                selection: None
+            })
+            .unwrap_err()
+            .code,
+        ProjectErrorCode::ResourceLimit
+    );
     assert_eq!(project.info(), before);
 }
 
@@ -2647,26 +2872,64 @@ fn appearance_acceptance_rejects_complete_report_that_exceeds_aggregate_manifest
 fn appearance_distinct_assets_and_reports_are_retained_across_undo_redo_and_staging() {
     let mut project = Project::new();
     let first = palette_asset("first.json");
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: first.clone() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: first.clone(),
+        },
+    );
     let initial_bytes = project.retained_appearance_bytes().unwrap();
     let mut document = first.document().clone();
     document.rows[0].name = "Second admitted palette".into();
     let canonical = document.canonical_bytes().unwrap();
     let original = canonical.clone();
-    let record = PaletteRecord::new(&document, &original, &canonical, "second.json".into()).unwrap();
-    let second = Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
-    let staged = project.prepare(Edit::ImportAppearancePalette { asset: second.clone() }).unwrap();
+    let record =
+        PaletteRecord::new(&document, &original, &canonical, "second.json".into()).unwrap();
+    let second =
+        Arc::new(PaletteAsset::from_document(record, original, canonical, document).unwrap());
+    let staged = project
+        .prepare(Edit::ImportAppearancePalette {
+            asset: second.clone(),
+        })
+        .unwrap();
     assert!(project.retained_appearance_bytes().unwrap() > initial_bytes);
     drop(staged);
     assert_eq!(project.retained_appearance_bytes().unwrap(), initial_bytes);
-    commit_appearance(&mut project, Edit::ImportAppearancePalette { asset: second.clone() });
+    commit_appearance(
+        &mut project,
+        Edit::ImportAppearancePalette {
+            asset: second.clone(),
+        },
+    );
     let both_bytes = project.retained_appearance_bytes().unwrap();
-    assert!(both_bytes >= initial_bytes + second.original().capacity() + second.canonical().capacity() + second.prepared().allocated_bytes());
+    assert!(
+        both_bytes
+            >= initial_bytes
+                + second.original().capacity()
+                + second.canonical().capacity()
+                + second.prepared().allocated_bytes()
+    );
     project.undo().unwrap();
-    assert!(Arc::ptr_eq(project.snapshot().appearance_palettes.values().next().unwrap(), &first));
+    assert!(Arc::ptr_eq(
+        project
+            .snapshot()
+            .appearance_palettes
+            .values()
+            .next()
+            .unwrap(),
+        &first
+    ));
     assert_eq!(project.retained_appearance_bytes().unwrap(), both_bytes);
     project.redo().unwrap();
-    assert!(Arc::ptr_eq(project.snapshot().appearance_palettes.values().next().unwrap(), &second));
+    assert!(Arc::ptr_eq(
+        project
+            .snapshot()
+            .appearance_palettes
+            .values()
+            .next()
+            .unwrap(),
+        &second
+    ));
     assert_eq!(project.retained_appearance_bytes().unwrap(), both_bytes);
 }
 
@@ -2677,9 +2940,16 @@ fn manifest_capacity_guard_reserves_recovery_envelope_and_counter_growth() {
     let mut manifest = Project::new().capture().manifest;
     manifest.appearance_study.selection = Some(String::new());
     let base = serde_json::to_vec_pretty(&manifest).unwrap().len();
-    manifest.appearance_study.selection = Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 100));
-    assert!(serde_json::to_vec_pretty(&manifest).unwrap().len() < MAX_PROJECT_MANIFEST_BYTES as usize);
-    assert_eq!(validate_manifest_size(&manifest).unwrap_err().code, ProjectErrorCode::ResourceLimit);
-    manifest.appearance_study.selection = Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 8192));
+    manifest.appearance_study.selection =
+        Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 100));
+    assert!(
+        serde_json::to_vec_pretty(&manifest).unwrap().len() < MAX_PROJECT_MANIFEST_BYTES as usize
+    );
+    assert_eq!(
+        validate_manifest_size(&manifest).unwrap_err().code,
+        ProjectErrorCode::ResourceLimit
+    );
+    manifest.appearance_study.selection =
+        Some("x".repeat(MAX_PROJECT_MANIFEST_BYTES as usize - base - 8192));
     assert!(validate_manifest_size(&manifest).is_ok());
 }

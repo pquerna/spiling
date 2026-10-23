@@ -252,7 +252,13 @@ pub fn validate_replay_display(
             || line > MAX_MANUFACTURING_BUNDLE_BYTES
             || (!(6..8).contains(&kind) && next_layer >= info.layer_count)
             || kind > 13
-            || flags != (u8::from(index != 0) | if matches!(kind, 1..=5 | 8..=10 | 13) { 2 } else { 0 })
+            || flags
+                != (u8::from(index != 0)
+                    | if matches!(kind, 1..=5 | 8..=10 | 13) {
+                        2
+                    } else {
+                        0
+                    })
             || (index == 0 && (kind != 0 && kind != 6))
             || (index == 0 && kind == 0 && next_layer != 0)
         {
@@ -266,10 +272,13 @@ pub fn validate_replay_display(
             return Err(corrupt("reserved replay association bytes"));
         }
         if flags & 2 != 0 {
-            if !width.is_finite() || width <= 0.0
-                || !lower.is_finite() || !upper.is_finite() || lower >= upper
+            if !width.is_finite()
+                || width <= 0.0
+                || !lower.is_finite()
+                || !upper.is_finite()
+                || lower >= upper
                 || (upper - position[2]).abs() > 0.000_000_500_001
-                || (owner < u32::MAX - 1 && owner as usize >= MAX_PROCESS_REGIONS)
+                || (owner < u32::MAX - 2 && owner as usize >= MAX_PROCESS_REGIONS)
             {
                 return Err(corrupt("invalid nominal deposition association"));
             }
@@ -449,7 +458,11 @@ mod tests {
     fn append_association(bytes: &mut Vec<u8>, index: usize, kind: u8, z: f64) {
         let associated = matches!(kind, 1..=5 | 8..=10 | 13);
         bytes.extend_from_slice(&[kind, u8::from(index != 0) | if associated { 2 } else { 0 }]);
-        for value in if associated { [0.45, z - 0.2, z] } else { [0.0; 3] } {
+        for value in if associated {
+            [0.45, z - 0.2, z]
+        } else {
+            [0.0; 3]
+        } {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());

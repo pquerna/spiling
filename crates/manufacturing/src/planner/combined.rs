@@ -16,9 +16,10 @@ pub(super) fn combine(
     intent: &ManufacturingIntent,
     sections: &[SectionSpan],
     schedule: &[LayerElevation],
-    layouts: &[Option<Arc<classification::WallLayout>>],
+    layouts: &[Option<Arc<classification::WallPlan>>],
     neighborhoods: &mut super::SkinNeighborhoods<'_>,
     retained_points: usize,
+    outside_layer_payload_bytes: usize,
     geometry_work: &mut spiling_geometry::GeometryWorkBudget,
     native_live_bytes: usize,
     native_sources: &[spiling_geometry::NativeUnionSourceCapture],
@@ -104,7 +105,7 @@ pub(super) fn combine(
             first = last + 1;
             continue;
         }
-        let Some(layout) = &layouts[span] else {
+        let Some(layout) = &layouts[first] else {
             record(
                 plan,
                 first,
@@ -117,25 +118,51 @@ pub(super) fn combine(
             first = last + 1;
             continue;
         };
+        if (first..=last).any(|index| {
+            layouts[index]
+                .as_ref()
+                .is_none_or(|other| other.fill != layout.fill)
+        }) {
+            record(
+                plan,
+                first,
+                last,
+                None,
+                SparseBandDisposition::RetainedFine {
+                    reason: SparseBandVeto::ChangingDomain,
+                },
+            )?;
+            first += 1;
+            continue;
+        }
         // Band geometry and original source ownership are fixed here. Exact
         // source invariance OR the separately queried constant inner-material
         // prism is required; occupied outer envelopes cannot establish it.
         let live_geometry = super::skin_retained_points(retained_points, neighborhoods, &[])?;
-        let classified = classification::ClassifiedRegions::new(
+        let live_owned_bytes = super::skin_retained_bytes(
+            super::geometry_bytes(&[
+                outside_layer_payload_bytes,
+                super::layer_payload_bytes(&plan.layers)?,
+            ])?,
+            neighborhoods,
+            &[],
+        )?;
+        let mut classified = classification::ClassifiedRegions::new(
             Arc::clone(layout),
             &layout.fill,
             &layout.fill,
-            classification::fixed_point_budget(live_geometry),
+            classification::fixed_owned_budget(live_geometry, live_owned_bytes),
             recipe,
             cancel,
         )?
         .with_process(
             &section.process_domains,
             recipe,
-            classification::fixed_point_budget(live_geometry + layout.point_count()),
+            classification::fixed_owned_budget(live_geometry, live_owned_bytes),
             neighborhoods.work_mut(),
             cancel,
         )?;
+        let classified_owned_bytes = classified.retained_bytes();
         for (region_index, interior) in classified.interiors.iter().enumerate() {
             check_cancel(cancel)?;
             if interior.coverage.fraction >= 1.0 {
@@ -290,11 +317,18 @@ pub(super) fn combine(
                         )
                     })?;
             }
-            proposal_points
+            let proposal_bytes = proposal_points
                 .checked_mul(
                     std::mem::size_of::<DepositionPath>() + 2 * std::mem::size_of::<[f64; 3]>(),
                 )
-                .and_then(|bytes| bytes.checked_add(live_bytes))
+                .ok_or_else(|| {
+                    error(
+                        ManufacturingErrorCode::ResourceLimit,
+                        "combined proposal byte overflow",
+                    )
+                })?;
+            proposal_bytes
+                .checked_add(live_bytes)
                 .filter(|bytes| *bytes <= MAX_STAGE_BYTES)
                 .ok_or_else(|| {
                     error(
@@ -302,6 +336,7 @@ pub(super) fn combine(
                         "combined hatch proposal exceeds 4 MiB",
                     )
                 })?;
+            super::geometry_bytes(&[live_owned_bytes, classified_owned_bytes, proposal_bytes])?;
             region::hatch_with_phase(
                 &interior.domain,
                 DepositionKind::SparseFill,
@@ -333,6 +368,11 @@ pub(super) fn combine(
                     "combined sparse band alternative exceeds 4 MiB",
                 ));
             }
+            super::geometry_bytes(&[
+                live_owned_bytes,
+                classified_owned_bytes,
+                super::bonds::path_bytes(&coarse),
+            ])?;
             if !full_height_interface_contacts(
                 &plan.layers[first..=last],
                 &coarse,
@@ -509,7 +549,7 @@ pub(super) fn combine(
         }
         first = last + 1;
     }
-    support::object_volumes(&mut plan.layers, recipe);
+    support::object_volumes(&mut plan.layers, recipe)?;
     Ok(())
 }
 
@@ -545,7 +585,7 @@ fn full_height_interface_contacts(
                 let fine_height =
                     (separator.physical_z_mm[1] - separator.physical_z_mm[0]).next_up();
                 let Some(fine_core) =
-                    nominal_stadium_core_width_mm(separator.bead_width_mm, fine_height)
+                    nominal_stadium_core_width_mm(region::constant_width(separator)?, fine_height)
                 else {
                     return Ok(false);
                 };
@@ -565,13 +605,28 @@ fn full_height_interface_contacts(
                         continue;
                     }
                     let height = (path.physical_z_mm[1] - path.physical_z_mm[0]).next_up();
-                    let Some(core) = nominal_stadium_core_width_mm(path.bead_width_mm, height)
-                    else {
-                        continue;
-                    };
-                    let inner_sum = ((core + fine_core) * 0.5).next_down();
-                    let outer_sum = (path.bead_width_mm + separator.bead_width_mm) * 0.5;
-                    for point in [path.points_mm[0], *path.points_mm.last().unwrap()] {
+                    let edges = path.checked_edges()?;
+                    let first = edges.edge(0).ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "coarse contact lacks first edge",
+                        )
+                    })?;
+                    let last = edges.edge(edges.len() - 1).ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::InvalidSpecification,
+                            "coarse contact lacks last edge",
+                        )
+                    })?;
+                    for (point, width) in [
+                        (first.points_mm[0], first.width_mm),
+                        (last.points_mm[1], last.width_mm),
+                    ] {
+                        let Some(core) = nominal_stadium_core_width_mm(width, height) else {
+                            continue;
+                        };
+                        let inner_sum = ((core + fine_core) * 0.5).next_down();
+                        let outer_sum = (width + region::constant_width(separator)?) * 0.5;
                         super::boolean::charge(work, 1)?;
                         check_cancel(cancel)?;
                         if support::endpoint_bond(point, ends, outer_sum)?
@@ -699,9 +754,7 @@ pub(super) fn inner_material_admits(
             .certify_region(
                 expected, &actual, &candidate, outer_z, radius, byte_limit, work, cancel,
             )
-            .map_err(|failure| {
-                super::native_error(failure, "full-height native inner material")
-            })?
+            .map_err(|failure| super::native_error(failure, "full-height native inner material"))?
             .is_none()
         {
             return Ok(false);

@@ -24,6 +24,7 @@ mod resolution;
 pub use resolution::*;
 mod diaphragm;
 pub use diaphragm::*;
+mod skin_fit_decode;
 
 pub const MANUFACTURING_SCHEMA_VERSION: u32 = 11;
 pub const MAX_MANUFACTURING_BUNDLE_BYTES: u32 = 16 * 1024 * 1024;
@@ -182,14 +183,56 @@ fn components<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<MachineCompo
 }
 // One budget is owned by each admitted plan (or standalone layer/path), and
 // explicitly borrowed by every nested seed before a point grows its vector.
+// Per-edge widths have a separate cumulative allowance: they describe actual
+// edges but must not halve the established point/segment budget.
+// Skin fitting has its own unchanged witness-count and retained-byte allowance;
+// every layer/domain seed borrows both before growing nested table capacity.
 struct SegmentBudget {
-    remaining: u32,
+    remaining_segments: u32,
+    remaining_widths: u32,
+    remaining_width_bytes: usize,
+    remaining_skin_fits: u32,
+    remaining_skin_fit_bytes: usize,
 }
 impl SegmentBudget {
     fn new() -> Self {
         Self {
-            remaining: MAX_DEPOSITION_SEGMENTS,
+            remaining_segments: MAX_DEPOSITION_SEGMENTS,
+            remaining_widths: MAX_DEPOSITION_SEGMENTS,
+            remaining_width_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
+            remaining_skin_fits: MAX_DEPOSITION_SEGMENTS,
+            remaining_skin_fit_bytes: MAX_MANUFACTURING_BUNDLE_BYTES as usize,
         }
+    }
+    fn charge_width_metadata(&mut self) -> Result<(), &'static str> {
+        self.charge_width_bytes(std::mem::size_of::<Vec<f64>>())
+    }
+    fn admit_width(&mut self) -> Result<(), &'static str> {
+        if self.remaining_widths == 0 {
+            return Err("deposition width limit exceeded");
+        }
+        self.remaining_widths -= 1;
+        Ok(())
+    }
+    fn charge_width_capacity(&mut self, entries: usize) -> Result<(), &'static str> {
+        let bytes = entries
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or("deposition width byte limit exceeded")?;
+        self.charge_width_bytes(bytes)
+    }
+    fn charge_width_bytes(&mut self, bytes: usize) -> Result<(), &'static str> {
+        self.remaining_width_bytes = self
+            .remaining_width_bytes
+            .checked_sub(bytes)
+            .ok_or("deposition width byte limit exceeded")?;
+        Ok(())
+    }
+    fn charge_skin_fit_bytes(&mut self, bytes: usize) -> Result<(), &'static str> {
+        self.remaining_skin_fit_bytes = self
+            .remaining_skin_fit_bytes
+            .checked_sub(bytes)
+            .ok_or("skin fitting metadata byte limit exceeded")?;
+        Ok(())
     }
 }
 
@@ -208,13 +251,13 @@ impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut points = Vec::new();
         while let Some(point) = seq.next_element::<[f64; 3]>()? {
-            if self.0.remaining == 0 {
+            if self.0.remaining_segments == 0 {
                 return Err(serde::de::Error::custom(
                     "deposition segment limit exceeded",
                 ));
             }
             if !points.is_empty() {
-                self.0.remaining -= 1;
+                self.0.remaining_segments -= 1;
             }
             points.push(point);
         }
@@ -227,12 +270,146 @@ impl<'de> serde::de::Visitor<'de> for PointsSeed<'_> {
     }
 }
 
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum WidthKind {
+    Constant,
+    PerEdge,
+}
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum WidthField {
+    Kind,
+    WidthMm,
+    WidthsMm,
+}
+struct WidthProfileSeed<'a>(&'a mut SegmentBudget);
+impl<'de> serde::de::DeserializeSeed<'de> for WidthProfileSeed<'_> {
+    type Value = WidthProfile;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for WidthProfileSeed<'_> {
+    type Value = WidthProfile;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a constant or per-edge deposition width profile")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut kind = None;
+        let mut width_mm = None;
+        let mut widths_mm = None;
+        while let Some(field) = map.next_key::<WidthField>()? {
+            match field {
+                WidthField::Kind => {
+                    if kind.is_some() {
+                        return Err(serde::de::Error::duplicate_field("kind"));
+                    }
+                    kind = Some(map.next_value()?);
+                }
+                WidthField::WidthMm => {
+                    if width_mm.is_some() {
+                        return Err(serde::de::Error::duplicate_field("width_mm"));
+                    }
+                    width_mm = Some(map.next_value()?);
+                }
+                WidthField::WidthsMm => {
+                    if widths_mm.is_some() {
+                        return Err(serde::de::Error::duplicate_field("widths_mm"));
+                    }
+                    widths_mm = Some(map.next_value_seed(WidthsSeed(&mut *self.0))?);
+                }
+            }
+        }
+        let profile = match kind.ok_or_else(|| serde::de::Error::missing_field("kind"))? {
+            WidthKind::Constant => {
+                if widths_mm.is_some() {
+                    return Err(serde::de::Error::unknown_field(
+                        "widths_mm",
+                        &["kind", "width_mm"],
+                    ));
+                }
+                WidthProfile::Constant {
+                    width_mm: width_mm
+                        .ok_or_else(|| serde::de::Error::missing_field("width_mm"))?,
+                }
+            }
+            WidthKind::PerEdge => {
+                if width_mm.is_some() {
+                    return Err(serde::de::Error::unknown_field(
+                        "width_mm",
+                        &["kind", "widths_mm"],
+                    ));
+                }
+                WidthProfile::PerEdge {
+                    widths_mm: widths_mm
+                        .ok_or_else(|| serde::de::Error::missing_field("widths_mm"))?,
+                }
+            }
+        };
+        profile
+            .validate_values()
+            .map_err(serde::de::Error::custom)?;
+        Ok(profile)
+    }
+}
+struct WidthsSeed<'a>(&'a mut SegmentBudget);
+impl<'de> serde::de::DeserializeSeed<'de> for WidthsSeed<'_> {
+    type Value = Vec<f64>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+impl<'de> serde::de::Visitor<'de> for WidthsSeed<'_> {
+    type Value = Vec<f64>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("one width per actual edge within the cumulative width budget")
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        self.0
+            .charge_width_metadata()
+            .map_err(serde::de::Error::custom)?;
+        let mut widths = Vec::new();
+        while let Some(width) = seq.next_element::<f64>()? {
+            if !width.is_finite() || width <= 0.0 {
+                return Err(serde::de::Error::custom(
+                    "deposition widths must be finite and positive",
+                ));
+            }
+            self.0.admit_width().map_err(serde::de::Error::custom)?;
+            if widths.len() == widths.capacity() {
+                // Admit the current slot plus every remaining width entry, but
+                // grow geometrically. The requested capacity is charged before
+                // allocation, including any slack it creates.
+                let allowed = match widths
+                    .len()
+                    .checked_add(1)
+                    .and_then(|entries| entries.checked_add(self.0.remaining_widths as usize))
+                {
+                    Some(allowed) => allowed,
+                    None => {
+                        return Err(serde::de::Error::custom("deposition width limit exceeded"));
+                    }
+                };
+                let headroom = allowed.saturating_sub(widths.capacity()).max(1);
+                let additional = widths.capacity().max(4).min(headroom);
+                self.0
+                    .charge_width_capacity(additional)
+                    .map_err(serde::de::Error::custom)?;
+                widths.reserve_exact(additional);
+            }
+            widths.push(width);
+        }
+        Ok(widths)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(field_identifier, rename_all = "snake_case")]
 enum PathField {
     Kind,
     Owner,
-    BeadWidthMm,
+    Width,
     PhysicalZMm,
     PointsMm,
 }
@@ -242,13 +419,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PathSeed<'_> {
     fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
         d.deserialize_struct(
             "DepositionPath",
-            &[
-                "kind",
-                "owner",
-                "bead_width_mm",
-                "physical_z_mm",
-                "points_mm",
-            ],
+            &["kind", "owner", "width", "physical_z_mm", "points_mm"],
             self,
         )
     }
@@ -261,7 +432,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut kind = None;
         let mut owner = None;
-        let mut bead_width_mm = None;
+        let mut width = None;
         let mut physical_z_mm = None;
         let mut points_mm = None;
         while let Some(field) = map.next_key::<PathField>()? {
@@ -278,11 +449,11 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
                     }
                     owner = Some(map.next_value()?);
                 }
-                PathField::BeadWidthMm => {
-                    if bead_width_mm.is_some() {
-                        return Err(serde::de::Error::duplicate_field("bead_width_mm"));
+                PathField::Width => {
+                    if width.is_some() {
+                        return Err(serde::de::Error::duplicate_field("width"));
                     }
-                    bead_width_mm = Some(map.next_value()?);
+                    width = Some(map.next_value_seed(WidthProfileSeed(&mut *self.0))?);
                 }
                 PathField::PhysicalZMm => {
                     if physical_z_mm.is_some() {
@@ -301,8 +472,7 @@ impl<'de> serde::de::Visitor<'de> for PathSeed<'_> {
         let path = DepositionPath {
             kind: kind.ok_or_else(|| serde::de::Error::missing_field("kind"))?,
             owner: owner.ok_or_else(|| serde::de::Error::missing_field("owner"))?,
-            bead_width_mm: bead_width_mm
-                .ok_or_else(|| serde::de::Error::missing_field("bead_width_mm"))?,
+            width: width.ok_or_else(|| serde::de::Error::missing_field("width"))?,
             physical_z_mm: physical_z_mm
                 .ok_or_else(|| serde::de::Error::missing_field("physical_z_mm"))?,
             points_mm: points_mm.ok_or_else(|| serde::de::Error::missing_field("points_mm"))?,
@@ -349,6 +519,7 @@ enum LayerField {
     SectionZMm,
     Paths,
     RegionCoverage,
+    SkinCommandFits,
 }
 struct LayerSeed<'a>(&'a mut SegmentBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for LayerSeed<'_> {
@@ -364,6 +535,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LayerSeed<'_> {
                 "section_z_mm",
                 "paths",
                 "region_coverage",
+                "skin_command_fits",
             ],
             self,
         )
@@ -382,6 +554,7 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
         let mut section_z_mm = None;
         let mut paths = None;
         let mut region_coverage = None;
+        let mut skin_command_fits = None;
         while let Some(field) = map.next_key::<LayerField>()? {
             match field {
                 LayerField::Index => {
@@ -426,6 +599,14 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
                     }
                     region_coverage = Some(map.next_value()?);
                 }
+                LayerField::SkinCommandFits => {
+                    if skin_command_fits.is_some() {
+                        return Err(serde::de::Error::duplicate_field("skin_command_fits"));
+                    }
+                    skin_command_fits = Some(
+                        map.next_value_seed(diaphragm::SkinCommandFitDomainsSeed(&mut *self.0))?,
+                    );
+                }
             }
         }
         Ok(PrintLayer {
@@ -438,6 +619,8 @@ impl<'de> serde::de::Visitor<'de> for LayerSeed<'_> {
             paths: paths.ok_or_else(|| serde::de::Error::missing_field("paths"))?,
             region_coverage: region_coverage
                 .ok_or_else(|| serde::de::Error::missing_field("region_coverage"))?,
+            skin_command_fits: skin_command_fits
+                .ok_or_else(|| serde::de::Error::missing_field("skin_command_fits"))?,
         })
     }
 }
@@ -913,6 +1096,9 @@ pub enum DepositionOwner {
     Regional {
         region_index: u16,
     },
+    /// Immutable original construction wall. Actual multi-boundary/site/depth
+    /// correspondence remains internal to WallPlan, not persisted here.
+    Wall,
     /// One straight continuous Bridge. Its middle path point is the sole
     /// Regional/MandatorySkin transition; no other ownership crossing is admitted.
     RegionalSkinBridge {
@@ -925,7 +1111,7 @@ impl DepositionOwner {
     pub const fn skin_kind(self) -> Option<ProcessSkinKind> {
         match self {
             Self::MandatorySkin { skin } => Some(skin),
-            Self::Regional { .. } | Self::RegionalSkinBridge { .. } => None,
+            Self::Regional { .. } | Self::Wall | Self::RegionalSkinBridge { .. } => None,
         }
     }
 }
@@ -939,13 +1125,173 @@ pub fn nominal_stadium_core_width_mm(width: f64, height: f64) -> Option<f64> {
     let core = (width - height).next_down();
     (core.is_finite() && core > 0.0).then_some(core)
 }
+/// Nominal bead width for every actual edge of a path. Per-edge values are
+/// ordered with the path's actual edges, including the explicit closing edge.
+#[derive(Debug, Clone, Serialize, TS, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WidthProfile {
+    Constant { width_mm: f64 },
+    PerEdge { widths_mm: Vec<f64> },
+}
+impl<'de> Deserialize<'de> for WidthProfile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::DeserializeSeed;
+        WidthProfileSeed(&mut SegmentBudget::new()).deserialize(d)
+    }
+}
+impl WidthProfile {
+    /// Uniform nominal width only; a varying profile has no single width and
+    /// never reports its first varying edge.
+    pub fn constant_width_mm(&self) -> Option<f64> {
+        match self {
+            Self::Constant { width_mm } => Some(*width_mm),
+            Self::PerEdge { .. } => None,
+        }
+    }
+    fn validate_values(&self) -> Result<(), ManufacturingError> {
+        match self {
+            Self::Constant { width_mm } => positive(std::slice::from_ref(width_mm)),
+            Self::PerEdge { widths_mm } => {
+                if widths_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+                    return Err(resource("deposition width allocation limit exceeded"));
+                }
+                if widths_mm
+                    .iter()
+                    .any(|width| !width.is_finite() || *width <= 0.0)
+                {
+                    return Err(invalid("deposition widths must be finite and positive"));
+                }
+                Ok(())
+            }
+        }
+    }
+    fn validate_for(&self, points_len: usize, height_mm: f64) -> Result<(), ManufacturingError> {
+        positive(&[height_mm])?;
+        if points_len < 2 {
+            return Err(invalid("deposition path requires at least two points"));
+        }
+        match self {
+            Self::Constant { width_mm } => {
+                if !width_mm.is_finite() || *width_mm <= 0.0 || height_mm > *width_mm {
+                    return Err(invalid("path requires finite positive bead dimensions"));
+                }
+            }
+            Self::PerEdge { widths_mm } => {
+                if widths_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+                    return Err(resource("deposition width allocation limit exceeded"));
+                }
+                if widths_mm.len() != points_len - 1 {
+                    return Err(invalid("path requires exactly one width per actual edge"));
+                }
+                if widths_mm
+                    .iter()
+                    .any(|width| !width.is_finite() || *width <= 0.0 || height_mm > *width)
+                {
+                    return Err(invalid("path requires finite positive bead dimensions"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+/// One actual path edge. `points_mm` always contains exactly its two endpoints.
+#[derive(Debug, Clone, Copy)]
+pub struct DepositionEdge<'a> {
+    pub points_mm: &'a [[f64; 3]],
+    pub width_mm: f64,
+}
+#[derive(Debug, Clone, Copy)]
+enum EdgeWidths<'a> {
+    Constant(f64),
+    PerEdge(&'a [f64]),
+}
+/// Validated, allocation-free view over a path's actual edges. Mutation of the
+/// source path invalidates this view.
+#[derive(Debug, Clone, Copy)]
+pub struct DepositionEdges<'a> {
+    points_mm: &'a [[f64; 3]],
+    widths: EdgeWidths<'a>,
+    front: usize,
+    back: usize,
+    len: usize,
+}
+impl<'a> DepositionEdges<'a> {
+    /// Access an edge by its absolute index in the original path, regardless
+    /// of the current iterator cursor. Returns `None` past the actual edges.
+    pub fn edge(&self, index: usize) -> Option<DepositionEdge<'a>> {
+        if index >= self.len {
+            return None;
+        }
+        let width_mm = match self.widths {
+            EdgeWidths::Constant(width_mm) => width_mm,
+            EdgeWidths::PerEdge(widths_mm) => *widths_mm.get(index)?,
+        };
+        Some(DepositionEdge {
+            points_mm: self.points_mm.get(index..index + 2)?,
+            width_mm,
+        })
+    }
+}
+impl<'a> Iterator for DepositionEdges<'a> {
+    type Item = DepositionEdge<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        let index = self.front;
+        self.front += 1;
+        self.edge(index)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        let Some(index) = self.front.checked_add(n) else {
+            self.front = self.back;
+            return None;
+        };
+        if index >= self.back {
+            self.front = self.back;
+            return None;
+        }
+        self.front = index + 1;
+        self.edge(index)
+    }
+}
+impl<'a> DoubleEndedIterator for DepositionEdges<'a> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.edge(self.back)
+    }
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        let Some(offset) = n.checked_add(1) else {
+            self.back = self.front;
+            return None;
+        };
+        let Some(index) = self.back.checked_sub(offset) else {
+            self.back = self.front;
+            return None;
+        };
+        if index < self.front {
+            self.back = self.front;
+            return None;
+        }
+        self.back = index;
+        self.edge(index)
+    }
+}
+impl ExactSizeIterator for DepositionEdges<'_> {}
 #[derive(Debug, Clone, Serialize, TS, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DepositionPath {
     pub kind: DepositionKind,
     /// Immutable original construction purpose, never inferred from Bridge shape.
     pub owner: Option<DepositionOwner>,
-    pub bead_width_mm: f64,
+    pub width: WidthProfile,
     /// Explicit occupied interval; upper endpoint belongs to the owning layer.
     pub physical_z_mm: [f64; 2],
     pub points_mm: Vec<[f64; 3]>,
@@ -960,15 +1306,71 @@ impl DepositionPath {
     pub fn height_mm(&self) -> f64 {
         self.physical_z_mm[1] - self.physical_z_mm[0]
     }
-    fn validate_owner(&self) -> Result<(), ManufacturingError> {
-        positive(&[self.bead_width_mm, self.height_mm()])?;
-        if !self.physical_z_mm.iter().all(|z| z.is_finite())
-            || self.height_mm() > self.bead_width_mm
-        {
+    /// Validate cardinality and dimensions once, then borrow the actual edges.
+    /// Constant-width paths iterate without cloning or allocating.
+    pub fn checked_edges(&self) -> Result<DepositionEdges<'_>, ManufacturingError> {
+        if !self.physical_z_mm.iter().all(|z| z.is_finite()) {
             return Err(invalid("path requires finite positive bead dimensions"));
         }
+        self.width
+            .validate_for(self.points_mm.len(), self.height_mm())?;
+        let widths = match &self.width {
+            WidthProfile::Constant { width_mm } => EdgeWidths::Constant(*width_mm),
+            WidthProfile::PerEdge { widths_mm } => EdgeWidths::PerEdge(widths_mm),
+        };
+        let len = self.points_mm.len() - 1;
+        Ok(DepositionEdges {
+            points_mm: &self.points_mm,
+            widths,
+            front: 0,
+            back: len,
+            len,
+        })
+    }
+    /// Reverse point order and the per-edge widths that follow those points.
+    /// A mixed Regional/Mandatory skin bridge toggles its actual first portion.
+    pub fn reverse(&mut self) {
+        self.points_mm.reverse();
+        if let WidthProfile::PerEdge { widths_mm } = &mut self.width {
+            widths_mm.reverse();
+        }
+        if let Some(DepositionOwner::RegionalSkinBridge { skin_first, .. }) = &mut self.owner {
+            *skin_first = !*skin_first;
+        }
+    }
+    /// Rotate a closed path so `seam_index` names its first actual edge. The
+    /// explicit closing duplicate and each edge's width follow the rotation.
+    pub fn rotate_closed(&mut self, seam_index: usize) -> Result<(), ManufacturingError> {
+        let vertices = self.points_mm.len().saturating_sub(1);
+        if vertices < 2 || self.points_mm.first() != self.points_mm.last() {
+            return Err(invalid(
+                "closed rotation requires an explicit closing duplicate",
+            ));
+        }
+        if seam_index >= vertices {
+            return Err(invalid("closed rotation seam is outside its actual edges"));
+        }
+        self.checked_edges()?;
+        if seam_index == 0 {
+            return Ok(());
+        }
+        self.points_mm[..vertices].rotate_left(seam_index);
+        let closing = self.points_mm[0];
+        self.points_mm[vertices] = closing;
+        if let WidthProfile::PerEdge { widths_mm } = &mut self.width {
+            widths_mm.rotate_left(seam_index);
+        }
+        Ok(())
+    }
+    fn validate_owner(&self) -> Result<(), ManufacturingError> {
+        if !self.physical_z_mm.iter().all(|z| z.is_finite()) {
+            return Err(invalid("path requires finite positive bead dimensions"));
+        }
+        self.width
+            .validate_for(self.points_mm.len(), self.height_mm())?;
         if self.kind == DepositionKind::Bridge
             && !matches!(self.owner, Some(DepositionOwner::RegionalSkinBridge { .. }))
+            && self.owner != Some(DepositionOwner::Wall)
             && self.points_mm.first() != self.points_mm.last()
             && self.points_mm.len() != 2
         {
@@ -989,7 +1391,10 @@ impl DepositionPath {
                         skin: ProcessSkinKind::TopSkin,
                     })
             }
+            // Every Perimeter is a construction wall. A wall may be relabelled
+            // to Bridge during construction while its immutable ownership stays.
             DepositionKind::Bridge => true,
+            DepositionKind::Perimeter => self.owner == Some(DepositionOwner::Wall),
             DepositionKind::SolidFill | DepositionKind::SparseFill => {
                 self.owner.is_none() || matches!(self.owner, Some(DepositionOwner::Regional { .. }))
             }
@@ -1638,6 +2043,10 @@ pub struct PrintLayer {
     #[serde(deserialize_with = "paths")]
     pub paths: Vec<DepositionPath>,
     pub region_coverage: PlanarRegionCoverage,
+    /// Source-owned minimum-length realization, distinct from skin classification
+    /// and independently qualified Bridge/permanent-interface construction.
+    #[serde(deserialize_with = "diaphragm::skin_command_fits")]
+    pub skin_command_fits: Vec<SkinCommandFitDomain>,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1843,6 +2252,27 @@ fn prime_intersects_bounds(start: [f64; 3], end: [f64; 3], bounds: PrimeExclusio
 }
 
 impl NormalizedPrintPlan {
+    /// Actual retained heap capacity of the distinct minimum-skin proof table.
+    pub fn skin_command_fit_bytes(&self) -> Result<usize, ManufacturingError> {
+        let mut bytes = 0usize;
+        for layer in &self.layers {
+            let records = layer
+                .skin_command_fits
+                .capacity()
+                .checked_mul(std::mem::size_of::<SkinCommandFitDomain>())
+                .ok_or_else(|| resource("skin fitting metadata byte overflow"))?;
+            bytes = bytes
+                .checked_add(records)
+                .ok_or_else(|| resource("skin fitting metadata byte overflow"))?;
+            for domain in &layer.skin_command_fits {
+                bytes = bytes
+                    .checked_add(domain.allocated_bytes())
+                    .ok_or_else(|| resource("skin fitting metadata byte overflow"))?;
+            }
+        }
+        Ok(bytes)
+    }
+
     pub fn validate(&self, intent: &ManufacturingIntent) -> Result<(), ManufacturingError> {
         self.validate_and_prime_exclusion(intent).map(|_| ())
     }
@@ -1857,6 +2287,47 @@ impl NormalizedPrintPlan {
         }
         self.native_geometry.validate()?;
         diaphragm::validate_layers(&self.layers)?;
+        if self.skin_command_fit_bytes()? > MAX_MANUFACTURING_BUNDLE_BYTES as usize {
+            return Err(resource(
+                "skin fitting metadata exceeds the bounded bundle allowance",
+            ));
+        }
+        let mut fit_count = 0usize;
+        for layer in &self.layers {
+            if layer.skin_command_fits.len() > MAX_PROCESS_REGIONS {
+                return Err(resource("skin fitting domain limit exceeded"));
+            }
+            for (index, domain) in layer.skin_command_fits.iter().enumerate() {
+                domain.validate()?;
+                if layer
+                    .region_coverage
+                    .process_regions
+                    .get(usize::from(domain.region_index))
+                    != Some(&domain.region)
+                    || layer.skin_command_fits[..index].iter().any(|other| {
+                        other.region_index == domain.region_index && other.skin == domain.skin
+                    })
+                {
+                    return Err(invalid(
+                        "skin fitting lost its unique captured effective region",
+                    ));
+                }
+                fit_count = fit_count
+                    .checked_add(domain.fits.len())
+                    .ok_or_else(|| resource("skin fitting witness count overflow"))?;
+                if fit_count > MAX_DEPOSITION_SEGMENTS as usize {
+                    return Err(resource("cumulative skin fitting witness limit exceeded"));
+                }
+                if domain.fits.iter().any(|fit| {
+                    fit.required_mm
+                        .iter()
+                        .chain(&fit.fitted_mm)
+                        .any(|point| point[2] != layer.z_mm)
+                }) {
+                    return Err(invalid("skin fitting witness has a different layer height"));
+                }
+            }
+        }
         validate_process_resolution(&self.process_resolution)?;
         if self.process_resolution.capacity() > MAX_PROCESS_REGIONS {
             return Err(resource("process resolution allocation limit exceeded"));
@@ -2275,17 +2746,10 @@ impl NormalizedPrintPlan {
                 path.validate_owner()?;
                 let physical = path.physical_z_mm;
                 let path_height = path.height_mm();
-                if !physical.iter().all(|z| z.is_finite())
-                    || physical[1] != layer.z_mm
-                    || !intent
-                        .printer
-                        .deposition_limits
-                        .admits(path.bead_width_mm, path_height)
-                    || path.bead_width_mm != intent.recipe.bead_width_mm
-                {
+                if !physical.iter().all(|z| z.is_finite()) || physical[1] != layer.z_mm {
                     return Err(invalid(&format!(
-                        "path dimensions exceed local deposition limits or owning layer: width={}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",
-                        path.bead_width_mm, layer.z_mm, intent.printer.deposition_limits
+                        "path physical interval exceeds owning layer: physical_z={physical:?}, height={path_height}, layer_z={}",
+                        layer.z_mm
                     )));
                 }
                 let recipe = &intent.recipe;
@@ -2307,26 +2771,35 @@ impl NormalizedPrintPlan {
                 } else {
                     (1.0, 1.0)
                 };
-                let area = ((path.bead_width_mm - path_height) * path_height
-                    + std::f64::consts::PI * (path_height * 0.5).powi(2))
-                    * recipe.flow_multiplier
-                    * first_flow
-                    * bridge_flow;
                 let speed = recipe.print_speed_mm_s * first_speed * bridge_speed;
                 let feed = (speed * 60_000_000.0).round() / 1_000_000.0;
-                if !area.is_finite()
-                    || area <= 0.0
-                    || !feed.is_finite()
-                    || feed < 0.000001
-                    || area * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s
-                {
-                    return Err(invalid(
-                        "path dimensions exceed emitted-feed volumetric flow limit",
-                    ));
+                for edge in path.checked_edges()? {
+                    let width = edge.width_mm;
+                    if !intent.printer.deposition_limits.admits(width, path_height) {
+                        return Err(invalid(&format!(
+                            "path dimensions exceed local deposition limits or owning layer: width={width}, physical_z={physical:?}, height={path_height}, layer_z={}, limits={:?}",
+                            layer.z_mm, intent.printer.deposition_limits
+                        )));
+                    }
+                    let area = ((width - path_height) * path_height
+                        + std::f64::consts::PI * (path_height * 0.5).powi(2))
+                        * recipe.flow_multiplier
+                        * first_flow
+                        * bridge_flow;
+                    if !area.is_finite()
+                        || area <= 0.0
+                        || !feed.is_finite()
+                        || feed < 0.000001
+                        || area * feed / 60.0 > intent.printer.max_volumetric_flow_mm3_s
+                    {
+                        return Err(invalid(
+                            "path dimensions exceed emitted-feed volumetric flow limit",
+                        ));
+                    }
                 }
                 let ordinary_lower = layer.lower_z_mm;
-                if physical[0] != ordinary_lower {
-                    if !(path.kind == DepositionKind::SparseFill
+                if physical[0] != ordinary_lower
+                    && (!(path.kind == DepositionKind::SparseFill
                         || path.kind == DepositionKind::Bridge
                             && matches!(path.owner, Some(DepositionOwner::Regional { .. })))
                         || !self.sparse_bands.iter().any(|band| {
@@ -2337,12 +2810,11 @@ impl NormalizedPrintPlan {
                                     .layers
                                     .get(band.first_layer as usize)
                                     .is_some_and(|first| physical[0] == first.lower_z_mm)
-                        })
-                    {
-                        return Err(invalid(
-                            "coarse interval requires schedule-contiguous combined regional sparse ownership",
-                        ));
-                    }
+                        }))
+                {
+                    return Err(invalid(
+                        "coarse interval requires schedule-contiguous combined regional sparse ownership",
+                    ));
                 }
                 if let Some(DepositionOwner::Regional { region_index }) = path.owner {
                     if usize::from(region_index) >= layer.region_coverage.process_regions.len() {
@@ -2357,17 +2829,15 @@ impl NormalizedPrintPlan {
                 if let Some(DepositionOwner::RegionalSkinBridge {
                     region_index, skin, ..
                 }) = path.owner
-                {
-                    if !layer
+                    && !layer
                         .region_coverage
                         .skin_bridge_domains
                         .iter()
                         .any(|domain| domain.region_index == region_index && domain.skin == skin)
-                    {
-                        return Err(invalid(
-                            "mixed skin bridge is missing its source-classified domains",
-                        ));
-                    }
+                {
+                    return Err(invalid(
+                        "mixed skin bridge is missing its source-classified domains",
+                    ));
                 }
                 if matches!(
                     path.kind,
@@ -2393,10 +2863,16 @@ impl NormalizedPrintPlan {
                 if segments > MAX_DEPOSITION_SEGMENTS as usize {
                     return Err(resource("deposition segment limit exceeded"));
                 }
+                // Automatic walls include open thin-feature and junction arms.
+                // Only immutable Wall ownership admits that construction purpose;
+                // unowned/other-role perimeters must not borrow this exception.
                 if path.kind == DepositionKind::Perimeter
+                    && path.owner != Some(DepositionOwner::Wall)
                     && path.points_mm.first() != path.points_mm.last()
                 {
-                    return Err(invalid("perimeter closure must be explicit"));
+                    return Err(invalid(
+                        "perimeter closure must be explicit unless owned by Wall",
+                    ));
                 }
                 let fixed_axis = matches!(
                     path.kind,

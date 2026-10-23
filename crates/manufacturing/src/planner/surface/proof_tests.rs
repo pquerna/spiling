@@ -67,7 +67,7 @@ fn brute_simple(material: &MultiPolygon<f64>) -> bool {
     true
 }
 #[test]
-fn varying_native_edge_layers_preserve_exact_holes_without_cartesian_work() {
+fn varying_native_edge_layers_preserve_exact_holes_with_shared_work() {
     let native = native_ring(128);
     let hole = LineString(vec![
         Coord { x: -0.5, y: -0.5 },
@@ -78,11 +78,6 @@ fn varying_native_edge_layers_preserve_exact_holes_without_cartesian_work() {
     ]);
     let cancel = AtomicBool::new(false);
     let mut work = 0;
-    // 96 genuinely different layers would require >20M remote-edge pairs with
-    // the previous 8*N*M + K^2 accounting. Every current layer still executes
-    // the identical robust predicates for every possibly touching pair.
-    let old_cartesian = (8 * 128 * 256 + 260 * 260) * 96;
-    assert!(old_cartesian > super::super::super::MAX_BOOLEAN_PAIRS);
     for layer in 0..96 {
         let derived = native_edge_lift(&native, layer as f64 * 0.137);
         certify_retention(&native, &derived, &mut work, &cancel).unwrap();
@@ -144,37 +139,46 @@ fn swept_candidates_match_exhaustive_crossings_contacts_and_simplicity() {
     assert!(certify_simple(&material, &mut 0, &cancel).is_err());
 }
 #[test]
-fn index_charges_rejected_active_pairs_and_honors_cancel_and_unchanged_cap() {
-    let mut original = (0..8000)
-        .map(|index| {
-            if index % 2 == 0 {
-                Coord { x: 0.0, y: 0.0 }
-            } else {
-                Coord { x: 1.0, y: 1.0 }
-            }
-        })
-        .collect::<Vec<_>>();
-    original.push(original[0]);
-    let original = LineString(original);
-    let distant = LineString(vec![
-        Coord { x: 0.0, y: 10.0 },
-        Coord { x: 1.0, y: 10.0 },
-        Coord { x: 1.0, y: 11.0 },
-        Coord { x: 0.0, y: 11.0 },
-        Coord { x: 0.0, y: 10.0 },
-    ]);
-    // This intentionally invalid source tests broad-phase resource accounting,
-    // not native admission: even same-group/Y-disjoint scans consume work.
+fn index_honors_cumulative_admission_cancellation_and_fresh_recovery() {
+    let original = native_ring(128);
+    let derived = native_edge_lift(&original, 0.4);
+    let material = MultiPolygon(vec![Polygon::new(derived.clone(), Vec::new())]);
+    let cancel = AtomicBool::new(false);
+    let mut work = 0;
+    certify_retention(&original, &derived, &mut work, &cancel).unwrap();
+    let retention_work = work;
+    assert!(retention_work > 0);
+    certify_simple(&material, &mut work, &cancel).unwrap();
+    assert!(
+        work > retention_work,
+        "successive proofs share cumulative work"
+    );
+
+    // A valid query cannot restart a caller's exhausted shared allowance.
+    let mut exhausted = super::super::super::MAX_BOOLEAN_PAIRS;
     assert_eq!(
-        certify_retention(&original, &distant, &mut 0, &AtomicBool::new(false))
+        certify_retention(&original, &derived, &mut exhausted, &cancel)
             .unwrap_err()
             .code,
         ManufacturingErrorCode::ResourceLimit
     );
+    assert_eq!(exhausted, super::super::super::MAX_BOOLEAN_PAIRS);
+    let mut cancelled_work = 0;
     assert_eq!(
-        certify_retention(&original, &distant, &mut 0, &AtomicBool::new(true))
-            .unwrap_err()
-            .code,
+        certify_retention(
+            &original,
+            &derived,
+            &mut cancelled_work,
+            &AtomicBool::new(true)
+        )
+        .unwrap_err()
+        .code,
         ManufacturingErrorCode::Cancelled
     );
+
+    // Neither refusal poisons later proofs over the same original material.
+    let mut fresh_work = 0;
+    certify_retention(&original, &derived, &mut fresh_work, &cancel).unwrap();
+    certify_simple(&material, &mut fresh_work, &cancel).unwrap();
+    assert_eq!(fresh_work, work);
 }

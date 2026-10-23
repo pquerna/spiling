@@ -747,17 +747,16 @@ fn trace(
 
 /// Split into lower / band / upper using one shared source-edge arrangement.
 ///
-/// `admit` receives a conservative peak of LOCAL coordinate-equivalent storage,
-/// excluding `original` (which remains borrowed). It includes node/edge/event/
-/// trace metadata, polygon/ring descriptors and every output closing coordinate,
-/// before any allocation. Add other live owners in the callback, counting the
-/// original once. After return, retain/count all three outputs with the existing
-/// `region::point_count`; no proof geometry or original-coordinate copies remain.
+/// `admit` receives conservative LOCAL coordinate-equivalent units and a known
+/// storage byte bound, excluding borrowed `original`. The bound includes graph,
+/// trace, polygon/ring descriptors and output closing coordinates before growth.
+/// Callers add other live owners once; returned output capacities are measured
+/// while mutable, not inferred from coordinate counts.
 pub(super) fn split(
     original: &MultiPolygon<f64>,
     axis: usize,
     cuts: [f64; 2],
-    mut admit: impl FnMut(usize) -> Result<(), ManufacturingError>,
+    mut admit: impl FnMut(usize, usize) -> Result<(), ManufacturingError>,
     work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<[MultiPolygon<f64>; 3], ManufacturingError> {
@@ -860,7 +859,7 @@ pub(super) fn split(
                 .and_then(|v| n.checked_add(v))
         })
         .ok_or_else(|| resource("axis partition storage bound overflow"))?;
-    admit(bytes.div_ceil(size_of::<Coord<f64>>()))?;
+    admit(bytes.div_ceil(size_of::<Coord<f64>>()), bytes)?;
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut events = Vec::new();
@@ -894,6 +893,20 @@ pub(super) fn split(
         connect(&nodes, &mut edges, work, cancel)?;
         trace(&nodes, &mut edges, &mut cycles, work, cancel)?;
         let bases: [usize; 3] = std::array::from_fn(|i| result[i].0.len());
+        let mut actual_bytes = nodes.capacity() * size_of::<Node<'_>>()
+            + edges.capacity() * size_of::<Edge>()
+            + events.capacity() * size_of::<usize>()
+            + cycles.capacity() * size_of::<Cycle>()
+            + cycles
+                .iter()
+                .map(|cycle| cycle.ring.0.capacity() * size_of::<Coord<f64>>())
+                .sum::<usize>();
+        for output in &mut result {
+            actual_bytes = actual_bytes
+                .checked_add(super::super::native::material_bytes(output))
+                .ok_or_else(|| resource("axis partition actual storage overflow"))?;
+        }
+        admit(actual_bytes.div_ceil(size_of::<Coord<f64>>()), actual_bytes)?;
         for cycle in cycles.iter_mut().filter(|c| c.positive) {
             check_cancel(cancel)?;
             let output = &mut result[cycle.owner].0;
@@ -972,5 +985,15 @@ pub(super) fn split(
             }
         }
     }
+    let mut actual_bytes = nodes.capacity() * size_of::<Node<'_>>()
+        + edges.capacity() * size_of::<Edge>()
+        + events.capacity() * size_of::<usize>()
+        + cycles.capacity() * size_of::<Cycle>();
+    for output in &mut result {
+        actual_bytes = actual_bytes
+            .checked_add(super::super::native::material_bytes(output))
+            .ok_or_else(|| resource("axis partition actual storage overflow"))?;
+    }
+    admit(actual_bytes.div_ceil(size_of::<Coord<f64>>()), actual_bytes)?;
     Ok(result)
 }

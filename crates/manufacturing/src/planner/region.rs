@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use super::{MAX_BOOLEAN_PAIRS, OFFSET_TOLERANCE_MM, boolean_budget, forward};
+#[cfg(test)]
+use super::boolean_budget;
+use super::{MAX_BOOLEAN_PAIRS, MAX_RETAINED_GEOMETRY_UNITS, OFFSET_TOLERANCE_MM, forward};
 use crate::{check_cancel, error};
-use geo::algorithm::buffer::{BufferStyle, LineJoin};
 use geo::algorithm::convex_hull::quick_hull;
 use geo::kernels::{Kernel, Orientation, RobustKernel};
 use geo::{
-    Area, BooleanOps, BoundingRect, Buffer, Contains, Coord, LineString, MultiPolygon, Point,
-    Polygon, unary_union,
+    Area, BooleanOps, BoundingRect, Contains, Coord, LineString, MultiPolygon, Point, Polygon,
+    unary_union,
 };
 use spiling_contracts::geometry::RigidPoseMm;
 use spiling_contracts::manufacturing::*;
@@ -48,7 +49,7 @@ pub(super) fn from_native(
     for boundary in native.loops() {
         check_cancel(cancel)?;
         points += boundary.points_mm.len();
-        if points > MAX_DEPOSITION_SEGMENTS as usize {
+        if points > MAX_RETAINED_GEOMETRY_UNITS {
             return Err(resource("native section point limit exceeded"));
         }
         let ring = native_ring(boundary, pose, sample, cancel)?;
@@ -81,7 +82,7 @@ fn native_ring(
     sample: f64,
     cancel: &AtomicBool,
 ) -> Result<LineString<f64>, ManufacturingError> {
-    if boundary.points_mm.len() > MAX_DEPOSITION_SEGMENTS as usize {
+    if boundary.points_mm.len() > MAX_RETAINED_GEOMETRY_UNITS {
         return Err(resource("native loop point limit exceeded"));
     }
     let mut coordinates = Vec::with_capacity(boundary.points_mm.len());
@@ -140,7 +141,7 @@ fn check_polygons(polygons: &[Polygon<f64>]) -> Result<(), ManufacturingError> {
             p.exterior().0.len() + p.interiors().iter().map(|hole| hole.0.len()).sum::<usize>()
         })
         .sum();
-    if points > MAX_DEPOSITION_SEGMENTS as usize {
+    if points > MAX_RETAINED_GEOMETRY_UNITS {
         return Err(resource("planar region point limit exceeded"));
     }
     if polygons.iter().any(|p| {
@@ -158,6 +159,7 @@ fn check_polygons(polygons: &[Polygon<f64>]) -> Result<(), ManufacturingError> {
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn offset(
     region: &MultiPolygon<f64>,
     distance: f64,
@@ -166,7 +168,7 @@ pub(super) fn offset(
     offset_admitted(
         region,
         distance,
-        |_, overlay| {
+        |_, _, overlay| {
             if let Some((a, b)) = overlay {
                 boolean_budget(a, b, cancel)?;
             }
@@ -176,14 +178,16 @@ pub(super) fn offset(
     )
 }
 
-/// Admit known live application-owned construction/input coordinates before
-/// growth, and returned overlay output immediately after the call. The caller
-/// owns combined retention and cumulative overlay work. Upstream transient
-/// allocation is not bounded by this callback; host-process limits remain separate.
+/// Admit coordinate-equivalent units AND known application-owned bytes before
+/// growth, including simultaneous old/new containers and returned overlay
+/// output immediately after the call. Borrowed input belongs to the caller.
+/// Upstream Boolean-kernel transient allocation remains separately bounded by
+/// existing operation/work policy and observed process limits, not this receipt.
 pub(super) fn offset_admitted(
     region: &MultiPolygon<f64>,
     distance: f64,
     mut admit: impl FnMut(
+        usize,
         usize,
         Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
     ) -> Result<(), ManufacturingError>,
@@ -192,29 +196,26 @@ pub(super) fn offset_admitted(
     offset_polygons(&region.0, distance, &mut admit, cancel)
 }
 
-/// Offset one certified outer operand without normalizing overlapping masks.
-pub(super) fn offset_polygon(
+/// The polygon form keeps the same borrowed operand and float frame while
+/// exposing the common offset implementation's live-capacity admission.
+pub(super) fn offset_polygon_admitted(
     polygon: &Polygon<f64>,
     distance: f64,
+    mut admit: impl FnMut(
+        usize,
+        usize,
+        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
+    ) -> Result<(), ManufacturingError>,
     cancel: &AtomicBool,
 ) -> Result<MultiPolygon<f64>, ManufacturingError> {
-    offset_polygons(
-        std::slice::from_ref(polygon),
-        distance,
-        &mut |_, overlay| {
-            if let Some((a, b)) = overlay {
-                boolean_budget(a, b, cancel)?;
-            }
-            Ok(())
-        },
-        cancel,
-    )
+    offset_polygons(std::slice::from_ref(polygon), distance, &mut admit, cancel)
 }
 
 fn offset_polygons(
     polygons: &[Polygon<f64>],
     distance: f64,
     admit: &mut impl FnMut(
+        usize,
         usize,
         Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
     ) -> Result<(), ManufacturingError>,
@@ -223,8 +224,16 @@ fn offset_polygons(
     check_cancel(cancel)?;
     check_polygons(polygons)?;
     if polygons.is_empty() || distance == 0.0 {
-        admit(polygons.iter().map(polygon_points).sum(), None)?;
-        return Ok(MultiPolygon(polygons.to_vec()));
+        let units = polygons.iter().map(polygon_points).sum();
+        offset_admit(admit, units, cloned_polygons_bytes(polygons)?, None)?;
+        let mut result = MultiPolygon(polygons.to_vec());
+        offset_admit(
+            admit,
+            units,
+            super::native::material_bytes(&mut result),
+            None,
+        )?;
+        return Ok(result);
     }
     if !distance.is_finite() {
         return Err(unsupported("offset distance is not finite"));
@@ -243,7 +252,7 @@ fn offset_polygons(
     if !circumradius.is_finite() || circumradius - radius > radial_error {
         return Err(resource("offset disk cannot meet the radial error budget"));
     }
-    admit(sides, None)?;
+    offset_admit(admit, sides, coordinate_bytes(sides)?, None)?;
     let disk = (0..sides)
         .map(|index| {
             let angle = std::f64::consts::TAU * (index as f64 + 0.5) / sides as f64;
@@ -253,49 +262,124 @@ fn offset_polygons(
             }
         })
         .collect::<Vec<_>>();
+    let disk_bytes = coordinate_bytes(disk.capacity())?;
     let mut result = if distance < 0.0 {
-        // S eroded by a disk is S minus the disk-neighborhood of its boundary.
-        // Build that neighborhood from convex segment capsules, not independently
-        // shifted finite edges whose disappearing supports can form false islands.
-        // Each island retains its own Boolean coordinate range.
+        // S eroded by a disk is S minus its boundary neighborhood. Preserve
+        // exactly the existing per-island Boolean operands and float frames.
         let mut eroded_polygons = MultiPolygon(Vec::new());
         for polygon in polygons {
             check_cancel(cancel)?;
             let retained = sides + point_count(&eroded_polygons);
-            let tube = boundary_tube(polygon, &disk, retained, admit, cancel)?;
+            let retained_bytes = offset_bytes(&[
+                disk_bytes,
+                super::native::material_bytes(&mut eroded_polygons),
+            ])?;
+            let mut tube = boundary_tube(polygon, &disk, retained, retained_bytes, admit, cancel)?;
+            let tube_bytes = super::native::material_bytes(&mut tube);
             let source_points = polygon_points(polygon);
             let scratch = retained + point_count(&tube) + source_points;
-            admit(scratch, None)?;
-            let source = MultiPolygon(vec![polygon.clone()]);
-            admit(scratch, Some((&source, &tube)))?;
+            offset_admit(
+                admit,
+                scratch,
+                offset_bytes(&[
+                    retained_bytes,
+                    tube_bytes,
+                    cloned_polygons_bytes(std::slice::from_ref(polygon))?,
+                ])?,
+                None,
+            )?;
+            let mut source = MultiPolygon(vec![polygon.clone()]);
+            let scratch_bytes = offset_bytes(&[
+                retained_bytes,
+                tube_bytes,
+                super::native::material_bytes(&mut source),
+            ])?;
+            offset_admit(admit, scratch, scratch_bytes, Some((&source, &tube)))?;
             let mut eroded = source.difference(&tube);
             check_cancel(cancel)?;
             check_size(&eroded)?;
-            admit(scratch + point_count(&eroded), None)?;
+            let eroded_bytes = super::native::material_bytes(&mut eroded);
+            offset_admit(
+                admit,
+                scratch + point_count(&eroded),
+                offset_bytes(&[scratch_bytes, eroded_bytes])?,
+                None,
+            )?;
+            drop(source);
+            drop(tube);
+            let units = retained + point_count(&eroded);
+            reserve_offset_polygons(
+                &mut eroded_polygons.0,
+                eroded.0.len(),
+                units,
+                offset_bytes(&[retained_bytes, eroded_bytes])?,
+                admit,
+            )?;
             eroded_polygons.0.append(&mut eroded.0);
         }
         eroded_polygons
     } else {
-        admit(
-            sides + polygons.iter().map(polygon_points).sum::<usize>(),
+        let points = polygons.iter().map(polygon_points).sum::<usize>();
+        offset_admit(
+            admit,
+            sides + points,
+            offset_bytes(&[disk_bytes, cloned_polygons_bytes(polygons)?])?,
             None,
         )?;
         let mut expanded = MultiPolygon(polygons.to_vec());
         for polygon in polygons {
             let retained = sides + point_count(&expanded);
-            let tube = boundary_tube(polygon, &disk, retained, admit, cancel)?;
+            let retained_bytes =
+                offset_bytes(&[disk_bytes, super::native::material_bytes(&mut expanded)])?;
+            let mut tube = boundary_tube(polygon, &disk, retained, retained_bytes, admit, cancel)?;
             let scratch = retained + point_count(&tube);
-            admit(scratch, Some((&expanded, &tube)))?;
-            let replacement = expanded.union(&tube);
-            admit(scratch + point_count(&replacement), None)?;
+            let scratch_bytes =
+                offset_bytes(&[retained_bytes, super::native::material_bytes(&mut tube)])?;
+            offset_admit(admit, scratch, scratch_bytes, Some((&expanded, &tube)))?;
+            let mut replacement = expanded.union(&tube);
+            offset_admit(
+                admit,
+                scratch + point_count(&replacement),
+                offset_bytes(&[
+                    scratch_bytes,
+                    super::native::material_bytes(&mut replacement),
+                ])?,
+                None,
+            )?;
             expanded = replacement;
             check_cancel(cancel)?;
             check_size(&expanded)?;
         }
         expanded
     };
+    drop(disk);
     check_cancel(cancel)?;
     check_size(&result)?;
+    // Stable slice sorting may own a temporary record array. Only one interior
+    // or outer sort runs at once; reserve its complete record length.
+    let sort_bytes = result
+        .0
+        .iter()
+        .map(|p| {
+            p.interiors()
+                .len()
+                .checked_mul(std::mem::size_of::<LineString<f64>>())
+                .ok_or_else(|| resource("offset sort byte overflow"))
+        })
+        .try_fold(
+            result
+                .0
+                .len()
+                .checked_mul(std::mem::size_of::<Polygon<f64>>())
+                .ok_or_else(|| resource("offset sort byte overflow"))?,
+            |largest, bytes| Ok::<_, ManufacturingError>(largest.max(bytes?)),
+        )?;
+    offset_admit(
+        admit,
+        point_count(&result),
+        offset_bytes(&[super::native::material_bytes(&mut result), sort_bytes])?,
+        None,
+    )?;
     canonicalize(&mut result);
     Ok(result)
 }
@@ -307,11 +391,94 @@ fn polygon_points(polygon: &Polygon<f64>) -> usize {
         .sum()
 }
 
+fn coordinate_bytes(capacity: usize) -> Result<usize, ManufacturingError> {
+    capacity
+        .checked_mul(std::mem::size_of::<Coord<f64>>())
+        .ok_or_else(|| resource("offset coordinate byte overflow"))
+}
+fn offset_bytes(parts: &[usize]) -> Result<usize, ManufacturingError> {
+    parts.iter().try_fold(0usize, |total, bytes| {
+        total
+            .checked_add(*bytes)
+            .ok_or_else(|| resource("offset owned-byte overflow"))
+    })
+}
+pub(super) fn cloned_polygons_bytes(
+    polygons: &[Polygon<f64>],
+) -> Result<usize, ManufacturingError> {
+    polygons.iter().try_fold(
+        polygons
+            .len()
+            .checked_mul(std::mem::size_of::<Polygon<f64>>())
+            .ok_or_else(|| resource("offset cloned container byte overflow"))?,
+        |bytes, polygon| {
+            let rings = polygon
+                .interiors()
+                .len()
+                .checked_mul(std::mem::size_of::<LineString<f64>>())
+                .ok_or_else(|| resource("offset cloned interior byte overflow"))?;
+            offset_bytes(&[bytes, rings, coordinate_bytes(polygon_points(polygon))?])
+        },
+    )
+}
+fn offset_admit(
+    admit: &mut impl FnMut(
+        usize,
+        usize,
+        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
+    ) -> Result<(), ManufacturingError>,
+    units: usize,
+    bytes: usize,
+    overlay: Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
+) -> Result<(), ManufacturingError> {
+    admit(
+        units.max(bytes.div_ceil(std::mem::size_of::<Coord<f64>>())),
+        bytes,
+        overlay,
+    )
+}
+fn reserve_offset_polygons(
+    polygons: &mut Vec<Polygon<f64>>,
+    additional: usize,
+    units: usize,
+    live_bytes: usize,
+    admit: &mut impl FnMut(
+        usize,
+        usize,
+        Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
+    ) -> Result<(), ManufacturingError>,
+) -> Result<(), ManufacturingError> {
+    let needed = polygons
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| resource("offset polygon count overflow"))?;
+    if needed <= polygons.capacity() {
+        return Ok(());
+    }
+    let capacity = polygons.capacity().saturating_mul(2).max(4).max(needed);
+    let bytes = capacity
+        .checked_mul(std::mem::size_of::<Polygon<f64>>())
+        .ok_or_else(|| resource("offset polygon capacity byte overflow"))?;
+    // The old container and every moved polygon payload remain owned while a
+    // replacement container grows. Reserve geometrically, never one record/run.
+    offset_admit(admit, units, offset_bytes(&[live_bytes, bytes])?, None)?;
+    polygons
+        .try_reserve_exact(capacity - polygons.len())
+        .map_err(|_| resource("offset polygon allocation refused"))?;
+    let actual = polygons
+        .capacity()
+        .checked_mul(std::mem::size_of::<Polygon<f64>>())
+        .ok_or_else(|| resource("offset polygon capacity byte overflow"))?;
+    offset_admit(admit, units, offset_bytes(&[live_bytes, actual])?, None)
+}
+
 fn boundary_tube(
     polygon: &Polygon<f64>,
     disk: &[Coord<f64>],
     external: usize,
+    external_bytes: usize,
     admit: &mut impl FnMut(
+        usize,
         usize,
         Option<(&MultiPolygon<f64>, &MultiPolygon<f64>)>,
     ) -> Result<(), ManufacturingError>,
@@ -320,18 +487,23 @@ fn boundary_tube(
     let mut primitives = MultiPolygon(Vec::new());
     let mut retained_points = 0usize;
     let mut retained_capacity = 0usize;
+    let mut payload_bytes = 0usize;
     let construction_points = disk
         .len()
         .checked_mul(2)
         .ok_or_else(|| resource("offset capsule construction point overflow"))?;
-    // Pinned quick_hull partitions its input in place and grows only its output
-    // Vec. At most every input point plus closure enters that output; account
-    // its power-of-two capacity, not merely its final coordinate count.
+    // The pinned hull partitions input in place; its output fits every input
+    // point plus closure, with a power-of-two capacity. No source ring is hulled.
     let hull_capacity = construction_points
         .checked_add(1)
         .and_then(usize::checked_next_power_of_two)
         .ok_or_else(|| resource("offset capsule hull capacity overflow"))?;
-    admit(external + construction_points, None)?;
+    offset_admit(
+        admit,
+        external + construction_points,
+        offset_bytes(&[external_bytes, coordinate_bytes(construction_points)?])?,
+        None,
+    )?;
     let mut construction = Vec::new();
     construction
         .try_reserve_exact(construction_points)
@@ -342,9 +514,8 @@ fn boundary_tube(
             check_cancel(cancel)?;
             let a = ring.0[start];
             let mut end = start + 1;
-            // Collinear monotone partitions have exactly the same disk
-            // neighborhood as their full segment. Coalesce only construction
-            // capsules; never simplify or round the authoritative material ring.
+            // Exact monotone coalescing applies ONLY to construction capsules,
+            // never to authoritative original material coordinates.
             while end + 1 < ring.0.len() {
                 check_cancel(cancel)?;
                 let b = ring.0[end];
@@ -361,12 +532,33 @@ fn boundary_tube(
             }
             let segment = [a, ring.0[end]];
             start = end;
-            // Only this convex construction primitive is hulled; authoritative
-            // material rings are never simplified, snapped or replaced by a hull.
-            // Reuse one admitted input buffer. Calling ConvexHull on MultiPoint
-            // would retain it while allocating another complete input copy.
-            admit(
-                external + retained_capacity + construction.capacity() + hull_capacity,
+            let units = external + retained_capacity + construction.capacity() + hull_capacity;
+            let live_bytes = offset_bytes(&[
+                external_bytes,
+                payload_bytes,
+                primitives
+                    .0
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Polygon<f64>>())
+                    .ok_or_else(|| resource("offset primitive container byte overflow"))?,
+                coordinate_bytes(construction.capacity())?,
+                coordinate_bytes(hull_capacity)?,
+            ])?;
+            reserve_offset_polygons(&mut primitives.0, 1, units, live_bytes, admit)?;
+            offset_admit(
+                admit,
+                units,
+                offset_bytes(&[
+                    external_bytes,
+                    payload_bytes,
+                    primitives
+                        .0
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<Polygon<f64>>())
+                        .ok_or_else(|| resource("offset primitive container byte overflow"))?,
+                    coordinate_bytes(construction.capacity())?,
+                    coordinate_bytes(hull_capacity)?,
+                ])?,
                 None,
             )?;
             construction.clear();
@@ -376,14 +568,17 @@ fn boundary_tube(
                     y: endpoint.y + delta.y,
                 })
             }));
-            let capsule = Polygon::new(quick_hull(&mut construction), Vec::new());
+            let mut capsule = Polygon::new(quick_hull(&mut construction), Vec::new());
             retained_points = retained_points
                 .checked_add(capsule.exterior().0.len())
-                .filter(|count| *count <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|count| *count <= MAX_RETAINED_GEOMETRY_UNITS)
                 .ok_or_else(|| resource("offset primitive point limit exceeded"))?;
             retained_capacity = retained_capacity
                 .checked_add(capsule.exterior().0.capacity())
                 .ok_or_else(|| resource("offset primitive capacity overflow"))?;
+            payload_bytes = payload_bytes
+                .checked_add(super::native::polygon_bytes(&mut capsule))
+                .ok_or_else(|| resource("offset primitive payload byte overflow"))?;
             let count = primitives.0.len() + 1;
             if count
                 .checked_mul(count)
@@ -391,23 +586,48 @@ fn boundary_tube(
             {
                 return Err(resource("offset primitive pair admission limit exceeded"));
             }
-            admit(external + construction.capacity() + retained_capacity, None)?;
+            offset_admit(
+                admit,
+                external + construction.capacity() + retained_capacity,
+                offset_bytes(&[
+                    external_bytes,
+                    coordinate_bytes(construction.capacity())?,
+                    payload_bytes,
+                    primitives
+                        .0
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<Polygon<f64>>())
+                        .ok_or_else(|| resource("offset primitive container byte overflow"))?,
+                ])?,
+                None,
+            )?;
             primitives.0.push(capsule);
         }
     }
     drop(construction);
     check_size(&primitives)?;
-    admit(
+    let primitive_bytes = super::native::material_bytes(&mut primitives);
+    offset_admit(
+        admit,
         external + retained_capacity,
+        offset_bytes(&[external_bytes, primitive_bytes])?,
         Some((&primitives, &primitives)),
     )?;
     check_cancel(cancel)?;
-    // One overlay coordinate frame for all boundary capsules. Incremental
-    // unions repeatedly quantize prior results and can create sub-grid edges.
-    let tube = unary_union(&primitives.0);
+    // Keep the same ONE unary union and float frame; no incremental overlays.
+    let mut tube = unary_union(&primitives.0);
     check_cancel(cancel)?;
     check_size(&tube)?;
-    admit(external + retained_capacity + point_count(&tube), None)?;
+    offset_admit(
+        admit,
+        external + retained_capacity + point_count(&tube),
+        offset_bytes(&[
+            external_bytes,
+            primitive_bytes,
+            super::native::material_bytes(&mut tube),
+        ])?,
+        None,
+    )?;
     Ok(tube)
 }
 
@@ -467,97 +687,31 @@ fn ring_compare(a: &LineString<f64>, b: &LineString<f64>) -> std::cmp::Ordering 
     a.0.len().cmp(&b.0.len())
 }
 
-pub(super) fn wall_centers(
-    section: &MultiPolygon<f64>,
-    required_material: &RequiredMaterial<'_>,
-    recipe: &PlanarPrintRecipe,
-    retained_native_points: usize,
-    cancel: &AtomicBool,
-) -> Result<Vec<MultiPolygon<f64>>, ManufacturingError> {
-    if required_material.polygons.is_empty() && !section.0.is_empty() {
-        return Err(unsupported(
-            "nonempty requested material requires a mandatory coverage operand",
-        ));
-    }
-    let width = recipe.bead_width_mm;
-    let mut walls = Vec::with_capacity(recipe.perimeter_count as usize);
-    let mut retained_points = retained_native_points;
-    for wall in 0..recipe.perimeter_count {
-        let centers = offset(section, -(wall as f64 + 0.5) * width, cancel)?;
-        if centers.0.len() != section.0.len() {
-            return Err(unsupported(&format!(
-                "requested perimeter offset erases or splits an island; thin geometry is unsupported (source islands {}, offset islands {}, section area {} mm², bead width {} mm)",
-                section.0.len(),
-                centers.0.len(),
-                section.unsigned_area(),
-                width
-            )));
-        }
-        for original in &section.0 {
-            check_cancel(cancel)?;
-            let mut descendants = centers
-                .0
-                .iter()
-                .filter(|p| original.contains(&Point(p.exterior().0[0])));
-            let Some(descendant) = descendants.next() else {
-                return Err(unsupported("requested perimeter offset erases an island"));
-            };
-            if descendants.next().is_some()
-                || descendant.interiors().len() != original.interiors().len()
-            {
-                return Err(unsupported(
-                    "requested perimeter offset changes island/hole topology",
-                ));
-            }
-        }
-        if wall == 0 {
-            // Conservative miter dilation preserves square corners while exposing erased
-            // narrow branches. Tolerance accounts for section and offset approximation.
-            if point_count(&centers) > MAX_DEPOSITION_SEGMENTS as usize / 2 {
-                return Err(resource("miter dilation expanded point budget exceeded"));
-            }
-            boolean_budget(&centers, &centers, cancel)?;
-            let reachable = centers.buffer_with_style(
-                BufferStyle::new(width * 0.5 + 2.0 * OFFSET_TOLERANCE_MM)
-                    .line_join(LineJoin::Miter(0.01)),
-            );
-            check_cancel(cancel)?;
-            check_size(&reachable)?;
-            super::boolean::budget_parts(&required_material.polygons, &reachable, cancel)?;
-            let unreachable = required_material.difference(&reachable);
-            check_size(&unreachable)?;
-            let unreachable_area = unreachable.unsigned_area();
-            check_cancel(cancel)?;
-            if unreachable_area > OFFSET_TOLERANCE_MM.powi(2) {
-                return Err(unsupported(
-                    "section contains thin regions unreachable by nominal bead centers",
-                ));
-            }
-        }
-        retained_points = retained_points
-            .checked_add(point_count(&centers))
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
-            .ok_or_else(|| resource("retained wall center point limit exceeded"))?;
-        walls.push(centers);
-    }
-    Ok(walls)
-}
-
-pub(super) fn wall_paths(
+pub(super) fn support_contour_paths(
     centers: &MultiPolygon<f64>,
     z: f64,
     lower_z: f64,
     bead_width_mm: f64,
+    kind: DepositionKind,
     paths: &mut Vec<DepositionPath>,
     segments: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
+    if !matches!(
+        kind,
+        DepositionKind::Support | DepositionKind::SupportInterface
+    ) {
+        return Err(error(
+            ManufacturingErrorCode::InvalidSpecification,
+            "support contour requires explicit support construction",
+        ));
+    }
     for p in &centers.0 {
         for ring in std::iter::once(p.exterior()).chain(p.interiors()) {
             check_cancel(cancel)?;
             reserve_segments(segments, ring.0.len() - 1)?;
             let points_mm = ring.0.iter().map(|c| [c.x, c.y, z]).collect();
-            push_path(paths, DepositionKind::Perimeter, points_mm, bead_width_mm, [lower_z, z])?;
+            push_path(paths, kind, points_mm, bead_width_mm, [lower_z, z])?;
         }
     }
     Ok(())
@@ -716,7 +870,7 @@ impl HatchRows {
         self.count
             .checked_add(1)
             .and_then(|count| self.edges.checked_mul(count))
-            .filter(|points| *points <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
             .ok_or_else(|| resource("component hatch point bound exceeds retained budget"))
     }
 }
@@ -1014,7 +1168,13 @@ pub(super) fn append_hatch_row(
         if reverse {
             std::mem::swap(&mut a, &mut b);
         }
-        push_path(paths, kind, vec![a, b], layer.recipe.bead_width_mm, [layer.lower_z, layer.z])?;
+        push_path(
+            paths,
+            kind,
+            vec![a, b],
+            layer.recipe.bead_width_mm,
+            [layer.lower_z, layer.z],
+        )?;
     }
     Ok(())
 }
@@ -1041,7 +1201,9 @@ fn push_path(
     }
     paths.push(DepositionPath {
         kind,
-        bead_width_mm,
+        width: WidthProfile::Constant {
+            width_mm: bead_width_mm,
+        },
         physical_z_mm,
         owner: match kind {
             DepositionKind::BottomSkin => Some(DepositionOwner::MandatorySkin {
@@ -1055,6 +1217,42 @@ fn push_path(
         points_mm,
     });
     Ok(())
+}
+
+/// Scalar-only producers (hatch rows/interfaces) must establish that ownership;
+/// never flatten an adaptive wall to a recipe width or an average.
+pub(crate) fn constant_width(path: &DepositionPath) -> Result<f64, ManufacturingError> {
+    path.checked_edges()?;
+    path.width.constant_width_mm().ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::InvalidSpecification,
+            "constant-width row operation received an adaptive width profile",
+        )
+    })
+}
+
+pub(crate) fn nominal_volume(
+    path: &DepositionPath,
+    index: u32,
+    recipe: &PlanarPrintRecipe,
+) -> Result<f64, ManufacturingError> {
+    let height = path.height_mm();
+    let mut factor = recipe.flow_multiplier;
+    if index == 0 {
+        factor *= recipe.process.first_layer_flow_factor;
+    }
+    if path.kind == DepositionKind::Bridge {
+        factor *= recipe.process.bridge_flow_factor;
+    }
+    let mut volume = 0.0;
+    for edge in path.checked_edges()? {
+        let a = edge.points_mm[0];
+        let b = edge.points_mm[1];
+        let area =
+            (edge.width_mm - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
+        volume += (b[0] - a[0]).hypot(b[1] - a[1]) * area * factor;
+    }
+    Ok(volume)
 }
 fn reserve_segments(count: &mut usize, additional: usize) -> Result<(), ManufacturingError> {
     if additional > MAX_DEPOSITION_SEGMENTS as usize - *count {

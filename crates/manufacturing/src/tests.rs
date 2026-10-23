@@ -29,12 +29,11 @@ fn intent() -> ManufacturingIntent {
             workflow: JobWorkflow::DiagnosticBodyOnly,
             nozzle_diameter_mm: 0.4,
             deposition_limits: spiling_contracts::manufacturing::DepositionLimits {
-                min_bead_width_mm: 0.6,
-                max_bead_width_mm: 0.6,
+                min_bead_width_mm: 0.3,
+                max_bead_width_mm: 0.75,
                 min_bead_height_mm: 0.000001,
-                // Test-only software envelope encloses the .4 nominal
-                // schedule's actual subtraction intervals; this is not a
-                // maximum-height boundary-behavior test.
+                // Test-only envelope leaves room for actual commanded width
+                // and height enclosures; this is not a process-boundary test.
                 max_bead_height_mm: 0.5,
             },
             max_feed_mm_s: 200.0,
@@ -1040,8 +1039,7 @@ fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &Ma
             })
             .map(|p| {
                 let h = p.height_mm();
-                let area = ((p.bead_width_mm - h) * h + std::f64::consts::PI * (h * 0.5).powi(2))
-                    * intent.recipe.flow_multiplier;
+                let flow = intent.recipe.flow_multiplier;
                 let factor = if p.kind == DepositionKind::Bridge {
                     intent.recipe.process.bridge_flow_factor
                 } else {
@@ -1051,9 +1049,17 @@ fn assert_reemitted_interface_refuses(mut plan: NormalizedPrintPlan, intent: &Ma
                 } else {
                     1.
                 };
-                p.points_mm
-                    .windows(2)
-                    .map(|e| (e[1][0] - e[0][0]).hypot(e[1][1] - e[0][1]) * area * factor)
+                p.checked_edges()
+                    .unwrap()
+                    .map(|edge| {
+                        let area = ((edge.width_mm - h) * h
+                            + std::f64::consts::PI * (h * 0.5).powi(2))
+                            * flow;
+                        (edge.points_mm[1][0] - edge.points_mm[0][0])
+                            .hypot(edge.points_mm[1][1] - edge.points_mm[0][1])
+                            * area
+                            * factor
+                    })
                     .sum::<f64>()
             })
             .sum();
@@ -1128,7 +1134,9 @@ fn through_bore_splits_actual_separator_and_replay_refuses_a_forged_hole_crossin
     layer.paths.push(DepositionPath {
         kind: DepositionKind::SeparatorWall,
         owner: None,
-        bead_width_mm: intent.recipe.bead_width_mm,
+        width: WidthProfile::Constant {
+            width_mm: intent.recipe.bead_width_mm,
+        },
         physical_z_mm: [layer.lower_z_mm, layer.z_mm],
         points_mm: joined.map(|p| [p[0], p[1], layer.z_mm]).to_vec(),
     });
@@ -1422,8 +1430,18 @@ fn build_direction_and_prime_endpoint_resolve_actual_seam_ties() {
     );
     let bundle = rotated.compile(&diagnostic).unwrap();
     let start = actual_motion(&bundle)[0].2;
-    assert!((start[0] - 69.7).abs() < 0.000001);
-    assert!((start[1] - 60.3).abs() < 0.000001);
+    let wall = &bundle.plan.layers[0].paths[0];
+    let expected = wall
+        .points_mm
+        .iter()
+        .copied()
+        .map(|point| project_xyz6_point_mm(point).unwrap())
+        .min_by(|a, b| b[0].total_cmp(&a[0]).then_with(|| a[1].total_cmp(&b[1])))
+        .unwrap();
+    assert_eq!(
+        start, expected,
+        "the authored build direction stays in world coordinates after source rotation"
+    );
 }
 
 #[test]
@@ -1464,18 +1482,69 @@ fn native_box_has_pinned_geometry_nominal_volume_and_deterministic_program() {
     assert_eq!(bundle.plan.layers[0].section_z_mm, 0.2);
     let ring = &bundle.plan.layers[0].paths[0];
     assert_eq!(ring.kind, DepositionKind::Perimeter);
-    assert!((ring.points_mm[0][0] - 0.3).abs() < 1e-7);
-    assert!((ring.points_mm[0][1] - 0.3).abs() < 1e-7);
-    // Independent rectangular geometry/count calculation, not a planner preview echo.
-    let h: f64 = 0.4;
-    let w: f64 = 0.6;
-    let area = (w - h) * h + std::f64::consts::PI * (h * 0.5).powi(2);
-    let spacing = area / h;
-    let wall_length = 2.0 * ((20.0 - w) + (10.0 - w));
-    let x_rows = ((10.0 - 2.0 * w) / spacing).ceil();
-    let y_rows = ((20.0 - 2.0 * w) / spacing).ceil();
-    let expected =
-        10.0 * (2.0 * wall_length + x_rows * (20.0 - 2.0 * w) + y_rows * (10.0 - 2.0 * w)) * area;
+    assert_eq!(ring.owner, Some(DepositionOwner::Wall));
+    assert_eq!(ring.points_mm.first(), ring.points_mm.last());
+    assert!(
+        ring.points_mm
+            .iter()
+            .all(|point| { (0.0..=20.0).contains(&point[0]) && (0.0..=10.0).contains(&point[1]) })
+    );
+    // The native box remains 20x10x8. Wall allocation may change, but every
+    // nominal stroke must account for its own realized width and physical height.
+    assert!(
+        (bundle
+            .plan
+            .layers
+            .iter()
+            .map(|layer| layer.height_mm)
+            .sum::<f64>()
+            - 8.0)
+            .abs()
+            < 1e-7
+    );
+    let expected = bundle
+        .plan
+        .layers
+        .iter()
+        .map(|layer| {
+            let coverage = &layer.region_coverage;
+            assert!((coverage.source_section_area_mm2 - 200.0).abs() < 1e-7);
+            assert!((coverage.section_area_mm2 - 200.0).abs() < 1e-7);
+            assert_eq!(coverage.protected_hole_area_mm2, 0.0);
+            assert_eq!(coverage.intentional_void_area_mm2, 0.0);
+            let volume = layer
+                .paths
+                .iter()
+                .map(|path| {
+                    let height = path.height_mm();
+                    let factor = intent.recipe.flow_multiplier
+                        * if layer.index == 0 {
+                            intent.recipe.process.first_layer_flow_factor
+                        } else {
+                            1.0
+                        }
+                        * if path.kind == DepositionKind::Bridge {
+                            intent.recipe.process.bridge_flow_factor
+                        } else {
+                            1.0
+                        };
+                    path.checked_edges()
+                        .unwrap()
+                        .map(|edge| {
+                            let area = (edge.width_mm - height) * height
+                                + std::f64::consts::PI * (height * 0.5).powi(2);
+                            (edge.points_mm[1][0] - edge.points_mm[0][0])
+                                .hypot(edge.points_mm[1][1] - edge.points_mm[0][1])
+                                * area
+                                * factor
+                        })
+                        .sum::<f64>()
+                })
+                .sum::<f64>();
+            assert!((coverage.nominal_deposition_volume_mm3 - volume).abs() < 1e-7);
+            volume
+        })
+        .sum::<f64>();
     assert!((bundle.verification.deposited_volume_mm3 - expected).abs() < 0.001);
     assert!(
         (bundle.verification.filament_length_mm
@@ -1791,14 +1860,18 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         DepositionPath {
             kind: DepositionKind::SolidFill,
             owner: None,
-            bead_width_mm: intent.recipe.bead_width_mm,
+            width: WidthProfile::Constant {
+                width_mm: intent.recipe.bead_width_mm,
+            },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[1.000_000_4, 1.0, 0.4], [5.0, 1.0, 0.4]],
         },
         DepositionPath {
             kind: DepositionKind::SolidFill,
             owner: None,
-            bead_width_mm: intent.recipe.bead_width_mm,
+            width: WidthProfile::Constant {
+                width_mm: intent.recipe.bead_width_mm,
+            },
             physical_z_mm: [0.0, 0.4],
             points_mm: vec![[5.0, 1.0, 0.4], [9.0, 1.0, 0.4]],
         },
@@ -1853,6 +1926,27 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     assert_eq!(positions[0], [1.0, 1.0, 0.4]);
     assert_ne!(positions[0], bundle.plan.layers[0].paths[0].points_mm[0]);
     assert_eq!(positions[1], positions[2]);
+    // Dose follows the actual XYZ6 chord, including the first endpoint's visible
+    // rounding, and replay preserves the emitted eight-decimal absolute E.
+    let filament_area = std::f64::consts::PI * (recipe.filament_diameter_mm * 0.5).powi(2);
+    let mut expected_extrusion = 0.0;
+    for (index, record) in replay.bytes[REPLAY_HEADER_BYTES..]
+        .as_chunks::<REPLAY_RECORD_BYTES>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        if record[46] != 0 {
+            let a = positions[index - 1];
+            let b = positions[index];
+            expected_extrusion +=
+                (b[0] - a[0]).hypot(b[1] - a[1]).hypot(b[2] - a[2]) * bead_area / filament_area;
+        }
+        assert_eq!(
+            f64::from_le_bytes(record[24..32].try_into().unwrap()),
+            (expected_extrusion * 100_000_000.0).round() / 100_000_000.0
+        );
+    }
     let replay_hash = SourceHash::from_bytes(&replay.bytes);
     let descriptor = ReplayDisplayDescriptor {
         info: replay.info,

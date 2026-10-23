@@ -1390,7 +1390,12 @@ fn capture_base(
                             "native continuous occupied point count overflow",
                         )
                     })?;
-                admit_points(retained_points, native_points, points, &placed)?;
+                admit_points(
+                    retained_points,
+                    native_points,
+                    points,
+                    region::point_count(&placed),
+                )?;
                 for polygon in outer.0 {
                     occupied.push(polygon, height)?;
                 }
@@ -1506,7 +1511,7 @@ fn capture_base(
                         retained_points,
                         native_points,
                         occupied.point_count,
-                        &overlap,
+                        region::point_count(&overlap),
                     )?;
                     if overlap.unsigned_area() > 0.0 {
                         // Additive finishes preserve M, so positive original-M
@@ -1542,76 +1547,68 @@ fn capture_base(
                     .saturating_add(MATERIAL_ARC_BYTES);
                 finished.push((occurrence.occurrence_id, Arc::new(placed)));
             } else {
-                let process_enabled = input
-                    .process_document
-                    .layers
-                    .iter()
-                    .any(|layer| layer.enabled)
-                    || input.intent.recipe.infill_fraction < 1.0;
-                if process_enabled {
-                    let bytes = material_bytes(&mut placed);
-                    contribution_bytes = contribution_bytes
-                        .saturating_add(bytes)
-                        .saturating_add(MATERIAL_ARC_BYTES);
-                    admit_bytes(
-                        retained_bytes.saturating_add(native_bytes),
-                        contribution_bytes,
-                        composed_bytes,
-                    )?;
-                    let placed = Arc::new(placed);
-                    native_points = native_points
-                        .checked_add(region::point_count(&placed))
-                        .ok_or_else(|| {
-                            error(
-                                ManufacturingErrorCode::ResourceLimit,
-                                "process contribution point count overflow",
-                            )
-                        })?;
-                    let live_bytes = retained_bytes
-                        .saturating_add(native_bytes)
-                        .saturating_add(contribution_bytes)
-                        .saturating_add(
-                            if contributions
-                                .iter()
-                                .any(|(_, source, _)| Arc::ptr_eq(source, &material))
-                            {
-                                0
-                            } else {
-                                composed_bytes.saturating_add(MATERIAL_ARC_BYTES)
-                            },
-                        );
-                    merge_shared(
-                        &mut material,
-                        &placed,
-                        &mut coordinate_error_request_mm,
-                        live_bytes,
-                        composed_bytes,
-                        bytes,
-                        surface_work,
-                        cancel,
-                    )?;
-                    composed_bytes = if let Some(output) = Arc::get_mut(&mut material) {
-                        material_bytes(output)
-                    } else {
-                        bytes
-                    };
-                    contributions.push((occurrence.occurrence_id, placed, bytes));
+                // Default-process construction needs the same original source
+                // owners as modifiers; shared material is admitted only once.
+                let bytes = material_bytes(&mut placed);
+                contribution_bytes = contribution_bytes
+                    .saturating_add(bytes)
+                    .saturating_add(MATERIAL_ARC_BYTES);
+                admit_bytes(
+                    retained_bytes.saturating_add(native_bytes),
+                    contribution_bytes,
+                    composed_bytes,
+                )?;
+                let placed = Arc::new(placed);
+                native_points = native_points
+                    .checked_add(region::point_count(&placed))
+                    .ok_or_else(|| {
+                        error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "process contribution point count overflow",
+                        )
+                    })?;
+                let live_bytes = retained_bytes
+                    .saturating_add(native_bytes)
+                    .saturating_add(contribution_bytes)
+                    .saturating_add(
+                        if contributions
+                            .iter()
+                            .any(|(_, source, _)| Arc::ptr_eq(source, &material))
+                        {
+                            0
+                        } else {
+                            composed_bytes.saturating_add(MATERIAL_ARC_BYTES)
+                        },
+                    );
+                merge_shared(
+                    &mut material,
+                    &placed,
+                    &mut coordinate_error_request_mm,
+                    live_bytes,
+                    composed_bytes,
+                    bytes,
+                    surface_work,
+                    cancel,
+                )?;
+                composed_bytes = if let Some(output) = Arc::get_mut(&mut material) {
+                    material_bytes(output)
                 } else {
-                    merge(
-                        Arc::get_mut(&mut material).expect("unshared ordinary native material"),
-                        placed,
-                        &mut coordinate_error_request_mm,
-                        retained_bytes.saturating_add(native_bytes),
-                        surface_work,
-                        cancel,
-                    )?;
-                }
+                    bytes
+                };
+                contributions.push((occurrence.occurrence_id, placed, bytes));
             }
             admit_points(
                 retained_points,
                 native_points,
                 occupied.point_count,
-                &material,
+                if contributions
+                    .iter()
+                    .any(|(_, source, _)| Arc::ptr_eq(source, &material))
+                {
+                    0
+                } else {
+                    region::point_count(&material)
+                },
             )?;
         }
         if refine {
@@ -1728,12 +1725,12 @@ fn admit_points(
     retained: usize,
     native: usize,
     occupied: usize,
-    b: &MultiPolygon<f64>,
+    additional: usize,
 ) -> Result<(), ManufacturingError> {
     retained
         .checked_add(native)
         .and_then(|n| n.checked_add(occupied))
-        .and_then(|n| n.checked_add(region::point_count(b)))
+        .and_then(|n| n.checked_add(additional))
         .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
         .ok_or_else(|| {
             error(
@@ -1828,24 +1825,6 @@ fn merge_root(
         index = nodes[index].parent;
     }
     Ok(index)
-}
-
-fn merge(
-    target: &mut MultiPolygon<f64>,
-    incoming: MultiPolygon<f64>,
-    coordinate_error_request: &mut f64,
-    live_bytes: usize,
-    work: &mut usize,
-    cancel: &AtomicBool,
-) -> Result<(), ManufacturingError> {
-    merge_operand(
-        target,
-        std::borrow::Cow::Owned(incoming),
-        coordinate_error_request,
-        live_bytes,
-        work,
-        cancel,
-    )
 }
 
 fn merge_shared(
@@ -2926,7 +2905,8 @@ fn certify_polygon_capsules(
             ) {
                 continue;
             }
-            for edge in path.points_mm.windows(2) {
+            for local in path.checked_edges()? {
+                let edge = local.points_mm;
                 charge_support_clearance(support_work, cancel)?;
                 let [lower, upper] =
                     project_xyz6_segment_bead_height_mm(edge[0][2], edge[1][2], path.height_mm())?;
@@ -2949,7 +2929,7 @@ fn certify_polygon_capsules(
                     segment,
                     encoded.as_ref().expect("encoded actual forbidden polygon"),
                     spiling_geometry::PlanarCapsuleClearancePolicy {
-                        radius_mm: path.bead_width_mm * 0.5,
+                        radius_mm: local.width_mm * 0.5,
                         required_gap_mm: clearance,
                         endpoint_error_mm,
                     },
@@ -3146,7 +3126,8 @@ fn certify_deposited_clearance(
             }
             let objects =
                 applicable.expect("actual support selected a complete applicable layer slice");
-            for support_edge in support.points_mm.windows(2) {
+            for support_local in support.checked_edges()? {
+                let support_edge = support_local.points_mm;
                 charge_support_clearance(work, cancel)?;
                 let support_height = project_xyz6_segment_bead_height_mm(
                     support_edge[0][2],
@@ -3164,7 +3145,8 @@ fn certify_deposited_clearance(
                         ) {
                             continue;
                         }
-                        for object_edge in object.points_mm.windows(2) {
+                        for object_local in object.checked_edges()? {
+                            let object_edge = object_local.points_mm;
                             charge_support_clearance(work, cancel)?;
                             let object_height = project_xyz6_segment_bead_height_mm(
                                 object_edge[0][2],
@@ -3188,11 +3170,11 @@ fn certify_deposited_clearance(
                             let (object_xy, object_error) = emitted_xy_segment(object_edge)?;
                             spiling_geometry::certify_planar_capsule_pair_clearance([
                                 spiling_geometry::PlanarCapsuleMm {
-                                    segment_xy_mm: support_xy, radius_mm: support.bead_width_mm * 0.5,
+                                    segment_xy_mm: support_xy, radius_mm: support_local.width_mm * 0.5,
                                     endpoint_error_mm: support_error,
                                 },
                                 spiling_geometry::PlanarCapsuleMm {
-                                    segment_xy_mm: object_xy, radius_mm: object.bead_width_mm * 0.5,
+                                    segment_xy_mm: object_xy, radius_mm: object_local.width_mm * 0.5,
                                     endpoint_error_mm: object_error,
                                 },
                             ], xy_gap, native_work, cancel).map_err(|failure| super::native_error(failure,
@@ -3237,44 +3219,42 @@ mod actual_deposition_tests {
                 let volume =
                     (0.5 - height) * height + std::f64::consts::PI * (height * 0.5).powi(2);
                 let index = layers.len() as u32;
-                layers.push(PrintLayer {
-                    index,
-                    z_mm: z,
-                    lower_z_mm: lower,
-                    height_mm: height,
-                    section_z_mm: lower + height * 0.5,
-                    region_coverage: PlanarRegionCoverage { skin_bridge_domains: Vec::new(), process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
-                    source_section_area_mm2: object_area,
-                    surface_added_area_mm2: 0.0,
-                    separator_area_mm2: 0.0,
-                    process_interfaces: Vec::new(),
-                    wall_area_mm2: 0.0,
-                    bottom_skin_area_mm2: 0.0,
-                    top_skin_area_mm2: 0.0,
-                    solid_interior_area_mm2: object_area,
-                    sparse_interior_area_mm2: 0.0,
-                    intentional_void_area_mm2: 0.0,
-                    protected_hole_area_mm2: 0.0,
-                    nominal_deposition_volume_mm3: object_area * volume,
-                    support_area_mm2: support_area,
-                    support_nominal_deposition_volume_mm3: support_area * volume,
-                    process_regions: if object_area > 0.0 {
-                        vec![ProcessRegionCoverage {
-                            area_mm2: object_area,
-                            fraction: 1.0,
-                            contributions: Vec::new(),
-                        }]
-                    } else {
-                        Vec::new()
-                    }, },
-                    paths: vec![DepositionPath {
-                        kind,
-                        owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },
-                        bead_width_mm: 0.5,
-                        physical_z_mm: [lower, z],
-                        points_mm: vec![[x, 0.0, z], [x + 1.0, 0.0, z]],
-                    }],
-                });
+                layers.push(PrintLayer { skin_command_fits: Vec::new(), index,
+                z_mm: z,
+                lower_z_mm: lower,
+                height_mm: height,
+                section_z_mm: lower + height * 0.5,
+                region_coverage: PlanarRegionCoverage { skin_bridge_domains: Vec::new(), process_diaphragms: Vec::new(), diaphragm_area_mm2: 0.0, section_area_mm2: object_area,
+                source_section_area_mm2: object_area,
+                surface_added_area_mm2: 0.0,
+                separator_area_mm2: 0.0,
+                process_interfaces: Vec::new(),
+                wall_area_mm2: 0.0,
+                bottom_skin_area_mm2: 0.0,
+                top_skin_area_mm2: 0.0,
+                solid_interior_area_mm2: object_area,
+                sparse_interior_area_mm2: 0.0,
+                intentional_void_area_mm2: 0.0,
+                protected_hole_area_mm2: 0.0,
+                nominal_deposition_volume_mm3: object_area * volume,
+                support_area_mm2: support_area,
+                support_nominal_deposition_volume_mm3: support_area * volume,
+                process_regions: if object_area > 0.0 {
+                    vec![ProcessRegionCoverage {
+                        area_mm2: object_area,
+                        fraction: 1.0,
+                        contributions: Vec::new(),
+                    }]
+                } else {
+                    Vec::new()
+                }, },
+                paths: vec![DepositionPath {
+                    kind,
+                    owner: match kind { DepositionKind::BottomSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::BottomSkin }), DepositionKind::TopSkin => Some(spiling_contracts::manufacturing::DepositionOwner::MandatorySkin { skin: spiling_contracts::manufacturing::ProcessSkinKind::TopSkin }), _ => None },
+                    width: spiling_contracts::manufacturing::WidthProfile::Constant { width_mm: 0.5 },
+                    physical_z_mm: [lower, z],
+                    points_mm: vec![[x, 0.0, z], [x + 1.0, 0.0, z]],
+                }], });
                 schedule.push(LayerElevation {
                     z,
                     lower_z: lower,

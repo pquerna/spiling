@@ -53,7 +53,7 @@ export interface DecodedReplayDisplay {
   kind(index: number): ReplayKind;
   knownStart(index: number): boolean;
   /** Nominal expected-plan association; never a physical bead measurement. */
-  association(index: number): { beadWidthMm: number; physicalZMm: [number, number]; regionalOwner: number | "mandatory_skin" | null } | null;
+  association(index: number): { beadWidthMm: number; physicalZMm: [number, number]; regionalOwner: number | "mandatory_skin" | "wall" | null } | null;
 }
 export class ReplayDecodeError extends Error {
   constructor(message: string) {
@@ -199,7 +199,7 @@ export async function decodeReplayDisplay(
     if (associated) {
       if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(lower) ||
           !Number.isFinite(upper) || lower >= upper || Math.abs(upper - data.getFloat64(start + 16, true)) > 0.000000500001 ||
-          (owner < 0xfffffffe && owner >= MAX_PROCESS_REGIONS))
+          (owner < 0xfffffffd && owner >= MAX_PROCESS_REGIONS))
         fail("invalid nominal deposition association");
     } else {
       zero(data, start + 48, start + 72, fail);
@@ -324,7 +324,7 @@ export async function decodeReplayDisplay(
       return {
         beadWidthMm: data.getFloat64(start + 48, true),
         physicalZMm: [data.getFloat64(start + 56, true), data.getFloat64(start + 64, true)] as [number, number],
-        regionalOwner: owner === 0xffffffff ? null : owner === 0xfffffffe ? "mandatory_skin" as const : owner,
+        regionalOwner: owner === 0xffffffff ? null : owner === 0xfffffffe ? "mandatory_skin" as const : owner === 0xfffffffd ? "wall" as const : owner,
       };
     },
   });

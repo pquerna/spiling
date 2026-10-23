@@ -125,10 +125,6 @@ impl JobStatus {
         )
     }
 }
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Bounded job observations stay inline without a per-result allocation"
-)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobResult {

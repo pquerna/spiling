@@ -14,6 +14,7 @@ mod preflight;
 mod region;
 pub(crate) mod support;
 mod surface;
+mod walls;
 mod zones;
 pub use preflight::preflight;
 #[cfg(test)]
@@ -36,15 +37,47 @@ use std::{
 
 pub const LAYER_QUANTIZATION_MM: f64 = 0.000001;
 pub const OFFSET_TOLERANCE_MM: f64 = 0.005;
-const MAX_BOOLEAN_PAIRS: usize = 128_000_000;
+const MAX_BOOLEAN_PAIRS: usize = 16_384_000_000;
+// Geometry retention uses coordinate-equivalent reservation units (including
+// opaque proof bytes), NOT the independent 100k published-command ceiling.
+// This coarse arithmetic bound never replaces actual allocated-byte admission.
+const MAX_RETAINED_GEOMETRY_UNITS: usize =
+    MAX_MANUFACTURING_RETAINED_BYTES as usize / std::mem::size_of::<geo::Coord<f64>>();
+
+fn remaining_geometry_units(
+    retained: usize,
+    owned_bytes: usize,
+) -> Result<usize, ManufacturingError> {
+    let units = MAX_RETAINED_GEOMETRY_UNITS
+        .checked_sub(retained)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "retained geometry coordinate-unit budget exceeded",
+            )
+        })?;
+    let bytes = (MAX_MANUFACTURING_RETAINED_BYTES as usize)
+        .checked_sub(owned_bytes)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "retained geometry allocated-byte budget exceeded",
+            )
+        })?;
+    Ok(units.min(bytes / std::mem::size_of::<geo::Coord<f64>>()))
+}
 // Native interval operations and polygon Boolean pairs are independent resources.
 const MAX_NATIVE_WORK_UNITS: u64 = 512_000_000;
+// Compile-local immutable D span, required-C/exemption owner and exact XY width
+// envelope. Actual physical Z remains on each materialized layer and skin key.
+type WallCacheKey = (usize, Option<usize>, [u64; 3]);
 
 pub(crate) fn plan(
     input: &CompilerInput<'_>,
     cancel: &AtomicBool,
 ) -> Result<NormalizedPrintPlan, ManufacturingError> {
     let (mut admission, geometry_sources) = preflight::admit(input, cancel)?;
+
     match admission.report.disposition {
         PreflightDisposition::Admitted => {}
         disposition @ (PreflightDisposition::Refused | PreflightDisposition::Unresolved) => {
@@ -95,6 +128,7 @@ pub(crate) fn plan(
     }
     let recipe = &input.intent.recipe;
     let mut surface_work = 0usize;
+
     preflight::resolve_native_events(
         input,
         &mut admission,
@@ -126,6 +160,7 @@ pub(crate) fn plan(
         &mut admission.geometry_work,
         cancel,
     )?;
+
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
     // source-union certificates, refining this same field/support schedule.
@@ -222,7 +257,7 @@ pub(crate) fn plan(
             native_occupied_shared = Some(captured.occupied);
             let live_retained = retained_points
                 .checked_add(native_stage.retained_point_count())
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -239,7 +274,7 @@ pub(crate) fn plan(
                         .checked_add(native_points)
                         .filter(|n| {
                             n.checked_add(region::point_count(native))
-                                .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
+                                .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
                         })
                         .ok_or_else(|| {
                             error(
@@ -260,7 +295,7 @@ pub(crate) fn plan(
                         .filter(|n| {
                             live_retained
                                 .checked_add(*n)
-                                .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
+                                .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
                         })
                         .ok_or_else(|| {
                             error(
@@ -281,7 +316,7 @@ pub(crate) fn plan(
         let lookahead_points = native_stage.retained_point_count();
         let live_retained = retained_points
             .checked_add(lookahead_points)
-            .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+            .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
             .ok_or_else(|| {
                 error(
                     ManufacturingErrorCode::ResourceLimit,
@@ -309,34 +344,29 @@ pub(crate) fn plan(
             end += 1;
         }
         let mut next = Arc::clone(native_material.as_ref().expect("captured native material"));
+        // The ordinary recipe is a resolved process too. Preserve actual
+        // original/finished D owners even when no modifier layer is authored.
         let mut process_domains = Vec::new();
-        if input
-            .process_document
-            .layers
-            .iter()
-            .any(|layer| layer.enabled)
-        {
-            process_domains
-                .try_reserve_exact(native_contributions.len() + native_finished.len())
-                .map_err(|_| {
-                    error(
-                        ManufacturingErrorCode::ResourceLimit,
-                        "process contribution allocation refused",
-                    )
-                })?;
-            for (occurrence_id, material, bytes) in &native_contributions {
-                process_domains.push(process_domain(
-                    input,
-                    process_captures
-                        .iter()
-                        .find(|capture| capture.occurrence_id == *occurrence_id)
-                        .and_then(|capture| capture.zone),
-                    *occurrence_id,
-                    Arc::clone(material),
-                    *bytes,
-                    [slab_start, schedule[(end - 1) as usize].z],
-                )?);
-            }
+        process_domains
+            .try_reserve_exact(native_contributions.len() + native_finished.len())
+            .map_err(|_| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "process contribution allocation refused",
+                )
+            })?;
+        for (occurrence_id, material, bytes) in &native_contributions {
+            process_domains.push(process_domain(
+                input,
+                process_captures
+                    .iter()
+                    .find(|capture| capture.occurrence_id == *occurrence_id)
+                    .and_then(|capture| capture.zone),
+                *occurrence_id,
+                Arc::clone(material),
+                *bytes,
+                [slab_start, schedule[(end - 1) as usize].z],
+            )?);
         }
         let mut next_bytes = native_material_bytes;
         for (occurrence_id, placed) in &native_finished {
@@ -345,7 +375,7 @@ pub(crate) fn plan(
                 .checked_add(native_points)
                 .and_then(|n| n.checked_add(region::point_count(&next)))
                 .and_then(|n| n.checked_add(region::point_count(placed)))
-                .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|n| *n <= MAX_RETAINED_GEOMETRY_UNITS)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
@@ -362,24 +392,17 @@ pub(crate) fn plan(
             )?;
             let finished_bytes = native::material_bytes(&mut finished);
             let finished = Arc::new(finished);
-            if input
-                .process_document
-                .layers
-                .iter()
-                .any(|layer| layer.enabled)
-            {
-                process_domains.push(process_domain(
-                    input,
-                    process_captures
-                        .iter()
-                        .find(|capture| capture.occurrence_id == *occurrence_id)
-                        .and_then(|capture| capture.zone),
-                    *occurrence_id,
-                    Arc::clone(&finished),
-                    finished_bytes,
-                    [slab_start, schedule[(end - 1) as usize].z],
-                )?);
-            }
+            process_domains.push(process_domain(
+                input,
+                process_captures
+                    .iter()
+                    .find(|capture| capture.occurrence_id == *occurrence_id)
+                    .and_then(|capture| capture.zone),
+                *occurrence_id,
+                Arc::clone(&finished),
+                finished_bytes,
+                [slab_start, schedule[(end - 1) as usize].z],
+            )?);
             // Expanded occurrence separation is certified in preflight. Preserve
             // exact source vertices rather than resnapping them through a union.
             if next.0.is_empty() {
@@ -445,7 +468,7 @@ pub(crate) fn plan(
             .filter(|n| {
                 n.checked_add(native_points)
                     .and_then(|n| n.checked_add(lookahead_points))
-                    .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
+                    .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
             })
             .ok_or_else(|| {
                 error(
@@ -538,7 +561,7 @@ pub(crate) fn plan(
                     .filter(|points| {
                         points
                             .checked_add(lookahead_points)
-                            .is_some_and(|total| total <= MAX_DEPOSITION_SEGMENTS as usize)
+                            .is_some_and(|total| total <= MAX_RETAINED_GEOMETRY_UNITS)
                     })
                     .ok_or_else(|| {
                         error(
@@ -560,6 +583,7 @@ pub(crate) fn plan(
         index = end;
     }
     let mut native_coverage = native_stage.finalize(&mut admission.geometry_work, cancel)?;
+
     // Deferred void projection borrows these immutable domains and recipes.
     // Keep source owners in the native byte pool, not the deposition-point pool.
     let retained_support_native_bytes = prepared_sources
@@ -580,7 +604,7 @@ pub(crate) fn plan(
         .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
     retained_points = retained_points
         .checked_add(proof_units)
-        .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
@@ -594,14 +618,43 @@ pub(crate) fn plan(
     let mut layers = Vec::with_capacity(count as usize);
     let mut retained_plan_bytes = layers.capacity() * std::mem::size_of::<PrintLayer>();
     let mut segments = 0usize;
-    let skin_inset_mm = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
-    let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset_mm, surface_work)?;
+    let skin_inset = (recipe.perimeter_count as f64 - 0.5) * recipe.bead_width_mm;
+    let mut neighborhoods = SkinNeighborhoods::new(&sections, skin_inset, surface_work)?;
     let mut key = None;
     let mut classified = None;
+    let mut classified_owned_bytes = 0usize;
     let mut layout_span = None;
     let mut wall_layout = None;
-    let mut wall_layouts = (0..sections.len()).map(|_| None).collect::<Vec<_>>();
-    let mut templates: [Option<(Vec<DepositionPath>, PlanarRegionCoverage)>; 2] = [None, None];
+    let mut wall_layouts = (0..schedule.len()).map(|_| None).collect::<Vec<_>>();
+    let mut wall_cache = BTreeMap::<WallCacheKey, Arc<walls::WallPlan>>::new();
+    let mut retained_wall_bytes = 0usize;
+    // Same conservative sparse-BTree node convention as native::output_bytes:
+    // a live entry covers all key/value/child slots of its possible node.
+    let wall_index_entry_bytes = 16
+        * (std::mem::size_of::<(WallCacheKey, Arc<walls::WallPlan>)>()
+            + std::mem::size_of::<usize>());
+    let wall_static_bytes =
+        native::output_bytes(&sections, &native_surfaces, retained_section_bytes)
+            .checked_add(retained_support_native_bytes)
+            .and_then(|b| {
+                b.checked_add(schedule.capacity() * std::mem::size_of::<LayerElevation>())
+            })
+            .and_then(|b| {
+                b.checked_add(
+                    wall_layouts.capacity() * std::mem::size_of::<Option<Arc<walls::WallPlan>>>(),
+                )
+            })
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "wall caller retained-byte overflow",
+                )
+            })?;
+    let mut templates: [Option<(
+        Vec<DepositionPath>,
+        PlanarRegionCoverage,
+        Vec<SkinCommandFitDomain>,
+    )>; 2] = [None, None];
     let mut surface_resolution = Vec::new();
     let mut resolution_allocated_bytes = 0usize;
     let mut diagnostic_work = 0usize;
@@ -619,6 +672,7 @@ pub(crate) fn plan(
             .map(|i| span_at(&sections, i));
         if sections[current].material.0.is_empty() {
             layers.push(PrintLayer {
+                skin_command_fits: Vec::new(),
                 index,
                 z_mm: z,
                 lower_z_mm: elevation.lower_z,
@@ -629,66 +683,147 @@ pub(crate) fn plan(
             });
             continue;
         }
+        let native_index = native_surfaces.partition_point(|span| span.end <= index);
+        let native_span = native_surfaces
+            .get(native_index)
+            .filter(|span| span.start <= index);
+        // With no image exemptions C is exactly D. Otherwise preserve the
+        // complete immutable C/source-island attribution, not XY equality.
+        let required_owner = native_span
+            .filter(|span| !span.image_islands.is_empty())
+            .map(|_| native_index);
         let next_key = (
             current,
             below,
             above,
             (z - elevation.lower_z).to_bits(),
             top_axis,
+            required_owner,
         );
         if key != Some(next_key) {
             // Drop the prior classification before allocating its replacement.
             // The current wall layout survives skin-key changes, not span changes.
             drop(classified.take());
             templates = [None, None];
-            if layout_span != Some(current) {
+            let actual_height = z - elevation.lower_z;
+            let limits = &input.intent.printer.deposition_limits;
+            let envelope = walls::width_envelope(limits, actual_height)?;
+            // Retain the exact unguarded stadium floor as well: adding the
+            // guard must not merge adjacent height-dominated f64 floors.
+            let envelope_key = [
+                envelope[0].to_bits(),
+                envelope[1].to_bits(),
+                limits.min_bead_width_mm.max(actual_height).to_bits(),
+            ];
+            let layout_key = (current, required_owner, envelope_key);
+            if layout_span != Some(layout_key) {
                 drop(wall_layout.take());
-                let native_span = native_surfaces
-                    .get(native_surfaces.partition_point(|span| span.end <= index))
-                    .filter(|span| span.start <= index);
-                let required_material = required_material(
-                    &sections[current].material,
-                    native_span,
-                    neighborhoods.work_mut(),
-                    cancel,
-                )?;
-                wall_layout = Some(Arc::new(classification::WallLayout::new(
-                    &sections[current].material,
-                    &required_material,
-                    recipe,
-                    skin_retained_points(retained_points, &neighborhoods, &[])?,
-                    cancel,
-                ).map_err(|mut failure| {
-                    failure.message = format!(
-                        "layer {index} (section Z={sample} mm, deposition Z={z} mm, height={height} mm): {}",
-                        failure.message
-                    );
-                    failure
-                })?));
-                let layout = wall_layout
-                    .as_ref()
-                    .expect("current wall layout initialized");
-                retained_points += layout.point_count();
-                wall_layouts[current] = Some(Arc::clone(layout));
-                for fields in admission.surface_fields.values() {
-                    surface::certify_first_wall(
-                        wall_layout
-                            .as_ref()
-                            .expect("current wall layout initialized")
-                            .first_wall(),
-                        fields,
-                        sample,
-                        recipe.bead_width_mm,
+                if let Some(cached) = wall_cache.get(&layout_key) {
+                    wall_layout = Some(Arc::clone(cached));
+                } else {
+                    let required_material = required_material(
+                        &sections[current].material,
+                        native_span,
+                        neighborhoods.work_mut(),
                         cancel,
                     )?;
+                    let retained_wall_points =
+                        skin_retained_points(retained_points, &neighborhoods, &[])?;
+                    let wall_owned_bytes = wall_static_bytes
+                        .checked_add(retained_plan_bytes)
+                        .and_then(|b| b.checked_add(retained_wall_bytes))
+                        .and_then(|b| b.checked_add(wall_cache.len() * wall_index_entry_bytes))
+                        .and_then(|b| b.checked_add(resolution_allocated_bytes))
+                        .and_then(|b| b.checked_add(neighborhoods.retained_bytes()))
+                        .and_then(|b| {
+                            b.checked_add(
+                                required_material.polygons.capacity()
+                                    * std::mem::size_of::<&geo::Polygon<f64>>(),
+                            )
+                        })
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "wall caller live-byte overflow",
+                            )
+                        })?;
+
+                    let layout = walls::plan_section_walls(
+                        walls::WallRequest {
+                            material: &sections[current].material,
+                            required: &required_material,
+                            recipe,
+                            limits: &input.intent.printer.deposition_limits,
+                            nozzle_diameter_mm: input.intent.printer.nozzle_diameter_mm,
+                            lower_z: elevation.lower_z,
+                            upper_z: z,
+                            retained_points: retained_wall_points,
+                            owned_bytes: wall_owned_bytes,
+                        },
+                        neighborhoods.work_mut(),
+                        cancel,
+                    ).map_err(|mut failure| {
+                        failure.message = format!(
+                            "layer {index} (section Z={sample} mm, deposition Z={z} mm, height={height} mm): {}",
+                            failure.message
+                        );
+                        failure
+                    })?;
+                    let new_wall_bytes = layout
+                        .retained_bytes
+                        .checked_add(2 * std::mem::size_of::<usize>())
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "wall cache allocation-byte overflow",
+                            )
+                        })?;
+                    if wall_owned_bytes
+                        .checked_add(new_wall_bytes)
+                        .and_then(|b| b.checked_add(wall_index_entry_bytes))
+                        .is_none_or(|b| b as u64 > MAX_MANUFACTURING_RETAINED_BYTES)
+                    {
+                        return Err(error(
+                            ManufacturingErrorCode::ResourceLimit,
+                            "wall cache retention byte budget exceeded",
+                        ));
+                    }
+                    retained_wall_bytes = retained_wall_bytes
+                        .checked_add(new_wall_bytes)
+                        .ok_or_else(|| {
+                            error(
+                                ManufacturingErrorCode::ResourceLimit,
+                                "wall cache retained-byte overflow",
+                            )
+                        })?;
+                    let layout = Arc::new(layout);
+                    retained_points += layout.point_count();
+                    wall_cache.insert(layout_key, Arc::clone(&layout));
+                    wall_layout = Some(layout);
                 }
-                layout_span = Some(current);
+                layout_span = Some(layout_key);
             }
-            let lower = neighborhoods.survival(current, below, retained_points, cancel)?;
+            let skin_owned_bytes = skin_external_owned_bytes(
+                wall_static_bytes,
+                retained_plan_bytes,
+                retained_wall_bytes,
+                wall_cache.len(),
+                wall_index_entry_bytes,
+                resolution_allocated_bytes,
+                &templates,
+            )?;
+            let lower = neighborhoods.survival(
+                current,
+                below,
+                retained_points,
+                skin_owned_bytes,
+                cancel,
+            )?;
             let upper = neighborhoods.survival(
                 current,
                 above,
                 skin_query_retained_points(retained_points, &[&lower])?,
+                skin_query_retained_bytes(skin_owned_bytes, &[&lower])?,
                 cancel,
             )?;
             classified = Some(
@@ -700,12 +835,14 @@ pub(crate) fn plan(
                     ),
                     &lower,
                     &upper,
-                    |scratch| {
+                    |scratch, scratch_bytes| {
                         admit_skin_scratch(
                             retained_points,
+                            skin_owned_bytes,
                             &mut neighborhoods,
                             &[&lower, &upper],
                             scratch,
+                            scratch_bytes,
                             cancel,
                         )
                     },
@@ -715,15 +852,19 @@ pub(crate) fn plan(
                 .with_process(
                     &sections[current].process_domains,
                     recipe,
-                    classification::fixed_point_budget(skin_retained_points(
-                        retained_points,
-                        &neighborhoods,
-                        &[&lower, &upper],
-                    )?),
+                    classification::fixed_owned_budget(
+                        skin_retained_points(retained_points, &neighborhoods, &[&lower, &upper])?,
+                        skin_retained_bytes(skin_owned_bytes, &neighborhoods, &[&lower, &upper])?,
+                    ),
                     neighborhoods.work_mut(),
                     cancel,
                 )?,
             );
+            classified_owned_bytes = classified
+                .as_mut()
+                .expect("classified process regions")
+                .retained_bytes();
+
             for plate in &classified
                 .as_ref()
                 .expect("classified process regions")
@@ -772,10 +913,20 @@ pub(crate) fn plan(
                 }
             }
         }
+        // Only XY wall geometry is shared. Source-finish evidence is evaluated
+        // at this actual sample, independently of the wall cache/envelope key.
+        for fields in admission.surface_fields.values() {
+            surface::certify_first_wall(
+                wall_layout
+                    .as_ref()
+                    .expect("current wall construction initialized"),
+                &sections[current].material,
+                fields,
+                sample,
+                cancel,
+            )?;
+        }
         if !admission.surface_fields.is_empty() {
-            let native_span = native_surfaces
-                .get(native_surfaces.partition_point(|span| span.end <= index))
-                .filter(|span| span.start <= index);
             for (occurrence_id, fields) in &admission.surface_fields {
                 let Some(native) = native_span.and_then(|span| {
                     span.occurrences
@@ -787,17 +938,15 @@ pub(crate) fn plan(
                 };
                 let records = surface::collect_resolution(
                     surface::ResolutionGeometry {
-                        firstwall: wall_layout
+                        wall: wall_layout
                             .as_ref()
-                            .expect("current wall layout initialized")
-                            .first_wall(),
+                            .expect("current wall construction initialized"),
                         material: &sections[current].material,
                         native,
                     },
                     fields,
                     sample,
                     index,
-                    recipe.bead_width_mm,
                     &mut diagnostic_work,
                     cancel,
                 )?;
@@ -849,33 +998,66 @@ pub(crate) fn plan(
                 surface_resolution.extend(records);
             }
         }
+        wall_layouts[index as usize] = wall_layout.as_ref().map(Arc::clone);
         let axis = region::HatchAxis::for_policy(recipe.rectilinear_axis, index);
         let axis_slot = usize::from(axis == region::HatchAxis::Y);
+        let outside_skin_bytes = skin_external_owned_bytes(
+            wall_static_bytes,
+            retained_plan_bytes,
+            retained_wall_bytes,
+            wall_cache.len(),
+            wall_index_entry_bytes,
+            resolution_allocated_bytes,
+            &templates,
+        )?;
         if templates[axis_slot].is_none() {
             let mut template_segments = segments;
             let classified = classified
                 .as_ref()
                 .expect("region classification initialized");
-            let (paths, proposed) = classified.paths(
+            let (paths, proposed, fits) = classified.paths(
                 z,
                 elevation.lower_z,
                 axis,
                 top_axis,
                 recipe,
+                classified_owned_bytes,
+                &sections[current].process_domains,
                 &mut template_segments,
+                |scratch, scratch_bytes, work| {
+                    boolean::charge(neighborhoods.work_mut(), work)?;
+                    admit_skin_scratch(
+                        retained_points,
+                        outside_skin_bytes,
+                        &mut neighborhoods,
+                        &[],
+                        scratch,
+                        scratch_bytes,
+                        cancel,
+                    )
+                },
                 cancel,
             )?;
             let base = skin_retained_points(retained_points, &neighborhoods, &[])?
                 + classified.retained_points()
-                + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>();
-            let mut admit = classification::fixed_point_budget(base);
+                + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
+                + bonds::skin_command_fit_points(&fits);
+            let live_bytes = geometry_bytes(&[
+                skin_retained_bytes(outside_skin_bytes, &neighborhoods, &[])?,
+                classified_owned_bytes,
+                bonds::path_bytes(&paths),
+                bonds::skin_command_fit_bytes(&fits),
+            ])?;
+            let mut admit = classification::fixed_owned_budget(base, live_bytes);
             admit(
-                bonds::coverage_bytes(proposed).div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                bonds::coverage_owned_bytes(proposed)
+                    .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                bonds::coverage_owned_bytes(proposed),
             )?;
             let coverage = proposed.clone();
-            templates[axis_slot] = Some((paths, coverage));
+            templates[axis_slot] = Some((paths, coverage, fits));
         }
-        let (template, coverage) = templates[axis_slot]
+        let (template, coverage, template_fits) = templates[axis_slot]
             .as_ref()
             .expect("current axis template initialized");
         let additional = template
@@ -898,7 +1080,8 @@ pub(crate) fn plan(
                 )
             })?;
         let layer_bytes = bonds::path_bytes(template)
-            .checked_add(bonds::coverage_bytes(coverage))
+            .checked_add(bonds::coverage_owned_bytes(coverage))
+            .and_then(|bytes| bytes.checked_add(bonds::skin_command_fit_bytes(template_fits)))
             .and_then(|bytes| bytes.checked_add(rib_bytes))
             .ok_or_else(|| {
                 error(
@@ -917,7 +1100,11 @@ pub(crate) fn plan(
         let template_bytes = templates
             .iter()
             .flatten()
-            .map(|(paths, coverage)| bonds::path_bytes(paths) + bonds::coverage_bytes(coverage))
+            .map(|(paths, coverage, fits)| {
+                bonds::path_bytes(paths)
+                    + bonds::coverage_owned_bytes(coverage)
+                    + bonds::skin_command_fit_bytes(fits)
+            })
             .sum::<usize>();
         if retained_plan_bytes
             .checked_add(template_bytes)
@@ -929,6 +1116,20 @@ pub(crate) fn plan(
                 "live plan output clones and interface metadata exceed the existing manufacturing byte budget",
             ));
         }
+        let live_outside = skin_external_owned_bytes(
+            wall_static_bytes,
+            retained_plan_bytes,
+            retained_wall_bytes,
+            wall_cache.len(),
+            wall_index_entry_bytes,
+            resolution_allocated_bytes,
+            &templates,
+        )?;
+        neighborhoods.admit_retained(
+            retained_points,
+            geometry_bytes(&[live_outside, classified_owned_bytes])?,
+            cancel,
+        )?;
         segments = segments
             .checked_add(additional)
             .filter(|n| *n <= MAX_DEPOSITION_SEGMENTS as usize)
@@ -944,16 +1145,25 @@ pub(crate) fn plan(
             paths.push(DepositionPath {
                 kind: path.kind,
                 owner: path.owner,
-                bead_width_mm: path.bead_width_mm,
+                width: path.width.clone(),
                 physical_z_mm: [elevation.lower_z, z],
                 points_mm: path.points_mm.iter().map(|p| [p[0], p[1], z]).collect(),
             });
         }
         let mut coverage = coverage.clone();
+        let mut skin_command_fits = template_fits.clone();
+        for domain in &mut skin_command_fits {
+            for fit in &mut domain.fits {
+                for point in fit.required_mm.iter_mut().chain(fit.fitted_mm.iter_mut()) {
+                    point[2] = z;
+                }
+            }
+        }
         coverage.source_section_area_mm2 = sections[current].source_area_mm2;
         coverage.surface_added_area_mm2 =
             coverage.section_area_mm2 - coverage.source_section_area_mm2;
         layers.push(PrintLayer {
+            skin_command_fits,
             index,
             z_mm: z,
             lower_z_mm: elevation.lower_z,
@@ -963,6 +1173,7 @@ pub(crate) fn plan(
             region_coverage: coverage,
         });
     }
+
     drop(classified);
     drop(wall_layout);
     drop(templates);
@@ -988,27 +1199,59 @@ pub(crate) fn plan(
     // rebuild within it, but cannot silently increase retained support staging.
     neighborhoods.freeze_retained_capacity();
     let support_native_points = skin_retained_points(retained_points, &neighborhoods, &[])?;
+    // Surface-only captures/templates/classification are gone. Support owns the
+    // changing layer buffers, so its callback reports those separately.
+    let support_static_bytes = geometry_bytes(&[
+        native::output_bytes(&sections, &Vec::new(), retained_section_bytes),
+        retained_support_native_bytes,
+        schedule.capacity() * std::mem::size_of::<LayerElevation>(),
+        wall_layouts.capacity() * std::mem::size_of::<Option<Arc<walls::WallPlan>>>(),
+        layers.capacity() * std::mem::size_of::<PrintLayer>(),
+    ])?;
+    let support_outside_bytes = skin_external_owned_bytes(
+        support_static_bytes,
+        0,
+        retained_wall_bytes,
+        wall_cache.len(),
+        wall_index_entry_bytes,
+        resolution_allocated_bytes,
+        &[None, None],
+    )?;
+    let support_native_owned_bytes =
+        skin_retained_bytes(support_outside_bytes, &neighborhoods, &[])?;
+
     support::realize(
         &mut layers,
         &support::SupportInput {
             sections: &sections,
             schedule: &schedule,
             native_points: support_native_points,
+            native_owned_bytes: support_native_owned_bytes,
             recipe,
         },
         &mut segments,
         cancel,
         &mut admission.geometry_work,
-        |index, axis, segments, retained_support_points, recovery| {
+        |index,
+         axis,
+         segments,
+         retained_support_points,
+         retained_support_bytes,
+         anchor_owned_bytes,
+         recovery| {
             let live_retained_points = retained_points
                 .checked_add(retained_support_points)
-                .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
                         "support raster retained point limit exceeded",
                     )
                 })?;
+            let outside_owned_bytes =
+                geometry_bytes(&[support_outside_bytes, retained_support_bytes])?;
+            let mut live_owned_bytes = geometry_bytes(&[outside_owned_bytes, anchor_owned_bytes])?;
+            let anchor_capacity = std::cell::Cell::new(anchor_owned_bytes);
             let elevation = &schedule[index];
             let current = span_at(&sections, index as u32);
             let below = physical_neighbor(
@@ -1021,28 +1264,37 @@ pub(crate) fn plan(
             let above =
                 physical_neighbor(&schedule, index as u32, recipe.top_skin_thickness_mm, true)
                     .map(|i| span_at(&sections, i));
-            let lower = neighborhoods.survival(current, below, live_retained_points, cancel)?;
+            let lower = neighborhoods.survival(
+                current,
+                below,
+                live_retained_points,
+                live_owned_bytes,
+                cancel,
+            )?;
             let upper = neighborhoods.survival(
                 current,
                 above,
                 skin_query_retained_points(live_retained_points, &[&lower])?,
+                skin_query_retained_bytes(live_owned_bytes, &[&lower])?,
                 cancel,
             )?;
             let wall = Arc::clone(
-                wall_layouts[current]
+                wall_layouts[index]
                     .as_ref()
-                    .expect("D span erosion already admitted"),
+                    .expect("physical-height wall construction already admitted"),
             );
-            let classified = classification::ClassifiedRegions::new(
+            let mut classified = classification::ClassifiedRegions::new(
                 wall,
                 &lower,
                 &upper,
-                |scratch| {
+                |scratch, scratch_bytes| {
                     admit_skin_scratch(
                         live_retained_points,
+                        live_owned_bytes,
                         &mut neighborhoods,
                         &[&lower, &upper],
                         scratch,
+                        scratch_bytes,
                         cancel,
                     )
                 },
@@ -1052,14 +1304,14 @@ pub(crate) fn plan(
             .with_process(
                 &sections[current].process_domains,
                 recipe,
-                classification::fixed_point_budget(skin_retained_points(
-                    live_retained_points,
-                    &neighborhoods,
-                    &[&lower, &upper],
-                )?),
+                classification::fixed_owned_budget(
+                    skin_retained_points(live_retained_points, &neighborhoods, &[&lower, &upper])?,
+                    skin_retained_bytes(live_owned_bytes, &neighborhoods, &[&lower, &upper])?,
+                ),
                 neighborhoods.work_mut(),
                 cancel,
             )?;
+            let classified_bytes = classified.retained_bytes();
             let hatch_layer = region::HatchLayer {
                 z: elevation.z,
                 lower_z: elevation.lower_z,
@@ -1070,58 +1322,101 @@ pub(crate) fn plan(
             };
             let recovering_components = recovery.is_some();
             let mut skin_bridge_domains = Vec::new();
+            let mut skin_command_fits = Vec::new();
             let paths = if let Some(anchors) = recovery {
                 let query_points = skin_query_retained_points(0, &[&lower, &upper])?;
+                let query_owned_bytes = skin_query_retained_bytes(0, &[&lower, &upper])?;
                 let mut check_component =
-                    |candidate: &mut support::RasterCandidate, axis, scratch: usize| {
+                    |candidate: &mut support::RasterCandidate,
+                     axis,
+                     scratch: usize,
+                     scratch_owned_bytes: usize| {
                         let live = scratch.checked_add(query_points).ok_or_else(|| {
                             error(
                                 ManufacturingErrorCode::ResourceLimit,
                                 "component and query scratch overflow",
                             )
                         })?;
-                        anchors(candidate, axis, live)
+                        let receipt = anchors(
+                            candidate,
+                            axis,
+                            live,
+                            geometry_bytes(&[scratch_owned_bytes, query_owned_bytes])?,
+                        )?;
+                        anchor_capacity.set(receipt.workspace_bytes);
+                        Ok(receipt)
                     };
                 classified.paths_with_bridge_recovery(
                     &hatch_layer,
                     &sections[current].process_domains,
+                    classified_bytes,
+                    anchor_owned_bytes,
                     segments,
-                    |scratch, work| {
+                    |scratch, scratch_bytes, work| {
                         boolean::charge(neighborhoods.work_mut(), work)?;
                         admit_skin_scratch(
                             live_retained_points,
+                            outside_owned_bytes,
                             &mut neighborhoods,
                             &[&lower, &upper],
                             scratch,
+                            scratch_bytes,
                             cancel,
                         )
                     },
                     &mut check_component,
                     &mut skin_bridge_domains,
+                    &mut skin_command_fits,
                     cancel,
                 )?
             } else {
-                classified
-                    .paths(
-                        elevation.z,
-                        elevation.lower_z,
-                        axis,
-                        region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
-                        recipe,
-                        segments,
-                        cancel,
-                    )?
-                    .0
+                let (paths, _, fits) = classified.paths(
+                    elevation.z,
+                    elevation.lower_z,
+                    axis,
+                    region::HatchAxis::for_policy(recipe.top_skin_axis, index as u32),
+                    recipe,
+                    classified_bytes,
+                    &sections[current].process_domains,
+                    segments,
+                    |scratch, scratch_bytes, work| {
+                        boolean::charge(neighborhoods.work_mut(), work)?;
+                        admit_skin_scratch(
+                            live_retained_points,
+                            live_owned_bytes,
+                            &mut neighborhoods,
+                            &[&lower, &upper],
+                            scratch,
+                            scratch_bytes,
+                            cancel,
+                        )
+                    },
+                    cancel,
+                )?;
+                skin_command_fits = fits;
+                paths
             };
+            // Recovery scratch carries the whole workspace receipt once.
+            // Refresh its capacity before cloning interface metadata below.
+            live_owned_bytes = geometry_bytes(&[outside_owned_bytes, anchor_capacity.get()])?;
             let base =
                 skin_retained_points(live_retained_points, &neighborhoods, &[&lower, &upper])?
                     + classified.retained_points()
                     + paths.iter().map(|p| p.points_mm.capacity()).sum::<usize>()
-                    + bonds::skin_bridge_points(&skin_bridge_domains);
-            let mut admit = classification::fixed_point_budget(base);
+                    + bonds::skin_bridge_points(&skin_bridge_domains)
+                    + bonds::skin_command_fit_points(&skin_command_fits);
+            let live_bytes = geometry_bytes(&[
+                skin_retained_bytes(live_owned_bytes, &neighborhoods, &[&lower, &upper])?,
+                classified_bytes,
+                bonds::path_bytes(&paths),
+                bonds::skin_bridge_bytes(&skin_bridge_domains),
+                bonds::skin_command_fit_bytes(&skin_command_fits),
+            ])?;
+            let mut admit = classification::fixed_owned_budget(base, live_bytes);
             admit(
-                bonds::interface_bytes(&classified.coverage.process_interfaces)
+                bonds::interface_owned_bytes(&classified.coverage.process_interfaces)
                     .div_ceil(std::mem::size_of::<geo::Coord<f64>>()),
+                bonds::interface_owned_bytes(&classified.coverage.process_interfaces),
             )?;
             let process_interfaces = classified.coverage.process_interfaces.clone();
             let whole_rows = if recovering_components {
@@ -1129,10 +1424,24 @@ pub(crate) fn plan(
                 // Global row extension must not re-enter the selected band.
                 Vec::new()
             } else {
-                classified.whole_rows(&paths, &hatch_layer, segments, cancel)?
+                let outside_rows_bytes = geometry_bytes(&[
+                    live_bytes,
+                    bonds::interface_owned_bytes(&process_interfaces),
+                ])?;
+                let outside_rows_units = base
+                    + bonds::interface_owned_bytes(&process_interfaces)
+                        .div_ceil(std::mem::size_of::<geo::Coord<f64>>());
+                classified.whole_rows(
+                    &paths,
+                    &hatch_layer,
+                    segments,
+                    cancel,
+                    classification::fixed_owned_budget(outside_rows_units, outside_rows_bytes),
+                )?
             };
             Ok(support::RasterCandidate {
                 skin_bridge_domains,
+                skin_command_fits,
                 paths,
                 whole_rows,
                 process_interfaces,
@@ -1154,15 +1463,22 @@ pub(crate) fn plan(
                 cancel,
             )
         },
-        |index, candidate, segments, work| {
+        |index, candidate, segments, work, outside_owned_bytes| {
             let current = span_at(&sections, index as u32);
             let base = support_native_points
                 + bonds::skin_bridge_points(&candidate.skin_bridge_domains)
+                + bonds::skin_command_fit_points(&candidate.skin_command_fits)
                 + candidate
                     .paths
                     .iter()
                     .map(|p| p.points_mm.capacity())
                     .sum::<usize>();
+            let candidate_owned_bytes = geometry_bytes(&[
+                bonds::path_bytes(&candidate.paths),
+                bonds::path_bytes(&candidate.whole_rows),
+                bonds::skin_bridge_bytes(&candidate.skin_bridge_domains),
+                bonds::skin_command_fit_bytes(&candidate.skin_command_fits),
+            ])?;
             bonds::construct(
                 &mut candidate.process_interfaces,
                 &sections[current].process_domains,
@@ -1171,20 +1487,29 @@ pub(crate) fn plan(
                 schedule[index].lower_z,
                 recipe,
                 segments,
-                classification::fixed_point_budget(base),
+                classification::fixed_point_budget(
+                    base,
+                    geometry_bytes(&[outside_owned_bytes, candidate_owned_bytes])?,
+                ),
                 work,
                 cancel,
             )
         },
     )?;
+
     let coordinate_scratch = skin_retained_points(retained_points, &neighborhoods, &[])?;
+    let coordinate_owned_bytes = skin_retained_bytes(
+        geometry_bytes(&[support_outside_bytes, layer_payload_bytes(&layers)?])?,
+        &neighborhoods,
+        &[],
+    )?;
     zones::diaphragm::construct_coordinates(
         &mut layers,
-        classification::fixed_point_budget(coordinate_scratch),
+        classification::fixed_point_budget(coordinate_scratch, coordinate_owned_bytes),
         neighborhoods.work_mut(),
         cancel,
     )?;
-    support::object_volumes(&mut layers, recipe);
+    support::object_volumes(&mut layers, recipe)?;
     for layer in &mut layers {
         bonds::refresh_witness_kinds(layer)?;
     }
@@ -1260,6 +1585,7 @@ pub(crate) fn plan(
         layer_quantization_mm: LAYER_QUANTIZATION_MM,
     };
     result.validate(input.intent)?;
+
     combined::combine(
         &mut result,
         input.intent,
@@ -1268,6 +1594,7 @@ pub(crate) fn plan(
         &wall_layouts,
         &mut neighborhoods,
         retained_points,
+        support_outside_bytes,
         &mut admission.geometry_work,
         retained_support_native_bytes.saturating_add(native::output_bytes(
             &sections,
@@ -1281,6 +1608,7 @@ pub(crate) fn plan(
     result.validate(input.intent)?;
     drop(native_coverage.material_proof);
     drop(prepared_sources);
+
     Ok(result)
 }
 
@@ -2002,11 +2330,11 @@ fn skin_query_retained_points(
         .try_fold(retained_points, |points, material| {
             points
                 .checked_add(material.temporary_points())
-                .filter(|points| *points <= MAX_DEPOSITION_SEGMENTS as usize)
+                .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
                 .ok_or_else(|| {
                     error(
                         ManufacturingErrorCode::ResourceLimit,
-                        "retained skin query point budget exceeded",
+                        "retained skin query coordinate-unit budget exceeded",
                     )
                 })
         })
@@ -2019,14 +2347,132 @@ fn skin_retained_points(
 ) -> Result<usize, ManufacturingError> {
     let retained = retained_points
         .checked_add(neighborhoods.retained_points())
-        .filter(|points| *points <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|points| *points <= MAX_RETAINED_GEOMETRY_UNITS)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
-                "retained skin cache point budget exceeded",
+                "retained skin cache coordinate-unit budget exceeded",
             )
         })?;
     skin_query_retained_points(retained, materials)
+}
+
+/// Exact known outside ownership. Borrowed leaves/cache handles contribute no
+/// extra payload here; the neighborhood admits its own cache separately.
+fn skin_query_retained_bytes(
+    owned_bytes: usize,
+    materials: &[&neighborhood::Material<'_>],
+) -> Result<usize, ManufacturingError> {
+    materials.iter().try_fold(owned_bytes, |bytes, material| {
+        bytes
+            .checked_add(material.temporary_bytes())
+            .filter(|bytes| *bytes as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "retained skin query allocated-byte budget exceeded",
+                )
+            })
+    })
+}
+
+fn skin_retained_bytes(
+    owned_bytes: usize,
+    neighborhoods: &SkinNeighborhoods<'_>,
+    materials: &[&neighborhood::Material<'_>],
+) -> Result<usize, ManufacturingError> {
+    let bytes = owned_bytes
+        .checked_add(neighborhoods.retained_bytes())
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "skin retained byte overflow",
+            )
+        })?;
+    skin_query_retained_bytes(bytes, materials)
+}
+
+fn skin_external_owned_bytes(
+    static_bytes: usize,
+    plan_bytes: usize,
+    wall_bytes: usize,
+    cache_len: usize,
+    cache_entry_bytes: usize,
+    resolution_bytes: usize,
+    templates: &[Option<(
+        Vec<DepositionPath>,
+        PlanarRegionCoverage,
+        Vec<SkinCommandFitDomain>,
+    )>; 2],
+) -> Result<usize, ManufacturingError> {
+    let index_bytes = cache_len.checked_mul(cache_entry_bytes).ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "wall index byte overflow",
+        )
+    })?;
+    let mut bytes = [
+        static_bytes,
+        plan_bytes,
+        wall_bytes,
+        index_bytes,
+        resolution_bytes,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, part| total.checked_add(part))
+    .ok_or_else(|| {
+        error(
+            ManufacturingErrorCode::ResourceLimit,
+            "skin outside byte overflow",
+        )
+    })?;
+    for (paths, coverage, fits) in templates.iter().flatten() {
+        bytes = bytes
+            .checked_add(bonds::path_bytes(paths))
+            .and_then(|b| b.checked_add(bonds::coverage_owned_bytes(coverage)))
+            .and_then(|b| b.checked_add(bonds::skin_command_fit_bytes(fits)))
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "skin template byte overflow",
+                )
+            })?;
+    }
+    if bytes as u64 > MAX_MANUFACTURING_RETAINED_BYTES {
+        return Err(error(
+            ManufacturingErrorCode::ResourceLimit,
+            "skin outside retained-byte budget exceeded",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn geometry_bytes(parts: &[usize]) -> Result<usize, ManufacturingError> {
+    let bytes = parts
+        .iter()
+        .try_fold(0usize, |total, part| total.checked_add(*part))
+        .filter(|bytes| *bytes as u64 <= MAX_MANUFACTURING_RETAINED_BYTES)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "owned geometry byte allowance exceeded",
+            )
+        })?;
+    Ok(bytes)
+}
+
+fn layer_payload_bytes(layers: &[PrintLayer]) -> Result<usize, ManufacturingError> {
+    // The stable PrintLayer Vec allocation belongs to the fixed outside pool.
+    let mut bytes = 0usize;
+    for layer in layers {
+        bytes = geometry_bytes(&[
+            bytes,
+            bonds::path_bytes(&layer.paths),
+            bonds::coverage_owned_bytes(&layer.region_coverage),
+            bonds::skin_command_fit_bytes(&layer.skin_command_fits),
+        ])?;
+    }
+    Ok(bytes)
 }
 
 pub(super) fn rotate(pose: &RigidPoseMm, p: [f64; 3]) -> [f64; 3] {
@@ -2174,19 +2620,29 @@ fn required_material<'a>(
 /// cached ranges and all concurrently live source/query/support geometry.
 fn admit_skin_scratch(
     retained: usize,
+    owned_bytes: usize,
     neighborhoods: &mut neighborhood::SkinNeighborhoods<'_>,
     queries: &[&neighborhood::Material<'_>],
     scratch: usize,
+    scratch_owned_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {
     let external = skin_query_retained_points(retained, queries)?
         .checked_add(scratch)
-        .filter(|total| *total <= MAX_DEPOSITION_SEGMENTS as usize)
+        .filter(|total| *total <= MAX_RETAINED_GEOMETRY_UNITS)
         .ok_or_else(|| {
             error(
                 ManufacturingErrorCode::ResourceLimit,
-                "classified external geometry point limit exceeded",
+                "classified external coordinate-unit budget exceeded",
             )
         })?;
-    neighborhoods.admit_retained(external, cancel)
+    let external_bytes = skin_query_retained_bytes(owned_bytes, queries)?
+        .checked_add(scratch_owned_bytes)
+        .ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "classified external byte overflow",
+            )
+        })?;
+    neighborhoods.admit_retained(external, external_bytes, cancel)
 }

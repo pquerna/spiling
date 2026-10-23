@@ -76,6 +76,7 @@ export interface ManufacturingController extends ManufacturingReviewState {
   selectSoftwareIntent(): void;
   editScalar(key: ScalarField, value: string): void;
   editPolicyScalar(key: string, value: string): void;
+  editWidthLimit(bound: "minimum" | "maximum", value: string): void;
   editSeamPolicy(value: SeamPolicy["kind"]): void;
   editSparseInfill(kind: "fine" | "combine_eligible", maxHeight: string): void;
   editPreferredDirection(axis: 0 | 1, value: string): void;
@@ -353,6 +354,11 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     setFailure(null);
     setMessage("");
     setDraft(previous => previous ? { ...previous, policyValues: { ...previous.policyValues, [key]: value } } : null);
+  }
+  function editWidthLimit(bound: "minimum" | "maximum", value: string) {
+    setFailure(null);
+    setMessage("");
+    setDraft(previous => previous ? { ...previous, widthLimits: { ...previous.widthLimits, [bound]: value } } : null);
   }
   function editSparseInfill(kind: "fine" | "combine_eligible", maxHeight: string) {
     setFailure(null);
@@ -723,6 +729,7 @@ export function useManufacturing(host: ManufacturingHost): ManufacturingControll
     selectSoftwareIntent,
     editScalar,
     editPolicyScalar,
+    editWidthLimit,
     editSeamPolicy,
     editSparseInfill,
     editPreferredDirection,

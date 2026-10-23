@@ -21,13 +21,46 @@ pub(super) fn interface_bytes(interfaces: &Vec<ProcessInterfaceCoverage>) -> usi
             .sum::<usize>()
 }
 
-pub(super) fn skin_bridge_points(domains: &Vec<SkinBridgeDomain>) -> usize {
-    (domains.capacity() * std::mem::size_of::<SkinBridgeDomain>()
+/// Construction reserves all future endpoint bonds; outside-owner receipts
+/// count only endpoint slots that are already allocated.
+fn unallocated_endpoint_bytes(interfaces: &[ProcessInterfaceCoverage]) -> usize {
+    interfaces
+        .iter()
+        .map(|i| {
+            i.centerlines_mm
+                .len()
+                .saturating_sub(i.endpoint_bonds.capacity())
+                * std::mem::size_of::<[ProcessEndpointBond; 2]>()
+        })
+        .sum()
+}
+
+pub(super) fn interface_owned_bytes(interfaces: &Vec<ProcessInterfaceCoverage>) -> usize {
+    interface_bytes(interfaces) - unallocated_endpoint_bytes(interfaces)
+}
+
+pub(super) fn skin_bridge_bytes(domains: &Vec<SkinBridgeDomain>) -> usize {
+    domains.capacity() * std::mem::size_of::<SkinBridgeDomain>()
         + domains
             .iter()
             .map(SkinBridgeDomain::allocated_bytes)
-            .sum::<usize>())
-    .div_ceil(std::mem::size_of::<geo::Coord<f64>>())
+            .sum::<usize>()
+}
+
+pub(super) fn skin_bridge_points(domains: &Vec<SkinBridgeDomain>) -> usize {
+    skin_bridge_bytes(domains).div_ceil(std::mem::size_of::<geo::Coord<f64>>())
+}
+
+pub(super) fn skin_command_fit_bytes(domains: &Vec<SkinCommandFitDomain>) -> usize {
+    domains.capacity() * std::mem::size_of::<SkinCommandFitDomain>()
+        + domains
+            .iter()
+            .map(SkinCommandFitDomain::allocated_bytes)
+            .sum::<usize>()
+}
+
+pub(super) fn skin_command_fit_points(domains: &Vec<SkinCommandFitDomain>) -> usize {
+    skin_command_fit_bytes(domains).div_ceil(std::mem::size_of::<geo::Coord<f64>>())
 }
 
 pub(super) fn coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
@@ -58,11 +91,23 @@ pub(super) fn coverage_bytes(coverage: &PlanarRegionCoverage) -> usize {
             .sum::<usize>()
 }
 
+pub(super) fn coverage_owned_bytes(coverage: &PlanarRegionCoverage) -> usize {
+    coverage_bytes(coverage) - unallocated_endpoint_bytes(&coverage.process_interfaces)
+}
+
 pub(super) fn path_bytes(paths: &Vec<DepositionPath>) -> usize {
     paths.capacity() * std::mem::size_of::<DepositionPath>()
         + paths
             .iter()
-            .map(|p| p.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
+            .map(|p| {
+                p.points_mm.capacity() * std::mem::size_of::<[f64; 3]>()
+                    + match &p.width {
+                        WidthProfile::Constant { .. } => 0,
+                        WidthProfile::PerEdge { widths_mm } => {
+                            widths_mm.capacity() * std::mem::size_of::<f64>()
+                        }
+                    }
+            })
             .sum::<usize>()
 }
 
@@ -125,13 +170,13 @@ pub(super) fn construct(
             walls.clear();
             skins.clear();
             for (index, path) in paths.iter().enumerate() {
-                if path.kind != DepositionKind::Perimeter
+                if path.owner != Some(DepositionOwner::Wall)
                     && path.owner.and_then(DepositionOwner::skin_kind).is_none()
                 {
                     continue;
                 }
                 if domains.len() == 1 || owned_path(path, &domain.material, work, cancel)? {
-                    if path.kind == DepositionKind::Perimeter {
+                    if path.owner == Some(DepositionOwner::Wall) {
                         walls.push(index);
                     } else {
                         skins.push(index);
@@ -208,7 +253,7 @@ pub(super) fn construct(
                         point,
                         path.points_mm[1 - end],
                         ends,
-                        (path.bead_width_mm + recipe.bead_width_mm) * 0.5,
+                        (region::constant_width(path)? + recipe.bead_width_mm) * 0.5,
                     )? {
                         path.points_mm[end] = bonded;
                     }
@@ -220,7 +265,9 @@ pub(super) fn construct(
                 .ok_or_else(|| resource("separator segment budget exceeded"))?;
             paths.push(DepositionPath {
                 kind: DepositionKind::SeparatorWall,
-                bead_width_mm: recipe.bead_width_mm,
+                width: WidthProfile::Constant {
+                    width_mm: recipe.bead_width_mm,
+                },
                 physical_z_mm: [lower_z, z],
                 owner: None,
                 points_mm: Vec::from(ends),
@@ -241,14 +288,15 @@ fn terminal(
     cancel: &AtomicBool,
 ) -> Result<Option<([f64; 3], ProcessEndpointBond)>, ManufacturingError> {
     for &index in walls {
-        for edge in paths[index].points_mm.windows(2) {
+        for local in paths[index].checked_edges()? {
+            let edge = local.points_mm;
             check_cancel(cancel)?;
             boolean::charge(work, 1)?;
             if let Some(point) = support::inward_bond_endpoint(
                 endpoint,
                 other,
                 [edge[0], edge[1]],
-                (width + paths[index].bead_width_mm) * 0.5,
+                (width + local.width_mm) * 0.5,
             )? {
                 return Ok(Some((
                     point,
@@ -271,20 +319,21 @@ fn terminal(
             endpoint,
             other,
             stroke,
-            (width + skin.bead_width_mm) * 0.5,
+            (width + region::constant_width(skin)?) * 0.5,
         )?
         else {
             continue;
         };
         for &wall in walls {
-            for edge in paths[wall].points_mm.windows(2) {
+            for local in paths[wall].checked_edges()? {
+                let edge = local.points_mm;
                 for &skin_end in &stroke {
                     check_cancel(cancel)?;
                     boolean::charge(work, 1)?;
                     if support::endpoint_bond(
                         skin_end,
                         [edge[0], edge[1]],
-                        (skin.bead_width_mm + paths[wall].bead_width_mm) * 0.5,
+                        (region::constant_width(skin)? + local.width_mm) * 0.5,
                     )? {
                         return Ok(Some((point,ProcessEndpointBond::Skin{
                             skin_kind:skin.owner.and_then(DepositionOwner::skin_kind).ok_or_else(||invalid("surrounding stroke lost immutable mandatory-skin ownership"))?,
