@@ -212,11 +212,11 @@ Installed CEF Debian layout resolves the sidecar from the installation-prefix `b
 other packages resolve it adjacent to the actual executable. A debug engine override
 is not an installed-path fallback.
 
-Automatic CI is a lean Linux source/contract/client check; native platform packaging
-is explicitly dispatched. Markdown-only changes do not launch builds. Neither CI
-compilation nor a local smoke establishes installed-platform or physical-machine
-qualification. Full checks remain available; report actual failures, not a pass
-inferred from selected filters.
+Automatic remote CI is disabled for pushes and pull requests. Native platform
+packaging remains available only through explicit workflow dispatch. Run affected
+checks and real-surface smoke locally; full checks are `pnpm check` and `pnpm test`.
+Neither compilation nor a local smoke establishes installed-platform or physical-machine
+qualification. Report actual failures, not a pass inferred from selected filters.
 
 Commit/PR verification notes contain changed behavior, exercised commands, outcomes
 and remaining risks. Detailed logs, screenshots, identities and measurements belong

@@ -164,7 +164,7 @@ Before implementation, identify the owning area, read its applicable existing gu
 
 Verify the changed behavior through the real surface: native engine/CLI operations, packaged desktop integration, geometry corpus, or emitted-program replay as appropriate. Unit tests alone do not establish end-to-end behavior. For documentation-only changes, check scope, consistency, and document references; no application smoke run is implied.
 
-Use tests for consumer-visible invariants: geometry closure/orientation, units, source mappings, approximation bounds, revision ownership, cancellation, recovery, extrusion accounting, and invalid input rejection. Binary interoperability uses cross-language golden fixtures. Generated contracts are checked in and CI rejects drift.
+Use tests for consumer-visible invariants: geometry closure/orientation, units, source mappings, approximation bounds, revision ownership, cancellation, recovery, extrusion accounting, and invalid input rejection. Binary interoperability uses cross-language golden fixtures. Generated contracts are checked in; run `pnpm contracts --check` locally to reject drift. Automatic remote CI is disabled; native packaging remains opt-in. Local verification requirements still apply.
 
 Distinguish deterministic normalized-plan comparisons from semantic equivalence within declared floating-point tolerances. Exclude nonsemantic timing metadata. Do not promise universal bitwise geometry equality across kernels or platforms.
 
