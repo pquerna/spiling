@@ -55,7 +55,7 @@ Required `rectilinear_axis` and independent `top_skin_axis` each use `"x"`, `"y"
 
 ## Normalized plan
 
-`NormalizedPrintPlan` uses schema11/planner17. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
+`NormalizedPrintPlan` uses schema11/planner18. It contains layers, bounded surface/process resolution, native geometry coverage, explicit `sparse_bands` decisions and positive source-sampling, offset, surface and layer-quantization bounds.
 
 Native sampling and offset construction bounds are each 0.005 mm; finish XY construction has a separate 0.001 mm bound. The explicit recipe `native_shape_error_mm` bounds source-target approximation independently of those construction tolerances. Each mapped image additionally declares its own vertical displacement-error bound.
 
@@ -214,6 +214,17 @@ Producer/kernel versions are checked independently of the authoring input hash;
 changing realization semantics requires a producer cutover, not a compatibility
 interpretation of an older bundle.
 
+Adjacent regular slabs may obtain registered actual-pair authority only for the
+same occurrence, source recipe and pose at their bitwise-identical shared cut.
+Both per-source actual material/void loop buffers are checked independently;
+the candidate union or an invariance declaration cannot substitute for either.
+Globally disjoint two-sided collars cover the complete Jordan forest, with a
+one-turn transverse graph rather than a shared visibility-kernel assumption.
+The union binding ledger consumes bounded geometry/source fingerprints, not
+retained contours. Critical endpoints, coface incidence and whole closed-cut
+obligations remain independent; a refused regular pair grants no authority.
+Pending receipts and temporary scratch share the existing all-live byte bound.
+
 `input_fingerprint(project_id,definitions,occurrences,intent,surface_overlays,process_document)` validates these inputs, sorts definitions/occurrences by identity, then SHA-256 hashes compact UTF-8 Rust serde_json in this field order:
 
 ```text
@@ -240,7 +251,7 @@ An independent verifier decodes command state from emitted bytes, not emitter he
 
 Current Cartesian XYZ admission binds independently parsed coordinates to the checked XYZ6 projection of each captured expected point. Raw-plan half-step tolerance cannot authorize an alternate neighboring lattice point. The explicit `contracts::manufacturing::program_coordinates` module owns this fixed output precision, coordinate-conditioning range and outward decimal/height enclosures; backend serialization and verifier command parsing remain independent. Projection multiplies the binary64 input by `1_000_000`, rounds ties away from zero, divides by `1_000_000` and normalizes signed zero; it is not exact-real decimal rounding of the original input. Accepted absolute coordinates are at most `2^52 / 1_000_000` mm, preserving distinct adjacent parsed micrometre lattice points. Compensated gap subtraction checks every intermediate and its outward result for finiteness. Unrepresentable arithmetic refuses with `program_coordinate_conditioning_failure`, not a widened clearance tolerance.
 
-Current inspection/reopen requires planner17. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
+Current inspection/reopen requires planner18. Input fingerprints bind complete ordered authoring documents, source/pose and explicit printer/recipe policies. Fresh replay independently rechecks actual decoded dimensions, contacts, role/order/flow, Wall and mixed skin ownership, permanent plate extent/attachment and actual lower Bridge/rib anchors; it does not reconstruct transient native source/finish certificates. Project10/manufacturing11/process3/surface3, emitter7/verifier9 and SPLR5 form one consumed cutover without aliases or missing-policy defaults.
 
 Final normalized-plan admission checks ordinary projected axes during its existing coordinate pass. Independent fresh verification separately checks preferred perimeter seam dot/distance/coordinate ordering before matching actual emitted commands. A mutually matching program and plan that ignore either consumed policy do not earn semantic success; stored `verified` metadata remains descriptive.
 

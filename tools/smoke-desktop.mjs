@@ -202,6 +202,9 @@ const manufacturingSource = customManufacturingSource
   : cylindricalFinishScenario
     ? "independent-exporters/occt-cylinder-mm.step"
     : "box-mm.step";
+const ordinaryMechanicalReference =
+  manufacturingSource === "occt-rounded-housing-mm.step" ||
+  manufacturingSource === "occt-ribbed-bracket-mm.step";
 const manufacturingScenario = scenario === "manufacturing" || surfaceFinishScenario;
 if (!executable)
   throw new Error(
@@ -251,7 +254,7 @@ if (scenario === "project-bridge" || manufacturingScenario) {
 }
 if (manufacturingScenario) {
   await copyFile(
-    resolve(processDiaphragm || manufacturingSource === "occt-rounded-housing-mm.step" && !processZones && !combineSparse
+    resolve(processDiaphragm || ordinaryMechanicalReference && !processZones && !combineSparse
       ? "fixtures/manufacturing/housing-ordinary.intent.json"
       : combineSparse ? "fixtures/manufacturing/housing-h1-fine.intent.json"
       : "fixtures/manufacturing/complete-sparse.intent.json"),
@@ -2145,7 +2148,7 @@ async function inspectManufacturing() {
       "Fresh actual replay retains the authored policies",
     );
   if (scenario === "manufacturing" && !manufacturingDiagnostic &&
-      manufacturingSource === "occt-rounded-housing-mm.step" && !combineSparse) {
+      ordinaryMechanicalReference && !combineSparse) {
     const originalIntent = structuredClone(state.selected_intent);
     assert.equal(originalIntent.recipe.bead_width_mm, 0.45);
     assert.equal(originalIntent.printer.deposition_limits.min_bead_width_mm, 0.30);

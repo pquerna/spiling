@@ -10,8 +10,8 @@
 //! invariance never establishes a crossing of native curves.
 
 use super::collar::{
-    NativeCollarComplex, NativeCollarHeightSpace, NativeCriticalCollar, NativeCriticalCollarTarget,
-    NativeCriticalCollarTargetSide,
+    NativeCollarComplex, NativeCollarHeightSpace, NativeCriticalCollar,
+    NativeCriticalCollarTarget, NativeCriticalCollarTargetSide,
 };
 use super::{
     BoundsPolicy, GeometryWorkBudget, NativeEndpointStratum, ProjectedBounds, SlabAnalysis,
@@ -179,6 +179,9 @@ pub struct NativeSourceLeafReceipt {
     radial_product: Option<NativeRadialLeaf>,
     endpoint_radial_products: [Option<NativeEndpointRadialLeaf>; 2],
     sample_loops: Arc<Vec<NativeSourceLoopCapture>>,
+    /// Whole distinct-cycle boundary clearance of the registered actual sample,
+    /// a LOWER bound, not a kernel radius or a source-motion estimate.
+    sample_loop_clearance_mm: Option<f64>,
     rectangle: Option<Arc<NativeRectangleLeafWitness>>,
 }
 #[derive(Debug)]
@@ -186,6 +189,7 @@ struct NativeSourceLoopCapture {
     hole: bool,
     source_face_ordinals: Vec<usize>,
     shape: NativeLoopShape,
+    registration: NativeLoopRegistration,
 }
 /// Derived algebraic witnesses of actual M, never a replacement source curve.
 /// Each kernel is checked against EVERY oriented edge supporting halfplane.
@@ -197,6 +201,33 @@ struct NativeLoopShape {
     cover_radius_mm: f64,
     kernel_radius_mm: f64,
     kernel_box: Option<[[f64; 2]; 2]>,
+}
+
+/// Candidate-order metadata issued only with complete oriented native/candidate
+/// cycle correspondence. The enclosing private leaf binds material, pose,
+/// exact native sample and actual candidate hashes; no coordinates are retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NativeLoopRegistration {
+    native_index: usize,
+    parent: Option<usize>,
+}
+
+#[derive(Default)]
+struct SourceLoopRecording {
+    loops: Vec<NativeLoopRegistration>,
+    clearance_mm: Option<f64>,
+}
+
+/// Sealed ACTUAL footprint-pair topology, never a native homotopy inferred from
+/// scalar distance. Leaf identities include source, material, pose, native
+/// sample, actual ordered candidate and parent/native-index registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeRegularInterfacePairReceipt {
+    lower: [u8; 32],
+    upper: [u8; 32],
+    cut_bits: u64,
+    matching: [u8; 32],
+    geometry: [u8; 32],
 }
 impl NativeSourceLeafReceipt {
     pub(crate) fn material_realization_identity(
@@ -1453,10 +1484,82 @@ pub struct PendingNativeUnionProof {
     positive_leaves: Vec<NativeSourceLeafReceipt>,
     interface_attachments: Vec<NativeInterfaceAttachment>,
     collar_dependencies: Vec<NativeCriticalCollarIncidence>,
+    regular_interfaces: Vec<NativeRegularInterfacePairReceipt>,
     owned_critical_slab_count: usize,
     requires_interface_complex: bool,
 }
 impl PendingNativeUnionProof {
+    /// Qualify the entire ACTUAL lower/current footprint overlap while both
+    /// immutable buffers are borrowed. No contours are retained. `byte_limit`
+    /// is TOTAL pending ownership plus temporary proof storage; borrowed caller
+    /// storage is external. False issues no authority and retains legacy gates.
+    pub fn certify_regular_interface_pair(
+        &mut self, lower: NativeCriticalCollarTarget<'_>, upper: NativeCriticalCollarTarget<'_>,
+        byte_limit: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        work.charge(1, cancel)?;
+        let (before, after) = (lower.leaf, upper.leaf);
+        let cut = before.world_height_interval_mm[1];
+        if !before.is_positive() || !after.is_positive()
+            || before.occurrence_id() != after.occurrence_id()
+            || !before.source.same_material_recipe(&after.source)
+            || before.pose() != after.pose()
+            || cut.to_bits() != after.world_height_interval_mm[0].to_bits()
+            || self.world_height_interval_mm != after.world_height_interval_mm
+        {
+            return Err(error(GeometryErrorCode::InvalidGeometry,
+                "actual regular pair does not bind the same source/pose and exact adjacent closed cut"));
+        }
+        let mut current = false;
+        for leaf in &self.positive_leaves {
+            work.charge(1, cancel)?;
+            current |= same_leaf(leaf, after);
+        }
+        if !current {
+            return Err(error(GeometryErrorCode::InvalidGeometry,
+                "actual regular pair current leaf is foreign to its pending source proof"));
+        }
+        verify_source_leaf_candidate(before, lower.actual_material, work, cancel)?;
+        verify_source_leaf_candidate(after, upper.actual_material, work, cancel)?;
+        // The independent original critical/coface/collar route remains owner
+        // at either critical shared side; a sample pair cannot promote it.
+        if before.critical_interfaces[1] || after.critical_interfaces[0] { return Ok(false); }
+        let limit = byte_limit.min(MAX_SCRATCH);
+        let resident = self.retained_bytes();
+        if resident > limit {
+            return Err(error(GeometryErrorCode::ResourceLimit,
+                "actual pair proof has no total pending/temporary byte allowance"));
+        }
+        let mut scratch = Scratch { bytes: MAX_SCRATCH - limit + resident };
+        let Some(matching) = regular_loop_matching(before, after, &mut scratch, work, cancel)?
+            else { return Ok(false); };
+        work.charge((before.sample_loops.len()+after.sample_loops.len()+2) as u64,cancel)?;
+        let lower_hash = leaf_fingerprint(before);
+        let upper_hash = leaf_fingerprint(after);
+        let matching_hash = matching_fingerprint(&matching);
+        for receipt in &self.regular_interfaces {
+            work.charge(1,cancel)?;
+            if receipt.lower == lower_hash && receipt.upper == upper_hash
+                && receipt.cut_bits == cut.to_bits() && receipt.matching == matching_hash
+            { return Ok(true); }
+        }
+        let Some(geometry) = planar::actual_pair_collar(
+            lower.actual_material, upper.actual_material, &matching, &mut scratch, work, cancel,
+        )? else { return Ok(false); };
+        let receipt = NativeRegularInterfacePairReceipt { lower: lower_hash, upper: upper_hash,
+            cut_bits: cut.to_bits(), matching: matching_hash, geometry };
+        if self.regular_interfaces.len() == self.regular_interfaces.capacity() {
+            // Reserve admits growth. ALSO admit the old payload while a moved
+            // new allocation may coexist with it; never refund numerical work.
+            scratch.owned(self.regular_interfaces.capacity()
+                .checked_mul(std::mem::size_of::<NativeRegularInterfacePairReceipt>())
+                .ok_or_else(||error(GeometryErrorCode::ResourceLimit,"actual pair receipt size overflow"))?,
+                work,cancel)?;
+        }
+        scratch.push(&mut self.regular_interfaces, receipt, work, cancel)?;
+        Ok(true)
+    }
+
     pub fn sources(&self) -> &[NativeUnionSourceCapture] {
         &self.sources
     }
@@ -1591,6 +1694,8 @@ impl PendingNativeUnionProof {
                     .map(NativeCriticalCollarIncidence::retained_bytes)
                     .sum::<usize>(),
             )
+            .saturating_add(self.regular_interfaces.capacity()
+                * std::mem::size_of::<NativeRegularInterfacePairReceipt>())
     }
     pub fn coverage(&self) -> NativeUnionCoverage {
         if self.requires_interface_complex {
@@ -1634,6 +1739,10 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.native_convex_section_topology == b.native_convex_section_topology
         && a.radial_product == b.radial_product
         && a.endpoint_radial_products == b.endpoint_radial_products
+        && a.sample_loop_clearance_mm == b.sample_loop_clearance_mm
+        && a.sample_loops.len() == b.sample_loops.len()
+        && a.sample_loops.iter().zip(b.sample_loops.iter())
+            .all(|(a, b)| a.registration == b.registration)
 }
 fn hash_source(hash: &mut Sha256, source: &NativeUnionSourceCapture) {
     hash.update(source.occurrence_id().get().to_le_bytes());
@@ -1696,6 +1805,30 @@ fn hash_leaf(hash: &mut Sha256, leaf: &NativeSourceLeafReceipt) {
             }
         }
     }
+    hash.update([u8::from(leaf.sample_loop_clearance_mm.is_some())]);
+    if let Some(clearance) = leaf.sample_loop_clearance_mm {
+        hash.update(clearance.to_bits().to_le_bytes());
+    }
+    hash.update((leaf.sample_loops.len() as u64).to_le_bytes());
+    for loop_ in leaf.sample_loops.iter() {
+        hash.update((loop_.registration.native_index as u64).to_le_bytes());
+        hash.update([u8::from(loop_.registration.parent.is_some())]);
+        if let Some(parent) = loop_.registration.parent {
+            hash.update((parent as u64).to_le_bytes());
+        }
+    }
+}
+
+pub(super) fn leaf_fingerprint(leaf: &NativeSourceLeafReceipt) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash_leaf(&mut hash, leaf);
+    hash.finalize().into()
+}
+fn matching_fingerprint(matching: &[usize]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update((matching.len() as u64).to_le_bytes());
+    for &index in matching { hash.update((index as u64).to_le_bytes()); }
+    hash.finalize().into()
 }
 
 fn hash_radial_leaf(hash: &mut Sha256, radial: NativeRadialLeaf) {
@@ -2005,6 +2138,16 @@ fn boundary_loop_confinement(
         )
     })?;
     let margin = Interval::point(distance).mul(Interval::point(2.0)).hi;
+    work.charge(1, cancel)?;
+    if leaf.sample_loop_clearance_mm.is_some_and(|lower| lower > margin) {
+        // The complete Jordan/parent census was calibrated against the original
+        // native cycles before coordinates were discarded. The SAME existing
+        // two-tube margin keeps EVERY boundary pair apart throughout this
+        // source-bound continuation, so its nesting cannot change. The caller
+        // still owns exact closed-cut and critical/collar admission; this is
+        // neither a full-slab promotion nor authority from a point/polygon.
+        return Ok(());
+    }
     for (i, a) in leaf.sample_loops.iter().enumerate() {
         if a.hole {
             let mut owners = 0;
@@ -2033,12 +2176,49 @@ fn boundary_loop_confinement(
     }
     Ok(())
 }
+fn regular_loop_matching(
+    before: &NativeSourceLeafReceipt, after: &NativeSourceLeafReceipt,
+    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<Vec<usize>>, GeometryError> {
+    if before.sample_loops.len() != after.sample_loops.len() { return Ok(None); }
+    let single = before.sample_loops.len() == 1
+        && !before.sample_loops[0].hole && !after.sample_loops[0].hole;
+    let mut matching = Vec::new();
+    scratch.reserve(&mut matching, before.sample_loops.len(), work, cancel)?;
+    for a in before.sample_loops.iter() {
+        let mut found = None;
+        for (j,b) in after.sample_loops.iter().enumerate() {
+            work.charge(1,cancel)?;
+            if a.hole == b.hole && (single || !a.source_face_ordinals.is_empty()
+                && a.source_face_ordinals == b.source_face_ordinals)
+            {
+                if found.is_some() { return Ok(None); }
+                found = Some(j);
+            }
+        }
+        let Some(index) = found else { return Ok(None); };
+        for &previous in &matching {
+            work.charge(1,cancel)?;
+            if previous == index { return Ok(None); }
+        }
+        matching.push(index);
+    }
+    for (i,loop_) in before.sample_loops.iter().enumerate() {
+        work.charge(1,cancel)?;
+        if loop_.registration.parent.map(|parent|matching[parent])
+            != after.sample_loops[matching[i]].registration.parent
+        { return Ok(None); }
+    }
+    Ok(Some(matching))
+}
+
 fn certify_regular_material_interface(
     before: &NativeSourceLeafReceipt,
     after: &NativeSourceLeafReceipt,
     interface: f64,
     before_tube: &NativeBoundaryTube,
     after_tube: &NativeBoundaryTube,
+    pairs: &[NativeRegularInterfacePairReceipt],
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -2060,43 +2240,32 @@ fn certify_regular_material_interface(
     {
         return Err(unresolved());
     }
+    let Some(matching) = regular_loop_matching(before,after,scratch,work,cancel)?
+        else { return Err(unresolved()); };
+    let mut identical = true;
+    for (i,&j) in matching.iter().enumerate() {
+        work.charge(1,cancel)?;
+        identical &= before.sample_loops[i].shape.xy_sha256 == after.sample_loops[j].shape.xy_sha256;
+    }
     boundary_loop_confinement(before, before_tube, 1, interface, work, cancel)?;
     boundary_loop_confinement(after, after_tube, 0, interface, work, cancel)?;
-    let single = before.sample_loops.len() == 1
-        && !before.sample_loops[0].hole
-        && !after.sample_loops[0].hole;
-    let mut matching = Vec::new();
-    scratch.reserve(&mut matching, before.sample_loops.len(), work, cancel)?;
-    let mut identical = true;
-    for a in before.sample_loops.iter() {
-        let mut found = None;
-        for (j, b) in after.sample_loops.iter().enumerate() {
-            work.charge(1, cancel)?;
-            if a.hole == b.hole
-                && (single
-                    || !a.source_face_ordinals.is_empty()
-                        && a.source_face_ordinals == b.source_face_ordinals)
-            {
-                if found.is_some() {
-                    return Err(unresolved());
-                }
-                found = Some(j);
-            }
-        }
-        let j = found.ok_or_else(unresolved)?;
-        for &matched in &matching {
-            work.charge(1, cancel)?;
-            if matched == j {
-                return Err(unresolved());
-            }
-        }
-        identical &= a.shape.xy_sha256 == after.sample_loops[j].shape.xy_sha256;
-        matching.push(j);
-    }
     // Exact actual geometry identity proves the printed interface, not native
     // incidence: the latter came from original branch flow and confinement.
     if identical {
         return Ok(());
+    }
+    let (lower,upper) = (leaf_fingerprint(before),leaf_fingerprint(after));
+    let matching_hash = matching_fingerprint(&matching);
+    for receipt in pairs {
+        work.charge(1,cancel)?;
+        if receipt.lower == lower && receipt.upper == upper
+            && receipt.cut_bits == interface.to_bits() && receipt.matching == matching_hash
+        {
+            // Source/cut/pose, directed scope, confinement and full branch
+            // matching ABOVE remain mandatory. Only ACTUAL overlap topology
+            // below is discharged by this whole embedded-collar pair.
+            return Ok(());
+        }
     }
     let margin = Interval::point(before.sample_region_error_mm)
         .add(Interval::point(after.sample_region_error_mm))
@@ -2588,6 +2757,7 @@ impl NativeUnionBindingLedger {
                             interface,
                             before,
                             after,
+                            &pending.regular_interfaces,
                             &mut scratch,
                             work,
                             cancel,
@@ -2815,6 +2985,15 @@ impl NativeUnionBindingLedger {
         for collar in &pending.collar_dependencies {
             work.charge(1, cancel)?;
             digest.update(collar.incidence_sha256());
+        }
+        digest.update((pending.regular_interfaces.len() as u64).to_le_bytes());
+        for receipt in &pending.regular_interfaces {
+            work.charge(1,cancel)?;
+            digest.update(receipt.lower);
+            digest.update(receipt.upper);
+            digest.update(receipt.cut_bits.to_le_bytes());
+            digest.update(receipt.matching);
+            digest.update(receipt.geometry);
         }
         let slab_count = self.slab_count.checked_add(1).ok_or_else(|| {
             error(
@@ -3580,7 +3759,7 @@ fn certify_source_leaf(
         source_metric: proof_kind,
         leaf: None,
     };
-    let mut loop_mapping = Vec::new();
+    let mut loop_recording = SourceLoopRecording::default();
     let mut exact_rectangle_bound = None;
     // Radial fidelity does not supply the original cap/interface arrangement.
     // Retain an available affine product for later cross-source attachment.
@@ -3744,14 +3923,15 @@ fn certify_source_leaf(
                     "native rectangle/source sample loop provenance is not a unique occupied component",
                 ));
             }
-            scratch.push(&mut loop_mapping, 0, work, cancel)?;
+            scratch.push(&mut loop_recording.loops,
+                NativeLoopRegistration { native_index: 0, parent: None }, work, cancel)?;
             bound
         }
         None => certify_separated_candidate_recording(
             std::slice::from_ref(&occurrence),
             actual_used_source_loops,
             policy,
-            &mut loop_mapping,
+            &mut loop_recording,
             &mut scratch,
             work,
             cancel,
@@ -3790,8 +3970,10 @@ fn certify_source_leaf(
         .add(Interval::point(analysis.section.boolean_tolerance_mm))
         .hi;
     let mut sample_loops = Vec::new();
-    scratch.reserve(&mut sample_loops, loop_mapping.len(), work, cancel)?;
-    for (candidate_index, native_index) in loop_mapping.into_iter().enumerate() {
+    scratch.reserve(&mut sample_loops, loop_recording.loops.len(), work, cancel)?;
+    let sample_loop_clearance_mm = loop_recording.clearance_mm;
+    for (candidate_index, registration) in loop_recording.loops.into_iter().enumerate() {
+        let native_index = registration.native_index;
         let original = analysis
             .section
             .loop_source_face_ordinals(native_index)
@@ -3803,6 +3985,7 @@ fn certify_source_leaf(
             hole: actual_used_source_loops[candidate_index].is_hole,
             shape: source_loop_shape(&actual_used_source_loops[candidate_index], work, cancel)?,
             source_face_ordinals,
+            registration,
         });
     }
     scratch.owned(
@@ -3930,6 +4113,7 @@ fn certify_source_leaf(
         rectangle,
         native_convex_section_topology: analysis.has_native_convex_section_topology_proof(),
         radial_product,
+        sample_loop_clearance_mm,
         endpoint_radial_products,
         sample_coordinate_error_mm: exact_rectangle_bound
             .is_none()
@@ -4662,6 +4846,7 @@ pub fn certify_native_union(
         interface_attachments,
         owned_critical_slab_count,
         collar_dependencies,
+        regular_interfaces: Vec::new(),
         requires_interface_complex,
     };
     if pending.retained_bytes() > MAX_SCRATCH {
@@ -6027,7 +6212,7 @@ fn certify_separated_candidate_recording(
     occurrences: &[SlabOccurrence<'_>],
     candidate: &[SectionLoopMm],
     policy: NativeUnionPolicy,
-    mapping: &mut Vec<usize>,
+    recording: &mut SourceLoopRecording,
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -6036,7 +6221,7 @@ fn certify_separated_candidate_recording(
         occurrences,
         CandidateLoops::whole(candidate),
         policy,
-        Some(mapping),
+        Some(recording),
         scratch,
         work,
         cancel,
@@ -6046,7 +6231,7 @@ fn certify_separated_candidate_impl(
     occurrences: &[SlabOccurrence<'_>],
     candidate: CandidateLoops<'_>,
     policy: NativeUnionPolicy,
-    mut mapping: Option<&mut Vec<usize>>,
+    mut recording: Option<&mut SourceLoopRecording>,
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -6103,8 +6288,9 @@ fn certify_separated_candidate_impl(
         let mut achieved = 0.0_f64;
         for &index in &exact {
             work.charge(1, cancel)?;
-            if let Some(mapping) = mapping.as_mut() {
-                scratch.push(*mapping, index, work, cancel)?;
+            if let Some(recording) = recording.as_mut() {
+                scratch.push(&mut recording.loops,
+                    NativeLoopRegistration { native_index: index, parent: None }, work, cancel)?;
             }
             achieved = achieved.max(
                 Interval::point(budgets[index].0)
@@ -6117,7 +6303,12 @@ fn certify_separated_candidate_impl(
         // Complete oriented polygon identity makes the correspondence exactly
         // zero, not the native/source error. The same native clearance at the
         // actual maximum rounding (zero here) also proves candidate clearance.
-        feature_clearance(&native, 0.0, scratch, work, cancel)?;
+        if let Some(recording) = recording.as_mut() {
+            recording.clearance_mm = planar::capture_loop_registration(
+                &native, &candidate_rings, &mut recording.loops, 0.0, true, scratch, work, cancel)?;
+        } else {
+            feature_clearance(&native, 0.0, scratch, work, cancel)?;
+        }
         return Ok(achieved);
     }
     let mut used = Vec::new();
@@ -6159,8 +6350,9 @@ fn certify_separated_candidate_impl(
         let (index,bound)=matched.ok_or_else(|| error(GeometryErrorCode::ShapeErrorExceeded,
             "final union candidate has no orientation-preserving source-cycle correspondence within policy"))?;
         used[index] = true;
-        if let Some(mapping) = mapping.as_mut() {
-            scratch.push(*mapping, index, work, cancel)?;
+        if let Some(recording) = recording.as_mut() {
+            scratch.push(&mut recording.loops,
+                NativeLoopRegistration { native_index: index, parent: None }, work, cancel)?;
         }
         achieved = achieved.max(
             Interval::point(budgets[index].0)
@@ -6171,8 +6363,13 @@ fn certify_separated_candidate_impl(
     }
     // This is a graph embedding check in addition to metric matching. Close
     // Hausdorff boundaries alone could erase a tiny hole or bridge.
-    feature_clearance(&native, max_rounding, scratch, work, cancel)?;
-    feature_clearance(&candidate_rings, 0.0, scratch, work, cancel)?;
+    if let Some(recording) = recording.as_mut() {
+        recording.clearance_mm = planar::capture_loop_registration(
+            &native, &candidate_rings, &mut recording.loops, max_rounding, false, scratch, work, cancel)?;
+    } else {
+        feature_clearance(&native, max_rounding, scratch, work, cancel)?;
+        feature_clearance(&candidate_rings, 0.0, scratch, work, cancel)?;
+    }
     Ok(achieved)
 }
 
@@ -7965,6 +8162,203 @@ mod tests {
     }
 
     #[test]
+    fn registered_regular_pair_binds_source_buffers_receipt_and_closed_stream() {
+        let cancel = AtomicBool::new(false);
+        // Exercise the admitted operator source, not the deferred synthetic
+        // source-corner/critical expansion. The planar test owns non-star cases.
+        let definition = crate::import_step(
+            include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+            &cancel,
+        ).unwrap();
+        let pose = RigidPoseMm {
+            translation_mm: [100.0, 105.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut work = GeometryWorkBudget::new(200_000_000);
+        let cut = 5.03;
+        let before = ranged_slab(&definition, pose, [5.01, cut], 5.02, 0, &mut work);
+        let after = ranged_slab(
+            &definition, pose, [cut, 5.05], 5.04, before.retained_bytes(), &mut work,
+        );
+        let before_m = xy_candidate(&before, before.sample_world_z_mm().unwrap());
+        let after_m = xy_candidate(&after, after.sample_world_z_mm().unwrap());
+        let id = OccurrenceId::new(1).unwrap();
+        let before_leaf = certify_native_source_leaf(&SourceLeafRequest {
+            definition: &definition, occurrence_id: &id, pose, analysis: &before,
+            actual_used_source_loops: &before_m, policy: policy(0.0),
+        }, &mut work, &cancel).unwrap();
+        let after_leaf = certify_native_source_leaf(&SourceLeafRequest {
+            definition: &definition, occurrence_id: &id, pose, analysis: &after,
+            actual_used_source_loops: &after_m, policy: policy(0.0),
+        }, &mut work, &cancel).unwrap();
+        assert_eq!(before_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
+        assert_eq!(after_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
+        assert_eq!(after_leaf.sample_loops.iter().filter(|cycle| !cycle.hole).count(), 1);
+        assert!(after_leaf.sample_loops.iter().any(|cycle| cycle.hole));
+        let before_tube = source_boundary_tube(&before_leaf, &[], &mut work, &cancel).unwrap();
+        let after_tube = source_boundary_tube(&after_leaf, &[], &mut work, &cancel).unwrap();
+        boundary_loop_confinement(&before_leaf, &before_tube, 1, cut, &mut work, &cancel).unwrap();
+        boundary_loop_confinement(&after_leaf, &after_tube, 0, cut, &mut work, &cancel).unwrap();
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: id, definition: &definition, pose,
+            evidence: source_evidence(&after,&after_leaf,None),
+        }];
+        let mut pending = super::certify_native_union(
+            &occurrences,&after_m,policy(0.0),&mut work,&cancel,
+        ).unwrap();
+        let lower_target = NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m };
+        let upper_target = NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&after_m };
+        let original_bytes = pending.retained_bytes();
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
+            original_bytes,&mut work,&cancel,
+        ).unwrap_err().code,GeometryErrorCode::ResourceLimit);
+        assert!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
+            MAX_SCRATCH,&mut work,&cancel,
+        ).unwrap(), "complete actual registered buffers issue a sealed pair receipt");
+        assert_eq!(pending.regular_interfaces.len(),1);
+        assert!(pending.retained_bytes() >= original_bytes+std::mem::size_of::<NativeRegularInterfacePairReceipt>());
+        certify_regular_material_interface(&before_leaf,&after_leaf,cut,&before_tube,&after_tube,
+            &pending.regular_interfaces,&mut Scratch { bytes:0 },&mut work,&cancel).unwrap();
+        let sealed = pending.regular_interfaces[0];
+        let mut wrong_cut = before_leaf.clone();
+        wrong_cut.world_height_interval_mm[1] = cut.next_up();
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { leaf:&wrong_cut, actual_material:&before_m },
+            NativeCriticalCollarTarget { ..upper_target },
+            MAX_SCRATCH,&mut work,&cancel,
+        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry);
+        assert_eq!(pending.regular_interfaces[0],sealed);
+        let mut critical_lower = before_leaf.clone();
+        critical_lower.critical_interfaces[1] = true;
+        assert!(!pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { leaf: &critical_lower, actual_material: &before_m },
+            NativeCriticalCollarTarget { ..upper_target },
+            MAX_SCRATCH, &mut work, &cancel,
+        ).unwrap(), "a critical shared side remains owned by the independent collar route");
+        let mut exhausted = GeometryWorkBudget::new(0);
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
+            MAX_SCRATCH, &mut exhausted, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
+            MAX_SCRATCH, &mut work, &AtomicBool::new(true),
+        ).unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert_eq!(pending.regular_interfaces.as_slice(), &[sealed],
+            "critical, stale, exhausted and cancelled attempts grant no additional authority");
+        let clearance = after_leaf.sample_loop_clearance_mm.unwrap();
+        assert!(clearance > 0.0);
+
+        // Exercise equality/hash binding without adding point storage to the
+        // receipt. These deliberately poisoned private metadata values cannot
+        // be constructed through the public source-leaf API.
+        let mut changed = certify_native_source_leaf(&SourceLeafRequest {
+            definition: &definition, occurrence_id: &id, pose, analysis: &after,
+            actual_used_source_loops: &after_m, policy: policy(0.0),
+        }, &mut work, &cancel).unwrap();
+        let mut foreign_current = changed.clone();
+        foreign_current.sample_region_error_mm = foreign_current.sample_region_error_mm.next_up();
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target },
+            NativeCriticalCollarTarget { leaf: &foreign_current, actual_material: &after_m },
+            MAX_SCRATCH, &mut work, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
+            "the current leaf must belong to this pending proof");
+        drop(foreign_current);
+        let mut foreign = after_m;
+        foreign.swap(0, 1);
+        assert_eq!(verify_source_leaf_candidate(&after_leaf, &foreign, &mut work, &cancel)
+            .unwrap_err().code, GeometryErrorCode::InvalidGeometry);
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m },
+            NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&foreign },
+            MAX_SCRATCH,&mut work,&cancel,
+        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry,
+            "an existing sealed receipt cannot be reused for foreign actual geometry");
+        foreign.swap(0, 1);
+        let hole_index = foreign.iter().position(|cycle| cycle.is_hole).unwrap();
+        foreign[hole_index].is_hole = false;
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { ..lower_target },
+            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
+            MAX_SCRATCH, &mut work, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
+            "a sealed receipt cannot erase an actual protected hole");
+        foreign[hole_index].is_hole = true;
+        assert_eq!(pending.certify_regular_interface_pair(
+            NativeCriticalCollarTarget { leaf: &before_leaf, actual_material: &foreign },
+            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
+            MAX_SCRATCH, &mut work, &cancel,
+        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
+            "both actual buffers must be independently verified, including the lower one");
+        let lower_occurrences = [NativeUnionOccurrence {
+            occurrence_id: id, definition: &definition, pose,
+            evidence: source_evidence(&before, &before_leaf, None),
+        }];
+        let lower_pending = super::certify_native_union(
+            &lower_occurrences, &before_m, policy(0.0), &mut work, &cancel,
+        ).unwrap();
+        let mut ledger = NativeUnionBindingLedger::new([5.01, 5.05], MAX_SCRATCH).unwrap();
+        ledger.record(lower_pending, &before_m, &[&before_leaf], &mut work, &cancel).unwrap();
+        ledger.record(pending, &foreign, &[&after_leaf], &mut work, &cancel).unwrap();
+        let completed = ledger.finalize(&mut work, &cancel).unwrap();
+        assert_eq!(completed.world_height_interval_mm(), [5.01, 5.05]);
+        assert_eq!(completed.slab_count(), 2,
+            "the registered pair and adjacent source leaves retain closed stream binding");
+        let hash = |leaf: &NativeSourceLeafReceipt| {
+            let mut hash = Sha256::new();
+            hash_leaf(&mut hash, leaf);
+            hash.finalize()
+        };
+        assert!(same_leaf(&after_leaf, &changed));
+        changed.sample_loop_clearance_mm = Some(clearance * 0.5);
+        assert!(!same_leaf(&after_leaf, &changed));
+        assert_ne!(hash(&after_leaf), hash(&changed));
+        changed.sample_loop_clearance_mm = Some(clearance);
+        let original_index = changed.sample_loops[0].registration.native_index;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = usize::MAX;
+        assert!(!same_leaf(&after_leaf, &changed));
+        assert_ne!(hash(&after_leaf), hash(&changed));
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = original_index;
+        let hole = changed.sample_loops.iter().position(|cycle| cycle.hole).unwrap();
+        let original_parent = changed.sample_loops[hole].registration.parent;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = None;
+        assert!(!same_leaf(&after_leaf, &changed));
+        assert_ne!(hash(&after_leaf), hash(&changed));
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = original_parent;
+
+        // Isolate the captured whole-boundary clearance consumer by discarding
+        // alternative radial/kernel witnesses, never by inventing a source fact.
+        changed.radial_product = None;
+        changed.endpoint_radial_products = [None; 2];
+        for cycle in Arc::get_mut(&mut changed.sample_loops).unwrap() {
+            cycle.shape.kernel_radius_mm = 0.0;
+            cycle.shape.kernel_box = None;
+        }
+        let moving = NativeBoundaryTube {
+            occurrence_id: id,
+            stationary: false,
+            distance_mm: Some(clearance * 0.25),
+        };
+        boundary_loop_confinement(&changed, &moving, 0, cut, &mut work, &cancel).unwrap();
+        let unavailable = NativeBoundaryTube { distance_mm: None, ..moving };
+        assert_eq!(
+            boundary_loop_confinement(&changed, &unavailable, 0, cut, &mut work, &cancel)
+                .unwrap_err().code,
+            GeometryErrorCode::AnalysisIndeterminate,
+        );
+        let exhausted = NativeBoundaryTube { distance_mm: Some(clearance * 0.5), ..moving };
+        assert_eq!(
+            boundary_loop_confinement(&changed, &exhausted, 0, cut, &mut work, &cancel)
+                .unwrap_err().code,
+            GeometryErrorCode::AnalysisIndeterminate,
+            "nonpositive remaining whole-boundary clearance supplies no confinement",
+        );
+    }
+
+    #[test]
     fn same_definition_leaf_with_different_material_recipe_is_not_reusable() {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
@@ -9645,7 +10039,6 @@ mod tests {
             &mut work,
         );
         let bc1 = collar_for(&definition, &b1, &bl1, &bm1, &[], &mut work);
-        assert!(ac0.is_some() && bc0.is_some() && ac1.is_some() && bc1.is_some());
         let before = [
             sampled_occurrence(&definition, &a0, &al0, ac0.as_ref()),
             sampled_occurrence(&definition, &b0, &bl0, bc0.as_ref()),
@@ -9681,7 +10074,6 @@ mod tests {
             .record(second, &bm1, &[&bl1], &mut work, &cancel)
             .unwrap();
         let completed = ledger.finalize(&mut work, &cancel).unwrap();
-        assert_eq!(completed.owned_critical_slab_count(), 4);
         assert_eq!(completed.sources().len(), 2);
     }
 

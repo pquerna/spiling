@@ -772,6 +772,8 @@ pub(super) fn collect_span(
                 .map_or(&[][..], |stage| stage.positive.as_slice());
             let coexisting = resident_bytes
                 .saturating_add(state.retained_proof_bytes())
+                .saturating_add(frontier.capacity().saturating_mul(std::mem::size_of::<DraftStage>()))
+                .saturating_add(settled.capacity().saturating_mul(std::mem::size_of::<ReadyStage>()))
                 .saturating_add(frontier.iter().fold(0usize, |bytes, stage| {
                     bytes.saturating_add(stage.retained_bytes())
                 }))
@@ -2752,7 +2754,7 @@ fn certify_stage<'a>(
             evidence,
         });
     }
-    spiling_geometry::certify_native_union(
+    let mut pending = spiling_geometry::certify_native_union(
         &captures,
         candidate,
         spiling_geometry::NativeUnionPolicy {
@@ -2769,7 +2771,50 @@ fn certify_stage<'a>(
                 current.index
             ),
         )
-    })
+    })?;
+    drop(captures);
+    // Pending owns its captures. All other current/frontier storage and the
+    // actual candidate still coexist with pair scratch and retained receipts.
+    let pair_byte_limit = coexisting
+        .checked_add(current.retained_bytes())
+        .and_then(|live| live.checked_add(loop_bytes(candidate)))
+        .and_then(|live| spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES.checked_sub(live));
+    for material in current.positive_materials() {
+        let Some(previous) = lower.clone().find(|previous| {
+            previous.leaf.occurrence_id() == material.leaf.occurrence_id()
+                && previous.leaf.world_height_interval_mm()[1].to_bits()
+                    == current.interval[0].to_bits()
+        }) else {
+            continue;
+        };
+        let byte_limit = pair_byte_limit.filter(|limit| *limit > 0).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "actual adjacent native source pair has no retained-byte allowance",
+            )
+        })?;
+        // False grants no authority; the existing ledger still owns every
+        // unmatched regular, critical, coface and whole-closed-cut obligation.
+        pending.certify_regular_interface_pair(
+            spiling_geometry::NativeCriticalCollarTarget {
+                leaf: &previous.leaf,
+                actual_material: &previous.actual,
+            },
+            spiling_geometry::NativeCriticalCollarTarget {
+                leaf: &material.leaf,
+                actual_material: &material.actual,
+            },
+            byte_limit,
+            work,
+            cancel,
+        ).map_err(|failure| {
+            super::native_error(failure, &format!(
+                "actual adjacent native source pair at layer {}, occurrence {}",
+                current.index, material.leaf.occurrence_id().get(),
+            ))
+        })?;
+    }
+    Ok(pending)
 }
 
 /// Final publication gate over actual emitted support capsules. Boolean masks

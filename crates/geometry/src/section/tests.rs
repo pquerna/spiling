@@ -217,6 +217,94 @@ fn unchanged_independent_fitting_section_preserves_taper_and_bore() {
 }
 
 #[test]
+fn unchanged_bracket_periodic_bore_section_preserves_void_and_original_face() {
+    let definition = fixture("independent-exporters/occt-ribbed-bracket-mm.step");
+    let source_mapping = definition.faces.clone();
+    let source_provenance = definition.provenance.clone();
+    let source_geometry =
+        serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(50_000_000);
+    let prepared = prepare_section_source(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut work,
+    )
+    .expect("unchanged original bracket prepares with the standard section limits");
+    let height = 0.9499998642846288;
+    let result = prepared
+        .section_with_byte_limit(
+            PlaneMm {
+                origin_mm: [0.0, 0.0, height],
+                normal: [0.0, 0.0, 1.0],
+            },
+            &cancel,
+            spiling_contracts::geometry::MAX_SECTION_BYTES,
+            &mut work,
+        )
+        .expect("the original periodic bore must close at the actual refused operator plane");
+    assert_canonical(&result);
+    let bore_indices: Vec<_> = (0..result.loops.len())
+        .filter(|&index| {
+            result
+                .loop_source_face_ordinals(index)
+                .is_some_and(|owners| owners.contains(&31))
+        })
+        .collect();
+    assert_eq!(bore_indices.len(), 1, "retain the complete original bore cycle");
+    let bore_index = bore_indices[0];
+    assert_eq!(result.loop_source_face_ordinals(bore_index).unwrap(), &[31]);
+    let bore = &result.loops[bore_index];
+    assert!(bore.is_hole, "the inward original cylinder bounds void, not material");
+    let radius = 1.3;
+    for point in &bore.points_mm {
+        assert!(
+            ((point[0] - 24.0).hypot(point[1] - 11.0) - radius).abs()
+                <= SECTION_PLANE_TOLERANCE_MM
+        );
+        assert!((point[2] - height).abs() <= SECTION_PLANE_TOLERANCE_MM);
+    }
+    let allowance = 2.0 * PI * radius * SECTION_SAMPLING_TOLERANCE_MM
+        + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2);
+    assert!(
+        (signed_area(bore, &result.frame) + PI * radius * radius).abs() <= allowance,
+        "the complete radius-1.3 void retains the declared chord-area enclosure"
+    );
+    // Independent XY ray parity checks the actual consumer polygons, not just
+    // the hole label or the copied original-face inventory.
+    let contains = |boundary: &SectionLoopMm, point: [f64; 2]| {
+        boundary.points_mm.windows(2).fold(false, |inside, edge| {
+            let [a, b] = [edge[0], edge[1]];
+            inside
+                ^ ((a[1] > point[1]) != (b[1] > point[1])
+                    && point[0]
+                        < a[0] + (point[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]))
+        })
+    };
+    assert!(contains(bore, [24.0, 11.0]));
+    let is_material = |point| {
+        result.loops.iter().fold(false, |inside, boundary| {
+            inside ^ contains(boundary, point)
+        })
+    };
+    assert!(!is_material([24.0, 11.0]), "the through-bore center stays void");
+    assert!(is_material([25.4, 11.0]), "the adjacent bracket wall stays material");
+    for index in 0..result.loops.len() {
+        let owners = result.loop_source_face_ordinals(index).unwrap();
+        assert!(!owners.is_empty());
+        assert!(owners.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(owners.iter().all(|owner| *owner < definition.faces().len()));
+    }
+    assert_eq!(definition.faces, source_mapping);
+    assert_eq!(definition.provenance, source_provenance);
+    assert_eq!(
+        serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+        source_geometry,
+    );
+}
+
+#[test]
 fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material() {
     let definition = fixture("independent-exporters/occt-tapered-fitting-mm.step");
     let height = 0.0999999912280684;

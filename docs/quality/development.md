@@ -160,10 +160,11 @@ SPILING_ENGINE_PATH="$ENGINE" node tools/smoke-desktop.mjs \
 
 The manufacturing runner exercises intent/placement/history, Compile, actual-byte
 report/motion, cancellation, export, source-independent reopen and child cleanup.
-`--manufacturing-source RELATIVE_STEP` preserves its selected explicit complete
-intent for a real mechanical input; it never turns refused geometry into success.
-For an ordinary fine housing, use `housing-ordinary.intent.json`: the same0.10 mm
-physical schedule/process with fill and top skin both AlternatingXY. Compile the
+`--manufacturing-source RELATIVE_STEP` selects `housing-ordinary.intent.json`
+for the rounded-housing and ribbed-bracket references; other sources retain the
+runner's explicit complete intent. Refused geometry never becomes success.
+The ordinary reference uses the same0.10 mm physical schedule/process with fill
+and top skin both AlternatingXY. For the housing zone/plate journey, compile the
 uniform0.25 job before authoring whole-owned0.60 and lower source box
 `[-1,-1,-1]..[25,19,5.03]` at0.20. The final `--process-set-box` token
 `horizontal-diaphragm:0.23` explicitly permits the centered0.23 mm permanent

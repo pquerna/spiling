@@ -61,7 +61,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Native adapter dependency version captured in persisted provenance.
 pub const KERNEL_VERSION: &str = "0.4.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "bb7d6000af95e489ed76803bfd1ac5917da446f5";
+pub const KERNEL_REVISION: &str = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
