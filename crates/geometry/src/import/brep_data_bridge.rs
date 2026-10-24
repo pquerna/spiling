@@ -1384,7 +1384,7 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
     }
 }
 
-mod analytic {
+pub(crate) mod analytic {
     use super::*;
     use solidcraft_geom::Vec3 as ScVec3;
 
@@ -1462,7 +1462,7 @@ mod analytic {
         }
     }
 
-    pub(super) fn first_turn([a, z]: [f64; 2]) -> [f64; 2] {
+    pub(crate) fn first_turn([a, z]: [f64; 2]) -> [f64; 2] {
         let shift = (a / TAU).floor() * TAU;
         [a - shift, z - shift]
     }

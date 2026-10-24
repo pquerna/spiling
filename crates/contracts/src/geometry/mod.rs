@@ -282,6 +282,10 @@ impl FaceId {
         }
         Ok(Self(format!("step:{entity}")))
     }
+    /// Construct FaceId from StepEntityId, validating that the entity is nonzero.
+    pub fn from_step_entity_id(id: StepEntityId) -> Result<Self, GeometryError> {
+        Self::from_step_entity(id.get())
+    }
     pub fn parse(value: impl Into<String>) -> Result<Self, GeometryError> {
         let value = value.into();
         let digits = value
@@ -322,6 +326,246 @@ impl<'de> Deserialize<'de> for FaceId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserialize_checked::<D, String, Self>(deserializer)
     }
+}
+
+/// Canonical STEP entity identifier (e.g. `#128` in ISO 10303-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StepEntityId(pub u64);
+
+impl StepEntityId {
+    /// Construct a new StepEntityId.
+    #[inline]
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Retrieve raw integer entity index.
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for StepEntityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "step:{}", self.0)
+    }
+}
+
+impl From<u64> for StepEntityId {
+    #[inline]
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl From<StepEntityId> for u64 {
+    #[inline]
+    fn from(id: StepEntityId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<StepEntityId> for FaceId {
+    type Error = GeometryError;
+    fn try_from(id: StepEntityId) -> Result<Self, Self::Error> {
+        Self::from_step_entity_id(id)
+    }
+}
+
+impl TryFrom<&StepEntityId> for FaceId {
+    type Error = GeometryError;
+    fn try_from(id: &StepEntityId) -> Result<Self, Self::Error> {
+        Self::from_step_entity_id(*id)
+    }
+}
+
+impl TryFrom<&FaceId> for StepEntityId {
+    type Error = GeometryError;
+    fn try_from(face_id: &FaceId) -> Result<Self, Self::Error> {
+        let entity = face_id.step_entity();
+        if entity == 0 {
+            return Err(invalid("STEP face entity must be nonzero"));
+        }
+        Ok(StepEntityId(entity))
+    }
+}
+
+impl TryFrom<FaceId> for StepEntityId {
+    type Error = GeometryError;
+    fn try_from(face_id: FaceId) -> Result<Self, Self::Error> {
+        Self::try_from(&face_id)
+    }
+}
+
+/// Canonical source face ordinal index within an imported solid definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceFaceId(pub u32);
+
+impl SourceFaceId {
+    #[inline]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SourceFaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u32> for SourceFaceId {
+    #[inline]
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<SourceFaceId> for u32 {
+    #[inline]
+    fn from(id: SourceFaceId) -> Self {
+        id.0
+    }
+}
+
+/// Canonical source edge ordinal index within an imported solid definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceEdgeId(pub u32);
+
+impl SourceEdgeId {
+    #[inline]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SourceEdgeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u32> for SourceEdgeId {
+    #[inline]
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<SourceEdgeId> for u32 {
+    #[inline]
+    fn from(id: SourceEdgeId) -> Self {
+        id.0
+    }
+}
+
+/// Exact 2D planar curve representations in a section PlaneFrameMm coordinate system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SectionCurve2d {
+    /// Finite straight line segment in 2D millimetres.
+    Line {
+        start_mm: [f64; 2],
+        end_mm: [f64; 2],
+    },
+    /// Circular arc in 2D millimetres with start angle and signed sweep angle.
+    CircularArc {
+        center_mm: [f64; 2],
+        radius_mm: f64,
+        start_angle_rad: f64,
+        sweep_angle_rad: f64,
+    },
+    /// Elliptic arc in 2D millimetres with major axis direction and minor radius.
+    EllipticArc {
+        center_mm: [f64; 2],
+        major_axis_mm: [f64; 2],
+        minor_radius_mm: f64,
+        start_param_rad: f64,
+        end_param_rad: f64,
+    },
+    /// Single NURBS span or B-spline curve in 2D plane coordinates.
+    NurbsSpan {
+        degree: u8,
+        knots: Vec<f64>,
+        control_points_mm: Vec<[f64; 2]>,
+        weights: Option<Vec<f64>>,
+    },
+}
+
+impl SectionCurve2d {
+    /// Returns the start point [x, y] in mm.
+    pub fn start_point_mm(&self) -> [f64; 2] {
+        match self {
+            Self::Line { start_mm, .. } => *start_mm,
+            Self::CircularArc {
+                center_mm,
+                radius_mm,
+                start_angle_rad,
+                ..
+            } => [
+                center_mm[0] + radius_mm * start_angle_rad.cos(),
+                center_mm[1] + radius_mm * start_angle_rad.sin(),
+            ],
+            Self::EllipticArc {
+                center_mm,
+                major_axis_mm,
+                minor_radius_mm,
+                start_param_rad,
+                ..
+            } => {
+                let major_len = (major_axis_mm[0].powi(2) + major_axis_mm[1].powi(2)).sqrt();
+                if major_len > 0.0 {
+                    let ux = major_axis_mm[0] / major_len;
+                    let uy = major_axis_mm[1] / major_len;
+                    let vx = -uy;
+                    let vy = ux;
+                    let cos = start_param_rad.cos();
+                    let sin = start_param_rad.sin();
+                    [
+                        center_mm[0] + major_len * cos * ux + minor_radius_mm * sin * vx,
+                        center_mm[1] + major_len * cos * uy + minor_radius_mm * sin * vy,
+                    ]
+                } else {
+                    *center_mm
+                }
+            }
+            Self::NurbsSpan {
+                control_points_mm, ..
+            } => control_points_mm.first().copied().unwrap_or([0.0, 0.0]),
+        }
+    }
+
+    /// True if the curve is a rational NURBS span.
+    pub fn is_rational(&self) -> bool {
+        matches!(self, Self::NurbsSpan { weights: Some(_), .. })
+    }
+}
+
+/// Provenance-bearing exact 2D curve span in a planar section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectionSpan2d {
+    /// Exact 2D curve geometry in the query plane frame.
+    pub curve: SectionCurve2d,
+    /// Originating source face ordinal.
+    pub source_face: SourceFaceId,
+    /// Originating source edge ordinal (if the span coincides with a B-Rep edge).
+    pub source_edge: Option<SourceEdgeId>,
+    /// Proved distance residual from the section plane in 3D mm.
+    pub achieved_plane_error_mm: f64,
 }
 
 macro_rules! counter_id {

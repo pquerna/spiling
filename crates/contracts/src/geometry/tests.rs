@@ -467,3 +467,62 @@ fn display_unavailability_cannot_turn_cancellation_or_staleness_into_success() {
         );
     }
 }
+
+#[test]
+fn step_entity_and_section_ir_types_work() {
+    let step_id = StepEntityId::new(128);
+    assert_eq!(step_id.get(), 128);
+    assert_eq!(step_id.to_string(), "step:128");
+    assert_eq!(u64::from(step_id), 128);
+    assert_eq!(StepEntityId::from(128u64), step_id);
+
+    let face_id: FaceId = step_id.try_into().expect("valid StepEntityId");
+    assert_eq!(face_id.as_str(), "step:128");
+    let back_step_id = StepEntityId::try_from(&face_id).unwrap();
+    assert_eq!(back_step_id, step_id);
+    let back_step_id2 = StepEntityId::try_from(face_id).unwrap();
+    assert_eq!(back_step_id2, step_id);
+
+    // Entity 0 is invalid and rejected
+    assert!(FaceId::try_from(StepEntityId::new(0)).is_err());
+    assert!(FaceId::from_step_entity_id(StepEntityId::new(0)).is_err());
+
+    let source_face = SourceFaceId::new(42);
+    assert_eq!(source_face.get(), 42);
+    assert_eq!(source_face.to_string(), "42");
+    assert_eq!(u32::from(source_face), 42);
+    assert_eq!(SourceFaceId::from(42u32), source_face);
+
+    let source_edge = SourceEdgeId::new(17);
+    assert_eq!(source_edge.get(), 17);
+    assert_eq!(source_edge.to_string(), "17");
+    assert_eq!(u32::from(source_edge), 17);
+    assert_eq!(SourceEdgeId::from(17u32), source_edge);
+
+    let line = SectionCurve2d::Line {
+        start_mm: [1.0, 2.0],
+        end_mm: [3.0, 4.0],
+    };
+    assert_eq!(line.start_point_mm(), [1.0, 2.0]);
+    assert!(!line.is_rational());
+
+    let arc = SectionCurve2d::CircularArc {
+        center_mm: [0.0, 0.0],
+        radius_mm: 5.0,
+        start_angle_rad: 0.0,
+        sweep_angle_rad: std::f64::consts::PI / 2.0,
+    };
+    assert_eq!(arc.start_point_mm(), [5.0, 0.0]);
+    assert!(!arc.is_rational());
+
+    let span = SectionSpan2d {
+        curve: line,
+        source_face,
+        source_edge: Some(source_edge),
+        achieved_plane_error_mm: 1e-7,
+    };
+    let json = serde_json::to_string(&span).unwrap();
+    let deserialized: SectionSpan2d = serde_json::from_str(&json).unwrap();
+    assert_eq!(span, deserialized);
+}
+

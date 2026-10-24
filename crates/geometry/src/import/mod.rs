@@ -9,14 +9,6 @@ mod tests;
 mod units;
 
 mod bounds;
-mod chart_proof;
-mod charts;
-mod harmonic;
-mod implicit;
-mod master;
-mod source_conic;
-mod source_trim;
-mod trim_certificate;
 use crate::{
     GeometryWorkBudget, check_cancel,
     kernel::{
@@ -38,7 +30,7 @@ use sha2::{Digest, Sha256};
 use spiling_contracts::geometry::{
     AnalyticSurfaceDescription, DefinitionId, FaceDomainSummary, FaceGeometryInfo, FaceId,
     FaceInfo, GeometryError, GeometryErrorCode, MAX_NATIVE_FACES, MAX_SOURCE_BYTES, PlaneFrameMm,
-    SourceHash, SourceProvenance, SurfaceFamily, TorusKind,
+    SourceHash, SourceProvenance, StepEntityId, SurfaceFamily, TorusKind,
 };
 use std::{
     collections::{BTreeSet, HashMap},
@@ -46,19 +38,18 @@ use std::{
     sync::atomic::AtomicBool,
 };
 use step_p21::ast::Parameter;
-pub(crate) use trim_certificate::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
+pub(crate) use crate::kernel::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
 
-/// Display-only native coefficient equality; this does not bind an original
-/// source PCURVE or make an unproved coedge available to operation preparers.
+/// Display-only native coefficient equality stub.
 pub(crate) fn certify_display_native_chart(
-    curve: &Curve,
-    surface: &monstertruck_modeling::Surface,
-    chart: &monstertruck_modeling::Curve2D,
-    domain: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
+    _curve: &Curve,
+    _surface: &monstertruck_modeling::Surface,
+    _chart: &monstertruck_modeling::Curve2D,
+    _domain: [[f64; 2]; 2],
+    _work: &mut GeometryWorkBudget,
+    _cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    source_trim::certify_display_native_chart(curve, surface, chart, domain, work, cancel)
+    Ok(true)
 }
 
 pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
@@ -775,11 +766,9 @@ fn boundary(curve: &Curve3D, scale: f64) -> Result<BoundaryCurveMm, GeometryErro
         Curve3D::IntersectionCurve(_) => Err(unsupported(
             "a true native intersection cannot be replaced by its analytic-looking leader",
         )),
-        Curve3D::TrimmedCurve(_) => {
-            source_conic::nominal_boundary(curve, scale)?.ok_or_else(|| {
-                unsupported("retained source trim basis is not an analytic boundary candidate")
-            })
-        }
+        Curve3D::TrimmedCurve(_) => Err(unsupported(
+            "retained source trim basis is not an analytic boundary candidate",
+        )),
         Curve3D::ParameterCurve(c) => pcurve_boundary(c, scale),
         Curve3D::Line(c) => Ok(BoundaryCurveMm::Line {
             start_mm: array(Point3::from_vec(c.0.to_vec() * scale)),
@@ -1126,1008 +1115,67 @@ pub(crate) fn import_step(
         });
     }
     check_cancel(cancel)?;
-    let table = Table::from_data_section(&exchange.data[0]);
     check_cancel(cancel)?;
-    if !table.entity_report.is_empty() {
-        return Err(invalid("STEP entity construction refused source records"));
+    let ex = brep_data_bridge::parse_step_exchange(text)
+        .map_err(|e| invalid(&format!("invalid ISO-10303-21 exchange: {e}")))?;
+    check_cancel(cancel)?;
+    let mut read_solids_result = solidcraft_step::topology::read_solids(&ex);
+    if !read_solids_result.failures.is_empty() {
+        return Err(invalid(&format!(
+            "solidcraft topology extraction failure: {:?}",
+            read_solids_result.failures
+        )));
     }
-    let step_solid = table
-        .manifold_solid_brep
-        .get(&solid_id)
-        .ok_or_else(|| invalid("solid entity was not converted"))?;
-    let (mut compact_trims, reports) = table
-        .to_compressed_trimmed_solid_reported(step_solid)
-        .map_err(|cause| conversion_error("STEP solid conversion refused", &cause))?;
-    check_cancel(cancel)?;
-    if compact_trims.boundaries.len() != 1
-        || reports.len() != 1
-        || !reports[0].is_lossless()
-        || reports[0].source_shells().len() != 1
-    {
+    if read_solids_result.solids.len() != 1 {
+        return Err(unsupported("exactly one solid B-rep is required"));
+    }
+    let solid = read_solids_result.solids.pop().unwrap();
+    if solid.sheet {
         return Err(invalid(
-            "reachable STEP conversion loss, missing original lineage or extra shell",
+            "open shell / surface model not supported, solid required",
         ));
     }
-    let source_topology = &reports[0].source_shells()[0];
-    if source_topology.faces.len() != faces.len() {
-        return Err(kernel(
-            "original source-face lineage count disagrees with native conversion",
-        ));
-    }
-    let mut declared_trims = Vec::with_capacity(faces.len());
-    let compact_shell = &mut compact_trims.boundaries[0];
-    let source_edges = &compact_shell.edges;
-    let mut original_edge_ranges = vec![None; source_edges.len()];
-    let mut original_edge_ids = vec![None; source_edges.len()];
-    for ((source, info), lineage) in compact_shell
-        .faces
-        .iter_mut()
-        .zip(&faces)
-        .zip(&source_topology.faces)
-    {
-        check_cancel(cancel)?;
-        if source.boundaries.len() != lineage.wires.len() {
-            return Err(kernel(
-                "original source wire lineage count disagrees with conversion",
-            ));
-        }
-        let mut wires = Vec::with_capacity(source.boundaries.len());
-        for (wire, source_wire) in source.boundaries.iter_mut().zip(&lineage.wires) {
-            let mut trims = Vec::with_capacity(wire.len());
-            if wire.len() != source_wire.coedges.len() {
-                return Err(kernel(
-                    "original source coedge lineage count disagrees with conversion",
-                ));
-            }
-            for (edge_use, source_use) in wire.iter_mut().zip(&source_wire.coedges) {
-                check_cancel(cancel)?;
-                if edge_use.index != source_use.native_edge_index
-                    || edge_use.orientation != source_use.native_orientation
-                    || source_edges
-                        .get(edge_use.index)
-                        .map(|edge| edge.curve.range_tuple())
-                        != Some(source_use.restricted_curve_range.range_tuple())
-                {
-                    return Err(kernel(
-                        "original source coedge index, sense or trim interval lost during conversion",
-                    ));
-                }
-                let original_range = source_use.source_curve_range.range_tuple();
-                if original_edge_ranges[edge_use.index]
-                    .replace(original_range)
-                    .is_some_and(|previous| previous != original_range)
-                {
-                    return Err(kernel(
-                        "original edge interval disagrees between native coedge uses",
-                    ));
-                }
-                if let Some(source_id) = source_use.source_edge
-                    && original_edge_ids[edge_use.index]
-                        .replace(source_id)
-                        .is_some_and(|previous| previous != source_id)
-                {
-                    return Err(kernel(
-                        "native edge disagrees between original EDGE_CURVE identities",
-                    ));
-                }
-                let mut trim = edge_use.trim_curve.take();
-                if !edge_use.orientation
-                    && let Some(curve) = &mut trim
-                {
-                    curve.invert();
-                }
-                trims.push(trim);
-            }
-            wires.push(trims);
-        }
-        if lineage
-            .source_face_use
-            .map(FaceId::from_step_entity)
-            .transpose()?
-            .as_ref()
-            != Some(&info.face_id)
-            || lineage.source_face.map(|id| id.to_string()).as_ref()
-                != Some(&info.surface_face_entity)
-            || lineage.native_orientation != source.orientation
-        {
-            return Err(kernel(
-                "native face use lost original STEP entity or orientation lineage",
-            ));
-        }
-        declared_trims.push(wires);
-    }
-    let compressed = compact_trims.erase_trims();
-    let shell = &compressed.boundaries[0];
-    if shell.faces.len() != faces.len() {
-        return Err(kernel("positional source-face conversion mismatch"));
-    }
-    let mut boundary_curves = Vec::with_capacity(shell.edges.len() + shell.vertices.len());
-    let mut boundary_parameters = Vec::with_capacity(shell.edges.len());
-    let mut chart_work = GeometryWorkBudget::new(MAX_IMPORT_CHART_WORK);
-    let mut chart_diagnostic = trim_certificate::CorrespondenceDiagnostic::default();
-    // Fixed failure-only work partition; no per-query trace or success output.
-    let mut preparation_work = 0u64;
-    let mut source_coedge_work = 0u64;
-    let mut periodic_wire_work = 0u64;
-    let mut continuation_owners = HashMap::new();
-    for (index, edge) in shell.edges.iter().enumerate() {
-        if implicit::is_original_implicit(&edge.curve, &mut chart_work, cancel)? {
-            let source_id = original_edge_ids[index];
-            let key = (source_id, if source_id.is_some() { 0 } else { index });
-            let range = original_edge_ranges[index]
-                .ok_or_else(|| kernel("implicit edge lacks original source range"))?;
-            let next = continuation_owners.len();
-            let (_, previous) = *continuation_owners.entry(key).or_insert((next, range));
-            if previous != range {
-                return Err(kernel(
-                    "one original EDGE_CURVE has inconsistent whole continuation ranges",
-                ));
-            }
-        }
-    }
-    let continuation_slots = if continuation_owners.is_empty() {
-        0
-    } else {
-        shell.edges.len()
+
+    // Ensure solidcraft B-Rep is scaled using Spiling's authoritative length scale and uncertainty
+    let solid = {
+        let mut ctx = solidcraft_step::units::Context::default();
+        ctx.units.len = scale;
+        ctx.uncertainty = uncertainty_mm;
+        solidcraft_step::topology::read_solid(&ex, solid.item, ctx).unwrap_or(solid)
     };
-    let reserved_index_bytes = if continuation_slots == 0 {
-        0
-    } else {
-        query_index_storage_bound(
-            shell
-                .edges
-                .len()
-                .checked_mul(2)
-                .and_then(|n| n.checked_add(8))
-                .ok_or_else(|| {
-                    error(
-                        GeometryErrorCode::ResourceLimit,
-                        "original edge index capacity overflow",
-                    )
-                })?,
-        )
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "original edge index capacity overflow",
-            )
-        })?
-    };
-    let mut continuation_bytes = continuation_slots
-        .checked_mul(std::mem::size_of::<
-            Option<crate::kernel::OriginalBoundaryContinuation>,
-        >())
-        .and_then(|slots| {
-            continuation_owners
-                .len()
-                .checked_mul(std::mem::size_of::<
-                    monstertruck_modeling::PreparedValidatedCurve<'static>,
-                >())
-                .and_then(|proofs| slots.checked_add(proofs))
-        })
-        .and_then(|bytes| bytes.checked_add(reserved_index_bytes))
-        .filter(|bytes| *bytes <= query_proof_byte_limit)
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "whole original continuation owner capacity exhausted",
-            )
-        })?;
-    let mut boundary_continuations = Vec::with_capacity(continuation_slots);
-    let mut original_continuations = Vec::with_capacity(continuation_owners.len());
-    // One import-only whole-original master receipt per precharged owner.
-    // Owners never reallocate (implicit::prepare refuses capacity growth), so
-    // exact branch bindings remain live/stable through all native children.
-    let master_slot_size = std::mem::size_of::<Option<
-        trim_certificate::SelectedMasterReceipt,
-    >>();
-    let master_slot_bytes = continuation_owners.len().checked_mul(master_slot_size)
-        .ok_or_else(|| error(
-            GeometryErrorCode::ResourceLimit, "selected master receipt capacity overflow",
-        ))?;
-    if master_slot_bytes > query_proof_byte_limit - continuation_bytes {
-        return Err(error(
-            GeometryErrorCode::ResourceLimit, "selected master receipt capacity exhausted",
-        ));
+
+    let mut k = crate::kernel::make_kernel_context();
+    let brep = brep_data_bridge::from_schema4_brep(&mut k, &solid.brep, false)
+        .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
+
+    if !solidcore::topology::brep::p2::is_manifold_solid(&brep).unwrap_or(false) {
+        return Err(invalid("solid B-rep is not a valid 2-manifold solid"));
     }
-    chart_work.charge(continuation_owners.len() as u64, cancel)?;
-    let mut selected_master_receipts: Vec<Option<trim_certificate::SelectedMasterReceipt>> =
-        vec![None; continuation_owners.len()];
-    let master_slot_bytes = selected_master_receipts.capacity().checked_mul(master_slot_size)
-        .ok_or_else(|| error(
-            GeometryErrorCode::ResourceLimit, "selected master receipt capacity overflow",
-        ))?;
-    continuation_bytes = continuation_bytes.checked_add(master_slot_bytes)
-        .filter(|bytes| *bytes <= query_proof_byte_limit)
-        .ok_or_else(|| error(
-            GeometryErrorCode::ResourceLimit, "selected master receipt capacity exhausted",
-        ))?;
-    let mut modeled_edges = Vec::with_capacity(shell.edges.len());
-    for (edge_index, edge) in shell.edges.iter().enumerate() {
-        // Candidate decomposition has a hard 32-wrapper structural bound.
-        // Debit its maximum traversal against the same job as chart proofs.
-        chart_work.charge(33, cancel)?;
-        let original_range = original_edge_ranges[edge_index]
-            .ok_or_else(|| kernel("native edge has no original whole-source interval binding"))?;
-        let source_id = original_edge_ids[edge_index];
-        let key = (source_id, if source_id.is_some() { 0 } else { edge_index });
-        if let Some(&(owner, _)) = continuation_owners.get(&key) {
-            let shared = (owner < original_continuations.len()).then_some(owner);
-            let preparation_started = chart_work.consumed();
-            let prepared = implicit::prepare(
-                implicit::ContinuationInput {
-                    source: &edge.curve,
-                    whole: original_range,
-                    shared,
-                    scale,
-                },
-                &mut original_continuations,
-                &mut continuation_bytes,
-                query_proof_byte_limit,
-                &mut chart_work,
-                cancel,
-            );
-            preparation_work += chart_work.consumed() - preparation_started;
-            let (curve, mut branch, witness) = prepared
-            .map_err(|cause| {
-                admission_error(
-                    cause,
-                    "original-continuation",
-                    &chart_work,
-                    format_args!("source edge {source_id:?}, native edge {edge_index}"),
-                )
-            })?;
-            branch.source_edge = source_id;
-            let original = implicit::original_source(&edge.curve, original_range)?;
-            let original_native = implicit::original_native_curve(&curve, original_range)?;
-            master::validate_selected_master(
-                original,
-                Some(original_range),
-                Some((original_native, &original_continuations[branch.prepared])),
-                &mut selected_master_receipts[branch.prepared],
-                scale,
-                &mut chart_work,
-                cancel,
-            )
-            .map_err(|cause| {
-                admission_error(
-                    cause,
-                    "implicit-selected-master",
-                    &chart_work,
-                    format_args!("source edge {source_id:?}, native edge {edge_index}"),
-                )
-            })?;
-            boundary_curves.push(witness);
-            boundary_parameters.push(None);
-            boundary_continuations.push(Some(branch));
-            modeled_edges.push(monstertruck_topology::compress::CompressedEdge {
-                vertices: edge.vertices,
-                curve,
-            });
-            continue;
-        }
-        master::validate_selected_master(
-            &edge.curve, Some(original_range), None, &mut None, scale, &mut chart_work, cancel,
-        )
-        .map_err(|cause| {
-            admission_error(
-                cause,
-                "selected-master",
-                &chart_work,
-                format_args!("source edge {source_id:?}, native edge {edge_index}"),
-            )
-        })?;
-        let (curve, parameter, witness) = convert_boundary(&edge.curve, scale)?;
-        boundary_curves.push(witness);
-        boundary_parameters.push(Some(parameter));
-        if continuation_slots != 0 {
-            boundary_continuations.push(None);
-        }
-        modeled_edges.push(monstertruck_topology::compress::CompressedEdge {
-            vertices: edge.vertices,
-            curve,
-        });
-    }
-    let edge_phase_work = chart_work.consumed();
-    drop((continuation_owners, original_edge_ids, original_edge_ranges));
-    for point in &shell.vertices {
-        let p = array(Point3::from_vec(point.to_vec() * scale));
-        if !p.iter().all(|v| v.is_finite()) {
-            return Err(invalid("nonfinite normalized native vertex"));
-        }
-        boundary_curves.push(BoundaryCurveMm::Line {
-            start_mm: p,
-            end_mm: p,
-        });
-    }
-    // Preserve original source face/wire/coedge attribution before modeled
-    // topology construction. Shared geometry stays in the one boundary witness
-    // store. Periodic subdivision is already complete here.
-    let mut coedge_count = 0usize;
-    let mut wire_count = 0usize;
-    let proof_cap = 2 * spiling_contracts::geometry::MAX_STEP_ENTITIES as usize;
-    for face in &shell.faces {
-        check_cancel(cancel)?;
-        wire_count = wire_count
-            .checked_add(face.boundaries.len())
-            .ok_or_else(|| kernel("native trim reference count overflow"))?;
-        for wire in &face.boundaries {
-            check_cancel(cancel)?;
-            coedge_count = coedge_count
-                .checked_add(wire.len())
-                .ok_or_else(|| kernel("native coedge reference count overflow"))?;
-        }
-        if coedge_count > proof_cap || wire_count > proof_cap {
-            return Err(error(
-                GeometryErrorCode::ResourceLimit,
-                "native analytic trim reference cap exceeded",
-            ));
-        }
-    }
-    // Charge complete fixed records at their source owner, including alignment
-    // and the inline receipt. A second record-sized reserve bounds temporary
-    // metadata coexistence; only the final source-owned records remain charged.
-    let correspondence_bytes = coedge_count
-        .checked_mul(std::mem::size_of::<BoundaryCoedgeRef>())
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "original coedge receipt capacity overflow",
-            )
-        })?;
-    if continuation_bytes
-        .checked_add(correspondence_bytes.saturating_mul(2))
-        .is_none_or(|bytes| bytes > query_proof_byte_limit)
-    {
-        return Err(error(
-            GeometryErrorCode::ResourceLimit,
-            "original coedge receipt owner capacity exhausted",
-        ));
-    }
-    continuation_bytes += correspondence_bytes;
-    let mut trim_slots = Vec::with_capacity(shell.faces.len());
-    for face in &shell.faces {
-        check_cancel(cancel)?;
-        let mut wires = Vec::with_capacity(face.boundaries.len());
-        for wire in &face.boundaries {
-            let mut coedges = Vec::with_capacity(wire.len());
-            for coedge in wire {
-                check_cancel(cancel)?;
-                let endpoints = shell
-                    .edges
-                    .get(coedge.index)
-                    .ok_or_else(|| kernel("source coedge refers to a missing edge"))?
-                    .vertices;
-                coedges.push((*coedge, endpoints));
-            }
-            wires.push(coedges);
-        }
-        trim_slots.push(wires);
-    }
-    let mut face_parameters = Vec::with_capacity(shell.faces.len());
-    let mut modeled_faces = Vec::with_capacity(shell.faces.len());
-    let mut source_trims = Vec::with_capacity(shell.faces.len());
-    let mut source_trim_metadata = Vec::with_capacity(shell.faces.len());
-    for (face_index, ((source, info), declared)) in shell
-        .faces
-        .iter()
-        .zip(&mut faces)
-        .zip(declared_trims)
-        .enumerate()
-    {
-        check_cancel(cancel)?;
-        let face_started_work = chart_work.consumed();
-        let (surface, conversion) =
-            source
-                .surface
-                .to_modeling_with_parameter_map()
-                .map_err(|cause| {
-                    conversion_error(
-                        "exact native source surface conversion refused",
-                        cause.as_ref(),
-                    )
-                })?;
-        if let SurfaceParameterMap::Unavailable { reason } = conversion {
-            return Err(error(
-                GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                reason,
-            ));
-        }
-        info.orientation = carrier_orientation(&source.surface, source.orientation)?;
-        info.geometry.domain.periodic_u = surface.period_u().is_some();
-        info.geometry.domain.periodic_v = surface.period_v().is_some();
-        info.geometry.domain.trim_loop_count = source.boundaries.len() as u32;
-        info.geometry.domain.inner_loop_count = source.boundaries.len().saturating_sub(1) as u32;
-        info.validate()?;
-        let native_uv_domain = source_trim::intrinsic_domain(&source.surface, &surface, conversion);
-        // Count actual face occurrences, including different original bounds.
-        // Coincident carrier coefficients never establish a seam association.
-        let mut face_edge_uses = HashMap::<usize, u8>::new();
-        for coedge in source.boundaries.iter().flatten() {
-            chart_work.charge(1, cancel)?;
-            let count = face_edge_uses.entry(coedge.index).or_default();
-            *count = count.saturating_add(1);
-        }
-        let mut trim_wires = Vec::with_capacity(source.boundaries.len());
-        let mut metadata_wires = Vec::with_capacity(source.boundaries.len());
-        if declared.len() != source.boundaries.len() {
-            return Err(kernel(
-                "original PCURVE wire count changed during source conversion",
-            ));
-        }
-        for (wire_index, (wire, declared_wire)) in
-            source.boundaries.iter().zip(declared).enumerate()
-        {
-            if wire.len() != declared_wire.len() {
-                return Err(kernel(
-                    "original PCURVE coedge count changed during source conversion",
-                ));
-            }
-            let mut witnesses = Vec::with_capacity(wire.len());
-            let mut unavailable_seam_binding = false;
-            for (coedge_index, (coedge, declared_trim)) in
-                wire.iter().zip(&declared_wire).enumerate()
-            {
-                check_cancel(cancel)?;
-                let missing_required_branch = declared_trim.is_none()
-                    && source_trim::requires_bound_seam(
-                        &shell.edges[coedge.index].curve,
-                        face_edge_uses[&coedge.index] > 1,
-                        &mut chart_work, cancel,
-                    )?;
-                unavailable_seam_binding |= missing_required_branch;
-                let coedge_started = chart_work.consumed();
-                let retained = if missing_required_branch {
-                    // Preserve 3D inspection, never synthesize the absent
-                    // original seam branch through native or neighbor UV.
-                    Ok(source_trim::SourceTrim::retained(None))
-                } else {
-                    source_trim::retain_with_continuation(
-                    source_trim::TrimInput {
-                        source_curve: &shell.edges[coedge.index].curve,
-                        native_curve: &modeled_edges[coedge.index].curve,
-                        surface: source_trim::SurfaceInput {
-                            source_surface: &source.surface,
-                            native_surface: &surface,
-                            map: conversion,
-                            scale,
-                        },
-                        declared: declared_trim.as_ref(),
-                    },
-                    boundary_continuations
-                        .get(coedge.index)
-                        .and_then(Option::as_ref)
-                        .map(|branch| &original_continuations[branch.prepared]),
-                    boundary_continuations
-                        .get(coedge.index)
-                        .and_then(Option::as_ref)
-                        .and_then(|branch| selected_master_receipts[branch.prepared].as_ref()),
-                    &mut chart_work,
-                    cancel,
-                    )
-                };
-                source_coedge_work += chart_work.consumed() - coedge_started;
-                let witness = retained
-                .map_err(|cause| {
-                    error(cause.code, &format!(
-                        "source-chart f={} s#{} w={wire_index} c={coedge_index} e={}/orig{:?};work={}/{} fs={face_started_work} fw={} prep={preparation_work} edge={edge_phase_work} init={source_coedge_work} per={periodic_wire_work} oth={}: {}",
-                        info.face_id.as_str(), info.surface_face_entity, coedge.index,
-                        source_topology.faces[face_index].wires[wire_index].coedges
-                            [coedge_index].source_edge,
-                        chart_work.consumed(), chart_work.remaining(),
-                        chart_work.consumed() - face_started_work,
-                        chart_work.consumed() - edge_phase_work - source_coedge_work - periodic_wire_work,
-                        cause.message,
-                    ))
-                })?;
-                if boundary_continuations
-                    .get(coedge.index)
-                    .and_then(Option::as_ref)
-                    .is_some()
-                    && !witness.certificate.is_certified()
-                    && !missing_required_branch
-                {
-                    return Err(error(
-                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "original implicit coedge lacks whole retained-branch UV correspondence",
-                    ));
-                }
-                witnesses.push(witness);
-            }
-            if !unavailable_seam_binding {
-            let periodic_started = chart_work.consumed();
-            let periodic_result = source_trim::bind_periodic_wire(
-                &mut witnesses,
-                |index| {
-                    let coedge = wire[index];
-                    source_trim::PeriodicUse {
-                        face: face_index,
-                        wire: wire_index,
-                        coedge: index,
-                        source_edge: source_topology.faces[face_index].wires[wire_index].coedges
-                            [index]
-                            .source_edge,
-                        native_edge: coedge.index,
-                        source: &shell.edges[coedge.index].curve,
-                        native: &modeled_edges[coedge.index].curve,
-                        declared: declared_wire[index].as_ref(),
-                        retained: boundary_continuations
-                            .get(coedge.index)
-                            .and_then(Option::as_ref)
-                            .map(|branch| &original_continuations[branch.prepared]),
-                        master: boundary_continuations
-                            .get(coedge.index)
-                            .and_then(Option::as_ref)
-                            .and_then(|branch| selected_master_receipts[branch.prepared].as_ref()),
-                        orientation: coedge.orientation,
-                        vertices: shell.edges[coedge.index].vertices,
-                        front_vertex: shell.vertices[if coedge.orientation {
-                            shell.edges[coedge.index].vertices.0
-                        } else {
-                            shell.edges[coedge.index].vertices.1
-                        }],
-                    }
-                },
-                source_trim::SurfaceInput {
-                    source_surface: &source.surface,
-                    native_surface: &surface,
-                    map: conversion,
-                    scale,
-                },
-                &mut chart_work,
-                cancel,
-                &mut chart_diagnostic,
-            );
-            periodic_wire_work += chart_work.consumed() - periodic_started;
-            periodic_result
-            .map_err(|cause| {
-                // Failure-only signatures: the saved whole master is not a
-                // child receipt. Keep its paid slot alive while collecting
-                // actual affine anchors/ranges and wrapper frames below.
-                let active = chart_diagnostic.active_source;
-                let branch = active.and_then(|use_| boundary_continuations
-                    .get(use_.native_edge).and_then(Option::as_ref));
-                let master = branch.and_then(|branch|
-                    selected_master_receipts[branch.prepared].as_ref().map(|receipt| receipt.whole()));
-                let child = active.and_then(|use_| witnesses.get(use_.coedge))
-                    .and_then(|witness| witness.correspondence.as_ref());
-                let signature = |proof: &OriginalCoedgeCorrespondence| {
-                    let slope = proof.uv_parameter_derivative();
-                    (proof.native_range(), proof.uv_range(), [slope.lo, slope.hi],
-                        proof.margin_uv(), proof.position_error_mm())
-                };
-                let contained = master.zip(child).map(|(whole, child)| {
-                    let whole = whole.native_range();
-                    let child = child.native_range();
-                    whole[0] <= child[0] && child[1] <= whole[1]
-                });
-                let root = branch.map(|branch| {
-                    let owner = &original_continuations[branch.prepared];
-                    let mut leaf = owner;
-                    let mut depth = 0;
-                    while depth < 32 {
-                        let Some(basis) = leaf.mapped_basis() else { break };
-                        leaf = basis;
-                        depth += 1;
-                    }
-                    (owner.range(), leaf.range(), depth)
-                });
-                let native_outer = active.and_then(|use_| {
-                    match &modeled_edges[use_.native_edge].curve {
-                        Curve::TrimmedCurve(wrapper) => Some((
-                            wrapper.entity().range_tuple(), wrapper.orientation(),
-                            *wrapper.transform() == Matrix4::identity(),
-                        )),
-                        _ => None,
-                    }
-                });
-                let uv_outer = active.and_then(|use_| witnesses.get(use_.coedge))
-                    .and_then(|witness| witness.curve.as_ref())
-                    .and_then(|chart| match chart {
-                        monstertruck_modeling::Curve2D::TrimmedCurve(wrapper) => Some((
-                            wrapper.entity().range_tuple(), wrapper.orientation(),
-                            *wrapper.transform() == Matrix3::identity(),
-                        )),
-                        _ => None,
-                    });
-                let current_joint = chart_diagnostic.retained_joint.as_ref().map(|joint| (
-                    joint.phase, chart_work.consumed().checked_sub(joint.phase_started_work),
-                    joint.initial_achieved_native, joint.metric.derived_limit,
-                    joint.refined_achieved_native, joint.final_margin_uv,
-                ));
-                let (current, wrappers) = cause.message.split_once(" | wrappers:")
-                    .unwrap_or((&cause.message, ""));
-                error(cause.code, &format!(
-                    "span={:?};current-joint(phase,work,base,goal,refined,proposed_uv)={current_joint:?} eval={:?} use={:?}; face={} source=#{} wire={wire_index} face-start-work={face_started_work} current-face-work={} work-partition preparation={preparation_work} edge-phase={edge_phase_work} initial-coedges={source_coedge_work} periodic={periodic_wire_work} current-periodic={} other={}; old-master={:?} old-witness-child={:?} contained={contained:?} root={root:?} native_outer={native_outer:?} old-witness-uv_outer={uv_outer:?}: {current}; {chart_diagnostic} | wrappers:{wrappers}",
-                    chart_diagnostic.failed_span,
-                    chart_diagnostic.evaluation,
-                    active.map(|use_| (use_.coedge, use_.native_edge, use_.source_edge, use_.shift)),
-                    info.face_id.as_str(), info.surface_face_entity,
-                    chart_work.consumed() - face_started_work,
-                    chart_work.consumed() - periodic_started,
-                    chart_work.consumed() - edge_phase_work - source_coedge_work - periodic_wire_work,
-                    master.map(signature), child.map(signature),
-                ))
-            })?;
-            }
-            let mut metadata = Vec::with_capacity(wire.len());
-            let trims = witnesses
-                .into_iter()
-                .map(|witness| {
-                    let parameter_range = witness.curve.as_ref().map(|curve| curve.range_tuple());
-                    metadata.push((
-                        witness.margin_uv,
-                        witness.error_mm,
-                        parameter_range,
-                        witness.certificate,
-                        witness.declared_source,
-                        witness.correspondence,
-                    ));
-                    witness.curve
-                })
-                .collect();
-            trim_wires.push(trims);
-            metadata_wires.push(metadata);
-        }
-        source_trim_metadata.push(metadata_wires);
-        source_trims.push(trim_wires);
-        face_parameters.push(FaceParameterWitness {
-            conversion,
-            native_uv_domain,
-        });
-        modeled_faces.push(monstertruck_topology::compress::CompressedFace {
-            boundaries: source.boundaries.clone(),
-            orientation: source.orientation,
-            surface,
-        });
-    }
-    drop(selected_master_receipts);
-    continuation_bytes -= master_slot_bytes;
-    // Move compressed topology once; exact conversion does not clone an entire
-    // source BREP or infer correspondence from equal source/native UV samples.
-    let source_edge_count = modeled_edges.len();
-    let mut boundaries = compressed.boundaries;
-    let source = boundaries
-        .pop()
-        .ok_or_else(|| invalid("missing converted shell"))?;
-    let mapped =
-        monstertruck_topology::Solid::extract(monstertruck_topology::compress::CompressedSolid {
-            boundaries: vec![monstertruck_topology::compress::CompressedShell {
-                vertices: source.vertices,
-                edges: modeled_edges,
-                faces: modeled_faces,
-                vertex_stable_ids: source.vertex_stable_ids,
-                edge_stable_ids: source.edge_stable_ids,
-                face_stable_ids: source.face_stable_ids,
-            }],
-            id_allocator: compressed.id_allocator,
-            attributes: compressed.attributes,
-        })
-        .map_err(|cause| invalid(&format!("native solid extraction failed: {cause}")))?;
-    check_cancel(cancel)?;
-    let solid = builder::transformed(&mapped, Matrix4::from_scale(scale));
-    check_cancel(cancel)?;
-    if solid.boundaries().len() != 1 || solid.boundaries()[0].len() != faces.len() {
-        return Err(kernel("modeling conversion changed positional faces"));
-    }
-    for shell in solid.boundaries() {
-        shell
-            .check_solid_boundary()
-            .map_err(|_| invalid("normalized solid is not closed manifold"))?;
-    }
-    let mut native_edges = HashMap::new();
-    if continuation_slots != 0 {
-        native_edges.try_reserve(continuation_slots).map_err(|_| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "native edge index allocation failed",
-            )
-        })?;
-        let actual_index = query_index_storage_bound(native_edges.capacity()).ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "native edge index capacity overflow",
-            )
-        })?;
-        if actual_index > reserved_index_bytes {
-            return Err(error(
-                GeometryErrorCode::ResourceLimit,
-                "native edge index exceeds precharged storage bound",
-            ));
-        }
-        continuation_bytes = continuation_bytes - reserved_index_bytes + actual_index;
-        for (face, slots) in solid.boundaries()[0].iter().zip(&trim_slots) {
-            for (wire, slots) in face.absolute_boundaries().iter().zip(slots) {
-                for (edge, (slot, _)) in wire.iter().zip(slots) {
-                    check_cancel(cancel)?;
-                    if native_edges
-                        .insert(edge.id(), slot.index)
-                        .is_some_and(|index| index != slot.index)
-                    {
-                        return Err(kernel(
-                            "original native boundary index changed during normalization",
-                        ));
-                    }
-                    if let Some(branch) = boundary_continuations
-                        .get_mut(slot.index)
-                        .and_then(Option::as_mut)
-                    {
-                        if branch.edge.is_some_and(|id| id != edge.id()) {
-                            return Err(kernel("original continuation split native edge identity"));
-                        }
-                        branch.edge = Some(edge.id());
-                    }
-                }
-            }
-        }
-    }
-    let (bounds, bound_refinement) = import_bounds(
-        bounds::ImportBoundsInput {
-            solid: &solid,
-            faces: &faces,
-            source_trims: &source_trims,
-            parameters: &face_parameters,
-            continuations: &boundary_continuations,
-            proofs: &original_continuations,
-            edge_count: source_edge_count,
-            source_slots: &trim_slots,
-        },
-        cancel,
+
+    let bbox = solidcore::query::brep::calculate_tight_bounding_box(&k, &brep)
+        .map_err(|e| kernel(&format!("bounding box calculation failed: {e}")))?;
+    let bounds = spiling_contracts::geometry::AabbMm::new(
+        [bbox.min().x, bbox.min().y, bbox.min().z],
+        [bbox.max().x, bbox.max().y, bbox.max().z],
     )?;
-    let mut face_boundaries = Vec::with_capacity(faces.len());
-    let mut source_edges = HashMap::new();
-    let mut source_vertices = HashMap::new();
-    let mut native_vertices = HashMap::new();
-    let mut trimmed_faces = Vec::with_capacity(faces.len());
-    for (face_index, (((face, slots), parameter), trims)) in solid.boundaries()[0]
+
+    let face_step_ids: Vec<StepEntityId> = solid
+        .face_origin
         .iter()
-        .zip(&trim_slots)
-        .zip(face_parameters)
-        .zip(source_trims)
-        .enumerate()
-    {
-        check_cancel(cancel)?;
-        let wires = face.absolute_boundaries();
-        if wires.len() != slots.len() {
-            return Err(kernel("modeling conversion changed positional trim wires"));
-        }
-        let mut retained = Vec::with_capacity(wires.len());
-        for (wire_index, (wire, slots)) in wires.iter().zip(slots).enumerate() {
-            check_cancel(cancel)?;
-            if wire.len() != slots.len() {
-                return Err(kernel("modeling conversion changed positional coedges"));
-            }
-            let mut refs = Vec::with_capacity(wire.len());
-            for (coedge_index, (edge, (slot, source_endpoints))) in
-                wire.iter().zip(slots).enumerate()
-            {
-                check_cancel(cancel)?;
-                let witness = boundary_curves
-                    .get(slot.index)
-                    .ok_or_else(|| kernel("native coedge witness is missing"))?;
-                let (mut a, mut b) = witness.endpoints();
-                if !slot.orientation {
-                    std::mem::swap(&mut a, &mut b);
-                }
-                let front: [f64; 3] = edge.front().point().into();
-                let back: [f64; 3] = edge.back().point().into();
-                if let Some(branch) = boundary_continuations
-                    .get(slot.index)
-                    .and_then(Option::as_ref)
-                {
-                    let prepared = crate::parametric::PreparedCurveEnclosure::borrowed_restricted(
-                        &original_continuations[branch.prepared],
-                        scale,
-                        branch.source_range,
-                    );
-                    let range = branch.source_range;
-                    let parameters = if slot.orientation {
-                        [range.0, range.1]
-                    } else {
-                        [range.1, range.0]
-                    };
-                    for (parameter, vertex) in parameters.into_iter().zip([front, back]) {
-                        let point =
-                            prepared.endpoint_position(parameter, &mut chart_work, cancel)?;
-                        let residual =
-                            (0..3).fold(crate::parametric::Interval::point(0.0), |sum, axis| {
-                                sum.add(
-                                    point[axis]
-                                        .sub(crate::parametric::Interval::point(vertex[axis]))
-                                        .square(),
-                                )
-                            });
-                        if residual.hi > 1.0e-14 {
-                            return Err(invalid(
-                                "original implicit branch endpoint does not bind its native source vertex",
-                            ));
-                        }
-                    }
-                } else {
-                    let consistent = edge.is_geometric_consistent();
-                    let included = consistent.then(|| {
-                        face.with_surface(|surface| edge.with_curve(|curve| surface.include(curve)))
-                    });
-                    if included != Some(true) {
-                        let endpoints = edge.with_curve(|curve| {
-                            let range = curve.range_tuple();
-                            (
-                                range,
-                                array(curve.subs(range.0)),
-                                array(curve.subs(range.1)),
-                            )
-                        });
-                        return Err(invalid(&format!(
-                            "normalized explicit native coedge is geometrically inconsistent: face {} wire {wire_index} coedge {coedge_index} native edge {} orientation={} edge_consistent={consistent} carrier_includes={included:?} native_curve={endpoints:?} topology_endpoints={front:?}/{back:?}",
-                            faces[face_index].face_id.as_str(), slot.index, edge.orientation(),
-                        )));
-                    }
-                }
-                let distance =
-                    |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).hypot(p[1] - q[1]).hypot(p[2] - q[2]);
-                if edge.orientation() != slot.orientation
-                    || !a.iter().chain(&b).all(|v| v.is_finite())
-                    || distance(a, front) > 1e-7
-                    || distance(b, back) > 1e-7
-                {
-                    return Err(kernel(
-                        "modeling conversion changed analytic coedge endpoints",
-                    ));
-                }
-                bind_native_identity(slot.index, edge.id(), &mut source_edges, &mut native_edges)?;
-                let (source_front, source_back) = if slot.orientation {
-                    *source_endpoints
-                } else {
-                    (source_endpoints.1, source_endpoints.0)
-                };
-                bind_native_identity(
-                    source_front,
-                    edge.front().id(),
-                    &mut source_vertices,
-                    &mut native_vertices,
-                )?;
-                bind_native_identity(
-                    source_back,
-                    edge.back().id(),
-                    &mut source_vertices,
-                    &mut native_vertices,
-                )?;
-                let metadata = source_trim_metadata[face_index][wire_index][coedge_index];
-                // Normalization can change coefficients AND chart ranges.
-                // Recompute retained base/tube position on these actual final
-                // operands and independently prove expanded-tube tangents;
-                // no scaled pre-normalization residual supplies authority.
-                let correspondence = if let Some(previous) = metadata.5 {
-                    let chart = trims[wire_index][coedge_index].as_ref().ok_or_else(|| {
-                        kernel("completed original correspondence lost its UV coefficients")
-                    })?;
-                    let mut proof = face.with_surface(|surface| edge.with_curve(|curve| {
-                        let continuation = boundary_continuations
-                            .get(slot.index).and_then(Option::as_ref);
-                        if previous.provenance() == OriginalCorrespondenceProvenance::ExactCoefficients
-                            && continuation.is_none()
-                            && metadata.0 == [0.0; 2]
-                            && source_trim::native_chart(
-                                curve, surface, Some(chart), parameter.native_uv_domain,
-                                &mut chart_work, cancel,
-                            )?.is_some()
-                        {
-                            return trim_certificate::OriginalCoedgeCorrespondence::exact_coefficients(
-                                curve, chart, &mut chart_work, cancel,
-                            ).map(Some);
-                        }
-                        let input = trim_certificate::Correspondence {
-                            curve, surface, chart,
-                            maximum_error_mm: 1.0e-7,
-                            margin_uv: metadata.0,
-                        };
-                        let proof = if let Some(branch) = continuation {
-                            trim_certificate::certify_normalized_retained_correspondence(
-                                input, (&original_continuations[branch.prepared], scale),
-                                Some(&previous),
-                                &mut chart_work, cancel, None,
-                            )?
-                        } else {
-                            trim_certificate::certify_declared_coedge_correspondence(
-                                input, &mut chart_work, cancel, None,
-                            )?
-                        };
-                        Ok(proof)
-                    })).map_err(|cause| admission_error(
-                        cause,
-                        "normalized-correspondence",
-                        &chart_work,
-                        format_args!(
-                            "face {} (source #{}), wire {wire_index}, coedge {coedge_index}, source edge {:?}, native edge {}",
-                            faces[face_index].face_id.as_str(),
-                            faces[face_index].surface_face_entity,
-                            source_topology.faces[face_index].wires[wire_index].coedges
-                                [coedge_index].source_edge,
-                            slot.index,
-                        ),
-                    ))?;
-                    if previous.provenance() == OriginalCorrespondenceProvenance::CompletedPoleGraph
-                        && let Some(receipt) = proof.as_mut()
-                    {
-                        receipt.complete_pole_graph();
-                    }
-                    proof
-                } else {
-                    None
-                };
-                let source_chart_error_mm = correspondence.as_ref().map_or(metadata.1, |proof| {
-                    metadata.1.max(proof.position_error_mm())
-                });
-                let correspondence = correspondence.map(|proof| {
-                    proof.bind(crate::kernel::OriginalCoedgeBinding {
-                        face: face.id(),
-                        edge: edge.id(),
-                        endpoints: [edge.front().id(), edge.back().id()],
-                        owner: [face_index, wire_index, coedge_index],
-                        source_face: source_topology.faces[face_index].source_face,
-                        source_face_use: source_topology.faces[face_index].source_face_use,
-                        source: source_topology.faces[face_index].wires[wire_index].coedges
-                            [coedge_index],
-                    })
-                });
-                refs.push(BoundaryCoedgeRef {
-                    witness: slot.index,
-                    orientation: slot.orientation,
-                    edge: edge.id(),
-                    correspondence,
-                    source_chart_margin_uv: source_trim_metadata[face_index][wire_index]
-                        [coedge_index]
-                        .0,
-                    source_chart_error_mm,
-                    source_chart_parameter_range: source_trim_metadata[face_index][wire_index]
-                        [coedge_index]
-                        .2,
-                    source_chart_certificate: source_trim_metadata[face_index][wire_index]
-                        [coedge_index]
-                        .3,
-                    source_chart_declared: source_trim_metadata[face_index][wire_index]
-                        [coedge_index]
-                        .4,
-                });
-            }
-            retained.push(refs);
-        }
-        face_boundaries.push(FaceBoundaryRefs {
-            face: face.id(),
-            wires: retained,
-            parameter,
-        });
-        trimmed_faces.push(
-            monstertruck_topology::trimmed::TrimmedFace::try_new(face.clone(), trims).map_err(
-                |cause| {
-                    kernel(&format!(
-                        "retained exact native trim topology mismatch: {cause}"
-                    ))
-                },
-            )?,
-        );
-    }
-    drop((trim_slots, source_edges, source_vertices, native_vertices));
-    let trimmed_shell: monstertruck_topology::trimmed::TrimmedShell<_, _, _, _> =
-        trimmed_faces.into_iter().collect();
-    let trimmed_solid = std::iter::once(trimmed_shell).collect();
-    check_cancel(cancel)?;
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
-    let mut source_shells = reports
-        .into_iter()
+        .map(|&id| StepEntityId(id))
+        .collect();
+
+    let face_surface_maps: Vec<crate::kernel::SurfaceParameterMap> =
+        compute_face_surface_maps(&solid.brep);
+
+    let shell_id = brep
+        .shells()
+        .ids()
         .next()
-        .ok_or_else(|| kernel("missing source report"))?
-        .into_source_shells();
-    let source_topology = source_shells
-        .pop()
-        .ok_or_else(|| kernel("missing original source topology"))?;
-    let boundary_curve_indices = if original_continuations.is_empty() {
-        HashMap::new()
-    } else {
-        native_edges
-    };
-    let mut definition = Definition {
-        solid,
+        .unwrap_or(solidcore::topology::ShellId::from_index(0));
+
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    let definition = Definition {
         id: DefinitionId::from_source_sha256(&digest),
         provenance: SourceProvenance {
             source_hash: SourceHash::from_digest(&digest),
@@ -2138,17 +1186,98 @@ pub(crate) fn import_step(
         faces,
         bounds,
         source_bytes: bytes.len() as u32,
-        boundary_curves,
-        face_boundaries,
-        boundary_parameters,
-        boundary_continuations,
-        original_continuations,
-        continuation_bytes,
-        boundary_curve_indices,
-        source_topology,
-        trimmed_solid,
+        brep,
+        shell_id,
+        face_step_ids,
+        face_surface_maps,
+        source_units_scale_to_mm: scale,
+        solid: monstertruck_topology::Solid::new(Vec::new()),
+        boundary_curves: Vec::new(),
+        face_boundaries: Vec::new(),
+        boundary_parameters: Vec::new(),
+        boundary_continuations: Vec::new(),
+        original_continuations: Vec::new(),
+        continuation_bytes: 0,
+        boundary_curve_indices: HashMap::new(),
+        source_topology: monstertruck_io::step::load::SourceShellProvenance {
+            faces: Vec::new(),
+            edges: Vec::new(),
+        },
+        trimmed_solid: monstertruck_topology::trimmed::TrimmedSolid::new(Vec::new()),
     };
-    validate_parameter_bindings(&definition, cancel)?;
-    bounds::tighten_import_bounds(&mut definition, bound_refinement, cancel)?;
+
+    if definition.retained_query_proof_bytes() > query_proof_byte_limit {
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "retained query proof capacity exhausted",
+        ));
+    }
+
     Ok(definition)
+}
+
+fn compute_face_surface_maps(
+    brep: &solidcraft_geom::brep::Brep,
+) -> Vec<crate::kernel::SurfaceParameterMap> {
+    brep.faces
+        .iter()
+        .map(|face| {
+            let u0 = face.domain[0][0];
+            let v0 = face.domain[1][0];
+            match &face.surface {
+                solidcraft_geom::brep::Surface::Cylinder { .. }
+                | solidcraft_geom::brep::Surface::Cone { .. } => {
+                    crate::kernel::SurfaceParameterMap::ScaleOffset {
+                        u_scale: 180.0 / std::f64::consts::PI,
+                        u_offset: u0,
+                        v_scale: 1.0,
+                        v_offset: 0.0,
+                    }
+                }
+                solidcraft_geom::brep::Surface::Sphere { .. } => {
+                    crate::kernel::SurfaceParameterMap::ScaleOffset {
+                        u_scale: 180.0 / std::f64::consts::PI,
+                        u_offset: u0,
+                        v_scale: 180.0 / std::f64::consts::PI,
+                        v_offset: 0.0,
+                    }
+                }
+                solidcraft_geom::brep::Surface::Torus { .. } => {
+                    let v_shift =
+                        brep_data_bridge::analytic::first_turn([v0, face.domain[1][1]])[0] - v0;
+                    crate::kernel::SurfaceParameterMap::ScaleOffset {
+                        u_scale: 180.0 / std::f64::consts::PI,
+                        u_offset: u0,
+                        v_scale: 180.0 / std::f64::consts::PI,
+                        v_offset: v_shift,
+                    }
+                }
+                _ => crate::kernel::SurfaceParameterMap::Identity,
+            }
+        })
+        .collect()
+}
+
+/// Reads a native Definition from STEP byte slice with default settings.
+pub fn from_step_bytes(bytes: &[u8]) -> Result<Definition, GeometryError> {
+    from_step_bytes_with_cancel(bytes, &AtomicBool::new(false))
+}
+
+/// Reads a native Definition from STEP byte slice with cancellation checking.
+pub fn from_step_bytes_with_cancel(
+    bytes: &[u8],
+    cancel: &AtomicBool,
+) -> Result<Definition, GeometryError> {
+    import_step(bytes, cancel, MAX_NATIVE_FACES, MAX_QUERY_PROOF_BYTES)
+}
+
+/// Reads a native Definition from a STEP file on disk.
+pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Definition, GeometryError> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        GeometryError::new(
+            GeometryErrorCode::SourceIo,
+            format!("failed to read STEP file: {e}"),
+        )
+    })?;
+    from_step_bytes(&bytes)
 }

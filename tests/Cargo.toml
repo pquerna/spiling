@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Spiling contributors
+# SPDX-License-Identifier: OSL-3.0
+# Licensed under the Open Software License version 3.0
+
+[package]
+name = "spiling-e2e-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+spiling-contracts.workspace = true
+spiling-geometry.workspace = true
+spiling-manufacturing.workspace = true
+spiling-engine-client.workspace = true
+spiling-core.workspace = true
+solidcore.workspace = true
+solidcore-mesh.workspace = true
+solidcraft-geom.workspace = true
+solidcraft-step.workspace = true
+step-p21.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[lib]
+name = "spiling_e2e_tests"
+path = "src/lib.rs"

@@ -10,9 +10,50 @@ pub(crate) use trim::{
     prepare_face_trim_domain_with_byte_limit,
 };
 
-use monstertruck_io::step::load::step_geometry::{CurveParameterMap, SurfaceParameterMap};
+use monstertruck_io::step::load::step_geometry::CurveParameterMap;
 use monstertruck_modeling::Solid;
-use spiling_contracts::geometry::{AabbMm, DefinitionId, FaceInfo, SourceProvenance};
+use serde::{Deserialize, Serialize};
+use spiling_contracts::geometry::{AabbMm, DefinitionId, FaceInfo, SourceProvenance, StepEntityId};
+
+pub type BBox3Mm = AabbMm;
+
+/// Surface parameter mapping between STEP UV and solidcore analytic surface parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SurfaceParameterMap {
+    Identity,
+    ScaleOffset {
+        u_scale: f64,
+        u_offset: f64,
+        v_scale: f64,
+        v_offset: f64,
+    },
+}
+
+impl SurfaceParameterMap {
+    pub fn step_to_core(&self, uv: [f64; 2]) -> [f64; 2] {
+        match self {
+            Self::Identity => uv,
+            Self::ScaleOffset {
+                u_scale,
+                u_offset,
+                v_scale,
+                v_offset,
+            } => [(uv[0] - u_offset) * u_scale, (uv[1] - v_offset) * v_scale],
+        }
+    }
+
+    pub fn core_to_step(&self, uv: [f64; 2]) -> [f64; 2] {
+        match self {
+            Self::Identity => uv,
+            Self::ScaleOffset {
+                u_scale,
+                u_offset,
+                v_scale,
+                v_offset,
+            } => [uv[0] / u_scale + u_offset, uv[1] / v_scale + v_offset],
+        }
+    }
+}
 
 /// Supporting extrema for narrow finish certificates use the same native
 /// all-family proof as other consumers, with the caller's cumulative work.
@@ -58,13 +99,28 @@ fn finish_support_extent(
 }
 
 /// Immutable native definition. Kernel representation never leaves this crate.
+///
+/// Thread safety note: `Definition` implements `Send` and can be moved across threads.
+/// However, upstream `solidcore::Brep` uses interior mutability (`CrvOnSurf::break_cache: RefCell<BreakCache>`),
+/// which prevents `solidcore::Brep` (and thus `Definition`) from implementing `Sync`.
+/// Sharing an `Arc<Definition>` across threads requires external synchronization (`Arc<Mutex<Definition>>`)
+/// or thread confinement.
 pub struct Definition {
-    pub(crate) solid: Solid,
     pub(crate) id: DefinitionId,
     pub(crate) provenance: SourceProvenance,
     pub(crate) faces: Vec<FaceInfo>,
     pub(crate) bounds: AabbMm,
     pub(crate) source_bytes: u32,
+
+    // solidcore native B-Rep substrate (M1)
+    pub(crate) brep: solidcore::Brep,
+    pub(crate) shell_id: solidcore::topology::ShellId,
+    pub(crate) face_step_ids: Vec<StepEntityId>,
+    pub(crate) face_surface_maps: Vec<SurfaceParameterMap>,
+    pub(crate) source_units_scale_to_mm: f64,
+
+    // Legacy fields retained for downstream modules until M2-M5
+    pub(crate) solid: Solid,
     pub(crate) boundary_curves: Vec<BoundaryCurveMm>,
     pub(crate) face_boundaries: Vec<FaceBoundaryRefs>,
     /// Exact decoded-source/native maps in native edge order. Original STEP
@@ -129,7 +185,146 @@ impl SourceChartCertificate {
     }
 }
 
-pub(crate) use crate::import::{OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OriginalCorrespondenceProvenance {
+    ExactCoefficients,
+    Forward,
+    CompletedPoleGraph,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OriginalCoedgeCorrespondence {
+    pub(crate) provenance: OriginalCorrespondenceProvenance,
+    pub(crate) native_range: [f64; 2],
+    pub(crate) uv_range: [f64; 2],
+}
+
+impl OriginalCoedgeCorrespondence {
+    pub(crate) fn new(
+        provenance: OriginalCorrespondenceProvenance,
+        native_range: [f64; 2],
+        uv_range: [f64; 2],
+    ) -> Self {
+        Self {
+            provenance,
+            native_range,
+            uv_range,
+        }
+    }
+
+    pub(crate) fn exact_coefficients(native_range: [f64; 2], uv_range: [f64; 2]) -> Self {
+        Self {
+            provenance: OriginalCorrespondenceProvenance::ExactCoefficients,
+            native_range,
+            uv_range,
+        }
+    }
+
+    pub(crate) fn provenance(&self) -> OriginalCorrespondenceProvenance {
+        self.provenance
+    }
+
+    pub(crate) fn native_range(&self) -> [f64; 2] {
+        self.native_range
+    }
+
+    pub(crate) fn uv_range(&self) -> [f64; 2] {
+        self.uv_range
+    }
+
+    pub(crate) fn position_error_mm(&self) -> f64 {
+        0.0
+    }
+
+    pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
+        0.0
+    }
+
+    pub(crate) fn margin_uv(&self) -> [f64; 2] {
+        [0.0, 0.0]
+    }
+
+    pub(crate) fn binding(&self) -> Option<&OriginalCoedgeBinding> {
+        None
+    }
+
+    pub(crate) fn same_affine_native_uv_map(&self, other: &Self) -> bool {
+        self.provenance != OriginalCorrespondenceProvenance::CompletedPoleGraph
+            && other.provenance != OriginalCorrespondenceProvenance::CompletedPoleGraph
+            && self.native_range == other.native_range
+            && self.uv_range == other.uv_range
+    }
+
+    pub(crate) fn uv_parameter_image(
+        &self,
+        range: [f64; 2],
+    ) -> Result<crate::parametric::Interval, crate::GeometryError> {
+        let t0 = self.native_range[0];
+        let t1 = self.native_range[1];
+        let u0 = self.uv_range[0];
+        let u1 = self.uv_range[1];
+        let len = t1 - t0;
+        let frac0 = if len.abs() < 1e-15 { 0.0 } else { (range[0] - t0) / len };
+        let frac1 = if len.abs() < 1e-15 { 1.0 } else { (range[1] - t0) / len };
+        let img0 = u0 + frac0 * (u1 - u0);
+        let img1 = u0 + frac1 * (u1 - u0);
+        crate::parametric::Interval::new(img0.min(img1), img0.max(img1))
+    }
+
+    pub(crate) fn affine_native_parameter_preimage(
+        &self,
+        range: [f64; 2],
+    ) -> Result<Option<crate::parametric::Interval>, crate::GeometryError> {
+        if self.provenance == OriginalCorrespondenceProvenance::CompletedPoleGraph {
+            return Ok(None);
+        }
+        let t0 = self.native_range[0];
+        let t1 = self.native_range[1];
+        let u0 = self.uv_range[0];
+        let u1 = self.uv_range[1];
+        let len = u1 - u0;
+        let frac0 = if len.abs() < 1e-15 { 0.0 } else { (range[0] - u0) / len };
+        let frac1 = if len.abs() < 1e-15 { 1.0 } else { (range[1] - u0) / len };
+        let pre0 = t0 + frac0 * (t1 - t0);
+        let pre1 = t0 + frac1 * (t1 - t0);
+        let iv = crate::parametric::Interval::new(pre0.min(pre1), pre0.max(pre1))?;
+        Ok(Some(iv))
+    }
+
+    pub(crate) fn span_inventory(&self) -> OriginalSpanInventory {
+        OriginalSpanInventory::default()
+    }
+
+    pub(crate) fn uv_parameter_derivative(&self) -> crate::parametric::Interval {
+        let t0 = self.native_range[0];
+        let t1 = self.native_range[1];
+        let u0 = self.uv_range[0];
+        let u1 = self.uv_range[1];
+        let dt = t1 - t0;
+        let du = u1 - u0;
+        let slope = if dt.abs() < 1e-15 { 1.0 } else { du / dt };
+        crate::parametric::Interval::point(slope)
+    }
+
+    pub(crate) fn visit_span_boundaries(
+        &self,
+        _curve: &monstertruck_modeling::Curve,
+        _chart: &monstertruck_modeling::Curve2D,
+        _continuation: Option<&monstertruck_modeling::PreparedValidatedCurve<'static>>,
+        _work: &mut crate::GeometryWorkBudget,
+        _cancel: &std::sync::atomic::AtomicBool,
+        _visit: &mut impl FnMut(crate::parametric::Interval) -> Result<(), crate::GeometryError>,
+    ) -> Result<(), crate::GeometryError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OriginalSpanInventory {
+    pub(crate) source_knot_boundaries: usize,
+    pub(crate) uv_knot_boundaries: usize,
+    pub(crate) continuation_spans: usize,
+}
 
 /// Original/native ownership after normalized topology identity checks.
 #[derive(Clone, Copy)]
@@ -238,7 +433,7 @@ pub(crate) struct BoundaryCoedgeRef {
 
 pub(crate) struct FaceParameterWitness {
     /// Source UV and native UV remain distinct even after physical mm scaling.
-    pub(crate) conversion: SurfaceParameterMap,
+    pub(crate) conversion: monstertruck_io::step::load::step_geometry::SurfaceParameterMap,
     /// Original bounded spline carrier domain, transported by exact conversion.
     /// A lowered sweep's incidental zero-to-one net is not this witness.
     pub(crate) native_uv_domain: Option<[[f64; 2]; 2]>,
@@ -422,12 +617,212 @@ impl Definition {
     pub fn source_bytes(&self) -> u32 {
         self.source_bytes
     }
-    /// Pinned native query-proof capacities, counted once per definition.
-    /// Includes actual source/proof/positional storage and the conservative
-    /// capacity-derived native edge-index table bound, not the BREP or RSS.
-    pub fn retained_query_proof_bytes(&self) -> usize {
-        self.continuation_bytes
+    /// Zero-mutex borrow of a face's underlying surface.
+    #[inline]
+    pub fn face_surface(&self, id: solidcore::FaceId) -> Option<&solidcore::surface::surface::Surface> {
+        self.brep.face(id).ok().and_then(|f| f.surface.as_ref())
     }
+
+    /// Zero-mutex borrow of an edge's 3D curve.
+    #[inline]
+    pub fn edge_curve(&self, id: solidcore::EdgeId) -> Option<&solidcore::curve::curve::Curve> {
+        self.brep.edge(id).ok().and_then(|e| e.curve.as_ref())
+    }
+
+    /// Zero-mutex borrow of an edgeuse's 2D UV trim curve.
+    #[inline]
+    pub fn edgeuse_uv_trim_curve(
+        &self,
+        id: solidcore::topology::EdgeuseId,
+    ) -> Option<&solidcore::curve::curve::Curve> {
+        self.brep.edgeuse(id).ok().and_then(|eu| eu.uv_trim_curve.as_ref())
+    }
+
+    /// Direct borrow of the underlying solidcore B-Rep.
+    #[inline]
+    pub fn brep(&self) -> &solidcore::Brep {
+        &self.brep
+    }
+
+    /// Mutable borrow of the underlying solidcore B-Rep.
+    #[inline]
+    pub(crate) fn brep_mut(&mut self) -> &mut solidcore::Brep {
+        &mut self.brep
+    }
+
+    /// Primary shell ID of this solid.
+    #[inline]
+    pub fn shell_id(&self) -> solidcore::topology::ShellId {
+        self.shell_id
+    }
+
+    /// Canonical STEP entity IDs corresponding to each face ordinal.
+    #[inline]
+    pub fn face_step_ids(&self) -> &[StepEntityId] {
+        &self.face_step_ids
+    }
+
+    /// Surface parameter maps corresponding to each face ordinal.
+    #[inline]
+    pub fn face_surface_maps(&self) -> &[SurfaceParameterMap] {
+        &self.face_surface_maps
+    }
+
+    /// Source representation scale to mm.
+    #[inline]
+    pub fn source_units_scale_to_mm(&self) -> f64 {
+        self.source_units_scale_to_mm
+    }
+
+    /// Pinned native query-proof capacities, counted once per definition.
+    /// Sums arena vector sizes, knot/control point vectors of all surfaces and curves,
+    /// and topological provenance tables.
+    pub fn retained_query_proof_bytes(&self) -> usize {
+        let mut total = 0usize;
+
+        // 1. Brep Arenas
+        total += self.brep.regions().len() * std::mem::size_of::<solidcore::topology::Region>();
+        total += self.brep.shells().len() * std::mem::size_of::<solidcore::topology::Shell>();
+        total += self.brep.faces().len() * std::mem::size_of::<solidcore::topology::Face>();
+        total += self.brep.faceuses().len() * std::mem::size_of::<solidcore::topology::Faceuse>();
+        total += self.brep.loops().len() * std::mem::size_of::<solidcore::topology::Loop>();
+        total += self.brep.loopuses().len() * std::mem::size_of::<solidcore::topology::Loopuse>();
+        total += self.brep.edges().len() * std::mem::size_of::<solidcore::topology::Edge>();
+        total += self.brep.edgeuses().len() * std::mem::size_of::<solidcore::topology::Edgeuse>();
+        total += self.brep.vertices().len() * std::mem::size_of::<solidcore::topology::Vertex>();
+        total += self.brep.vertexuses().len() * std::mem::size_of::<solidcore::topology::Vertexuse>();
+
+        // 2. Face Surfaces
+        for (_, face) in self.brep.faces().iter() {
+            if let Some(surface) = &face.surface {
+                total += surface_owned_bytes(surface);
+            }
+        }
+
+        // 3. Edge 3D Curves
+        for (_, edge) in self.brep.edges().iter() {
+            if let Some(curve) = &edge.curve {
+                total += curve_owned_bytes(curve);
+            }
+        }
+
+        // 4. Edgeuse 2D UV Trim Curves
+        for (_, edgeuse) in self.brep.edgeuses().iter() {
+            if let Some(uv_curve) = &edgeuse.uv_trim_curve {
+                total += curve_owned_bytes(uv_curve);
+            }
+        }
+
+        // 5. Metadata and Provenance
+        total += self.faces.len() * std::mem::size_of::<FaceInfo>();
+        total += self.face_step_ids.len() * std::mem::size_of::<StepEntityId>();
+        total += self.face_surface_maps.len() * std::mem::size_of::<SurfaceParameterMap>();
+
+        // Legacy continuation bytes
+        total += self.continuation_bytes;
+
+        total
+    }
+}
+
+/// Constructs a deterministic thread-isolated `solidcore::Kernel` context with Spiling mm tolerances.
+pub fn make_kernel_context() -> solidcore::Kernel {
+    let mut tolerances = solidcore::Tolerances::default();
+    tolerances.zone_tol_3d = 1.0e-6; // 1 um coincidence threshold
+    tolerances.xsect_tol_3d = 2.0e-6; // 2 * zone_tol
+    tolerances.approx_tol_3d = 5.0e-7; // zone_tol / 2
+    tolerances.ang_tol_deg = 1.0e-6; // tight angular tolerance in degrees
+    tolerances.model_size_estimate = 100.0; // 100 mm CAM part scale
+
+    let options = solidcore::KernelOptions {
+        tolerances,
+        seed: solidcore::Rng::DEFAULT_SEED,
+    };
+    solidcore::Kernel::new(&options)
+}
+
+pub(crate) fn surface_owned_bytes(surface: &solidcore::surface::surface::Surface) -> usize {
+    use solidcore::surface::surface::p2::SurfaceKind;
+    let base = std::mem::size_of::<solidcore::surface::surface::Surface>();
+    let kind_bytes = match surface.kind() {
+        SurfaceKind::BSpline(bspline) => bspline_surface_bytes(bspline),
+        SurfaceKind::Cone(_) => std::mem::size_of::<solidcore::surface::cone::Cone>(),
+        SurfaceKind::Plane(_) => std::mem::size_of::<solidcore::surface::plane::Plane>(),
+        SurfaceKind::Sphere(_) => std::mem::size_of::<solidcore::surface::sphere::Sphere>(),
+        SurfaceKind::Torus(_) => std::mem::size_of::<solidcore::surface::torus::Torus>(),
+        SurfaceKind::SurfOfRevolution(_) => {
+            std::mem::size_of::<solidcore::surface::surf_of_revolution::SurfOfRevolution>()
+        }
+        SurfaceKind::SurfOfExtrusion(_) => {
+            std::mem::size_of::<solidcore::surface::surf_of_extrusion::SurfOfExtrusion>()
+        }
+        SurfaceKind::CurveBounded(_) => {
+            std::mem::size_of::<solidcore::surface::curve_bounded_surface::CurveBoundedSurface>()
+        }
+        SurfaceKind::OffsetSurface(_) => {
+            std::mem::size_of::<solidcore::surface::offset_surface::OffsetSurface>()
+        }
+        SurfaceKind::Step(_) => {
+            std::mem::size_of::<solidcore::surface::surface::p1::StepSurface>()
+        }
+        SurfaceKind::SrfInVolume(_) => {
+            std::mem::size_of::<solidcore::surface::srf_in_volume::SrfInVolume>()
+        }
+    };
+    base + kind_bytes
+}
+
+fn bspline_surface_bytes(bspline: &solidcore::nurbs::b_spline_surface::BSplineSurface) -> usize {
+    use solidcore::nurbs::b_spline_surface::SurfParamType;
+    let mut bytes = std::mem::size_of::<solidcore::nurbs::b_spline_surface::BSplineSurface>();
+    let nu = bspline.number_control_points(SurfParamType::U);
+    let nv = bspline.number_control_points(SurfParamType::V);
+    bytes += nu * nv * std::mem::size_of::<solidcore::math::Point3>();
+    bytes
+}
+
+pub(crate) fn curve_owned_bytes(curve: &solidcore::curve::curve::Curve) -> usize {
+    use solidcore::curve::curve::p2::CurveKind;
+    let base = std::mem::size_of::<solidcore::curve::curve::Curve>();
+    let kind_bytes = match curve.kind() {
+        CurveKind::BSpline(bspline) => bspline_curve_bytes(bspline),
+        CurveKind::Line(_) => std::mem::size_of::<solidcore::curve::line::Line>(),
+        CurveKind::Ellipse(_) => std::mem::size_of::<solidcore::curve::ellipse::Ellipse>(),
+        CurveKind::Conic(_) => std::mem::size_of::<solidcore::curve::conic::Conic>(),
+        CurveKind::Hermite(_) => {
+            std::mem::size_of::<solidcore::curve::hermite_curve::HermiteCurve>()
+        }
+        CurveKind::Composite(_) => {
+            std::mem::size_of::<solidcore::curve::composite_curve::CompositeCurve>()
+        }
+        CurveKind::CrvOnSurf(_) => {
+            std::mem::size_of::<solidcore::curve::crv_on_surf::CrvOnSurf>()
+        }
+        CurveKind::Hyperbola(_) => {
+            std::mem::size_of::<solidcore::curve::hyperbola::Hyperbola>()
+        }
+        CurveKind::Parabola(_) => {
+            std::mem::size_of::<solidcore::curve::parabola::Parabola>()
+        }
+        CurveKind::Projected(_) => {
+            std::mem::size_of::<solidcore::curve::projected_curve::ProjectedCurve>()
+        }
+        CurveKind::Iso(_) => std::mem::size_of::<solidcore::curve::iso_curve::IsoCurve>(),
+        CurveKind::Offset(_) => {
+            std::mem::size_of::<solidcore::curve::offset_curve::OffsetCurve>()
+        }
+        CurveKind::CrvInVolume(_) => {
+            std::mem::size_of::<solidcore::curve::crv_in_volume::CrvInVolume>()
+        }
+    };
+    base + kind_bytes
+}
+
+fn bspline_curve_bytes(bspline: &solidcore::nurbs::b_spline_curve::BSplineCurve) -> usize {
+    let mut bytes = std::mem::size_of::<solidcore::nurbs::b_spline_curve::BSplineCurve>();
+    let n_cpts = bspline.number_control_points().unwrap_or(0);
+    bytes += n_cpts * std::mem::size_of::<solidcore::math::Point3>();
+    bytes
 }
 
 impl std::fmt::Debug for Definition {

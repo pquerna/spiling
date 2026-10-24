@@ -4927,6 +4927,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "spiling-e2e-tests"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "solidcore",
+ "solidcore-mesh",
+ "solidcraft-geom",
+ "solidcraft-step",
+ "spiling-contracts",
+ "spiling-core",
+ "spiling-engine-client",
+ "spiling-geometry",
+ "spiling-manufacturing",
+ "step-p21",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "spiling-engine"
 version = "0.1.0"
 dependencies = [

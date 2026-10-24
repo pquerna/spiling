@@ -45,7 +45,8 @@ pub use analysis::{
     placed_material_bounds, prepare_geometry_source, prepare_material_source, projected_bounds,
     projected_protected_void_envelopes,
 };
-pub use kernel::Definition;
+pub use import::{from_step_bytes, from_step_bytes_with_cancel, from_step_file};
+pub use kernel::{BBox3Mm, Definition, SurfaceParameterMap, make_kernel_context};
 pub use section::{
     MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, PreparedSectionSource,
     prepare_section_source,
