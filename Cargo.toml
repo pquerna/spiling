@@ -40,6 +40,10 @@ monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/m
 monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
 monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5", default-features = false, features = ["step"] }
 monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
+solidcore = { version = "=0.0.1", git = "https://github.com/tangency-labs/solidcore", rev = "ec0dd723fb394acbdd3dfe05a4cc8182910dc403" }
+solidcore-mesh = { version = "=0.0.1", git = "https://github.com/tangency-labs/solidcore", rev = "ec0dd723fb394acbdd3dfe05a4cc8182910dc403", features = ["nurbs-grid-mesh"] }
+solidcraft-geom = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
+solidcraft-step = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
 step-p21 = "=0.1.1"
 spiling-geometry = { path = "crates/geometry" }
 spiling-core = { path = "crates/core" }
@@ -51,6 +55,12 @@ incremental = false
 
 # Keep geometry/manufacturing numerical work practical without optimizing the desktop stack.
 [profile.dev.package.monstertruck-modeling]
+opt-level = 2
+
+[profile.dev.package.solidcore]
+opt-level = 2
+
+[profile.dev.package.solidcore-mesh]
 opt-level = 2
 
 [profile.dev.package.spiling-geometry]

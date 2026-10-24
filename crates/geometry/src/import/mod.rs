@@ -3,6 +3,7 @@
 // Licensed under the Open Software License version 3.0
 
 mod ast;
+pub(crate) mod brep_data_bridge;
 #[cfg(test)]
 mod tests;
 mod units;

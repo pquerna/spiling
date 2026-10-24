@@ -3164,6 +3164,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "nurbs-grid-mesh"
+version = "0.1.0"
+source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+
+[[package]]
 name = "objc2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4808,6 +4813,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "solidcore"
+version = "0.0.1"
+source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "solidcore-mesh"
+version = "0.0.1"
+source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+dependencies = [
+ "nurbs-grid-mesh",
+ "solidcore",
+ "spade",
+]
+
+[[package]]
+name = "solidcraft-geom"
+version = "0.18.1"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=1b7b9d8d88233c18071fe8d6f4da418a315935a6#1b7b9d8d88233c18071fe8d6f4da418a315935a6"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "solidcraft-step"
+version = "0.18.1"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=1b7b9d8d88233c18071fe8d6f4da418a315935a6#1b7b9d8d88233c18071fe8d6f4da418a315935a6"
+dependencies = [
+ "solidcraft-geom",
+]
+
+[[package]]
 name = "spade"
 version = "2.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4945,6 +4985,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "solidcore",
+ "solidcore-mesh",
+ "solidcraft-geom",
+ "solidcraft-step",
  "spiling-contracts",
  "step-p21",
 ]
