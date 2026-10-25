@@ -193,13 +193,22 @@ pub(super) fn intersect(
                 )?;
                 let binding =
                     Boundary::new(definition, surface, eu_id, edge_id, scale, work, cancel)?;
-                binding.prove_correspondence(
-                    correspondence_allowance,
-                    0,
-                    [0.0, 1.0],
-                    work,
-                    cancel,
-                )?;
+                binding
+                    .prove_correspondence(
+                        correspondence_allowance,
+                        admission.limit.checked_sub(admission.used).ok_or_else(|| {
+                            resource_error("native trim correspondence exceeds live query allowance")
+                        })?,
+                        work,
+                        cancel,
+                    )
+                    .map_err(|mut error| {
+                        error.message = format!(
+                            "native section face={face_id:?} edge={edge_id:?} edgeuse={eu_id:?}: {}",
+                            error.message
+                        );
+                        error
+                    })?;
                 let chart_roots = roots::isolate(
                     std::iter::once([0.0, 1.0]),
                     &mut |range, work, cancel| {
@@ -666,9 +675,9 @@ fn ensure_edge_roots(
     Ok(())
 }
 
-/// The actual edgeuse UV law: its curve is in edge direction; only the native
-/// normalized edge fraction maps to its natural interval. It is never reversed
-/// because the face uses the edge in the opposite direction.
+/// The actual edgeuse UV law is directed with the native edge, not its coedge.
+/// Each operand retains its own literal gauge; a complete coefficient
+/// calibration proves their physical correspondence independently.
 struct Boundary<'a> {
     surface: &'a Surface,
     curve: &'a Curve,
@@ -842,9 +851,56 @@ impl<'a> Boundary<'a> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
-        Ok(accuracy / norm(self.edge_jet([0.0, 1.0], work, cancel)?.derivative).max(1.0))
+        let (_, derivative, _, _) = self.evaluate([0.0, 1.0], work, cancel)?;
+        Ok(accuracy / norm(derivative).max(1.0))
     }
     fn prove_correspondence(
+        &self,
+        allowance: f64,
+        byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
+        if let Some(chart) = self.uv_curve {
+            let reference = p::curve_prepared::NativeChartCurve {
+                surface: self.surface,
+                chart,
+            };
+            // Both actual complete parameter branches are fixed before the
+            // solver proposes any gauge. Its retained monotone C1 map and
+            // whole-span position/tangent bounds, not its point inverses,
+            // discharge correspondence. No map or new geometry is retained
+            // after this proof; root inventories remain independently checked.
+            let physical_allowance = Interval::point(allowance)
+                .div(Interval::point(self.scale))?
+                .lo;
+            return crate::kernel::trim::calibrate_source_curves(
+                &reference,
+                self.curve,
+                self.edge_range,
+                physical_allowance,
+                24,
+                byte_limit,
+                work,
+                cancel,
+            )
+            .map(|_| ())
+            .map_err(|mut error| {
+                if error.code == GeometryErrorCode::ParameterCorrespondenceUnavailable {
+                    error.code = GeometryErrorCode::AnalysisIndeterminate;
+                }
+                error.message = format!(
+                    "native trim/spatial coefficient correspondence unqualified: {}",
+                    error.message
+                );
+                error
+            });
+        }
+        // A missing pcurve is admitted only for the literal affine plane
+        // inverse, whose gauge is constructed from this very spatial edge.
+        self.prove_affine_correspondence(allowance, 0, [0.0, 1.0], work, cancel)
+    }
+    fn prove_affine_correspondence(
         &self,
         allowance: f64,
         depth: u8,
@@ -873,8 +929,8 @@ impl<'a> Boundary<'a> {
                 position
             )));
         }
-        self.prove_correspondence(allowance, depth + 1, [r[0], mid], work, cancel)?;
-        self.prove_correspondence(allowance, depth + 1, [mid, r[1]], work, cancel)
+        self.prove_affine_correspondence(allowance, depth + 1, [r[0], mid], work, cancel)?;
+        self.prove_affine_correspondence(allowance, depth + 1, [mid, r[1]], work, cancel)
     }
 }
 
@@ -1689,4 +1745,111 @@ pub(crate) fn canonicalize_section_in_place(
     }
     canonicalize_loops(section, work, cancel)?;
     certify_polygons(section, work, cancel)
+}
+
+#[cfg(test)]
+mod correspondence_tests {
+    use super::*;
+    use solidcore::nurbs::{
+        b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface,
+        crv_basic, math::{CPoint, NOW, NOZ}, srf_basic,
+    };
+
+    fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {
+        BSplineCurve::from_nurb(
+            crv_basic::Curve::new(points, degree, knots).unwrap(),
+            dim,
+            true,
+        )
+        .into()
+    }
+
+    fn carrier() -> Surface {
+        let net = [0.0, 1.0]
+            .map(|u| vec![CPoint::new(u, 0.0, 0.0, NOW), CPoint::new(u, 1.0, 0.0, NOW)])
+            .to_vec();
+        Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(
+            srf_basic::Surface::new(
+                net,
+                1,
+                1,
+                vec![0.0, 0.0, 1.0, 1.0],
+                vec![0.0, 0.0, 1.0, 1.0],
+            )
+            .unwrap(),
+            true,
+        )))
+    }
+
+    fn spatial() -> Curve {
+        // x(t)=2t/(1+t), not x(t)=t, despite identical directed trace.
+        curve(
+            vec![CPoint::new(0.0, 0.0, 0.0, 1.0), CPoint::new(2.0, 0.0, 0.0, 2.0)],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            3,
+        )
+    }
+
+    #[test]
+    fn native_boundary_calibrates_nonuniform_gauge_without_losing_trace() {
+        let surface = carrier();
+        let spatial = spatial();
+        let chart = curve(
+            vec![CPoint::new(0.0, 0.0, NOZ, NOW), CPoint::new(1.0, 0.0, NOZ, NOW)],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            2,
+        );
+        let boundary = Boundary {
+            surface: &surface,
+            curve: &spatial,
+            uv_curve: Some(&chart),
+            edge_range: [0.0, 1.0],
+            scale: 1.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let (point, _, _, _) = boundary.evaluate([0.5; 2], &mut work, &cancel).unwrap();
+        let native = boundary.edge_jet([0.5; 2], &mut work, &cancel).unwrap();
+        assert!(norm(std::array::from_fn(|i| point[i].sub(native.position[i]))) > 0.1);
+        boundary
+            .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
+            .unwrap();
+    }
+
+    #[test]
+    fn native_boundary_rejects_bowed_trace_and_missing_chart() {
+        let surface = carrier();
+        let spatial = spatial();
+        // Both original endpoints still agree; the interior trace is displaced.
+        let chart = curve(
+            vec![
+                CPoint::new(0.0, 0.0, NOZ, NOW),
+                CPoint::new(0.5, 0.01, NOZ, NOW),
+                CPoint::new(1.0, 0.0, NOZ, NOW),
+            ],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            2,
+        );
+        let mut boundary = Boundary {
+            surface: &surface,
+            curve: &spatial,
+            uv_curve: Some(&chart),
+            edge_range: [0.0, 1.0],
+            scale: 1.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        assert_eq!(
+            boundary.prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel).unwrap_err().code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+        boundary.uv_curve = None;
+        assert_eq!(
+            boundary.prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel).unwrap_err().code,
+            GeometryErrorCode::AnalysisIndeterminate
+        );
+    }
 }

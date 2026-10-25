@@ -651,6 +651,87 @@ impl<'a> PreparedValidatedCurve<'a> {
     }
 }
 
+/// Borrow the literal native chart composition without copying either operand.
+/// The chart's parameter is independent of the spatial edge's gauge.
+pub(crate) struct NativeChartCurve<'a> {
+    pub(crate) surface: &'a solidcore::surface::surface::Surface,
+    pub(crate) chart: &'a Curve,
+}
+impl super::CurveEvaluator for NativeChartCurve<'_> {
+    fn active_range(&self) -> [f64; 2] {
+        let d = self.chart.natural_interval();
+        [d.min(), d.max()]
+    }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        if order > 3 {
+            return Err(conditioning("curve derivative order exceeds three"));
+        }
+        let uv = curve_jet_order(self.chart, range, order, 0, work, cancel)?;
+        lift_surface_jet(self.surface, self.chart, range, uv, order, work, cancel)
+    }
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        if !super::curve_parameter_span_continuous(self.chart, range, work, cancel)? {
+            return Ok(false);
+        }
+        let uv = curve_jet_order(self.chart, range, 0, 0, work, cancel)?[0];
+        let bounds = chart_image_box(self.surface, self.chart, range, uv, work, cancel)?;
+        super::surface_parameter_span_continuous(self.surface, bounds, work, cancel)
+    }
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        curve_on_surface_span_smooth(self.surface, self.chart, range, [0.0, 1.0], work, cancel)
+    }
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<super::AxisSpans<'_>, GeometryError> {
+        super::curve_parameter_spans(self.chart, range, work, cancel)
+    }
+}
+
+fn chart_image_box(
+    surface: &solidcore::surface::surface::Surface,
+    chart: &Curve,
+    range: [f64; 2],
+    uv: [Interval; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[f64; 2]; 2], GeometryError> {
+    let mut bounds = [[uv[0].lo, uv[0].hi], [uv[1].lo, uv[1].hi]];
+    let active = surface.natural_uv_domain();
+    let lo = active.min();
+    let hi = active.max();
+    let domain = [[lo.x, hi.x], [lo.y, hi.y]];
+    if (0..2).any(|i| bounds[i][0] < domain[i][0] || bounds[i][1] > domain[i][1])
+        && super::curve2d_image_within_box(chart, range, domain, work, cancel)?
+    {
+        for i in 0..2 {
+            bounds[i] = [
+                bounds[i][0].max(domain[i][0]),
+                bounds[i][1].min(domain[i][1]),
+            ];
+        }
+    }
+    Ok(bounds)
+}
+
 fn lift_surface_jet(
     surface: &solidcore::surface::surface::Surface,
     chart: &Curve,
@@ -660,21 +741,7 @@ fn lift_surface_jet(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<[[Interval; 3]; 4], GeometryError> {
-    let mut box_uv = [[uv[0][0].lo, uv[0][0].hi], [uv[0][1].lo, uv[0][1].hi]];
-    let native_domain = surface.natural_uv_domain();
-    let lo = native_domain.min();
-    let hi = native_domain.max();
-    let domain = [[lo.x, hi.x], [lo.y, hi.y]];
-    if (0..2).any(|axis| box_uv[axis][0] < domain[axis][0] || box_uv[axis][1] > domain[axis][1])
-        && super::curve2d_image_within_box(chart, chart_range, domain, work, cancel)?
-    {
-        for axis in 0..2 {
-            box_uv[axis] = [
-                box_uv[axis][0].max(domain[axis][0]),
-                box_uv[axis][1].min(domain[axis][1]),
-            ];
-        }
-    }
+    let box_uv = chart_image_box(surface, chart, chart_range, uv[0], work, cancel)?;
     let s = super::analytic_eval::surface_tensor(surface, box_uv, order, work, cancel)?;
     let mut out = [[ZERO; 3]; 4];
     out[0] = s[0][0];
@@ -819,21 +886,7 @@ pub fn curve_on_surface_span_smooth(
         return Ok(false);
     }
     let uv = curve_jet_order(chart, mapped, 0, 0, work, cancel)?[0];
-    let active = surface.natural_uv_domain();
-    let lo = active.min();
-    let hi = active.max();
-    let domain = [[lo.x, hi.x], [lo.y, hi.y]];
-    let mut bounds = [[uv[0].lo, uv[0].hi], [uv[1].lo, uv[1].hi]];
-    if (0..2).any(|i| bounds[i][0] < domain[i][0] || bounds[i][1] > domain[i][1])
-        && super::curve2d_image_within_box(chart, mapped, domain, work, cancel)?
-    {
-        for i in 0..2 {
-            bounds[i] = [
-                bounds[i][0].max(domain[i][0]),
-                bounds[i][1].min(domain[i][1]),
-            ];
-        }
-    }
+    let bounds = chart_image_box(surface, chart, mapped, uv, work, cancel)?;
     super::surface_parameter_span_smooth(surface, bounds, work, cancel)
 }
 
