@@ -190,15 +190,13 @@ fn raw_boundary(
         Piece::Middle => [0.0; 2],
     };
     {
-        let surface = &domain.surface_operand();
         (|| {
-            let jet = surface_enclosure(surface, uv_box(boundary.uv), work, cancel)?;
+            let jet = domain.original_carrier_jet(uv_box(boundary.uv), work, cancel)?;
             let margin_box = margin.map(|radius| Interval {
                 lo: -radius,
                 hi: radius,
             });
-            let margin_jet = surface_enclosure(
-                surface,
+            let margin_jet = domain.original_carrier_jet(
                 uv_box(std::array::from_fn(|i| boundary.uv[i].add(margin_box[i]))),
                 work,
                 cancel,
@@ -844,10 +842,7 @@ impl PoleComparison {
                 "pole physical comparison exceeds frozen allowance",
             ));
         }
-        let source = {
-            let surface = &domain.surface_operand();
-            (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))()
-        }?;
+        let source = domain.original_carrier_jet(uv_box(raw.uv), work, cancel)?;
         Ok(ComparisonSourceCost {
             source: hull3(homotopy_image.position, source.position),
             displacement,
@@ -890,10 +885,7 @@ impl PoleComparison {
             work,
             cancel,
         )?;
-        let raw_surface = {
-            let surface = &domain.surface_operand();
-            (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))()
-        }?;
+        let raw_surface = domain.original_carrier_jet(uv_box(raw.uv), work, cancel)?;
         if !chart.same_hemisphere(boundary.position) || !chart.same_hemisphere(raw_surface.position)
         {
             return Err(ownership_failure(

@@ -267,11 +267,11 @@ fn certify_end(
             });
             let source_s = source.derivative.map(|v| v.mul(end.delta_t));
             {
-                let surface = &domain.surface_operand();
                 (|| {
                     // The entire straight UV homotopy, not its endpoint samples,
                     // bounds F(completed)-F(original) by the integral first jet.
-                    let homotopy_jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
+                    let homotopy_jet =
+                        domain.original_carrier_jet(uv_box(homotopy), work, cancel)?;
                     let displacement = compose_first(&homotopy_jet.du, &homotopy_jet.dv, shift);
                     let position_error_mm = Interval::point(proof.position_error_mm())
                         .add(Interval::point(length(displacement)?.hi))
@@ -280,7 +280,7 @@ fn certify_end(
                         return Ok(None);
                     }
                     let completed_jet =
-                        surface_enclosure(surface, uv_box(completed), work, cancel)?;
+                        domain.original_carrier_jet(uv_box(completed), work, cancel)?;
                     let completed_spatial_s =
                         compose_first(&completed_jet.du, &completed_jet.dv, completed_s);
                     let Some(relative_derivative_error) =

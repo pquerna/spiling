@@ -15,7 +15,7 @@ use super::super::source_incidence::CoedgeUse;
 use super::*;
 use crate::parametric::{
     ChartCurveEnclosure, CurveEnclosure, SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES,
-    SurfaceFirstEnclosure, surface_piecewise_first_enclosure,
+    SurfaceFirstEnclosure,
 };
 
 mod atlas;
@@ -783,23 +783,23 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             )
         });
         {
-            let surface = &self.domain.surface_operand();
-            Ok(surface_piecewise_first_enclosure(
-                surface,
-                uv_box(add_margin(tube, self.margin)),
-                work,
-                cancel,
-            )?
-            .position
-            .map(|value| {
-                add(
-                    value,
-                    Interval {
-                        lo: -allowance,
-                        hi: allowance,
-                    },
-                )
-            }))
+            Ok(self
+                .domain
+                .original_carrier_piecewise_first(
+                    uv_box(add_margin(tube, self.margin)),
+                    work,
+                    cancel,
+                )?
+                .position
+                .map(|value| {
+                    add(
+                        value,
+                        Interval {
+                            lo: -allowance,
+                            hi: allowance,
+                        },
+                    )
+                }))
         }
     }
 
@@ -954,15 +954,12 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             )
         })?;
         {
-            let surface = &self.domain.surface_operand();
-            let boundary = surface_piecewise_first_enclosure(
-                surface,
+            let boundary = self.domain.original_carrier_piecewise_first(
                 uv_box(add_margin(uv.position, self.margin)),
                 work,
                 cancel,
             )?;
-            let base = surface_piecewise_first_enclosure(
-                surface,
+            let base = self.domain.original_carrier_piecewise_first(
                 uv_box(add_margin(at, self.margin)),
                 work,
                 cancel,
@@ -1037,15 +1034,16 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             .map(|value| mul(mul(Interval::point(width), beta), value));
         let at = std::array::from_fn(|axis| add(uv.position[axis], mul(across, offset[axis])));
         {
-            let surface = &self.domain.surface_operand();
-            let boundary = surface_enclosure(
-                surface,
+            let boundary = self.domain.original_carrier_jet(
                 uv_box(add_margin(uv.position, self.margin)),
                 work,
                 cancel,
             )?;
-            let base =
-                surface_enclosure(surface, uv_box(add_margin(at, self.margin)), work, cancel)?;
+            let base = self.domain.original_carrier_jet(
+                uv_box(add_margin(at, self.margin)),
+                work,
+                cancel,
+            )?;
             let displacement = std::array::from_fn(|axis| {
                 intersection(
                     exact_difference(curve.position[axis], boundary.position[axis]),
@@ -1291,17 +1289,14 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             }
         }
         {
-            let surface = &self.domain.surface_operand();
-            let enclosure = |surface: &PreparedTrimSurface<'_, '_>,
-                             uv,
-                             work: &mut GeometryWorkBudget,
-                             cancel: &AtomicBool| {
+            let enclosure = |uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
                 if piecewise {
-                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                    self.domain
+                        .original_carrier_piecewise_first(uv, work, cancel)
                 } else {
                     // Keep the existing strict source/C1 qualification before
                     // extracting only the fields this first-matrix proof uses.
-                    let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    let jet = self.domain.original_carrier_jet(uv, work, cancel)?;
                     Ok(SurfaceFirstEnclosure {
                         position: jet.position,
                         du: jet.du,
@@ -1309,13 +1304,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     })
                 }
             };
-            let boundary = enclosure(
-                surface,
-                uv_box(add_margin(uv.position, self.margin)),
-                work,
-                cancel,
-            )?;
-            let patch = enclosure(surface, uv_box(owned_tube), work, cancel)?;
+            let boundary = enclosure(uv_box(add_margin(uv.position, self.margin)), work, cancel)?;
+            let patch = enclosure(uv_box(owned_tube), work, cancel)?;
             let boundary_t = compose_first(&boundary.du, &boundary.dv, uv.derivative);
             // Retained whole-forward error is an independent coefficient proof.
             // Intersect it with reevaluated component differences so subdivision

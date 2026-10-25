@@ -1280,11 +1280,11 @@ impl UvJointComparison {
         {
             let surface = &domain.surface_operand();
             (|| {
-                let comparison = surface_enclosure(surface, uv_box(completed.uv), work, cancel)?;
+                let comparison = domain.original_carrier_jet(uv_box(completed.uv), work, cancel)?;
                 let whole_jet = if whole_ray {
                     comparison
                 } else {
-                    surface_enclosure(surface, uv_box(whole.uv), work, cancel)?
+                    domain.original_carrier_jet(uv_box(whole.uv), work, cancel)?
                 };
                 let at_joint = centered_source_point(surface, self.joint, point, work, cancel)?;
                 let acceleration: Box3 = std::array::from_fn(|i| {
@@ -1306,8 +1306,7 @@ impl UvJointComparison {
                     acceleration,
                     s,
                 )?;
-                let homotopy = surface_enclosure(
-                    surface,
+                let homotopy = domain.original_carrier_jet(
                     uv_box(hull2(actual.uv, completed.uv)),
                     work,
                     cancel,

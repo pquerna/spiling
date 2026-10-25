@@ -203,9 +203,8 @@ pub(super) fn propose(
             std::array::from_fn(|i| original.position[i].add(UNIT.mul(correction.position[i])));
         let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
         let cheap_enough = {
-            let surface = &domain.surface_operand();
             (|| {
-                let jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
+                let jet = domain.original_carrier_jet(uv_box(homotopy), work, cancel)?;
                 let position = compose_first(&jet.du, &jet.dv, correction.position);
                 // Integral Hessian identity bounds the change of the surface first
                 // jet along the WHOLE UV homotopy. Include the derivative correction

@@ -172,6 +172,13 @@ must never be converted into display unavailability.
   boundaries, including signed underflow, rather than inventing outward material
   or widening source domains. Unproved coordinates are never clipped; coefficient
   domain checks and original-material embedding remain independent obligations.
+  Finite F/G homotopies use explicit original coefficient-sheet queries, not
+  trim-box membership as an evaluation shortcut. These borrow the captured
+  inventory and retain literal rectangular/spline restrictions, denominators,
+  requested closed-box C0/C1 and charged work. Piecewise first queries retain
+  derivative jumps without forcing Hessians. They do not mutate selected trim domains or
+  establish native correspondence, branch ownership or realized-material
+  embedding; those remain separate receipts.
 - **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
   and `analysis/placed.rs` distinguish geometric from realized-material bounds.
   Source realization error must survive actual affine conversion, placement

@@ -224,7 +224,7 @@ impl<'d> NativeTrimCoedge<'d> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BoundaryCurve {
     Coedge(usize),
     Joint(usize),
@@ -760,6 +760,36 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                     .expect("prepared immutable native carrier"),
             ),
         }
+    }
+
+    /// Original coefficient-sheet bounds only. The trim and source-material
+    /// domains remain unchanged and require their independent qualifications.
+    pub(crate) fn original_carrier_jet(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::SurfaceEnclosure, GeometryError> {
+        self.original_surface
+            .as_ref()
+            .ok_or_else(|| {
+                unavailable("source carrier evaluation requires captured original coefficients")
+            })?
+            .carrier_jet(uv, work, cancel)
+    }
+
+    pub(crate) fn original_carrier_piecewise_first(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::SurfaceFirstEnclosure, GeometryError> {
+        self.original_surface
+            .as_ref()
+            .ok_or_else(|| {
+                unavailable("source carrier evaluation requires captured original coefficients")
+            })?
+            .carrier_piecewise_first(uv, work, cancel)
     }
 
     /// All actual native knot restrictions, borrowed from the admitted bounded
@@ -5697,7 +5727,10 @@ impl PreparedFaceTrimDomain<'_> {
                         piece,
                         depth,
                         "original chart boundary injectivity/regularity",
-                    )?;
+                    ).map_err(|error| work.annotate_error(error, work.consumed(), format_args!(
+                        "original chart source_face={} boundary={boundary:?} parameter={piece:?} derivative={:?}",
+                        self.face_index, jet.derivative,
+                    )))?;
                     // Prefer an actual cover fence near the midpoint. Narrow
                     // original spans need not wait for dyadic resolution.
                     let operand = self.boundary_operand(boundary)?;

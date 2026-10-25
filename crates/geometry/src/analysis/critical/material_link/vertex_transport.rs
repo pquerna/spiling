@@ -1738,10 +1738,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             h.uv
                         };
                         {
-                            let surface = &domain.surface_operand();
                             (|| {
-                                let jet = surface_enclosure(
-                                    surface,
+                                let jet = domain.original_carrier_jet(
                                     uv_box(hull2(h.uv, comparison_uv)),
                                     work,
                                     cancel,
@@ -2066,7 +2064,7 @@ fn source_frame(
                     let t = proof.spatial_range()[usize::from(high)];
                     spatial_window = Some(proof.spatial_range());
                     let uv = chart_jet(&domain, corner.outgoing.coedge, [t; 2], work, cancel)?;
-                    let jet = surface_enclosure(surface, uv_box(uv.position), work, cancel)?;
+                    let jet = domain.original_carrier_jet(uv_box(uv.position), work, cancel)?;
                     if let Some(chart) =
                         source_chart::SphereChart::new(surface, &domain, work, cancel)?
                     {
@@ -2596,9 +2594,8 @@ fn boundary_jet_with_byte_limit(
             )
         });
         return {
-            let surface = &domain.surface_operand();
             (|| {
-                let jet = surface_enclosure(surface, uv_box(uv), work, cancel)?;
+                let jet = domain.original_carrier_jet(uv_box(uv), work, cancel)?;
                 Ok(BoundaryJet {
                     position: jet.position,
                     derivative: compose_first(&jet.du, &jet.dv, derivative_uv),
@@ -2784,11 +2781,11 @@ fn cover_piece(
                 )?;
                 stage = "finite B carrier and radius evaluation";
                 candidate = {
-                    let surface = &domain.surface_operand();
                     (|| {
-                        let jet = surface_enclosure(surface, uv_box(h.uv), work, cancel)?;
-                        let at_joint =
-                            surface_enclosure(surface, uv_box(j.uv), work, cancel)?.position;
+                        let jet = domain.original_carrier_jet(uv_box(h.uv), work, cancel)?;
+                        let at_joint = domain
+                            .original_carrier_jet(uv_box(j.uv), work, cancel)?
+                            .position;
                         let d0 = relative(at_joint, point).map(Interval::neg);
                         let acceleration: Box3 = std::array::from_fn(|i| {
                             jet.duu[i]
@@ -3528,8 +3525,7 @@ fn collar_graph_transverse(
                 work,
                 cancel,
             )?;
-            let patch = surface_enclosure(
-                surface,
+            let patch = domain.original_carrier_jet(
                 uv_box(add_margin(across, collar.margin)),
                 work,
                 cancel,

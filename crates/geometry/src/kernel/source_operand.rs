@@ -912,6 +912,64 @@ impl<'a> PreparedOriginalSurface<'a> {
             dvv: j[0][2],
         })
     }
+
+    /// Evaluate the captured coefficient sheet on this finite query, not
+    /// membership in its selected trim envelope. Source realization homotopies
+    /// need this distinct operation; it grants no material or native parity.
+    /// Literal rectangular restrictions, spline domains/denominators and C1
+    /// admission remain enforced by the actual original coefficient operators.
+    pub(crate) fn carrier_jet(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SurfaceEnclosure, GeometryError> {
+        work.charge(1, cancel)?;
+        for range in uv {
+            Interval::new(range[0], range[1])?;
+        }
+        if !surface_continuity(self.source, uv, 1, &self.inventory, 0, work, cancel)? {
+            return Err(GeometryError::new(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "original coefficient carrier lacks closed-box C1 authority",
+            ));
+        }
+        let j = surface_jet(self.source, uv, 2, &self.inventory, 0, work, cancel)?;
+        Ok(SurfaceEnclosure {
+            position: j[0][0],
+            du: j[1][0],
+            dv: j[0][1],
+            duu: j[2][0],
+            duv: j[1][1],
+            dvv: j[0][2],
+        })
+    }
+
+    /// Piecewise first bounds on the same captured coefficient sheet. C0 is
+    /// required; an original derivative jump stays in the closed first hull.
+    pub(crate) fn carrier_piecewise_first(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<crate::parametric::SurfaceFirstEnclosure, GeometryError> {
+        work.charge(1, cancel)?;
+        for range in uv {
+            Interval::new(range[0], range[1])?;
+        }
+        if !surface_continuity(self.source, uv, 0, &self.inventory, 0, work, cancel)? {
+            return Err(GeometryError::new(
+                GeometryErrorCode::AnalysisIndeterminate,
+                "original coefficient carrier lacks closed-box C0 authority",
+            ));
+        }
+        let j = surface_jet(self.source, uv, 1, &self.inventory, 0, work, cancel)?;
+        Ok(crate::parametric::SurfaceFirstEnclosure {
+            position: j[0][0],
+            du: j[1][0],
+            dv: j[0][1],
+        })
+    }
     pub(crate) fn position_bounds(
         &self,
         uv: [[f64; 2]; 2],
@@ -2805,6 +2863,27 @@ mod tests {
             GeometryErrorCode::Cancelled
         );
     }
+
+    #[test]
+    fn coefficient_sheet_query_does_not_extend_selected_trim_authority() {
+        let plane = Surface::Plane { position: frame() };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let active = [[-1.0, 1.0]; 2];
+        let prepared =
+            PreparedOriginalSurface::new(&plane, active, usize::MAX, &mut work, &cancel).unwrap();
+        let outside_trim = [[2.0, 2.0], [3.0, 3.0]];
+        assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
+        let sheet = prepared
+            .carrier_jet(outside_trim, &mut work, &cancel)
+            .unwrap();
+        assert!(sheet.position[0].contains(2.0));
+        assert!(sheet.position[1].contains(3.0));
+        assert_eq!(sheet.position[2], Interval::point(0.0));
+        assert!(sheet.du[0].contains(1.0) && sheet.dv[1].contains(1.0));
+        assert_eq!(prepared.active_domain(), active);
+        assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -3052,6 +3131,38 @@ mod composed_knot_tests {
             self_intersect: Logical::False,
             knot_spec: KnotSpec::Unspecified,
         }));
+        {
+            let cancel = AtomicBool::new(false);
+            let mut work = GeometryWorkBudget::new(1_000_000);
+            let prepared = PreparedOriginalSurface::new(
+                &carrier,
+                [[0.1, 0.4], [0.1, 0.9]],
+                usize::MAX,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(
+                prepared
+                    .carrier_jet([[0.45, 0.55], [0.25, 0.75]], &mut work, &cancel,)
+                    .is_err()
+            );
+            let first = prepared
+                .carrier_piecewise_first([[0.45, 0.55], [0.25, 0.75]], &mut work, &cancel)
+                .unwrap();
+            assert!(first.du[0].contains(2.0) && first.du[0].contains(0.0));
+            assert!(first.du[2].contains(0.0) && first.du[2].contains(2.0));
+            assert!(
+                prepared
+                    .carrier_jet([[0.9, 1.1], [0.25, 0.75]], &mut work, &cancel,)
+                    .is_err()
+            );
+            assert!(
+                prepared
+                    .carrier_piecewise_first([[0.9, 1.1], [0.25, 0.75]], &mut work, &cancel,)
+                    .is_err()
+            );
+        }
         let curve = Curve::SurfaceCurve {
             kind: SurfaceCurveKind::Surface,
             curve_3d: Arc::new(Curve::Line {
