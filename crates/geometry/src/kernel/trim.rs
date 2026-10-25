@@ -3077,11 +3077,13 @@ pub(crate) fn calibrate_source_curves(
     target: &dyn parametric::CurveEvaluator,
     target_range: [f64; 2],
     maximum_error_mm: f64,
+    maximum_depth: u8,
     allowance: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceCurveCalibration, GeometryError> {
     work.charge(1, cancel)?;
+    let maximum_depth = maximum_depth.min(MAX_DEPTH);
     memory(size_of::<SourceCurveCalibration>(), allowance)?;
     let source_range = reference.active_range();
     let target_domain = target.active_range();
@@ -3241,7 +3243,7 @@ pub(crate) fn calibrate_source_curves(
         if admitted {
             continue;
         }
-        if depth == MAX_DEPTH || middle <= a.source || middle >= b.source {
+        if depth == maximum_depth || middle <= a.source || middle >= b.source {
             return Err(unavailable(format!(
                 "whole source/native coefficient calibration unresolved at source range {:?}, target endpoints {:?}; endpoint/parameter-germ or one-sided knot correspondence is unproved",
                 range,
@@ -4410,6 +4412,7 @@ impl<'d> PreparedNativeTrimSource<'d> {
             native_curve,
             target_range,
             ceiling,
+            MAX_DEPTH,
             map_allowance,
             work,
             cancel,
