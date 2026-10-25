@@ -488,18 +488,8 @@ impl PoleComparison {
             }
             raw_uv = hull2(raw_uv, boundary_uv);
             phase = "whole raw boundary/reference box source hemisphere";
-            let raw_position = {
-                let surface = &domain.surface_operand();
-                (|| {
-                    crate::parametric::surface_piecewise_enclosure(
-                        surface,
-                        uv_box(raw_uv),
-                        work,
-                        cancel,
-                    )
-                    .map(|jet| jet.position)
-                })()
-            }?;
+            let raw_position =
+                domain.original_carrier_position_bounds(uv_box(raw_uv), work, cancel)?;
             if !chart.same_hemisphere(raw_position) {
                 return Ok(SourcePositionOvercover::Unavailable(
                     "SphericalPole full raw source box hemisphere unresolved",
@@ -986,11 +976,9 @@ impl PoleComparison {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         let chart = self.chart(domain)?;
-        let other_world = {
-            let surface = &domain.surface_operand();
-            (|| surface_enclosure(surface, uv_box(other), work, cancel))()
-        }?
-        .position;
+        // The foreign collar is an exclusion overcover, not selected material.
+        let other_world =
+            domain.original_carrier_position_bounds(uv_box(other), work, cancel)?;
         // Projection is two-to-one globally. Never confuse the opposite pole
         // with a collision, or use the projection to identify source sheets.
         if chart.opposite_hemisphere(other_world) {
@@ -1624,11 +1612,8 @@ impl PoleComparison {
                     ));
                     continue;
                 }
-                let other_world = {
-                    let surface = &domain.surface_operand();
-                    (|| surface_enclosure(surface, uv_box(other), work, cancel))()
-                }?
-                .position;
+                let other_world =
+                    domain.original_carrier_position_bounds(uv_box(other), work, cancel)?;
                 let other_local = chart.project(other_world);
                 let other_q = [other_local[0], other_local[1]];
                 let mut all_pieces = true;

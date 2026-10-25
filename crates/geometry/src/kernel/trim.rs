@@ -762,6 +762,22 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         }
     }
 
+    /// Position-only coefficient-sheet bounds for exclusion overcovers. This
+    /// does not grant selected-domain membership, continuity or material.
+    pub(crate) fn original_carrier_position_bounds(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 3], GeometryError> {
+        self.original_surface
+            .as_ref()
+            .ok_or_else(|| {
+                unavailable("source carrier evaluation requires captured original coefficients")
+            })?
+            .carrier_position_bounds(uv, work, cancel)
+    }
+
     /// Original coefficient-sheet bounds only. The trim and source-material
     /// domains remain unchanged and require their independent qualifications.
     pub(crate) fn original_carrier_jet(
