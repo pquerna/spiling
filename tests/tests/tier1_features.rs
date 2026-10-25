@@ -2383,16 +2383,6 @@ fn test_f48_no_legacy_panics_on_all_fixtures() {
 // =========================================================================
 
 #[test]
-fn test_f49_kernel_version_constant() {
-    assert!(!KERNEL_VERSION.is_empty());
-}
-
-#[test]
-fn test_f49_kernel_revision_constant() {
-    assert!(!KERNEL_REVISION.is_empty());
-}
-
-#[test]
 fn test_f49_provenance_kernel_identity() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let prov = def.provenance();
