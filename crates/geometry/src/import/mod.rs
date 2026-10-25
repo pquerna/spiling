@@ -366,8 +366,14 @@ pub(crate) fn import_step(
         ));
     }
 
+    // Normalize only the decoder's exact null out-and-back topology, before
+    // either consumer observes its domains. Original STEP and face_origin are
+    // untouched; source/native correspondence still requires every source use.
+    let mut normalized = solid.brep;
+    brep_data_bridge::strip_lamina_spurs(&mut normalized, query_proof_byte_limit, cancel)?;
+
     let mut k = crate::kernel::make_kernel_context();
-    let mut brep = brep_data_bridge::from_schema4_brep(&mut k, &solid.brep, false)
+    let mut brep = brep_data_bridge::from_schema4_brep(&mut k, &normalized, false)
         .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
 
     if !solidcore::topology::brep::p2::is_manifold_solid(&brep).unwrap_or(false) {
@@ -410,7 +416,7 @@ pub(crate) fn import_step(
     prepare_loop_edge_cache(&mut brep, &face_ids, query_proof_byte_limit, cancel)?;
 
     let face_surface_maps: Vec<crate::kernel::SurfaceParameterMap> =
-        compute_face_surface_maps(&solid.brep);
+        compute_face_surface_maps(&normalized);
 
     let shell_id = brep
         .shells()

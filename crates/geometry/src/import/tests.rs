@@ -618,3 +618,227 @@ fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
     assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
     assert!(projected.achieved_uncertainty_mm <= tolerance);
 }
+
+#[test]
+fn housing_null_spur_normalization_preserves_original_edges_and_native_ownership() {
+    let bytes = include_bytes!(
+        "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+    );
+    let cancel = cancelled();
+    let definition = from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+    assert_eq!(
+        definition.provenance.source_hash,
+        SourceHash::from_digest(&Sha256::digest(bytes).into()),
+    );
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let mut incidence = crate::analysis::source_incidence::SourceEdgeIncidence::new(
+        &definition,
+        MAX_QUERY_PROOF_BYTES,
+        &mut work,
+        &cancel,
+    )
+    .unwrap();
+    incidence
+        .prepare_vertices(MAX_QUERY_PROOF_BYTES, &mut work, &cancel)
+        .unwrap();
+    // This checks reciprocal native loop/vertex/radial ownership, not merely
+    // the decoder's copied wire sizes. Every remaining edge is physically paired.
+    assert_eq!(incidence.values().count(), definition.brep().edges().len());
+    assert!(incidence.values().all(|uses| uses.second.is_some()));
+    assert_eq!(
+        incidence.vertices().unwrap().count(),
+        definition.brep().vertices().len()
+    );
+
+    let close = |a: [f64; 3], b: [f64; 3]| (0..3).all(|axis| (a[axis] - b[axis]).abs() <= 1e-10);
+    let mut edge_sources = std::collections::HashMap::new();
+    let mut source_edges = std::collections::HashMap::new();
+    let mut vertex_sources = std::collections::HashMap::new();
+    let mut source_vertices = std::collections::HashMap::new();
+    let mut observed_pole = false;
+    for (info, &face_id) in definition.faces().iter().zip(definition.face_ids()) {
+        let original = definition.original_source().face(face_id).unwrap();
+        assert_eq!(original.source_face.0, info.face_id.step_entity());
+        let native = definition.brep().face(face_id).unwrap();
+        assert_eq!(native.loops.len(), original.wires.len());
+        let native_uses: usize = native
+            .loops
+            .iter()
+            .map(|&id| definition.brep().loop_(id).unwrap().edges.len())
+            .sum();
+        let original_uses: usize = original.wires.iter().map(|wire| wire.coedges.len()).sum();
+        assert_eq!(
+            native_uses,
+            original_uses,
+            "wire inventory on {}",
+            info.face_id.as_str()
+        );
+        // Endpoint pairs do not identify arbitrary arcs or repeated periodic
+        // seam uses. Restrict this physical bijection to the observed spherical
+        // octant, whose three original edges have distinct endpoint pairs.
+        // Global reciprocal ownership and source inventories remain checked.
+        if original.face_entity.0 != 491 {
+            continue;
+        }
+        let source_uses: Vec<_> = original
+            .wires
+            .iter()
+            .enumerate()
+            .flat_map(|(wire, source)| source.coedges.iter().map(move |&i| (wire, i)))
+            .collect();
+        let mut matched = vec![false; source_uses.len()];
+        let mut matched_wires = vec![false; original.wires.len()];
+        for &loop_id in &native.loops {
+            let wire = definition.brep().loop_(loop_id).unwrap();
+            assert_eq!(wire.face, face_id);
+            let mut source_wire = None;
+            for use_ in &wire.edges {
+                let edge = definition.brep().edge(use_.edge).unwrap();
+                let points = edge
+                    .vertices
+                    .map(|vertex| array(definition.brep().vertex(vertex).unwrap().point));
+                let candidates: Vec<_> = source_uses
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, (_, coedge))| {
+                        if matched[*slot] {
+                            return false;
+                        }
+                        let source = definition.original_source().coedge(*coedge).unwrap();
+                        let [a, z] = source.vertex_points_mm;
+                        (close(points[0], a) && close(points[1], z))
+                            || (close(points[0], z) && close(points[1], a))
+                    })
+                    .map(|(slot, _)| slot)
+                    .collect();
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "unbound physical edge on {}",
+                    info.face_id.as_str()
+                );
+                let slot = candidates[0];
+                matched[slot] = true;
+                let (wire_index, coedge) = source_uses[slot];
+                assert!(source_wire.is_none_or(|old| old == wire_index));
+                source_wire = Some(wire_index);
+                let source = definition.original_source().coedge(coedge).unwrap();
+                if let Some(old) = edge_sources.insert(use_.edge, source.edge_curve_id.0) {
+                    assert_eq!(
+                        old, source.edge_curve_id.0,
+                        "shared native edge changed source owner"
+                    );
+                }
+                if let Some(old) = source_edges.insert(source.edge_curve_id.0, use_.edge) {
+                    assert_eq!(
+                        old, use_.edge,
+                        "one original edge gained a duplicate native edge"
+                    );
+                }
+                let owners = incidence.get(use_.edge).unwrap();
+                for owner in [owners.first, owners.second.unwrap()] {
+                    let owner_face = definition.face_ids()[owner.face];
+                    let original_owner = definition.original_source().face(owner_face).unwrap();
+                    assert!(
+                        original_owner
+                            .wires
+                            .iter()
+                            .flat_map(|wire| &wire.coedges)
+                            .any(|&i| {
+                                definition
+                                    .original_source()
+                                    .coedge(i)
+                                    .unwrap()
+                                    .edge_curve_id
+                                    == source.edge_curve_id
+                            }),
+                        "native shared edge must retain its exact original EDGE_CURVE in both source faces",
+                    );
+                }
+                let reversed = !close(points[0], source.vertex_points_mm[0]);
+                for endpoint in 0..2 {
+                    let source_vertex = source.vertex_ids[endpoint ^ usize::from(reversed)].0;
+                    let native_vertex = edge.vertices[endpoint];
+                    if let Some(old) = vertex_sources.insert(native_vertex, source_vertex) {
+                        assert_eq!(
+                            old, source_vertex,
+                            "native vertex changed original ownership"
+                        );
+                    }
+                    if let Some(old) = source_vertices.insert(source_vertex, native_vertex) {
+                        assert_eq!(
+                            old, native_vertex,
+                            "original vertex gained a native duplicate"
+                        );
+                    }
+                }
+                observed_pole |= points.into_iter().any(|p| close(p, [2.0, 2.0, 10.0]));
+                assert!(!points.into_iter().any(|p| close(p, [2.0, 2.0, 6.0])));
+            }
+            let source_wire = source_wire.unwrap();
+            assert!(!std::mem::replace(&mut matched_wires[source_wire], true));
+            assert_eq!(wire.edges.len(), original.wires[source_wire].coedges.len());
+        }
+        assert!(matched.into_iter().all(|matched| matched));
+        assert!(matched_wires.into_iter().all(|matched| matched));
+    }
+    assert!(observed_pole, "the original physical pole must survive");
+}
+
+#[test]
+fn exact_normalization_retains_the_original_periodic_cylinder_seam_without_scratch() {
+    use solidcraft_geom::brep::Loop;
+    let text =
+        include_str!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step");
+    let exchange = brep_data_bridge::parse_step_exchange(text).unwrap();
+    let mut solids = solidcraft_step::topology::read_solids(&exchange);
+    assert!(solids.failures.is_empty());
+    let mut solid = solids.solids.pop().unwrap();
+    let mut seam = None;
+    for (edge_id, edge) in solid.brep.edges.iter().enumerate() {
+        let [a, z] = edge.uses.as_slice() else {
+            continue;
+        };
+        if a.face != z.face || a.r#loop != z.r#loop {
+            continue;
+        }
+        let Loop::Edges { edges } = &solid.brep.faces[a.face as usize].loops[a.r#loop as usize]
+        else {
+            panic!("seam must have edge-loop owners")
+        };
+        let (a, z) = (&edges[a.position as usize], &edges[z.position as usize]);
+        if a.forward != z.forward && a.pcurve != z.pcurve {
+            seam = Some(edge_id);
+        }
+    }
+    let seam = seam.expect("independent cylinder has a real two-branch periodic seam");
+    let before = solid.brep.clone();
+    let buffers = (
+        solid.brep.faces.as_ptr(),
+        solid.brep.edges.as_ptr(),
+        solid.brep.vertices.as_ptr(),
+    );
+    // Zero scratch is enough only because this is not a null-spur candidate.
+    brep_data_bridge::strip_lamina_spurs(&mut solid.brep, 0, &cancelled()).unwrap();
+    assert_eq!(solid.brep, before);
+    assert_eq!(
+        buffers,
+        (
+            solid.brep.faces.as_ptr(),
+            solid.brep.edges.as_ptr(),
+            solid.brep.vertices.as_ptr(),
+        )
+    );
+    solid.brep.validate().unwrap();
+    let mut kernel = crate::kernel::make_kernel_context();
+    let native = brep_data_bridge::from_schema4_brep(&mut kernel, &solid.brep, false).unwrap();
+    assert!(solidcore::topology::brep::p2::is_manifold_solid(&native).unwrap());
+    let source = &solid.brep.edges[seam];
+    assert_ne!(
+        source.vertices[0], source.vertices[1],
+        "physical seam has positive height"
+    );
+    let a = solid.brep.vertices[source.vertices[0] as usize].point;
+    let z = solid.brep.vertices[source.vertices[1] as usize].point;
+    assert!((z[2] - a[2]).abs() > 7.0);
+}

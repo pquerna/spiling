@@ -1004,6 +1004,81 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         Ok(Some(if forward { total } else { -total }))
     }
 
+    fn opposite_endpoint_germs(
+        a: &parametric::ChartCurveEnclosure,
+        sa: f64,
+        b: &parametric::ChartCurveEnclosure,
+        sb: f64,
+    ) -> bool {
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0]]
+            .iter()
+            .any(|normal| {
+                let projected = |jet: &parametric::ChartCurveEnclosure, sign| {
+                    jet.derivative[0]
+                        .mul(Interval::point(normal[0]))
+                        .add(jet.derivative[1].mul(Interval::point(normal[1])))
+                        .mul(Interval::point(sign))
+                };
+                let x = projected(a, sa);
+                let y = projected(b, sb);
+                (x.lo > 0.0 && y.hi < 0.0) || (x.hi < 0.0 && y.lo > 0.0)
+            })
+    }
+
+    fn parent_vertex_separates(
+        &self,
+        a: TrimSpan,
+        b: TrimSpan,
+        current_a: &parametric::ChartCurveEnclosure,
+        current_b: &parametric::ChartCurveEnclosure,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        if a.boundary == b.boundary {
+            return Ok(false);
+        }
+        let ar = self.boundary_restriction(a.boundary).0;
+        let br = self.boundary_restriction(b.boundary).0;
+        let ac = self.boundary_operand(a.boundary)?;
+        let bc = self.boundary_operand(b.boundary)?;
+        for ae in 0..2 {
+            for be in 0..2 {
+                if self.boundary_endpoint(a.boundary, ae) != self.boundary_endpoint(b.boundary, be)
+                {
+                    continue;
+                }
+                // The exact C0 anchor belongs to the complete boundary, not
+                // necessarily this knot/cut leaf. Certify every derivative
+                // between the leaf and anchor before applying monotonicity.
+                let ah = [a.range[0].min(ar[ae]), a.range[1].max(ar[ae])];
+                let bh = [b.range[0].min(br[be]), b.range[1].max(br[be])];
+                let a_extension;
+                let aj = if ah == a.range {
+                    current_a
+                } else {
+                    a_extension = parametric::curve2d_piecewise_jet(&ac, ah, work, cancel)?;
+                    &a_extension
+                };
+                let b_extension;
+                let bj = if bh == b.range {
+                    current_b
+                } else {
+                    b_extension = parametric::curve2d_piecewise_jet(&bc, bh, work, cancel)?;
+                    &b_extension
+                };
+                if Self::opposite_endpoint_germs(
+                    aj,
+                    if ae == 0 { 1.0 } else { -1.0 },
+                    bj,
+                    if be == 0 { 1.0 } else { -1.0 },
+                ) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn separate_spans(
         &self,
         a: TrimSpan,
@@ -1032,22 +1107,13 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 // Exact C0 was proved before this test; no endpoint tube/weld.
                 let sa = if ae == 0 { 1.0 } else { -1.0 };
                 let sb = if be == 0 { 1.0 } else { -1.0 };
-                let separated = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, -1.0]]
-                    .iter()
-                    .any(|n| {
-                        let d = |jet: &parametric::ChartCurveEnclosure, sign| {
-                            jet.derivative[0]
-                                .mul(Interval::point(n[0]))
-                                .add(jet.derivative[1].mul(Interval::point(n[1])))
-                                .mul(Interval::point(sign))
-                        };
-                        let x = d(&aj, sa);
-                        let y = d(&bj, sb);
-                        (x.lo > 0.0 && y.hi < 0.0) || (x.hi < 0.0 && y.lo > 0.0)
-                    });
+                let separated = Self::opposite_endpoint_germs(&aj, sa, &bj, sb);
                 if separated {
                     continue;
                 }
+            }
+            if self.parent_vertex_separates(a, b, &aj, &bj, work, cancel)? {
+                continue;
             }
             let aw = a.range[1] - a.range[0];
             let bw = b.range[1] - b.range[0];
@@ -4724,10 +4790,11 @@ impl<'d> PreparedNativeTrimSource<'d> {
                 .checked_sub(prepared.retained_bytes())
                 .and_then(|n| n.checked_sub(source_lookup_bytes(lookup.capacity()).ok()?))
                 .ok_or_else(|| resource("original face preparation exceeds allowance"))?;
-            let skeleton =
-                NativeFaceSkeleton::new(definition, face, &incidence, remaining, work, cancel)?;
             let domain =
-                prepared.prepare_source_face(skeleton, &mut lookup, ceiling, work, cancel)?;
+                NativeFaceSkeleton::new(definition, face, &incidence, remaining, work, cancel)
+                    .and_then(|skeleton| {
+                        prepared.prepare_source_face(skeleton, &mut lookup, ceiling, work, cancel)
+                    })?;
             memory(
                 prepared.retained_bytes()
                     + domain.owned_bytes()
@@ -5603,6 +5670,25 @@ impl PreparedFaceTrimDomain<'_> {
                     "selected original boundary coefficient operator lacks actual C0",
                 ));
             }
+            // Calibration cuts are proof inventory, not topology. A complete
+            // C0 boundary with one strict derivative coordinate is injective
+            // across every retained knot and cut without pairwise leaf proofs.
+            work.charge(1, cancel)?;
+            let whole = parametric::curve2d_piecewise_jet(
+                &self.boundary_operand(boundary)?,
+                range,
+                work,
+                cancel,
+            )?;
+            if whole.derivative.iter().any(|d| d.lo > 0.0 || d.hi < 0.0) {
+                reserve_span(self, allowance)?;
+                self.spans.push(TrimSpan {
+                    boundary,
+                    range,
+                    ends: [true; 2],
+                });
+                continue;
+            }
             // Borrow one span at a time; no unique-knot or sampled polygon copy.
             let mut cursor = range[0];
             while cursor < range[1] {
@@ -5736,5 +5822,77 @@ impl PreparedFaceTrimDomain<'_> {
         Err(unavailable(
             "complete original hole-containment winding cannot exclude its boundary",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_pole_face_classifies_across_internal_endpoint_cut_bands() {
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let bytes = 32 * 1024 * 1024;
+        let mut incidence = crate::analysis::source_incidence::SourceEdgeIncidence::new(
+            &definition,
+            bytes,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        incidence
+            .prepare_vertices(bytes, &mut work, &cancel)
+            .unwrap();
+        let live = bytes - incidence.owned_bytes();
+        let mut source = PreparedNativeTrimSource {
+            definition: &definition,
+            faces: Vec::new(),
+            allowance: live,
+            spatial_operators: Vec::new(),
+            source_vertices: Vec::new(),
+            source_inventory: None,
+        };
+        let face = definition
+            .original_source()
+            .faces
+            .iter()
+            .find(|face| face.source_face == spiling_contracts::geometry::StepEntityId(461))
+            .unwrap()
+            .native_face;
+        let skeleton = NativeFaceSkeleton::new(
+            &definition,
+            face,
+            &incidence,
+            live - source.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let domain = source
+            .prepare_source_face(
+                skeleton,
+                &mut SourceSpatialLookup::new(),
+                1.0e-7,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(
+            domain
+                .classify([[0.5, 0.6], [-0.6, -0.5]], &mut work, &cancel)
+                .unwrap(),
+            TrimClassification::Inside,
+        );
+        assert_eq!(
+            domain
+                .classify([[2.0, 2.1], [-0.6, -0.5]], &mut work, &cancel)
+                .unwrap(),
+            TrimClassification::Outside,
+        );
     }
 }

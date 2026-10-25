@@ -493,263 +493,349 @@ pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<
     Ok(d)
 }
 
-/// Removes zero-area lamina spur edges (two consecutive uses of the same edge with opposite
-/// orientation and identical UV pcurve, produced when `solidcraft_step`'s `pole_seam` mis-triggers
-/// due to pole `atan2` jitter) and restores canonical edge/vertex indexing and face UV domains.
-fn strip_lamina_spurs(brep: &b::Brep) -> R<Cow<'_, b::Brep>> {
-    let is_spur_pair = |u0: &b::OrientedEdge, u1: &b::OrientedEdge| -> bool {
-        u0.edge == u1.edge
-            && u0.forward != u1.forward
-            && u0.pcurve == u1.pcurve
-            && brep
-                .edges
-                .get(u0.edge as usize)
-                .is_some_and(|e| e.uses.len() == 2)
-    };
-    let has_spur = brep.faces.iter().any(|f| {
-        f.loops.iter().any(|l| match l {
-            b::Loop::Edges { edges } if edges.len() > 2 => {
-                (0..edges.len()).any(|i| is_spur_pair(&edges[i], &edges[(i + 1) % edges.len()]))
-            }
-            _ => false,
-        })
-    });
-    if !has_spur {
-        return Ok(Cow::Borrowed(brep));
+/// Cancel only an exact, adjacent out-and-back use of one otherwise unowned
+/// edge. Distinct periodic pcurves are real seams, not null spurs. Faces,
+/// carriers and all surviving curve coefficients stay in their original order.
+pub(crate) fn strip_lamina_spurs(
+    brep: &mut b::Brep,
+    byte_limit: usize,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), spiling_contracts::geometry::GeometryError> {
+    use super::{check_cancel, error, invalid};
+    use spiling_contracts::geometry::GeometryErrorCode;
+
+    fn pair(
+        records: &[b::Edge],
+        a: &b::OrientedEdge,
+        z: &b::OrientedEdge,
+        face: usize,
+        wire: usize,
+    ) -> bool {
+        a.edge == z.edge
+            && a.forward != z.forward
+            && records.get(a.edge as usize).is_some_and(|edge| {
+                edge.uses.len() == 2
+                    && edge
+                        .uses
+                        .iter()
+                        .all(|u| u.face as usize == face && u.r#loop as usize == wire)
+            })
+            && a.pcurve == z.pcurve
     }
 
-    let mut out = brep.clone();
-    for f in &mut out.faces {
-        let mut modified = false;
-        for l in &mut f.loops {
-            let b::Loop::Edges { edges } = l else {
+    // No scratch, allocation or BREP copy for the ordinary path.
+    let mut found = false;
+    for (fi, face) in brep.faces.iter().enumerate() {
+        for (li, wire) in face.loops.iter().enumerate() {
+            let b::Loop::Edges { edges } = wire else {
                 continue;
             };
-            while edges.len() > 2 {
-                let len = edges.len();
-                let Some(i) = (0..len).find(|&i| is_spur_pair(&edges[i], &edges[(i + 1) % len]))
-                else {
+            for i in 0..edges.len() {
+                check_cancel(cancel)?;
+                if edges.len() > 2
+                    && pair(
+                        &brep.edges,
+                        &edges[i],
+                        &edges[(i + 1) % edges.len()],
+                        fi,
+                        li,
+                    )
+                {
+                    found = true;
                     break;
-                };
-                modified = true;
-                if i + 1 < len {
-                    edges.drain(i..=i + 1);
-                } else {
-                    // Wraparound pair `(len - 1, 0)`.
-                    edges.pop();
-                    edges.remove(0);
                 }
             }
+            if found {
+                break;
+            }
+        }
+        if found {
+            break;
+        }
+    }
+    if !found {
+        return Ok(());
+    }
+
+    fn buffer<T: Copy>(
+        count: usize,
+        value: T,
+        retained: &mut usize,
+        limit: usize,
+    ) -> Result<Vec<T>, spiling_contracts::geometry::GeometryError> {
+        let resource = || {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "normalized topology scratch allowance exhausted",
+            )
+        };
+        let bytes = count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(resource)?;
+        if retained.checked_add(bytes).is_none_or(|n| n > limit) {
+            return Err(resource());
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(count).map_err(|_| resource())?;
+        let actual = out
+            .capacity()
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(resource)?;
+        *retained = retained.checked_add(actual).ok_or_else(resource)?;
+        if *retained > limit {
+            return Err(resource());
+        }
+        out.resize(count, value);
+        Ok(out)
+    }
+
+    let mut retained = 0;
+    let mut edge_new = buffer(brep.edges.len(), 0u32, &mut retained, byte_limit)?;
+    let mut vertex_new = buffer(brep.vertices.len(), u32::MAX, &mut retained, byte_limit)?;
+    let mut loop_count = 0usize;
+    let mut use_count = 0usize;
+    let mut max_wire = 0usize;
+    for face in &brep.faces {
+        for wire in &face.loops {
+            check_cancel(cancel)?;
+            loop_count = loop_count
+                .checked_add(1)
+                .ok_or_else(|| invalid("normalized topology loop count overflow"))?;
+            if let b::Loop::Edges { edges } = wire {
+                use_count = use_count
+                    .checked_add(edges.len())
+                    .ok_or_else(|| invalid("normalized topology use count overflow"))?;
+                max_wire = max_wire.max(edges.len());
+            }
+        }
+    }
+    let mut face_start = buffer(brep.faces.len(), 0usize, &mut retained, byte_limit)?;
+    let mut loop_start = buffer(loop_count, 0usize, &mut retained, byte_limit)?;
+    let mut use_new = buffer(use_count, u32::MAX, &mut retained, byte_limit)?;
+    let mut stack_old = buffer(max_wire, 0usize, &mut retained, byte_limit)?;
+    let mut loop_cursor = 0;
+    let mut use_cursor = 0;
+
+    for (fi, face) in brep.faces.iter_mut().enumerate() {
+        face_start[fi] = loop_cursor;
+        let mut modified = false;
+        for (li, wire) in face.loops.iter_mut().enumerate() {
+            loop_start[loop_cursor] = use_cursor;
+            loop_cursor += 1;
+            let b::Loop::Edges { edges } = wire else {
+                continue;
+            };
+            // An in-place stack cancels nested adjacent pairs in linear work;
+            // unlike repeated drain/search, it does not rescan long wires.
+            let n = edges.len();
+            let mut kept = 0;
+            for read in 0..n {
+                check_cancel(cancel)?;
+                if kept > 0
+                    && kept + n - read > 2
+                    && pair(&brep.edges, &edges[kept - 1], &edges[read], fi, li)
+                {
+                    edge_new[edges[read].edge as usize] = u32::MAX;
+                    kept -= 1;
+                    modified = true;
+                } else {
+                    edges.swap(kept, read);
+                    stack_old[kept] = read;
+                    kept += 1;
+                }
+            }
+            edges.truncate(kept);
+            let mut start = 0;
+            let mut end = kept;
+            while end - start > 2 && pair(&brep.edges, &edges[end - 1], &edges[start], fi, li) {
+                check_cancel(cancel)?;
+                edge_new[edges[start].edge as usize] = u32::MAX;
+                start += 1;
+                end -= 1;
+                modified = true;
+            }
+            for p in start..end {
+                use_new[use_cursor + stack_old[p]] = u32::try_from(p - start)
+                    .map_err(|_| invalid("normalized topology use index"))?;
+            }
+            use_cursor += n;
+            edges.truncate(end);
+            edges.drain(..start);
         }
         if modified {
-            f.domain = recompute_face_domain(&f.surface, &f.loops)?;
+            face.domain = recompute_face_domain(face.domain, &face.loops, cancel)?;
         }
     }
 
-    // Recompute canonical edge and vertex ordering (`docs/native-brep.md`).
-    let mut seen_shell = vec![false; out.shells.len()];
-    let mut seen_face = vec![false; out.faces.len()];
-    let mut direction = vec![true; out.faces.len()];
-    for region in &out.regions {
-        for &s in &region.shells {
-            let Some(seen_s) = seen_shell.get_mut(s as usize) else {
-                continue;
-            };
-            if std::mem::replace(seen_s, true) {
-                continue;
-            }
-            if let Some(b::Shell::Faces { faces, .. }) = out.shells.get(s as usize) {
-                for of in faces {
-                    if let Some(seen_f) = seen_face.get_mut(of.face as usize) {
-                        if !std::mem::replace(seen_f, true) {
-                            direction[of.face as usize] = of.forward;
-                        }
-                    }
-                }
-            }
+    // Surviving edges retain their relative first-appearance order and their
+    // exact primary/radial use order. Only positions within shortened loops
+    // change; never replace radial order with the face walk's order.
+    let mut next_edge = 0u32;
+    for (old, edge) in brep.edges.iter_mut().enumerate() {
+        check_cancel(cancel)?;
+        if edge_new[old] == u32::MAX {
+            continue;
+        }
+        edge_new[old] = next_edge;
+        next_edge = next_edge
+            .checked_add(1)
+            .ok_or_else(|| invalid("normalized topology edge index overflow"))?;
+        for u in &mut edge.uses {
+            check_cancel(cancel)?;
+            let loop_base = *face_start
+                .get(u.face as usize)
+                .ok_or_else(|| invalid("normalized topology face reference"))?;
+            let use_base = *loop_start
+                .get(loop_base + u.r#loop as usize)
+                .ok_or_else(|| invalid("normalized topology loop reference"))?;
+            u.position = *use_new
+                .get(use_base + u.position as usize)
+                .filter(|&&p| p != u32::MAX)
+                .ok_or_else(|| invalid("normalized topology removed a live edge use"))?;
         }
     }
-
-    let mut edge_new = vec![u32::MAX; out.edges.len()];
-    let mut edge_order = Vec::with_capacity(out.edges.len());
-    let mut walked: Vec<Vec<b::EdgeUseRef>> = vec![Vec::new(); out.edges.len()];
-    for (fi, f) in out.faces.iter().enumerate() {
-        let forward = direction[fi];
-        for (li, l) in f.loops.iter().enumerate() {
-            let b::Loop::Edges { edges } = l else {
-                continue;
-            };
-            let n = edges.len();
-            for k in 0..n {
-                let p = if forward { k } else { n - 1 - k };
-                let u = &edges[p];
-                let slot = edge_new
-                    .get_mut(u.edge as usize)
-                    .ok_or(BridgeError::Invalid("edge reference"))?;
-                if *slot == u32::MAX {
-                    *slot = idx(edge_order.len())?;
-                    edge_order.push(u.edge);
-                }
-                walked[u.edge as usize].push(b::EdgeUseRef {
-                    face: idx(fi)?,
-                    r#loop: idx(li)?,
-                    position: idx(p)?,
-                    upper: !u.forward,
-                });
-            }
-        }
-    }
-    for shell in &out.shells {
-        let wires = match shell {
-            b::Shell::Faces { wires, .. } => wires.as_slice(),
-            b::Shell::Wire { edges } => edges.as_slice(),
-            b::Shell::Vertex { .. } => &[],
-        };
-        for &e in wires {
-            let slot = edge_new
-                .get_mut(e as usize)
-                .ok_or(BridgeError::Invalid("edge reference"))?;
-            if *slot == u32::MAX {
-                *slot = idx(edge_order.len())?;
-                edge_order.push(e);
-            }
-        }
-    }
-
-    for f in &mut out.faces {
-        for l in &mut f.loops {
-            if let b::Loop::Edges { edges } = l {
+    for face in &mut brep.faces {
+        for wire in &mut face.loops {
+            if let b::Loop::Edges { edges } = wire {
                 for u in edges {
-                    u.edge = edge_new[u.edge as usize];
+                    check_cancel(cancel)?;
+                    u.edge = *edge_new
+                        .get(u.edge as usize)
+                        .filter(|&&e| e != u32::MAX)
+                        .ok_or_else(|| invalid("normalized topology removed a live edge"))?;
                 }
             }
         }
     }
-    for shell in &mut out.shells {
-        match shell {
-            b::Shell::Faces { wires, .. } => {
-                for e in wires {
-                    *e = edge_new[*e as usize];
-                }
-            }
-            b::Shell::Wire { edges } => {
-                for e in edges {
-                    *e = edge_new[*e as usize];
-                }
-            }
-            b::Shell::Vertex { .. } => {}
+    for shell in &mut brep.shells {
+        let wires = match shell {
+            b::Shell::Faces { wires, .. } => wires,
+            b::Shell::Wire { edges } => edges,
+            b::Shell::Vertex { .. } => continue,
+        };
+        for edge in wires {
+            check_cancel(cancel)?;
+            *edge = *edge_new
+                .get(*edge as usize)
+                .filter(|&&e| e != u32::MAX)
+                .ok_or_else(|| invalid("normalized topology removed a wire edge"))?;
         }
     }
+    let mut old = 0;
+    brep.edges.retain(|_| {
+        let keep = edge_new[old] != u32::MAX;
+        old += 1;
+        keep
+    });
 
-    let mut vertex_new = vec![u32::MAX; out.vertices.len()];
-    let mut vertex_order = Vec::with_capacity(out.vertices.len());
-    let mut visit_vertex = |v: u32| -> R<u32> {
+    let mut next_vertex = 0u32;
+    let mut visit = |v: &mut u32| -> Result<(), spiling_contracts::geometry::GeometryError> {
+        check_cancel(cancel)?;
         let slot = vertex_new
-            .get_mut(v as usize)
-            .ok_or(BridgeError::Invalid("vertex reference"))?;
+            .get_mut(*v as usize)
+            .ok_or_else(|| invalid("normalized topology vertex reference"))?;
         if *slot == u32::MAX {
-            *slot = idx(vertex_order.len())?;
-            vertex_order.push(v);
+            *slot = next_vertex;
+            next_vertex = next_vertex
+                .checked_add(1)
+                .ok_or_else(|| invalid("normalized topology vertex index overflow"))?;
         }
-        Ok(*slot)
+        *v = *slot;
+        Ok(())
     };
-    for &old_e in &edge_order {
-        let edge = &out.edges[old_e as usize];
-        visit_vertex(edge.vertices[0])?;
-        visit_vertex(edge.vertices[1])?;
+    for edge in &mut brep.edges {
+        for vertex in &mut edge.vertices {
+            visit(vertex)?;
+        }
     }
-    for f in &mut out.faces {
-        for l in &mut f.loops {
-            if let b::Loop::Vertex { vertex } = l {
-                *vertex = visit_vertex(*vertex)?;
+    for face in &mut brep.faces {
+        for wire in &mut face.loops {
+            if let b::Loop::Vertex { vertex } = wire {
+                visit(vertex)?;
             }
         }
     }
-    for shell in &mut out.shells {
+    for shell in &mut brep.shells {
         if let b::Shell::Vertex { vertex } = shell {
-            *vertex = visit_vertex(*vertex)?;
+            visit(vertex)?;
         }
     }
-
-    let old_edges = std::mem::take(&mut out.edges);
-    out.edges = edge_order
-        .into_iter()
-        .map(|old_e| {
-            let mut e = old_edges[old_e as usize].clone();
-            e.vertices = [
-                vertex_new[e.vertices[0] as usize],
-                vertex_new[e.vertices[1] as usize],
-            ];
-            e.uses = std::mem::take(&mut walked[old_e as usize]);
-            e
-        })
-        .collect();
-
-    let old_vertices = std::mem::take(&mut out.vertices);
-    out.vertices = vertex_order
-        .into_iter()
-        .map(|old_v| old_vertices[old_v as usize].clone())
-        .collect();
-
-    out.validate().map_err(|e| BridgeError::Invalid(e.0))?;
-    Ok(Cow::Owned(out))
+    // Move, never clone, owned vertices into their new canonical slots. Dead
+    // vertices are only those with no remaining edge, vertex-loop or shell use.
+    let mut i = 0;
+    while i < vertex_new.len() {
+        check_cancel(cancel)?;
+        let target = vertex_new[i];
+        if target == u32::MAX {
+            vertex_new.swap_remove(i);
+            brep.vertices.swap_remove(i);
+        } else if target as usize == i {
+            i += 1;
+        } else {
+            vertex_new.swap(i, target as usize);
+            brep.vertices.swap(i, target as usize);
+        }
+    }
+    Ok(())
 }
 
-fn recompute_face_domain(surface: &b::Surface, loops: &[b::Loop]) -> R<[[f64; 2]; 2]> {
+fn recompute_face_domain(
+    previous: [[f64; 2]; 2],
+    loops: &[b::Loop],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<[[f64; 2]; 2], spiling_contracts::geometry::GeometryError> {
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
-    for l in loops {
-        let b::Loop::Edges { edges } = l else {
+    let mut include = |p: [f64; 2]| -> Result<(), spiling_contracts::geometry::GeometryError> {
+        super::check_cancel(cancel)?;
+        if !p.into_iter().all(f64::is_finite) {
+            return Err(super::invalid(
+                "normalized topology nonfinite pcurve coefficient",
+            ));
+        }
+        for d in 0..2 {
+            lo[d] = lo[d].min(p[d]);
+            hi[d] = hi[d].max(p[d]);
+        }
+        Ok(())
+    };
+    for wire in loops {
+        let b::Loop::Edges { edges } = wire else {
             continue;
         };
         for u in edges {
             match &u.pcurve {
                 b::Curve2::Spline { points, .. } => {
-                    for p in points {
-                        for d in 0..2 {
-                            lo[d] = lo[d].min(p[d]);
-                            hi[d] = hi[d].max(p[d]);
-                        }
+                    for &p in points {
+                        include(p)?;
                     }
                 }
                 b::Curve2::RationalSpline { homogeneous, .. } => {
-                    for h in homogeneous.iter().filter(|h| h[2] > 0.0) {
-                        let p = [h[0] / h[2], h[1] / h[2]];
-                        for d in 0..2 {
-                            lo[d] = lo[d].min(p[d]);
-                            hi[d] = hi[d].max(p[d]);
-                        }
+                    // A mixed/nonpositive-weight hull cannot narrow a chart.
+                    // In particular, never silently omit its coefficients.
+                    if homogeneous.iter().any(|h| !(h[2] > 0.0)) {
+                        return Ok(previous);
+                    }
+                    for h in homogeneous {
+                        include([h[0] / h[2], h[1] / h[2]])?;
                     }
                 }
             }
         }
     }
-    let natural = surface.natural();
-    let mut out = [[0.0; 2]; 2];
+    let mut out = previous;
     for d in 0..2 {
-        let (a, b_val) = (lo[d], hi[d]);
-        if !(a.is_finite() && b_val.is_finite() && a <= b_val) {
-            return Err(BridgeError::Invalid("face without pcurves"));
+        let (a, z) = (lo[d], hi[d]);
+        if !(a.is_finite() && z.is_finite() && a <= z) {
+            return Err(super::invalid("normalized topology face without pcurves"));
         }
-        let pad = 1e-6 * (1.0 + (b_val - a)) + 1e-9 * a.abs().max(b_val.abs());
-        let (mut x, mut y) = (a - pad, b_val + pad);
-        match natural.get(d) {
-            Some(b::Natural::Periodic) => {
-                if y - x > TAU {
-                    x = a;
-                    y = a + TAU;
-                }
-            }
-            Some(b::Natural::Range(n0, n1)) => {
-                x = x.max(*n0);
-                y = y.min(*n1);
-            }
-            None => {}
+        // Preserve the decoder's padding convention, but only intersect its
+        // existing chart. No new tolerance, natural period or wider domain.
+        let pad = 1e-6 * (1.0 + (z - a)) + 1e-9 * a.abs().max(z.abs());
+        out[d] = [previous[d][0].max(a - pad), previous[d][1].min(z + pad)];
+        if !(out[d][0] < out[d][1]) {
+            return Err(super::invalid("normalized topology empty face domain"));
         }
-        if !(x < y) {
-            return Err(BridgeError::Invalid("empty face domain"));
-        }
-        out[d] = [x, y];
     }
     Ok(out)
 }

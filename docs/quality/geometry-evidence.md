@@ -42,6 +42,13 @@ bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retain
 capacity. Consumers still cross-check native incidence; the cache does not supply
 original-source correspondence or material authority.
 
+Before native conversion and chart-map construction, exact adjacent null uses
+may cancel only for the same edge, opposite directions, identical PCurves and
+exactly two uses in one face/wire. Owned normalization preserves surviving
+coefficients, radial order and face provenance; only unreferenced derived data
+disappears, and affected chart domains only narrow. Genuine periodic seam
+branches remain. Original-use census and material qualification still apply.
+
 Import bounds are complete, conservative native enclosures for scene fitting
 and coarse exclusion. The importer evaluates retained face-carrier domains,
 edge restrictions and vertices with one cancellable coefficient-work allowance;
@@ -227,6 +234,16 @@ Its nonzero physical source residual remains charged to the source allowance.
 A joint collapses only with coefficient identity or equal singleton outward UV
 enclosures; overlapping or merely small uncertainty boxes are not identity and
 do not erase displacement or correspondence obligations.
+
+Numerical knot/cut leaves are not new source endpoints. A leaf can use its
+complete boundary's exact shared C0 anchor only after opposite monotone germs
+are certified over both entire leaf-to-anchor parameter hulls. This preserves
+separation across uncertain internal cuts without endpoint welding or distance
+tolerances.
+Complete C0 boundaries with a globally strict derivative coordinate qualify as
+one injective proof span before pairwise separation; numerical calibration cuts
+and original knots remain in the evaluator. Unproved whole-boundary monotonicity
+retains the existing knot-span subdivision path.
 
 Source edge/vertex census checks complete original-use ownership against native
 incidence, including opposed uses, rather than matching stars by coordinates.
