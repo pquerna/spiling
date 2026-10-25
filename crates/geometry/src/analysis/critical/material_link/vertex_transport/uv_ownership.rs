@@ -1004,7 +1004,7 @@ impl UvJointComparison {
                 let a = self.germ_correction(0, s)?;
                 let b = self.germ_correction(1, s)?;
                 Ok(CorrectionJet {
-                    position: mix(a.position, b.position, t),
+                    position: convex_mix(a.position, b.position, t)?,
                     derivative: mix(a.derivative, b.derivative, t),
                     second_derivative: mix(a.second_derivative, b.second_derivative, t),
                 })
@@ -1189,7 +1189,7 @@ impl UvJointComparison {
                 let (qb, qsb) = self.divided_end(domain, recipe, 1, s, work, cancel)?;
                 let qa: Box2 = std::array::from_fn(|i| qa[i].add(recipe.outgoing.offset[i]));
                 let qb: Box2 = std::array::from_fn(|i| qb[i].add(recipe.incoming.offset[i]));
-                let blend = mix(qa, qb, t);
+                let blend = convex_mix(qa, qb, t)?;
                 let bubble = t.mul(source_unit_complement(t)?);
                 let slope = Interval::point(1.0).sub(Interval::point(2.0).mul(t));
                 (

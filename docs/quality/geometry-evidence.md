@@ -167,6 +167,11 @@ must never be converted into display unavailability.
   [`critical/material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
   and its transport/vertex owners prove original-use material embedding; a
   retained chart or enclosure-only recipe cannot supply embedding authority.
+  Closed-unit recipe coordinates are validated before convex endpoint hulls
+  tighten their affine enclosures. Exact zero/sign identities preserve attained
+  boundaries, including signed underflow, rather than inventing outward material
+  or widening source domains. Unproved coordinates are never clipped; coefficient
+  domain checks and original-material embedding remain independent obligations.
 - **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
   and `analysis/placed.rs` distinguish geometric from realized-material bounds.
   Source realization error must survive actual affine conversion, placement

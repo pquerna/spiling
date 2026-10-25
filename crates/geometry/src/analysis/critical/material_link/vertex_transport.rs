@@ -223,6 +223,19 @@ fn mix<const N: usize>(a: [Interval; N], b: [Interval; N], t: Interval) -> [Inte
     std::array::from_fn(|i| a[i].add(t.mul(b[i].sub(a[i]))))
 }
 
+fn convex_mix<const N: usize>(
+    a: [Interval; N],
+    b: [Interval; N],
+    t: Interval,
+) -> Result<[Interval; N], GeometryError> {
+    let mut result = mix(a, b, source_unit_parameter(t)?);
+    for i in 0..N {
+        result[i] = intersection(result[i], a[i].hull(b[i]))
+            .ok_or_else(|| refusal("validated convex interpolation enclosures disagree"))?;
+    }
+    Ok(result)
+}
+
 /// A normalized recipe coordinate is validated before its independently known
 /// image [0,1] can tighten outward arithmetic. Unproved inputs are never clipped.
 fn source_unit_parameter(value: Interval) -> Result<Interval, GeometryError> {
@@ -344,12 +357,7 @@ fn closed_cone_jet(
     let s = source_unit_parameter(Interval::new(radial_range[0], radial_range[1])?)?;
     let origin = point.map(Interval::point);
     let ds = relative(boundary.position, point);
-    let mut position = mix(origin, boundary.position, s);
-    let convex = hull3(origin, boundary.position);
-    for i in 0..3 {
-        position[i] = intersection(position[i], convex[i])
-            .ok_or_else(|| refusal("selected closed cone interpolation enclosures disagree"))?;
-    }
+    let position = convex_mix(origin, boundary.position, s)?;
     Ok(ClosedConeJet {
         position,
         ds,
@@ -2535,9 +2543,9 @@ fn star_jet(
     }
     let e0 = end_curve(domain, a, s, work, cancel)?;
     let e1 = end_curve(domain, b, s, work, cancel)?;
-    let k = mix(a.offset, b.offset, t);
+    let k = convex_mix(a.offset, b.offset, t)?;
     let bubble = t.mul(source_unit_complement(t)?);
-    let uv = mix(e0.position, e1.position, t);
+    let uv = convex_mix(e0.position, e1.position, t)?;
     let ds = mix(e0.derivative, e1.derivative, t);
     Ok(StarJet {
         uv: std::array::from_fn(|i| uv[i].add(s.mul(k[i].add(bubble.mul(bulge[i]))))),
@@ -2577,7 +2585,7 @@ fn boundary_jet_with_byte_limit(
         let p1 = chart_jet(domain, b.use_.coedge, [b.exit; 2], work, cancel)?.position;
         let u0: Box2 = std::array::from_fn(|i| p0[i].add(a.offset[i]));
         let u1: Box2 = std::array::from_fn(|i| p1[i].add(b.offset[i]));
-        let blend = mix(u0, u1, t);
+        let blend = convex_mix(u0, u1, t)?;
         let bubble = t.mul(source_unit_complement(t)?);
         let uv = std::array::from_fn(|i| blend[i].add(bubble.mul(bulge[i])));
         let derivative_uv = std::array::from_fn(|i| {
@@ -3756,6 +3764,18 @@ mod tests {
         };
         assert!(closed_cone_jet([0.0; 3], boundary, [down(0.0), 1.0]).is_err());
         assert!(closed_cone_jet([0.0; 3], boundary, [0.0, up(1.0)]).is_err());
+    }
+
+    #[test]
+    fn convex_source_coordinates_preserve_hulls_and_refuse_extrapolation() {
+        let a = [Interval::new(7.9, 8.0).unwrap(), Interval::point(-1.0)];
+        let b = [Interval::new(7.8, 8.0).unwrap(), Interval::point(1.0)];
+        let image = convex_mix(a, b, Interval::new(0.0, 1.0).unwrap()).unwrap();
+        for i in 0..2 {
+            assert_eq!(image[i], a[i].hull(b[i]));
+        }
+        assert!(convex_mix(a, b, Interval::new(down(0.0), 1.0).unwrap()).is_err());
+        assert!(convex_mix(a, b, Interval::new(0.0, up(1.0)).unwrap()).is_err());
     }
 
     #[test]

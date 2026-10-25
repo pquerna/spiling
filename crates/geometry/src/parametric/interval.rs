@@ -177,8 +177,20 @@ impl Interval {
             }
         }
         Self {
-            lo: down(self.lo + other.lo),
-            hi: up(self.hi + other.hi),
+            lo: if self.lo == 0.0 {
+                other.lo
+            } else if other.lo == 0.0 {
+                self.lo
+            } else {
+                down(self.lo + other.lo)
+            },
+            hi: if self.hi == 0.0 {
+                other.hi
+            } else if other.hi == 0.0 {
+                self.hi
+            } else {
+                up(self.hi + other.hi)
+            },
         }
     }
 
@@ -224,10 +236,17 @@ impl Interval {
             };
         }
 
-        Self {
-            lo: down(p1.min(p2).min(p3).min(p4)),
-            hi: up(p1.max(p2).max(p3).max(p4)),
+        // Product signs are exact even when a rounded corner product
+        // underflows. Do not widen an attained zero across its proved sign.
+        let mut lo = down(p1.min(p2).min(p3).min(p4));
+        let mut hi = up(p1.max(p2).max(p3).max(p4));
+        if (self.lo >= 0.0 && other.lo >= 0.0) || (self.hi <= 0.0 && other.hi <= 0.0) {
+            lo = lo.max(0.0);
         }
+        if (self.lo >= 0.0 && other.hi <= 0.0) || (self.hi <= 0.0 && other.lo >= 0.0) {
+            hi = hi.min(0.0);
+        }
+        Self { lo, hi }
     }
 
     pub fn reciprocal(self) -> Result<Self, GeometryError> {
@@ -719,6 +738,34 @@ mod tests {
         let mul = a.mul(b);
         assert!(mul.lo <= 3.0);
         assert!(mul.hi >= 8.0);
+    }
+
+    #[test]
+    fn inward_transport_preserves_the_closed_domain_endpoint() {
+        let anchor = Interval::point(1.570796326795);
+        let offset = Interval::new(-4.0e-7, 0.0).unwrap();
+        let across = Interval::new(0.0, 1.0).unwrap();
+        let moved = anchor.add(across.mul(offset));
+        assert_eq!(moved.hi, anchor.hi);
+        assert!(moved.lo <= anchor.lo - 4.0e-7);
+        let opposite = anchor.neg().add(across.mul(offset.neg()));
+        assert_eq!(opposite.lo, -anchor.hi);
+        assert!(opposite.hi >= -anchor.lo + 4.0e-7);
+    }
+
+    #[test]
+    fn signed_underflow_encloses_nonzero_products_without_crossing_zero() {
+        let tiny = f64::from_bits(1);
+        let positive = Interval::point(tiny).mul(Interval::point(0.5));
+        assert_eq!(positive.lo, 0.0);
+        assert!(positive.hi > 0.0);
+        let negative = Interval::point(-tiny).mul(Interval::point(0.5));
+        assert!(negative.lo < 0.0);
+        assert_eq!(negative.hi, 0.0);
+        let crossing = Interval::new(-tiny, tiny)
+            .unwrap()
+            .mul(Interval::point(0.5));
+        assert!(crossing.lo < 0.0 && crossing.hi > 0.0);
     }
 
     #[test]
