@@ -45,6 +45,52 @@ is live. Reuse one disk-backed Cargo target/profile; development/test profiles
 already disable debug information and incremental compilation. Selected numerical
 crates are optimized independently of the desktop stack.
 
+## SolidCore fork freshness
+
+While the migration is active, the integration owner refreshes the fork at the
+start of each UTC workday and before proposing another kernel patch or pin.
+Do not accumulate fixes against an old upstream snapshot. The current candidate,
+patch ownership and issue recommendations live in the
+[upstream assessment](solidcore-upstream-review.md).
+
+Use `origin` for `tangency-labs/solidcore` and `fork` for `pquerna/solidcore`.
+Fetch both. Fast-forward the fork's upstream-mirror `main` only when it is an
+ancestor of upstream; divergence requires inspection, never a reset or force.
+Preserve the old consumer pin and published topic branches.
+
+```sh
+git fetch origin
+git fetch fork
+git merge-base --is-ancestor fork/main origin/main
+git push fork origin/main:refs/heads/main
+git worktree add -b spiling/refresh-UTC_DATE-UPSTREAM_SHA NEW_WORKTREE PATCH_QUEUE_TIP
+git -C NEW_WORKTREE rebase origin/main
+```
+
+`PATCH_QUEUE_TIP` is the maintained candidate identified in the assessment, not
+automatically the older production pin. Create a new, unpublished branch;
+never rebase a shared published branch. Resolve against current manifests/APIs,
+retaining upstream changes, resource contracts and third-party attribution.
+If the same daily snapshot already exists, reuse it without rewriting history.
+
+Use separate Cargo targets for different checked-out producer baselines, for
+example `target/solidcore-UPSTREAM_SHA` and `target/solidcore-CANDIDATE_SHA`.
+Do not credit a comparison that reused the other worktree's path-package
+artifact; confirm which source was compiled and which executable was run.
+
+Run focused kernel/resource regressions and an actual native consumer. Publish
+the candidate under its new branch with a normal push; record exact producer
+identity, commands and results in ignored run evidence or commit/PR notes.
+Update the assessment in place, not as a dated append-only log. Existing open
+upstream PR branches follow upstream's merge-based synchronization rules.
+
+A refresh is not a qualified Spiling upgrade. Promote only after the relevant
+real engine/CLI controls: update both SolidCore package revisions, the lockfile
+and `geometry::KERNEL_REVISION` together. Keep remaining operation refusals
+explicit; neither a newer revision nor passing unit tests establishes parity.
+This cadence is an integration-owner duty, not an installed unattended timer.
+Spiling's disabled remote CI is not re-enabled by fork maintenance.
+
 ## Resources and test inputs
 
 Root tools default to one Cargo job; raise `CARGO_BUILD_JOBS` explicitly for the

@@ -18,6 +18,8 @@ Programs are **NOT MACHINE READY**: physical printability/grip, swept-tool colli
 
 Runtime SolidCore dependency pins in `Cargo.toml` and `geometry::KERNEL_REVISION` must agree on the same exact published commit. Original-exporter dependencies used only by corpus generators are not runtime geometry backends. Source layout, a successful build or a partial smoke run does not qualify complete geometry/manufacturing support. Current support declarations must distinguish exercised behavior, explicit refusals and unqualified operations.
 
+During active SolidCore work, refresh against upstream at the start of every UTC workday and before proposing a new fork patch or pin: fetch, fast-forward the fork mirror when safe, and rebase the maintained patch queue on a new unpublished branch. Preserve published branches and exact pins; never force-push shared history or silently upgrade the consumer. Follow the [daily fork procedure](docs/quality/development.md#solidcore-fork-freshness) and maintain the [upstream assessment](docs/quality/solidcore-upstream-review.md) before filing an issue.
+
 Initial implementation direction:
 
 - One Cargo workspace and one pnpm workspace.
