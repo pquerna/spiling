@@ -395,6 +395,7 @@ fn calibrate_raw_branch(
         &normalized,
         [0.0, 1.0],
         allowance,
+        32,
         available(remaining, live.checked_add(metadata).ok_or_else(capacity)?)?,
         work,
         cancel,
