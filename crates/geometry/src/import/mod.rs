@@ -374,12 +374,7 @@ pub(crate) fn import_step(
         return Err(invalid("solid B-rep is not a valid 2-manifold solid"));
     }
 
-    let bbox = solidcore::query::brep::calculate_tight_bounding_box(&k, &brep)
-        .map_err(|e| kernel(&format!("bounding box calculation failed: {e}")))?;
-    let bounds = spiling_contracts::geometry::AabbMm::new(
-        [bbox.min().x, bbox.min().y, bbox.min().z],
-        [bbox.max().x, bbox.max().y, bbox.max().z],
-    )?;
+    let bounds = native_enclosure_bounds(&brep, cancel)?;
 
     let native_faces = brep.faces().ids().collect::<Vec<_>>();
     if native_faces.len() != solid.face_origin.len() || native_faces.len() != faces.len() {
@@ -671,4 +666,80 @@ pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Definition, G
             )
         })?;
     from_step_bytes(&bytes)
+}
+
+/// A complete native enclosure for scene fitting and coarse exclusion, not a
+/// tight measurement or material receipt. Evaluate whole retained carrier/edge
+/// restrictions; never substitute a vertex hull or a failed tight-box result.
+fn native_enclosure_bounds(
+    brep: &solidcore::topology::Brep,
+    cancel: &AtomicBool,
+) -> Result<spiling_contracts::geometry::AabbMm, GeometryError> {
+    use crate::parametric::{self, CurveEvaluator, Interval};
+    let mut work = crate::GeometryWorkBudget::new(128_000_000);
+    let mut minimum = [f64::INFINITY; 3];
+    let mut maximum = [f64::NEG_INFINITY; 3];
+    let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {
+        for axis in 0..3 {
+            let span = Interval::new(position[axis].lo, position[axis].hi)?;
+            minimum[axis] = minimum[axis].min(span.lo);
+            maximum[axis] = maximum[axis].max(span.hi);
+        }
+        Ok(())
+    };
+    for (_, vertex) in brep.vertices().iter() {
+        work.charge(1, cancel)?;
+        include([
+            Interval::new(vertex.point.x, vertex.point.x)?,
+            Interval::new(vertex.point.y, vertex.point.y)?,
+            Interval::new(vertex.point.z, vertex.point.z)?,
+        ])?;
+    }
+    for (edge_id, edge) in brep.edges().iter() {
+        work.charge(1, cancel)?;
+        let Some(curve) = &edge.curve else {
+            return Err(invalid("native edge has no coefficient curve"));
+        };
+        let before = work.consumed();
+        let position = curve
+            .tensor(
+                [edge.interval.min(), edge.interval.max()],
+                0,
+                &mut work,
+                cancel,
+            )
+            .map_err(|failure| {
+                work.annotate_error(
+                    failure,
+                    before,
+                    format_args!("native import edge enclosure; edge={edge_id:?}"),
+                )
+            })?[0];
+        include(position)?;
+    }
+    for (face_id, face) in brep.faces().iter() {
+        work.charge(1, cancel)?;
+        let surface = face
+            .surface
+            .as_ref()
+            .ok_or_else(|| invalid("native face has no coefficient carrier"))?;
+        let low = face.uv_domain.min();
+        let high = face.uv_domain.max();
+        let before = work.consumed();
+        let position = parametric::surface_position_enclosure(
+            surface,
+            [[low.x, high.x], [low.y, high.y]],
+            &mut work,
+            cancel,
+        )
+        .map_err(|failure| {
+            work.annotate_error(
+                failure,
+                before,
+                format_args!("native import face enclosure; face={face_id:?}"),
+            )
+        })?;
+        include(position)?;
+    }
+    spiling_contracts::geometry::AabbMm::new(minimum, maximum)
 }

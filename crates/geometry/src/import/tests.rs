@@ -19,6 +19,22 @@ fn cancelled() -> AtomicBool {
     AtomicBool::new(false)
 }
 #[test]
+fn native_bounds_enclose_curved_extrema_between_source_vertices() {
+    let definition = from_step_bytes_with_cancel(&fixture("cylinder.step"), &cancelled()).unwrap();
+    // The cylinder's seam vertices cannot supply either Y extremum.
+    for point in [
+        [-5.0, 0.0, 0.0],
+        [5.0, 0.0, 8.0],
+        [0.0, -5.0, 4.0],
+        [0.0, 5.0, 4.0],
+    ] {
+        for axis in 0..3 {
+            assert!(definition.bounds.min[axis] <= point[axis]);
+            assert!(definition.bounds.max[axis] >= point[axis]);
+        }
+    }
+}
+#[test]
 fn lexical_caps_ignore_strings_comments_and_binary_strings() {
     lexical_bound(b"/* #1= */ '#2=''#3=' \"#4=\" #5 /*hi*/ =", &cancelled()).unwrap();
     let mut bytes = Vec::new();

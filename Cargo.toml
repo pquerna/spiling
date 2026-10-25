@@ -40,8 +40,8 @@ monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/m
 monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
 monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95", default-features = false, features = ["step"] }
 monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
-solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "1fef444cbaad61c0f414fe126314c079175da046" }
-solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "1fef444cbaad61c0f414fe126314c079175da046", features = ["nurbs-grid-mesh"] }
+solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "18ad8bd1b9d6a1db5e51cf0439bb3db5df31dcd4" }
+solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "18ad8bd1b9d6a1db5e51cf0439bb3db5df31dcd4", features = ["nurbs-grid-mesh"] }
 solidcraft-geom = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
 solidcraft-step = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }
 step-p21 = "=0.1.1"

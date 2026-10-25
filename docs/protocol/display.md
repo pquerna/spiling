@@ -40,6 +40,8 @@ Chunks split complete triangles with local vertex remapping in deterministic fac
 
 Definition display availability is explicit: `DefinitionRecord.display` is either `mesh` with a nonzero artifact identity or `unavailable` with a bounded typed geometry error. An unavailable display has no synthetic artifact, chunks or GPU picking targets. The definition's native bounds and canonical source-face table remain available independently for scene fitting and list-based native face inspection. Mixed rendered/non-rendered scenes publish atomically; a nonempty native scene may legitimately have zero mesh bytes and must not be labelled empty. Import/open Scene operation results publish no display outputs when their native scene has zero mesh bytes. Display refusal does not authorize or invalidate unrelated native queries; each operation retains its own evidence/error boundary.
 
+Definition bounds conservatively enclose native geometry; they are not required to be tight. In particular, complete carrier-domain enclosures can exceed the trimmed material. These scene-fitting bounds grant no precision, placement or manufacturing authority; those operations use their own native/source-bound queries and declared error budgets.
+
 ## SPLS section, version 1
 
 | Byte offset | Field                                |

@@ -42,6 +42,14 @@ bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retain
 capacity. Consumers still cross-check native incidence; the cache does not supply
 original-source correspondence or material authority.
 
+Import bounds are complete, conservative native enclosures for scene fitting
+and coarse exclusion. The importer evaluates retained face-carrier domains,
+edge restrictions and vertices with one cancellable coefficient-work allowance;
+it neither invokes the native tight-box solver nor substitutes a vertex hull.
+Whole carrier rectangles can over-enclose complex trims. These bounds are not
+precision measurements, source uncertainty claims or material receipts:
+placement and manufacturing retain their independent source-material queries.
+
 [`parametric.rs`](../../crates/geometry/src/parametric.rs) and its coefficient
 providers own bounded original-surface/curve evaluation. Unclamped splines use
 their regular domains, not exterior knot support. Knot crossings retain both
