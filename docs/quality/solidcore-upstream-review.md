@@ -18,9 +18,14 @@ violation before they become upstream bug candidates.
 
 | Role | Exact identity |
 | --- | --- |
-| Upstream and fast-forwarded fork `main` | [`1cd31cf033ca53948d8f98a4015e95f3581ec7ab`](https://github.com/tangency-labs/solidcore/commit/1cd31cf033ca53948d8f98a4015e95f3581ec7ab) |
-| Combined integration producer | [`ee4d9c3feefb3c702ca53b190b7fe4516714c841`](https://github.com/pquerna/solidcore/commit/ee4d9c3feefb3c702ca53b190b7fe4516714c841), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
-| Consumer pin authority | Both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree on an exact integration commit, never a floating branch |
+| Upstream and fast-forwarded fork `main` | [`694ab1f821289a97fba21f70512a8dc2ea8bd908`](https://github.com/tangency-labs/solidcore/commit/694ab1f821289a97fba21f70512a8dc2ea8bd908) |
+| Maintained integration tip | [`b33839745a29950af2db81dd6b6c30251fec55ce`](https://github.com/pquerna/solidcore/commit/b33839745a29950af2db81dd6b6c30251fec55ce), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
+| Qualified Spiling consumer pin | [`ee4d9c3feefb3c702ca53b190b7fe4516714c841`](https://github.com/pquerna/solidcore/commit/ee4d9c3feefb3c702ca53b190b7fe4516714c841); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree |
+
+Refreshing the fork does not automatically promote its moving tip into Spiling.
+The refreshed mesher follows upstream's mutable BREP property API without copying
+the model. Mesher controls and native primitive runs do not establish imported
+manufacturing parity; promotion still requires the real engine/CLI consumer gate.
 
 The integration contains inherited tessellator work plus the separate Spiling
 budget and STEP-copy overlays. Preserve the tessellator's original authors and
