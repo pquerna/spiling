@@ -12,7 +12,7 @@ pub use planner::preflight;
 use spiling_contracts::geometry::{DefinitionId, KernelIdentity, OccurrenceRecord};
 use spiling_contracts::manufacturing::*;
 use spiling_contracts::project::{ProjectId, ProjectRevision, StoredDefinition};
-use spiling_geometry::{KERNEL_REVISION, KERNEL_VERSION};
+use spiling_geometry::{KERNEL_NAME, KERNEL_REVISION, KERNEL_VERSION};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
@@ -80,7 +80,7 @@ pub fn compile(
             )
             .collect(),
         kernel: KernelIdentity {
-            name: "monstertruck".into(),
+            name: KERNEL_NAME.into(),
             version: KERNEL_VERSION.into(),
             revision: KERNEL_REVISION.into(),
         },
@@ -204,7 +204,7 @@ fn validate_inspection_bundle(
     if p.planner_version != PLANNER_VERSION
         || p.emitter_version != EMITTER_VERSION
         || p.verifier_version != VERIFIER_VERSION
-        || p.kernel.name != "monstertruck"
+        || p.kernel.name != KERNEL_NAME
         || p.kernel.version != KERNEL_VERSION
         || p.kernel.revision != KERNEL_REVISION
     {

@@ -1446,30 +1446,36 @@ fn build_direction_and_prime_endpoint_resolve_actual_seam_ties() {
 }
 
 #[test]
-fn saved_verification_cannot_authorize_an_incompatible_planner() {
+fn saved_verification_cannot_authorize_an_incompatible_producer() {
     let mut bundle = Scene::new(BOX, &[RigidPoseMm::IDENTITY])
         .compile(&intent())
         .unwrap();
     assert!(bundle.verification.verified);
-    bundle.provenance.planner_version = format!("incompatible-{PLANNER_VERSION}");
-    let bytes = serde_json::to_vec(&bundle).unwrap();
-    let decoded = decode_bundle(&bytes).unwrap();
-    for output in [
-        VerificationOutput::ReportOnly,
-        VerificationOutput::ReportAndMotion,
+    for (planner, kernel) in [
+        (format!("incompatible-{PLANNER_VERSION}"), KERNEL_NAME.into()),
+        (PLANNER_VERSION.into(), "monstertruck".into()),
     ] {
-        assert_eq!(
-            inspect_bundle(
-                &decoded,
-                &SourceHash::from_bytes(&bytes),
-                output,
-                &AtomicBool::new(false)
-            )
-            .err()
-            .unwrap()
-            .code,
-            ManufacturingErrorCode::UnsupportedCapability,
-        );
+        bundle.provenance.planner_version = planner;
+        bundle.provenance.kernel.name = kernel;
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        let decoded = decode_bundle(&bytes).unwrap();
+        for output in [
+            VerificationOutput::ReportOnly,
+            VerificationOutput::ReportAndMotion,
+        ] {
+            assert_eq!(
+                inspect_bundle(
+                    &decoded,
+                    &SourceHash::from_bytes(&bytes),
+                    output,
+                    &AtomicBool::new(false)
+                )
+                .err()
+                .unwrap()
+                .code,
+                ManufacturingErrorCode::UnsupportedCapability,
+            );
+        }
     }
 }
 

@@ -27,6 +27,10 @@ their original producer provenance, not transferred SolidCore acceptance.
   borrow captured project identity/revision, native definitions, stored provenance,
   occurrence poses, intent, ordered process/finish documents and canonical images. Compilation performs no
   uncaptured file reads. Semantic fingerprint and producer identity are separate bindings.
+  Both compilation and independent inspection bind the complete native producer
+  name/version/revision from the same geometry identity used by the engine
+  handshake. An obsolete kernel label is not a compatibility alias; a changed
+  dependency never relabels saved manufacturing bytes without fresh compilation.
 - Engine [`Runtime` manufacturing commands](../../apps/engine/src/geometry/manufacturing/mod.rs)
   capture that snapshot; the [native worker](../../apps/engine/src/geometry/worker.rs)
   resolves retained native definitions and invokes the same crate for CLI and UI.
