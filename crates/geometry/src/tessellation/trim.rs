@@ -13,7 +13,7 @@ use super::{
 use crate::{
     GeometryWorkBudget,
     kernel::Definition,
-    parametric::{self, Interval},
+    parametric::{self, Interval, PreparedValidatedCurve},
 };
 use solidcore::{curve::curve::Curve, surface::surface::Surface, topology::edgeuse::p1 as eu};
 use solidcore_mesh::{EdgeSet, FaceMesh};
@@ -35,9 +35,9 @@ struct SourceSegment<'a> {
     key: [u32; 2],
     start_vertex: u32,
     source_loop: usize,
-    curve: &'a Curve,
+    curve: PreparedValidatedCurve<'a>,
     range: [f64; 2],
-    uv_curve: Option<&'a Curve>,
+    uv_curve: Option<PreparedValidatedCurve<'a>>,
     uv_range: [f64; 2],
 }
 fn key(a: u32, b: u32) -> [u32; 2] {
@@ -52,7 +52,7 @@ pub(super) fn certify(
     outside: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<f64, GeometryError> {
+) -> Result<(f64, super::singular::Inventory), GeometryError> {
     let brep = definition.brep();
     let face = brep.face(mesh.face).map_err(native_error)?;
     let surface = face
@@ -79,6 +79,12 @@ pub(super) fn certify(
             Ok::<_, GeometryError>(count.saturating_add(poly.vertices.len().saturating_sub(1)))
         })
     })?;
+    let use_count = face.loops.iter().try_fold(0usize, |count, &loop_| {
+        Ok::<_, GeometryError>(
+            count.saturating_add(brep.loop_(loop_).map_err(native_error)?.edges.len()),
+        )
+    })?;
+    let boundary_capacity = edge_count_for_boundary(mesh, use_count)?;
     let edge_count = mesh
         .triangles
         .len()
@@ -86,22 +92,30 @@ pub(super) fn certify(
         .ok_or_else(|| resource("native triangle chain count overflow"))?;
     let requested = edge_count
         .saturating_mul(size_of::<HalfEdge>())
-        .saturating_add(segment_count.saturating_mul(
-            size_of::<SourceSegment<'_>>() + size_of::<Boundary>() + size_of::<bool>(),
-        ))
+        .saturating_add(segment_count.saturating_mul(size_of::<SourceSegment<'_>>()))
+        .saturating_add(boundary_capacity.saturating_mul(size_of::<Boundary>() + size_of::<bool>()))
         .saturating_add(
             mesh.positions
                 .len()
+                .saturating_add(2 * use_count)
                 .saturating_mul(size_of::<Option<usize>>() + size_of::<bool>()),
         )
         .saturating_add(fu.loopuses.len().saturating_mul(size_of::<bool>()))
         .saturating_add(parametric::curve_prepared::PreparedValidatedCurve::scratch_bytes())
+        .saturating_add(2 * size_of::<PreparedValidatedCurve<'_>>())
         .saturating_add(parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES);
     check_memory(outside.saturating_add(requested))?;
     let mut source = Vec::new();
     source
         .try_reserve_exact(segment_count)
         .map_err(|_| resource("native trim source inventory allocation failed"))?;
+    let requested = requested.saturating_add(
+        source
+            .capacity()
+            .saturating_sub(segment_count)
+            .saturating_mul(size_of::<SourceSegment<'_>>()),
+    );
+    check_memory(outside.saturating_add(requested))?;
     for (loop_index, &loopuse) in fu.loopuses.iter().enumerate() {
         work.charge(1, cancel)?;
         if brep.loopuse(loopuse).map_err(native_error)?.loop_ != Some(face.loops[loop_index]) {
@@ -182,13 +196,25 @@ pub(super) fn certify(
                         "native faceuse contains additional unowned trim intervals",
                     ));
                 }
+                // Retain one immutable coefficient binding for this exact
+                // original interval. Recursive trim leaves reuse its validated
+                // knots, not a frozen jet or a candidate parameter sample.
+                let owner_bytes = size_of::<PreparedValidatedCurve<'_>>()
+                    .saturating_add(PreparedValidatedCurve::scratch_bytes());
+                let prepared =
+                    PreparedValidatedCurve::new(curve, range, 1.0, owner_bytes, work, cancel)?;
+                let prepared_uv = uv_curve
+                    .map(|curve| {
+                        PreparedValidatedCurve::new(curve, uv_range, 1.0, owner_bytes, work, cancel)
+                    })
+                    .transpose()?;
                 source.push(SourceSegment {
                     key: key(poly.vertices[index], poly.vertices[index + 1]),
                     start_vertex: poly.vertices[index],
                     source_loop: loop_index,
-                    curve,
+                    curve: prepared,
                     range,
-                    uv_curve,
+                    uv_curve: prepared_uv,
                     uv_range,
                 });
             }
@@ -199,10 +225,27 @@ pub(super) fn certify(
             "native face loop and faceuse trim inventories disagree",
         ));
     }
+    let mut inventory = super::singular::inventory(
+        definition,
+        mesh,
+        edges,
+        use_count,
+        outside.saturating_add(requested),
+        work,
+        cancel,
+    )?;
+    let outside = outside.saturating_add(inventory.retained_bytes());
     let mut half_edges = Vec::new();
     half_edges
         .try_reserve_exact(edge_count)
         .map_err(|_| resource("native display triangle-chain allocation failed"))?;
+    let requested = requested.saturating_add(
+        half_edges
+            .capacity()
+            .saturating_sub(edge_count)
+            .saturating_mul(size_of::<HalfEdge>()),
+    );
+    check_memory(outside.saturating_add(requested))?;
     for &triangle in &mesh.triangles {
         work.charge(1, cancel)?;
         let uv = triangle_uv(mesh, triangle)?;
@@ -227,8 +270,16 @@ pub(super) fn certify(
     half_edges.sort_unstable_by_key(|edge| key(edge.a, edge.b));
     let mut boundary = Vec::new();
     boundary
-        .try_reserve_exact(segment_count)
+        .try_reserve_exact(boundary_capacity)
         .map_err(|_| resource("native display trim boundary allocation failed"))?;
+    check_memory(
+        outside.saturating_add(requested).saturating_add(
+            boundary
+                .capacity()
+                .saturating_sub(boundary_capacity)
+                .saturating_mul(size_of::<Boundary>()),
+        ),
+    )?;
     let mut index = 0;
     while index < half_edges.len() {
         work.charge(1, cancel)?;
@@ -241,11 +292,6 @@ pub(super) fn certify(
         }
         match end - index {
             1 => {
-                if boundary.len() == segment_count {
-                    return Err(invalid(
-                        "native triangle chain has an unowned trim boundary",
-                    ));
-                }
                 boundary.push(Boundary {
                     a: edge.a,
                     b: edge.b,
@@ -262,16 +308,31 @@ pub(super) fn certify(
         index = end;
     }
     drop(half_edges);
-    if boundary.len() != source.len() {
+    let mut fan_error = complete_fans(
+        mesh,
+        surface,
+        &inventory,
+        &mut boundary,
+        sense,
+        work,
+        cancel,
+    )?
+    .max(inventory.carrier_error);
+    let mut trim_error = 0.0_f64;
+    let source_count = boundary
+        .iter()
+        .filter(|edge| edge.source_loop == usize::MAX)
+        .count();
+    if source_count != source.len() {
         return Err(invalid(
             "native display omitted an original trim segment or loop",
         ));
     }
     let shared_key = |edge: &Boundary| -> Result<[u32; 2], GeometryError> {
-        let a = mesh.shared[edge.a as usize].ok_or_else(|| {
+        let a = inventory.shared(mesh, edge.a).ok_or_else(|| {
             invalid("native trim boundary is not anchored on an original shared edge vertex")
         })?;
-        let b = mesh.shared[edge.b as usize].ok_or_else(|| {
+        let b = inventory.shared(mesh, edge.b).ok_or_else(|| {
             invalid("native trim boundary is not anchored on an original shared edge vertex")
         })?;
         Ok(key(a, b))
@@ -285,34 +346,96 @@ pub(super) fn certify(
         cancel,
     )?;
     source.sort_unstable_by_key(|segment| segment.key);
-    boundary
-        .sort_unstable_by_key(|edge| shared_key(edge).expect("checked native boundary provenance"));
-    let mut trim_error = 0.0_f64;
-    for (edge, segment) in boundary.iter_mut().zip(&source) {
+    boundary.sort_unstable_by_key(|edge| {
+        (
+            edge.source_loop != usize::MAX,
+            shared_key(edge).expect("checked native boundary provenance"),
+        )
+    });
+    for (index, segment) in source.iter().enumerate() {
+        let mut edge = boundary[index];
         work.charge(1, cancel)?;
-        if shared_key(edge)? != segment.key {
+        if shared_key(&edge)? != segment.key {
             return Err(invalid(
                 "native mesh boundary does not biject the original trim intervals",
             ));
         }
         edge.source_loop = segment.source_loop;
-        let a = mesh.positions[edge.a as usize];
-        let b = mesh.positions[edge.b as usize];
-        let shared_a = mesh.shared[edge.a as usize].unwrap();
+        // A snapshot may omit the terminal source pole UV as well as interior
+        // replicas. Complete that real curved fan before replacing its endpoint
+        // in the proof graph; published vertices and triangles stay unchanged.
+        for endpoint in 0..2 {
+            let local = if endpoint == 0 { edge.a } else { edge.b };
+            if let Some(junction) = inventory.at(local) {
+                let curve = segment
+                    .uv_curve
+                    .as_ref()
+                    .ok_or_else(|| {
+                        invalid("singular source boundary has no native UV endpoint authority")
+                    })?
+                    .curve()
+                    .native_curve()
+                    .ok_or_else(|| invalid("singular display lost its native UV curve binding"))?;
+                let shared = inventory.shared(mesh, local).unwrap();
+                let phantom = inventory.source_endpoint(
+                    mesh,
+                    local,
+                    curve,
+                    shared != segment.start_vertex,
+                    work,
+                    cancel,
+                )?;
+                if inventory.uv(mesh, local) != inventory.uv(mesh, phantom) {
+                    fan_error = fan_error.max(super::singular::fan(
+                        surface,
+                        mesh,
+                        &inventory,
+                        [edge.b, edge.a, phantom],
+                        sense,
+                        work,
+                        cancel,
+                    )?);
+                    let row = if endpoint == 0 {
+                        (local, phantom)
+                    } else {
+                        (phantom, local)
+                    };
+                    if boundary.len() == boundary_capacity {
+                        return Err(resource(
+                            "singular source chart closure exceeded admitted inventory",
+                        ));
+                    }
+                    boundary.push(Boundary {
+                        a: row.0,
+                        b: row.1,
+                        source_loop: junction.source_loop,
+                    });
+                    if endpoint == 0 {
+                        edge.a = phantom;
+                    } else {
+                        edge.b = phantom;
+                    }
+                }
+            }
+        }
+        boundary[index] = edge;
+        let a = inventory.position(mesh, edge.a);
+        let b = inventory.position(mesh, edge.b);
+        let shared_a = inventory.shared(mesh, edge.a).unwrap();
         let chord = if shared_a == segment.start_vertex {
-            [[a.x, a.y, a.z], [b.x, b.y, b.z]]
+            [a, b]
         } else {
-            [[b.x, b.y, b.z], [a.x, a.y, a.z]]
+            [b, a]
         };
         trim_error = trim_error.max(curve_chord(
-            segment.curve,
+            &segment.curve,
             segment.range,
             None,
             chord,
             work,
             cancel,
         )?);
-        if let Some(uv_curve) = segment.uv_curve {
+        if let Some(uv_curve) = &segment.uv_curve {
             trim_error = trim_error.max(curve_chord(
                 uv_curve,
                 segment.uv_range,
@@ -323,12 +446,126 @@ pub(super) fn certify(
             )?);
         }
     }
-    circuits(mesh, &boundary, fu.loopuses.len(), sense, work, cancel)?;
-    Ok(trim_error)
+    circuits(
+        mesh,
+        &inventory,
+        &boundary,
+        fu.loopuses.len(),
+        sense,
+        work,
+        cancel,
+    )?;
+    inventory.carrier_error = fan_error;
+    Ok((trim_error, inventory))
+}
+
+fn edge_count_for_boundary(mesh: &FaceMesh, uses: usize) -> Result<usize, GeometryError> {
+    mesh.triangles
+        .len()
+        .checked_mul(3)
+        .and_then(|n| uses.checked_mul(2).and_then(|extra| n.checked_add(extra)))
+        .ok_or_else(|| resource("singular boundary inventory count overflow"))
+}
+
+fn quotient_key(edge: &Boundary, inventory: &super::singular::Inventory) -> [(u8, u32); 2] {
+    let identity = |local| inventory.at(local).map_or((0, local), |j| (1, j.shared));
+    let a = identity(edge.a);
+    let b = identity(edge.b);
+    if a < b { [a, b] } else { [b, a] }
+}
+
+fn complete_fans(
+    mesh: &FaceMesh,
+    surface: &Surface,
+    inventory: &super::singular::Inventory,
+    boundary: &mut Vec<Boundary>,
+    sense: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
+    work.charge(
+        (boundary.len() as u64).saturating_mul((boundary.len().max(1).ilog2() + 1) as u64),
+        cancel,
+    )?;
+    boundary.sort_unstable_by(|a, b| {
+        quotient_key(a, inventory)
+            .cmp(&quotient_key(b, inventory))
+            .then_with(|| {
+                let pole = |edge: &Boundary| {
+                    if inventory.at(edge.a).is_some() {
+                        edge.a
+                    } else {
+                        edge.b
+                    }
+                };
+                inventory.uv(mesh, pole(a))[0].total_cmp(&inventory.uv(mesh, pole(b))[0])
+            })
+    });
+    let mut index = 0;
+    let mut written = 0;
+    let mut error = 0.0_f64;
+    while index < boundary.len() {
+        work.charge(1, cancel)?;
+        let key = quotient_key(&boundary[index], inventory);
+        let mut end = index + 1;
+        while end < boundary.len() && quotient_key(&boundary[end], inventory) == key {
+            end += 1;
+        }
+        if end == index + 1 {
+            boundary[written] = boundary[index];
+            written += 1;
+        } else {
+            if (end - index) % 2 != 0 {
+                return Err(invalid(
+                    "singular display spokes have unbalanced multiplicity",
+                ));
+            }
+            for pair in (index..end).step_by(2) {
+                work.charge(1, cancel)?;
+                let a = boundary[pair];
+                let b = boundary[pair + 1];
+                let (outgoing, incoming) = if inventory.at(a.a).is_some() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                let junction = inventory.at(outgoing.a).ok_or_else(|| {
+                    invalid("unowned extra boundary has no proved singular endpoint")
+                })?;
+                if inventory.at(outgoing.b).is_some()
+                    || inventory.at(incoming.a).is_some()
+                    || inventory.at(incoming.b).map(|j| j.shared) != Some(junction.shared)
+                    || outgoing.b != incoming.a
+                {
+                    return Err(invalid(
+                        "singular display spokes do not cancel with opposite exact regular incidence",
+                    ));
+                }
+                error = error.max(super::singular::fan(
+                    surface,
+                    mesh,
+                    inventory,
+                    [outgoing.b, outgoing.a, incoming.b],
+                    sense,
+                    work,
+                    cancel,
+                )?);
+                boundary[written] = Boundary {
+                    a: outgoing.a,
+                    b: incoming.b,
+                    source_loop: junction.source_loop,
+                };
+                written += 1;
+            }
+        }
+        index = end;
+    }
+    boundary.truncate(written);
+    Ok(error)
 }
 
 fn curve_chord(
-    curve: &Curve,
+    curve: &PreparedValidatedCurve<'_>,
     range: [f64; 2],
     surface: Option<&Surface>,
     chord: [[f64; 3]; 2],
@@ -337,6 +574,10 @@ fn curve_chord(
 ) -> Result<f64, GeometryError> {
     // Every leaf covers a closed parameter interval. Taylor is used only with
     // independently established same-span C1; other leaves use full positions.
+    let native = curve
+        .curve()
+        .native_curve()
+        .ok_or_else(|| invalid("display trim lost its original native coefficient binding"))?;
     let mut stack = [([0.0; 2], 0u8); 33];
     stack[0] = (range, 0);
     let mut len = 1;
@@ -345,12 +586,12 @@ fn curve_chord(
         len -= 1;
         let (part, depth) = stack[len];
         work.charge(1, cancel)?;
-        let jet = parametric::curve_enclosure(curve, (part[0], part[1]), work, cancel)?;
+        let jet = curve.jet(part, work, cancel)?;
         let mut position = jet.position;
         let mut second = jet.second_derivative;
-        let mut smooth = parametric::curve_parameter_span_smooth(curve, part, work, cancel)?;
+        let mut smooth = curve.is_smooth_on(part, work, cancel)?;
         if let Some(surface) = surface {
-            let domain = bounded_uv(curve, part, surface, position, work, cancel)?;
+            let domain = bounded_uv(native, part, surface, position, work, cancel)?;
             let s = parametric::surface_piecewise_enclosure(surface, domain, work, cancel)?;
             smooth &= parametric::surface_parameter_span_smooth(surface, domain, work, cancel)?;
             second = std::array::from_fn(|i| {
@@ -381,9 +622,9 @@ fn curve_chord(
         let error = if smooth {
             let mut residual = [Interval::point(0.0); 3];
             for t in part {
-                let p = parametric::curve_enclosure(curve, (t, t), work, cancel)?.position;
+                let p = curve.position_bounds([t, t], work, cancel)?;
                 let p = if let Some(s) = surface {
-                    let domain = bounded_uv(curve, [t, t], s, p, work, cancel)?;
+                    let domain = bounded_uv(native, [t, t], s, p, work, cancel)?;
                     parametric::surface_position_enclosure(s, domain, work, cancel)?
                 } else {
                     p
@@ -431,14 +672,15 @@ fn curve_chord(
 
 fn circuits(
     mesh: &FaceMesh,
+    inventory: &super::singular::Inventory,
     boundary: &[Boundary],
     loop_count: usize,
     sense: f64,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
-    let mut next = vec![None; mesh.positions.len()];
-    let mut incoming = vec![false; mesh.positions.len()];
+    let mut next = vec![None; inventory.node_count(mesh)];
+    let mut incoming = vec![false; inventory.node_count(mesh)];
     for (index, edge) in boundary.iter().enumerate() {
         work.charge(1, cancel)?;
         if next[edge.a as usize].replace(index).is_some()
@@ -461,7 +703,7 @@ fn circuits(
         }
         loops[owner] = true;
         let mut current = start;
-        let origin = mesh.uvs[boundary[start].a as usize];
+        let origin = inventory.uv(mesh, boundary[start].a);
         let mut area = Interval::point(0.0);
         loop {
             work.charge(1, cancel)?;
@@ -469,9 +711,9 @@ fn circuits(
                 return Err(invalid("native display circuit changes original trim loop"));
             }
             seen[current] = true;
-            let a = mesh.uvs[boundary[current].a as usize];
-            let b = mesh.uvs[boundary[current].b as usize];
-            area = area.add(orient([origin.x, origin.y], [a.x, a.y], [b.x, b.y]));
+            let a = inventory.uv(mesh, boundary[current].a);
+            let b = inventory.uv(mesh, boundary[current].b);
+            area = area.add(orient(origin, a, b));
             current = next[boundary[current].b as usize]
                 .ok_or_else(|| invalid("native display trim circuit is open"))?;
             if current == start {
@@ -489,16 +731,12 @@ fn circuits(
         return Err(invalid("native display omitted an original trim loop"));
     }
     for (i, a) in boundary.iter().enumerate() {
-        let a0 = mesh.uvs[a.a as usize];
-        let a1 = mesh.uvs[a.b as usize];
-        let a0 = [a0.x, a0.y];
-        let a1 = [a1.x, a1.y];
+        let a0 = inventory.uv(mesh, a.a);
+        let a1 = inventory.uv(mesh, a.b);
         for b in &boundary[i + 1..] {
             work.charge(1, cancel)?;
-            let b0 = mesh.uvs[b.a as usize];
-            let b1 = mesh.uvs[b.b as usize];
-            let b0 = [b0.x, b0.y];
-            let b1 = [b1.x, b1.y];
+            let b0 = inventory.uv(mesh, b.a);
+            let b1 = inventory.uv(mesh, b.b);
             if (0..2).any(|axis| {
                 a0[axis].max(a1[axis]) < b0[axis].min(b1[axis])
                     || b0[axis].max(b1[axis]) < a0[axis].min(a1[axis])
@@ -552,7 +790,7 @@ fn circuits(
     }
     Ok(())
 }
-fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Interval {
+pub(super) fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Interval {
     let x = |p: [f64; 2], axis| Interval::point(p[axis]).sub(Interval::point(a[axis]));
     x(b, 0).mul(x(c, 1)).sub(x(b, 1).mul(x(c, 0)))
 }

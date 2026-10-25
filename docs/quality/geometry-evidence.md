@@ -132,6 +132,27 @@ check whole-triangle carriers, normals, native trim/triangle coverage and packed
 output. Candidate deviation estimates or generated UV curves are not original-F
 correspondence or material authority. Unqualified collapsed/singular coverage
 refuses display rather than dropping triangles or publishing an empty mesh.
+
+Singular-chart publication binds actual native vertex/edge-use ownership to the
+exact coefficient collapse law and one-sided coefficient normals. Missing curved
+fans must prove complete transport to the same retained mesh spoke; shared IDs
+or zero chord area alone do not establish coverage. Fan and ordinary triangle
+carrier bounds combine over disjoint coverage, while source-to-chord transport
+remains independently additive. No vertex snapping or raw-mesh fallback supplies
+these proofs.
+
+Display trim intervals retain immutable validated coefficient metadata through
+`PreparedValidatedCurve`, not sampled jets. Each query still evaluates every
+active closed original knot span, including both incident sides at exact knots,
+with its actual controls, denominator, derivatives and charged work. Interval
+owners and construction scratch share the existing bounded audit workspace.
+
+Triangle proof stopping criteria consume the remaining carrier allowance after
+certified trim and auxiliary transport, rather than the full publication cap.
+Existing proof-only subdivisions retain the original mesh triangle's affine
+image; they do not insert published vertices or substitute a finer candidate.
+The final carrier-plus-trim gate remains independent.
+
 [`apps/engine/src/geometry/worker.rs`](../../apps/engine/src/geometry/worker.rs)
 keeps native admission independent of display failure: `DefinitionDisplay::Unavailable`
 means no mesh artifact or GPU face picking, not an empty successful mesh.

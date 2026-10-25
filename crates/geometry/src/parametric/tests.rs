@@ -95,6 +95,24 @@ fn complete_original_narrow_knot_partition_and_closed_c1_refusal() {
     let whole = curve_enclosure(&c, (0.0, 1.0), &mut work, &cancel).unwrap();
     assert!(whole.position[0].contains(-10.0));
     assert!(!curve_parameter_span_smooth(&c, [0.25, cut], &mut work, &cancel).unwrap());
+    let prepared =
+        PreparedValidatedCurve::new(&c, [0.0, 1.0], 1.0, usize::MAX, &mut work, &cancel).unwrap();
+    let narrow_jet = prepared.jet([cut, narrow], &mut work, &cancel).unwrap();
+    assert!(narrow_jet.position[0].contains(1.0) && narrow_jet.position[0].contains(-10.0));
+    let joint = prepared.jet([cut, cut], &mut work, &cancel).unwrap();
+    assert!(
+        joint.derivative[0].contains(2.0),
+        "closed query retains the left span"
+    );
+    assert!(
+        joint.derivative[0].lo < -1e15,
+        "closed query retains the original one-ULP right span"
+    );
+    assert!(
+        !prepared
+            .is_smooth_on([0.25, cut], &mut work, &cancel)
+            .unwrap()
+    );
 }
 #[test]
 fn rational_denominator_zero_is_not_sampled_or_clipped_away() {

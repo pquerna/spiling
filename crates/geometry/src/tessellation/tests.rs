@@ -235,6 +235,121 @@ fn complete_native_trim_proof_rejects_missing_and_duplicate_on_carrier_triangles
 }
 
 #[test]
+fn housing_pole_lune_uses_coefficient_normals_and_refuses_unproved_aliases() {
+    let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
+    let ordinal = definition
+        .faces()
+        .iter()
+        .position(|f| f.face_id.as_str() == "step:461")
+        .unwrap();
+    let kernel = crate::make_kernel_context();
+    let mut options = TessellateOptions::default().with_chord(MESH_CARRIER_TOLERANCE_MM * 0.25);
+    options.measure_deviation = false;
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let mut attempt = 0;
+    // Like production, this consumer acquires a certified candidate rather
+    // than treating an incidental first grid as a required approximation.
+    // Failed native generation and proof work share the same allowance.
+    let (edges, candidate, audited, pole, shared) = loop {
+        let edges = candidate_query(0, &mut work, &cancel, |native| {
+            solidcore_mesh::tessellate_edge_set_with_budget(
+                &kernel,
+                definition.brep(),
+                &options,
+                native,
+            )
+        })
+        .unwrap();
+        let outside = edges.retained_bytes();
+        let mut candidate = candidate_query(outside, &mut work, &cancel, |native| {
+            solidcore_mesh::tessellate_face_with_budget(
+                &kernel,
+                definition.brep(),
+                definition.face_ids()[ordinal],
+                &edges,
+                &options,
+                native,
+            )
+        })
+        .unwrap();
+        let pole = candidate.uvs.iter().position(|q| q.y == -90.0).unwrap();
+        let shared = candidate.shared[pole].unwrap();
+        // Candidate fallback normals are neither required nor published at a
+        // proved singularity. Publish the same-law outward field instead.
+        for (i, owner) in candidate.shared.iter().enumerate() {
+            if *owner == Some(shared) {
+                candidate.normals[i] = solidcore::Vec3::new(1.0, 0.0, 0.0);
+            }
+        }
+        match audit::face(
+            &definition,
+            ordinal,
+            &candidate,
+            &edges,
+            MeshBudget::FROZEN,
+            outside,
+            &mut work,
+            &cancel,
+        ) {
+            Ok(audited) => break (edges, candidate, audited, pole, shared),
+            Err(cause) if cause.code == GeometryErrorCode::ShapeErrorExceeded && attempt < 8 => {
+                options.chord_tolerance =
+                    Tolerance::Absolute(MESH_CARRIER_TOLERANCE_MM * 0.25_f64.powi(attempt + 2));
+                attempt += 1;
+            }
+            Err(cause) => panic!("bounded housing pole display audit: {cause:?}"),
+        }
+    };
+    assert!(
+        crate::parametric::up(audited.carrier_error + audited.trim_error)
+            <= MESH_CARRIER_TOLERANCE_MM,
+        "regular patches, complete singular fans and source trim share the frozen native allowance",
+    );
+    for (i, owner) in candidate.shared.iter().enumerate() {
+        if *owner == Some(shared) {
+            assert!(audited.normals[i][0].abs() < 1e-10);
+            assert!(audited.normals[i][1].abs() < 1e-10);
+            assert!(audited.normals[i][2] < -0.999999);
+        }
+    }
+    for mutation in 0..3 {
+        let mut altered = candidate.clone();
+        match mutation {
+            0 => altered.uvs[pole].y = crate::parametric::up(-90.0),
+            1 => {
+                let regular = altered.uvs.iter().position(|q| q.y > -80.0).unwrap();
+                altered.shared[regular] = Some(shared);
+            }
+            _ => {
+                let regular = altered
+                    .triangles
+                    .iter()
+                    .position(|t| {
+                        t.iter()
+                            .all(|i| altered.shared[*i as usize] != Some(shared))
+                    })
+                    .unwrap();
+                altered.triangles.remove(regular);
+            }
+        }
+        let error = audit::face(
+            &definition,
+            ordinal,
+            &altered,
+            &edges,
+            MeshBudget::FROZEN,
+            0,
+            &mut GeometryWorkBudget::new(20_000_000),
+            &cancel,
+        )
+        .err()
+        .expect("a near pole, false shared alias or unowned hole must refuse");
+        assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+    }
+}
+
+#[test]
 fn face_slot_and_resource_refusals_never_return_partial_artifacts() {
     let definition = fixture("box-mm.step");
     let error = tessellate(

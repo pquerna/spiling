@@ -303,6 +303,76 @@ fn step_sphere_normal(
     ))
 }
 
+/// Exact degeneracy of the literal STEP sphere law, not a test for a nearby
+/// position. At v=+/-90 the entire longitude row is O +/- r*Z.
+pub(crate) fn collapsed_step_sphere_position(
+    surface: &Surface,
+    latitude: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<[Interval; 3]>, GeometryError> {
+    if latitude != -90.0 && latitude != 90.0 {
+        return Ok(None);
+    }
+    let mut source = surface;
+    let mut step = false;
+    for _ in 0..32 {
+        work.charge(1, cancel)?;
+        match source.kind() {
+            SurfaceKind::Step(s) => {
+                source = s
+                    .surface()
+                    .ok_or_else(|| conditioning("empty STEP pole source"))?;
+                step = true;
+            }
+            SurfaceKind::CurveBounded(s) => source = s.basis(),
+            SurfaceKind::Sphere(s) if step => {
+                if !s.radius().is_finite() || s.radius() == 0.0 {
+                    return Ok(None);
+                }
+                let placement = s.base().position();
+                let o = placement.origin();
+                let z = placement.z_axis();
+                let o = [o.x, o.y, o.z];
+                let z = [z.x, z.y, z.z];
+                let r = Interval::point(s.radius()).mul(Interval::point(latitude / 90.0));
+                let position = std::array::from_fn(|k| {
+                    Interval::point(o[k]).add(r.mul(Interval::point(z[k])))
+                });
+                for p in position {
+                    Interval::new(p.lo, p.hi)?;
+                }
+                return Ok(Some(position));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Err(GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "native STEP pole nesting limit exceeded",
+    ))
+}
+
+/// Apply the ordinary interpolation theorem to a chart fan whose physical
+/// chord collapses to a retained spoke. This never publishes a degenerate
+/// triangle or infers zero curved area from repeated physical endpoints.
+pub(crate) fn display_fan_transport(
+    surface: &Surface,
+    uv: &[[f64; 2]; 3],
+    points: &[[f64; 3]; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<f64, GeometryError> {
+    let domain = std::array::from_fn(|axis| {
+        [
+            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
+            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
+        ]
+    });
+    let bound = surface_order(surface, domain, 2, work, cancel)?;
+    super::triangle_interpolation_error(surface, uv, points, domain, &bound, work, cancel)
+}
+
 /// The *explicit* original analytic STEP chart. Angles use native degrees and
 /// cone V uses height. This function does not convert an original trim, invent
 /// a STEP/NURBS map, or apply face-use/inside-out NURBS orientation.

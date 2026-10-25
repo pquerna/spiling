@@ -1231,14 +1231,26 @@ impl<'a> DisplayTriangleProof<'a> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
-        self.triangle_error_bound_at(uv, points, None, true, work, cancel)
+        self.triangle_error_bound_at(
+            uv,
+            points,
+            None,
+            true,
+            spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM,
+            work,
+            cancel,
+        )
     }
+    /// `maximum_error` is the caller's remaining carrier allowance after
+    /// independent transport has been debited, never a wider geometry policy.
+    /// It selects existing proof paths; the caller still checks the final sum.
     pub(crate) fn indexed_triangle_error_bound(
         &mut self,
         uv: &[[f64; 2]; 3],
         points: &[[f64; 3]; 3],
         triangle_ordinal: usize,
         uv_indices: &[usize; 3],
+        maximum_error: f64,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
@@ -1247,6 +1259,7 @@ impl<'a> DisplayTriangleProof<'a> {
             points,
             Some((triangle_ordinal, uv_indices)),
             true,
+            maximum_error,
             work,
             cancel,
         )
@@ -1257,10 +1270,20 @@ impl<'a> DisplayTriangleProof<'a> {
         points: &[[f64; 3]; 3],
         uv_indices: Option<(usize, &[usize; 3])>,
         allow_auxiliary: bool,
+        maximum_error: f64,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<f64, GeometryError> {
         work.charge(1, cancel)?;
+        if !maximum_error.is_finite()
+            || maximum_error <= 0.0
+            || maximum_error > spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM
+        {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ShapeErrorExceeded,
+                "display triangle proof has no positive remaining carrier allowance",
+            ));
+        }
         if uv.iter().flatten().any(|value| !value.is_finite()) {
             return Err(GeometryError::new(
                 GeometryErrorCode::InvalidGeometry,
@@ -1362,7 +1385,7 @@ impl<'a> DisplayTriangleProof<'a> {
             .box_proof(box_index)
             .expect("completed same-box rank proof");
         let first_error = first_jet_triangle_error(points, domain, proof.du, proof.dv, &positions)?;
-        if first_error <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+        if first_error <= maximum_error {
             return Ok(first_error);
         }
         // A first-order bound/rank decline is not an error. Only then request
@@ -1397,11 +1420,7 @@ impl<'a> DisplayTriangleProof<'a> {
             &positions,
             (&mut *work, cancel),
         )?);
-        if !allow_auxiliary
-            && proof.smooth
-            && !proof.partitioned
-            && error > spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM
-        {
+        if !allow_auxiliary && proof.smooth && !proof.partitioned && error > maximum_error {
             // Tighten only the single auxiliary comparison's Hessian, once,
             // over four closed subboxes covering this SAME qualified box.
             let hessian = partition_display_hessian(self.surface, domain, proof, work, cancel)
@@ -1426,7 +1445,7 @@ impl<'a> DisplayTriangleProof<'a> {
                 (&mut *work, cancel),
             )?);
         }
-        if !allow_auxiliary || error <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+        if !allow_auxiliary || error <= maximum_error {
             return Ok(error);
         }
         let Some(auxiliary) = auxiliary_smooth_triangle(self.surface, uv, domain, work, cancel)
@@ -1536,7 +1555,7 @@ impl<'a> DisplayTriangleProof<'a> {
                 cancel,
             )?;
             let complete = up(bound + transport);
-            if complete <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+            if complete <= maximum_error {
                 return Ok(error.min(complete));
             }
             // Retaining a valid Hessian must not discard another existing
@@ -1545,8 +1564,22 @@ impl<'a> DisplayTriangleProof<'a> {
         }
         // Exactly one independently qualified comparison. Even if its bound
         // remains too large, there is no precision or conditioning ladder.
-        let auxiliary_error =
-            self.triangle_error_bound_at(&auxiliary, points, None, false, work, cancel)?;
+        let auxiliary_limit = Interval::point(maximum_error)
+            .sub(Interval::point(transport))
+            .lo;
+        let auxiliary_error = if auxiliary_limit > 0.0 {
+            self.triangle_error_bound_at(
+                &auxiliary,
+                points,
+                None,
+                false,
+                auxiliary_limit,
+                work,
+                cancel,
+            )?
+        } else {
+            f64::INFINITY
+        };
         if let Some(index) = parent_index {
             let slot = display_proof_slot(&auxiliary_key, self.boxes.len());
             let receipt = self.boxes[slot]
@@ -1564,7 +1597,7 @@ impl<'a> DisplayTriangleProof<'a> {
         let auxiliary_error =
             retained_error.map_or(auxiliary_error, |old: f64| old.min(auxiliary_error));
         let mut complete = error.min(up(auxiliary_error + transport));
-        if complete <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM {
+        if complete <= maximum_error {
             return Ok(complete);
         }
         // All existing scalar/conditioning paths have declined. At most ONE
@@ -1583,7 +1616,7 @@ impl<'a> DisplayTriangleProof<'a> {
             .filter(|entry| entry.key == auxiliary_key)
             .and_then(|entry| entry.proof.full.as_ref())
             .is_some_and(|full| full.smooth);
-        if has_retained || has_auxiliary {
+        if auxiliary_limit > 0.0 && (has_retained || has_auxiliary) {
             let positions = self.triangle_positions(&auxiliary, None, box_index, work, cancel)?;
             let hessian = parent_index
                 .and_then(|index| self.mesh_boxes[index].conditioned.as_ref())

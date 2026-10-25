@@ -150,12 +150,47 @@ pub(super) fn curve_jet_order(
     }
     let nurb =
         native_curve_nurbs(curve)?.ok_or_else(|| conditioning("missing curve coefficient law"))?;
+    validate_knots(
+        nurb.knots(),
+        nurb.degree(),
+        nurb.cpts().len(),
+        range,
+        work,
+        cancel,
+    )?;
+    validated_nurbs_jet(curve, nurb, range, order, work, cancel)
+}
+
+/// Same coefficient arithmetic as the standalone evaluator. The private caller
+/// holds completed original-knot validation for this immutable native curve.
+fn validated_nurbs_jet(
+    curve: &Curve,
+    nurb: &crv_basic::Curve,
+    range: [f64; 2],
+    order: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[Interval; 3]; 4], GeometryError> {
+    work.charge(1, cancel)?;
     let knots = nurb.knots();
     let degree = nurb.degree();
     let count = nurb.cpts().len();
-    validate_knots(knots, degree, count, range, work, cancel)?;
+    Interval::new(range[0], range[1])?;
+    if range[0] < knots[degree] || range[1] > knots[count] {
+        return Err(conditioning(
+            "prepared query exceeds complete native knot domain",
+        ));
+    }
+    // Closed queries retain BOTH incident spans at an exact knot, including
+    // all intervening repeated knots. Only proved-disjoint spans are skipped.
+    work.charge(2 * (knots.len().max(1).ilog2() as u64 + 2), cancel)?;
+    let first = knots
+        .partition_point(|k| *k < range[0])
+        .saturating_sub(1)
+        .max(degree);
+    let end = knots.partition_point(|k| *k <= range[1]).min(count);
     let mut result: Option<[[Interval; 3]; 4]> = None;
-    for span in degree..count {
+    for span in first..end {
         work.charge(1, cancel)?;
         if knots[span] == knots[span + 1] || knots[span] > range[1] || knots[span + 1] < range[0] {
             continue;
@@ -257,6 +292,9 @@ pub struct PreparedValidatedCurve<'a> {
     /// Spatial source-unit to output-unit conversion, not a parameter map.
     scale: f64,
     spans: super::AxisSpans<'a>,
+    /// Present only after `parameter_spans` validated the original native
+    /// knot inventory. Coefficients/denominators are still enclosed per query.
+    native: Option<(&'a Curve, &'a crv_basic::Curve)>,
 }
 impl std::fmt::Debug for PreparedValidatedCurve<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -293,11 +331,16 @@ impl<'a> PreparedValidatedCurve<'a> {
             work,
             cancel,
         )?;
+        let native = match curve.native_curve() {
+            Some(curve) => native_curve_nurbs(curve)?.map(|nurb| (curve, nurb)),
+            None => None,
+        };
         let owner = Self {
             curve,
             range,
             scale,
             spans,
+            native,
         };
         owner.jet(range, work, cancel)?;
         Ok(owner)
@@ -327,7 +370,10 @@ impl<'a> PreparedValidatedCurve<'a> {
                 "curve query extends outside immutable prepared binding",
             ));
         }
-        let jet = self.curve.tensor(query, order, work, cancel)?;
+        let jet = match self.native {
+            Some((curve, nurb)) => validated_nurbs_jet(curve, nurb, query, order, work, cancel)?,
+            None => self.curve.tensor(query, order, work, cancel)?,
+        };
         let result = jet.map(|row| row.map(|v| v.mul(Interval::point(self.scale))));
         for v in result.iter().flatten() {
             Interval::new(v.lo, v.hi)?;
@@ -407,6 +453,15 @@ impl<'a> PreparedValidatedCurve<'a> {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         self.enclosed(range, 0, work, cancel)?;
+        if let Some((curve, nurb)) = self.native {
+            return super::continuity::curve_is_c1(
+                nurb,
+                curve.dim(),
+                [range[0].min(range[1]), range[0].max(range[1])],
+                work,
+                cancel,
+            );
+        }
         super::curve_parameter_span_smooth(
             self.curve,
             [range[0].min(range[1]), range[0].max(range[1])],

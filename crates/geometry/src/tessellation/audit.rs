@@ -67,7 +67,25 @@ pub(super) fn face(
         .face_surface(mesh.face)
         .ok_or_else(|| invalid("native display face has no carrier"))?;
     let sense = outward_sense(definition.brep(), mesh.face)?;
-    let trim_error = trim::certify(definition, mesh, edges, sense, base, work, cancel)?;
+    let (trim_error, singular) = trim::certify(definition, mesh, edges, sense, base, work, cancel)?;
+    // The complete native carrier is the union of retained triangle patches
+    // and the proved missing chart fans. Direct transport on disjoint patches
+    // combines by max, not by adding one patch's error to another's. Original
+    // trim transport is a separate serial bound and remains additive for the
+    // entire published face, conservatively including its singular fans.
+    if parametric::up(singular.carrier_error + trim_error) > MESH_CARRIER_TOLERANCE_MM {
+        return Err(shape(format!(
+            "source face {ordinal} singular carrier={} trim={trim_error} exceeds display tolerance",
+            singular.carrier_error,
+        )));
+    }
+    // Narrow proof-path stopping to the actual remaining allowance. A bound
+    // below the full carrier cap may still need the existing SAME-triangle
+    // proof subdivision before adding this independently certified trim.
+    let carrier_allowance = Interval::point(MESH_CARRIER_TOLERANCE_MM)
+        .sub(Interval::point(trim_error))
+        .lo;
+    let base = base.saturating_add(singular.retained_bytes());
     let proof_bytes = DisplayTriangleProof::base_retained_bytes_for_vertices(count)?;
     let (box_ids, boxes) = box_inventory(mesh, base.saturating_add(proof_bytes), work, cancel)?;
     check_memory(
@@ -109,7 +127,7 @@ pub(super) fn face(
         normals.push([0.0; 3]);
         used.push(false);
     }
-    let mut carrier_error = 0.0_f64;
+    let mut carrier_error = singular.carrier_error;
     for (triangle_index, &triangle) in mesh.triangles.iter().enumerate() {
         work.charge(1, cancel)?;
         let uv = triangle_uv(mesh, triangle)?;
@@ -130,6 +148,7 @@ pub(super) fn face(
             &points,
             triangle_index,
             &triangle.map(|i| i as usize),
+            carrier_allowance,
             work,
             cancel,
         )?;
@@ -145,31 +164,38 @@ pub(super) fn face(
         for &index in &triangle {
             let i = index as usize;
             if !used[i] {
-                let q = mesh.uvs[i];
-                let enclosure = parametric::surface_geometric_normal_enclosure(
-                    surface,
-                    [[q.x, q.x], [q.y, q.y]],
-                    work,
-                    cancel,
-                )?;
-                let expected = enclosure.map(|v| v.mul(Interval::point(sense)));
-                let n = mesh.normals[i];
-                let n = [n.x, n.y, n.z];
-                if n.iter().any(|v| !v.is_finite())
-                    || (length(n) - 1.0).abs() > NORMAL_NORM_TOLERANCE
-                {
-                    return Err(GeometryError::new(
-                        GeometryErrorCode::SingularGeometry,
-                        "native display vertex has no finite regular unit normal",
-                    ));
+                if let Some(junction) = singular.at(index) {
+                    // The candidate's singular fallback is not authority. The
+                    // source-owned, one-sided same-law field supplies this normal.
+                    normals[i] = junction.normal.map(|n| n * sense);
+                } else {
+                    let q = mesh.uvs[i];
+                    let enclosure = parametric::surface_geometric_normal_enclosure(
+                        surface,
+                        [[q.x, q.x], [q.y, q.y]],
+                        work,
+                        cancel,
+                    )?;
+                    let expected = enclosure.map(|v| v.mul(Interval::point(sense)));
+                    let n = mesh.normals[i];
+                    let n = [n.x, n.y, n.z];
+                    if n.iter().any(|v| !v.is_finite())
+                        || (length(n) - 1.0).abs() > NORMAL_NORM_TOLERANCE
+                    {
+                        return Err(GeometryError::new(
+                            GeometryErrorCode::SingularGeometry,
+                            "native display vertex has no finite regular unit normal",
+                        ));
+                    }
+                    let difference =
+                        std::array::from_fn(|a| expected[a].sub(Interval::point(n[a])));
+                    if norm_upper(difference) > NORMAL_NORM_TOLERANCE {
+                        return Err(invalid(
+                            "native candidate normal disagrees with stored carrier coefficients and outward topology",
+                        ));
+                    }
+                    normals[i] = n;
                 }
-                let difference = std::array::from_fn(|a| expected[a].sub(Interval::point(n[a])));
-                if norm_upper(difference) > NORMAL_NORM_TOLERANCE {
-                    return Err(invalid(
-                        "native candidate normal disagrees with stored carrier coefficients and outward topology",
-                    ));
-                }
-                normals[i] = n;
                 used[i] = true;
             }
             let winding = (0..3).fold(Interval::point(0.0), |sum, k| {

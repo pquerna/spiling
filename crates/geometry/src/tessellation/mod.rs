@@ -7,6 +7,7 @@
 //! certificates, and this module never creates a manufacturing face domain.
 
 mod audit;
+mod singular;
 mod trim;
 
 use crate::{GeometryWorkBudget, MeshArtifact, check_cancel, kernel::Definition};
