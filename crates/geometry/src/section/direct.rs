@@ -1751,8 +1751,11 @@ pub(crate) fn canonicalize_section_in_place(
 mod correspondence_tests {
     use super::*;
     use solidcore::nurbs::{
-        b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface,
-        crv_basic, math::{CPoint, NOW, NOZ}, srf_basic,
+        b_spline_curve::BSplineCurve,
+        b_spline_surface::BSplineSurface,
+        crv_basic,
+        math::{CPoint, NOW, NOZ},
+        srf_basic,
     };
 
     fn curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {
@@ -1784,7 +1787,10 @@ mod correspondence_tests {
     fn spatial() -> Curve {
         // x(t)=2t/(1+t), not x(t)=t, despite identical directed trace.
         curve(
-            vec![CPoint::new(0.0, 0.0, 0.0, 1.0), CPoint::new(2.0, 0.0, 0.0, 2.0)],
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, 1.0),
+                CPoint::new(2.0, 0.0, 0.0, 2.0),
+            ],
             1,
             vec![0.0, 0.0, 1.0, 1.0],
             3,
@@ -1796,7 +1802,10 @@ mod correspondence_tests {
         let surface = carrier();
         let spatial = spatial();
         let chart = curve(
-            vec![CPoint::new(0.0, 0.0, NOZ, NOW), CPoint::new(1.0, 0.0, NOZ, NOW)],
+            vec![
+                CPoint::new(0.0, 0.0, NOZ, NOW),
+                CPoint::new(1.0, 0.0, NOZ, NOW),
+            ],
             1,
             vec![0.0, 0.0, 1.0, 1.0],
             2,
@@ -1843,12 +1852,18 @@ mod correspondence_tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         assert_eq!(
-            boundary.prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel).unwrap_err().code,
+            boundary
+                .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate
         );
         boundary.uv_curve = None;
         assert_eq!(
-            boundary.prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel).unwrap_err().code,
+            boundary
+                .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate
         );
     }

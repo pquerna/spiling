@@ -3260,22 +3260,81 @@ impl ParameterSegment {
             a.slope < 0.0 && b.slope < 0.0 && middle.hi < 0.0
         })
     }
+    fn directed_position_monotone(
+        &self,
+        source_range: [f64; 2],
+        forward: bool,
+    ) -> Result<bool, GeometryError> {
+        let [a, b] = self.endpoints;
+        let middle = Interval::point(b.target)
+            .sub(Interval::point(a.target))
+            .div(Interval::point(b.source).sub(Interval::point(a.source)))?
+            .mul(Interval::point(3.0))
+            .sub(Interval::point(a.slope))
+            .sub(Interval::point(b.slope));
+        let first_stationary = a.source == source_range[0] && a.slope == 0.0;
+        let last_stationary = b.source == source_range[1] && b.slope == 0.0;
+        // The middle Bernstein derivative coefficient is STRICT. Therefore
+        // the derivative is strict on the complete open segment even when
+        // its actual outer endpoint derivative is zero. Internal segment
+        // junctions remain strictly directed; no flat interval is admitted.
+        Ok(if forward {
+            (a.slope > 0.0 || first_stationary)
+                && (b.slope > 0.0 || last_stationary)
+                && middle.lo > 0.0
+        } else {
+            (a.slope < 0.0 || first_stationary)
+                && (b.slope < 0.0 || last_stationary)
+                && middle.hi < 0.0
+        })
+    }
 }
 
-/// A retained, monotone C1 coefficient map with exact endpoint coverage.
-/// Hermite endpoint values and endpoint slopes are shared by construction.
-/// Numerical inverses seed proposals only; whole-curve interval proofs below
-/// are the sole admission authority.
-pub(crate) struct SourceCurveCalibration {
+/// Strong original-source receipt: only the relative-tangent constructor can
+/// expose this wrapper. Native positional proofs discard their private map.
+pub(crate) struct SourceCurveCalibration(CurveCalibrationMap);
+impl SourceCurveCalibration {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.0.retained_bytes()
+    }
+    pub(crate) fn source_range(&self) -> [f64; 2] {
+        self.0.source_range()
+    }
+    pub(crate) fn target_range(&self) -> [f64; 2] {
+        self.0.target_range()
+    }
+    pub(crate) fn maximum_position_error_mm(&self) -> f64 {
+        self.0.maximum_position_error_mm()
+    }
+    pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
+        self.0.relative_derivative_error_bound
+            .expect("strong source constructor requires a relative-tangent receipt")
+    }
+    pub(crate) fn parameter_cuts(&self) -> &[f64] {
+        self.0.parameter_cuts()
+    }
+    pub(crate) fn jet(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 4], GeometryError> {
+        self.0.jet(range, work, cancel)
+    }
+}
+
+/// Retained coefficient map shared by two DISTINCT proof constructors.
+/// No optional relative receipt means precisely no tangent theorem.
+struct CurveCalibrationMap {
     segments: Vec<ParameterSegment>,
     cuts: Vec<f64>,
     source_range: [f64; 2],
     target_range: [f64; 2],
     affine: bool,
     maximum_position_error_mm: f64,
-    relative_derivative_error_bound: f64,
+    relative_derivative_error_bound: Option<f64>,
 }
-impl SourceCurveCalibration {
+impl CurveCalibrationMap {
     pub(crate) fn retained_bytes(&self) -> usize {
         size_of::<Self>()
             + self.segments.capacity() * size_of::<ParameterSegment>()
@@ -3289,9 +3348,6 @@ impl SourceCurveCalibration {
     }
     pub(crate) fn maximum_position_error_mm(&self) -> f64 {
         self.maximum_position_error_mm
-    }
-    pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
-        self.relative_derivative_error_bound
     }
     pub(crate) fn parameter_cuts(&self) -> &[f64] {
         if self.affine {
@@ -3394,6 +3450,7 @@ fn parameter_sample(
     source: f64,
     parameter: f64,
     secant: f64,
+    allow_stationary: bool,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ParameterSample, GeometryError> {
@@ -3405,7 +3462,9 @@ fn parameter_sample(
         .sum::<f64>();
     let denominator = (0..3).map(|axis| middle(b[1][axis]).powi(2)).sum::<f64>();
     let proposed = numerator / denominator;
-    let slope = if proposed.is_finite() && proposed * secant > 0.0 {
+    let slope = if allow_stationary && a[1] == [Interval::point(0.0); 3] {
+        0.0
+    } else if proposed.is_finite() && proposed * secant > 0.0 {
         proposed
     } else {
         secant
@@ -3449,6 +3508,31 @@ fn propose_parameter(
     Ok(parameter)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CurveCalibrationTheorem {
+    SourceRelativeTangent,
+    NativeDirectedPosition,
+}
+impl CurveCalibrationTheorem {
+    fn initial_relative_receipt(self) -> Option<f64> {
+        match self {
+            Self::SourceRelativeTangent => Some(0.0),
+            Self::NativeDirectedPosition => None,
+        }
+    }
+    fn monotone(
+        self,
+        segment: &ParameterSegment,
+        source_range: [f64; 2],
+        forward: bool,
+    ) -> Result<bool, GeometryError> {
+        match self {
+            Self::SourceRelativeTangent => segment.monotone(forward),
+            Self::NativeDirectedPosition => segment.directed_position_monotone(source_range, forward),
+        }
+    }
+}
+
 /// Calibrate two actual coefficient operators, without equating their gauges.
 /// The result proves a complete directed target restriction and a strict
 /// relative-tangent tube; it is not an exact-C0 or source-closure receipt.
@@ -3462,9 +3546,65 @@ pub(crate) fn calibrate_source_curves(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceCurveCalibration, GeometryError> {
+    let map = calibrate_curves(
+        reference,
+        target,
+        target_range,
+        maximum_error_mm,
+        maximum_depth,
+        allowance,
+        CurveCalibrationTheorem::SourceRelativeTangent,
+        work,
+        cancel,
+    )?;
+    if map.relative_derivative_error_bound.is_none() {
+        return Err(unavailable("source calibration lacks its required relative-tangent receipt"));
+    }
+    Ok(SourceCurveCalibration(map))
+}
+
+/// Prove a complete directed native branch's positional tube, allowing actual
+/// stationary OUTER parameter endpoints. The map is strictly monotone on its
+/// interior and covers both literal target endpoints exactly. No source
+/// relative-tangent receipt or parameter-map authority escapes this consumer.
+pub(crate) fn prove_native_curve_position_correspondence(
+    reference: &dyn parametric::CurveEvaluator,
+    target: &dyn parametric::CurveEvaluator,
+    target_range: [f64; 2],
+    maximum_error_mm: f64,
+    maximum_depth: u8,
+    allowance: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    calibrate_curves(
+        reference,
+        target,
+        target_range,
+        maximum_error_mm,
+        maximum_depth,
+        allowance,
+        CurveCalibrationTheorem::NativeDirectedPosition,
+        work,
+        cancel,
+    )?;
+    Ok(())
+}
+
+fn calibrate_curves(
+    reference: &dyn parametric::CurveEvaluator,
+    target: &dyn parametric::CurveEvaluator,
+    target_range: [f64; 2],
+    maximum_error_mm: f64,
+    maximum_depth: u8,
+    allowance: usize,
+    theorem: CurveCalibrationTheorem,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<CurveCalibrationMap, GeometryError> {
     work.charge(1, cancel)?;
     let maximum_depth = maximum_depth.min(MAX_DEPTH);
-    memory(size_of::<SourceCurveCalibration>(), allowance)?;
+    memory(size_of::<CurveCalibrationMap>(), allowance)?;
     let source_range = reference.active_range();
     let target_domain = target.active_range();
     Interval::new(source_range[0], source_range[1])?;
@@ -3498,26 +3638,26 @@ pub(crate) fn calibrate_source_curves(
             && a.derivative.iter().any(|v| v.sign() != 0)
             && affine_endpoint_identity(&a, source_range, &b, target_range, work, cancel)?
         {
-            return Ok(SourceCurveCalibration {
+            return Ok(CurveCalibrationMap {
                 segments: Vec::new(),
                 cuts: Vec::new(),
                 source_range,
                 target_range,
                 affine: true,
                 maximum_position_error_mm: 0.0,
-                relative_derivative_error_bound: 0.0,
+                relative_derivative_error_bound: theorem.initial_relative_receipt(),
             });
         }
     }
     if copied_source_spline_identity(reference, target, source_range, target_range, work, cancel)? {
-        return Ok(SourceCurveCalibration {
+        return Ok(CurveCalibrationMap {
             segments: Vec::new(),
             cuts: Vec::new(),
             source_range,
             target_range,
             affine: true,
             maximum_position_error_mm: 0.0,
-            relative_derivative_error_bound: 0.0,
+            relative_derivative_error_bound: theorem.initial_relative_receipt(),
         });
     }
     let secant = (target_range[1] - target_range[0]) / (source_range[1] - source_range[0]);
@@ -3527,6 +3667,7 @@ pub(crate) fn calibrate_source_curves(
         source_range[0],
         target_range[0],
         secant,
+        theorem == CurveCalibrationTheorem::NativeDirectedPosition,
         work,
         cancel,
     )?;
@@ -3536,6 +3677,7 @@ pub(crate) fn calibrate_source_curves(
         source_range[1],
         target_range[1],
         secant,
+        theorem == CurveCalibrationTheorem::NativeDirectedPosition,
         work,
         cancel,
     )?;
@@ -3544,14 +3686,14 @@ pub(crate) fn calibrate_source_curves(
     };
     let mut stack = [(root_segment, 0u8); MAX_DEPTH as usize + 1];
     let mut live = 1;
-    let mut result = SourceCurveCalibration {
+    let mut result = CurveCalibrationMap {
         segments: Vec::new(),
         cuts: Vec::new(),
         source_range,
         target_range,
         affine: false,
         maximum_position_error_mm: 0.0,
-        relative_derivative_error_bound: 0.0,
+        relative_derivative_error_bound: theorem.initial_relative_receipt(),
     };
     while live > 0 {
         live -= 1;
@@ -3561,7 +3703,8 @@ pub(crate) fn calibrate_source_curves(
         let range = [a.source, b.source];
         let middle = a.source * 0.5 + b.source * 0.5;
         let mut admitted = false;
-        if segment.monotone(target_range[1] > target_range[0])? {
+        let monotone = theorem.monotone(&segment, source_range, target_range[1] > target_range[0])?;
+        if monotone {
             let map = segment.jet(range)?;
             let at_middle = segment.jet([middle; 2])?;
             let c = reference.tensor(range, 2, work, cancel)?;
@@ -3586,15 +3729,24 @@ pub(crate) fn calibrate_source_curves(
                 }
             });
             let error = norm(residual)?.hi;
-            let speed = norm(c[1])?.lo;
-            let relative = if speed > 0.0 {
-                Interval::point(norm(difference)?.hi)
-                    .div(Interval::point(speed))?
-                    .hi
-            } else {
-                f64::INFINITY
+            let relative = match theorem {
+                CurveCalibrationTheorem::SourceRelativeTangent => {
+                    let speed = norm(c[1])?.lo;
+                    Some(if speed > 0.0 {
+                        Interval::point(norm(difference)?.hi)
+                            .div(Interval::point(speed))?
+                            .hi
+                    } else {
+                        f64::INFINITY
+                    })
+                }
+                CurveCalibrationTheorem::NativeDirectedPosition => None,
             };
-            if error <= maximum_error_mm && relative < 0.25 {
+            let tangent_admitted = match relative {
+                Some(bound) => bound < 0.25,
+                None => theorem == CurveCalibrationTheorem::NativeDirectedPosition,
+            };
+            if error <= maximum_error_mm && tangent_admitted {
                 let required = result.segments.len() + 1;
                 if required > result.segments.capacity() {
                     let capacity = required
@@ -3614,8 +3766,11 @@ pub(crate) fn calibrate_source_curves(
                         })?;
                 }
                 result.maximum_position_error_mm = result.maximum_position_error_mm.max(error);
-                result.relative_derivative_error_bound =
-                    result.relative_derivative_error_bound.max(relative);
+                if let (Some(maximum), Some(bound)) =
+                    (&mut result.relative_derivative_error_bound, relative)
+                {
+                    *maximum = maximum.max(bound);
+                }
                 result.segments.push(segment);
                 admitted = true;
             }
@@ -3636,13 +3791,13 @@ pub(crate) fn calibrate_source_curves(
                 "source/native parameter subdivision cannot isolate another distinct literal target coordinate",
             ));
         }
-        let seed = if segment.monotone(target_range[1] > target_range[0])? {
+        let seed = if monotone {
             segment.jet([middle; 2])?[0].mid()
         } else {
             a.target * 0.5 + b.target * 0.5
         };
         let parameter = propose_parameter(reference, target, middle, seed, domain, work, cancel)?;
-        let shared = parameter_sample(reference, target, middle, parameter, secant, work, cancel)?;
+        let shared = parameter_sample(reference, target, middle, parameter, secant, false, work, cancel)?;
         stack[live] = (
             ParameterSegment {
                 endpoints: [shared, b],
