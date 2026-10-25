@@ -970,6 +970,22 @@ impl<'a> PreparedOriginalSurface<'a> {
             dv: j[0][1],
         })
     }
+    /// Position-only image of the captured coefficient sheet. Every original
+    /// span and literal/natural restriction still applies; neither continuity
+    /// nor selected-material membership is inferred from this enclosure.
+    pub(crate) fn carrier_position_bounds(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 3], GeometryError> {
+        work.charge(1, cancel)?;
+        for range in uv {
+            Interval::new(range[0], range[1])?;
+        }
+        Ok(surface_jet(self.source, uv, 0, &self.inventory, 0, work, cancel)?[0][0])
+    }
+
     pub(crate) fn position_bounds(
         &self,
         uv: [[f64; 2]; 2],
@@ -2877,9 +2893,12 @@ mod tests {
         let sheet = prepared
             .carrier_jet(outside_trim, &mut work, &cancel)
             .unwrap();
-        assert!(sheet.position[0].contains(2.0));
-        assert!(sheet.position[1].contains(3.0));
-        assert_eq!(sheet.position[2], Interval::point(0.0));
+        let position = prepared
+            .carrier_position_bounds(outside_trim, &mut work, &cancel)
+            .unwrap();
+        assert!(position[0].contains(2.0));
+        assert!(position[1].contains(3.0));
+        assert_eq!(position[2], Interval::point(0.0));
         assert!(sheet.du[0].contains(1.0) && sheet.dv[1].contains(1.0));
         assert_eq!(prepared.active_domain(), active);
         assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
@@ -3160,6 +3179,11 @@ mod composed_knot_tests {
             assert!(
                 prepared
                     .carrier_piecewise_first([[0.9, 1.1], [0.25, 0.75]], &mut work, &cancel,)
+                    .is_err()
+            );
+            assert!(
+                prepared
+                    .carrier_position_bounds([[0.9, 1.1], [0.25, 0.75]], &mut work, &cancel)
                     .is_err()
             );
         }
