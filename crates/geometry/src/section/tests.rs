@@ -150,7 +150,7 @@ fn unchanged_bracket_periodic_bore_section_preserves_void_and_original_face() {
             &mut work,
         )
         .expect("the original periodic bore must close at the actual refused operator plane");
-    assert_canonical(&result);
+    assert_provenance(&definition, &result);
     let bore_indices: Vec<_> = (0..result.loops.len())
         .filter(|&index| {
             result
@@ -180,7 +180,7 @@ fn unchanged_bracket_periodic_bore_section_preserves_void_and_original_face() {
     let allowance = 2.0 * PI * radius * SECTION_SAMPLING_TOLERANCE_MM
         + PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2);
     assert!(
-        (signed_area(bore, &result.frame) + PI * radius * radius).abs() <= allowance,
+        (area(bore, result.frame()) + PI * radius * radius).abs() <= allowance,
         "the complete radius-1.3 void retains the declared chord-area enclosure"
     );
     // Independent XY ray parity checks the actual consumer polygons, not just
@@ -220,7 +220,7 @@ fn unchanged_bracket_periodic_bore_section_preserves_void_and_original_face() {
 fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material() {
     let definition = fixture("independent-exporters/occt-tapered-fitting-mm.step");
     let height = 0.0999999912280684;
-    let result = section(
+    let result = crate::section(
         &definition,
         PlaneMm {
             // Exact source-frame plane of the centered operator occurrence.
@@ -230,7 +230,7 @@ fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material(
         &AtomicBool::new(false),
     )
     .expect("back-only original endpoint seeds its unchanged negative covering chart");
-    assert_canonical(&result);
+    assert_provenance(&definition, &result);
     assert_eq!(result.loops.len(), 2);
     assert!(!result.loops[0].is_hole);
     assert!(result.loops[1].is_hole);
@@ -239,7 +239,7 @@ fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material(
     let area: f64 = result
         .loops
         .iter()
-        .map(|boundary| signed_area(boundary, &result.frame))
+        .map(|boundary| area(boundary, result.frame()))
         .sum();
     let error = 2.0 * PI * (outer_radius + 2.0) * SECTION_SAMPLING_TOLERANCE_MM
         + 2.0 * PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2)

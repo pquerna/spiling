@@ -525,7 +525,28 @@ fn native_projected_bounds(
                         let point_height = project(
                             original.position_bounds(point_cell, work, cancel)?, direction,
                         )?;
-                        (height, point_height, usize::from(width(cell[0]) < width(cell[1])))
+                        // Prioritize actual projected variation, not unrelated
+                        // UV span lengths. These C0 cross-sections choose only
+                        // refinement order; the full-cell bound above and the
+                        // independent feasible witness remain the authority.
+                        let u_height = project(
+                            original.position_bounds([cell[0], point_cell[1]], work, cancel)?,
+                            direction,
+                        )?;
+                        let v_height = project(
+                            original.position_bounds([point_cell[0], cell[1]], work, cancel)?,
+                            direction,
+                        )?;
+                        let variation = [
+                            width([u_height.lo, u_height.hi]),
+                            width([v_height.lo, v_height.hi]),
+                        ];
+                        let split_axis = if variation == [0.0; 2] {
+                            usize::from(width(cell[0]) < width(cell[1]))
+                        } else {
+                            usize::from(variation[0] < variation[1])
+                        };
+                        (height, point_height, split_axis)
                     }
                 };
                 let feasible = matches!(class, TrimClassification::Inside)
@@ -1127,6 +1148,33 @@ fn error(code: GeometryErrorCode, message: &str) -> GeometryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_plane_without_pcurves_has_tight_support_within_placement_work_limit() {
+        let definition = crate::from_step_bytes(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/box-mm.step"
+        )))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let precision = 0.00001;
+        let receipt = material_projected_bounds(
+            &definition,
+            [1.0, 0.0, 0.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: precision,
+            },
+            &mut work,
+            &cancel,
+        )
+        .expect("original plane support must fit the placement work allowance");
+        let bounds = receipt.bounds();
+        assert!(bounds.minimum[0] <= 0.0 && 0.0 <= bounds.minimum[1]);
+        assert!(bounds.maximum[0] <= 20.0 && 20.0 <= bounds.maximum[1]);
+        assert!(width(bounds.minimum) <= precision);
+        assert!(width(bounds.maximum) <= precision);
+    }
 
     fn exact_scalar_bounds() -> ProjectedBounds {
         ProjectedBounds {

@@ -2356,7 +2356,8 @@ mod properties {
     #[test]
     fn original_affine_sphere_graph_keeps_opposite_hemispheres_and_closed_cap_distinct() {
         use solidcore::{
-            geom::{Extent2d, Point3, Vec3},
+            Point3, Vec3,
+            geom::extent2d::Extent2d,
             surface::{
                 sphere::{Sphere, SphereOptions},
                 surface::{StepSurface, Surface},

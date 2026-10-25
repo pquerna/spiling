@@ -801,6 +801,7 @@ fn qualify_fiber_root(
 mod tests {
     use super::*;
     use solidcore::geom::{extent2d::Extent2d, vector2d::Vec2};
+    use solidcore::surface::surface::Surface;
     use solidcore::surface::{plane::Plane, surface::p2::SurfaceKind};
     use solidcore::{Point3, Vec3};
 

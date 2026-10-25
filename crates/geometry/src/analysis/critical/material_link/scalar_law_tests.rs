@@ -495,7 +495,7 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
         );
         let midpoint = range[0] * 0.5 + range[1] * 0.5;
         let (curve, _) = domain
-            .original_coedge_jets(use_.coedge, [midpoint; 2], available, &mut work, &cancel)
+            .original_coedge_jets(use_.coedge, [midpoint; 2], &mut work, &cancel)
             .unwrap();
         let before = collar
             .boundary_jet(midpoint, [0.0, 1.0], &curve, &mut work, &cancel)

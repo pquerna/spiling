@@ -594,7 +594,10 @@ fn original_circle_callbacks_keep_radian_gauge_separate_from_native_interval() {
     use solidcraft_step::geom::{Curve as OriginalCurve, PreferredRep};
     let cancel = AtomicBool::new(false);
     let definition = crate::from_step_bytes_with_cancel(
-        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+        )),
         &cancel,
     )
     .unwrap();
@@ -790,9 +793,7 @@ fn imported_exact_tensor_proves_internal_and_periodic_projective_g1_identities()
         tensor.weights.is_some(),
         "the selected original tensor retains its rational weights"
     );
-    let source_domain = domain
-        .certified_uv_domain()
-        .expect("independently proved original source chart domain");
+    let source_domain = domain.uv_domain();
     for axis in 0..2 {
         assert!(periodic_regular_join(surface, axis, source_domain, &mut work, &cancel).unwrap());
     }
@@ -821,7 +822,10 @@ fn imported_exact_tensor_proves_internal_and_periodic_projective_g1_identities()
 fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {
     let cancel = AtomicBool::new(false);
     let definition = crate::from_step_bytes_with_cancel(
-        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+        )),
         &cancel,
     )
     .unwrap();
@@ -968,7 +972,7 @@ fn diagonal_stationary_cover_retains_a_whole_critical_line_and_excludes_nonroots
     )
     .unwrap();
     extrusion.make_nurb(&kernel).unwrap();
-    let surface = Surface::new(SurfaceKind::SurfOfExtrusion(extrusion));
+    let surface = Surface::new(SurfaceKind::SurfOfExtrusion(Box::new(extrusion)));
     let jet = surface_enclosure(&surface, uv, &mut work, &cancel).unwrap();
     assert!(!height.dot(jet.duu).contains_zero());
     let root = necessary_stationary_domain(&surface, uv, &jet, height, &mut work, &cancel)
@@ -1058,7 +1062,7 @@ fn mixed_stationary_cover_retains_true_saddles_and_original_pole_corners() {
     )
     .unwrap();
     let pole = Surface::new(SurfaceKind::Step(
-        StepSurface::new(Surface::new(SurfaceKind::Sphere(sphere)), true).unwrap(),
+        StepSurface::new(Surface::new(SurfaceKind::Sphere(Box::new(sphere))), true).unwrap(),
     ));
     let uv = [[0.0, 45.0], [-90.0, -90.0 + 4e-7_f64.to_degrees()]];
     let jet = surface_enclosure(&pole, uv, &mut work, &cancel).unwrap();
@@ -1216,7 +1220,7 @@ fn original_folded_profile_cannot_gain_global_convexity_by_partitioning() {
     )
     .unwrap();
     extrusion.make_nurb(&kernel).unwrap();
-    let surface = Surface::new(SurfaceKind::SurfOfExtrusion(extrusion));
+    let surface = Surface::new(SurfaceKind::SurfOfExtrusion(Box::new(extrusion)));
     assert!(
         !critical_face_gluing(
             &surface,
@@ -1695,9 +1699,10 @@ fn complete_radial_material_link_preserves_a_genuine_nonconvex_star() {
 fn original_housing_layer_one_has_a_complete_paired_material_link() {
     let cancel = AtomicBool::new(false);
     let definition = crate::from_step_bytes_with_cancel(
-        include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        )),
         &cancel,
     )
     .unwrap();

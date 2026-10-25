@@ -1584,7 +1584,7 @@ mod tests {
             .edges
             .iter()
             .map(|edge| {
-                let solidcraft_step::brep::Curve::Circle { .. } = &edge.curve else {
+                let solidcraft_geom::brep::Curve::Circle { .. } = &edge.curve else {
                     return None;
                 };
                 let z = record.vertices[edge.vertices[0] as usize].point[2];

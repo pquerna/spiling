@@ -12,11 +12,14 @@ at one boundary does not qualify the next. The [protocol](../protocol/manufactur
 executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-material contract](../adr/004-native-geometry-parity.md) define authority.
 
-The **SolidCore development cutover is not manufacturing-qualified**. Material
-preparation currently requires actual declared source PCurves on the used
-carriers; missing evidence explicitly refuses instead of promoting generated
-native UV curves. Historical Monstertruck operator journeys below are the
-previous baseline, not transferred SolidCore qualification.
+The **SolidCore development cutover is not general manufacturing parity**.
+Native inspection/recovery and an original-plane software manufacturing path
+have real CLI evidence, including fresh saved-byte verification and replay.
+Missing declared PCurves may use a checked inverse of the actual original plane;
+generated native UV curves and failed declared associations cannot substitute.
+Nonlinear inverse families and the broader mechanical-part journeys retain
+independent qualification. Historical Monstertruck operator journeys below keep
+their original producer provenance, not transferred SolidCore acceptance.
 
 ## Entry points and immutable capture
 

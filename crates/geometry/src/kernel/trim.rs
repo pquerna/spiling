@@ -2088,6 +2088,275 @@ impl parametric::CurveEvaluator for SourcePlaneLineProjection<'_> {
         Some(self.curve)
     }
 }
+/// The global inverse of the actual original plane, applied to the SAME
+/// selected spatial expression. This is derived source evidence, not a
+/// declared PCurve and not an inverse of a generated native chart.
+struct SourcePlanePullback<'d> {
+    surface: &'d solidcraft_step::geom::Surface,
+    spatial: Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
+    origin: [f64; 3],
+    inverse: [[Interval; 3]; 2],
+}
+fn original_plane_placement<'a>(
+    mut surface: &'a solidcraft_step::geom::Surface,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<&'a solidcraft_step::geom::Placement>, GeometryError> {
+    for _ in 0..MAX_DEPTH {
+        work.charge(1, cancel)?;
+        match surface {
+            solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
+            solidcraft_step::geom::Surface::Plane { position } => return Ok(Some(position)),
+            _ => return Ok(None),
+        }
+    }
+    Err(unavailable(
+        "original plane wrapper depth exceeds the bounded source policy",
+    ))
+}
+fn original_plane_basis(
+    position: &solidcraft_step::geom::Placement,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[[ExactCoefficient; 3]; 2], GeometryError> {
+    for value in position
+        .origin
+        .into_iter()
+        .chain(position.axis)
+        .chain(position.ref_direction)
+    {
+        Interval::new(value, value)?;
+    }
+    let x = position.ref_direction.map(ExactCoefficient::point);
+    let mut y = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+    for axis in 0..3 {
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        y[axis] = exact_product(
+            &ExactCoefficient::point(position.axis[j]),
+            &x[k],
+            work,
+            cancel,
+        )?;
+        y[axis]
+            .subtract(&exact_product(
+                &ExactCoefficient::point(position.axis[k]),
+                &x[j],
+                work,
+                cancel,
+            )?)
+            .ok_or_else(|| unavailable("original plane basis exceeds exact expansion capacity"))?;
+    }
+    Ok([x, y])
+}
+fn original_plane_inverse_coefficients(
+    position: &solidcraft_step::geom::Placement,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<([[ExactCoefficient; 3]; 2], ExactCoefficient), GeometryError> {
+    let [x, y] = original_plane_basis(position, work, cancel)?;
+    let xx = exact_dot(&x, &x, work, cancel)?;
+    let xy = exact_dot(&x, &y, work, cancel)?;
+    let yy = exact_dot(&y, &y, work, cancel)?;
+    let mut determinant = exact_product(&xx, &yy, work, cancel)?;
+    determinant
+        .subtract(&exact_product(&xy, &xy, work, cancel)?)
+        .ok_or_else(|| unavailable("original plane Gram determinant exceeds exact capacity"))?;
+    if determinant.sign() <= 0 || exact_enclosure(&determinant).lo <= 0.0 {
+        return Err(unavailable(
+            "original plane has no proved nondegenerate global Gram inverse",
+        ));
+    }
+    let mut rows = std::array::from_fn(|_| std::array::from_fn(|_| ExactCoefficient::point(0.0)));
+    for axis in 0..3 {
+        rows[0][axis] = exact_product(&yy, &x[axis], work, cancel)?;
+        rows[0][axis]
+            .subtract(&exact_product(&xy, &y[axis], work, cancel)?)
+            .ok_or_else(|| unavailable("original plane inverse exceeds exact capacity"))?;
+        rows[1][axis] = exact_product(&xx, &y[axis], work, cancel)?;
+        rows[1][axis]
+            .subtract(&exact_product(&xy, &x[axis], work, cancel)?)
+            .ok_or_else(|| unavailable("original plane inverse exceeds exact capacity"))?;
+    }
+    Ok((rows, determinant))
+}
+impl<'d> SourcePlanePullback<'d> {
+    fn new(
+        surface: &'d solidcraft_step::geom::Surface,
+        spatial: &Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        let Some(position) = original_plane_placement(surface, work, cancel)? else {
+            return Ok(None);
+        };
+        let (rows, determinant) = original_plane_inverse_coefficients(position, work, cancel)?;
+        let mut inverse = [[Interval::point(0.0); 3]; 2];
+        for axis in 0..2 {
+            for coordinate in 0..3 {
+                inverse[axis][coordinate] =
+                    exact_ratio(&rows[axis][coordinate], &determinant, work, cancel)?;
+            }
+        }
+        Ok(Some(Self {
+            surface,
+            spatial: Arc::clone(spatial),
+            origin: position.origin,
+            inverse,
+        }))
+    }
+    fn exact_affine(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<parametric::ExactAffineCurve>, GeometryError> {
+        let Some(source) = self.spatial.exact_affine_coefficients(work, cancel)? else {
+            return Ok(None);
+        };
+        let position = original_plane_placement(self.surface, work, cancel)?
+            .ok_or_else(|| unavailable("sealed original plane inverse changed carrier"))?;
+        let (rows, determinant) = original_plane_inverse_coefficients(position, work, cancel)?;
+        let mut delta = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+        for axis in 0..3 {
+            exact_accumulate(&mut delta[axis], &source.position[axis])?;
+            delta[axis]
+                .subtract(&exact_product(
+                    &ExactCoefficient::point(position.origin[axis]),
+                    &source.denominator,
+                    work,
+                    cancel,
+                )?)
+                .ok_or_else(|| {
+                    unavailable("original plane projected position exceeds exact capacity")
+                })?;
+        }
+        let mut projected = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+        let mut derivative = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+        for axis in 0..2 {
+            projected[axis] = exact_dot(&rows[axis], &delta, work, cancel)?;
+            derivative[axis] = exact_dot(&rows[axis], &source.derivative, work, cancel)?;
+        }
+        Ok(Some(parametric::ExactAffineCurve {
+            position: projected,
+            derivative,
+            denominator: exact_product(&determinant, &source.denominator, work, cancel)?,
+        }))
+    }
+    fn exact_lift_identity(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let Some(chart) = self.exact_affine(work, cancel)? else {
+            return Ok(false);
+        };
+        let Some(source) = self.spatial.exact_affine_coefficients(work, cancel)? else {
+            return Ok(false);
+        };
+        let position = original_plane_placement(self.surface, work, cancel)?
+            .ok_or_else(|| unavailable("sealed original plane inverse changed carrier"))?;
+        let [x, y] = original_plane_basis(position, work, cancel)?;
+        let mut lifted = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+        let mut derivative = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+        for axis in 0..3 {
+            lifted[axis] = exact_product(
+                &ExactCoefficient::point(position.origin[axis]),
+                &chart.denominator,
+                work,
+                cancel,
+            )?;
+            for (basis, uv) in [(&x, 0), (&y, 1)] {
+                exact_accumulate(
+                    &mut lifted[axis],
+                    &exact_product(&basis[axis], &chart.position[uv], work, cancel)?,
+                )?;
+                exact_accumulate(
+                    &mut derivative[axis],
+                    &exact_product(&basis[axis], &chart.derivative[uv], work, cancel)?,
+                )?;
+            }
+        }
+        // Equality at BOTH endpoints proves equality of these complete affine
+        // coefficient expressions; these are not sampled approximate positions.
+        affine_endpoint_identity(
+            &parametric::ExactAffineCurve {
+                position: lifted,
+                derivative,
+                denominator: chart.denominator,
+            },
+            [0.0, 1.0],
+            &source,
+            [0.0, 1.0],
+            work,
+            cancel,
+        )
+    }
+}
+impl parametric::CurveEvaluator for SourcePlanePullback<'_> {
+    fn active_range(&self) -> [f64; 2] {
+        self.spatial.active_range()
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<parametric::ExactAffineCurve>, GeometryError> {
+        self.exact_affine(work, cancel)
+    }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        work.charge(1, cancel)?;
+        if order > 3 {
+            return Err(unavailable(
+                "original plane pullback supports curve jets through order three",
+            ));
+        }
+        let source = self.spatial.tensor(range, order, work, cancel)?;
+        let mut result = [[Interval::point(0.0); 3]; 4];
+        for derivative in 0..=order {
+            for axis in 0..2 {
+                result[derivative][axis] = (0..3).fold(Interval::point(0.0), |sum, coordinate| {
+                    let value = if derivative == 0 {
+                        source[0][coordinate].sub(Interval::point(self.origin[coordinate]))
+                    } else {
+                        source[derivative][coordinate]
+                    };
+                    sum.add(self.inverse[axis][coordinate].mul(value))
+                });
+            }
+        }
+        Ok(result)
+    }
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.spatial.continuous(range, work, cancel)
+    }
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.spatial.smooth(range, work, cancel)
+    }
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::AxisSpans<'_>, GeometryError> {
+        self.spatial.parameter_spans(range, work, cancel)
+    }
+}
 
 fn exact_accumulate(
     target: &mut ExactCoefficient,
@@ -2829,6 +3098,7 @@ impl PreparedSharedSpatialCurve<'_> {
 }
 enum OriginalUvCurve<'d> {
     PlaneLine(SourcePlaneLineProjection<'d>),
+    DerivedPlane(SourcePlanePullback<'d>),
     Pcurve(crate::analysis::source_restriction::pcurve::SourcePcurveRestriction<'d>),
 }
 pub(crate) struct PreparedOriginalUvCurve<'d> {
@@ -2850,12 +3120,13 @@ impl PreparedOriginalUvCurve<'_> {
     fn evaluator(&self) -> &dyn parametric::CurveEvaluator {
         match &self.curve {
             OriginalUvCurve::PlaneLine(curve) => curve,
+            OriginalUvCurve::DerivedPlane(curve) => curve,
             OriginalUvCurve::Pcurve(curve) => curve,
         }
     }
     fn owned_bytes(&self) -> usize {
         match &self.curve {
-            OriginalUvCurve::PlaneLine(_) => 0,
+            OriginalUvCurve::PlaneLine(_) | OriginalUvCurve::DerivedPlane(_) => 0,
             OriginalUvCurve::Pcurve(curve) => curve.retained_bytes() - size_of_val(curve),
         }
     }
@@ -4184,6 +4455,18 @@ impl PreparedFaceTrimDomain<'_> {
             .map(|coedge| coedge.source_pcurve.is_some())
             .ok_or_else(|| unavailable("selected original coedge declaration scope is unavailable"))
     }
+    /// True only for the retained selected expression composed with a proved
+    /// nondegenerate original-plane global Gram inverse. Declaration, a plane
+    /// label, or a native UV proposal cannot establish this property.
+    pub(crate) fn original_coedge_has_regular_inverse(
+        &self,
+        index: usize,
+    ) -> Result<bool, GeometryError> {
+        self.original_coedges
+            .get(index)
+            .map(|coedge| matches!(&coedge.curve.curve, OriginalUvCurve::DerivedPlane(_)))
+            .ok_or_else(|| unavailable("selected original inverse scope is unavailable"))
+    }
 }
 
 impl PreparedFaceTrimDomain<'_> {
@@ -4228,7 +4511,7 @@ struct OriginalCoedgeProposal<'d> {
     curve: PreparedOriginalUvCurve<'d>,
     binding: OriginalCoedgeBinding,
     image: [Interval; 2],
-    pcurve: &'d super::source::OriginalPcurveSource,
+    pcurve: Option<&'d super::source::OriginalPcurveSource>,
 }
 fn source_binding(
     native: &NativeTrimCoedge<'_>,
@@ -4555,20 +4838,29 @@ impl<'d> PreparedNativeTrimSource<'d> {
                     source_binding(native, skeleton.face_index, original, selected, source);
                 let mut choices = Vec::new();
                 let mut failure = None;
+                work.charge(source.pcurves.len() as u64 + 1, cancel)?;
+                let derive_plane = !source
+                    .pcurves
+                    .iter()
+                    .any(|pcurve| pcurve.carrier_id == original.carrier_id)
+                    && original_plane_placement(&original.carrier, work, cancel)?.is_some();
+                let choice_capacity = source
+                    .pcurves
+                    .len()
+                    .checked_add(usize::from(derive_plane))
+                    .ok_or_else(|| resource("original PCurve choice count overflow"))?;
                 memory(
                     self.retained_bytes()
                         + skeleton.retained_bytes()
                         + wire_bytes
                         + proposal_bytes
-                        + checked_bytes::<OriginalCoedgeProposal<'_>>(source.pcurves.len())?
+                        + checked_bytes::<OriginalCoedgeProposal<'_>>(choice_capacity)?
                         + source_lookup_bytes(lookup.capacity())?,
                     self.allowance,
                 )?;
-                choices
-                    .try_reserve_exact(source.pcurves.len())
-                    .map_err(|_| {
-                        resource("literal original PCurve association allocation failed")
-                    })?;
+                choices.try_reserve_exact(choice_capacity).map_err(|_| {
+                    resource("literal original PCurve association allocation failed")
+                })?;
                 proposal_bytes += choices.capacity() * size_of::<OriginalCoedgeProposal<'_>>();
                 for pcurve in &source.pcurves {
                     work.charge(1, cancel)?;
@@ -4660,7 +4952,34 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         curve,
                         binding,
                         image,
-                        pcurve,
+                        pcurve: Some(pcurve),
+                    });
+                }
+                if derive_plane {
+                    let inverse = SourcePlanePullback::new(
+                        &original.carrier,
+                        &selected.spatial.operator,
+                        work,
+                        cancel,
+                    )?
+                    .ok_or_else(|| {
+                        unavailable("original plane inverse changed carrier during preparation")
+                    })?;
+                    let curve = PreparedOriginalUvCurve {
+                        curve: OriginalUvCurve::DerivedPlane(inverse),
+                        spatial: Arc::clone(&selected.spatial),
+                    };
+                    let image =
+                        source_uv_image(&curve, carrier.original_natural_domain(), work, cancel)?;
+                    full = Some(match full {
+                        None => image,
+                        Some(old) => std::array::from_fn(|axis| old[axis].hull(image[axis])),
+                    });
+                    choices.push(OriginalCoedgeProposal {
+                        curve,
+                        binding,
+                        image,
+                        pcurve: None,
                     });
                 }
                 if choices.is_empty() {
@@ -4739,6 +5058,20 @@ impl<'d> PreparedNativeTrimSource<'d> {
                             OriginalCorrespondenceProvenance::Forward
                         },
                     }),
+                    OriginalUvCurve::DerivedPlane(curve)
+                        if curve.exact_lift_identity(work, cancel)? =>
+                    {
+                        Some(OriginalCoedgeCorrespondence {
+                            binding: proposal.binding,
+                            spatial_range: [0.0, 1.0],
+                            uv_ends: [0.0, 1.0],
+                            position_error_mm: 0.0,
+                            relative_derivative_error_bound: 0.0,
+                            inventory,
+                            provenance: OriginalCorrespondenceProvenance::ExactCoefficients,
+                            margin_uv: [0.0; 2],
+                        })
+                    }
                     OriginalUvCurve::PlaneLine(line)
                         if line.exact_endpoints
                             && proposal.curve.spatial.operator.exact_source_endpoints()
@@ -4760,17 +5093,19 @@ impl<'d> PreparedNativeTrimSource<'d> {
                             margin_uv: [0.0; 2],
                         })
                     }
-                    OriginalUvCurve::PlaneLine(_) => qualify_original_correspondence(
-                        proposal.binding,
-                        proposal.curve.spatial.operator.as_ref(),
-                        &surface,
-                        &proposal.curve,
-                        [0.0, 1.0],
-                        [0.0, 1.0],
-                        ceiling,
-                        work,
-                        cancel,
-                    )?,
+                    OriginalUvCurve::PlaneLine(_) | OriginalUvCurve::DerivedPlane(_) => {
+                        qualify_original_correspondence(
+                            proposal.binding,
+                            proposal.curve.spatial.operator.as_ref(),
+                            &surface,
+                            &proposal.curve,
+                            [0.0, 1.0],
+                            [0.0, 1.0],
+                            ceiling,
+                            work,
+                            cancel,
+                        )?
+                    }
                 };
                 if let Some(mut receipt) = receipt {
                     receipt.inventory = inventory;
@@ -4781,7 +5116,7 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         curve: proposal.curve,
                         correspondence: receipt,
                         full_uv_image: proposal.image,
-                        source_pcurve: Some(proposal.pcurve),
+                        source_pcurve: proposal.pcurve,
                     }));
                 }
             }

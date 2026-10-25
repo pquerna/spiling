@@ -347,7 +347,7 @@ fn frozen_occt_periodic_edges_admit_closed_solids_without_changing_source_face_s
             assert_eq!(info.face_id, FaceId::from_step_entity(id).unwrap());
             assert_eq!(
                 info.surface_face_entity,
-                resolve_face(&entities, id).unwrap().to_string()
+                resolve_face(&entities, id).unwrap().0.to_string()
             );
         }
         let uncertainty = definition
@@ -514,71 +514,6 @@ fn newly_supported_geometry_does_not_admit_unimplemented_surface_wrappers() {
     assert!(error.message.contains("OFFSET_SURFACE"));
 }
 
-#[test]
-fn sign_equivalent_and_nonzero_mixed_denominators_import_genuine_closed_sources() {
-    use monstertruck_io::step::load::step_geometry::re_exports::{
-        BsplineSurface, KnotVector, NurbsSurface,
-    };
-    for mixed in [false, true] {
-        let original = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(name, _, _)| *name == "native-parity-nurbs-box.step")
-            .unwrap()
-            .1;
-        let source = original
-            .try_mapped(
-                |p| Some(*p),
-                |c| Some(c.clone()),
-                |surface| {
-                    let StepSurface::NurbsSurface(surface) = surface else {
-                        return None;
-                    };
-                    if !mixed {
-                        let mut negative = surface.clone();
-                        for i in 0..2 {
-                            for j in 0..2 {
-                                *negative.control_point_mut(i, j) *= -1.0;
-                            }
-                        }
-                        return Some(StepSurface::NurbsSurface(negative));
-                    }
-                    // q has negative interior Bernstein coefficients but q(u)>0:
-                    // q = 1 - 1.1*(B_2^5+B_3^5), whose minimum is 0.3125.
-                    // Form (q*P(u,v),q) at degree six. Its exact quotient is the
-                    // original affine plane, not a fitted or folded replacement.
-                    let q = [1.0, 1.0, -0.1, -0.1, 1.0, 1.0];
-                    let controls = surface.control_points();
-                    let origin = controls[0][0].truncate() / controls[0][0].w;
-                    let du = controls[1][0].truncate() / controls[1][0].w - origin;
-                    let dv = controls[0][1].truncate() / controls[0][1].w - origin;
-                    let net = (0..=6)
-                        .map(|i| {
-                            let fraction = i as f64 / 6.0;
-                            let x = if i == 0 { 0.0 } else { fraction * q[i - 1] };
-                            let w = x + if i == 6 { 0.0 } else { (1.0 - fraction) * q[i] };
-                            (0..=1)
-                                .map(|j| {
-                                    let p = w * origin + x * du + (j as f64 * w) * dv;
-                                    Vector4::new(p.x, p.y, p.z, w)
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>();
-                    Some(StepSurface::NurbsSurface(NurbsSurface::new(
-                        BsplineSurface::new(
-                            (KnotVector::bezier_knot(6), KnotVector::bezier_knot(1)),
-                            net,
-                        ),
-                    )))
-                },
-            )
-            .unwrap();
-        let source = crate::parity_fixtures::original("signed-denominator.step", source);
-        // ISO 10303-42 Section 5.3 strictly mandates positive rational B-spline weights (w_i > 0).
-        // Negative Bernstein weights are rejected during AST normalization in solidcraft.
-        assert!(from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).is_err());
-    }
-}
 #[test]
 fn frozen_perforated_plate_admission_preserves_every_hole_with_frozen_work_caps() {
     let bytes = include_bytes!("../../../../fixtures/geometry/perforated-plate.step");

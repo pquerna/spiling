@@ -134,16 +134,18 @@ fn source_coedge_index(
     ))
 }
 
-/// Regularity of an actually declared ORIGINAL boundary's scalar query gauge,
-/// not a global physical inverse of its carrier. The sealed trace receipt
-/// supplies the whole position/relative-jet proof; the separate pole-graph lane
+/// Regularity of an original boundary's scalar query gauge, selected either
+/// from its declaration or the checked original-plane global inverse. The
+/// sealed trace receipt supplies the whole position/relative-jet proof; a
+/// separate pole-graph lane
 /// cannot be relabelled as this regular lane. All geometric attachment
 /// obligations below still use their selected operators and interval enclosures.
 fn has_regular_original_boundary_query(
     domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
     coedge: usize,
 ) -> Result<bool, GeometryError> {
-    if !domain.original_coedge_is_declared(coedge)?
+    if !(domain.original_coedge_is_declared(coedge)?
+        || domain.original_coedge_has_regular_inverse(coedge)?)
         || !matches!(
             domain.coedge_operand(coedge)?,
             crate::kernel::PreparedTrimCurve::Original(_)
@@ -7255,7 +7257,7 @@ mod tests {
         assert!(ascending && descending);
         assert!(
             !prepared
-                .is_smooth_on((0.0, 1.0), &mut work, &cancel)
+                .is_smooth_on([0.0, 1.0], &mut work, &cancel)
                 .unwrap(),
             "whole original coedge gluing must reject the height maximum hidden exactly on the prepared-piece boundary"
         );

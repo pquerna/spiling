@@ -6136,7 +6136,7 @@ mod tests {
     #[test]
     fn uncertain_mapped_original_c0_knot_band_is_not_rounded_into_incidence() {
         use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
-        let original = Curve::BSpline(std::sync::Arc::new(BSplineCurve {
+        let original = Curve::BSpline(Box::new(BSplineCurve {
             degree: 1,
             points: vec![[0., 0., 0.], [1., 0., 1.], [2., 0., 0.]],
             weights: None,
@@ -6800,18 +6800,19 @@ mod tests {
     #[test]
     fn actual_product_proof_honors_remaining_bytes_and_cumulative_cancellation() {
         let definition = parity_definition("native-parity-nurbs-cylinder.step");
+        let cancel = AtomicBool::new(false);
+        let mut preparation_work = GeometryWorkBudget::new(100_000_000);
+        let source = super::super::material_source::prepare_solid(
+            &definition,
+            MAX_SLAB_SCRATCH_BYTES,
+            &mut preparation_work,
+            &cancel,
+        )
+        .unwrap();
         let mut work = GeometryWorkBudget::new(1000);
         let before = work.consumed();
         let error = source_vertical_boundary_flow(
-            super::super::material_source::prepare_solid(
-                &definition,
-                MAX_SLAB_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .source_view()
-            .unwrap(),
+            source.source_view().unwrap(),
             frame(),
             [2.0, 6.0],
             0,
@@ -6822,15 +6823,7 @@ mod tests {
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         assert!(work.consumed() > before);
         let error = source_vertical_boundary_flow(
-            super::super::material_source::prepare_solid(
-                &definition,
-                MAX_SLAB_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .source_view()
-            .unwrap(),
+            source.source_view().unwrap(),
             frame(),
             [2.0, 6.0],
             0,
@@ -7594,7 +7587,7 @@ mod tests {
     #[test]
     fn original_rational_endpoint_identity_does_not_snap_an_interior_parameter() {
         use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
-        let curve = Curve::BSpline(std::sync::Arc::new(BSplineCurve {
+        let curve = Curve::BSpline(Box::new(BSplineCurve {
             degree: 1,
             points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
             weights: Some(vec![2.0, 3.0]),

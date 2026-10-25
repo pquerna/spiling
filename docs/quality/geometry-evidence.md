@@ -136,6 +136,9 @@ must never be converted into display unavailability.
   Source realization error must survive actual affine conversion, placement
   arithmetic and plane drift. A complete bound is not made cheaper by omitting
   uncertainty or charging it in a different coordinate system.
+  Original C0 bounds prioritize refinement by actual projected cross-section
+  variation, not unrelated UV lengths. This changes search order only: complete
+  cell enclosures, feasible witnesses and the work limit remain authoritative.
 - **Regular slabs:** [`analysis/slab.rs`](../../crates/geometry/src/analysis/slab.rs)
   binds the actual source, interval, reference and policy. Height invariance is
   local to regular partitions; it does not cross critical-event brackets.
@@ -198,6 +201,13 @@ incidence, including opposed uses, rather than matching stars by coordinates.
 `FACE_OUTER_BOUND` is an explicit outer marker; generic `FACE_BOUND` is not a
 declaration of a hole. Whole-domain winding and nesting retain the actual
 outer/hole qualification.
+
+When no declared PCurve exists on an original plane, preparation may derive UV
+from that plane's coefficient-proved nondegenerate global Gram inverse applied
+to the same selected original spatial expression. Derived evidence stays distinct
+from declaration and never overrides a failed declared branch. Whole lift,
+relative-derivative, native association, domain, joint and incidence checks remain;
+only exact whole-affine compose-back identity grants a zero transport receipt.
 
 `PreparedSolid` readiness means its actual selected realization operands are
 prepared. It is not a global Original-F embedding, filled-material, attachment

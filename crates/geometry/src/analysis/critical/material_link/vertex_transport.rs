@@ -3625,6 +3625,7 @@ mod tests {
         math::{CPoint, NOW},
         srf_basic,
     };
+    use solidcore::surface::surface::Surface;
 
     fn native_surface(
         points: Vec<Vec<CPoint>>,

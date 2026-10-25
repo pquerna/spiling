@@ -350,7 +350,7 @@ fn explicit_native_step_wrapper_retains_degrees_height_and_parameter_orientation
         true,
         false,
     );
-    let native = Surface::new(SurfaceKind::Cone(cone));
+    let native = Surface::new(SurfaceKind::Cone(Box::new(cone)));
     let wrapped = Surface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()));
     let mut work = GeometryWorkBudget::new(100_000);
     let cancel = AtomicBool::new(false);
@@ -458,7 +458,7 @@ fn explicit_step_sphere_has_a_coefficient_proved_pole_normal_not_a_nearby_sample
     };
     let kernel = crate::make_kernel_context();
     let sphere = Sphere::create_canonical(&kernel, &Axis2Placement::IDENTITY, 2.0).unwrap();
-    let native = Surface::new(SurfaceKind::Sphere(sphere));
+    let native = Surface::new(SurfaceKind::Sphere(Box::new(sphere)));
     let mut work = GeometryWorkBudget::new(1_000_000);
     let cancel = AtomicBool::new(false);
     let domain = native.natural_uv_domain();

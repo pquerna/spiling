@@ -965,7 +965,7 @@ mod tests {
             true,
             false,
         );
-        let native = NativeSurface::new(SurfaceKind::Cone(cone));
+        let native = NativeSurface::new(SurfaceKind::Cone(Box::new(cone)));
         if step {
             NativeSurface::new(SurfaceKind::Step(StepSurface::new(native, true).unwrap()))
         } else {
@@ -1146,7 +1146,7 @@ mod tests {
             false,
         );
         let native = NativeSurface::new(SurfaceKind::Step(
-            StepSurface::new(NativeSurface::new(SurfaceKind::Cone(cone)), true).unwrap(),
+            StepSurface::new(NativeSurface::new(SurfaceKind::Cone(Box::new(cone))), true).unwrap(),
         ));
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
