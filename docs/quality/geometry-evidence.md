@@ -36,6 +36,11 @@ result establishes physical printability or machine readiness.
   Literal PCurve associations and the selected original master remain distinct
   from generated native chart proposals. Missing correspondence refuses the
   material query; a native mesh or fitted inverse cannot fill that gap.
+  Without a declared PCurve, an original cylinder admits only the implemented
+  axial-line/same-frame coaxial-circle inverse: exact source-frame/coaxial
+  receipts, selected-provider parameter images, owned-rim angular lifts and
+  complete forward correspondence remain mandatory. Exact circle lifts do not
+  erase original vertex residuals; unproved families or declared branches refuse.
 
 The importer materializes the decoder's optional `Loop.edges` cache once from
 bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retained
