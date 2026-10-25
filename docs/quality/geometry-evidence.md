@@ -204,6 +204,11 @@ must never be converted into display unavailability.
   owns source leaves, union captures and `NativeUnionBindingLedger`. Receipts
   bind source/realization, occurrence, pose, interval/reference, policy and actual
   candidate geometry. Changed polygons or stale captures cannot inherit proof.
+  `certify_regular_interface_pair` registers complete actual material/void loops
+  and consumes the whole non-star collar theorem in
+  [`joint/planar.rs`](../../crates/geometry/src/analysis/joint/planar.rs).
+  Receipt-bound topology does not replace native boundary confinement or
+  closed-cut incidence; critical pairs retain the original proof route.
   Endpoint-local radial products can prove regular-side confinement beside a
   critical cap. Their own source/world domains and actual polygon calibration
   do not upgrade the whole leaf or fabricate a boundary-motion tube.

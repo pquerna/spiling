@@ -74,6 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         let directional_bounds = directional_bounds
             .into_iter()
+            .map(|result| result.map(|bounds| json!({
+                "minimum": bounds.minimum,
+                "maximum": bounds.maximum,
+                "achieved_uncertainty_mm": bounds.achieved_uncertainty_mm,
+            })))
             .collect::<Result<Vec<_>, _>>()?;
         let (native_section, section_us) = if mesh_only {
             (None, None)

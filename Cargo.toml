@@ -35,11 +35,11 @@ spiling-appearance = { path = "crates/appearance" }
 png = "=0.18.1"
 geo = "=0.32.0"
 boostvoronoi = { version = "=0.12.1", default-features = false }
-monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
-monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
-monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
-monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5", default-features = false, features = ["step"] }
-monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "bb7d6000af95e489ed76803bfd1ac5917da446f5" }
+monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
+monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
+monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
+monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95", default-features = false, features = ["step"] }
+monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
 solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "1fef444cbaad61c0f414fe126314c079175da046" }
 solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "1fef444cbaad61c0f414fe126314c079175da046", features = ["nurbs-grid-mesh"] }
 solidcraft-geom = { version = "=0.18.1", git = "https://github.com/tangency-labs/solidcraft", rev = "1b7b9d8d88233c18071fe8d6f4da418a315935a6" }

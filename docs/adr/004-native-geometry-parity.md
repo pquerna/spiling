@@ -581,6 +581,17 @@ cycles, or the full original projection tube for filled projection. The proved
 native clearance then applies to an exactly identical candidate; caller
 provenance or a matching hash alone is insufficient.
 
+Actual adjacent regular leaves may use a registered material/void collar instead
+of a shared visibility kernel. Register complete oriented Jordan boundaries and
+their parent forest, prove an embedded two-sided lower collar and exactly one
+oriented upper trace across its whole extent. Point overlap or component counts
+cannot replace the filled-material proof. Native branch confinement and complete
+closed-cut incidence remain independent; a critical side receives no authority.
+Bind each receipt to the original source/recipe, occurrence pose, exact cut and
+both actual immutable buffers. The union ledger checks and hashes that binding
+without retaining contours. Admit temporary scratch together with pending receipt
+capacity and the caller's other live storage; a false result grants no authority.
+
 ### 5.10 Contract affine-plane systems from paired source functionals
 
 For source surface `S`, query plane `(n,O)` and unchanged Native leader `L`,
@@ -1690,6 +1701,7 @@ incident side ports. Their nonzero mapping margins remain physical uncertainty
 already charged to the connection, not permission to move an endpoint.
 Complete shared original vertex links, paired coedges, whole root-to-port
 regularity and source/coface material orientation remain mandatory.
+
 
 An opaque source-contributor leaf receipt binds an actual positive source-M candidate and its independent source-sample/forward-distance fact: original occurrence/definition, actual pose, closed interval, sample, actual candidate geometry hash, achieved error and numerical/source policy. A section receipt does not by itself prove reverse coverage of the source's closed slab or promise that an adjacent global union will succeed.
 

@@ -1854,8 +1854,6 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         native_interface_complex_layer_count: 0,
         owned_critical_slab_count: 0,
     };
-    // ABI fixture identity excludes incidental native traversal work.
-    bundle.plan.native_geometry.geometry_work = 1;
     bundle.plan.layers[0].paths = vec![
         DepositionPath {
             kind: DepositionKind::SolidFill,
@@ -2002,13 +2000,13 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
         .code,
         ManufacturingErrorCode::Cancelled
     );
-    // Fixed fixture identity makes the independently decoded ABI golden reproducible.
+    // The ABI golden owns decoded layout and motion, not producer-dependent identity.
     use std::fmt::Write;
     let mut hex = String::with_capacity(replay.bytes.len() * 2);
     for byte in &replay.bytes {
         write!(&mut hex, "{byte:02x}").unwrap();
     }
-    let fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,
+    let mut fixture = serde_json::json!({ "encoding":"hex", "descriptor":descriptor,
         "data":hex, "actual_positions":positions, "program":bundle.program });
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2017,8 +2015,14 @@ fn actual_motion_inspection_rounding_coincident_travel_and_fixture() {
     if std::env::var_os("SPILING_UPDATE_REPLAY_FIXTURE").is_some() {
         std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
     } else {
-        let committed: serde_json::Value =
+        let mut committed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for value in [&mut committed, &mut fixture] {
+            value["descriptor"]["info"]
+                .as_object_mut()
+                .unwrap()
+                .remove("bundle_hash");
+        }
         assert_eq!(committed, fixture, "native replay ABI golden drift");
     }
 }
