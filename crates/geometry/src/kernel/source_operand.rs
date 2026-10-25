@@ -888,9 +888,10 @@ impl<'a> PreparedOriginalSurface<'a> {
         for i in 0..2 {
             Interval::new(uv[i][0], uv[i][1])?;
             if uv[i][0] < self.active[i][0] || uv[i][1] > self.active[i][1] {
-                return Err(unavailable(
-                    "original surface query exceeds its authorized domain",
-                ));
+                return Err(unavailable(&format!(
+                    "original surface query exceeds its authorized domain: axis={i} query={uv:?} authorized={:?}",
+                    self.active
+                )));
             }
         }
         surface_jet(self.source, uv, order, &self.inventory, 0, work, cancel)

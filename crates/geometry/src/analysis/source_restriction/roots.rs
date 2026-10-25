@@ -368,8 +368,45 @@ pub(super) fn isolate_endpoint(
                     }
                     parameter = next;
                 }
-                let position = curve.tensor([parameter.lo, parameter.hi], 0, work, cancel)?[0];
-                let error_mm = distance(displacement(position, vertex))?.hi;
+                // Newton can contract a broad search around a representable
+                // stationary root that none of the original search proposals
+                // hit. Recheck the contracted coefficient expression; a small
+                // interval or its midpoint alone is still not exact identity.
+                let mut exact_error = None;
+                if !parameter.is_point() {
+                    let center = parameter.mid();
+                    let candidates = [
+                        center,
+                        center.next_down(),
+                        center.next_up(),
+                        parameter.lo,
+                        parameter.hi,
+                    ];
+                    for (index, candidate) in candidates.into_iter().enumerate() {
+                        work.charge(1, cancel)?;
+                        if !parameter.contains(candidate)
+                            || candidates[..index].contains(&candidate)
+                        {
+                            continue;
+                        }
+                        let jet = curve.tensor([candidate; 2], 1, work, cancel)?;
+                        let delta = displacement(jet[0], vertex);
+                        if finite(dot(delta, jet[1]))? == Interval::point(0.0) {
+                            let error = distance(delta)?.hi;
+                            if error <= maximum_source_error_mm {
+                                parameter = Interval::point(candidate);
+                                exact_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let error_mm = if let Some(error) = exact_error {
+                    error
+                } else {
+                    let position = curve.tensor([parameter.lo, parameter.hi], 0, work, cancel)?[0];
+                    distance(displacement(position, vertex))?.hi
+                };
                 if error_mm <= maximum_source_error_mm {
                     retain(
                         &mut roots,

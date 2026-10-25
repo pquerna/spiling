@@ -5670,65 +5670,62 @@ impl PreparedFaceTrimDomain<'_> {
                     "selected original boundary coefficient operator lacks actual C0",
                 ));
             }
-            // Calibration cuts are proof inventory, not topology. A complete
-            // C0 boundary with one strict derivative coordinate is injective
-            // across every retained knot and cut without pairwise leaf proofs.
-            work.charge(1, cancel)?;
-            let whole = parametric::curve2d_piecewise_jet(
-                &self.boundary_operand(boundary)?,
-                range,
-                work,
-                cancel,
-            )?;
-            if whole.derivative.iter().any(|d| d.lo > 0.0 || d.hi < 0.0) {
-                reserve_span(self, allowance)?;
-                self.spans.push(TrimSpan {
-                    boundary,
-                    range,
-                    ends: [true; 2],
-                });
-                continue;
-            }
-            // Borrow one span at a time; no unique-knot or sampled polygon copy.
-            let mut cursor = range[0];
-            while cursor < range[1] {
-                let part = self
-                    .boundary_operand(boundary)?
-                    .parameter_spans([cursor, range[1]], work, cancel)?
-                    .find(|part| part[1] > part[0])
-                    .ok_or_else(|| unavailable("original coefficient span cover is incomplete"))?;
-                let mut stack = [([0.0; 2], 0u8); MAX_DEPTH as usize + 1];
-                stack[0] = (part, 0);
-                let mut live = 1;
-                while live > 0 {
-                    live -= 1;
-                    let (piece, depth) = stack[live];
-                    work.charge(1, cancel)?;
-                    let jet = parametric::curve2d_piecewise_jet(
-                        &self.boundary_operand(boundary)?,
+            // Proof cuts are not topology. Qualify complete C0 pieces first;
+            // the coefficient evaluator still retains every original knot.
+            let mut stack = [([0.0; 2], 0u8); MAX_DEPTH as usize + 1];
+            stack[0] = (range, 0);
+            let mut live = 1;
+            while live > 0 {
+                live -= 1;
+                let (piece, depth) = stack[live];
+                work.charge(1, cancel)?;
+                let jet = parametric::curve2d_piecewise_jet(
+                    &self.boundary_operand(boundary)?,
+                    piece,
+                    work,
+                    cancel,
+                )?;
+                if jet.derivative.iter().any(|d| d.lo > 0.0 || d.hi < 0.0) {
+                    reserve_span(self, allowance)?;
+                    self.spans.push(TrimSpan {
+                        boundary,
+                        range: piece,
+                        ends: [piece[0] == range[0], piece[1] == range[1]],
+                    });
+                } else {
+                    let middle = split(
                         piece,
-                        work,
-                        cancel,
+                        depth,
+                        "original chart boundary injectivity/regularity",
                     )?;
-                    if jet.derivative.iter().any(|d| d.lo > 0.0 || d.hi < 0.0) {
-                        reserve_span(self, allowance)?;
-                        self.spans.push(TrimSpan {
-                            boundary,
-                            range: piece,
-                            ends: [piece[0] == range[0], piece[1] == range[1]],
-                        });
-                    } else {
-                        let middle = split(
-                            piece,
-                            depth,
-                            "original chart boundary injectivity/regularity",
-                        )?;
-                        stack[live] = ([middle, piece[1]], depth + 1);
-                        stack[live + 1] = ([piece[0], middle], depth + 1);
-                        live += 2;
+                    // Prefer an actual cover fence near the midpoint. Narrow
+                    // original spans need not wait for dyadic resolution.
+                    let operand = self.boundary_operand(boundary)?;
+                    let mut cover = None;
+                    for part in operand.parameter_spans(piece, work, cancel)? {
+                        work.charge(1, cancel)?;
+                        if part[0] < part[1] && part[0] <= middle && middle <= part[1] {
+                            cover = Some(part);
+                            break;
+                        }
                     }
+                    let cover = cover.ok_or_else(|| {
+                        unavailable("original coefficient span cover is incomplete")
+                    })?;
+                    let mut nearest = None;
+                    for fence in cover {
+                        if piece[0] < fence && fence < piece[1] {
+                            let distance = (fence - middle).abs();
+                            if nearest.is_none_or(|(best, _)| distance < best) {
+                                nearest = Some((distance, fence));
+                            }
+                        }
+                    }
+                    let cut = nearest.map_or(middle, |(_, fence)| fence);
+                    stack[live] = ([cut, piece[1]], depth + 1);
+                    stack[live + 1] = ([piece[0], cut], depth + 1);
+                    live += 2;
                 }
-                cursor = part[1];
             }
         }
         for i in 0..self.spans.len() {
@@ -5829,8 +5826,11 @@ impl PreparedFaceTrimDomain<'_> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn original_pole_face_classifies_across_internal_endpoint_cut_bands() {
+    fn assert_original_face_regions(
+        source_face: spiling_contracts::geometry::StepEntityId,
+        inside: [[f64; 2]; 2],
+        outside: [[f64; 2]; 2],
+    ) {
         let definition = crate::from_step_bytes(include_bytes!(
             "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
         ))
@@ -5861,7 +5861,7 @@ mod tests {
             .original_source()
             .faces
             .iter()
-            .find(|face| face.source_face == spiling_contracts::geometry::StepEntityId(461))
+            .find(|face| face.source_face == source_face)
             .unwrap()
             .native_face;
         let skeleton = NativeFaceSkeleton::new(
@@ -5883,16 +5883,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            domain
-                .classify([[0.5, 0.6], [-0.6, -0.5]], &mut work, &cancel)
-                .unwrap(),
+            domain.classify(inside, &mut work, &cancel).unwrap(),
             TrimClassification::Inside,
         );
         assert_eq!(
-            domain
-                .classify([[2.0, 2.1], [-0.6, -0.5]], &mut work, &cancel)
-                .unwrap(),
+            domain.classify(outside, &mut work, &cancel).unwrap(),
             TrimClassification::Outside,
+        );
+    }
+
+    #[test]
+    fn original_pole_face_classifies_across_internal_endpoint_cut_bands() {
+        assert_original_face_regions(
+            spiling_contracts::geometry::StepEntityId(461),
+            [[0.5, 0.6], [-0.6, -0.5]],
+            [[2.0, 2.1], [-0.6, -0.5]],
+        );
+    }
+
+    #[test]
+    fn original_periodic_cylinder_retains_a_simple_material_chart() {
+        assert_original_face_regions(
+            spiling_contracts::geometry::StepEntityId(1254),
+            [[0.5, 0.6], [2.0, 2.1]],
+            [[0.5, 0.6], [6.0, 6.1]],
+        );
+    }
+
+    #[test]
+    fn original_closed_disk_retains_material_inside_and_outside() {
+        assert_original_face_regions(
+            spiling_contracts::geometry::StepEntityId(1407),
+            [[0.5, 0.6], [0.5, 0.6]],
+            [[3.1, 3.2], [0.1, 0.2]],
         );
     }
 }

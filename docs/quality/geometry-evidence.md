@@ -247,8 +247,10 @@ in its own gauge before it counts as qualified. Distinct qualified branches
 refuse; cumulative work and peak root/proof/workspace bytes stay bounded.
 
 Endpoint proposals include finite coefficient fences, midpoints and reference
-zero. They still require exact stationarity or strict Newton existence; proximity
-to a search or natural-domain fence is not a root or branch certificate.
+zero. Recheck representable candidates after Newton contraction: an initial
+search midpoint need not hit the contracted root. Every singleton still requires
+exact outward stationarity and its full physical residual bound; proximity or a
+small interval is not parameter identity.
 
 An exactly isolated stationary parameter is not exact vertex coincidence.
 Its nonzero physical source residual remains charged to the source allowance.
@@ -261,10 +263,12 @@ complete boundary's exact shared C0 anchor only after opposite monotone germs
 are certified over both entire leaf-to-anchor parameter hulls. This preserves
 separation across uncertain internal cuts without endpoint welding or distance
 tolerances.
-Complete C0 boundaries with a globally strict derivative coordinate qualify as
-one injective proof span before pairwise separation; numerical calibration cuts
-and original knots remain in the evaluator. Unproved whole-boundary monotonicity
-retains the existing knot-span subdivision path.
+Complete C0 coefficient pieces with a strict derivative coordinate qualify as
+injective spans before pairwise separation. Unproved pieces subdivide within the
+same depth/work policy, preferring an actual cover fence near the midpoint so
+narrow original spans do not depend on dyadic resolution. Numerical calibration
+cuts and original knots remain in the evaluator; they are not mandatory
+pairwise topology.
 
 Source edge/vertex census checks complete original-use ownership against native
 incidence, including opposed uses, rather than matching stars by coordinates.
