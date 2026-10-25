@@ -20,7 +20,7 @@ use std::sync::{
 };
 
 /// Binds complete immutable original-source realization and wall authority.
-pub const PLANNER_VERSION: &str = "19";
+pub const PLANNER_VERSION: &str = "20";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

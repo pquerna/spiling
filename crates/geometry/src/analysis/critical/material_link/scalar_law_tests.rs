@@ -215,6 +215,30 @@ fn actual_fitting_complete_paired_source_collars_have_local_geometry() {
         .unwrap_or_else(|| {
             panic!("whole used paired UV embedding: {first_owner:?} {second_owner:?} {central:?}")
         });
+        // The actual atlas asks for the COMPLETE central support before any
+        // local FIRST-matrix subdivision. Its auxiliary rectangle can extend
+        // beyond the selected trim envelope; this must remain a coefficient-
+        // sheet positional query, not a whole-collar Jacobian qualification.
+        for collar in [&link.first, &link.second] {
+            let gamma = chart_jet(
+                collar.domain,
+                collar.use_.coedge,
+                central,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let support = collar.source_relative_support(
+                central, &gamma, link.allowance, &mut work, &cancel,
+            ).unwrap_or_else(|error| panic!(
+                "complete source-relative positional support: owner={:?} central={central:?}: {error:?}",
+                [collar.use_.face, collar.use_.wire, collar.use_.index],
+            )).expect("the literal fitting trace has retained whole-forward authority");
+            for component in support {
+                assert!(component.lo.is_finite() && component.hi.is_finite());
+                assert!(component.lo <= component.hi);
+            }
+        }
         // Prepare original knots before borrowing the same physical edge.
         let cuts = original_coedge_parameter_cuts(
             [(a, first.coedge), (b, second.coedge)],

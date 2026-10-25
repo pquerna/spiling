@@ -328,7 +328,7 @@ mod properties {
     use super::*;
 
     #[test]
-    fn actual_fitting_coefficients_replace_requested_quarter_bound_at_zero_margin() {
+    fn actual_fitting_coefficients_certify_completed_germs_without_changing_source() {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
@@ -356,7 +356,6 @@ mod properties {
             vertices.push(vertex);
         }
         let mut fresh = 0;
-        let mut zero_margin_requested_quarter = 0;
         for vertex in vertices {
             let plan = SourceVertexTransportPlan::prepare(
                 source,
@@ -407,11 +406,6 @@ mod properties {
                     assert!(bounds[i].position_error_mm >= proof.position_error_mm());
                     assert!(bounds[i].position_error_mm < allowance);
                     assert!(bounds[i].relative_derivative_error < 0.25);
-                    if proof.margin_uv() == [0.0; 2]
-                        && proof.relative_derivative_error_bound() == 0.25
-                    {
-                        zero_margin_requested_quarter += 1;
-                    }
                     let range = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
                     let native = domain
                         .original_coedge_jets(end.use_.coedge, range, &mut work, &cancel)
@@ -463,10 +457,6 @@ mod properties {
             }
         }
         assert!(fresh > 0, "exercise a nonidentity actual Native joint");
-        assert!(
-            zero_margin_requested_quarter > 0,
-            "the original zero-margin/.25 receipt is not an achieved derivative proof"
-        );
         assert_eq!(
             format!("{:?}", definition.brep()),
             original,

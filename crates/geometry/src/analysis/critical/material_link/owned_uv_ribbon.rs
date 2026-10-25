@@ -29,7 +29,10 @@ fn boundary_parameter_intervals<'c>(
 // These proof phases run sequentially, after the pure embedding has returned.
 // Their largest explicit stack fits the existing caller-reserved UV allowance.
 const _: () = assert!(
-    std::mem::size_of::<[UvPairCell; MAX_DEPTH as usize + 1]>() <= UV_EMBEDDING_STACK_BYTES
+    std::mem::size_of::<[UvPairCell; MAX_DEPTH as usize + 1]>()
+        + std::mem::size_of::<Option<(UvPairCell, [[Interval; 2]; 2], [f64; 2])>>()
+        + std::mem::size_of::<Option<[Interval; 2]>>()
+        <= UV_EMBEDDING_STACK_BYTES
 );
 const _: () = assert!(
     std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>() <= UV_EMBEDDING_STACK_BYTES
@@ -210,6 +213,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         &self,
         range: [f64; 2],
         error: [f64; 2],
+        embedding: &UvRibbonEmbedding<'a, 'd>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
@@ -219,9 +223,11 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let own = self
             .domain
             .original_coedge_correspondence(self.use_.coedge)?;
+        let before = work.consumed();
+        let mut whole_inner = None;
         for coedge in 0..self.domain.coedges().len() {
             // Retain the association of EVERY original boundary occurrence.
-            self.domain.original_coedge_correspondence(coedge)?;
+            let other = self.domain.original_coedge_correspondence(coedge)?;
             // Restrict the COMPLETE owning original PCurve, including unused
             // end pieces. Native UV trim cuts have a different parameter law.
             let chart = self.domain.coedge_operand(coedge)?;
@@ -232,36 +238,80 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     [([0.0; 2], [0.0; 2], 0); MAX_DEPTH as usize + 1];
                 stack[0] = (range, span, 0);
                 let mut pending = 1;
+                let mut last_split = None;
                 while pending != 0 {
                     pending -= 1;
                     let (a, b, depth) = stack[pending];
-                    let context = |error| {
-                        resource_at(
-                            error,
+                    let context = |failure, work: &GeometryWorkBudget| {
+                        let failure = resource_at(
+                            failure,
                             self.use_,
                             "complete original boundary",
                             a,
                             Some((coedge, b)),
-                        )
+                        );
+                        if failure.code != GeometryErrorCode::ResourceLimit {
+                            return failure;
+                        }
+                        work.annotate_error(failure, before, format_args!(
+                            "original boundary exclusion owning_source={:?} owning_spatial={:?} owning_uv={:?} boundary_source={:?} boundary_spatial={:?} boundary_uv={:?} error={error:?} boundary_span={span:?} depth={depth} last_split={last_split:?}",
+                            own.binding().map(|binding| (binding.source, binding.edge)),
+                            own.spatial_range(), own.uv_endpoints(),
+                            other.binding().map(|binding| (binding.source, binding.edge)),
+                            other.spatial_range(), other.uv_endpoints(),
+                        ))
                     };
-                    work.charge(1, cancel).map_err(&context)?;
-                    let image = self.inner_image(a, error, work, cancel).map_err(&context)?;
+                    work.charge(1, cancel)
+                        .map_err(|failure| context(failure, work))?;
+                    let own_spatial = if coedge == self.use_.coedge {
+                        own.affine_spatial_parameter_preimage(b)?
+                    } else {
+                        None
+                    };
+                    if error == [0.0; 2]
+                        && embedding.covers(self, a, [0.5, 1.0])
+                        && own_spatial.is_some_and(|spatial| {
+                            embedding.covers(self, [spatial.lo, spatial.hi], [0.0, 0.0])
+                        })
+                    {
+                        // The owning boundary is the SAME G(s,0), whereas
+                        // this inner image has across in [1/2,1]. The sealed
+                        // whole-used-scope embedding excludes equality without
+                        // separating independent Cartesian overcovers. This
+                        // consumes no authority for nonzero UV errors, foreign
+                        // occurrences or the unused original complement.
+                        continue;
+                    }
+                    let image = match (a == range, whole_inner) {
+                        (true, Some(image)) => image,
+                        _ => {
+                            let image = self
+                                .inner_image(a, error, work, cancel)
+                                .map_err(|failure| context(failure, work))?;
+                            if a == range {
+                                // Same immutable source, error and exact input
+                                // range across every foreign parameter span.
+                                whole_inner = Some(image);
+                            }
+                            image
+                        }
+                    };
                     let boundary =
                         crate::parametric::curve2d_piecewise_jet(&chart, b, work, cancel)
-                            .map_err(&context)?
+                            .map_err(|failure| context(failure, work))?
                             .position;
                     if apart(image, boundary) {
                         continue;
                     }
                     if coedge == self.use_.coedge {
-                        let Some(spatial) = own.affine_spatial_parameter_preimage(b)? else {
+                        let Some(spatial) = own_spatial else {
                             return Ok(false);
                         };
                         let hull = [a[0].min(spatial.lo), a[1].max(spatial.hi)];
                         // The SAME original strict C2 operator supplies this
                         // convex proof hull; genuine knots cannot be crossed.
-                        let jet =
-                            chart_jet(self.domain, coedge, hull, work, cancel).map_err(&context)?;
+                        let jet = chart_jet(self.domain, coedge, hull, work, cancel)
+                            .map_err(|failure| context(failure, work))?;
                         if normal_secant_separates(&jet, width, inward, self.bubble(a)?.0, error)? {
                             continue;
                         }
@@ -279,6 +329,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     } else {
                         0.0
                     };
+                    last_split = Some(((a, b, depth), [image, boundary], [a_fraction, b_fraction]));
                     let split_a = a[0] < a[1] && (a_fraction >= b_fraction || b[0] == b[1]);
                     let split = if split_a { a } else { b };
                     let mid = split[0] * 0.5 + split[1] * 0.5;
@@ -337,7 +388,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             .hi
         });
         if !self.inner_misses_joints_and_domain(range, error, work, cancel)?
-            || !self.inner_misses_original_boundaries(range, error, work, cancel)?
+            || !self.inner_misses_original_boundaries(range, error, &embedding, work, cancel)?
         {
             return Ok(None);
         }

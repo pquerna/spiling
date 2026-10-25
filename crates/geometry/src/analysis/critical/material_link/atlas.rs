@@ -345,7 +345,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
     /// F(U) covers the full removed reference ribbon; padding by that residual
     /// covers every lambda*(1-w)*delta and hence all actual G homotopy points.
     /// This grants no embedding, source-error acceptance or chart authority.
-    fn source_relative_support(
+    pub(super) fn source_relative_support(
         &self,
         range: [f64; 2],
         gamma: &ChartCurveEnclosure,
@@ -389,25 +389,24 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 })
             }
         };
-        let surface = &self.domain.surface_operand();
-        (|| {
-            let position = surface_piecewise_first_enclosure(
-                surface,
-                uv_box(add_margin(tube, self.margin)),
-                work,
-                cancel,
-            )?
-            .position;
-            Ok(Some(position.map(|v| {
-                add(
-                    v,
-                    Interval {
-                        lo: -padding,
-                        hi: padding,
-                    },
-                )
-            })))
-        })()
+        // This auxiliary UV rectangle need not lie inside the selected trim
+        // envelope. Only coefficient-sheet positions are required for exclusion;
+        // continuity, FIRST matrices and collar ownership are proved separately
+        // if its complete support meets the closed certification scope.
+        let position = self.domain.original_carrier_position_bounds(
+            uv_box(add_margin(tube, self.margin)),
+            work,
+            cancel,
+        )?;
+        Ok(Some(position.map(|v| {
+            add(
+                v,
+                Interval {
+                    lo: -padding,
+                    hi: padding,
+                },
+            )
+        })))
     }
 
     fn reference_owned(
@@ -967,6 +966,8 @@ fn visit_original_links(
         let allowance = source_allowance(source.definition())?;
         let interval = coordinates.world_interval();
         for uses in incidence.values() {
+            active_spatial = None;
+            last_geometry_refusal = None;
             owners = Some([
                 [uses.first.face, uses.first.wire, uses.first.index],
                 uses.second
@@ -1170,6 +1171,7 @@ fn visit_original_links(
                         while pending != 0 {
                             pending -= 1;
                             let (range, depth) = stack[pending];
+                            last_geometry_refusal = None;
                             active_spatial = Some((range, depth));
                             phase = "shared C3D and full reference/G support";
                             work.charge(1, cancel)?;
@@ -1311,9 +1313,15 @@ fn visit_original_links(
         }
         Ok(true)
     })();
-    outcome.map_err(|error| work.annotate_error(error, before, format_args!(
-        "closed radial atlas paired links owners={owners:?} phase={phase} spatial={active_spatial:?} last_geometry_refusal={last_geometry_refusal:?}"
-    )))
+    outcome.map_err(|error| {
+        // The propagated cause must precede phase context and a sufficient-
+        // premise refusal, so bounded operator errors cannot hide the cause.
+        let consumed = work.consumed();
+        GeometryError::new(error.code, format!(
+            "{}; closed radial atlas paired links owners={owners:?} phase={phase} spatial={active_spatial:?} work_before={before} work_consumed={consumed} work_delta={} work_remaining={} last_geometry_refusal={last_geometry_refusal:?}",
+            error.message, consumed.saturating_sub(before), work.remaining(),
+        ))
+    })
 }
 
 fn cylinder_fiber(coordinates: &ActualMaterialCoordinates<'_>, alpha: f64) -> fiber::OriginalFiber {

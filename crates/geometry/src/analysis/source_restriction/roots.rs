@@ -89,6 +89,63 @@ fn exact_vertex(
     Ok(true)
 }
 
+fn affine_closed_existence(
+    curve: &dyn CurveEvaluator,
+    vertex: [f64; 3],
+    range: Interval,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let Some(affine) = curve.exact_affine_coefficients(work, cancel)? else {
+        return Ok(false);
+    };
+    if affine.denominator.sign() == 0 {
+        return Ok(false);
+    }
+    // For C(t)=(P+tD)/w, w² g(t)=(P+tD-wV)·D.
+    // Evaluate its closed-fence signs as exact expansions, not outward
+    // singleton overlap. The caller separately proves g' > 0 on this tube;
+    // these signs then establish existence by the intermediate value theorem.
+    for (fence, lower) in [(range.lo, true), (range.hi, false)] {
+        work.charge(1, cancel)?;
+        let mut value = ExactCoefficient::point(0.0);
+        for axis in 0..3 {
+            let Some(mut delta) =
+                affine.derivative[axis].product(&ExactCoefficient::point(fence), work, cancel)?
+            else {
+                return Ok(false);
+            };
+            for &term in &affine.position[axis].terms[..affine.position[axis].len] {
+                if delta.push(term).is_none() {
+                    return Ok(false);
+                }
+            }
+            let Some(reference) =
+                affine
+                    .denominator
+                    .product(&ExactCoefficient::point(vertex[axis]), work, cancel)?
+            else {
+                return Ok(false);
+            };
+            if delta.subtract(&reference).is_none() {
+                return Ok(false);
+            }
+            let Some(term) = delta.product(&affine.derivative[axis], work, cancel)? else {
+                return Ok(false);
+            };
+            for &coefficient in &term.terms[..term.len] {
+                if value.push(coefficient).is_none() {
+                    return Ok(false);
+                }
+            }
+        }
+        if (lower && value.sign() > 0) || (!lower && value.sign() < 0) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn retain(
     roots: &mut Vec<EndpointRoot>,
     mut root: EndpointRoot,
@@ -174,7 +231,7 @@ pub(super) fn isolate_endpoint(
     const FIXED_BYTES: usize = SOURCE_OPERAND_SCRATCH_BYTES
         + std::mem::size_of::<[Pending; MAX_DEPTH + 1]>()
         + 256 * std::mem::size_of::<Interval>()
-        + 8 * std::mem::size_of::<ExactCoefficient>()
+        + 32 * std::mem::size_of::<ExactCoefficient>()
         + std::mem::size_of::<AxisSpans<'static>>()
         + std::mem::size_of::<Vec<EndpointRoot>>();
     let retained_bytes = maximum_live_bytes
@@ -328,10 +385,14 @@ pub(super) fn isolate_endpoint(
             }
 
             let newton = finite(Interval::point(midpoint).sub(point_g.div(derivative)?))?;
-            if range.lo < newton.lo && newton.hi < range.hi {
-                // Strict interval Newton inclusion establishes existence as well
-                // as uniqueness. Keep the entire root recipe, never its midpoint.
-                let mut parameter = newton;
+            let strict_newton = range.lo < newton.lo && newton.hi < range.hi;
+            if strict_newton || affine_closed_existence(curve, vertex, range, work, cancel)? {
+                // Strict interval Newton or exact closed-fence signs establish
+                // existence. Newton intersection then encloses that root even
+                // when outward arithmetic crosses a natural domain boundary.
+                let mut parameter = range.intersection(newton).ok_or_else(|| {
+                    unavailable("endpoint Newton image contradicts its established closed root")
+                })?;
                 // Root width is epistemic, not geometric endpoint residual.
                 // Contract it independently so two representations of the same
                 // source curve do not spend the entire physical budget merely
@@ -489,6 +550,91 @@ mod tests {
         assert!(roots[0].source_error_mm() <= 1.0e-6);
         assert!(
             isolate_endpoint(&curve, vertex, range, 1.0e-9, BYTES, &mut work, &cancel,)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn affine_root_at_natural_fence_requires_exact_closed_domain_existence() {
+        use solidcraft_step::geom::{Associated, Pcurve, PreferredRep, Surface, SurfaceCurveKind};
+        use std::sync::Arc;
+
+        let chart = Arc::new(Curve::BSpline(Box::new(BSplineCurve {
+            degree: 1,
+            points: vec![[0.1, 0.0, 0.0], [0.2, 0.0, 0.0]],
+            weights: None,
+            knots: vec![0.0, 1.0],
+            multiplicities: vec![2, 2],
+            form: CurveForm::Unspecified,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        })));
+        let source = Curve::SurfaceCurve {
+            kind: SurfaceCurveKind::Surface,
+            curve_3d: chart.clone(),
+            associated: vec![Associated::Pcurve(Pcurve {
+                curve: chart,
+                surface: Arc::new(Surface::Plane {
+                    position: Placement {
+                        origin: [0.1, 0.0, 0.0],
+                        axis: [0.0, 0.0, 1.0],
+                        ref_direction: [1.0, 0.0, 0.0],
+                    },
+                }),
+            })],
+            master: PreferredRep::PcurveS1,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let range = [0.0, 1.0];
+        let curve = PreparedOriginalCurve::new(&source, range, BYTES, &mut work, &cancel).unwrap();
+        let vertex = [0.3, 1.0e-7, 0.0];
+        // Literal 0.3 is strictly below exact 0.1+0.2. Its stationary
+        // parameter is inside the natural domain, but is not representable.
+        // A rounded endpoint or a tiny overlapping interval cannot prove it.
+        assert!(
+            !curve_endpoint_coordinate_equal(&curve, 1.0, 0, vertex[0], &mut work, &cancel,)
+                .unwrap()
+        );
+        assert!(
+            affine_closed_existence(
+                &curve,
+                vertex,
+                Interval::new(0.0, 1.0).unwrap(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        let roots =
+            isolate_endpoint(&curve, vertex, range, 1.0e-6, BYTES, &mut work, &cancel).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].enclosure().lo >= 0.0 && roots[0].enclosure().hi <= 1.0);
+        assert_eq!(roots[0].exact_parameter(), None);
+        assert!(roots[0].source_error_mm() >= vertex[1]);
+        assert!(roots[0].source_error_mm() <= 1.0e-6);
+
+        // The adjacent literal lies above exact 0.1+0.2: proximity and the
+        // source allowance must not manufacture an out-of-domain root.
+        let outside = [vertex[0].next_up(), vertex[1], vertex[2]];
+        assert!(
+            !affine_closed_existence(
+                &curve,
+                outside,
+                Interval::new(0.0, 1.0).unwrap(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+        );
+        assert!(
+            isolate_endpoint(&curve, outside, range, 1.0e-6, BYTES, &mut work, &cancel)
+                .map_or(true, |roots| roots.is_empty())
+        );
+        assert!(
+            isolate_endpoint(&curve, vertex, range, 1.0e-9, BYTES, &mut work, &cancel)
                 .unwrap()
                 .is_empty()
         );

@@ -191,18 +191,28 @@ must never be converted into display unavailability.
   boundaries, including signed underflow, rather than inventing outward material
   or widening source domains. Unproved coordinates are never clipped; coefficient
   domain checks and original-material embedding remain independent obligations.
-  Finite F/G homotopies use explicit original coefficient-sheet queries, not
-  trim-box membership as an evaluation shortcut. These borrow the captured
-  inventory and retain literal rectangular/spline restrictions, denominators
-  and charged work. Position-only images infer no continuity; piecewise first
-  queries require closed C0, retain derivative jumps and avoid Hessians, while
-  smooth second queries require closed C1. Source scalar support projects these
-  same original coefficients in their actual gauge, not a native degree chart.
-  None of these queries mutates selected trim domains or establishes native
-  correspondence, branch ownership or realized-material embedding.
-  Original joint and pole-exclusion position overcovers use the coefficient-sheet
-  interface, not selected-trim membership. Literal/natural coefficient support
-  remains mandatory; position enclosures grant no material or continuity authority.
+  Finite F/G homotopies and auxiliary support rectangles use explicit original
+  coefficient-sheet queries, not trim-box membership as an evaluation shortcut.
+  These borrow the captured inventory and retain literal rectangular/spline
+  restrictions, denominators and charged work. Position-only images infer no
+  continuity; piecewise first queries require closed C0 and retain derivative
+  jumps, while smooth second queries require closed C1. Auxiliary inverse boxes
+  retain strict original-root inclusion, scaled contraction and branch checks;
+  independent selected-domain calibration supplies material membership.
+  Source 2D images may intersect their natural enclosure with an enclosed
+  midpoint plus the complete derivative only after checked C0. Prepared coedges
+  retain whole-restriction jets separately from selected image metadata; reuse
+  requires the identical captured operator and exact validated full range.
+  Refined requests retain ordinary evaluation and every visit remains charged
+  and cancellation-aware. Source scalar support projects the same original
+  coefficients in their actual gauge, never a native degree chart. None of
+  these queries mutates selected domains or grants native correspondence,
+  branch ownership or realized-material embedding.
+  Complete-path winding and literal geometric laws may use the same selected
+  PCurve before its sealed C0, strictly monotone, endpoint-preserving calibration.
+  This preserves the complete oriented image and original root/turn expressions,
+  not interior parameter identity. Physical G, frozen cuts and native/source
+  correspondence must retain their spatial-gauge evaluator.
 - **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
   and `analysis/placed.rs` distinguish geometric from realized-material bounds.
   Source realization error must survive actual affine conversion, placement

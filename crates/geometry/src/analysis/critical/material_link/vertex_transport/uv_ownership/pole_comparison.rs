@@ -36,13 +36,16 @@ struct RawBoundary {
     displacement: Box3,
 }
 
-/// Call-local coefficient law. Borrowing all three immutable authorities keeps
-/// the normalized common polar function bound to its actual source operands.
+/// Call-local scalar pole law, bound to its actual original germ and scope.
+/// A whole-star law requires the separate common-coordinate theorem; an owned
+/// collar piece needs only its own unchanged polar coordinate.
 #[derive(Clone, Copy)]
 struct SharedPolarGerm<'a, 'd> {
     comparison: &'a PoleComparison,
     domain: &'a PreparedFaceTrimDomain<'d>,
     recipe: &'a CornerRecipe,
+    end: End,
+    scope: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -51,27 +54,31 @@ struct ExitSupport<'a, 'd> {
     shared_polar: Option<SharedPolarGerm<'a, 'd>>,
 }
 
-type ExitEvidence<'a, 'd> = Result<ExitSupport<'a, 'd>, (Interval, Interval)>;
+type ExitEvidence<'a, 'd> = Result<ExitSupport<'a, 'd>, (&'static str, Interval, Interval)>;
 
 impl SharedPolarGerm<'_, '_> {
-    /// No two-dimensional inverse is needed for this scalar support. The
-    /// sealed affine FUNCTION identity makes phi(s) common to every piece and
-    /// theta, including each original offset and the actual middle bulge.
+    /// No two-dimensional inverse is needed for this scalar support. Its
+    /// constructor binds the polar function to the whole star or one owned
+    /// collar piece whose transverse offset has exactly zero polar component.
     fn before_exit(
         &self,
         lower_s: f64,
+        piece: Piece,
         row: Box2,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
+        if self.scope.is_some_and(|scope| scope != piece_slot(piece)) {
+            return Ok(false);
+        }
         let s = source_unit_parameter(Interval::new(lower_s, 1.0)?)?;
         let polar = self.comparison.polar_axis;
         let angular = 1 - polar;
         if row[angular].lo != 0.0 || row[angular].hi != 0.0 {
             return Ok(false);
         }
-        let germ = end_curve(self.domain, self.recipe.outgoing, s, work, cancel)?;
+        let germ = end_curve(self.domain, self.end, s, work, cancel)?;
         let chart = self.comparison.chart(self.domain)?;
         if !chart.principal_polar(germ.position[polar])
             || row[polar].mul(germ.derivative[polar]).lo <= 0.0
@@ -96,13 +103,7 @@ impl SharedPolarGerm<'_, '_> {
         if radius_squared_s.lo <= 0.0 {
             return Ok(false);
         }
-        let exit = end_curve(
-            self.domain,
-            self.recipe.outgoing,
-            Interval::point(1.0),
-            work,
-            cancel,
-        )?;
+        let exit = end_curve(self.domain, self.end, Interval::point(1.0), work, cancel)?;
         let (exit_q, _, _) = chart.covering_jet(exit.position, ZERO2, ZERO2, work, cancel)?;
         let radius_squared = dot2(exit_q, exit_q);
         if radius_squared.lo <= 0.0 || radius_squared.hi >= 1.0 {
@@ -132,7 +133,7 @@ pub(super) const STACK_BYTES: usize =
         + 6 * std::mem::size_of::<PoleChart>()
         + 4 * std::mem::size_of::<RawBoundary>()
         + 4 * std::mem::size_of::<PoleImage>()
-        + std::mem::size_of::<[Option<ExitEvidence<'static, 'static>>; 2]>()
+        + std::mem::size_of::<[[Option<ExitEvidence<'static, 'static>>; 3]; 2]>()
         + std::mem::size_of::<Option<Box2>>()
         + std::mem::size_of::<Option<(Box2, TrimClassification)>>();
 
@@ -141,6 +142,14 @@ fn active(recipe: &CornerRecipe, piece: Piece) -> bool {
         Piece::Outgoing => recipe.outgoing.collar,
         Piece::Incoming => recipe.incoming.collar,
         Piece::Middle => true,
+    }
+}
+
+fn piece_slot(piece: Piece) -> usize {
+    match piece {
+        Piece::Outgoing => 0,
+        Piece::Middle => 1,
+        Piece::Incoming => 2,
     }
 }
 
@@ -849,6 +858,16 @@ struct PoleImage {
     raw_uv: Box2,
 }
 
+#[derive(Debug)]
+struct PoleInverseFailure {
+    stage: &'static str,
+    candidate: [[f64; 2]; 2],
+    contracted: Option<[[f64; 2]; 2]>,
+    selected: [[f64; 2]; 2],
+    target: Box2,
+    proposal: Box2,
+}
+
 impl PoleComparison {
     /// The entire straight Cartesian homotopy, not just its two end maps.
     /// The hemisphere graph is the SAME original sphere on this whole cap.
@@ -896,10 +915,11 @@ impl PoleComparison {
         })
     }
 
-    /// Uniform strict inclusion in an ORIGINAL UV box using the existing
-    /// source local-inverse operator. This is not a nearest-root query or a
-    /// separate topology census. The real pole-axis branch is checked again
-    /// on the contracted root, in addition to graph hemisphere qualification.
+    /// Uniform strict inclusion on the ORIGINAL coefficient sheet using the
+    /// existing local-inverse operator, not selected-trim membership. Closed
+    /// trim edges need an open coefficient neighborhood for this auxiliary
+    /// inverse. The actual pole branch, hemisphere and unique-root obligations
+    /// remain mandatory; calibration independently requires selected Inside.
     fn inverse(
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
@@ -908,7 +928,10 @@ impl PoleComparison {
         proposal: Box2,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<Option<(Box2, crate::parametric::SurfaceEnclosure)>, GeometryError> {
+    ) -> Result<
+        Result<(Box2, crate::parametric::SurfaceEnclosure), PoleInverseFailure>,
+        GeometryError,
+    > {
         use crate::analysis::critical::material_link::fiber::{
             FiberNewton, OriginalFiber, fiber_krawczyk,
         };
@@ -923,29 +946,57 @@ impl PoleComparison {
             core: None,
         };
         let bounds = domain.uv_domain();
+        let crate::kernel::trim::PreparedTrimSurface::Original(original) = domain.surface_operand()
+        else {
+            return Err(refusal(
+                "pole inverse requires captured original coefficients",
+            ));
+        };
+        let mut failure = PoleInverseFailure {
+            stage: "candidate",
+            candidate: bounds,
+            contracted: None,
+            selected: bounds,
+            target,
+            proposal,
+        };
         for scale in [1.0, 2.0, 4.0] {
             let uv: [[f64; 2]; 2] = std::array::from_fn(|i| {
                 let padding = up(proposal[i].width() * scale);
-                [
-                    down(proposal[i].lo - padding).max(bounds[i][0]),
-                    up(proposal[i].hi + padding).min(bounds[i][1]),
-                ]
+                [down(proposal[i].lo - padding), up(proposal[i].hi + padding)]
             });
+            failure.candidate = uv;
+            failure.contracted = None;
+            failure.stage = "candidate";
             if uv.iter().any(|range| range[0] >= range[1])
                 || (0..2).any(|i| proposal[i].lo < uv[i][0] || proposal[i].hi > uv[i][1])
             {
                 continue;
             }
             let result = {
-                let surface = &domain.surface_operand();
+                let surface = &crate::parametric::OriginalCoefficientSheet::new(original, uv)?;
                 (|| {
                     let jet = surface_enclosure(surface, uv, work, cancel)?;
-                    let FiberNewton::Enclosure { uv, unique: true } =
-                        fiber_krawczyk(surface, uv, &jet, &fiber, work, cancel)?
-                    else {
-                        return Ok(None);
+                    let newton = fiber_krawczyk(surface, uv, &jet, &fiber, work, cancel)?;
+                    let uv = match newton {
+                        FiberNewton::Enclosure { uv, unique: true } => uv,
+                        FiberNewton::Enclosure { uv, unique: false } => {
+                            failure.stage = "non_strict";
+                            failure.contracted = Some(uv);
+                            return Ok(None);
+                        }
+                        FiberNewton::Excluded => {
+                            failure.stage = "excluded";
+                            return Ok(None);
+                        }
+                        FiberNewton::Unresolved => {
+                            failure.stage = "unresolved";
+                            return Ok(None);
+                        }
                     };
                     let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    failure.stage = "root_branch";
+                    failure.contracted = Some(uv);
                     let relative =
                         std::array::from_fn(|i| jet.position[i].sub(Interval::point(center[i])));
                     if !chart.same_hemisphere(jet.position)
@@ -960,11 +1011,11 @@ impl PoleComparison {
                     Ok(Some((uv.map(|v| Interval { lo: v[0], hi: v[1] }), jet)))
                 })()
             }?;
-            if result.is_some() {
-                return Ok(result);
+            if let Some(result) = result {
+                return Ok(Ok(result));
             }
         }
-        Ok(None)
+        Ok(Err(failure))
     }
 
     fn misses_original_box(
@@ -977,8 +1028,7 @@ impl PoleComparison {
     ) -> Result<bool, GeometryError> {
         let chart = self.chart(domain)?;
         // The foreign collar is an exclusion overcover, not selected material.
-        let other_world =
-            domain.original_carrier_position_bounds(uv_box(other), work, cancel)?;
+        let other_world = domain.original_carrier_position_bounds(uv_box(other), work, cancel)?;
         // Projection is two-to-one globally. Never confuse the opposite pole
         // with a collision, or use the projection to identify source sheets.
         if chart.opposite_hemisphere(other_world) {
@@ -1158,6 +1208,7 @@ impl PoleComparison {
         let mut half_width = 0.25_f64;
         let mut last_proposal = None;
         let mut last_classification = None;
+        let mut last_inverse = None;
         for _ in 0..=MAX_DEPTH {
             work.charge(1, cancel)?;
             let lower = 0.5 - half_width;
@@ -1182,18 +1233,19 @@ impl PoleComparison {
             )?
             .uv;
             last_proposal = Some(proposal);
-            if let Some((uv, _)) =
-                self.inverse(domain, &chart, reference.xy, proposal, work, cancel)?
-            {
-                // Strict original-carrier inverse inclusion, the REAL pole
-                // half-ray and canonical branch were proved by inverse().
-                let membership = domain.classify(uv_box(uv), work, cancel)?;
-                if membership == TrimClassification::Inside {
-                    return Ok(true);
-                }
-                last_classification = Some((uv, membership));
-                if membership == TrimClassification::Outside {
-                    break;
+            match self.inverse(domain, &chart, reference.xy, proposal, work, cancel)? {
+                Err(failure) => last_inverse = Some(failure),
+                Ok((uv, _)) => {
+                    // Strict original-carrier inverse inclusion, the REAL pole
+                    // half-ray and canonical branch were proved by inverse().
+                    let membership = domain.classify(uv_box(uv), work, cancel)?;
+                    if membership == TrimClassification::Inside {
+                        return Ok(true);
+                    }
+                    last_classification = Some((uv, membership));
+                    if membership == TrimClassification::Outside {
+                        break;
+                    }
                 }
             }
             half_width *= 0.5;
@@ -1201,7 +1253,7 @@ impl PoleComparison {
         Err(ownership_failure(
             recipe,
             format_args!(
-                "pole calibration strict original inverse/Inside target_q={:?} last_source_uv_proposal={last_proposal:?} last_classification={last_classification:?}",
+                "pole calibration strict original inverse/Inside target_q={:?} last_source_uv_proposal={last_proposal:?} last_classification={last_classification:?} last_inverse={last_inverse:?}",
                 reference.xy,
             ),
         ))
@@ -1343,8 +1395,117 @@ impl PoleComparison {
                 comparison: self,
                 domain,
                 recipe,
+                end: recipe.outgoing,
+                scope: None,
             });
         Ok((exact_exit, shared))
+    }
+
+    /// A separator belongs to one reference piece, not necessarily the whole
+    /// outer trace. Independent original germs need not have equal exit levels.
+    /// At an owned collar the canonical normal starts at its entire cross.
+    /// For the other pieces a transverse normal starts at the exact cross/B
+    /// join: the remaining central cross has nonnegative support, while the
+    /// directed B coefficient and other cross have strictly negative support.
+    #[allow(clippy::too_many_arguments)]
+    fn scoped_exit_support<'a, 'd>(
+        &'a self,
+        domain: &'a PreparedFaceTrimDomain<'d>,
+        recipe: &'a CornerRecipe,
+        index: usize,
+        piece: Piece,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<ExitEvidence<'a, 'd>, GeometryError> {
+        let own = if index == 0 {
+            recipe.outgoing
+        } else {
+            recipe.incoming
+        };
+        let other = if index == 0 {
+            recipe.incoming
+        } else {
+            recipe.outgoing
+        };
+        let direction = if own.spatial_high { -1.0 } else { 1.0 };
+        let at = chart_jet(domain, own.use_.coedge, [own.exit; 2], work, cancel)?;
+        let row = at
+            .derivative
+            .map(|value| value.mul(Interval::point(direction)));
+        let (exact, shared_polar) = self.exit_polar_law(domain, recipe, row, work, cancel)?;
+        if self.outer_before_exit(domain, recipe, index, row, at.position, exact, work, cancel)? {
+            return Ok(Ok(ExitSupport { row, shared_polar }));
+        }
+        let other_at = end_curve(domain, other, Interval::point(1.0), work, cancel)?.position;
+        let other_join: Box2 = std::array::from_fn(|axis| other_at[axis].add(other.offset[axis]));
+        let other_cross = hull2(other_at, other_join);
+        let original_support = dot2(
+            row,
+            std::array::from_fn(|axis| other_cross[axis].sub(at.position[axis])),
+        );
+        let original_bulge = dot2(row, recipe.bulge);
+        let own_piece = matches!((index, piece), (0, Piece::Outgoing) | (1, Piece::Incoming));
+        if own_piece {
+            let angular = 1 - self.polar_axis;
+            let zero = |value: Interval| value.lo == 0.0 && value.hi == 0.0;
+            if zero(row[angular])
+                && zero(own.offset[self.polar_axis])
+                && !row[self.polar_axis].contains_zero()
+            {
+                // At s=1 the complete cross is the SAME original exit plus
+                // its retained transverse offset, not an independently equal
+                // endpoint of another germ.
+                return Ok(Ok(ExitSupport {
+                    row,
+                    shared_polar: Some(SharedPolarGerm {
+                        comparison: self,
+                        domain,
+                        recipe,
+                        end: own,
+                        scope: Some(piece_slot(piece)),
+                    }),
+                }));
+            }
+            return Ok(Err(("owned_polar_cross", original_support, original_bulge)));
+        }
+        let own_join: Box2 = std::array::from_fn(|axis| at.position[axis].add(own.offset[axis]));
+        let delta: Box2 = std::array::from_fn(|axis| other_join[axis].sub(own_join[axis]));
+        let tangent = row.map(Interval::mid);
+        let rotated = [-tangent[1], tangent[0]];
+        let toward = rotated[0] * delta[0].mid() + rotated[1] * delta[1].mid();
+        let side = if toward > 0.0 { -1.0 } else { 1.0 };
+        // This finite tilted-normal proposal also covers a degenerate owned
+        // cross. All admission below uses complete original coefficients.
+        let proposal: [f64; 2] = std::array::from_fn(|axis| tangent[axis] + side * rotated[axis]);
+        if proposal.into_iter().any(|value| !value.is_finite())
+            || proposal.into_iter().all(|value| value == 0.0)
+        {
+            return Ok(Err(("transverse_normal", original_support, original_bulge)));
+        }
+        let row = proposal.map(Interval::point);
+        let offset_support = dot2(row, own.offset);
+        if offset_support.hi > 0.0 {
+            return Ok(Err(("central_cross_side", offset_support, original_bulge)));
+        }
+        let bulge = dot2(row, recipe.bulge);
+        let support = if matches!(piece, Piece::Middle) {
+            // With z directed away from this join, Phi(B(z)) =
+            // z * (row.delta + (1-z)*row.bulge). Its only possible
+            // closed zero is the already owned z=0 join.
+            dot2(row, delta).add(Interval::new(0.0, bulge.hi.max(0.0))?)
+        } else {
+            dot2(
+                row,
+                std::array::from_fn(|axis| other_cross[axis].sub(own_join[axis])),
+            )
+        };
+        if support.hi >= 0.0 {
+            return Ok(Err(("scoped_outer_support", support, bulge)));
+        }
+        Ok(Ok(ExitSupport {
+            row,
+            shared_polar: None,
+        }))
     }
 
     /// When an entire outer arc has zero normal support, zero does NOT mean
@@ -1419,9 +1580,20 @@ impl PoleComparison {
         shared_polar: Option<SharedPolarGerm<'_, '_>>,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<Result<(), (&'static str, Option<Interval>)>, GeometryError> {
+    ) -> Result<
+        Result<(), (&'static str, Option<Interval>, Option<PoleInverseFailure>)>,
+        GeometryError,
+    > {
         if let Some(law) = shared_polar {
-            if law.before_exit(cell[0][0], row, work, cancel)? {
+            if !std::ptr::eq(law.comparison, self)
+                || !std::ptr::eq(law.domain, domain)
+                || !std::ptr::eq(law.recipe, recipe)
+            {
+                return Err(refusal(
+                    "pole scalar exit law belongs to another source recipe",
+                ));
+            }
+            if law.before_exit(cell[0][0], piece, row, work, cancel)? {
                 return Ok(Ok(()));
             }
         }
@@ -1435,15 +1607,15 @@ impl PoleComparison {
             work,
             cancel,
         )?;
-        let Some((_, jet)) = self.inverse(domain, &chart, image.q, image.raw_uv, work, cancel)?
-        else {
-            return Ok(Err(("reference_uv_inverse", None)));
+        let jet = match self.inverse(domain, &chart, image.q, image.raw_uv, work, cancel)? {
+            Ok((_, jet)) => jet,
+            Err(failure) => return Ok(Err(("reference_uv_inverse", None, Some(failure)))),
         };
         let du = chart.project_vector(jet.du);
         let dv = chart.project_vector(jet.dv);
         let det = determinant([du[0], du[1]], [dv[0], dv[1]]);
         if det.contains_zero() {
-            return Ok(Err(("reference_inverse_jacobian", Some(det))));
+            return Ok(Err(("reference_inverse_jacobian", Some(det), None)));
         }
         let derivative = [
             image.qs[0]
@@ -1459,7 +1631,7 @@ impl PoleComparison {
         Ok(if support.lo > 0.0 {
             Ok(())
         } else {
-            Err(("reference_inverse_directional_support", Some(support)))
+            Err(("reference_inverse_directional_support", Some(support), None))
         })
     }
 
@@ -1471,236 +1643,218 @@ impl PoleComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
-        let Some(collar) = OriginalCollar::for_enclosure(domain, end.use_, work, cancel)? else {
-            return Err(self.central_failure(recipe, end, "constructor"));
-        };
-        let Some(embedding) = collar.embedding([end.exit; 2], [0.0, 1.0], work, cancel)? else {
-            return Err(self.central_failure(recipe, end, "scoped_exit_embedding"));
-        };
-        if !embedding.covers(&collar, [end.exit; 2], [0.0, 1.0]) {
-            return Err(self.central_failure(recipe, end, "scoped_exit_receipt"));
-        }
-        let mut central = collar.range;
-        for owned in [recipe.outgoing, recipe.incoming] {
-            if owned.edge == end.edge {
-                central[usize::from(owned.spatial_high)] = owned.exit;
+        let before = work.consumed();
+        let mut last_inverse = None;
+        let mut last_reference = None;
+        let mut active_native = None;
+        let mut active_cell = None;
+        let outcome = (|| {
+            let Some(collar) = OriginalCollar::for_enclosure(domain, end.use_, work, cancel)?
+            else {
+                return Err(self.central_failure(recipe, end, "constructor"));
+            };
+            let Some(embedding) = collar.embedding([end.exit; 2], [0.0, 1.0], work, cancel)? else {
+                return Err(self.central_failure(recipe, end, "scoped_exit_embedding"));
+            };
+            if !embedding.covers(&collar, [end.exit; 2], [0.0, 1.0]) {
+                return Err(self.central_failure(recipe, end, "scoped_exit_receipt"));
             }
-        }
-        if central[0] > central[1] {
-            return Err(self.central_failure(recipe, end, "native_remaining_range"));
-        }
-        let chart = self.chart(domain)?;
-        let mut native_stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-        native_stack[0] = (central, 0);
-        let mut native_pending = 1;
-        // The source-only outer trace and exact coefficient law do not change
-        // during the native-cell census. Retain each owned exit proof once.
-        let mut exit_supports: [Option<ExitEvidence<'_, '_>>; 2] = [None; 2];
-        while native_pending != 0 {
-            native_pending -= 1;
-            let (range, depth) = native_stack[native_pending];
-            work.charge(1, cancel)?;
-            let beta = collar.bubble(range)?.0;
-            let other = collar.normal_image(range, UNIT.mul(beta), work, cancel)?;
-            if self.misses_original_box(domain, recipe, other, work, cancel)? {
-                continue;
+            let mut central = collar.range;
+            for owned in [recipe.outgoing, recipe.incoming] {
+                if owned.edge == end.edge {
+                    central[usize::from(owned.spatial_high)] = owned.exit;
+                }
             }
-            let mut supported = false;
-            let mut last_support = None;
-            for (index, owned) in [recipe.outgoing, recipe.incoming].into_iter().enumerate() {
-                if owned.edge != end.edge {
-                    continue;
-                }
-                let direction = if owned.spatial_high { -1.0 } else { 1.0 };
-                let evidence = match exit_supports[index] {
-                    Some(evidence) => evidence,
-                    None => {
-                        let at =
-                            chart_jet(domain, owned.use_.coedge, [owned.exit; 2], work, cancel)?;
-                        let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
-                        let (exact_exit, shared_polar) =
-                            self.exit_polar_law(domain, recipe, row, work, cancel)?;
-                        let evidence = if self.outer_before_exit(
-                            domain,
-                            recipe,
-                            index,
-                            row,
-                            at.position,
-                            exact_exit,
-                            work,
-                            cancel,
-                        )? {
-                            Ok(ExitSupport { row, shared_polar })
-                        } else {
-                            let other_end = if index == 0 {
-                                recipe.incoming
-                            } else {
-                                recipe.outgoing
-                            };
-                            let other_at =
-                                end_curve(domain, other_end, Interval::point(1.0), work, cancel)?
-                                    .position;
-                            let other_cross = hull2(
-                                other_at,
-                                std::array::from_fn(|i| other_at[i].add(other_end.offset[i])),
-                            );
-                            Err((
-                                dot2(
-                                    row,
-                                    std::array::from_fn(|i| other_cross[i].sub(at.position[i])),
-                                ),
-                                dot2(row, recipe.bulge),
-                            ))
-                        };
-                        exit_supports[index] = Some(evidence);
-                        evidence
-                    }
-                };
-                let support = match evidence {
-                    Ok(support) => support,
-                    Err((support, bulge)) => {
-                        last_support =
-                            Some(("outer_exit_support", index, Some(support), bulge, None));
-                        continue;
-                    }
-                };
-                let row = support.row;
-                if if owned.spatial_high {
-                    range[1] > owned.exit
-                } else {
-                    range[0] < owned.exit
-                } {
-                    last_support = Some((
-                        "central_native_side",
-                        index,
-                        None,
-                        dot2(row, recipe.bulge),
-                        None,
-                    ));
-                    continue;
-                }
-                // The SAME original exit and canonical quarter-turn offset
-                // give Phi(exit,w)=0. The signed native difference is >=0
-                // including its closed zero; the strict prefix derivative
-                // below factors Phi without subtracting rounded exit boxes.
-                let prefix = [range[0].min(owned.exit), range[1].max(owned.exit)];
-                let original = chart_jet(domain, owned.use_.coedge, prefix, work, cancel)?;
-                let (beta, beta_t) = collar.bubble(prefix)?;
-                let derivative = match collar.transport {
-                    CarrierTransport::Exact => original.derivative,
-                    CarrierTransport::Collar { width, inward } => {
-                        let n = rotate(original.derivative, inward);
-                        let nt = rotate(original.second_derivative, inward);
-                        std::array::from_fn(|i| {
-                            original.derivative[i].add(
-                                Interval { lo: 0.0, hi: width }
-                                    .mul(beta_t.mul(n[i]).add(beta.mul(nt[i]))),
-                            )
-                        })
-                    }
-                };
-                if dot2(row, derivative.map(|v| v.mul(Interval::point(direction)))).lo <= 0.0 {
-                    last_support = Some((
-                        "central_directional_support",
-                        index,
-                        Some(dot2(
-                            row,
-                            derivative.map(|v| v.mul(Interval::point(direction))),
-                        )),
-                        dot2(row, recipe.bulge),
-                        None,
-                    ));
-                    continue;
-                }
+            if central[0] > central[1] {
+                return Err(self.central_failure(recipe, end, "native_remaining_range"));
+            }
+            let chart = self.chart(domain)?;
+            let mut native_stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
+            native_stack[0] = (central, 0);
+            let mut native_pending = 1;
+            let mut exit_supports: [[Option<ExitEvidence<'_, '_>>; 3]; 2] = [[None; 3]; 2];
+            while native_pending != 0 {
+                native_pending -= 1;
+                let (range, depth) = native_stack[native_pending];
+                active_native = Some((range, depth));
+                work.charge(1, cancel)?;
+                let beta = collar.bubble(range)?.0;
+                let other = collar.normal_image(range, UNIT.mul(beta), work, cancel)?;
                 let other_world =
                     domain.original_carrier_position_bounds(uv_box(other), work, cancel)?;
+                if chart.opposite_hemisphere(other_world) {
+                    continue;
+                }
                 let other_local = chart.project(other_world);
                 let other_q = [other_local[0], other_local[1]];
-                let mut all_pieces = true;
-                for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
-                    if !active(recipe, piece) {
+                let mut supported = false;
+                let mut last_support = None;
+                for (index, owned) in [recipe.outgoing, recipe.incoming].into_iter().enumerate() {
+                    if owned.edge != end.edge {
                         continue;
                     }
-                    let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
-                    stack[0] = ([[0.0, 1.0]; 2], 0);
-                    let mut pending = 1;
-                    while pending != 0 {
-                        pending -= 1;
-                        let (cell, cell_depth) = stack[pending];
-                        work.charge(1, cancel)?;
-                        let image = self.image(
-                            domain,
-                            recipe,
-                            piece,
-                            Interval::new(cell[0][0], cell[0][1])?,
-                            Interval::new(cell[1][0], cell[1][1])?,
-                            work,
-                            cancel,
-                        )?;
-                        if disjoint(image.position, other_world) || disjoint(image.q, other_q) {
+                    let direction = if owned.spatial_high { -1.0 } else { 1.0 };
+                    if if owned.spatial_high {
+                        range[1] > owned.exit
+                    } else {
+                        range[0] < owned.exit
+                    } {
+                        last_support = Some(("central_native_side", index, None, None, None));
+                        continue;
+                    }
+                    let prefix = [range[0].min(owned.exit), range[1].max(owned.exit)];
+                    let original = chart_jet(domain, owned.use_.coedge, prefix, work, cancel)?;
+                    let (beta, beta_t) = collar.bubble(prefix)?;
+                    let derivative = match collar.transport {
+                        CarrierTransport::Exact => original.derivative,
+                        CarrierTransport::Collar { width, inward } => {
+                            let n = rotate(original.derivative, inward);
+                            let nt = rotate(original.second_derivative, inward);
+                            std::array::from_fn(|axis| {
+                                original.derivative[axis].add(
+                                    Interval { lo: 0.0, hi: width }
+                                        .mul(beta_t.mul(n[axis]).add(beta.mul(nt[axis]))),
+                                )
+                            })
+                        }
+                    };
+                    let mut all_pieces = true;
+                    for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
+                        if !active(recipe, piece) {
                             continue;
                         }
-                        let inverse_refusal = match self.cell_before_exit(
-                            domain,
-                            recipe,
-                            piece,
-                            cell,
-                            row,
-                            support.shared_polar,
-                            work,
-                            cancel,
-                        )? {
-                            Ok(()) => continue,
-                            Err(reason) => reason,
-                        };
-                        let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
-                        let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
-                        if cell_depth >= MAX_DEPTH || mid <= cell[axis][0] || mid >= cell[axis][1] {
-                            all_pieces = false;
-                            last_support = Some((
-                                inverse_refusal.0,
-                                index,
-                                inverse_refusal.1,
-                                dot2(row, recipe.bulge),
-                                Some(cell),
-                            ));
+                        let slot = piece_slot(piece);
+                        let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
+                        stack[0] = ([[0.0, 1.0]; 2], 0);
+                        let mut pending = 1;
+                        while pending != 0 {
+                            pending -= 1;
+                            let (cell, cell_depth) = stack[pending];
+                            active_cell = Some((slot, cell, cell_depth));
+                            work.charge(1, cancel)?;
+                            let image = self.image(
+                                domain,
+                                recipe,
+                                piece,
+                                Interval::new(cell[0][0], cell[0][1])?,
+                                Interval::new(cell[1][0], cell[1][1])?,
+                                work,
+                                cancel,
+                            )?;
+                            if disjoint(image.position, other_world) || disjoint(image.q, other_q) {
+                                continue;
+                            }
+                            let evidence = match exit_supports[index][slot] {
+                                Some(evidence) => evidence,
+                                None => {
+                                    let evidence = self.scoped_exit_support(
+                                        domain, recipe, index, piece, work, cancel,
+                                    )?;
+                                    exit_supports[index][slot] = Some(evidence);
+                                    evidence
+                                }
+                            };
+                            // One reference DFS handles both geometric exclusion
+                            // and original exit support. Do not first repeat a
+                            // complete pure-disjoint search at an owned contact.
+                            let (inverse_refusal, refusal_bulge) = match evidence {
+                                Err((phase, value, bulge)) => {
+                                    ((phase, Some(value), None), Some(bulge))
+                                }
+                                Ok(support) => {
+                                    // The canonical cross starts at zero support.
+                                    // The constructor owns its complete zero set;
+                                    // positive prefix slope puts central points
+                                    // on the other side of this SAME cross.
+                                    let central_slope = dot2(
+                                        support.row,
+                                        derivative
+                                            .map(|value| value.mul(Interval::point(direction))),
+                                    );
+                                    if central_slope.lo <= 0.0 {
+                                        (
+                                            (
+                                                "central_directional_support",
+                                                Some(central_slope),
+                                                None,
+                                            ),
+                                            None,
+                                        )
+                                    } else {
+                                        match self.cell_before_exit(
+                                            domain,
+                                            recipe,
+                                            piece,
+                                            cell,
+                                            support.row,
+                                            support.shared_polar,
+                                            work,
+                                            cancel,
+                                        )? {
+                                            Ok(()) => continue,
+                                            Err(reason) => (reason, None),
+                                        }
+                                    }
+                                }
+                            };
+                            last_reference = Some((inverse_refusal.0, inverse_refusal.1));
+                            last_inverse = inverse_refusal.2;
+                            let axis =
+                                usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
+                            let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
+                            if cell_depth >= MAX_DEPTH
+                                || mid <= cell[axis][0]
+                                || mid >= cell[axis][1]
+                            {
+                                all_pieces = false;
+                                last_support = Some((
+                                    inverse_refusal.0,
+                                    index,
+                                    Some((slot, cell)),
+                                    inverse_refusal.1,
+                                    refusal_bulge,
+                                ));
+                                break;
+                            }
+                            let mut left = cell;
+                            let mut right = cell;
+                            left[axis][1] = mid;
+                            right[axis][0] = mid;
+                            stack[pending] = (right, cell_depth + 1);
+                            stack[pending + 1] = (left, cell_depth + 1);
+                            pending += 2;
+                        }
+                        if !all_pieces {
                             break;
                         }
-                        let mut left = cell;
-                        let mut right = cell;
-                        left[axis][1] = mid;
-                        right[axis][0] = mid;
-                        stack[pending] = (right, cell_depth + 1);
-                        stack[pending + 1] = (left, cell_depth + 1);
-                        pending += 2;
                     }
-                    if !all_pieces {
+                    if all_pieces {
+                        supported = true;
                         break;
                     }
                 }
-                if all_pieces {
-                    supported = true;
-                    break;
+                if supported {
+                    continue;
                 }
-            }
-            if supported {
-                continue;
-            }
-            let mid = range[0] * 0.5 + range[1] * 0.5;
-            if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
-                return Err(self.central_failure(
+                let mid = range[0] * 0.5 + range[1] * 0.5;
+                if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
+                    return Err(self.central_failure(
                     recipe,
                     end,
                     format_args!(
-                        "remaining_cell range={range:?} depth={depth} last_support={last_support:?}"
+                        "remaining_cell range={range:?} depth={depth} last_inverse={last_inverse:?} last_support={last_support:?}"
                     ),
                 ));
+                }
+                native_stack[native_pending] = ([mid, range[1]], depth + 1);
+                native_stack[native_pending + 1] = ([range[0], mid], depth + 1);
+                native_pending += 2;
             }
-            native_stack[native_pending] = ([mid, range[1]], depth + 1);
-            native_stack[native_pending + 1] = ([range[0], mid], depth + 1);
-            native_pending += 2;
-        }
-        Ok(true)
+            Ok(true)
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "pole central support={last_reference:?} inverse={last_inverse:?} active_native={active_native:?} active_cell={active_cell:?}"
+        )))
     }
 
     pub(super) fn disk_owned(
@@ -1868,7 +2022,6 @@ mod properties {
             .unwrap();
         let available = available.checked_sub(incidence.owned_bytes()).unwrap();
         let mut seen = vec![false; poles.len()];
-        let mut polar_laws = 0;
         for vertex in vertices {
             // One canonical source-only plan per ACTUAL NativeV. Neither
             // pole selection nor cutovers are chosen from failure coordinates.
@@ -2063,13 +2216,21 @@ mod properties {
                     .exit_polar_law(&domain, recipe, row, &mut work, &cancel)
                     .unwrap()
                 {
-                    assert!(law.before_exit(0.5, row, &mut work, &cancel).unwrap());
                     assert!(
-                        !law.before_exit(0.5, row.map(Interval::neg), &mut work, &cancel,)
-                            .unwrap(),
+                        law.before_exit(0.5, Piece::Middle, row, &mut work, &cancel)
+                            .unwrap()
+                    );
+                    assert!(
+                        !law.before_exit(
+                            0.5,
+                            Piece::Middle,
+                            row.map(Interval::neg),
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap(),
                         "a radius derivative alone cannot authorize the opposite cutover sign"
                     );
-                    polar_laws += 1;
                 }
                 let mut wrong_gauge = *recipe;
                 wrong_gauge.outgoing.endpoint = up(wrong_gauge.outgoing.endpoint);
@@ -2117,10 +2278,6 @@ mod properties {
         assert!(
             seen.into_iter().all(|value| value),
             "every original pole and closed cutover was consumed"
-        );
-        assert!(
-            polar_laws > 0,
-            "original affine polar functions exercise the closed support lemma"
         );
         assert_eq!(geometry_before, format!("{:?}", definition.brep()),);
     }

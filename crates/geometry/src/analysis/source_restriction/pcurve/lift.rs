@@ -5,8 +5,10 @@
 //! Temporary actual S_original(gamma_raw(t)) operand. It owns only borrowed
 //! coefficient inventories, never a generated source declaration or topology.
 use super::window::PcurveWindow;
-use crate::kernel::source_operand::{PreparedOriginalCurve, PreparedOriginalSurface, lift};
-use crate::parametric::{AxisSpans, CurveEvaluator, Interval};
+use crate::kernel::source_operand::{
+    PreparedOriginalCurve, PreparedOriginalSurface, exact_plane_curve_affine, lift,
+};
+use crate::parametric::{AxisSpans, CurveEvaluator, ExactAffineCurve, Interval};
 use crate::{GeometryError, GeometryWorkBudget};
 use solidcraft_step::geom::Pcurve;
 use spiling_contracts::geometry::GeometryErrorCode;
@@ -78,6 +80,16 @@ impl<'d> LiftedPcurve<'d> {
 impl CurveEvaluator for LiftedPcurve<'_> {
     fn active_range(&self) -> [f64; 2] {
         self.chart.active_range()
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<ExactAffineCurve>, GeometryError> {
+        let Some(chart) = self.chart.exact_affine_coefficients(work, cancel)? else {
+            return Ok(None);
+        };
+        exact_plane_curve_affine(self.surface.source(), chart, 0, work, cancel)
     }
     fn source_parameter_map(&self) -> Option<[Interval; 2]> {
         Some([Interval::point(0.0), Interval::point(1.0)])

@@ -213,6 +213,85 @@ impl SurfaceEvaluator for PreparedOriginalSurface<'_> {
         Some(self.source())
     }
 }
+
+/// A finite, borrowed coefficient-only query scope. This neither enlarges the
+/// prepared selected domain nor certifies trim/material membership. All source
+/// restrictions and continuity checks use the owner's one immutable inventory.
+pub(crate) struct OriginalCoefficientSheet<'p, 'd> {
+    surface: &'p PreparedOriginalSurface<'d>,
+    scope: [[f64; 2]; 2],
+}
+
+impl<'p, 'd> OriginalCoefficientSheet<'p, 'd> {
+    pub(crate) fn new(
+        surface: &'p PreparedOriginalSurface<'d>,
+        scope: [[f64; 2]; 2],
+    ) -> Result<Self, GeometryError> {
+        for range in scope {
+            Interval::new(range[0], range[1])?;
+        }
+        Ok(Self { surface, scope })
+    }
+
+    fn validate_query(&self, uv: [[f64; 2]; 2]) -> Result<(), GeometryError> {
+        for i in 0..2 {
+            Interval::new(uv[i][0], uv[i][1])?;
+            if uv[i][0] < self.scope[i][0] || uv[i][1] > self.scope[i][1] {
+                return Err(nurbs_eval::conditioning(
+                    "original coefficient query exceeds its finite scope",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SurfaceEvaluator for OriginalCoefficientSheet<'_, '_> {
+    fn active_domain(&self) -> [[f64; 2]; 2] {
+        self.scope
+    }
+    fn tensor(
+        &self,
+        uv: [[f64; 2]; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SurfaceTensor, GeometryError> {
+        self.validate_query(uv)?;
+        self.surface.carrier_evaluate_order(uv, order, work, cancel)
+    }
+    fn continuous(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.validate_query(uv)?;
+        self.surface.carrier_continuity(uv, 0, work, cancel)
+    }
+    fn smooth(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.validate_query(uv)?;
+        self.surface.carrier_continuity(uv, 1, work, cancel)
+    }
+    fn parameter_axes(
+        &self,
+        uv: [[f64; 2]; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[(&[f64], usize); 2], GeometryError> {
+        self.validate_query(uv)?;
+        self.surface.carrier_evaluate_order(uv, 0, work, cancel)?;
+        self.surface.parameter_axes(work, cancel)
+    }
+    fn original_surface(&self) -> Option<&solidcraft_step::geom::Surface> {
+        Some(self.surface.source())
+    }
+}
 impl CurveEvaluator for Curve {
     fn active_range(&self) -> [f64; 2] {
         if let Ok(Some(n)) = curve_prepared::native_curve_nurbs(self) {
@@ -629,7 +708,23 @@ pub(crate) fn curve2d_piecewise_jet<C: CurveEvaluator + ?Sized>(
     if let Some(native) = curve.native_curve() {
         return super::native_curve2d_piecewise_jet(native, range, work, cancel);
     }
-    let j = curve.tensor(range, 2, work, cancel)?;
+    let mut j = curve.tensor(range, 2, work, cancel)?;
+    if range[0] < range[1]
+        && (0..2)
+            .any(|axis| j[0][axis].width() > up((range[1] - range[0]) * j[1][axis].abs_upper()))
+        && curve.continuous(range, work, cancel)?
+    {
+        // The midpoint proposes no geometry: its original position enclosure
+        // plus the COMPLETE derivative hull encloses every point by the MVT.
+        // C0 admits derivative jumps; without C0 retain the natural overcover.
+        // Use raw tensor evaluation, not recursive refined-jet evaluation.
+        let middle = range[0] * 0.5 + range[1] * 0.5;
+        let at_middle = curve.tensor([middle; 2], 0, work, cancel)?;
+        let delta = Interval::new(range[0], range[1])?.sub(Interval::point(middle));
+        for axis in 0..2 {
+            j[0][axis] = j[0][axis].intersect(at_middle[0][axis].add(delta.mul(j[1][axis])))?;
+        }
+    }
     Ok(ChartCurveEnclosure {
         position: [j[0][0], j[0][1]],
         derivative: [j[1][0], j[1][1]],

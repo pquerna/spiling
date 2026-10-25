@@ -912,6 +912,35 @@ impl<'a> PreparedOriginalSurface<'a> {
             dvv: j[0][2],
         })
     }
+    /// Requested-order coefficients, without selected-trim membership authority.
+    /// The literal source operators still enforce rectangular/natural domains,
+    /// denominator support and the original parameter gauge.
+    pub(crate) fn carrier_evaluate_order(
+        &self,
+        uv: [[f64; 2]; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<SurfaceTensor, GeometryError> {
+        work.charge(1, cancel)?;
+        if order > 3 {
+            return Err(conditioning(
+                "original surface derivative order exceeds three",
+            ));
+        }
+        surface_jet(self.source, uv, order, &self.inventory, 0, work, cancel)
+    }
+
+    pub(crate) fn carrier_continuity(
+        &self,
+        uv: [[f64; 2]; 2],
+        required: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.carrier_evaluate_order(uv, 0, work, cancel)?;
+        surface_continuity(self.source, uv, required, &self.inventory, 0, work, cancel)
+    }
 
     /// Evaluate the captured coefficient sheet on this finite query, not
     /// membership in its selected trim envelope. Source realization homotopies
@@ -2665,7 +2694,7 @@ impl PreparedOriginalCurve<'_> {
         Err(resource())
     }
 }
-fn exact_plane_curve_affine(
+pub(crate) fn exact_plane_curve_affine(
     mut surface: &Surface,
     chart: ExactAffineCurve,
     start_depth: usize,
@@ -2902,6 +2931,53 @@ mod tests {
         assert!(sheet.du[0].contains(1.0) && sheet.dv[1].contains(1.0));
         assert_eq!(prepared.active_domain(), active);
         assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
+        let borrowed =
+            crate::parametric::OriginalCoefficientSheet::new(&prepared, [[1.5, 2.5], [2.5, 3.5]])
+                .unwrap();
+        let jet = crate::parametric::surface_enclosure(&borrowed, outside_trim, &mut work, &cancel)
+            .unwrap();
+        assert!(jet.position[0].contains(2.0) && jet.position[1].contains(3.0));
+        assert!(
+            crate::parametric::SurfaceEvaluator::tensor(
+                &borrowed,
+                [[1.0, 3.0], [2.5, 3.5]],
+                0,
+                &mut work,
+                &cancel,
+            )
+            .is_err(),
+            "the borrowed view cannot exceed even its coefficient-only scope"
+        );
+        assert_eq!(prepared.active_domain(), active);
+        assert!(prepared.jet(outside_trim, &mut work, &cancel).is_err());
+
+        let literal = Surface::RectangularTrimmed {
+            basis: std::sync::Arc::new(Surface::Plane { position: frame() }),
+            u1: -1.0,
+            u2: 1.0,
+            v1: -1.0,
+            v2: 1.0,
+            u_sense: true,
+            v_sense: true,
+        };
+        let literal =
+            PreparedOriginalSurface::new(&literal, active, usize::MAX, &mut work, &cancel).unwrap();
+        let borrowed =
+            crate::parametric::OriginalCoefficientSheet::new(&literal, outside_trim).unwrap();
+        assert!(
+            crate::parametric::surface_enclosure(&borrowed, outside_trim, &mut work, &cancel)
+                .is_err(),
+            "coefficient scope never widens the literal source restriction"
+        );
+        assert!(
+            crate::parametric::SurfaceEvaluator::parameter_axes(
+                &borrowed,
+                outside_trim,
+                &mut work,
+                &cancel,
+            )
+            .is_err()
+        );
     }
 }
 

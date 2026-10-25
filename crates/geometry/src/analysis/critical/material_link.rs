@@ -168,15 +168,15 @@ impl std::fmt::Debug for LocalGeometryRefusal {
                 normal,
             } => f
                 .debug_struct("TransportJacobian")
+                .field("normal", normal)
+                .field("tangent", tangent)
+                .field("across", across)
+                .field("displacement_t", displacement_t)
+                .field("displacement", displacement)
                 .field("uv", uv)
                 .field("margin_uv", margin_uv)
                 .field("width", width)
                 .field("beta", beta)
-                .field("displacement", displacement)
-                .field("displacement_t", displacement_t)
-                .field("tangent", tangent)
-                .field("across", across)
-                .field("normal", normal)
                 .finish(),
         }
     }
@@ -782,25 +782,21 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 mul(Interval { lo: 0.0, hi: width }, mul(beta, v[axis])),
             )
         });
-        {
-            Ok(self
-                .domain
-                .original_carrier_piecewise_first(
-                    uv_box(add_margin(tube, self.margin)),
-                    work,
-                    cancel,
-                )?
-                .position
-                .map(|value| {
-                    add(
-                        value,
-                        Interval {
-                            lo: -allowance,
-                            hi: allowance,
-                        },
-                    )
-                }))
-        }
+        // This is an exclusion overcover, not a selected-domain or FIRST-matrix
+        // query. Preserve the complete original coefficient sheet and padding
+        // without imposing continuity or computing unused derivative columns.
+        Ok(self
+            .domain
+            .original_carrier_position_bounds(uv_box(add_margin(tube, self.margin)), work, cancel)?
+            .map(|value| {
+                add(
+                    value,
+                    Interval {
+                        lo: -allowance,
+                        hi: allowance,
+                    },
+                )
+            }))
     }
 
     fn other_collar_enclosure(
@@ -822,12 +818,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<[Interval; 2], GeometryError> {
-        let position = domain
-            .boundary_position_enclosure(coedge, range, work, cancel)?
-            .map(|value| Interval {
-                lo: value[0],
-                hi: value[1],
-            });
+        let jet = domain.boundary_piecewise_enclosure(coedge, range, work, cancel)?;
+        let position = jet.position;
         let proof = domain.original_coedge_correspondence(coedge)?;
         if proof.provenance()
             == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
@@ -835,12 +827,6 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         {
             return Ok(position);
         }
-        let jet = crate::parametric::curve2d_piecewise_jet(
-            &domain.coedge_operand(coedge)?,
-            range,
-            work,
-            cancel,
-        )?;
         let derivative = jet
             .derivative
             .map(|value| mul(value, proof.uv_parameter_derivative()));

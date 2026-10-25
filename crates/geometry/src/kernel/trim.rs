@@ -39,7 +39,8 @@ const MAX_DEPTH: u8 = 32;
 const SCRATCH_BYTES: usize = 128 * 1024
     + parametric::curve_prepared::CURVE_EVALUATION_SCRATCH_BYTES
     + parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES;
-const CLASSIFICATION_SCRATCH_BYTES: usize = SCRATCH_BYTES;
+const CLASSIFICATION_SCRATCH_BYTES: usize =
+    SCRATCH_BYTES + 2 * size_of::<parametric::ChartCurveEnclosure>();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrimClassification {
@@ -824,13 +825,13 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             .map(|span| span.range))
     }
 
-    pub(crate) fn boundary_position_enclosure(
+    pub(crate) fn boundary_piecewise_enclosure(
         &self,
         coedge: usize,
         range: [f64; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> Result<[[f64; 2]; 2], GeometryError> {
+    ) -> Result<parametric::ChartCurveEnclosure, GeometryError> {
         let curve = self.coedge_operand(coedge)?;
         let active = self.boundary_restriction(BoundaryCurve::Coedge(coedge)).0;
         Interval::new(range[0], range[1])?;
@@ -839,11 +840,24 @@ impl<'d> PreparedFaceTrimDomain<'d> {
                 "selected boundary query leaves its complete actual coefficient restriction",
             ));
         }
-        Ok(
-            parametric::curve2d_piecewise_jet(&curve, range, work, cancel)?
-                .position
-                .map(|v| [v.lo, v.hi]),
-        )
+        if self.original_surface.is_some() && range == curve.active_range() {
+            work.charge(1, cancel)?;
+            return Ok(self.original_coedges[coedge].full_uv_jet);
+        }
+        parametric::curve2d_piecewise_jet(&curve, range, work, cancel)
+    }
+
+    pub(crate) fn boundary_position_enclosure(
+        &self,
+        coedge: usize,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[f64; 2]; 2], GeometryError> {
+        Ok(self
+            .boundary_piecewise_enclosure(coedge, range, work, cancel)?
+            .position
+            .map(|v| [v.lo, v.hi]))
     }
 
     pub(crate) fn boundary_first_enclosure(
@@ -1012,42 +1026,90 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<i64>, GeometryError> {
-        let curve = self.boundary_operand(boundary)?;
-        let (range, forward) = self.boundary_restriction(boundary);
-        let mut total = 0i64;
-        let mut stack = [([0.0; 2], 0u8); MAX_DEPTH as usize + 1];
-        stack[0] = (range, 0);
-        let mut live = 1;
-        while live != 0 {
-            live -= 1;
-            let (part, depth) = stack[live];
-            work.charge(1, cancel)?;
-            let image = parametric::curve2d_piecewise_jet(&curve, part, work, cancel)?.position;
-            let disjoint = (0..2).any(|a| image[a].hi < uv_box[a][0] || image[a].lo > uv_box[a][1]);
-            if disjoint {
-                let a =
-                    parametric::curve2d_piecewise_jet(&curve, [part[0]; 2], work, cancel)?.position;
-                let b =
-                    parametric::curve2d_piecewise_jet(&curve, [part[1]; 2], work, cancel)?.position;
-                if let Some(delta) = chord_winding(a, b, point, shear) {
-                    total = total
-                        .checked_add(delta)
-                        .ok_or_else(|| resource("native trim winding count overflow"))?;
-                    continue;
+        let before = work.consumed();
+        let mut active = ([0.0; 2], 0_u8);
+        let mut last_split = None;
+        let outcome = (|| {
+            // Winding depends on the complete oriented path, not its calibrated
+            // native/spatial speed. Never pass these parameters to physical G or a
+            // correspondence consumer.
+            let curve = match boundary {
+                BoundaryCurve::Coedge(index) => {
+                    self.coedge_geometric_operand(index, work, cancel)?
                 }
+                BoundaryCurve::Joint(_) => self.boundary_operand(boundary)?,
+            };
+            let (mut range, forward) = self.boundary_restriction(boundary);
+            let geometric = matches!(curve, PreparedTrimCurve::GeometricPcurve(_));
+            if geometric {
+                range = curve.active_range();
             }
-            if depth == MAX_DEPTH {
-                return Ok(None);
+            let mut total = 0i64;
+            let mut stack = [([0.0; 2], 0u8); MAX_DEPTH as usize + 1];
+            stack[0] = (range, 0);
+            let mut live = 1;
+            while live != 0 {
+                live -= 1;
+                let (part, depth) = stack[live];
+                active = (part, depth);
+                work.charge(1, cancel)?;
+                let whole = match boundary {
+                    BoundaryCurve::Coedge(index) if !geometric => {
+                        self.boundary_piecewise_enclosure(index, part, work, cancel)?
+                    }
+                    _ => parametric::curve2d_piecewise_jet(&curve, part, work, cancel)?,
+                };
+                let mut image = whole.position;
+                if curve.native_curve().is_some()
+                    && !(0..2).any(|a| image[a].hi < uv_box[a][0] || image[a].lo > uv_box[a][1])
+                    && parametric::curve_parameter_span_continuous(&curve, part, work, cancel)?
+                {
+                    // Original operators are tightened by the shared source jet.
+                    // Preserve the native fallback: both bounds enclose the same
+                    // C0 piecewise curve, including its finite derivative jumps.
+                    let middle = part[0] * 0.5 + part[1] * 0.5;
+                    let midpoint =
+                        parametric::curve2d_piecewise_jet(&curve, [middle; 2], work, cancel)?
+                            .position;
+                    let displacement =
+                        Interval::new(part[0], part[1])?.sub(Interval::point(middle));
+                    for axis in 0..2 {
+                        image[axis] = image[axis].intersect(
+                            midpoint[axis].add(displacement.mul(whole.derivative[axis])),
+                        )?;
+                    }
+                }
+                let disjoint =
+                    (0..2).any(|a| image[a].hi < uv_box[a][0] || image[a].lo > uv_box[a][1]);
+                if disjoint {
+                    let a = parametric::curve2d_piecewise_jet(&curve, [part[0]; 2], work, cancel)?
+                        .position;
+                    let b = parametric::curve2d_piecewise_jet(&curve, [part[1]; 2], work, cancel)?
+                        .position;
+                    if let Some(delta) = chord_winding(a, b, point, shear) {
+                        total = total
+                            .checked_add(delta)
+                            .ok_or_else(|| resource("native trim winding count overflow"))?;
+                        continue;
+                    }
+                }
+                last_split = Some((part, depth, image, disjoint));
+                if depth == MAX_DEPTH {
+                    return Ok(None);
+                }
+                let middle = part[0] * 0.5 + part[1] * 0.5;
+                if middle <= part[0] || middle >= part[1] {
+                    return Ok(None);
+                }
+                stack[live] = ([middle, part[1]], depth + 1);
+                stack[live + 1] = ([part[0], middle], depth + 1);
+                live += 2;
             }
-            let middle = part[0] * 0.5 + part[1] * 0.5;
-            if middle <= part[0] || middle >= part[1] {
-                return Ok(None);
-            }
-            stack[live] = ([middle, part[1]], depth + 1);
-            stack[live + 1] = ([part[0], middle], depth + 1);
-            live += 2;
-        }
-        Ok(Some(if forward { total } else { -total }))
+            Ok(Some(if forward { total } else { -total }))
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "original trim winding boundary={boundary:?} shear={shear} active={active:?} last_split={last_split:?} query={uv_box:?}",
+        )))
     }
 
     fn opposite_endpoint_germs(
@@ -1683,30 +1745,38 @@ pub(crate) fn certified_curve2d_is_straight_regular(
                 _ => break,
             }
         }
-        let solidcraft_step::geom::Curve::BSpline(spline) = original else {
-            return Ok(false);
-        };
-        let Some(first) = spline.points.first() else {
-            return Ok(false);
-        };
-        let Some(second) = spline
-            .points
-            .iter()
-            .find(|point| point[0] != first[0] || point[1] != first[1])
-        else {
-            return Ok(false);
-        };
-        work.charge(spline.points.len() as u64, cancel)?;
-        for point in &spline.points {
-            if !homogeneous_collinear(
-                [first[0], first[1], 1.0],
-                [second[0], second[1], 1.0],
-                [point[0], point[1], 1.0],
-                work,
-                cancel,
-            )? {
-                return Ok(false);
+        match original {
+            // Literal coefficient straightness is invariant under a monotone
+            // parameter change, even when opaque endpoint roots prevent exact
+            // affine coefficients in the query gauge. The complete strict
+            // first-jet proof below is still required; this proves no endpoint
+            // coordinate identity or literal port-span inclusion.
+            solidcraft_step::geom::Curve::Line { .. } => {}
+            solidcraft_step::geom::Curve::BSpline(spline) => {
+                let Some(first) = spline.points.first() else {
+                    return Ok(false);
+                };
+                let Some(second) = spline
+                    .points
+                    .iter()
+                    .find(|point| point[0] != first[0] || point[1] != first[1])
+                else {
+                    return Ok(false);
+                };
+                work.charge(spline.points.len() as u64, cancel)?;
+                for point in &spline.points {
+                    if !homogeneous_collinear(
+                        [first[0], first[1], 1.0],
+                        [second[0], second[1], 1.0],
+                        [point[0], point[1], 1.0],
+                        work,
+                        cancel,
+                    )? {
+                        return Ok(false);
+                    }
+                }
             }
+            _ => return Ok(false),
         }
     }
     // A straight coefficient image can still stop or reverse. Prove a nonzero
@@ -3885,6 +3955,9 @@ struct PreparedOriginalCoedge<'d> {
     curve: PreparedOriginalUvCurve<'d>,
     correspondence: OriginalCoedgeCorrespondence,
     full_uv_image: [Interval; 2],
+    // Raw whole-restriction jet of this same immutable selected operator.
+    // The selected envelope above retains its separate domain semantics.
+    full_uv_jet: parametric::ChartCurveEnclosure,
     source_pcurve: Option<&'d super::source::OriginalPcurveSource>,
 }
 impl PreparedOriginalCoedge<'_> {
@@ -3984,6 +4057,8 @@ impl parametric::CurveEvaluator for PreparedOriginalUvCurve<'_> {
 pub(crate) enum PreparedTrimCurve<'p, 'd> {
     Native(&'p Curve),
     Original(&'p PreparedOriginalUvCurve<'d>),
+    /// Complete-path geometry only; its interior parameter is NOT native gauge.
+    GeometricPcurve(crate::analysis::source_restriction::pcurve::SourcePcurveGeometry<'p, 'd>),
     Completion(&'p SourceEndpointConnector),
 }
 impl PreparedTrimCurve<'_, '_> {
@@ -3991,6 +4066,7 @@ impl PreparedTrimCurve<'_, '_> {
         match self {
             Self::Native(curve) => *curve,
             Self::Original(curve) => *curve,
+            Self::GeometricPcurve(curve) => curve,
             Self::Completion(curve) => *curve,
         }
     }
@@ -4074,6 +4150,30 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             .get(index)
             .map(|coedge| PreparedTrimCurve::Native(coedge.curve))
             .ok_or_else(|| unavailable("native coedge ordinal is absent"))
+    }
+    /// Same complete oriented boundary image and endpoint expressions, with a
+    /// potentially different interior gauge. Only parameterization-invariant
+    /// path operations may use this; physical ribbons, cuts and correspondence
+    /// queries must keep `coedge_operand`.
+    pub(crate) fn coedge_geometric_operand(
+        &self,
+        index: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<PreparedTrimCurve<'_, 'd>, GeometryError> {
+        work.charge(1, cancel)?;
+        if self.original_surface.is_some() {
+            let coedge = self
+                .original_coedges
+                .get(index)
+                .ok_or_else(|| unavailable("geometric original coedge ordinal is absent"))?;
+            if let OriginalUvCurve::Pcurve(curve) = &coedge.curve.curve
+                && let Some(geometry) = curve.geometric_path(work, cancel)?
+            {
+                return Ok(PreparedTrimCurve::GeometricPcurve(geometry));
+            }
+        }
+        self.coedge_operand(index)
     }
     pub(crate) fn original_coedge_correspondence(
         &self,
@@ -5841,6 +5941,7 @@ impl<'d> PreparedNativeTrimSource<'d> {
                 + surface.retained_bytes()
                 + checked_bytes::<Vec<Option<PreparedOriginalCoedge<'_>>>>(proposals.len())?
                 + checked_bytes::<Option<PreparedOriginalCoedge<'_>>>(total_choices)?
+                + size_of::<parametric::ChartCurveEnclosure>()
                 + source_lookup_bytes(lookup.capacity())?,
             self.allowance,
         )?;
@@ -5935,10 +6036,17 @@ impl<'d> PreparedNativeTrimSource<'d> {
                     measured = measured
                         .max(receipt.position_error_mm())
                         .max(proposal.curve.spatial.operator.source_error_mm());
+                    let full_uv_jet = parametric::curve2d_piecewise_jet(
+                        &proposal.curve,
+                        proposal.curve.active_range(),
+                        work,
+                        cancel,
+                    )?;
                     admitted.push(Some(PreparedOriginalCoedge {
                         curve: proposal.curve,
                         correspondence: receipt,
                         full_uv_image: proposal.image,
+                        full_uv_jet,
                         source_pcurve: proposal.pcurve,
                     }));
                 }

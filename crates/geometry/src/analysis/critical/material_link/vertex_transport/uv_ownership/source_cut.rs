@@ -14,6 +14,8 @@ pub(super) const STACK_BYTES: usize =
     std::mem::size_of::<[([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1]>()
         + std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
         + 4 * std::mem::size_of::<UvBoundaryJet>()
+        + 2 * std::mem::size_of::<Box2>()
+        + std::mem::size_of::<Interval>()
         + 3 * std::mem::size_of::<OriginalCollar<'static, 'static>>()
         + 4 * std::mem::size_of::<crate::parametric::ChartCurveEnclosure>()
         + 2 * std::mem::size_of::<CorrectionJet>();
@@ -66,42 +68,72 @@ fn pair_misses(
         &AtomicBool,
     ) -> Result<[UvBoundaryJet; 2], GeometryError>,
 ) -> Result<bool, GeometryError> {
-    let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
-    stack[0] = ([[0.0, 1.0]; 2], 0);
-    let mut pending = 1;
-    while pending != 0 {
-        pending -= 1;
-        let (cell, depth) = stack[pending];
-        work.charge(1, cancel)?;
-        let parameter = cell.map(|v| Interval { lo: v[0], hi: v[1] });
-        let [a, b] = jets(parameter, work, cancel)?;
-        if disjoint(a.position, b.position) {
-            continue;
-        }
-        if let Some(root) = root {
-            let extended = std::array::from_fn(|i| Interval {
-                lo: parameter[i].lo.min(root[i]),
-                hi: parameter[i].hi.max(root[i]),
-            });
-            let [a, b] = jets(extended, work, cancel)?;
-            if pair_jacobian_injective(a.derivative, b.derivative) {
+    let before = work.consumed();
+    let mut active = ([[0.0, 1.0]; 2], 0);
+    let mut phase = "pair traversal";
+    let outcome = (|| {
+        let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
+        stack[0] = ([[0.0, 1.0]; 2], 0);
+        let mut pending = 1;
+        while pending != 0 {
+            pending -= 1;
+            let (cell, depth) = stack[pending];
+            active = (cell, depth);
+            phase = "pair traversal";
+            work.charge(1, cancel)?;
+            let parameter = cell.map(|v| Interval { lo: v[0], hi: v[1] });
+            phase = "whole homotopy pair jets";
+            let [a, b] = jets(parameter, work, cancel)?;
+            if disjoint(a.position, b.position) {
                 continue;
             }
+            if let Some(root) = root {
+                let extended = std::array::from_fn(|i| Interval {
+                    lo: parameter[i].lo.min(root[i]),
+                    hi: parameter[i].hi.max(root[i]),
+                });
+                phase = "uniform fixed-endpoint injectivity";
+                let [a, b] = jets(extended, work, cancel)?;
+                if pair_jacobian_injective(a.derivative, b.derivative) {
+                    continue;
+                }
+            }
+            // The center enclosures still contain EVERY homotopy member.
+            // For each fixed lambda the complete-family first derivative
+            // bounds its own center-to-cell integral. No sampled lambda,
+            // independent endpoint membership, or interior map is asserted.
+            phase = "whole-family midpoint jets";
+            let [ma, mb] = jets(parameter.map(|v| Interval::point(v.mid())), work, cancel)?;
+            let pa = mean_value_boundary_position(&a, ma.position, parameter[0])?;
+            let pb = mean_value_boundary_position(&b, mb.position, parameter[1])?;
+            if disjoint(pa, pb) {
+                continue;
+            }
+            let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
+            let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
+            if depth >= MAX_DEPTH || mid <= cell[axis][0] || mid >= cell[axis][1] {
+                return Ok(false);
+            }
+            let mut left = cell;
+            let mut right = cell;
+            left[axis][1] = mid;
+            right[axis][0] = mid;
+            stack[pending] = (right, depth + 1);
+            stack[pending + 1] = (left, depth + 1);
+            pending += 2;
         }
-        let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
-        let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
-        if depth >= MAX_DEPTH || mid <= cell[axis][0] || mid >= cell[axis][1] {
-            return Ok(false);
-        }
-        let mut left = cell;
-        let mut right = cell;
-        left[axis][1] = mid;
-        right[axis][0] = mid;
-        stack[pending] = (right, depth + 1);
-        stack[pending + 1] = (left, depth + 1);
-        pending += 2;
-    }
-    Ok(true)
+        Ok(true)
+    })();
+    outcome.map_err(|error| {
+        work.annotate_error(
+            error,
+            before,
+            format_args!(
+                "sourceCut pair phase={phase} parameter_pair={:?} depth={} known_endpoint={root:?}",
+                active.0, active.1,
+            ),
+        )
+    })
 }
 
 fn curve_misses_box(
@@ -110,33 +142,48 @@ fn curve_misses_box(
     cancel: &AtomicBool,
     mut image: impl FnMut(Interval, &mut GeometryWorkBudget, &AtomicBool) -> Result<Box2, GeometryError>,
 ) -> Result<bool, GeometryError> {
-    let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-    stack[0] = ([0.0, 1.0], 0);
-    let mut pending = 1;
-    while pending != 0 {
-        pending -= 1;
-        let (range, depth) = stack[pending];
-        work.charge(1, cancel)?;
-        let cut = image(
-            Interval {
-                lo: range[0],
-                hi: range[1],
-            },
-            work,
-            cancel,
-        )?;
-        if disjoint(envelope, cut) {
-            continue;
+    let before = work.consumed();
+    let mut active = ([0.0, 1.0], 0);
+    let outcome = (|| {
+        let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
+        stack[0] = ([0.0, 1.0], 0);
+        let mut pending = 1;
+        while pending != 0 {
+            pending -= 1;
+            let (range, depth) = stack[pending];
+            active = (range, depth);
+            work.charge(1, cancel)?;
+            let cut = image(
+                Interval {
+                    lo: range[0],
+                    hi: range[1],
+                },
+                work,
+                cancel,
+            )?;
+            if disjoint(envelope, cut) {
+                continue;
+            }
+            let mid = range[0] * 0.5 + range[1] * 0.5;
+            if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
+                return Ok(false);
+            }
+            stack[pending] = ([mid, range[1]], depth + 1);
+            stack[pending + 1] = ([range[0], mid], depth + 1);
+            pending += 2;
         }
-        let mid = range[0] * 0.5 + range[1] * 0.5;
-        if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
-            return Ok(false);
-        }
-        stack[pending] = ([mid, range[1]], depth + 1);
-        stack[pending + 1] = ([range[0], mid], depth + 1);
-        pending += 2;
-    }
-    Ok(true)
+        Ok(true)
+    })();
+    outcome.map_err(|error| {
+        work.annotate_error(
+            error,
+            before,
+            format_args!(
+                "sourceCut fixed-cut curve vs whole joint envelope parameter_window={:?} depth={}",
+                active.0, active.1,
+            ),
+        )
+    })
 }
 
 impl UvJointComparison {
@@ -182,10 +229,18 @@ impl UvJointComparison {
             {
                 continue;
             }
+            let before = work.consumed();
             if !curve_misses_box(envelope, work, cancel, |t, work, cancel| {
                 Ok(self
                     .boundary_jet(domain, recipe, boundary, t, work, cancel)?
                     .position)
+            })
+            .map_err(|error| {
+                work.annotate_error(
+                    error,
+                    before,
+                    format_args!("sourceCut joint envelope vs fixed boundary={boundary:?}",),
+                )
             })? {
                 return Ok(false);
             }
@@ -258,14 +313,20 @@ impl UvJointComparison {
                 while pending != 0 {
                     pending -= 1;
                     let (range, depth) = stack[pending];
-                    work.charge(1, cancel)?;
-                    let image = if own.is_some() {
-                        OriginalCollar::spatial_collar_overcover(
-                            domain, index, range, work, cancel,
-                        )?
-                    } else {
-                        OriginalCollar::other_collar_overcover(domain, index, range, work, cancel)?
-                    };
+                    let before = work.consumed();
+                    let image = (|| {
+                        work.charge(1, cancel)?;
+                        if own.is_some() {
+                            OriginalCollar::spatial_collar_overcover(
+                                domain, index, range, work, cancel,
+                            )
+                        } else {
+                            OriginalCollar::other_collar_overcover(domain, index, range, work, cancel)
+                        }
+                    })().map_err(|error| work.annotate_error(error, before, format_args!(
+                        "sourceCut joint envelope vs original collar coedge={index} spatial_owned={} parameter_window={range:?} depth={depth}",
+                        own.is_some(),
+                    )))?;
                     if disjoint(envelope, image) {
                         continue;
                     }
@@ -327,108 +388,146 @@ impl UvJointComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<SourceFaceCut<'a, 'd>>, GeometryError> {
-        // Keep both traversal frames and live collar/jet state separate from
-        // the native query allowance. The vertex owner also reserves the
-        // aggregate ownership frame before borrowing/preparing its domain.
-        let query_bytes = scratch.checked_sub(STACK_BYTES).ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "source-face relative-cut frame exceeds admitted scratch",
-            )
-        })?;
-        // Supplies simple B, degree-one disk, complete foreign trim/collar
-        // and joint exclusion, exact central ribbon laws and exit separation.
-        // None of these facts alone supplies original complement ownership.
-        if !self.disk_owned(domain, recipe, query_bytes, work, cancel)? {
-            return Ok(None);
-        }
-        for index in 0..2 {
-            for boundary in [
-                ComparisonBoundary::OutgoingCross,
-                ComparisonBoundary::Bridge,
-                ComparisonBoundary::IncomingCross,
-            ] {
-                if boundary == ComparisonBoundary::OutgoingCross && !recipe.outgoing.collar
-                    || boundary == ComparisonBoundary::IncomingCross && !recipe.incoming.collar
-                {
-                    continue;
-                }
-                let root = match (index, boundary) {
-                    (0, ComparisonBoundary::OutgoingCross) => Some([1.0, 0.0]),
-                    (0, ComparisonBoundary::Bridge) if !recipe.outgoing.collar => Some([1.0, 0.0]),
-                    (1, ComparisonBoundary::IncomingCross) => Some([1.0, 1.0]),
-                    (1, ComparisonBoundary::Bridge) if !recipe.incoming.collar => Some([1.0, 1.0]),
-                    _ => None,
-                };
-                // c_i(1)=0 is an exact completion identity. The root therefore
-                // uses the SAME original coedge exit for every lambda.
-                if !pair_misses(root, work, cancel, |parameter, work, cancel| {
-                    Ok([
-                        self.germ_homotopy_jet(domain, recipe, index, parameter[0], work, cancel)?,
-                        self.boundary_jet(domain, recipe, boundary, parameter[1], work, cancel)?,
-                    ])
-                })? {
-                    return Err(ownership_failure(
-                        recipe,
-                        format_args!(
-                            "sourceCut germ_homotopy={index} crosses_fixed_cut={boundary:?}"
-                        ),
-                    ));
+        let before = work.consumed();
+        let mut phase = "relative-cut scratch admission";
+        let mut active_pair = None;
+        let outcome = (|| {
+            // Keep both traversal frames and live collar/jet state separate from
+            // the native query allowance. The vertex owner also reserves the
+            // aggregate ownership frame before borrowing/preparing its domain.
+            let query_bytes = scratch.checked_sub(STACK_BYTES).ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "source-face relative-cut frame exceeds admitted scratch",
+                )
+            })?;
+            // Supplies simple B, degree-one disk, complete foreign trim/collar
+            // and joint exclusion, exact central ribbon laws and exit separation.
+            // None of these facts alone supplies original complement ownership.
+            phase = "complete reference disk ownership";
+            if !self.disk_owned(domain, recipe, query_bytes, work, cancel)? {
+                return Ok(None);
+            }
+            for index in 0..2 {
+                for boundary in [
+                    ComparisonBoundary::OutgoingCross,
+                    ComparisonBoundary::Bridge,
+                    ComparisonBoundary::IncomingCross,
+                ] {
+                    if boundary == ComparisonBoundary::OutgoingCross && !recipe.outgoing.collar
+                        || boundary == ComparisonBoundary::IncomingCross && !recipe.incoming.collar
+                    {
+                        continue;
+                    }
+                    let root = match (index, boundary) {
+                        (0, ComparisonBoundary::OutgoingCross) => Some([1.0, 0.0]),
+                        (0, ComparisonBoundary::Bridge) if !recipe.outgoing.collar => {
+                            Some([1.0, 0.0])
+                        }
+                        (1, ComparisonBoundary::IncomingCross) => Some([1.0, 1.0]),
+                        (1, ComparisonBoundary::Bridge) if !recipe.incoming.collar => {
+                            Some([1.0, 1.0])
+                        }
+                        _ => None,
+                    };
+                    // c_i(1)=0 is an exact completion identity. The root therefore
+                    // uses the SAME original coedge exit for every lambda.
+                    phase = "whole germ homotopy vs fixed crosscut";
+                    active_pair = Some((index, boundary));
+                    if !pair_misses(root, work, cancel, |parameter, work, cancel| {
+                        Ok([
+                            self.germ_homotopy_jet(
+                                domain,
+                                recipe,
+                                index,
+                                parameter[0],
+                                work,
+                                cancel,
+                            )?,
+                            self.boundary_jet(
+                                domain,
+                                recipe,
+                                boundary,
+                                parameter[1],
+                                work,
+                                cancel,
+                            )?,
+                        ])
+                    })? {
+                        return Err(ownership_failure(
+                            recipe,
+                            format_args!(
+                                "sourceCut germ_homotopy={index} crosses_fixed_cut={boundary:?}"
+                            ),
+                        ));
+                    }
                 }
             }
-        }
-        let envelope = match self.authority {
-            EndpointAuthority::ExactNativeAdjacency => self.joint,
-            EndpointAuthority::EndpointUncertaintyJoint { enclosure, .. } => enclosure,
-            EndpointAuthority::SphericalPoleJoint { .. } => return Ok(None),
-        };
-        if !self.joint_misses_cut(domain, recipe, envelope, work, cancel)? {
-            return Err(ownership_failure(
-                recipe,
-                "sourceCut whole_native_joint_crosses_cut",
-            ));
-        }
-        if !self.joint_misses_other_sources(domain, recipe, envelope, work, cancel)? {
-            return Err(ownership_failure(
-                recipe,
-                "sourceCut whole_native_joint_foreign_or_central",
-            ));
-        }
-        // The reference interior anchor is insufficient: original germs could
-        // separate it from B. Calibrate B itself, AFTER excluding ALL original
-        // boundaries from its open arc. Connectedness then fixes the native
-        // material side along the entire proper crosscut.
-        let anchor = self
-            .boundary_jet(
-                domain,
-                recipe,
-                ComparisonBoundary::Bridge,
-                Interval::point(0.5),
-                work,
-                cancel,
-            )?
-            .position;
-        let classifier_bytes = query_bytes.min(MAX_SCRATCH_BYTES);
-        if domain.classify_with_byte_limit(uv_box(anchor), classifier_bytes, work, cancel)?
-            != TrimClassification::Inside
+            active_pair = None;
+            phase = "whole native joint vs fixed cut and exit supports";
+            let envelope = match self.authority {
+                EndpointAuthority::ExactNativeAdjacency => self.joint,
+                EndpointAuthority::EndpointUncertaintyJoint { enclosure, .. } => enclosure,
+                EndpointAuthority::SphericalPoleJoint { .. } => return Ok(None),
+            };
+            if !self.joint_misses_cut(domain, recipe, envelope, work, cancel)? {
+                return Err(ownership_failure(
+                    recipe,
+                    "sourceCut whole_native_joint_crosses_cut",
+                ));
+            }
+            phase = "whole native joint vs foreign sources and central continuations";
+            if !self.joint_misses_other_sources(domain, recipe, envelope, work, cancel)? {
+                return Err(ownership_failure(
+                    recipe,
+                    "sourceCut whole_native_joint_foreign_or_central",
+                ));
+            }
+            // The reference interior anchor is insufficient: original germs could
+            // separate it from B. Calibrate B itself, AFTER excluding ALL original
+            // boundaries from its open arc. Connectedness then fixes the native
+            // material side along the entire proper crosscut.
+            phase = "fixed B source anchor and original Inside classification";
+            let anchor = self
+                .boundary_jet(
+                    domain,
+                    recipe,
+                    ComparisonBoundary::Bridge,
+                    Interval::point(0.5),
+                    work,
+                    cancel,
+                )?
+                .position;
+            let classifier_bytes = query_bytes.min(MAX_SCRATCH_BYTES);
+            let before_classify = work.consumed();
+            if domain.classify_with_byte_limit(uv_box(anchor), classifier_bytes, work, cancel)
+            .map_err(|error| work.annotate_error(error, before_classify, format_args!(
+                "sourceCut fixed B midpoint original Inside query anchor={anchor:?} classifier_bytes={classifier_bytes}",
+            )))? != TrimClassification::Inside
         {
             return Err(ownership_failure(
                 recipe,
-                "sourceCut fixed_B_not_native_inside",
+                format_args!("sourceCut fixed_B_not_native_inside anchor={anchor:?}"),
             ));
         }
-        // Relative crosscut theorem: the uniform fixed-exit order connects
-        // each original germ to the replaced side of the reference disk. Its
-        // entire homotopy cannot cross B or go around the central exit seam.
-        // The convex native envelope is connected to those same endpoints and
-        // misses B and both continuations, so EVERY connector confined to it
-        // is on that side too. Its possibly non-Jordan loops change winding
-        // only there. Foreign boundaries are excluded by disk_owned. Cutting
-        // the original winding domain along B therefore retains precisely the
-        // other side, with B and the fixed central ribbons its sole new
-        // interfaces. This is relative boundary surgery, NOT an assertion
-        // that the completed UV disk is the removed original set.
-        Ok(Some(SourceFaceCut { domain, recipe }))
+            // Relative crosscut theorem: the uniform fixed-exit order connects
+            // each original germ to the replaced side of the reference disk. Its
+            // entire homotopy cannot cross B or go around the central exit seam.
+            // The convex native envelope is connected to those same endpoints and
+            // misses B and both continuations, so EVERY connector confined to it
+            // is on that side too. Its possibly non-Jordan loops change winding
+            // only there. Foreign boundaries are excluded by disk_owned. Cutting
+            // the original winding domain along B therefore retains precisely the
+            // other side, with B and the fixed central ribbons its sole new
+            // interfaces. This is relative boundary surgery, NOT an assertion
+            // that the completed UV disk is the removed original set.
+            Ok(Some(SourceFaceCut { domain, recipe }))
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "sourceCut face={} coedges={:?} phase={phase} germ_homotopy_fixed_boundary={active_pair:?}",
+            recipe.outgoing.use_.face,
+            [recipe.outgoing.use_.coedge, recipe.incoming.use_.coedge],
+        )))
     }
 }
 

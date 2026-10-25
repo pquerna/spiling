@@ -368,7 +368,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner19,
+Current identities are project10/manufacturing11/process3/surface3, planner20,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -376,6 +376,15 @@ Raw inspection, an older producer's successful job or historical hardware
 evidence does not qualify the current producer. Current software admission is
 not general manufacturing or G0–G3 qualification; the executable refusal
 boundaries and freshly verified outputs remain authoritative.
+
+The SolidCore software Compile/fresh Verify/export/save controls are the native
+box and protected bore with `solid-fill.intent.json`; source-deleted read-only
+reopen independently verifies and preserves their program/replay bytes. Unchanged
+fitting and ordinary housing import, bed preparation, Preflight, save and
+source-deleted reopen are exercised, not manufacturing completion. Fitting
+closed-source metric coverage and housing spherical critical incidence remain
+open operator gates. Original spline-carrier gauge/correspondence and closed-spline
+seam controls also remain cutover obligations, not newly waived input classes.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader

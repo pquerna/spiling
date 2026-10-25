@@ -15,6 +15,13 @@
 //! parameter map; original radian charts are never mixed with native UV gauges.
 //! Whole-face rectangle covers deliberately overcover holes; the complete
 //! trim-cell proof remains authoritative when that optional cover is too broad.
+//! A literal rounded trim need not contain its carrier's exact stationary root.
+//! A port attachment may bridge only a whole source ribbon from a literal
+//! constant transverse port, bounded by the existing measured chart error and
+//! declared uncertainty; exact endpoints and the complete original link own it.
+//! Exact trim classification selects the ribbon's material side; complete
+//! foreign-boundary exclusion and original endcap relative cuts extend that
+//! selection over the hull. Metric proximity alone never supplies attachment.
 
 use super::joint::NativeSourceLeafReceipt;
 use super::material_source::{MaterialSourceView, PreparedSolid, prepare_solid};
@@ -189,6 +196,7 @@ struct CriticalFaceBoundaryStarQuery<'a, 'source> {
     request: &'a super::SlabRequest,
     events: &'a [NativeCollarFaceEvent],
     edges: &'a SourceEdgeIncidence<'source>,
+    terminal: bool,
 }
 
 struct CriticalCoedgeNormalQuery<'a, 'source> {
@@ -214,6 +222,7 @@ struct CriticalEdgeBoundaryStarQuery<'a, 'source> {
     request: &'a super::SlabRequest,
     events: &'a [NativeCollarFaceEvent],
     edges: &'a SourceEdgeIncidence<'source>,
+    attachments: Option<&'a super::critical::OriginalFaceCornerAttachments<'a, 'source>>,
     remaining_bytes: usize,
 }
 
@@ -767,94 +776,108 @@ fn material_distance_upper(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
-    work.charge(1, cancel)?;
-    let center = bounds.map(|axis| axis[0] * 0.5 + axis[1] * 0.5);
-    if boundary_disjoint(bounds, loops, work, cancel)?
-        && material_at(center, loops, work, cancel)? == Some(true)
-    {
-        return Ok(0.0);
-    }
-    if maximum_distance_mm > 0.0 {
-        // This is a witness search distance drawn from the existing policy,
-        // not an acceptance tolerance. Its actual clamping distance is proved
-        // below and must still satisfy the caller's unchanged numerical limit.
-        let margin = maximum_distance_mm * 0.25;
-        let inset: Box2 = std::array::from_fn(|axis| {
-            [
-                (bounds[axis][0] + margin)
-                    .min(center[axis])
-                    .max(bounds[axis][0]),
-                (bounds[axis][1] - margin)
-                    .max(center[axis])
-                    .min(bounds[axis][1]),
-            ]
-        });
-        if boundary_disjoint(inset, loops, work, cancel)?
-            && material_at(center, loops, work, cancel)? == Some(true)
-        {
-            let displacement: [f64; 2] = std::array::from_fn(|axis| {
-                Interval::point(inset[axis][0])
-                    .sub(Interval::point(bounds[axis][0]))
-                    .hi
-                    .max(
-                        Interval::point(bounds[axis][1])
-                            .sub(Interval::point(inset[axis][1]))
-                            .hi,
-                    )
-                    .max(0.0)
+    let before = work.consumed();
+    let mut phase = "rectangle boundary exclusion";
+    let mut best = f64::INFINITY;
+    let mut segments_visited = 0_u64;
+    let mut last_corner_segment = None;
+    let outcome = (|| {
+        work.charge(1, cancel)?;
+        let center = bounds.map(|axis| axis[0] * 0.5 + axis[1] * 0.5);
+        let disjoint = boundary_disjoint(bounds, loops, work, cancel)?;
+        phase = "rectangle material membership";
+        if disjoint && material_at(center, loops, work, cancel)? == Some(true) {
+            return Ok(0.0);
+        }
+        if maximum_distance_mm > 0.0 {
+            // This is a witness search distance drawn from the existing policy,
+            // not an acceptance tolerance. Its actual clamping distance is proved
+            // below and must still satisfy the caller's unchanged numerical limit.
+            let margin = maximum_distance_mm * 0.25;
+            let inset: Box2 = std::array::from_fn(|axis| {
+                [
+                    (bounds[axis][0] + margin)
+                        .min(center[axis])
+                        .max(bounds[axis][0]),
+                    (bounds[axis][1] - margin)
+                        .max(center[axis])
+                        .min(bounds[axis][1]),
+                ]
             });
-            let distance = hypot(displacement[0], displacement[1])?;
-            if distance <= maximum_distance_mm {
-                return Ok(distance);
+            phase = "inset boundary exclusion";
+            let disjoint = boundary_disjoint(inset, loops, work, cancel)?;
+            phase = "inset material membership";
+            if disjoint && material_at(center, loops, work, cancel)? == Some(true) {
+                let displacement: [f64; 2] = std::array::from_fn(|axis| {
+                    Interval::point(inset[axis][0])
+                        .sub(Interval::point(bounds[axis][0]))
+                        .hi
+                        .max(
+                            Interval::point(bounds[axis][1])
+                                .sub(Interval::point(inset[axis][1]))
+                                .hi,
+                        )
+                        .max(0.0)
+                });
+                let distance = hypot(displacement[0], displacement[1])?;
+                if distance <= maximum_distance_mm {
+                    return Ok(distance);
+                }
             }
         }
-    }
-    let mut best = f64::INFINITY;
-    for ring in loops {
-        for edge in ring.points_mm.windows(2) {
-            work.charge(1, cancel)?;
-            let a = [edge[0][0], edge[0][1]];
-            let b = [edge[1][0], edge[1][1]];
-            // Distance to the segment's AABB is a lower bound on distance
-            // to that same closed segment. One rectangle corner already
-            // suffices to exclude a segment from improving the current
-            // whole-rectangle witness; retain interval subtraction rounding.
-            if (0..2).any(|axis| {
-                Interval::point(a[axis].min(b[axis]))
-                    .sub(Interval::point(bounds[axis][0]))
-                    .lo
-                    .max(
-                        Interval::point(bounds[axis][1])
-                            .sub(Interval::point(a[axis].max(b[axis])))
-                            .lo,
-                    )
-                    > best
-            }) {
-                continue;
-            }
-            let mut maximum = 0.0_f64;
-            for x in bounds[0] {
-                for y in bounds[1] {
-                    work.charge(1, cancel)?;
-                    maximum = maximum.max(
-                        super::planar::point_segment_distance(
+        phase = "fixed-segment convex distance witness";
+        for ring in loops {
+            for edge in ring.points_mm.windows(2) {
+                work.charge(1, cancel)?;
+                segments_visited += 1;
+                let a = [edge[0][0], edge[0][1]];
+                let b = [edge[1][0], edge[1][1]];
+                // Distance to the segment's AABB is a lower bound on distance
+                // to that same closed segment. One rectangle corner already
+                // suffices to exclude a segment from improving the current
+                // whole-rectangle witness; retain interval subtraction rounding.
+                if (0..2).any(|axis| {
+                    Interval::point(a[axis].min(b[axis]))
+                        .sub(Interval::point(bounds[axis][0]))
+                        .lo
+                        .max(
+                            Interval::point(bounds[axis][1])
+                                .sub(Interval::point(a[axis].max(b[axis])))
+                                .lo,
+                        )
+                        > best
+                }) {
+                    continue;
+                }
+                let mut maximum = 0.0_f64;
+                for x in bounds[0] {
+                    for y in bounds[1] {
+                        work.charge(1, cancel)?;
+                        let distance = super::planar::point_segment_distance(
                             [Interval::point(x), Interval::point(y)],
                             a,
                             b,
-                        )?
-                        .hi,
-                    );
+                        )?;
+                        // This interval is for ONE corner/segment, not a lower
+                        // bound on distance to the union or on an actual trim point.
+                        last_corner_segment = Some(([x, y], a, b, distance));
+                        maximum = maximum.max(distance.hi);
+                    }
+                }
+                best = best.min(maximum);
+                if maximum <= maximum_distance_mm {
+                    // Any one fixed segment is a complete convex distance
+                    // witness. A smaller bound is unnecessary for acceptance.
+                    return Ok(maximum);
                 }
             }
-            best = best.min(maximum);
-            if maximum <= maximum_distance_mm {
-                // Any one fixed segment is a complete convex distance
-                // witness. A smaller bound is unnecessary for acceptance.
-                return Ok(maximum);
-            }
         }
-    }
-    Ok(best)
+        Ok(best)
+    })();
+    outcome.map_err(|error: GeometryError| failure(error.code, format!(
+        "{}; cell metric phase={phase} before={before} delta={} xy_limit={maximum_distance_mm:?} best_fixed_upper={best:?} segments={segments_visited} bounds={bounds:?} last_corner_segment={last_corner_segment:?}",
+        error.message, work.consumed().saturating_sub(before),
+    )))
 }
 
 /// Retain the complete necessary CLOSED height preimage, then enclose its
@@ -1077,6 +1100,7 @@ fn certify_native_critical_collar_using(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<NativeCriticalCollar, GeometryError> {
+    let cover_before = work.consumed();
     let definition = source.definition();
     work.charge(1, cancel)?;
     let pose = analysis.placed_pose().ok_or_else(|| {
@@ -1452,6 +1476,7 @@ fn certify_native_critical_collar_using(
             .enumerate()
             .map(move |(index, face)| (filled_only, index, face))
     }) {
+        let face_before = work.consumed();
         if !filled_only {
             let mut covered = false;
             for cell in &cells {
@@ -1766,9 +1791,10 @@ fn certify_native_critical_collar_using(
             failure(
                 error.code,
                 format!(
-                    "native collar original face {face_index}, CLOSED {interval:?}, source-occupied {occupied_interval:?}, sample {sample}, event {:?}, cumulative work {}: {}",
-                    event.map(|event| (event.height, event.outward_height_sign)),
+                    "cover work_before={cover_before} face_before={face_before} consumed={} cells={}; original face {face_index}, CLOSED {interval:?}, occupied {occupied_interval:?}, sample {sample}, event {:?}: {}",
                     work.consumed(),
+                    cells.len(),
+                    event.map(|event| (event.height, event.outward_height_sign)),
                     error.message
                 ),
             )
@@ -2628,6 +2654,7 @@ fn choose_material_target(
         native_policy,
     } = query;
     let mut best: Option<(usize, f64, f64)> = None;
+    let mut prior_metric: Option<(usize, f64, f64, Option<f64>, &str)> = None;
     let mut eligible = false;
     for (index, (input, target)) in inputs.iter().zip(targets).enumerate() {
         work.charge(1, cancel)?;
@@ -2660,6 +2687,13 @@ fn choose_material_target(
             continue;
         }
         eligible = true;
+        // The implemented witness cost is hypot(dx, dz), with dx >= 0.
+        // Once an admitted witness is no greater than this target's fixed dz,
+        // no XY witness from this target can improve the retained result.
+        // This prunes the sufficient-bound search, not actual source geometry.
+        if best.is_some_and(|(_, _, distance)| distance <= dz) {
+            continue;
+        }
         let dx = match coverage {
             MaterialCoverage::Rectangle(bounds) => {
                 let limit = policy.maximum_distance_mm.min(native_policy);
@@ -2674,7 +2708,17 @@ fn choose_material_target(
                 } else {
                     0.0
                 };
-                material_distance_upper(bounds, input.actual_material, xy_allowance, work, cancel)?
+                material_distance_upper(bounds, input.actual_material, xy_allowance, work, cancel)
+                    .map_err(|error| failure(error.code, format!(
+                        "target {index} {:?} best={best:?} prior_metric={prior_metric:?} height={:?} sample={} source_column={interval:?} dz={dz:?} limit={limit:?} xy_limit={xy_allowance:?} xy_policy={} loops={} edges={}: {}",
+                        target.side,
+                        target.leaf.world_height_interval_mm(),
+                        target.leaf.sample_world_z_mm(),
+                        policy.maximum_xy_cover_error_mm,
+                        input.actual_material.len(),
+                        input.actual_material.iter().map(|ring| ring.points_mm.len().saturating_sub(1)).sum::<usize>(),
+                        error.message,
+                    )))?
             }
             MaterialCoverage::AffineImage(image) => {
                 let limit = policy.maximum_distance_mm.min(native_policy);
@@ -2712,9 +2756,21 @@ fn choose_material_target(
             }
         };
         if dx > policy.maximum_xy_cover_error_mm {
+            prior_metric = Some((index, dx, dz, None, "xy-policy"));
             continue;
         }
         let distance = hypot(dx, dz)?;
+        prior_metric = Some((
+            index,
+            dx,
+            dz,
+            Some(distance),
+            if distance > policy.maximum_distance_mm || distance > native_policy {
+                "distance-policy"
+            } else {
+                "admitted"
+            },
+        ));
         if distance > policy.maximum_distance_mm || distance > native_policy {
             continue;
         }
@@ -2774,6 +2830,8 @@ pub(super) struct NativeCollarBoundaryCriticalBand {
     source_face: usize,
     source_coedge: Option<(usize, usize)>,
     source_uv: Option<Box2>,
+    // Despite the historical field name, original edge bands use the selected
+    // SOURCE spatial gauge, never the native edge interval or raw UV gauge.
     native_parameter_interval: Option<[f64; 2]>,
     // Larger qualifying domains include the separately excluded regular
     // complement; public domains above describe only the critical connection.
@@ -3464,13 +3522,58 @@ fn critical_face_boundary_star(
         domain,
         cell,
         jet: _,
-        attachments: _,
+        attachments,
         functional,
         request,
         events,
         edges,
+        terminal,
     } = query;
     let full = super::slab::trim_parameter_box(domain)?;
+    // Keep only the furthest failed obligation per transverse axis, and only
+    // for a cell which cannot be split under the existing depth policy.
+    let mut diagnosis = terminal.then(|| [(0_u8, String::new()), (0_u8, String::new())]);
+    let mut reject = |axis: usize, rank: u8, detail: std::fmt::Arguments<'_>| {
+        if let Some(entries) = diagnosis.as_mut()
+            && rank >= entries[axis].0
+        {
+            use std::fmt::Write;
+            entries[axis].0 = rank;
+            entries[axis].1.clear();
+            let gate = match rank {
+                1 => "whole-strip-C1",
+                2 => "exact-longitudinal-invariance",
+                3 => "strict-transverse-curvature",
+                4 => "geometric-normal",
+                5 => "normal-height-sign",
+                6 => "curvature-normal-consistency",
+                10 => "regular-original-query",
+                11 => "zero-longitudinal-margin",
+                12 => "original-event-adjacency",
+                13 => "event-normal-sign",
+                20 => "literal-longitudinal-span",
+                21 => "whole-longitudinal-coverage",
+                22 => "connection-C1",
+                23 => "literal-transverse-constant",
+                24 => "declared-source-uncertainty",
+                25 => "finite-measured-source-limit",
+                26 => "physical-connection-bound",
+                27 => "strict-root-port-separation",
+                28 => "selected-original-face-classification",
+                29 => "connection-curvature",
+                30 => "connection-longitudinal-invariance",
+                31 => "connection-normal-sign",
+                32 => "foreign-coedge-exclusion",
+                33 => "literal-endcap-coordinate",
+                34 => "original-joint-incidence",
+                35 => "original-endcap-relative-cut",
+                36 => "complete-original-vertex-cycle",
+                37 => "critical-height-sample-separation",
+                _ => "unmapped",
+            };
+            let _ = write!(entries[axis].1, "gate={gate} {detail}");
+        }
+    };
     for transverse in 0..2 {
         let longitudinal = 1 - transverse;
         let mut strip = cell;
@@ -3480,6 +3583,11 @@ fn critical_face_boundary_star(
                 critical_geometry_error(error, face_index, "critical-strip whole C1 qualification")
             },
         )? {
+            reject(
+                transverse,
+                1,
+                format_args!("whole-strip C1 strip={strip:?}"),
+            );
             continue;
         }
         let jet = surface_enclosure(surface, strip, work, cancel).map_err(|error| {
@@ -3491,10 +3599,27 @@ fn critical_face_boundary_star(
             || !exact_zero(functional.dot(hessian[longitudinal][longitudinal]))
             || !exact_zero(functional.dot(hessian[transverse][longitudinal]))
         {
+            if terminal {
+                reject(
+                    transverse,
+                    2,
+                    format_args!(
+                        "longitudinal invariance dh={:?}, dll={:?}, dtl={:?}",
+                        functional.dot(tangents[longitudinal]),
+                        functional.dot(hessian[longitudinal][longitudinal]),
+                        functional.dot(hessian[transverse][longitudinal])
+                    ),
+                );
+            }
             continue;
         }
         let curvature = functional.dot(hessian[transverse][transverse]);
         if curvature.contains_zero() {
+            reject(
+                transverse,
+                3,
+                format_args!("transverse curvature contains zero {curvature:?}"),
+            );
             continue;
         }
         let root = super::critical::necessary_stationary_domain(
@@ -3519,7 +3644,14 @@ fn critical_face_boundary_star(
             {
                 return Err(error);
             }
-            Err(_) => continue,
+            Err(error) => {
+                reject(
+                    transverse,
+                    4,
+                    format_args!("geometric normal: {}", error.message),
+                );
+                continue;
+            }
         };
         let Some(root) = root else {
             return Ok(Some(None));
@@ -3533,9 +3665,19 @@ fn critical_face_boundary_star(
         } else if direction.hi < 0.0 {
             -1
         } else {
+            reject(
+                transverse,
+                5,
+                format_args!("root={root:?} normal-height sign unresolved {direction:?}"),
+            );
             continue;
         };
         if (sign < 0 && curvature.lo <= 0.0) || (sign > 0 && curvature.hi >= 0.0) {
+            reject(
+                transverse,
+                6,
+                format_args!("root={root:?} curvature={curvature:?} normal sign={sign} disagree"),
+            );
             continue;
         }
         let physical = functional
@@ -3781,9 +3923,22 @@ fn critical_face_boundary_star(
             work.charge(1, cancel)?;
             let correspondence = domain.original_coedge_correspondence(port_index)?;
             if !has_regular_original_boundary_query(domain, port_index)? {
+                reject(
+                    transverse,
+                    10,
+                    format_args!("root={root:?} port={port_index} lacks regular original query"),
+                );
                 continue;
             }
             if correspondence.margin_uv()[longitudinal] != 0.0 {
+                reject(
+                    transverse,
+                    11,
+                    format_args!(
+                        "root={root:?} port={port_index} longitudinal margin={:?}",
+                        correspondence.margin_uv()
+                    ),
+                );
                 continue;
             }
             let Some(pair) = edges.get(port.identity().edge_id) else {
@@ -3801,19 +3956,44 @@ fn critical_face_boundary_star(
                 &pair.first
             };
             let Some(event) = events.iter().find(|event| event.face == neighbor.face) else {
+                reject(
+                    transverse,
+                    12,
+                    format_args!(
+                        "root={root:?} port={port_index} neighbor face={} is not event",
+                        neighbor.face
+                    ),
+                );
                 continue;
             };
             if event.outward_height_sign != sign {
+                reject(
+                    transverse,
+                    13,
+                    format_args!(
+                        "root={root:?} port={port_index} event={} sign={} expected={sign}",
+                        event.face, event.outward_height_sign
+                    ),
+                );
                 continue;
             }
             // An unrelated original coedge cannot attach this critical star.
             // Establish ownership before asking its whole coefficient proof.
-            let uv_range = domain
-                .original_coedge_correspondence(port_index)?
-                .uv_range();
-            let operand = domain.coedge_operand(port_index)?;
+            // These are complete geometric-image and literal-endpoint laws,
+            // not native-gauge cut or correspondence queries. Borrow the same
+            // original path without its unnecessary spatial calibration.
+            let operand = domain.coedge_geometric_operand(port_index, work, cancel)?;
+            let uv_range = crate::parametric::CurveEvaluator::active_range(&operand);
             let Some(span) = literal_port_span(&operand, uv_range, longitudinal, work, cancel)?
             else {
+                reject(
+                    transverse,
+                    20,
+                    format_args!(
+                        "root={root:?} event={} port={port_index} lacks literal full longitudinal span uv_range={uv_range:?}",
+                        event.face
+                    ),
+                );
                 continue;
             };
             let port_uv = original_port_uv(domain, port_index, work, cancel)?;
@@ -3822,11 +4002,14 @@ fn critical_face_boundary_star(
             if port_uv[longitudinal][0] > full[longitudinal][0]
                 || port_uv[longitudinal][1] < full[longitudinal][1]
             {
-                continue;
-            }
-            if root[transverse][0] < port_uv[transverse][0]
-                || root[transverse][1] > port_uv[transverse][1]
-            {
+                reject(
+                    transverse,
+                    21,
+                    format_args!(
+                        "root={root:?} event={} port={port_index} port_uv={port_uv:?} does not cover longitudinal full={full:?}",
+                        event.face
+                    ),
+                );
                 continue;
             }
             let mut connection = strip;
@@ -3843,12 +4026,125 @@ fn critical_face_boundary_star(
                     )
                 })?
             {
+                reject(
+                    transverse,
+                    22,
+                    format_args!(
+                        "root={root:?} event={} port={port_index} connection={connection:?} lacks C1",
+                        event.face
+                    ),
+                );
                 continue;
             }
             let connection_jet =
                 surface_enclosure(surface, connection, work, cancel).map_err(|error| {
                     critical_geometry_error(error, face_index, "root-to-port whole surface jet")
                 })?;
+            let off_literal_port = root[transverse][0] < port_uv[transverse][0]
+                || root[transverse][1] > port_uv[transverse][1];
+            if off_literal_port {
+                // The original decimal PCurve can lie just beyond the exact
+                // stationary root (for example a declared rounded radian).
+                // Do not move either operand or enlarge the material domain.
+                // Own their entire connection only inside the already sealed
+                // source-error ribbon, with a literal constant transverse port.
+                let coordinate =
+                    Interval::new(port_uv[transverse][0], port_uv[transverse][1])?.mid();
+                if !literal_port_coordinate(
+                    &operand,
+                    uv_range,
+                    transverse,
+                    [coordinate; 2],
+                    work,
+                    cancel,
+                )? {
+                    reject(
+                        transverse,
+                        23,
+                        format_args!(
+                            "root={root:?} event={} port={port_index} port_uv={port_uv:?} lacks literal constant transverse={coordinate}",
+                            event.face
+                        ),
+                    );
+                    continue;
+                }
+                let Some(uncertainty) = definition.provenance().uncertainty_mm else {
+                    reject(
+                        transverse,
+                        24,
+                        format_args!(
+                            "root={root:?} port={port_index} lacks declared source uncertainty"
+                        ),
+                    );
+                    continue;
+                };
+                let maximum_deviation = uncertainty.min(domain.source_chart_error_mm());
+                if !maximum_deviation.is_finite() || maximum_deviation < 0.0 {
+                    reject(
+                        transverse,
+                        25,
+                        format_args!(
+                            "root={root:?} port={port_index} invalid measured source limit={maximum_deviation}"
+                        ),
+                    );
+                    continue;
+                }
+                work.charge(32, cancel)?;
+                let displacement = Interval::new(root[transverse][0], root[transverse][1])?
+                    .sub(Interval::point(coordinate))
+                    .abs_upper();
+                let tangent = if transverse == 0 {
+                    connection_jet.du
+                } else {
+                    connection_jet.dv
+                };
+                let speed = tangent
+                    .into_iter()
+                    .fold(Interval::point(0.0), |sum, value| sum.add(value.square()))
+                    .sqrt()?;
+                if speed.mul(Interval::point(displacement)).hi > maximum_deviation {
+                    if terminal {
+                        reject(
+                            transverse,
+                            26,
+                            format_args!(
+                                "root={root:?} event={} port={port_index} port_uv={port_uv:?} displacement={} exceeds source limit={maximum_deviation}",
+                                event.face,
+                                speed.mul(Interval::point(displacement)).hi
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                // This exact trim-classification anchor chooses the original
+                // material side. It is not a sampled coverage proof: the whole
+                // ribbon's foreign-boundary exclusions and qualified endcap
+                // relative cuts below must establish its connected extension.
+                if !(root[transverse][0] > coordinate || root[transverse][1] < coordinate) {
+                    reject(
+                        transverse,
+                        27,
+                        format_args!(
+                            "root={root:?} port={port_index} overlaps literal transverse={coordinate}"
+                        ),
+                    );
+                    continue;
+                }
+                let mut anchor = root;
+                anchor[longitudinal] = [span[0] * 0.5 + span[1] * 0.5; 2];
+                let classification = domain.classify(anchor, work, cancel)?;
+                if !matches!(classification, TrimClassification::Inside) {
+                    reject(
+                        transverse,
+                        28,
+                        format_args!(
+                            "root={root:?} event={} port={port_index} port_uv={port_uv:?} anchor={anchor:?} classified {classification:?}",
+                            event.face
+                        ),
+                    );
+                    continue;
+                }
+            }
             let second = if transverse == 0 {
                 connection_jet.duu
             } else {
@@ -3858,6 +4154,13 @@ fn critical_face_boundary_star(
             if (sign < 0 && connection_curvature.lo <= 0.0)
                 || (sign > 0 && connection_curvature.hi >= 0.0)
             {
+                reject(
+                    transverse,
+                    29,
+                    format_args!(
+                        "root={root:?} port={port_index} connection curvature={connection_curvature:?} sign={sign} disagree"
+                    ),
+                );
                 continue;
             }
             let connection_tangents = [connection_jet.du, connection_jet.dv];
@@ -3869,6 +4172,13 @@ fn critical_face_boundary_star(
                 || !exact_zero(functional.dot(connection_hessian[longitudinal][longitudinal]))
                 || !exact_zero(functional.dot(connection_hessian[transverse][longitudinal]))
             {
+                reject(
+                    transverse,
+                    30,
+                    format_args!(
+                        "root={root:?} port={port_index} connection longitudinal invariance failed"
+                    ),
+                );
                 continue;
             }
             let mut connection_normal = crate::parametric::surface_geometric_normal_enclosure(
@@ -3884,6 +4194,13 @@ fn critical_face_boundary_star(
             if (sign < 0 && connection_direction.hi >= 0.0)
                 || (sign > 0 && connection_direction.lo <= 0.0)
             {
+                reject(
+                    transverse,
+                    31,
+                    format_args!(
+                        "root={root:?} port={port_index} connection normal={connection_direction:?} sign={sign} disagree"
+                    ),
+                );
                 continue;
             }
             let (boundary_edge, _) = native_coedge(
@@ -3917,11 +4234,18 @@ fn critical_face_boundary_star(
                     .into_iter()
                     .any(|vertex| other_vertices.contains(&vertex));
                 if !shares_endpoint || !has_regular_original_boundary_query(domain, index)? {
+                    reject(
+                        transverse,
+                        32,
+                        format_args!(
+                            "root={root:?} port={port_index} foreign coedge={index} boundary={boundary:?} intersects connection={connection:?}"
+                        ),
+                    );
                     complete = false;
                     break;
                 }
-                let uv_range = domain.original_coedge_correspondence(index)?.uv_range();
-                let operand = domain.coedge_operand(index)?;
+                let operand = domain.coedge_geometric_operand(index, work, cancel)?;
+                let uv_range = crate::parametric::CurveEvaluator::active_range(&operand);
                 if !literal_port_coordinate(
                     &operand,
                     uv_range,
@@ -3937,6 +4261,13 @@ fn critical_face_boundary_star(
                     work,
                     cancel,
                 )? {
+                    reject(
+                        transverse,
+                        33,
+                        format_args!(
+                            "root={root:?} port={port_index} coedge={index} lacks literal endcap span={span:?}"
+                        ),
+                    );
                     complete = false;
                     break;
                 }
@@ -3944,10 +4275,80 @@ fn critical_face_boundary_star(
             if !complete {
                 continue;
             }
+            if off_literal_port {
+                for (joint_index, joint) in domain.original_joints()?.iter().enumerate() {
+                    work.charge(1, cancel)?;
+                    if (0..2).any(|axis| {
+                        joint.enclosure[axis].hi < connection[axis][0]
+                            || connection[axis][1] < joint.enclosure[axis].lo
+                    }) {
+                        continue;
+                    }
+                    // A native vertex ID alone does not identify the endcap:
+                    // consume the selected original port occurrence's own cut.
+                    let incident = [joint.incoming, joint.outgoing].into_iter().any(|use_| {
+                        use_.face_id == port.identity().face_id
+                            && use_.wire_index == port.identity().wire_index
+                            && use_.coedge_index == port.identity().coedge_index
+                            && use_.edgeuse == port.identity().edgeuse
+                    });
+                    if !incident || !boundary_vertices.contains(&joint.vertex_id) {
+                        reject(
+                            transverse,
+                            34,
+                            format_args!(
+                                "root={root:?} port={port_index} foreign joint={joint_index} vertex={:?} enclosure={:?}",
+                                joint.vertex_id, joint.enclosure
+                            ),
+                        );
+                        complete = false;
+                        break;
+                    }
+                    let mut endcap = joint.enclosure.map(|value| [value.lo, value.hi]);
+                    endcap[transverse][0] = endcap[transverse][0].min(connection[transverse][0]);
+                    endcap[transverse][1] = endcap[transverse][1].max(connection[transverse][1]);
+                    let owned = if let Some(attachments) = attachments {
+                        attachments.qualifies_original_connection(
+                            domain,
+                            joint_index,
+                            joint.vertex_id,
+                            endcap,
+                            work,
+                            cancel,
+                        )?
+                    } else {
+                        false
+                    };
+                    if !owned {
+                        reject(
+                            transverse,
+                            35,
+                            format_args!(
+                                "root={root:?} event={} port={port_index} joint={joint_index} endcap={endcap:?} original cut not owned; attachments={}",
+                                event.face,
+                                attachments.is_some()
+                            ),
+                        );
+                        complete = false;
+                        break;
+                    }
+                }
+                if !complete {
+                    continue;
+                }
+            }
             for vertex in oriented_vertices(definition, &boundary_edge)? {
                 if critical_vertex_owner(definition, events, edges, vertex, work, cancel)?
                     != Some(event.face)
                 {
+                    reject(
+                        transverse,
+                        36,
+                        format_args!(
+                            "root={root:?} port={port_index} vertex={vertex:?} lacks same event={} complete cycle",
+                            event.face
+                        ),
+                    );
                     complete = false;
                     break;
                 }
@@ -3960,6 +4361,14 @@ fn critical_face_boundary_star(
                 hi: physical,
             });
             let Some(height) = critical_star_height(root_height, attachment, event, request) else {
+                reject(
+                    transverse,
+                    37,
+                    format_args!(
+                        "root={root:?} event={} port={port_index} root_height={root_height:?} attachment={attachment:?} event_height={:?} sample={} not separated",
+                        event.face, event.height, request.sample_height_mm
+                    ),
+                );
                 continue;
             };
             return Ok(Some(Some(NativeCollarBoundaryCriticalBand {
@@ -3978,6 +4387,14 @@ fn critical_face_boundary_star(
                 },
             })));
         }
+    }
+    if let Some(entries) = diagnosis {
+        return Err(unresolved(format!(
+            "terminal strip obligation: source_face={} face_index={face_index}; transverse0: {}; transverse1: {}; cell={cell:?}",
+            definition.faces[face_index].face_id.as_str(),
+            entries[0].1,
+            entries[1].1,
+        )));
     }
     Ok(None)
 }
@@ -4124,6 +4541,7 @@ fn critical_edge_boundary_star(
         request,
         events,
         edges,
+        attachments,
         remaining_bytes,
     } = query;
     let definition = source.definition();
@@ -4141,6 +4559,54 @@ fn critical_edge_boundary_star(
     let Some(second_use) = pair.second.as_ref() else {
         return Ok(None);
     };
+    if let Some(attachments) = attachments {
+        for vertex in [record.vertices[low_vertex], record.vertices[1 - low_vertex]] {
+            let Some(owner) =
+                critical_vertex_owner(definition, events, edges, vertex, work, cancel)?
+            else {
+                continue;
+            };
+            let event = events
+                .iter()
+                .find(|event| event.face == owner)
+                .ok_or_else(|| unresolved("removed endpoint lost its exact source event owner"))?;
+            let Some((removed, cap_height)) = attachments.qualified_removed_endpoint(
+                source,
+                domain,
+                flat,
+                vertex,
+                full,
+                cell,
+                functional,
+                request.sample_height_mm,
+                event.outward_height_sign,
+                remaining_bytes,
+                work,
+                cancel,
+            )?
+            else {
+                continue;
+            };
+            // The complete removed F and actual CLOSED G are independently
+            // beyond the sample. Keep the original event's own height and the
+            // final exact-vertex projected-degree audit; no root is inferred.
+            let Some(height) = critical_star_height(cap_height, cap_height, event, request) else {
+                continue;
+            };
+            return Ok(Some(Some(NativeCollarBoundaryCriticalBand {
+                event_face: owner,
+                source_face: face_index,
+                source_coedge: Some((wire_index, coedge_index)),
+                source_uv: None,
+                native_parameter_interval: Some(removed),
+                qualified_uv: None,
+                qualified_parameter_interval: Some(removed),
+                height,
+                outward_height_sign: event.outward_height_sign,
+                owner: NativeCollarCriticalOwner::Vertex { vertex },
+            })));
+        }
+    }
     let jet = crate::parametric::curve_enclosure(curve, (cell[0], cell[1]), work, cancel)
         .map_err(|error| critical_geometry_error(error, face_index, "critical-edge cell jet"))?;
     let second = functional.dot(jet.second_derivative);
@@ -5133,6 +5599,15 @@ fn certify_collar_complex(
                     } else { false }
                 } else { regular && (!functional.dot(jet.du).contains_zero()
                     || !functional.dot(jet.dv).contains_zero()) };
+                let pending_split = (!accepted).then(|| {
+                    let motion = [jet.du, jet.dv].map(|tangent| tangent.into_iter()
+                        .map(Interval::abs_upper).fold(0.0_f64, f64::max));
+                    let scores: [f64; 2] = std::array::from_fn(|axis|
+                        motion[axis] * (uv[axis][1] - uv[axis][0]));
+                    let axis = usize::from(scores[1] > scores[0]);
+                    let midpoint = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+                    (axis, depth >= MAX_DEPTH || midpoint <= uv[axis][0] || midpoint >= uv[axis][1])
+                });
                 let mut critical_owned = false;
                 if !accepted && event_index.is_none() {
                     let covered = boundary_critical_bands.iter().any(|band: &NativeCollarBoundaryCriticalBand|
@@ -5141,7 +5616,7 @@ fn certify_collar_complex(
                     if covered {
                         accepted = true;
                         critical_owned = true;
-                    } else if let Some(cover) = critical_face_boundary_star(CriticalFaceBoundaryStarQuery { definition, face_index: index, surface, domain: &domain, cell: uv, jet: &jet, attachments: attachments.as_ref(), functional, request, events: &events, edges: &edges }, work, cancel)? {
+                    } else if let Some(cover) = critical_face_boundary_star(CriticalFaceBoundaryStarQuery { definition, face_index: index, surface, domain: &domain, cell: uv, jet: &jet, attachments: attachments.as_ref(), functional, request, events: &events, edges: &edges, terminal: pending_split.is_some_and(|(_, terminal)| terminal) }, work, cancel)? {
                         if let Some(band) = cover {
                             if boundary_critical_bands.len() == band_capacity {
                                 return Err(failure(GeometryErrorCode::ResourceLimit, "critical star band capacity exhausted"));
@@ -5164,11 +5639,8 @@ fn certify_collar_complex(
                     hash_uv(&mut hash, uv);
                     for point in jet.position { hash_interval(&mut hash, point); }
                 } else {
-                    let motion = [jet.du, jet.dv].map(|tangent| tangent.into_iter()
-                        .map(Interval::abs_upper).fold(0.0_f64, f64::max));
-                    let scores: [f64; 2] = std::array::from_fn(|axis|
-                        motion[axis] * (uv[axis][1] - uv[axis][0]));
-                    for child in split_axis(uv, depth, usize::from(scores[1] > scores[0]))
+                    let (axis, _) = pending_split.expect("an unaccepted original face cell retains its selected split");
+                    for child in split_axis(uv, depth, axis)
                         .map_err(|error| failure(error.code, format!("native collar face {index} has unresolved native critical/root incidence at {uv:?}: {}", error.message)))? {
                         stack.push((child, depth + 1));
                     }
@@ -5354,7 +5826,7 @@ fn certify_collar_complex(
                                     if covered {
                                         accepted = true;
                                         critical_owned = true;
-                                    } else if let Some(cover) = critical_edge_boundary_star(CriticalEdgeBoundaryStarQuery { source, face_index: index, wire_index, coedge_index, curve, full: source_range, cell: cell[0], functional, request, events: &events, edges: &edges, remaining_bytes: limit.saturating_sub(occupied) }, work, cancel)? {
+                                    } else if let Some(cover) = critical_edge_boundary_star(CriticalEdgeBoundaryStarQuery { source, face_index: index, wire_index, coedge_index, curve, full: source_range, cell: cell[0], functional, request, events: &events, edges: &edges, attachments: attachments.as_ref(), remaining_bytes: limit.saturating_sub(occupied) }, work, cancel)? {
                                         if let Some(band) = cover {
                                             if boundary_critical_bands.len() == band_capacity {
                                                 return Err(failure(GeometryErrorCode::ResourceLimit, "critical star edge capacity exhausted"));

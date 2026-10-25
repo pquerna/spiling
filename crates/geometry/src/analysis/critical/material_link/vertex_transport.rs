@@ -186,6 +186,118 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
         ];
         comparison.connection_stays_on_replaced_side(domain, recipe, connection, work, cancel)
     }
+
+    /// Admit only a complete queried SOURCE-gauge interval removed by this
+    /// exact occurrence's frozen endpoint cut. The independently qualified
+    /// source cut and complete removed-F / closed-G sample-side cover are
+    /// separate premises; neither a nearby root nor an exit alone is authority.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::analysis) fn qualified_removed_endpoint(
+        &self,
+        source: MaterialSourceView<'_, 'd>,
+        domain: &PreparedFaceTrimDomain<'_>,
+        coedge: usize,
+        vertex: VertexId,
+        full_source_range: [f64; 2],
+        cell: [f64; 2],
+        functional: crate::analysis::slab::HeightFunctional,
+        sample_height: f64,
+        sign: i8,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<([f64; 2], Interval)>, GeometryError> {
+        work.charge(1, cancel)?;
+        Interval::new(cell[0], cell[1])?;
+        if !std::ptr::eq(self.domain, domain)
+            || !std::ptr::eq(self.definition, source.definition())
+            || !source
+                .vertex_plans()
+                .is_some_and(|plans| std::ptr::eq(plans, self.plans))
+            || !matches!(sign, -1 | 1)
+        {
+            return Ok(None);
+        }
+        let proof = domain.original_coedge_correspondence(coedge)?;
+        let Some(binding) = proof.binding() else {
+            return Ok(None);
+        };
+        let identity = domain.coedges()[coedge].identity();
+        if full_source_range != proof.spatial_range()
+            || binding.face != identity.face_id
+            || binding.edge != identity.edge_id
+            || binding.edgeuse != identity.edgeuse
+            || binding.owner[1] != identity.wire_index
+            || binding.owner[2] != identity.coedge_index
+        {
+            return Ok(None);
+        }
+        let plan = self.plans.plan(self.definition, vertex, work, cancel)?;
+        if !plan.source_geometry_qualified.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        for recipe in &plan.recipes {
+            for end in [recipe.outgoing, recipe.incoming] {
+                work.charge(1, cancel)?;
+                // Incidences are material-oriented; identities retain native orientation.
+                if end.use_.face != binding.owner[0]
+                    || end.use_.coedge != coedge
+                    || end.use_.wire != identity.wire_index
+                    || end.use_.index != identity.coedge_index
+                    || end.use_.edgeuse != identity.edgeuse
+                    || (end.use_.orientation == domain.native_orientation()) != identity.orientation
+                    || end.edge != binding.edge
+                    || binding.endpoints[binding.native_endpoint_index(end.spatial_high)] != vertex
+                    || end.endpoint != full_source_range[usize::from(end.spatial_high)]
+                {
+                    continue;
+                }
+                let removed = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
+                if cell[0] < removed[0]
+                    || cell[1] > removed[1]
+                    || !(QualifiedSourceGeometry { plan }).owns_source_cut(recipe)
+                {
+                    continue;
+                }
+                let mut frozen_exit = false;
+                plan.visit_spatial_exits(work, cancel, &mut |edge, high, exit, _work| {
+                    frozen_exit |= edge == end.edge && high == end.spatial_high && exit == end.exit;
+                    Ok(())
+                })?;
+                if !frozen_exit {
+                    continue;
+                }
+                let mut height: Option<Interval> = None;
+                let mut failed_cover = None;
+                let covered = plan.complete_incident_positions_miss(
+                    source,
+                    remaining_bytes,
+                    work,
+                    cancel,
+                    &mut failed_cover,
+                    &mut |position| {
+                        let candidate = functional.height(position);
+                        let accepted = if sign < 0 {
+                            candidate.hi < sample_height
+                        } else {
+                            candidate.lo > sample_height
+                        };
+                        // A failed whole-face prefilter can be refined by the
+                        // existing overcover. Retain only accepted cover bounds.
+                        if accepted {
+                            height =
+                                Some(height.map_or(candidate, |previous| previous.hull(candidate)));
+                        }
+                        Ok(accepted)
+                    },
+                )?;
+                if covered && let Some(height) = height {
+                    return Ok(Some((removed, height)));
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Query authority is separate from the geometry-only realization choice.
@@ -577,20 +689,39 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             end_curve(&domain, outgoing, Interval::point(0.0), work, cancel)?
                                 .derivative;
                         let mut corner_accepted = false;
-                        for candidate in 0..7 {
+                        for candidate in 0..8 {
                             current_candidate = Some(candidate);
+                            let bulge = if candidate == 7 {
+                                // The first seven proposals cannot turn around
+                                // an affine reflex corner: rotating only the
+                                // outgoing tangent leaves the incoming endpoint
+                                // determinant negative. Use both directed germs.
+                                // For curved ends this remains a proposal only;
+                                // every existing complete gate still applies.
+                                stage = "incoming end tangent";
+                                let incoming_tangent = end_curve(
+                                    &domain,
+                                    incoming,
+                                    Interval::point(0.0),
+                                    work,
+                                    cancel,
+                                )?
+                                .derivative;
+                                reflex_bridge_bulge(tangent, incoming_tangent)
+                            } else {
+                                let bulge_scale = if candidate == 0 {
+                                    0.0
+                                } else {
+                                    [1.0, 2.0, 4.0][(candidate - 1) / 2]
+                                        * if candidate % 2 == 1 { 1.0 } else { -1.0 }
+                                };
+                                if bulge_scale == 0.0 {
+                                    [Interval::point(0.0); 2]
+                                } else {
+                                    rotate(tangent, bulge_scale)
+                                }
+                            };
                             stage = "finite B cover";
-                            let bulge_scale = if candidate == 0 {
-                                0.0
-                            } else {
-                                [1.0, 2.0, 4.0][(candidate - 1) / 2]
-                                    * if candidate % 2 == 1 { 1.0 } else { -1.0 }
-                            };
-                            let bulge = if bulge_scale == 0.0 {
-                                [Interval::point(0.0); 2]
-                            } else {
-                                rotate(tangent, bulge_scale)
-                            };
                             let cell_start = cells.len();
                             let ray_start = rays.len();
                             let cell_limit =
@@ -645,7 +776,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     stage = "opposed spatial exits";
                     validate_spatial_exits(&recipes, work, cancel)?;
                 }
-                stage = "projected vertex fan";
+                if accepted {
+                    stage = "projected vertex fan";
+                }
                 if accepted
                     && !cells.is_empty()
                     && super::vertex_fan::projected_vertex_fan(&rays, work, cancel)?
@@ -947,7 +1080,10 @@ impl<'d> SourceVertexTransportPlan<'d> {
         let required = scratch
             .saturating_add(pole_scratch)
             .max(super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES)
-            .saturating_add(std::mem::size_of::<Box3>() + 3 * std::mem::size_of::<Box2>());
+            .saturating_add(std::mem::size_of::<Box3>() + 3 * std::mem::size_of::<Box2>())
+            .saturating_add(std::mem::size_of::<
+                crate::parametric::OriginalCoefficientSheet<'_, '_>,
+            >());
         if required > remaining_bytes {
             return Err(super::transport::resource());
         }
@@ -1001,8 +1137,18 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     return Ok(false);
                 }
             }
+            // The owned cut and selected chart were qualified above. This
+            // final closed-UV hull only overcovers the original coefficient
+            // image; it grants no additional selected-material membership.
+            let crate::kernel::trim::PreparedTrimSurface::Original(original) = surface else {
+                return Err(refusal(
+                    "original joint image lost its captured coefficient owner",
+                ));
+            };
+            let coefficients =
+                crate::parametric::OriginalCoefficientSheet::new(original, uv_box(uv))?;
             whole_original_joint_image_fits(
-                surface,
+                &coefficients,
                 uv,
                 self.point,
                 cross(self.rows[0], self.rows[1]),
@@ -2494,7 +2640,7 @@ fn admit_candidate_source_costs(
             work.charge(1, cancel)?;
             cell.error_mm = cell.error_mm.max(edge_error_mm);
             if let Some(comparison) = &recipe.comparison {
-                if comparison.is_identity(recipe) {
+                if comparison.is_identity() {
                     // This is exact original-operand identity, not a small
                     // shift threshold: the already proved source cost is reused.
                     continue;
@@ -2533,6 +2679,13 @@ fn admit_candidate_source_costs(
         }
     }
     Ok(SourceCostAdmission::Admitted)
+}
+
+/// A source-only quadratic proposal, not a reflex classification or receipt.
+/// For affine rays a,b with det(a,b)<0, h=-4(a+b) gives
+/// det(B,B')=-det(a,b)*(1+8*(theta-1/2)^2)>0 on the whole bridge.
+fn reflex_bridge_bulge(outgoing: Box2, incoming: Box2) -> Box2 {
+    std::array::from_fn(|i| outgoing[i].add(incoming[i]).mul(Interval::point(-4.0)))
 }
 
 fn star_jet(
@@ -3728,6 +3881,35 @@ mod tests {
     }
 
     #[test]
+    fn reflex_bridge_uses_both_directed_rays_at_the_initial_source_fraction() {
+        let fraction = Interval::point(1.0 / 1024.0);
+        let a = [Interval::point(-8.0).mul(fraction), Interval::point(0.0)];
+        let b = [
+            Interval::point(0.0),
+            Interval::point(5.3).sub(Interval::point(4.7)).mul(fraction),
+        ];
+        let difference = std::array::from_fn::<_, 2, _>(|i| b[i].sub(a[i]));
+        // A single rotated outgoing tangent cannot fix the reflex incoming
+        // endpoint, regardless of which of the seven existing scales is used.
+        for scale in [0.0, 1.0, -1.0, 2.0, -2.0, 4.0, -4.0] {
+            let bulge = rotate(a, scale);
+            let derivative = std::array::from_fn(|i| difference[i].sub(bulge[i]));
+            assert!(determinant(b, derivative).hi < 0.0);
+        }
+        let bulge = reflex_bridge_bulge(a, b);
+        assert!(bulge[0].lo > 0.0 && bulge[1].hi < 0.0);
+        let outgoing_derivative = std::array::from_fn(|i| difference[i].add(bulge[i]));
+        let incoming_derivative = std::array::from_fn(|i| difference[i].sub(bulge[i]));
+        assert!(determinant(a, outgoing_derivative).lo > 0.0);
+        assert!(determinant(b, incoming_derivative).lo > 0.0);
+        // Complete coefficient theorem, not a finite collection of theta
+        // samples: det(B,B')=-det(a,b)*(1+8*(theta-1/2)^2).
+        let centered_theta = Interval::new(-0.5, 0.5).unwrap();
+        let factor = Interval::point(1.0).add(Interval::point(8.0).mul(centered_theta.square()));
+        assert!(determinant(a, b).neg().mul(factor).lo > 0.0);
+    }
+
+    #[test]
     fn closed_cone_atlas_covers_apex_fan_and_both_closed_radial_ends() {
         // B(t)=(1,t,t^2), t in [0,1]. All limiting normals at the
         // collapsed apex must survive, not merely the t-midpoint normal.
@@ -4176,6 +4358,98 @@ mod tests {
         crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
         ), &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn reversed_face_removed_endpoint_keeps_qualified_source_cut_scope() {
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+        ), &AtomicBool::new(false)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let prepared = crate::analysis::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = prepared.source_view().unwrap();
+        let plans = source.vertex_plans().unwrap();
+        let source_incidence = incidence(&definition, &mut work, &cancel);
+        let (vertex, end, domain) = source_incidence
+            .vertices()
+            .unwrap()
+            .into_iter()
+            .find_map(|vertex| {
+                let plan = plans.plan(&definition, vertex, &mut work, &cancel).unwrap();
+                plan.recipes
+                    .iter()
+                    .flat_map(|recipe| [recipe.outgoing, recipe.incoming])
+                    .find_map(|end| {
+                        let domain = source
+                            .face_domain(end.use_.face, MAX_SCRATCH_BYTES, &mut work, &cancel)
+                            .unwrap();
+                        (!domain.native_orientation()).then_some((vertex, end, domain))
+                    })
+            })
+            .expect("the original fitting must retain an oppositely oriented native face");
+        let plan = plans.plan(&definition, vertex, &mut work, &cancel).unwrap();
+        plan.qualify_geometry(source, MAX_SCRATCH_BYTES, &mut work, &cancel)
+            .unwrap();
+        let attachments = OriginalFaceCornerAttachments {
+            definition: &definition,
+            domain,
+            plans,
+        };
+        let full = domain
+            .original_coedge_correspondence(end.use_.coedge)
+            .unwrap()
+            .spatial_range();
+        let removed = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
+        let functional = crate::analysis::slab::HeightFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(0.0),
+        };
+        let admitted = attachments
+            .qualified_removed_endpoint(
+                source,
+                domain,
+                end.use_.coedge,
+                vertex,
+                full,
+                removed,
+                functional,
+                1_000.0,
+                -1,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .expect("native face reversal must not discard the same qualified removed source set");
+        assert_eq!(admitted.0, removed);
+        assert!(admitted.1.hi < 1_000.0);
+        assert!(
+            attachments
+                .qualified_removed_endpoint(
+                    source,
+                    domain,
+                    end.use_.coedge,
+                    vertex,
+                    full,
+                    full,
+                    functional,
+                    1_000.0,
+                    -1,
+                    MAX_SCRATCH_BYTES,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap()
+                .is_none(),
+            "a qualified endpoint cut must not authorize the rest of its original edge"
+        );
     }
 
     fn spherical_corner(definition: &Definition) -> VertexId {

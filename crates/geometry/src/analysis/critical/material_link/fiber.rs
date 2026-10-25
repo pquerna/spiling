@@ -641,7 +641,7 @@ pub(super) enum FiberNewton {
 
 /// A numerical midpoint inverse only proposes the preconditioner. Existence
 /// requires strict interval inclusion; uniqueness additionally requires an
-/// interval infinity-norm contraction on the ENTIRE owning original cell.
+/// interval box-scaled infinity-norm contraction on the ENTIRE original cell.
 pub(super) fn fiber_krawczyk(
     surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
@@ -721,7 +721,26 @@ fn fiber_krawczyk_jacobian(
         };
         contracted[axis] = [overlap.lo, overlap.hi];
     }
-    let contraction = remainder.map(|row| up(row[0].abs_upper() + row[1].abs_upper()));
+    // Any fixed positive diagonal defines a valid contraction norm. Scale by
+    // finite box radii so unequal UV units/aspect ratios cannot invalidate an
+    // otherwise contractive original map. These rounded values are weights,
+    // never replacements for the actual owner or strict Krawczyk inclusion.
+    let weights: [f64; 2] =
+        std::array::from_fn(|i| boxes[i].sub(Interval::point(center[i])).abs_upper());
+    let mut contraction = [f64::INFINITY; 2];
+    if weights
+        .into_iter()
+        .all(|weight| weight > 0.0 && weight.is_finite())
+    {
+        for i in 0..2 {
+            let row = (0..2).fold(Interval::point(0.0), |sum, j| {
+                sum.add(
+                    Interval::point(remainder[i][j].abs_upper()).mul(Interval::point(weights[j])),
+                )
+            });
+            contraction[i] = row.div(Interval::point(weights[i]))?.hi;
+        }
+    }
     let unique = contraction.into_iter().all(|v| v < 1.0)
         && (0..2).all(|i| strictly_contains(boxes[i], krawczyk[i]));
     Ok(FiberNewton::Enclosure {
@@ -894,6 +913,121 @@ mod tests {
             sample_height_mm: 2.0,
             native_shape_error_mm: 0.1,
         }
+    }
+
+    #[test]
+    fn anisotropic_original_fiber_uses_a_scaled_norm_without_admitting_folds() {
+        use crate::kernel::source_operand::{
+            PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
+        };
+        use solidcraft_step::geom::{
+            BSplineSurface, KnotSpec, Logical, Surface as OriginalSurface, SurfaceForm,
+        };
+        // The actual bilinear source is F(u,v)=(u*(1+1000*v),v,0).
+        // On this owner its unscaled remainder has a row sum above one,
+        // whereas its box-scaled row sum is small. The origin is its unique
+        // root because v=0 and then u=0, not because a midpoint says so.
+        let source = OriginalSurface::BSpline(Box::new(BSplineSurface {
+            u_degree: 1,
+            v_degree: 1,
+            points: vec![
+                vec![[999.0, -1.0, 0.0], [-1001.0, 1.0, 0.0]],
+                vec![[-999.0, -1.0, 0.0], [1001.0, 1.0, 0.0]],
+            ],
+            weights: None,
+            u_knots: vec![-1.0, 1.0],
+            u_multiplicities: vec![2, 2],
+            v_knots: vec![-1.0, 1.0],
+            v_multiplicities: vec![2, 2],
+            form: SurfaceForm::Unspecified,
+            u_closed: Logical::False,
+            v_closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        }));
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let cancel = AtomicBool::new(false);
+        let surface = PreparedOriginalSurface::new(
+            &source,
+            [[-1.0, 1.0]; 2],
+            SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let uv = [[-0.001, 0.001], [-1.0e-6, 1.0e-6]];
+        let jet = surface_enclosure(&surface, uv, &mut work, &cancel).unwrap();
+        let ray = fiber([0.0; 3]);
+        let FiberNewton::Enclosure {
+            uv: root,
+            unique: true,
+        } = fiber_krawczyk(&surface, uv, &jet, &ray, &mut work, &cancel).unwrap()
+        else {
+            panic!("the complete anisotropic original owner has one strict root");
+        };
+        for axis in 0..2 {
+            assert!(root[axis][0] <= 0.0 && root[axis][1] >= 0.0);
+            assert!(root[axis][0] > uv[axis][0] && root[axis][1] < uv[axis][1]);
+        }
+
+        let mut outside_family = ray;
+        outside_family.offsets[0] = Interval::new(-0.01, 0.01).unwrap();
+        let mut singular = ray;
+        singular.rows[1] = [0.0, 0.0, 1.0].map(Interval::point);
+        let mut collapsed_line = ray;
+        collapsed_line.offsets[1] = Interval::point(0.001);
+        for (owner, query) in [
+            // A midpoint root cannot admit a target family extending outside.
+            (uv, outside_family),
+            // Projecting to (x,z) drops a whole source parameter direction.
+            (uv, singular),
+            // At v=-0.001 the bilinear source maps ALL u to the same fiber.
+            ([[-0.001, 0.001], [-0.001001, -0.000999]], collapsed_line),
+        ] {
+            let jet = surface_enclosure(&surface, owner, &mut work, &cancel).unwrap();
+            assert!(!matches!(
+                fiber_krawczyk(&surface, owner, &jet, &query, &mut work, &cancel).unwrap(),
+                FiberNewton::Enclosure { unique: true, .. },
+            ));
+        }
+
+        // A genuine fold F(u,v)=(u^2,v,0) has TWO regular preimages of
+        // (1/4,0). No choice of positive coordinate weights makes it unique.
+        let folded = OriginalSurface::BSpline(Box::new(BSplineSurface {
+            u_degree: 2,
+            v_degree: 1,
+            points: vec![
+                vec![[1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+                vec![[-1.0, -1.0, 0.0], [-1.0, 1.0, 0.0]],
+                vec![[1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+            ],
+            weights: None,
+            u_knots: vec![-1.0, 1.0],
+            u_multiplicities: vec![3, 3],
+            v_knots: vec![-1.0, 1.0],
+            v_multiplicities: vec![2, 2],
+            form: SurfaceForm::Unspecified,
+            u_closed: Logical::False,
+            v_closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        }));
+        let folded = PreparedOriginalSurface::new(
+            &folded,
+            [[-1.0, 1.0]; 2],
+            SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let owner = [[-0.75, 0.75], [-1.0e-6, 1.0e-6]];
+        let jet = surface_enclosure(&folded, owner, &mut work, &cancel).unwrap();
+        let mut two_roots = ray;
+        two_roots.offsets[0] = Interval::point(-0.25);
+        assert!(!matches!(
+            fiber_krawczyk(&folded, owner, &jet, &two_roots, &mut work, &cancel).unwrap(),
+            FiberNewton::Enclosure { unique: true, .. },
+        ));
     }
 
     #[test]

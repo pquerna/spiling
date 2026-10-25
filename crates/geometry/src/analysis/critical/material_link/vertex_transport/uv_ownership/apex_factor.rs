@@ -116,10 +116,8 @@ fn coefficients_strict(
     let bubble = theta.mul(complement);
     let slope = Interval::point(1.0).sub(Interval::point(2.0).mul(theta));
     let delta: Box2 = std::array::from_fn(|i| rb[i].sub(ra[i]).add(slope.mul(bulge[i])));
-    let base_r = mix(ra, rb, theta);
     let base_p = mix(dda, ddb, theta);
     let offset = mix(offsets[0], offsets[1], theta);
-    let rblend: Box2 = std::array::from_fn(|i| base_r[i].add(bubble.mul(bulge[i])));
     let pblend: Box2 = std::array::from_fn(|i| {
         base_p[i].add(Interval::point(2.0).mul(offset[i].add(bubble.mul(bulge[i]))))
     });
@@ -147,14 +145,11 @@ fn coefficients_strict(
         .mul(determinant(tangent, delta))
         .add(one_plus_kappa.mul(determinant(tangent, pblend)))
         .add(s.mul(determinant(pblend, delta)));
-    // Q = a(theta)*T + s*Rblend. For every s>0, this strict
-    // determinant proves Q != 0, including a(theta)=0. At s=0 the
-    // collapsed same-NativeV quotient is retained by the parent consumer.
-    let normal_remainder = determinant(tangent, rblend);
-    strict(angular, sign)
-        && strict(jacobian, sign)
-        && finite(normal_remainder)
-        && (normal_remainder.lo > 0.0 || normal_remainder.hi < 0.0)
+    // det(Q,Q_theta) = s*angular. Strict angular coefficients already
+    // imply Q != 0 for every s>0. A separate fixed-normal remainder need
+    // not keep one sign: it may vanish while Q has a nonzero tangential
+    // component. At s=0 retain the parent's collapsed NativeV quotient.
+    strict(angular, sign) && strict(jacobian, sign)
 }
 
 #[cfg(test)]
@@ -235,6 +230,26 @@ mod properties {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn bulged_concave_split_keeps_orientation_when_normal_remainder_changes_sign() {
+        let s = Interval { lo: 0.0, hi: 0.125 };
+        // gamma_a=(s,-s²/8), gamma_b=(-s,-s²/8), B=(0,1).
+        // The normal remainder -1/8+theta*(1-theta) crosses zero in
+        // [.14,.15], but the Jacobian coefficient is exactly 1/2 and
+        // the angular coefficient is (1-theta)²+theta²-1/4 > 0.
+        assert!(coefficients_strict(
+            point(1.0, 0.0),
+            Interval::point(1.0),
+            second(&quadratic(1.0, -0.125), s.hi),
+            second(&quadratic(-1.0, -0.125), s.hi),
+            [ZERO2; 2],
+            point(0.0, 1.0),
+            s,
+            Interval { lo: 0.14, hi: 0.15 },
+            1.0,
+        ));
     }
 
     #[test]

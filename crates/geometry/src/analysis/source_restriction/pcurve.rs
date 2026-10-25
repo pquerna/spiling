@@ -157,6 +157,126 @@ pub(crate) struct SourcePcurveRestriction<'d> {
     exact_endpoints: bool,
 }
 
+/// The same complete oriented UV path in its raw endpoint-expression gauge.
+/// This view grants no native/spatial parameter correspondence: interior query
+/// parameters differ from `SourcePcurveRestriction`'s calibrated gauge.
+#[derive(Clone, Copy)]
+pub(crate) struct SourcePcurveGeometry<'a, 'd> {
+    owner: &'a SourcePcurveRestriction<'d>,
+    raw: &'a RawRestriction,
+}
+
+impl CurveEvaluator for SourcePcurveGeometry<'_, '_> {
+    fn active_range(&self) -> [f64; 2] {
+        [0.0, 1.0]
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<crate::parametric::ExactAffineCurve>, GeometryError> {
+        use crate::exact_coefficient::ExactCoefficient as E;
+        work.charge(1, cancel)?;
+        // Root enclosures and periodic turn bounds are not exact parameters.
+        // Only the retained literal/root identity may supply this algebra.
+        let exact = |endpoint| match endpoint {
+            RawEndpoint::Literal { value, turns: 0 } => Some(value),
+            RawEndpoint::Root(root) => root.exact_parameter(),
+            _ => None,
+        };
+        let [Some(a), Some(b)] = self.raw.endpoints.map(exact) else {
+            return Ok(None);
+        };
+        let Some(mut affine) = self.owner.chart.exact_affine_coefficients(work, cancel)? else {
+            return Ok(None);
+        };
+        let mut slope = E::point(b);
+        if slope.push(-a).is_none() {
+            return Ok(None);
+        }
+        for axis in 0..3 {
+            let Some(offset) = affine.derivative[axis].product(&E::point(a), work, cancel)? else {
+                return Ok(None);
+            };
+            for term in &offset.terms[..offset.len] {
+                if affine.position[axis].push(*term).is_none() {
+                    return Ok(None);
+                }
+            }
+            let Some(derivative) = affine.derivative[axis].product(&slope, work, cancel)? else {
+                return Ok(None);
+            };
+            affine.derivative[axis] = derivative;
+        }
+        Ok(Some(affine))
+    }
+    fn source_parameter_image(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Interval>, GeometryError> {
+        work.charge(1, cancel)?;
+        self.raw.image(range).map(Some)
+    }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        work.charge(1, cancel)?;
+        if order > 3 {
+            return Err(unavailable("geometric PCurve jet order exceeds three"));
+        }
+        let map = self.raw.jet(range)?;
+        Ok(compose(
+            self.owner
+                .chart
+                .evaluate_order([map[0].lo, map[0].hi], order, work, cancel)?,
+            map,
+            order,
+        ))
+    }
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let p = self.raw.image(range)?;
+        self.owner
+            .chart
+            .span_is_continuous([p.lo, p.hi], work, cancel)
+    }
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let p = self.raw.image(range)?;
+        self.owner.chart.span_is_smooth([p.lo, p.hi], work, cancel)
+    }
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<AxisSpans<'_>, GeometryError> {
+        work.charge(1, cancel)?;
+        normalized(range)?;
+        // A complete evaluation cover, not a new knot inventory. The borrowed
+        // original chart retains every knot and proves continuity independently;
+        // calibrated-gauge cover cuts must not be reused in this different gauge.
+        AxisSpans::single(range)
+    }
+    fn original_curve(&self) -> Option<&Curve> {
+        Some(self.owner.chart.source())
+    }
+}
+
 fn normalized(range: [f64; 2]) -> Result<(), GeometryError> {
     Interval::new(range[0], range[1])?;
     if range[0] < 0.0 || range[1] > 1.0 {
@@ -729,6 +849,29 @@ impl<'d> SourcePcurveRestriction<'d> {
             ParameterRecipe::Shared(_) => None,
             ParameterRecipe::Calibrated { calibration, .. } => Some(calibration),
         }
+    }
+    /// A strictly increasing, endpoint-preserving calibration [0,1]->[0,1]
+    /// changes speed only. Its sealed C0 segments share literal internal ends
+    /// and cover the whole target, so removing it preserves the complete
+    /// oriented path with the SAME raw roots, turns and selected chart.
+    pub(crate) fn geometric_path(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<SourcePcurveGeometry<'_, 'd>>, GeometryError> {
+        work.charge(1, cancel)?;
+        let ParameterRecipe::Calibrated { raw, calibration } = &self.recipe else {
+            return Ok(None);
+        };
+        if calibration.source_range() != [0.0, 1.0]
+            || calibration.target_range() != [0.0, 1.0]
+            || raw.derivative()?.contains_zero()
+        {
+            return Err(unavailable(
+                "geometric PCurve view lacks a complete endpoint-preserving directed calibration",
+            ));
+        }
+        Ok(Some(SourcePcurveGeometry { owner: self, raw }))
     }
     pub(crate) fn source_error_mm(&self) -> f64 {
         self.calibration()

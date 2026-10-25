@@ -863,14 +863,16 @@ operators: `delta_d_a = T - gamma_a'(0)` and
 `delta_d_b = -kappa T - gamma_b'(0)`, for finite source-only `T` and
 `kappa > 0`. Retain that common-basis expression, not two independently
 rounded vectors or points selected from derivative enclosures.
-Comparison ribbons and the middle bulge may use quadratic radial weights:
-their displacement is `s^2 O`, with derivative `2s O`, rather than introducing
-an offset into the apex tangent. Keep the original `s=1` outer trace and charge
-the entire `(s^2-s) O` comparison homotopy. For opposed completed germs, C2
-integral remainders together with those quadratic coefficients may expose an
-additional radial factor in the middle comparison Jacobian and angular
-determinant. Prove the remaining coefficients and nonzero radial vector for
-every `s > 0`, retaining the existing same-NativeV quotient at `s = 0`.
+Linear completion retains linear radial ribbons and middle bulge; its sector
+cannot be silently replaced by a quadratic turn-on. Constructed opposed-apex
+Hermite completion uses displacement `s^2 O`, with derivative `2s O`, rather
+than introducing an offset into the apex tangent. Keep the original `s=1`
+outer trace and charge the entire `(s^2-s) O` comparison homotopy. C2 integral
+remainders together with these coefficients may expose an additional radial
+factor in the middle Jacobian and angular determinant. Prove both remaining
+coefficients strictly oriented for every `s > 0`, retaining the same-NativeV
+quotient at `s = 0`. A strict angular coefficient already implies a nonzero
+radial vector; one fixed normal component need not retain its sign.
 Never discard a small apex neighborhood, clamp an uncertain sign, or infer an
 exact cancellation from interval overlap.
 

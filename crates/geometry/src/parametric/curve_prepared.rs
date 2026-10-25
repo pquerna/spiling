@@ -15,8 +15,10 @@ use solidcore::nurbs::crv_basic;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 const ZERO: Interval = Interval::point(0.0);
-pub const CURVE_EVALUATION_SCRATCH_BYTES: usize =
-    super::nurbs_eval::BASIS_SCRATCH_BYTES + std::mem::size_of::<[[Interval; 4]; 4]>();
+pub const CURVE_EVALUATION_SCRATCH_BYTES: usize = super::nurbs_eval::BASIS_SCRATCH_BYTES
+        + std::mem::size_of::<[[Interval; 4]; 4]>()
+        // Source 2D MVT refinement retains its whole-span and midpoint tensors.
+        + 2 * std::mem::size_of::<[[Interval; 3]; 4]>();
 
 #[derive(Clone, Copy, Debug)]
 pub struct CurveEnclosure {

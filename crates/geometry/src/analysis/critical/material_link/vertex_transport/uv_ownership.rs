@@ -202,7 +202,7 @@ pub(super) struct ComparisonStarJet {
     pub(super) q: Box2,
     /// Angular derivative direction after cancelling its positive radial factor.
     pub(super) angular_direction: Box2,
-    /// det(H_s,H_theta)/s for Middle, /s² for a quadratic collar.
+    /// Cancels s for Middle, and s or s² for a linear or quadratic collar.
     pub(super) factored_jacobian: Interval,
 }
 
@@ -678,8 +678,8 @@ impl OriginalCornerComparison {
         Ok(UvComparisonPreparation::Prepared(Self::NativeUv(candidate)))
     }
 
-    pub(super) fn is_identity(&self, recipe: &CornerRecipe) -> bool {
-        matches!(self, Self::NativeUv(comparison) if comparison.star_is_identity(recipe))
+    pub(super) fn is_identity(&self) -> bool {
+        matches!(self, Self::NativeUv(comparison) if comparison.germs_are_identity())
     }
 
     pub(super) fn native_uv(&self) -> Option<&UvJointComparison> {
@@ -821,13 +821,6 @@ impl UvJointComparison {
                 .correction
                 .into_iter()
                 .all(|shift| equal_box(shift, ZERO2))
-    }
-
-    fn star_is_identity(&self, recipe: &CornerRecipe) -> bool {
-        self.germs_are_identity()
-            && equal_box(recipe.outgoing.offset, ZERO2)
-            && equal_box(recipe.incoming.offset, ZERO2)
-            && equal_box(recipe.bulge, ZERO2)
     }
 
     fn validate(
@@ -1019,6 +1012,11 @@ impl UvJointComparison {
                 }
             }
         };
+        // Only the constructed Hermite/opposed-apex receipt needs the extra
+        // radial order. Ordinary/reflex corners retain their linear ribbons.
+        if matches!(self.completion, ComparisonCompletion::Linear) {
+            return Ok(correction);
+        }
         let offset = match piece {
             Piece::Outgoing => recipe.outgoing.offset.map(|v| t.mul(v)),
             Piece::Incoming => {
@@ -1031,14 +1029,13 @@ impl UvJointComparison {
                 std::array::from_fn(|i| blend[i].add(bubble.mul(recipe.bulge[i])))
             }
         };
-        // The source reference turns collars on as s². Its original germs and
-        // outer B are unchanged; the physical carrier star still uses s.
+        // The constructed opposed-apex reference turns collars on as s².
+        // Original germs and outer B remain fixed; physical G still uses s.
         let position = s.mul(source_unit_complement(s)?).neg();
         let derivative = Interval::point(2.0).mul(s).sub(Interval::point(1.0));
         for i in 0..2 {
             correction.position[i] = correction.position[i].add(position.mul(offset[i]));
-            correction.derivative[i] =
-                correction.derivative[i].add(derivative.mul(offset[i]));
+            correction.derivative[i] = correction.derivative[i].add(derivative.mul(offset[i]));
             correction.second_derivative[i] =
                 correction.second_derivative[i].add(Interval::point(2.0).mul(offset[i]));
         }
@@ -1093,7 +1090,7 @@ impl UvJointComparison {
         cancel: &AtomicBool,
     ) -> Result<Box2, GeometryError> {
         let completed = self.star_jet(domain, recipe, piece, s, t, work, cancel)?.uv;
-        if self.star_is_identity(recipe) {
+        if self.germs_are_identity() {
             return Ok(completed);
         }
         let actual = super::star_jet(
@@ -1196,6 +1193,9 @@ impl UvJointComparison {
         self.validate(domain, recipe)?;
         let s = source_unit_parameter(s)?;
         let t = source_unit_parameter(t)?;
+        let quadratic = matches!(self.completion, ComparisonCompletion::Hermite(_));
+        let radial_weight = if quadratic { s } else { Interval::point(1.0) };
+        let radial_weight_s = Interval::point(if quadratic { 1.0 } else { 0.0 });
         let (q, qs, qt): (Box2, Box2, Box2) = match piece {
             Piece::Outgoing | Piece::Incoming => {
                 let incoming = matches!(piece, Piece::Incoming);
@@ -1208,8 +1208,8 @@ impl UvJointComparison {
                 };
                 let offset = self.ends[index].offset;
                 (
-                    std::array::from_fn(|i| q[i].add(s.mul(weight).mul(offset[i]))),
-                    std::array::from_fn(|i| qs[i].add(weight.mul(offset[i]))),
+                    std::array::from_fn(|i| q[i].add(radial_weight.mul(weight).mul(offset[i]))),
+                    std::array::from_fn(|i| qs[i].add(radial_weight_s.mul(weight).mul(offset[i]))),
                     if incoming {
                         offset.map(Interval::neg)
                     } else {
@@ -1228,14 +1228,16 @@ impl UvJointComparison {
                     std::array::from_fn(|i| offsets[i].add(bubble.mul(recipe.bulge[i])));
                 let radial = mix(qsa, qsb, t);
                 (
-                    std::array::from_fn(|i| blend[i].add(s.mul(offset[i]))),
-                    std::array::from_fn(|i| radial[i].add(offset[i])),
+                    std::array::from_fn(|i| blend[i].add(radial_weight.mul(offset[i]))),
+                    std::array::from_fn(|i| radial[i].add(radial_weight_s.mul(offset[i]))),
                     std::array::from_fn(|i| {
-                        qb[i].sub(qa[i]).add(s.mul(
-                            recipe.incoming.offset[i]
-                                .sub(recipe.outgoing.offset[i])
-                                .add(slope.mul(recipe.bulge[i])),
-                        ))
+                        qb[i].sub(qa[i]).add(
+                            radial_weight.mul(
+                                recipe.incoming.offset[i]
+                                    .sub(recipe.outgoing.offset[i])
+                                    .add(slope.mul(recipe.bulge[i])),
+                            ),
+                        )
                     }),
                 )
             }
@@ -1391,6 +1393,9 @@ impl UvJointComparison {
 pub(super) const OWNERSHIP_STACK_BYTES: usize =
     3 * std::mem::size_of::<[([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1]>()
         + std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
+        + 2 * std::mem::size_of::<Box2>()
+        + std::mem::size_of::<Interval>()
+        + 4 * std::mem::size_of::<Box2>()
         + comparison_transport::STACK_BYTES
         + completion::STACK_BYTES
         + apex_factor::STACK_BYTES
@@ -1406,6 +1411,7 @@ enum ComparisonBoundary {
     IncomingGerm,
 }
 
+#[derive(Clone, Copy)]
 struct UvBoundaryJet {
     position: Box2,
     derivative: Box2,
@@ -1455,6 +1461,42 @@ fn pair_jacobian_injective(a: Box2, b: Box2) -> bool {
     })
 }
 
+/// The midpoint is an enclosed evaluation of the SAME boundary expression.
+/// The complete first derivative encloses gamma(I) by the fundamental theorem:
+/// gamma(mid(I)) + (I-mid(I))*gamma'(I). Intersect two independently valid
+/// position enclosures; a midpoint alone never excludes an intersection.
+/// This is only boundary-image authority, not an interior-map certificate.
+fn mean_value_boundary_position(
+    whole: &UvBoundaryJet,
+    midpoint: Box2,
+    parameter: Interval,
+) -> Result<Box2, GeometryError> {
+    let displacement = parameter.sub(Interval::point(parameter.mid()));
+    let mut position = whole.position;
+    for axis in 0..2 {
+        position[axis] = intersection(
+            position[axis],
+            midpoint[axis].add(displacement.mul(whole.derivative[axis])),
+        )
+        .ok_or_else(|| refusal("boundary natural and mean-value position enclosures disagree"))?;
+    }
+    Ok(position)
+}
+
+/// The bridge derivative is d+(1-2t)h. Project its actual coefficients BEFORE
+/// enclosing t: boxing its two coordinates separately loses this correlation.
+/// A strict scalar derivative proves the complete closed UV curve injective.
+fn quadratic_boundary_is_monotone(base: Box2, bulge: Box2) -> bool {
+    let proposals = [base.map(Interval::mid), [-bulge[1].mid(), bulge[0].mid()]];
+    proposals.into_iter().any(|proposal| {
+        let row = proposal.map(Interval::point);
+        let derivative = dot2(row, base).add(Interval { lo: -1.0, hi: 1.0 }.mul(dot2(row, bulge)));
+        derivative.lo.is_finite()
+            && derivative.hi.is_finite()
+            && (derivative.lo > 0.0 || derivative.hi < 0.0)
+    })
+}
+
 impl UvJointComparison {
     fn boundary_jet(
         &self,
@@ -1466,65 +1508,72 @@ impl UvJointComparison {
         cancel: &AtomicBool,
     ) -> Result<UvBoundaryJet, GeometryError> {
         let t = source_unit_parameter(t)?;
-        let (piece, reverse) = match boundary {
-            ComparisonBoundary::OutgoingGerm => (Piece::Outgoing, false),
-            ComparisonBoundary::IncomingGerm => (Piece::Incoming, true),
-            ComparisonBoundary::OutgoingCross => (Piece::Outgoing, false),
-            ComparisonBoundary::IncomingCross => (Piece::Incoming, false),
-            ComparisonBoundary::Bridge => (Piece::Middle, false),
-        };
         if matches!(
             boundary,
             ComparisonBoundary::OutgoingGerm | ComparisonBoundary::IncomingGerm
         ) {
+            let reverse = boundary == ComparisonBoundary::IncomingGerm;
             let s = if reverse {
                 source_unit_complement(t)?
             } else {
                 t
             };
-            let theta = Interval::point(if reverse { 1.0 } else { 0.0 });
-            let jet = self.star_jet(domain, recipe, piece, s, theta, work, cancel)?;
+            self.validate(domain, recipe)?;
+            let jet =
+                self.completed_end_jet(domain, recipe, usize::from(reverse), s, work, cancel)?;
             return Ok(UvBoundaryJet {
-                position: jet.uv,
+                position: jet.position,
                 derivative: if reverse {
-                    jet.ds.map(Interval::neg)
+                    jet.derivative.map(Interval::neg)
                 } else {
-                    jet.ds
+                    jet.derivative
                 },
             });
         }
-        let position = super::star_jet(
-            domain,
-            recipe.outgoing,
-            recipe.incoming,
-            piece,
-            Interval::point(1.0),
-            t,
-            recipe.bulge,
-            work,
-            cancel,
-        )?
-        .uv;
-        let derivative = match boundary {
-            ComparisonBoundary::OutgoingCross => recipe.outgoing.offset,
-            ComparisonBoundary::IncomingCross => recipe.incoming.offset.map(Interval::neg),
+        match boundary {
+            ComparisonBoundary::OutgoingCross | ComparisonBoundary::IncomingCross => {
+                let incoming = boundary == ComparisonBoundary::IncomingCross;
+                let end = if incoming {
+                    recipe.incoming
+                } else {
+                    recipe.outgoing
+                };
+                let exit = end_curve(domain, end, Interval::point(1.0), work, cancel)?;
+                let weight = if incoming {
+                    source_unit_complement(t)?
+                } else {
+                    t
+                };
+                Ok(UvBoundaryJet {
+                    position: std::array::from_fn(|i| {
+                        exit.position[i].add(weight.mul(end.offset[i]))
+                    }),
+                    derivative: if incoming {
+                        end.offset.map(Interval::neg)
+                    } else {
+                        end.offset
+                    },
+                })
+            }
             ComparisonBoundary::Bridge => {
                 let a = end_curve(domain, recipe.outgoing, Interval::point(1.0), work, cancel)?;
                 let b = end_curve(domain, recipe.incoming, Interval::point(1.0), work, cancel)?;
+                let a: Box2 = std::array::from_fn(|i| a.position[i].add(recipe.outgoing.offset[i]));
+                let b: Box2 = std::array::from_fn(|i| b.position[i].add(recipe.incoming.offset[i]));
+                // The SAME fixed endpoint coefficients supply both position
+                // and derivatives. No completed interior star is evaluated.
+                let blend = convex_mix(a, b, t)?;
+                let bubble = t.mul(source_unit_complement(t)?);
                 let slope = Interval::point(1.0).sub(Interval::point(2.0).mul(t));
-                std::array::from_fn(|i| {
-                    b.position[i]
-                        .add(recipe.incoming.offset[i])
-                        .sub(a.position[i].add(recipe.outgoing.offset[i]))
-                        .add(slope.mul(recipe.bulge[i]))
+                Ok(UvBoundaryJet {
+                    position: std::array::from_fn(|i| blend[i].add(bubble.mul(recipe.bulge[i]))),
+                    derivative: std::array::from_fn(|i| {
+                        b[i].sub(a[i]).add(slope.mul(recipe.bulge[i]))
+                    }),
                 })
             }
             _ => unreachable!("germ boundary returned above"),
-        };
-        Ok(UvBoundaryJet {
-            position,
-            derivative,
-        })
+        }
     }
 
     fn side_germs_separated(
@@ -1557,84 +1606,117 @@ impl UvJointComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
-        let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
-        stack[0] = ([[0.0, 1.0]; 2], 0);
-        let mut pending = 1;
-        while pending != 0 {
-            pending -= 1;
-            let (cell, depth) = stack[pending];
-            work.charge(1, cancel)?;
-            let ja = self.boundary_jet(
-                domain,
-                recipe,
-                a,
-                Interval::new(cell[0][0], cell[0][1])?,
-                work,
-                cancel,
-            )?;
-            let jb = self.boundary_jet(
-                domain,
-                recipe,
-                b,
-                Interval::new(cell[1][0], cell[1][1])?,
-                work,
-                cancel,
-            )?;
-            if disjoint(ja.position, jb.position) {
-                continue;
-            }
-            if let Some(root) = root {
-                let ar = [cell[0][0].min(root[0]), cell[0][1].max(root[0])];
-                let br = [cell[1][0].min(root[1]), cell[1][1].max(root[1])];
-                let da = self
+        let before = work.consumed();
+        let mut active = ([[0.0, 1.0]; 2], 0);
+        let outcome = (|| {
+            let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
+            stack[0] = ([[0.0, 1.0]; 2], 0);
+            let mut pending = 1;
+            while pending != 0 {
+                pending -= 1;
+                let (cell, depth) = stack[pending];
+                active = (cell, depth);
+                work.charge(1, cancel)?;
+                let parameter = cell.map(|range| Interval {
+                    lo: range[0],
+                    hi: range[1],
+                });
+                let ja = self.boundary_jet(domain, recipe, a, parameter[0], work, cancel)?;
+                let jb = self.boundary_jet(domain, recipe, b, parameter[1], work, cancel)?;
+                if disjoint(ja.position, jb.position) {
+                    continue;
+                }
+                if let Some(root) = root {
+                    let ar = [cell[0][0].min(root[0]), cell[0][1].max(root[0])];
+                    let br = [cell[1][0].min(root[1]), cell[1][1].max(root[1])];
+                    let ea = if ar == cell[0] {
+                        ja
+                    } else {
+                        self.boundary_jet(
+                            domain,
+                            recipe,
+                            a,
+                            Interval::new(ar[0], ar[1])?,
+                            work,
+                            cancel,
+                        )?
+                    };
+                    let eb = if br == cell[1] {
+                        jb
+                    } else {
+                        self.boundary_jet(
+                            domain,
+                            recipe,
+                            b,
+                            Interval::new(br[0], br[1])?,
+                            work,
+                            cancel,
+                        )?
+                    };
+                    if pair_jacobian_injective(ea.derivative, eb.derivative) {
+                        continue;
+                    }
+                }
+                let ma = self
                     .boundary_jet(
                         domain,
                         recipe,
                         a,
-                        Interval::new(ar[0], ar[1])?,
+                        Interval::point(parameter[0].mid()),
                         work,
                         cancel,
                     )?
-                    .derivative;
-                let db = self
+                    .position;
+                let pa = mean_value_boundary_position(&ja, ma, parameter[0])?;
+                if disjoint(pa, jb.position) {
+                    continue;
+                }
+                let mb = self
                     .boundary_jet(
                         domain,
                         recipe,
                         b,
-                        Interval::new(br[0], br[1])?,
+                        Interval::point(parameter[1].mid()),
                         work,
                         cancel,
                     )?
-                    .derivative;
-                if pair_jacobian_injective(da, db) {
+                    .position;
+                let pb = mean_value_boundary_position(&jb, mb, parameter[1])?;
+                if disjoint(pa, pb) {
                     continue;
                 }
+                if depth >= MAX_DEPTH {
+                    return Err(ownership_failure(
+                        recipe,
+                        format_args!(
+                            "simpleBoundary pair={a:?}/{b:?} parameter_pair={cell:?} known_endpoint={root:?}"
+                        ),
+                    ));
+                }
+                let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
+                let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
+                if mid <= cell[axis][0] || mid >= cell[axis][1] {
+                    return Err(ownership_failure(
+                        recipe,
+                        format_args!("simpleBoundary indivisible_pair={cell:?}"),
+                    ));
+                }
+                let mut left = cell;
+                let mut right = cell;
+                left[axis][1] = mid;
+                right[axis][0] = mid;
+                stack[pending] = (right, depth + 1);
+                stack[pending + 1] = (left, depth + 1);
+                pending += 2;
             }
-            if depth >= MAX_DEPTH {
-                return Err(ownership_failure(
-                    recipe,
-                    format_args!(
-                        "simpleBoundary pair={a:?}/{b:?} parameter_pair={cell:?} known_endpoint={root:?}"
-                    ),
-                ));
-            }
-            let axis = usize::from(cell[1][1] - cell[1][0] > cell[0][1] - cell[0][0]);
-            let mid = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
-            if mid <= cell[axis][0] || mid >= cell[axis][1] {
-                return Err(ownership_failure(
-                    recipe,
-                    format_args!("simpleBoundary indivisible_pair={cell:?}"),
-                ));
-            }
-            let mut left = cell;
-            let mut right = cell;
-            left[axis][1] = mid;
-            right[axis][0] = mid;
-            stack[pending] = (right, depth + 1);
-            stack[pending + 1] = (left, depth + 1);
-            pending += 2;
-        }
-        Ok(true)
+            Ok(true)
+        })();
+        outcome.map_err(|error| {
+            work.annotate_error(error, before, format_args!(
+            "simpleBoundary pair={a:?}/{b:?} parameter_pair={:?} depth={} known_endpoint={root:?}",
+            active.0, active.1,
+        ))
+        })
     }
 
     fn simple_boundary(
@@ -1661,11 +1743,15 @@ impl UvJointComparison {
             }
             boundary[count] = item;
             count += 1;
-            let whole = self.boundary_jet(domain, recipe, item, UNIT, work, cancel)?;
             let midpoint =
                 self.boundary_jet(domain, recipe, item, Interval::point(0.5), work, cancel)?;
-            // A whole-expression monotone row proves each component simple.
-            if dot2(midpoint.derivative, whole.derivative).lo <= 0.0 {
+            let monotone = if item == Bridge {
+                quadratic_boundary_is_monotone(midpoint.derivative, recipe.bulge)
+            } else {
+                let whole = self.boundary_jet(domain, recipe, item, UNIT, work, cancel)?;
+                dot2(midpoint.derivative, whole.derivative).lo > 0.0
+            };
+            if !monotone {
                 return Err(ownership_failure(
                     recipe,
                     format_args!("simpleBoundary nonmonotone_component={item:?} parameter=[0,1]"),
@@ -1711,6 +1797,32 @@ impl UvJointComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
+        // A wholly contained enclosure of one actual G point disproves box
+        // exclusion for the homotopy (G is its lambda=1 member). This is only
+        // a rejection witness; sampled points never establish exclusion.
+        for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
+            if matches!(piece, Piece::Outgoing) && !recipe.outgoing.collar
+                || matches!(piece, Piece::Incoming) && !recipe.incoming.collar
+            {
+                continue;
+            }
+            let witness = self
+                .star_jet(
+                    domain,
+                    recipe,
+                    piece,
+                    Interval::point(0.5),
+                    Interval::point(0.5),
+                    work,
+                    cancel,
+                )?
+                .uv;
+            if (0..2).all(|axis| {
+                other[axis].lo <= witness[axis].lo && witness[axis].hi <= other[axis].hi
+            }) {
+                return Ok(false);
+            }
+        }
         for piece in [Piece::Outgoing, Piece::Middle, Piece::Incoming] {
             if matches!(piece, Piece::Outgoing) && !recipe.outgoing.collar
                 || matches!(piece, Piece::Incoming) && !recipe.incoming.collar
@@ -1852,7 +1964,10 @@ impl UvJointComparison {
                 }
                 let h = self.factored_jet(domain, recipe, piece, s, theta, work, cancel)?;
                 if h.factored_jacobian.mul(Interval::point(sign)).lo > 0.0
-                    && determinant(h.q, h.angular_direction).mul(Interval::point(sign)).lo > 0.0
+                    && determinant(h.q, h.angular_direction)
+                        .mul(Interval::point(sign))
+                        .lo
+                        > 0.0
                     && !(h.q[0].contains_zero() && h.q[1].contains_zero())
                 {
                     continue;
@@ -1861,18 +1976,18 @@ impl UvJointComparison {
                     return Err(ownership_failure(
                         recipe,
                         format_args!(
-                            "factoredJac piece={} parameter_cell={cell:?} determinant={:?} angular={:?} q={:?} offsets={:?} bulge={:?} completed_apex_line={:?}",
+                            "factoredJac piece={} quadratic={} apex_line={:?} bulge={:?} parameter_cell={cell:?} determinant={:?} angular={:?} q={:?}",
                             match piece {
                                 Piece::Outgoing => "outgoing",
                                 Piece::Middle => "middle",
                                 Piece::Incoming => "incoming",
                             },
+                            matches!(self.completion, ComparisonCompletion::Hermite(_)),
+                            self.apex_line(),
+                            recipe.bulge,
                             h.factored_jacobian,
                             determinant(h.q, h.angular_direction),
                             h.q,
-                            [recipe.outgoing.offset, recipe.incoming.offset],
-                            recipe.bulge,
-                            self.apex_line(),
                         ),
                     ));
                 }
@@ -2686,5 +2801,50 @@ mod properties {
             [Interval { lo: -1.0, hi: 1.0 }, Interval::point(0.0)],
             y,
         ));
+    }
+
+    #[test]
+    fn boundary_mean_value_enclosure_retains_foreign_crossings_away_from_midpoint() {
+        // The whole derivative, not the midpoint, supplies image authority.
+        // For gamma(t)=(t,(t-1/2)^2), gamma(1/4) is a foreign intersection
+        // even though the midpoint image misses it.
+        let parabola = UvBoundaryJet {
+            position: [UNIT, Interval { lo: -1.0, hi: 2.0 }],
+            derivative: [Interval::point(1.0), Interval { lo: -1.0, hi: 1.0 }],
+        };
+        let foreign = [0.25, 0.0625].map(Interval::point);
+        let midpoint = [0.5, 0.0].map(Interval::point);
+        assert!(disjoint(midpoint, foreign));
+        let bounded = mean_value_boundary_position(&parabola, midpoint, UNIT).unwrap();
+        assert!(!disjoint(bounded, foreign));
+
+        // A loose absolute-position box for a nearly flat source expression
+        // can be tightened without changing that expression or its derivative.
+        let flat = UvBoundaryJet {
+            position: [UNIT, Interval { lo: 0.0, hi: 8.0 }],
+            derivative: [1.0, 1.0 / 1024.0].map(Interval::point),
+        };
+        let midpoint = [0.5, 4.0 + 1.0 / 2048.0].map(Interval::point);
+        let bounded = mean_value_boundary_position(&flat, midpoint, UNIT).unwrap();
+        assert!(bounded[1].lo <= 4.0 && bounded[1].hi >= 4.0 + 1.0 / 1024.0);
+        let separate = [0.5, 4.125].map(Interval::point);
+        assert!(!disjoint(flat.position, separate));
+        assert!(disjoint(bounded, separate));
+    }
+
+    #[test]
+    fn quadratic_bridge_projection_preserves_reflex_arcs_and_rejects_reversal() {
+        let base = [1.0, 1.0].map(Interval::point);
+        let bulge = [4.0, -4.0].map(Interval::point);
+        let boxed = std::array::from_fn(|axis| {
+            base[axis].add(Interval { lo: -1.0, hi: 1.0 }.mul(bulge[axis]))
+        });
+        assert!(dot2(base, boxed).lo < 0.0);
+        assert!(quadratic_boundary_is_monotone(base, bulge));
+        assert!(!quadratic_boundary_is_monotone(
+            [1.0, 0.0].map(Interval::point),
+            [2.0, 0.0].map(Interval::point),
+        ));
+        assert!(!quadratic_boundary_is_monotone(ZERO2, ZERO2));
     }
 }
