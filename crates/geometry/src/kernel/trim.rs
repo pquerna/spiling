@@ -1109,6 +1109,91 @@ impl<'d> PreparedFaceTrimDomain<'d> {
         Ok(false)
     }
 
+    fn owned_joint_overlap(
+        &self,
+        a: BoundaryCurve,
+        b: BoundaryCurve,
+        overlap: [Interval; 2],
+    ) -> bool {
+        for ae in 0..2 {
+            let BoundaryEndpoint::Joint(joint, _) = self.boundary_endpoint(a, ae) else {
+                continue;
+            };
+            for be in 0..2 {
+                if !matches!(self.boundary_endpoint(b, be), BoundaryEndpoint::Joint(other, _) if other == joint)
+                {
+                    continue;
+                }
+                let enclosure = self.original_joints[joint].enclosure;
+                if (0..2).all(|axis| {
+                    enclosure[axis].lo <= overlap[axis].lo && overlap[axis].hi <= enclosure[axis].hi
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn owned_joint_germs_separate(
+        &self,
+        a: TrimSpan,
+        b: TrimSpan,
+        aj: &parametric::ChartCurveEnclosure,
+        bj: &parametric::ChartCurveEnclosure,
+        mut overlap: [Interval; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let shared = (0..2).any(|ae| {
+            let BoundaryEndpoint::Joint(joint, _) = self.boundary_endpoint(a.boundary, ae) else {
+                return false;
+            };
+            (0..2).any(|be| {
+                matches!(self.boundary_endpoint(b.boundary, be), BoundaryEndpoint::Joint(other, _) if other == joint)
+            })
+        });
+        if !shared {
+            return Ok(false);
+        }
+        let ac = self.boundary_operand(a.boundary)?;
+        let bc = self.boundary_operand(b.boundary)?;
+        for axis in 0..2 {
+            if aj.derivative[axis].contains_zero() || bj.derivative[axis].contains_zero() {
+                continue;
+            }
+            // Any actual common point lies in `overlap`. On a complete C0
+            // piece, its parameter must therefore satisfy this mean-value
+            // contraction. Retain the full endpoint uncertainty; no equality
+            // or material ownership follows from a successful contraction.
+            for (curve, range, derivative) in [
+                (&ac, a.range, aj.derivative[axis]),
+                (&bc, b.range, bj.derivative[axis]),
+            ] {
+                let middle = range[0] * 0.5 + range[1] * 0.5;
+                let center = curve.tensor([middle; 2], 0, work, cancel)?[0][axis];
+                let parameter =
+                    Interval::point(middle).add(overlap[axis].sub(center).div(derivative)?);
+                let Some(parameter) = Interval::new(range[0], range[1])?.intersection(parameter)
+                else {
+                    return Ok(true);
+                };
+                let position = curve.tensor([parameter.lo, parameter.hi], 0, work, cancel)?[0];
+                for coordinate in 0..2 {
+                    let Some(intersection) = overlap[coordinate].intersection(position[coordinate])
+                    else {
+                        return Ok(true);
+                    };
+                    overlap[coordinate] = intersection;
+                }
+            }
+            if self.owned_joint_overlap(a.boundary, b.boundary, overlap) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn separate_spans(
         &self,
         a: TrimSpan,
@@ -1124,11 +1209,32 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             work.charge(1, cancel)?;
             let ac = self.boundary_operand(a.boundary)?;
             let bc = self.boundary_operand(b.boundary)?;
-            let aj = parametric::curve2d_piecewise_jet(&ac, a.range, work, cancel)?;
-            let bj = parametric::curve2d_piecewise_jet(&bc, b.range, work, cancel)?;
+            let mut aj = parametric::curve2d_piecewise_jet(&ac, a.range, work, cancel)?;
+            let mut bj = parametric::curve2d_piecewise_jet(&bc, b.range, work, cancel)?;
+            // A joint's complete uncertainty cell is excluded from positive
+            // classification. Keep foreign boundaries out of that whole cell,
+            // not merely out of one affine connector realization.
+            if let BoundaryCurve::Joint(joint) = a.boundary {
+                aj.position = self.original_joints[joint].enclosure;
+            }
+            if let BoundaryCurve::Joint(joint) = b.boundary {
+                bj.position = self.original_joints[joint].enclosure;
+            }
             if (0..2).any(|i| {
                 aj.position[i].hi < bj.position[i].lo || bj.position[i].hi < aj.position[i].lo
             }) {
+                continue;
+            }
+            let overlap = [
+                aj.position[0].intersect(bj.position[0])?,
+                aj.position[1].intersect(bj.position[1])?,
+            ];
+            // Only the actual incident source uses may remain unresolved,
+            // wholly inside their own already-masked joint cell. This neither
+            // welds endpoints nor supplies the later material vertex receipt.
+            if self.owned_joint_overlap(a.boundary, b.boundary, overlap)
+                || self.owned_joint_germs_separate(a, b, &aj, &bj, overlap, work, cancel)?
+            {
                 continue;
             }
             if let Some([ae, be]) = self.common_endpoint(a, b) {
@@ -1144,6 +1250,18 @@ impl<'d> PreparedFaceTrimDomain<'d> {
             }
             if self.parent_vertex_separates(a, b, &aj, &bj, work, cancel)? {
                 continue;
+            }
+            if depth == MAX_DEPTH {
+                return Err(unavailable(format!(
+                    "original chart pair separation unproved at bounded subdivision depth: source_face={} a={:?} parameter={:?} position={:?} b={:?} parameter={:?} position={:?}",
+                    self.face_index,
+                    a.boundary,
+                    a.range,
+                    aj.position,
+                    b.boundary,
+                    b.range,
+                    bj.position,
+                )));
             }
             let aw = a.range[1] - a.range[0];
             let bw = b.range[1] - b.range[0];
@@ -5690,6 +5808,17 @@ impl PreparedFaceTrimDomain<'_> {
                 if self.original_joints[index].connector.collapsed {
                     continue;
                 }
+                // Every member of this sealed endpoint family is affine
+                // (possibly constant), but interval endpoint uncertainty need
+                // not prove a nonzero derivative. Its owned cell is Boundary,
+                // never Inside; pair separation still excludes foreign uses.
+                reserve_span(self, allowance)?;
+                self.spans.push(TrimSpan {
+                    boundary,
+                    range: [0.0, 1.0],
+                    ends: [true; 2],
+                });
+                continue;
             }
             let (range, _) = self.boundary_restriction(boundary);
             if !self
@@ -5766,8 +5895,9 @@ impl PreparedFaceTrimDomain<'_> {
                 self.separate_spans(self.spans[i], self.spans[j], work, cancel)?;
             }
         }
-        // Boundaries are embedded and disjoint. Winding of a complete endpoint
-        // expression box consequently proves strict whole-hole containment.
+        // Boundaries are embedded and disjoint outside owned uncertainty
+        // cells; foreign loops are excluded from those complete cells too.
+        // Winding of a complete endpoint expression box proves containment.
         for hole in 1..self.loops.len() {
             let [start, _] = self.loops[hole];
             let p = self.original_coedges[start]
@@ -5858,16 +5988,18 @@ impl PreparedFaceTrimDomain<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TrimClassification::{Boundary, Inside, Outside};
+
+    const HOUSING: &[u8] = include_bytes!(
+        "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+    );
 
     fn assert_original_face_regions(
+        fixture: &[u8],
         source_face: spiling_contracts::geometry::StepEntityId,
-        inside: [[f64; 2]; 2],
-        outside: [[f64; 2]; 2],
+        regions: &[([[f64; 2]; 2], TrimClassification)],
     ) {
-        let definition = crate::from_step_bytes(include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ))
-        .unwrap();
+        let definition = crate::from_step_bytes(fixture).unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
         let bytes = 32 * 1024 * 1024;
@@ -5915,40 +6047,62 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-        assert_eq!(
-            domain.classify(inside, &mut work, &cancel).unwrap(),
-            TrimClassification::Inside,
-        );
-        assert_eq!(
-            domain.classify(outside, &mut work, &cancel).unwrap(),
-            TrimClassification::Outside,
-        );
+        for (query, expected) in regions {
+            assert_eq!(
+                domain.classify(*query, &mut work, &cancel).unwrap(),
+                *expected,
+                "query={query:?}",
+            );
+        }
     }
 
     #[test]
     fn original_pole_face_classifies_across_internal_endpoint_cut_bands() {
         assert_original_face_regions(
+            HOUSING,
             spiling_contracts::geometry::StepEntityId(461),
-            [[0.5, 0.6], [-0.6, -0.5]],
-            [[2.0, 2.1], [-0.6, -0.5]],
+            &[
+                ([[0.5, 0.6], [-0.6, -0.5]], Inside),
+                ([[2.0, 2.1], [-0.6, -0.5]], Outside),
+            ],
         );
     }
 
     #[test]
     fn original_periodic_cylinder_retains_a_simple_material_chart() {
         assert_original_face_regions(
+            HOUSING,
             spiling_contracts::geometry::StepEntityId(1254),
-            [[0.5, 0.6], [2.0, 2.1]],
-            [[0.5, 0.6], [6.0, 6.1]],
+            &[
+                ([[0.5, 0.6], [2.0, 2.1]], Inside),
+                ([[0.5, 0.6], [6.0, 6.1]], Outside),
+            ],
         );
     }
 
     #[test]
     fn original_closed_disk_retains_material_inside_and_outside() {
         assert_original_face_regions(
+            HOUSING,
             spiling_contracts::geometry::StepEntityId(1407),
-            [[0.5, 0.6], [0.5, 0.6]],
-            [[3.1, 3.2], [0.1, 0.2]],
+            &[
+                ([[0.5, 0.6], [0.5, 0.6]], Inside),
+                ([[3.1, 3.2], [0.1, 0.2]], Outside),
+            ],
+        );
+    }
+
+    #[test]
+    fn original_annulus_keeps_uncertain_joins_boundary_and_protects_its_void() {
+        assert_original_face_regions(
+            include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+            spiling_contracts::geometry::StepEntityId(18),
+            &[
+                ([[14.9, 15.1], [9.9, 10.1]], Inside),
+                ([[9.9, 10.1], [9.9, 10.1]], Outside),
+                ([[21.0, 22.0], [9.0, 11.0]], Outside),
+                ([[13.0; 2], [10.0; 2]], Boundary),
+            ],
         );
     }
 }

@@ -187,6 +187,10 @@ must never be converted into display unavailability.
   Original C0 bounds prioritize refinement by actual projected cross-section
   variation, not unrelated UV lengths. This changes search order only: complete
   cell enclosures, feasible witnesses and the work limit remain authoritative.
+  Native source support carries independently feasible extrema across faces.
+  A complete coefficient-sheet enclosure already covered by those extrema may
+  skip trim contact search under the same outward stopping rule; it supplies no
+  witness and never promotes a carrier bound to a material-contact receipt.
 - **Regular slabs:** [`analysis/slab.rs`](../../crates/geometry/src/analysis/slab.rs)
   binds the actual source, interval, reference and policy. Height invariance is
   local to regular partitions; it does not cross critical-event brackets.
@@ -199,10 +203,16 @@ must never be converted into display unavailability.
   directed/core-only metrics and separately isotopic annuli are insufficient.
 - **Original corner cuts:** [`vertex_transport/uv_ownership/source_cut.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/source_cut.rs)
   proves fixed-exit relative surgery against the actual original germs,
-  retained central continuations and foreign sources. An uncertainty connector
-  need not be Jordan; a completed reference disk cannot simply be subtracted
-  from native UV. The closed atlas covers original F and actual G, including
-  literal NativeV apices. Genuine poles require independent quotient authority.
+  retained central continuations and foreign sources. Original classification
+  masks complete owned joint cells as Boundary, never Inside. A sealed affine
+  endpoint family need not have a provably nonzero derivative; incident germs
+  may overlap only inside the same incidence-owned cell. Bounded interval
+  mean-value contraction can establish that containment without welding their
+  uncertain endpoints. Foreign boundaries must stay outside the whole cell.
+  These chart receipts do not replace material corner surgery: an uncertainty
+  connector need not be Jordan, and a completed reference disk cannot simply
+  be subtracted from native UV. The closed atlas covers original F and actual G,
+  including literal NativeV apices. Genuine poles need independent quotient authority.
 - **Critical sets and collars:** [`analysis/critical.rs`](../../crates/geometry/src/analysis/critical.rs)
   covers original face/coedge complexes; [`source_incidence.rs`](../../crates/geometry/src/analysis/source_incidence.rs)
   owns actual edge/vertex use incidence. [`analysis/collar.rs`](../../crates/geometry/src/analysis/collar.rs)

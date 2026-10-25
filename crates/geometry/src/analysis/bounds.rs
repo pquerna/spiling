@@ -1035,7 +1035,10 @@ fn search_domains_with_query_scratch(
                 feasible_max = feasible_max.max(witness.lo);
             }
             if resolved_by_feasible_extrema(
-                evaluation.height, feasible_min, feasible_max, tolerance,
+                evaluation.height,
+                feasible_min,
+                feasible_max,
+                tolerance,
             ) {
                 outer_min = outer_min.min(evaluation.height.lo);
                 outer_max = outer_max.max(evaluation.height.hi);
@@ -1701,20 +1704,40 @@ mod tests {
     fn noncontact_exclusion_uses_outward_endpoint_uncertainty() {
         let tolerance = 0.125;
         assert!(resolved_by_feasible_extrema(
-            Interval { lo: -parametric::down(tolerance), hi: 10.0 },
-            0.0, 10.0, tolerance,
+            Interval {
+                lo: -parametric::down(tolerance),
+                hi: 10.0
+            },
+            0.0,
+            10.0,
+            tolerance,
         ));
         assert!(!resolved_by_feasible_extrema(
-            Interval { lo: -tolerance, hi: 10.0 },
-            0.0, 10.0, tolerance,
+            Interval {
+                lo: -tolerance,
+                hi: 10.0
+            },
+            0.0,
+            10.0,
+            tolerance,
         ));
         assert!(resolved_by_feasible_extrema(
-            Interval { lo: 0.0, hi: parametric::down(10.0 + tolerance) },
-            0.0, 10.0, tolerance,
+            Interval {
+                lo: 0.0,
+                hi: parametric::down(10.0 + tolerance)
+            },
+            0.0,
+            10.0,
+            tolerance,
         ));
         assert!(!resolved_by_feasible_extrema(
-            Interval { lo: 0.0, hi: 10.0 + tolerance },
-            0.0, 10.0, tolerance,
+            Interval {
+                lo: 0.0,
+                hi: 10.0 + tolerance
+            },
+            0.0,
+            10.0,
+            tolerance,
         ));
         for endpoints in [
             [f64::INFINITY, 10.0],
@@ -1724,14 +1747,19 @@ mod tests {
         ] {
             assert!(!resolved_by_feasible_extrema(
                 Interval { lo: 2.0, hi: 8.0 },
-                endpoints[0], endpoints[1], tolerance,
+                endpoints[0],
+                endpoints[1],
+                tolerance,
             ));
         }
     }
 
     #[test]
     fn prior_source_witnesses_do_not_bypass_terminal_face_errors() {
-        for code in [GeometryErrorCode::ResourceLimit, GeometryErrorCode::Cancelled] {
+        for code in [
+            GeometryErrorCode::ResourceLimit,
+            GeometryErrorCode::Cancelled,
+        ] {
             let failure = search_domains(
                 std::iter::once([[0.0, 1.0]; 2]),
                 2,
