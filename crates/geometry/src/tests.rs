@@ -122,7 +122,9 @@ fn cancelled_native_operations_never_publish_partial_geometry() {
     let definition = from_step_bytes_with_cancel(&source, &AtomicBool::new(false)).unwrap();
     let cancel = AtomicBool::new(true);
     assert_eq!(
-        from_step_bytes_with_cancel(&source, &cancel).unwrap_err().code,
+        from_step_bytes_with_cancel(&source, &cancel)
+            .unwrap_err()
+            .code,
         GeometryErrorCode::Cancelled
     );
     assert_eq!(
@@ -178,14 +180,13 @@ fn remaining_scene_capacity_rejects_without_partial_native_artifacts() {
     let cancel = AtomicBool::new(false);
     assert_eq!(
         from_step_bytes_with_limits(&bytes, &cancel, 5, crate::import::MAX_QUERY_PROOF_BYTES)
-        .unwrap_err()
-        .code,
+            .unwrap_err()
+            .code,
         GeometryErrorCode::ResourceLimit
     );
-    let definition = from_step_bytes_with_limits(
-        &bytes, &cancel, 6, crate::import::MAX_QUERY_PROOF_BYTES,
-    )
-    .unwrap();
+    let definition =
+        from_step_bytes_with_limits(&bytes, &cancel, 6, crate::import::MAX_QUERY_PROOF_BYTES)
+            .unwrap();
     let capacity = MeshBudget {
         vertices: 24,
         triangles: 12,
@@ -640,7 +641,6 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
         GeometryErrorCode::UnsupportedGeometry
     );
 }
-
 
 /// Genuine original analytic source: one periodic cylindrical face per step,
 /// with shared native seams and arbitrary exact circular rim subdivisions.

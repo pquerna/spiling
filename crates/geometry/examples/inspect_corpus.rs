@@ -5,8 +5,8 @@
 //! Native-only smoke surface. No engine session or occurrence semantics are simulated.
 use serde_json::json;
 use spiling_geometry::{
-    BoundsPolicy, DisplayProfile, GeometryWorkBudget, NativeSection, PlaneMm, from_step_bytes_with_cancel,
-    inspect_face, projected_bounds, section, tessellate,
+    BoundsPolicy, DisplayProfile, GeometryWorkBudget, NativeSection, PlaneMm,
+    from_step_bytes_with_cancel, inspect_face, projected_bounds, section, tessellate,
 };
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Instant};
 
@@ -74,11 +74,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         let directional_bounds = directional_bounds
             .into_iter()
-            .map(|result| result.map(|bounds| json!({
-                "minimum": bounds.minimum,
-                "maximum": bounds.maximum,
-                "achieved_uncertainty_mm": bounds.achieved_uncertainty_mm,
-            })))
+            .map(|result| {
+                result.map(|bounds| {
+                    json!({
+                        "minimum": bounds.minimum,
+                        "maximum": bounds.maximum,
+                        "achieved_uncertainty_mm": bounds.achieved_uncertainty_mm,
+                    })
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let (native_section, section_us) = if mesh_only {
             (None, None)

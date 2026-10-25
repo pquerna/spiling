@@ -248,19 +248,20 @@ pub(crate) fn prove_source_wall_component(
                 .checked_sub(UV_EMBEDDING_STACK_BYTES)
                 .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<OwnedUvRibbon<'_, '_>>()))
                 .ok_or_else(resource)?;
-            let collar = OriginalCollar::for_enclosure_with_byte_limit(
-                domain,
-                use_,
-                scratch,
-                work,
-                cancel,
-            )?
-            .ok_or_else(|| refusal("source wall constructor has no original collar geometry"))?;
+            let collar =
+                OriginalCollar::for_enclosure_with_byte_limit(domain, use_, scratch, work, cancel)?
+                    .ok_or_else(|| {
+                        refusal("source wall constructor has no original collar geometry")
+                    })?;
             let (edge_use, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
-            let coedge = domain.coedges().get(use_.coedge)
+            let coedge = domain
+                .coedges()
+                .get(use_.coedge)
                 .ok_or_else(|| refusal("source wall lost its original coedge binding"))?;
             if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
-                return Err(refusal("source wall belongs to another original native use"));
+                return Err(refusal(
+                    "source wall belongs to another original native use",
+                ));
             }
             let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
             let binding = correspondence
@@ -291,7 +292,9 @@ pub(crate) fn prove_source_wall_component(
                 .ok_or_else(|| {
                     refusal("source wall constructor has no complete boundary-owned UV ribbon")
                 })?;
-            let provider_query_bytes = scratch.checked_add(transport::EVALUATION_SCRATCH_BYTES).ok_or_else(resource)?;
+            let provider_query_bytes = scratch
+                .checked_add(transport::EVALUATION_SCRATCH_BYTES)
+                .ok_or_else(resource)?;
             domain.with_original_spatial_curve(
                 use_.coedge, provider_query_bytes, work, cancel,
                 |prepared, work, cancel| {
@@ -408,8 +411,10 @@ pub(crate) fn prove_source_wall_component(
             ));
         }
         let loop_ = definition.brep().loop_(face.loops[0]).map_err(|error| {
-            GeometryError::new(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                format!("source floor original loop is unavailable: {error}"))
+            GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                format!("source floor original loop is unavailable: {error}"),
+            )
         })?;
         for edge in &loop_.edges {
             let uses = incidence

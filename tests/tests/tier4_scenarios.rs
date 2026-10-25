@@ -5,12 +5,12 @@
 //! Tier 4: Realistic CAM Scenarios.
 //! 26 end-to-end operator journeys testing the full CAM pipeline on reference fixtures.
 
-use std::f64::consts::PI;
-use std::sync::atomic::AtomicBool;
 use spiling_contracts::geometry::*;
-use spiling_geometry::*;
 use spiling_e2e_tests::fixtures::*;
 use spiling_e2e_tests::helpers::*;
+use spiling_geometry::*;
+use std::f64::consts::PI;
+use std::sync::atomic::AtomicBool;
 
 // =========================================================================
 // Scenario 1: Stock Selection & Facing Setup
@@ -25,8 +25,16 @@ fn test_cam_01_stock_selection_and_facing_setup_box_mm() {
     // CAM operator adds 5.0mm stock margin on XY and 2.0mm on Z
     let margin_xy = 5.0;
     let margin_z = 2.0;
-    let stock_min = [b.min[0] - margin_xy, b.min[1] - margin_xy, b.min[2] - margin_z];
-    let stock_max = [b.max[0] + margin_xy, b.max[1] + margin_xy, b.max[2] + margin_z];
+    let stock_min = [
+        b.min[0] - margin_xy,
+        b.min[1] - margin_xy,
+        b.min[2] - margin_z,
+    ];
+    let stock_max = [
+        b.max[0] + margin_xy,
+        b.max[1] + margin_xy,
+        b.max[2] + margin_z,
+    ];
 
     assert_close(stock_max[0] - stock_min[0], 30.0, 1e-3, "stock x");
     assert_close(stock_max[1] - stock_min[1], 20.0, 1e-3, "stock y");
@@ -57,7 +65,11 @@ fn test_cam_02_hole_making_and_peck_drilling_through_hole() {
     for z in [0.5, 4.0, 7.5] {
         let sec = section_at_z(&def, z).expect("strata slice");
         assert_eq!(sec.loops().len(), 2, "box + hole at z={z}");
-        let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+        let mut areas: Vec<f64> = sec
+            .loops()
+            .iter()
+            .map(|lp| loop_area(&sec, lp).abs())
+            .collect();
         areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let hole_area = areas[1];
         assert_close(hole_area, 9.0 * PI, 0.5, "hole area at z={z}");
@@ -78,10 +90,17 @@ fn test_cam_03_waterline_roughing_tapered_fitting() {
     for z_step in [1.0, 3.0, 5.0, 7.0, 9.0, 11.0] {
         let sec = section_at_z(&def, z_step).expect("waterline slice");
         assert_eq!(sec.loops().len(), 2, "2 loops per roughing level");
-        let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+        let mut areas: Vec<f64> = sec
+            .loops()
+            .iter()
+            .map(|lp| loop_area(&sec, lp).abs())
+            .collect();
         areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let outer = areas[0];
-        assert!(outer < prev_outer, "waterline area decreases monotonically with Z");
+        assert!(
+            outer < prev_outer,
+            "waterline area decreases monotonically with Z"
+        );
         prev_outer = outer;
     }
 }
@@ -98,7 +117,11 @@ fn test_cam_04_finish_contouring_narrow_pocket() {
     // Floor transition at z=1.07mm
     let sec = section_at_z(&def, 2.0).expect("contouring level");
     assert_eq!(sec.loops().len(), 2);
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let pocket_area = areas[1];
     // Slot width 0.6 mm * slot length 8.0 mm = 4.8 mm2
@@ -191,7 +214,12 @@ fn test_cam_09_imperial_stock_and_metric_tooling() {
     let tool_radius = 3.0;
     let contour_x_min = b.min[0] - tool_radius;
     let contour_x_max = b.max[0] + tool_radius;
-    assert_close(contour_x_max - contour_x_min, 26.0, 1e-2, "toolpath x envelope");
+    assert_close(
+        contour_x_max - contour_x_min,
+        26.0,
+        1e-2,
+        "toolpath x envelope",
+    );
 }
 
 // =========================================================================
@@ -261,7 +289,10 @@ fn test_cam_14_fixture_clamping_clearance_envelope() {
     let b = def.bounds_mm();
     let clamp_height = 2.0;
     let machinable_z_min = b.min[2] + clamp_height;
-    assert!(machinable_z_min < b.max[2], "clear machinable region above clamp");
+    assert!(
+        machinable_z_min < b.max[2],
+        "clear machinable region above clamp"
+    );
 }
 
 // =========================================================================
@@ -283,7 +314,10 @@ fn test_cam_15_taper_angle_verification_for_conical_cutter() {
     let delta_z = 10.0;
     let taper_angle_rad = (delta_r / delta_z).atan();
     let taper_angle_deg = taper_angle_rad * 180.0 / PI;
-    assert!(taper_angle_deg > 0.0 && taper_angle_deg < 45.0, "valid taper angle");
+    assert!(
+        taper_angle_deg > 0.0 && taper_angle_deg < 45.0,
+        "valid taper angle"
+    );
 }
 
 // =========================================================================
@@ -307,7 +341,11 @@ fn test_cam_17_adaptive_clearing_stepover_area() {
     let bytes = fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step");
     let def = import_test_step(&bytes).expect("narrow pocket");
     let sec = section_at_z(&def, 2.0).expect("sec");
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let pocket_area = areas[1];
     let stepover_percentage = 0.40;
@@ -378,12 +416,26 @@ fn test_cam_22_cancellation_during_long_toolpath_slicing() {
     let cancel = AtomicBool::new(false);
 
     // First slice succeeds
-    let s1 = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 5.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let s1 = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 5.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert!(s1.is_ok());
 
     // Operator cancels
     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    let s2 = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 10.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let s2 = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 10.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert!(s2.is_err(), "must abort after cancellation");
 }
 
@@ -398,7 +450,10 @@ fn test_cam_23_work_budget_governor_on_batch_nests() {
     let mut budget = GeometryWorkBudget::new(50_000);
     let cancel = AtomicBool::new(false);
     for z in [2.0, 4.0, 6.0] {
-        let plane = PlaneMm { origin_mm: [0.0, 0.0, z], normal: [0.0, 0.0, 1.0] };
+        let plane = PlaneMm {
+            origin_mm: [0.0, 0.0, z],
+            normal: [0.0, 0.0, 1.0],
+        };
         let res = section_with_budget(&def, plane, &mut budget, &cancel);
         assert!(res.is_ok());
     }
@@ -417,7 +472,10 @@ fn test_cam_24_part_reorientation_coordinate_transform() {
     let area_top = loop_area(&sec_top, &sec_top.loops()[0]).abs();
 
     // Setup 2: slicing from reverse normal (looking down -Z)
-    let plane_rev = PlaneMm { origin_mm: [0.0, 0.0, 4.0], normal: [0.0, 0.0, -1.0] };
+    let plane_rev = PlaneMm {
+        origin_mm: [0.0, 0.0, 4.0],
+        normal: [0.0, 0.0, -1.0],
+    };
     let sec_rev = section(&def, plane_rev, &AtomicBool::new(false)).expect("rev sec");
     let area_rev = loop_area(&sec_rev, &sec_rev.loops()[0]).abs();
 
@@ -432,7 +490,10 @@ fn test_cam_24_part_reorientation_coordinate_transform() {
 fn test_cam_25_unsupported_geometry_pre_flight_check() {
     let bytes_unsupported = fixture_bytes("reachable-unsupported.step");
     let res = import_test_step(&bytes_unsupported);
-    assert!(res.is_err(), "CAM pre-flight must reject unsupported geometry");
+    assert!(
+        res.is_err(),
+        "CAM pre-flight must reject unsupported geometry"
+    );
 
     let bytes_assembly = fixture_bytes("assembly.step");
     let res_asm = import_test_step(&bytes_assembly);

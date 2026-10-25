@@ -176,7 +176,9 @@ fn certify_spans(
             allowance,
             work,
             cancel,
-            |range, work, cancel| crate::parametric::curve_enclosure(spatial, (range[0], range[1]), work, cancel),
+            |range, work, cancel| {
+                crate::parametric::curve_enclosure(spatial, (range[0], range[1]), work, cancel)
+            },
         )?
         else {
             return Ok(None);
@@ -264,29 +266,34 @@ fn certify_end(
                     .add(correction.derivative[i])
             });
             let source_s = source.derivative.map(|v| v.mul(end.delta_t));
-            { let surface = &domain.surface_operand(); (|| {
-                // The entire straight UV homotopy, not its endpoint samples,
-                // bounds F(completed)-F(original) by the integral first jet.
-                let homotopy_jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
-                let displacement = compose_first(&homotopy_jet.du, &homotopy_jet.dv, shift);
-                let position_error_mm = Interval::point(proof.position_error_mm())
-                    .add(Interval::point(length(displacement)?.hi))
-                    .hi;
-                if !position_error_mm.is_finite() || position_error_mm >= allowance {
-                    return Ok(None);
-                }
-                let completed_jet = surface_enclosure(surface, uv_box(completed), work, cancel)?;
-                let completed_spatial_s = compose_first(&completed_jet.du, &completed_jet.dv, completed_s);
-                let Some(relative_derivative_error) =
-                    relative_error(source_s, completed_spatial_s)?
-                else {
-                    return Ok(None);
-                };
-                Ok(Some(GermTransport {
-                    position_error_mm,
-                    relative_derivative_error,
-                }))
-            })() }
+            {
+                let surface = &domain.surface_operand();
+                (|| {
+                    // The entire straight UV homotopy, not its endpoint samples,
+                    // bounds F(completed)-F(original) by the integral first jet.
+                    let homotopy_jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
+                    let displacement = compose_first(&homotopy_jet.du, &homotopy_jet.dv, shift);
+                    let position_error_mm = Interval::point(proof.position_error_mm())
+                        .add(Interval::point(length(displacement)?.hi))
+                        .hi;
+                    if !position_error_mm.is_finite() || position_error_mm >= allowance {
+                        return Ok(None);
+                    }
+                    let completed_jet =
+                        surface_enclosure(surface, uv_box(completed), work, cancel)?;
+                    let completed_spatial_s =
+                        compose_first(&completed_jet.du, &completed_jet.dv, completed_s);
+                    let Some(relative_derivative_error) =
+                        relative_error(source_s, completed_spatial_s)?
+                    else {
+                        return Ok(None);
+                    };
+                    Ok(Some(GermTransport {
+                        position_error_mm,
+                        relative_derivative_error,
+                    }))
+                })()
+            }
         })();
         match queried {
             Ok(Some(cell)) => {
@@ -336,8 +343,12 @@ mod properties {
             .prepare_vertices(MAX_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
         let prepared = crate::analysis::prepare_solid(
-            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = prepared.source_view().unwrap().with_vertex_plans(None);
         let allowance = source_allowance(&definition).unwrap();
         let mut vertices = Vec::new();
@@ -433,7 +444,8 @@ mod properties {
                 // Move toward this actual source chart's interior, rather than
                 // leaving a bounded carrier domain and testing an unrelated
                 // parameter/arithmetic error. This is still the SAME allowance.
-                let target = domain.uv_domain()
+                let target = domain
+                    .uv_domain()
                     .map(|range| Interval::point(range[0] * 0.5 + range[1] * 0.5));
                 let mut excessive = comparison;
                 excessive.correction = std::array::from_fn(|end| {

@@ -6,32 +6,38 @@
 //! original LINE's active range. Its two captured source vertices instead name
 //! immutable orthogonal-projection parameter expressions. Whole-coedge/face
 //! correspondence and original wire ownership remain separate obligations.
-use crate::{GeometryError, GeometryWorkBudget};
 use crate::exact_coefficient::ExactCoefficient;
 use crate::parametric::{CurveEnclosure, CurveThirdEnclosure, Interval};
+use crate::{GeometryError, GeometryWorkBudget};
 use solidcraft_step::geom::Curve;
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
-mod roots;
-mod selection;
 mod affine;
 pub(crate) mod carrier;
-pub(crate) mod pcurve;
 pub(crate) mod census;
-use affine::SourceAffineRestriction;
+pub(crate) mod pcurve;
+mod roots;
+mod selection;
 use crate::kernel::source::OriginalCoedgeSource;
 use crate::kernel::source_operand::PreparedOriginalCurve;
 use crate::kernel::trim::{SourceCurveCalibration, calibrate_source_curves};
 use crate::parametric::{AxisSpans, CurveEvaluator, ExactAffineCurve};
+use affine::SourceAffineRestriction;
 use roots::EndpointRoot;
 
 /// One selected original spatial operator. Native parameters never enter its
 /// normalized query gauge; the trim owner proves their separate association.
 pub(crate) enum SourceSpatialRestriction<'a> {
-    Line { source: &'a OriginalCoedgeSource, operator: SourceLineRestriction<'a> },
-    Affine { source: &'a OriginalCoedgeSource, operator: SourceAffineRestriction<'a>,
-        original_master: Option<SourceCurveCalibration> },
+    Line {
+        source: &'a OriginalCoedgeSource,
+        operator: SourceLineRestriction<'a>,
+    },
+    Affine {
+        source: &'a OriginalCoedgeSource,
+        operator: SourceAffineRestriction<'a>,
+        original_master: Option<SourceCurveCalibration>,
+    },
     Endpoint(EndpointRestrictedOriginal<'a>),
 }
 
@@ -41,86 +47,169 @@ enum OriginalSpatialReference<'a> {
     Endpoint(EndpointRestrictedOriginal<'a>),
 }
 impl<'a> OriginalSpatialReference<'a> {
-    fn prepare(source: &'a OriginalCoedgeSource, allowance: f64, remaining: usize,
-        work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    fn prepare(
+        source: &'a OriginalCoedgeSource,
+        allowance: f64,
+        remaining: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
-        let Some((curve, sense)) = selection::original_3d_reference(source, work, cancel)?
-            else { return Ok(None); };
+        let Some((curve, sense)) = selection::original_3d_reference(source, work, cancel)? else {
+            return Ok(None);
+        };
         Self::prepare_curve(source, curve, sense, allowance, remaining, 0, work, cancel).map(Some)
     }
-    fn prepare_curve(source: &'a OriginalCoedgeSource, curve: &'a Curve, sense: bool,
-        allowance: f64, remaining: usize, depth: usize,
-        work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    fn prepare_curve(
+        source: &'a OriginalCoedgeSource,
+        curve: &'a Curve,
+        sense: bool,
+        allowance: f64,
+        remaining: usize,
+        depth: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         work.charge(1, cancel)?;
-        if depth >= 16 || remaining < std::mem::size_of::<Self>()
-            + SOURCE_LINE_RESTRICTION_SCRATCH_BYTES { return Err(source_capacity()); }
-        if let Some(line) = SourceLineRestriction::new(curve,
-            &source.vertex_points_mm, sense, allowance, work, cancel)? {
+        if depth >= 16
+            || remaining < std::mem::size_of::<Self>() + SOURCE_LINE_RESTRICTION_SCRATCH_BYTES
+        {
+            return Err(source_capacity());
+        }
+        if let Some(line) = SourceLineRestriction::new(
+            curve,
+            &source.vertex_points_mm,
+            sense,
+            allowance,
+            work,
+            cancel,
+        )? {
             return Ok(Self::Line(line));
         }
         // Every preferred layer keeps its own actual 3D declaration. Parameter
         // selectors are never transplanted across an independently gauged master.
         let reference = if let Some((basis, basis_sense)) =
-            selection::original_3d_reference_curve(curve, sense, work, cancel)? {
-            let budget = remaining.checked_sub(std::mem::size_of::<Self>())
+            selection::original_3d_reference_curve(curve, sense, work, cancel)?
+        {
+            let budget = remaining
+                .checked_sub(std::mem::size_of::<Self>())
                 .ok_or_else(source_capacity)?;
-            Some(Self::prepare_curve(source, basis, basis_sense, allowance,
-                budget, depth + 1, work, cancel)?)
-        } else { None };
+            Some(Self::prepare_curve(
+                source,
+                basis,
+                basis_sense,
+                allowance,
+                budget,
+                depth + 1,
+                work,
+                cancel,
+            )?)
+        } else {
+            None
+        };
         let reference_bytes = reference.as_ref().map_or(0, Self::retained_bytes);
-        let available = remaining.checked_sub(reference_bytes).ok_or_else(source_capacity)?;
-        let affine_budget = available.checked_sub(std::mem::size_of::<Self>())
+        let available = remaining
+            .checked_sub(reference_bytes)
+            .ok_or_else(source_capacity)?;
+        let affine_budget = available
+            .checked_sub(std::mem::size_of::<Self>())
             .and_then(|n| n.checked_add(std::mem::size_of::<SourceAffineRestriction<'a>>()))
             .ok_or_else(source_capacity)?;
         let mut selected = if let Some(operator) = SourceAffineRestriction::try_new_curve(
-            source, curve, sense, allowance, affine_budget, work, cancel)? {
+            source,
+            curve,
+            sense,
+            allowance,
+            affine_budget,
+            work,
+            cancel,
+        )? {
             Self::Affine(operator, None)
         } else {
             let selection = selection::select_curve(curve, sense, work, cancel)?;
-            let budget = available.checked_sub(std::mem::size_of::<Self>())
+            let budget = available
+                .checked_sub(std::mem::size_of::<Self>())
                 .and_then(|n| n.checked_add(std::mem::size_of::<EndpointRestrictedOriginal<'a>>()))
                 .ok_or_else(source_capacity)?;
-            Self::Endpoint(EndpointRestrictedOriginal::from_selection(source, curve, sense,
-                selection, reference.as_ref().map(Self::evaluator), allowance, budget, work, cancel)?)
+            Self::Endpoint(EndpointRestrictedOriginal::from_selection(
+                source,
+                curve,
+                sense,
+                selection,
+                reference.as_ref().map(Self::evaluator),
+                allowance,
+                budget,
+                work,
+                cancel,
+            )?)
         };
         if let Some(reference) = &reference {
-            let live = reference.retained_bytes().checked_add(selected.retained_bytes())
+            let live = reference
+                .retained_bytes()
+                .checked_add(selected.retained_bytes())
                 .ok_or_else(source_capacity)?;
             let budget = remaining.checked_sub(live).ok_or_else(source_capacity)?;
-            let proof = calibrate_source_curves(reference.evaluator(), selected.evaluator(),
-                [0.0, 1.0], allowance, budget, work, cancel)?;
+            let proof = calibrate_source_curves(
+                reference.evaluator(),
+                selected.evaluator(),
+                [0.0, 1.0],
+                allowance,
+                budget,
+                work,
+                cancel,
+            )?;
             match &mut selected {
                 Self::Affine(_, association) => *association = Some(proof),
                 Self::Endpoint(operator) => operator.original_master = Some(proof),
-                Self::Line(_) => return Err(source_unavailable(
-                    "literal reference LINE cannot replace a preferred spatial expression")),
+                Self::Line(_) => {
+                    return Err(source_unavailable(
+                        "literal reference LINE cannot replace a preferred spatial expression",
+                    ));
+                }
             }
         }
-        if selected.retained_bytes() > remaining { return Err(source_capacity()); }
+        if selected.retained_bytes() > remaining {
+            return Err(source_capacity());
+        }
         Ok(selected)
     }
     fn evaluator(&self) -> &dyn CurveEvaluator {
-        match self { Self::Line(operator) => operator, Self::Affine(operator, _) => operator,
-            Self::Endpoint(operator) => operator }
+        match self {
+            Self::Line(operator) => operator,
+            Self::Affine(operator, _) => operator,
+            Self::Endpoint(operator) => operator,
+        }
     }
     fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + match self {
-            Self::Line(_) => 0,
-            Self::Affine(operator, association) => operator.retained_bytes()
-                .saturating_sub(std::mem::size_of::<SourceAffineRestriction<'a>>())
-                .saturating_add(association.as_ref().map_or(0, |proof|
-                    proof.retained_bytes().saturating_sub(std::mem::size_of::<SourceCurveCalibration>()))),
-            Self::Endpoint(operator) => operator.heap_bytes(),
-        }
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Line(_) => 0,
+                Self::Affine(operator, association) => operator
+                    .retained_bytes()
+                    .saturating_sub(std::mem::size_of::<SourceAffineRestriction<'a>>())
+                    .saturating_add(association.as_ref().map_or(0, |proof| {
+                        proof
+                            .retained_bytes()
+                            .saturating_sub(std::mem::size_of::<SourceCurveCalibration>())
+                    })),
+                Self::Endpoint(operator) => operator.heap_bytes(),
+            }
     }
 }
 
 #[derive(Clone, Copy)]
 enum SourceEndpoint {
-    Literal { value: f64, turns: i32 },
-    Root { root: EndpointRoot, branch: usize, turns: i32 },
-    FirstShift { turns: i32 },
+    Literal {
+        value: f64,
+        turns: i32,
+    },
+    Root {
+        root: EndpointRoot,
+        branch: usize,
+        turns: i32,
+    },
+    FirstShift {
+        turns: i32,
+    },
 }
 pub(crate) struct EndpointRestrictedOriginal<'a> {
     source: &'a OriginalCoedgeSource,
@@ -135,174 +224,319 @@ pub(crate) struct EndpointRestrictedOriginal<'a> {
     original_master: Option<SourceCurveCalibration>,
 }
 fn source_capacity() -> GeometryError {
-    failure(GeometryErrorCode::ResourceLimit,
-        "selected original spatial restriction exceeds its live byte allowance")
+    failure(
+        GeometryErrorCode::ResourceLimit,
+        "selected original spatial restriction exceeds its live byte allowance",
+    )
 }
 fn source_unavailable(message: &'static str) -> GeometryError {
-    failure(GeometryErrorCode::ParameterCorrespondenceUnavailable, message)
+    failure(
+        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        message,
+    )
 }
-fn admit_vec<T>(values: &mut Vec<T>, additional: usize, live: usize, limit: usize)
-    -> Result<(), GeometryError> {
-    let required = values.len().checked_add(additional).ok_or_else(source_capacity)?;
-    if required <= values.capacity() { return Ok(()); }
-    let extra = required.checked_sub(values.capacity()).and_then(|n|
-        n.checked_mul(std::mem::size_of::<T>())).ok_or_else(source_capacity)?;
-    if live.checked_add(extra).is_none_or(|n| n > limit) { return Err(source_capacity()); }
-    let old = values.capacity();
-    values.try_reserve_exact(required - values.len()).map_err(|_| source_capacity())?;
-    let actual = (values.capacity() - old).checked_mul(std::mem::size_of::<T>())
+fn admit_vec<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    live: usize,
+    limit: usize,
+) -> Result<(), GeometryError> {
+    let required = values
+        .len()
+        .checked_add(additional)
         .ok_or_else(source_capacity)?;
-    if live.checked_add(actual).is_none_or(|n| n > limit) { return Err(source_capacity()); }
+    if required <= values.capacity() {
+        return Ok(());
+    }
+    let extra = required
+        .checked_sub(values.capacity())
+        .and_then(|n| n.checked_mul(std::mem::size_of::<T>()))
+        .ok_or_else(source_capacity)?;
+    if live.checked_add(extra).is_none_or(|n| n > limit) {
+        return Err(source_capacity());
+    }
+    let old = values.capacity();
+    values
+        .try_reserve_exact(required - values.len())
+        .map_err(|_| source_capacity())?;
+    let actual = (values.capacity() - old)
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(source_capacity)?;
+    if live.checked_add(actual).is_none_or(|n| n > limit) {
+        return Err(source_capacity());
+    }
     Ok(())
 }
 impl<'a> SourceSpatialRestriction<'a> {
-    pub(crate) fn new(source: &'a OriginalCoedgeSource, allowance: f64, remaining: usize,
-        work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    pub(crate) fn new(
+        source: &'a OriginalCoedgeSource,
+        allowance: f64,
+        remaining: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         work.charge(1, cancel)?;
         if remaining < std::mem::size_of::<Self>() + SOURCE_LINE_RESTRICTION_SCRATCH_BYTES {
             return Err(source_capacity());
         }
-        if let Some(operator) = SourceLineRestriction::new(source.spatial_curve.as_ref(),
-            &source.vertex_points_mm, source.same_sense, allowance, work, cancel)? {
+        if let Some(operator) = SourceLineRestriction::new(
+            source.spatial_curve.as_ref(),
+            &source.vertex_points_mm,
+            source.same_sense,
+            allowance,
+            work,
+            cancel,
+        )? {
             return Ok(Self::Line { source, operator });
         }
-        let reference_budget = remaining.checked_sub(std::mem::size_of::<Self>())
+        let reference_budget = remaining
+            .checked_sub(std::mem::size_of::<Self>())
             .ok_or_else(source_capacity)?;
-        let reference = OriginalSpatialReference::prepare(
-            source, allowance, reference_budget, work, cancel)?;
-        let reference_bytes = reference.as_ref().map_or(0, OriginalSpatialReference::retained_bytes);
-        let selected_budget = remaining.checked_sub(reference_bytes).ok_or_else(source_capacity)?;
-        let affine_budget = selected_budget.checked_sub(std::mem::size_of::<Self>())
+        let reference =
+            OriginalSpatialReference::prepare(source, allowance, reference_budget, work, cancel)?;
+        let reference_bytes = reference
+            .as_ref()
+            .map_or(0, OriginalSpatialReference::retained_bytes);
+        let selected_budget = remaining
+            .checked_sub(reference_bytes)
+            .ok_or_else(source_capacity)?;
+        let affine_budget = selected_budget
+            .checked_sub(std::mem::size_of::<Self>())
             .and_then(|n| n.checked_add(std::mem::size_of::<SourceAffineRestriction<'a>>()))
             .ok_or_else(source_capacity)?;
-        let mut selected = if let Some(operator) = SourceAffineRestriction::try_new(
-            source, allowance, affine_budget, work, cancel)? {
-            Self::Affine { source, operator, original_master: None }
+        let mut selected = if let Some(operator) =
+            SourceAffineRestriction::try_new(source, allowance, affine_budget, work, cancel)?
+        {
+            Self::Affine {
+                source,
+                operator,
+                original_master: None,
+            }
         } else {
-            let endpoint_budget = selected_budget.checked_sub(std::mem::size_of::<Self>())
+            let endpoint_budget = selected_budget
+                .checked_sub(std::mem::size_of::<Self>())
                 .and_then(|n| n.checked_add(std::mem::size_of::<EndpointRestrictedOriginal<'a>>()))
                 .ok_or_else(source_capacity)?;
-            Self::Endpoint(EndpointRestrictedOriginal::new(source,
+            Self::Endpoint(EndpointRestrictedOriginal::new(
+                source,
                 reference.as_ref().map(OriginalSpatialReference::evaluator),
-                allowance, endpoint_budget, work, cancel)?)
+                allowance,
+                endpoint_budget,
+                work,
+                cancel,
+            )?)
         };
         if let Some(reference) = &reference {
-            let live = selected.retained_bytes().checked_add(reference.retained_bytes())
+            let live = selected
+                .retained_bytes()
+                .checked_add(reference.retained_bytes())
                 .ok_or_else(source_capacity)?;
             let budget = remaining.checked_sub(live).ok_or_else(source_capacity)?;
-            let association = calibrate_source_curves(reference.evaluator(), &selected,
-                [0.0, 1.0], allowance, budget, work, cancel)?;
+            let association = calibrate_source_curves(
+                reference.evaluator(),
+                &selected,
+                [0.0, 1.0],
+                allowance,
+                budget,
+                work,
+                cancel,
+            )?;
             match &mut selected {
-                Self::Affine { original_master, .. } => *original_master = Some(association),
+                Self::Affine {
+                    original_master, ..
+                } => *original_master = Some(association),
                 Self::Endpoint(operator) => operator.original_master = Some(association),
-                Self::Line { .. } => return Err(source_unavailable(
-                    "literal LINE cannot carry an unrelated selected spatial master")),
+                Self::Line { .. } => {
+                    return Err(source_unavailable(
+                        "literal LINE cannot carry an unrelated selected spatial master",
+                    ));
+                }
             }
         }
-        if selected.retained_bytes() > remaining { return Err(source_capacity()); }
+        if selected.retained_bytes() > remaining {
+            return Err(source_capacity());
+        }
         Ok(selected)
     }
     fn evaluator(&self) -> &dyn CurveEvaluator {
-        match self { Self::Line { operator, .. } => operator,
-            Self::Affine { operator, .. } => operator, Self::Endpoint(operator) => operator }
-    }
-    fn source(&self) -> &'a OriginalCoedgeSource {
-        match self { Self::Line { source, .. } | Self::Affine { source, .. } => source,
-            Self::Endpoint(operator) => operator.source }
-    }
-    pub(crate) fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + match self {
-            Self::Line { .. } => 0,
-            Self::Affine { operator, original_master, .. } => operator.retained_bytes()
-                .saturating_sub(std::mem::size_of::<SourceAffineRestriction<'a>>())
-                .saturating_add(original_master.as_ref().map_or(0, |proof|
-                    proof.retained_bytes().saturating_sub(std::mem::size_of::<SourceCurveCalibration>()))),
-            Self::Endpoint(operator) => operator.heap_bytes(),
+        match self {
+            Self::Line { operator, .. } => operator,
+            Self::Affine { operator, .. } => operator,
+            Self::Endpoint(operator) => operator,
         }
     }
+    fn source(&self) -> &'a OriginalCoedgeSource {
+        match self {
+            Self::Line { source, .. } | Self::Affine { source, .. } => source,
+            Self::Endpoint(operator) => operator.source,
+        }
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Line { .. } => 0,
+                Self::Affine {
+                    operator,
+                    original_master,
+                    ..
+                } => operator
+                    .retained_bytes()
+                    .saturating_sub(std::mem::size_of::<SourceAffineRestriction<'a>>())
+                    .saturating_add(original_master.as_ref().map_or(0, |proof| {
+                        proof
+                            .retained_bytes()
+                            .saturating_sub(std::mem::size_of::<SourceCurveCalibration>())
+                    })),
+                Self::Endpoint(operator) => operator.heap_bytes(),
+            }
+    }
     pub(crate) fn original_master_association(&self) -> Option<&SourceCurveCalibration> {
-        match self { Self::Line { .. } => None,
-            Self::Affine { original_master, .. } => original_master.as_ref(),
-            Self::Endpoint(operator) => operator.original_master.as_ref() }
+        match self {
+            Self::Line { .. } => None,
+            Self::Affine {
+                original_master, ..
+            } => original_master.as_ref(),
+            Self::Endpoint(operator) => operator.original_master.as_ref(),
+        }
     }
     pub(crate) fn source_error_mm(&self) -> f64 {
-        match self { Self::Line { operator, .. } => operator.source_error_mm(),
+        match self {
+            Self::Line { operator, .. } => operator.source_error_mm(),
             Self::Affine { operator, .. } => operator.source_error_mm(),
-            Self::Endpoint(operator) => operator.source_error_mm }
+            Self::Endpoint(operator) => operator.source_error_mm,
+        }
     }
     pub(crate) fn exact_source_endpoints(&self) -> bool {
-        match self { Self::Line { operator, .. } => operator.exact_source_endpoints(),
+        match self {
+            Self::Line { operator, .. } => operator.exact_source_endpoints(),
             Self::Affine { operator, .. } => operator.exact_source_endpoints(),
-            Self::Endpoint(operator) => operator.exact_endpoints }
+            Self::Endpoint(operator) => operator.exact_endpoints,
+        }
     }
     pub(crate) fn endpoint_parameters(&self) -> Result<[Interval; 2], GeometryError> {
-        match self { Self::Line { operator, .. } => Ok(operator.endpoint_parameters()),
+        match self {
+            Self::Line { operator, .. } => Ok(operator.endpoint_parameters()),
             Self::Affine { operator, .. } => Ok(operator.endpoint_parameters()),
-            Self::Endpoint(operator) => operator.parameters() }
+            Self::Endpoint(operator) => operator.parameters(),
+        }
     }
-    pub(crate) fn parameter_derivative(&self, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<Interval, GeometryError> {
+    pub(crate) fn parameter_derivative(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Interval, GeometryError> {
         work.charge(1, cancel)?;
-        match self { Self::Line { operator, .. } => operator.parameter_derivative(work, cancel),
+        match self {
+            Self::Line { operator, .. } => operator.parameter_derivative(work, cancel),
             Self::Affine { operator, .. } => operator.parameter_derivative(work, cancel),
-            Self::Endpoint(operator) => operator.derivative() }
+            Self::Endpoint(operator) => operator.derivative(),
+        }
     }
     pub(crate) fn original_knots(&self) -> &[f64] {
-        match self { Self::Line { .. } | Self::Affine { .. } => &[],
-            Self::Endpoint(operator) => &operator.original_knots }
+        match self {
+            Self::Line { .. } | Self::Affine { .. } => &[],
+            Self::Endpoint(operator) => &operator.original_knots,
+        }
     }
     pub(crate) fn knot_bands(&self) -> &[Interval] {
-        match self { Self::Line { .. } | Self::Affine { .. } => &[],
-            Self::Endpoint(operator) => &operator.knot_bands }
+        match self {
+            Self::Line { .. } | Self::Affine { .. } => &[],
+            Self::Endpoint(operator) => &operator.knot_bands,
+        }
     }
-    pub(crate) fn original_knot_is_active(&self, index: usize,
-        work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    pub(crate) fn original_knot_is_active(
+        &self,
+        index: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
-        let &parameter = self.original_knots().get(index).ok_or_else(||
-            source_unavailable("original spatial knot index is outside its sealed census"))?;
+        let &parameter = self.original_knots().get(index).ok_or_else(|| {
+            source_unavailable("original spatial knot index is outside its sealed census")
+        })?;
         let [a, b] = self.endpoint_parameters()?;
-        Ok((a.hi <= parameter && parameter <= b.lo)
-            || (b.hi <= parameter && parameter <= a.lo))
+        Ok((a.hi <= parameter && parameter <= b.lo) || (b.hi <= parameter && parameter <= a.lo))
     }
-    pub(crate) fn original_knot_jet(&self, index: usize, order: usize,
-        work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    pub(crate) fn original_knot_jet(
+        &self,
+        index: usize,
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<[[Interval; 3]; 4], GeometryError> {
         if !self.original_knot_is_active(index, work, cancel)? {
             return Err(source_unavailable(
-                "possible original knot band does not prove an active source incidence"));
+                "possible original knot band does not prove an active source incidence",
+            ));
         }
         match self {
             Self::Endpoint(operator) => {
-                let &parameter = operator.original_knots.get(index).ok_or_else(||
-                    source_unavailable("original spatial knot index is outside its sealed census"))?;
-                operator.operand.evaluate_order([parameter; 2], order, work, cancel)
+                let &parameter = operator.original_knots.get(index).ok_or_else(|| {
+                    source_unavailable("original spatial knot index is outside its sealed census")
+                })?;
+                operator
+                    .operand
+                    .evaluate_order([parameter; 2], order, work, cancel)
             }
-            Self::Line { .. } | Self::Affine { .. } => Err(source_unavailable("affine source has no original knot")),
+            Self::Line { .. } | Self::Affine { .. } => {
+                Err(source_unavailable("affine source has no original knot"))
+            }
         }
     }
-    pub(crate) fn same_operator(&self, other: &Self, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    pub(crate) fn same_operator(
+        &self,
+        other: &Self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
         let (a, b) = (self.source(), other.source());
         if !std::ptr::eq(a.spatial_curve.as_ref(), b.spatial_curve.as_ref())
-            || a.edge_curve_id != b.edge_curve_id || a.curve_id != b.curve_id
-            || a.vertex_ids != b.vertex_ids || a.vertex_points_mm != b.vertex_points_mm
-            || a.same_sense != b.same_sense { return Ok(false); }
+            || a.edge_curve_id != b.edge_curve_id
+            || a.curve_id != b.curve_id
+            || a.vertex_ids != b.vertex_ids
+            || a.vertex_points_mm != b.vertex_points_mm
+            || a.same_sense != b.same_sense
+        {
+            return Ok(false);
+        }
         Ok(match (self, other) {
             (Self::Line { .. }, Self::Line { .. }) => true,
             (Self::Affine { .. }, Self::Affine { .. }) => true,
-            (Self::Endpoint(a), Self::Endpoint(b)) => a.endpoints.iter().zip(&b.endpoints)
-                .all(|(a, b)| match (a, b) {
-                    (SourceEndpoint::Literal { value: a, turns: at },
-                        SourceEndpoint::Literal { value: b, turns: bt }) => a == b && at == bt,
-                    (SourceEndpoint::Root { branch: a, turns: at, .. },
-                        SourceEndpoint::Root { branch: b, turns: bt, .. }) => a == b && at == bt,
-                    (SourceEndpoint::FirstShift { turns: a },
-                        SourceEndpoint::FirstShift { turns: b }) => a == b,
-                    _ => false,
-                }),
+            (Self::Endpoint(a), Self::Endpoint(b)) => {
+                a.endpoints
+                    .iter()
+                    .zip(&b.endpoints)
+                    .all(|(a, b)| match (a, b) {
+                        (
+                            SourceEndpoint::Literal {
+                                value: a,
+                                turns: at,
+                            },
+                            SourceEndpoint::Literal {
+                                value: b,
+                                turns: bt,
+                            },
+                        ) => a == b && at == bt,
+                        (
+                            SourceEndpoint::Root {
+                                branch: a,
+                                turns: at,
+                                ..
+                            },
+                            SourceEndpoint::Root {
+                                branch: b,
+                                turns: bt,
+                                ..
+                            },
+                        ) => a == b && at == bt,
+                        (
+                            SourceEndpoint::FirstShift { turns: a },
+                            SourceEndpoint::FirstShift { turns: b },
+                        ) => a == b,
+                        _ => false,
+                    })
+            }
             _ => false,
         })
     }
@@ -314,9 +548,14 @@ impl EndpointRestrictedOriginal<'_> {
             SourceEndpoint::Root { root, turns, .. } => (root.enclosure(), turns),
             SourceEndpoint::FirstShift { turns } => (self.endpoint(0)?, turns),
         };
-        if turns == 0 { return Ok(base); }
-        let period = self.period.ok_or_else(|| source_unavailable(
-            "original endpoint period shift has no coefficient periodicity proof"))?;
+        if turns == 0 {
+            return Ok(base);
+        }
+        let period = self.period.ok_or_else(|| {
+            source_unavailable(
+                "original endpoint period shift has no coefficient periodicity proof",
+            )
+        })?;
         finite(base.add(period.mul(Interval::point(f64::from(turns)))))
     }
     fn parameters(&self) -> Result<[Interval; 2], GeometryError> {
@@ -324,16 +563,22 @@ impl EndpointRestrictedOriginal<'_> {
     }
     fn derivative(&self) -> Result<Interval, GeometryError> {
         if let SourceEndpoint::FirstShift { turns } = self.endpoints[1] {
-            return finite(self.period.ok_or_else(|| source_unavailable(
-                "closed original curve has no coefficient period"))?
-                .mul(Interval::point(f64::from(turns))));
+            return finite(
+                self.period
+                    .ok_or_else(|| {
+                        source_unavailable("closed original curve has no coefficient period")
+                    })?
+                    .mul(Interval::point(f64::from(turns))),
+            );
         }
         finite(self.endpoint(1)?.sub(self.endpoint(0)?))
     }
     fn image(&self, range: [f64; 2]) -> Result<Interval, GeometryError> {
         Interval::new(range[0], range[1])?;
         if range[0] < 0.0 || range[1] > 1.0 {
-            return Err(source_unavailable("original spatial query exceeds its selected normalized edge"));
+            return Err(source_unavailable(
+                "original spatial query exceeds its selected normalized edge",
+            ));
         }
         let p = self.parameters()?;
         let at = |value: f64| -> Result<Interval, GeometryError> {
@@ -351,85 +596,166 @@ impl EndpointRestrictedOriginal<'_> {
         // Constructor-proved endpoint containment and convexity establish this
         // constraint on the actual map. This removes arithmetic over-enclosure,
         // not any source endpoint/root uncertainty.
-        image.intersection(Interval::new(active[0], active[1])?).ok_or_else(||
-            source_unavailable("original parameter image misses its proved source domain"))
+        image
+            .intersection(Interval::new(active[0], active[1])?)
+            .ok_or_else(|| {
+                source_unavailable("original parameter image misses its proved source domain")
+            })
     }
     fn heap_bytes(&self) -> usize {
-        self.operand.retained_bytes().saturating_sub(std::mem::size_of::<PreparedOriginalCurve<'_>>())
+        self.operand
+            .retained_bytes()
+            .saturating_sub(std::mem::size_of::<PreparedOriginalCurve<'_>>())
             .saturating_add(self.original_knots.capacity() * std::mem::size_of::<f64>())
             .saturating_add(self.knot_bands.capacity() * std::mem::size_of::<Interval>())
             .saturating_add(self.cover_cuts.capacity() * std::mem::size_of::<f64>())
-            .saturating_add(self.original_master.as_ref().map_or(0, |proof|
-                proof.retained_bytes().saturating_sub(std::mem::size_of::<SourceCurveCalibration>())))
+            .saturating_add(self.original_master.as_ref().map_or(0, |proof| {
+                proof
+                    .retained_bytes()
+                    .saturating_sub(std::mem::size_of::<SourceCurveCalibration>())
+            }))
     }
 }
-fn endpoint_identity(curve: &dyn CurveEvaluator, parameter: f64, point: [f64; 3],
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn endpoint_identity(
+    curve: &dyn CurveEvaluator,
+    parameter: f64,
+    point: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     for axis in 0..3 {
         if !crate::parametric::curve_endpoint_coordinate_equal(
-            curve, parameter, axis, point[axis], work, cancel)? { return Ok(false); }
+            curve,
+            parameter,
+            axis,
+            point[axis],
+            work,
+            cancel,
+        )? {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
-fn endpoint_error(curve: &dyn CurveEvaluator, range: Interval, point: [f64; 3],
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn endpoint_error(
+    curve: &dyn CurveEvaluator,
+    range: Interval,
+    point: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<f64, GeometryError> {
     if range.is_point() && endpoint_identity(curve, range.lo, point, work, cancel)? {
         return Ok(0.0);
     }
     let p = curve.tensor([range.lo, range.hi], 0, work, cancel)?[0];
-    finite((0..3).fold(Interval::point(0.0), |sum, axis|
-        sum.add(p[axis].sub(Interval::point(point[axis])).square())).sqrt()?).map(|v| v.hi)
+    finite(
+        (0..3)
+            .fold(Interval::point(0.0), |sum, axis| {
+                sum.add(p[axis].sub(Interval::point(point[axis])).square())
+            })
+            .sqrt()?,
+    )
+    .map(|v| v.hi)
 }
-fn endpoint_root(curve: &dyn CurveEvaluator, vertex: [f64; 3], search: [f64; 2],
-    period: Option<Interval>, allowance: f64, remaining: usize,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn endpoint_root(
+    curve: &dyn CurveEvaluator,
+    vertex: [f64; 3],
+    search: [f64; 2],
+    period: Option<Interval>,
+    allowance: f64,
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<SourceEndpoint, GeometryError> {
-    let mut roots = roots::isolate_endpoint(curve, vertex, search, allowance, remaining, work, cancel)?;
-    work.charge((roots.len() as u64).saturating_mul(usize::BITS as u64), cancel)?;
+    let mut roots =
+        roots::isolate_endpoint(curve, vertex, search, allowance, remaining, work, cancel)?;
+    work.charge(
+        (roots.len() as u64).saturating_mul(usize::BITS as u64),
+        cancel,
+    )?;
     roots.sort_unstable_by(|a, b| a.enclosure().lo.total_cmp(&b.enclosure().lo));
     let Some(first) = roots.first().copied() else {
-        return Err(source_unavailable("original endpoint has no proved source-curve root"));
+        return Err(source_unavailable(
+            "original endpoint has no proved source-curve root",
+        ));
     };
     for root in roots.iter().skip(1) {
         work.charge(1, cancel)?;
         let Some(period) = period else {
-            return Err(source_unavailable("original endpoint has more than one source branch"));
+            return Err(source_unavailable(
+                "original endpoint has more than one source branch",
+            ));
         };
         let shifted = first.enclosure().add(period);
         let tube = shifted.hull(root.enclosure());
         let j = curve.tensor([tube.lo, tube.hi], 2, work, cancel)?;
         let delta = std::array::from_fn(|axis| j[0][axis].sub(Interval::point(vertex[axis])));
         if shifted.intersection(root.enclosure()).is_none()
-            || dot(j[1], j[1]).add(dot(delta, j[2])).lo <= 0.0 {
-            return Err(source_unavailable("periodic source endpoint branches lack a unique shared root"));
+            || dot(j[1], j[1]).add(dot(delta, j[2])).lo <= 0.0
+        {
+            return Err(source_unavailable(
+                "periodic source endpoint branches lack a unique shared root",
+            ));
         }
     }
-    Ok(SourceEndpoint::Root { root: first, branch: 0, turns: 0 })
+    Ok(SourceEndpoint::Root {
+        root: first,
+        branch: 0,
+        turns: 0,
+    })
 }
 impl<'a> EndpointRestrictedOriginal<'a> {
-    fn new(source: &'a OriginalCoedgeSource, reference: Option<&dyn CurveEvaluator>,
-        allowance: f64, remaining: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    fn new(
+        source: &'a OriginalCoedgeSource,
+        reference: Option<&dyn CurveEvaluator>,
+        allowance: f64,
+        remaining: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
-        Self::from_selection(source, source.spatial_curve.as_ref(), source.same_sense,
-            selection::select(source, work, cancel)?, reference, allowance, remaining, work, cancel)
+        Self::from_selection(
+            source,
+            source.spatial_curve.as_ref(),
+            source.same_sense,
+            selection::select(source, work, cancel)?,
+            reference,
+            allowance,
+            remaining,
+            work,
+            cancel,
+        )
     }
-    fn from_selection(source: &'a OriginalCoedgeSource, curve: &'a Curve, same_sense: bool,
-        mut selection: selection::SourceSelection, reference: Option<&dyn CurveEvaluator>,
-        allowance: f64, remaining: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    fn from_selection(
+        source: &'a OriginalCoedgeSource,
+        curve: &'a Curve,
+        same_sense: bool,
+        mut selection: selection::SourceSelection,
+        reference: Option<&dyn CurveEvaluator>,
+        allowance: f64,
+        remaining: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         if !allowance.is_finite() || allowance < 0.0 {
-            return Err(source_unavailable("original spatial restriction needs finite nonnegative source admission"));
+            return Err(source_unavailable(
+                "original spatial restriction needs finite nonnegative source admission",
+            ));
         }
         let fixed = std::mem::size_of::<Self>();
-        let available = remaining.checked_sub(fixed).and_then(|n|
-            n.checked_add(std::mem::size_of::<PreparedOriginalCurve<'a>>()))
+        let available = remaining
+            .checked_sub(fixed)
+            .and_then(|n| n.checked_add(std::mem::size_of::<PreparedOriginalCurve<'a>>()))
             .ok_or_else(source_capacity)?;
         let operand = PreparedOriginalCurve::new(curve, selection.active, available, work, cancel)?;
-        let root_bytes = remaining.checked_sub(fixed).and_then(|n|
-            n.checked_sub(operand.retained_bytes().saturating_sub(
-                std::mem::size_of::<PreparedOriginalCurve<'a>>())))
+        let root_bytes = remaining
+            .checked_sub(fixed)
+            .and_then(|n| {
+                n.checked_sub(
+                    operand
+                        .retained_bytes()
+                        .saturating_sub(std::mem::size_of::<PreparedOriginalCurve<'a>>()),
+                )
+            })
             .ok_or_else(source_capacity)?;
         if let Some(reference) = reference {
             let mut phase = None;
@@ -438,124 +764,241 @@ impl<'a> EndpointRestrictedOriginal<'a> {
                 candidates = [None; 2];
                 // These are candidate evaluation points only. A lifted endpoint
                 // enclosure is handled by the complete root search below.
-                for (index, (parameter, turns)) in parameters.into_iter()
-                    .zip(selection.declared_turns).enumerate() {
-                    if turns == 0 { candidates[index] = Some(parameter); }
+                for (index, (parameter, turns)) in parameters
+                    .into_iter()
+                    .zip(selection.declared_turns)
+                    .enumerate()
+                {
+                    if turns == 0 {
+                        candidates[index] = Some(parameter);
+                    }
                 }
             }
             for parameter in candidates.into_iter().flatten() {
                 work.charge(1, cancel)?;
-                if endpoint_error(&operand, Interval::point(parameter),
-                    source.vertex_points_mm[0], work, cancel)? <= allowance {
-                    phase = Some(Interval::point(parameter)); break;
+                if endpoint_error(
+                    &operand,
+                    Interval::point(parameter),
+                    source.vertex_points_mm[0],
+                    work,
+                    cancel,
+                )? <= allowance
+                {
+                    phase = Some(Interval::point(parameter));
+                    break;
                 }
             }
             let phase = match phase {
                 Some(phase) => phase,
-                None => match endpoint_root(&operand, source.vertex_points_mm[0],
-                    selection.search, selection.periodic, allowance, root_bytes, work, cancel)? {
+                None => match endpoint_root(
+                    &operand,
+                    source.vertex_points_mm[0],
+                    selection.search,
+                    selection.periodic,
+                    allowance,
+                    root_bytes,
+                    work,
+                    cancel,
+                )? {
                     SourceEndpoint::Root { root, .. } => root.enclosure(),
-                    _ => return Err(source_unavailable("original master direction has no bounded source endpoint")),
+                    _ => {
+                        return Err(source_unavailable(
+                            "original master direction has no bounded source endpoint",
+                        ));
+                    }
                 },
             };
             let reference_jet = reference.tensor([0.0; 2], 1, work, cancel)?;
             let selected_jet = operand.evaluate_order([phase.lo, phase.hi], 1, work, cancel)?;
             let alignment = dot(reference_jet[1], selected_jet[1]);
-            selection.increasing = if alignment.lo > 0.0 { true }
-                else if alignment.hi < 0.0 { false }
-                else { return Err(source_unavailable("preferred master has no proved directed source germ")); };
+            selection.increasing = if alignment.lo > 0.0 {
+                true
+            } else if alignment.hi < 0.0 {
+                false
+            } else {
+                return Err(source_unavailable(
+                    "preferred master has no proved directed source germ",
+                ));
+            };
         }
         let endpoints = if let Some(parameters) = selection.declared_endpoints {
             let mut endpoints = [
-                SourceEndpoint::Literal { value: parameters[0], turns: selection.declared_turns[0] },
-                SourceEndpoint::Literal { value: parameters[1], turns: selection.declared_turns[1] },
+                SourceEndpoint::Literal {
+                    value: parameters[0],
+                    turns: selection.declared_turns[0],
+                },
+                SourceEndpoint::Literal {
+                    value: parameters[1],
+                    turns: selection.declared_turns[1],
+                },
             ];
             if reference.is_some() {
                 let endpoint = |value: f64, turns: i32| -> Result<Interval, GeometryError> {
-                    if turns == 0 { return Ok(Interval::point(value)); }
-                    Ok(Interval::point(value).add(selection.periodic.ok_or_else(||
-                        source_unavailable("declared original turn has no actual period"))?
-                        .mul(Interval::point(f64::from(turns)))))
+                    if turns == 0 {
+                        return Ok(Interval::point(value));
+                    }
+                    Ok(Interval::point(value).add(
+                        selection
+                            .periodic
+                            .ok_or_else(|| {
+                                source_unavailable("declared original turn has no actual period")
+                            })?
+                            .mul(Interval::point(f64::from(turns))),
+                    ))
                 };
                 let a = endpoint(parameters[0], selection.declared_turns[0])?;
                 let b = endpoint(parameters[1], selection.declared_turns[1])?;
-                if (selection.increasing && a.lo > b.hi)
-                    || (!selection.increasing && a.hi < b.lo) { endpoints.swap(0, 1); }
-            } else if !same_sense { endpoints.swap(0, 1); }
+                if (selection.increasing && a.lo > b.hi) || (!selection.increasing && a.hi < b.lo) {
+                    endpoints.swap(0, 1);
+                }
+            } else if !same_sense {
+                endpoints.swap(0, 1);
+            }
             endpoints
         } else {
-            let mut targets = selection.endpoint_targets.unwrap_or(source.vertex_points_mm);
+            let mut targets = selection
+                .endpoint_targets
+                .unwrap_or(source.vertex_points_mm);
             if selection.endpoint_targets.is_some() {
                 if reference.is_some() && targets[0] != targets[1] {
                     let distance = |target: [f64; 3]| -> Result<Interval, GeometryError> {
-                        finite((0..3).fold(Interval::point(0.0), |sum, axis|
-                            sum.add(Interval::point(target[axis]).sub(
-                                Interval::point(source.vertex_points_mm[0][axis])).square())))
+                        finite((0..3).fold(Interval::point(0.0), |sum, axis| {
+                            sum.add(
+                                Interval::point(target[axis])
+                                    .sub(Interval::point(source.vertex_points_mm[0][axis]))
+                                    .square(),
+                            )
+                        }))
                     };
-                    let a = distance(targets[0])?; let b = distance(targets[1])?;
-                    if b.hi < a.lo { targets.swap(0, 1); }
-                    else if a.hi >= b.lo {
-                        return Err(source_unavailable("Cartesian master endpoints have ambiguous original vertex ownership"));
+                    let a = distance(targets[0])?;
+                    let b = distance(targets[1])?;
+                    if b.hi < a.lo {
+                        targets.swap(0, 1);
+                    } else if a.hi >= b.lo {
+                        return Err(source_unavailable(
+                            "Cartesian master endpoints have ambiguous original vertex ownership",
+                        ));
                     }
-                } else if !same_sense { targets.swap(0, 1); }
+                } else if !same_sense {
+                    targets.swap(0, 1);
+                }
             }
             let natural = operand.active_range();
-            let candidates = if selection.increasing { natural } else { [natural[1], natural[0]] };
-            let mut endpoints = [SourceEndpoint::Literal { value: 0.0, turns: 0 }; 2];
+            let candidates = if selection.increasing {
+                natural
+            } else {
+                [natural[1], natural[0]]
+            };
+            let mut endpoints = [SourceEndpoint::Literal {
+                value: 0.0,
+                turns: 0,
+            }; 2];
             for endpoint in 0..2 {
                 work.charge(1, cancel)?;
                 endpoints[endpoint] = if selection.periodic.is_none()
-                    && endpoint_identity(&operand, candidates[endpoint], targets[endpoint], work, cancel)? {
-                    SourceEndpoint::Literal { value: candidates[endpoint], turns: 0 }
-                } else if endpoint == 1 && source.vertex_ids[0] == source.vertex_ids[1]
-                    && targets[0] == targets[1] && selection.periodic.is_some() {
-                    SourceEndpoint::FirstShift { turns: if selection.increasing { 1 } else { -1 } }
+                    && endpoint_identity(
+                        &operand,
+                        candidates[endpoint],
+                        targets[endpoint],
+                        work,
+                        cancel,
+                    )? {
+                    SourceEndpoint::Literal {
+                        value: candidates[endpoint],
+                        turns: 0,
+                    }
+                } else if endpoint == 1
+                    && source.vertex_ids[0] == source.vertex_ids[1]
+                    && targets[0] == targets[1]
+                    && selection.periodic.is_some()
+                {
+                    SourceEndpoint::FirstShift {
+                        turns: if selection.increasing { 1 } else { -1 },
+                    }
                 } else {
-                    endpoint_root(&operand, targets[endpoint], selection.search,
-                        selection.periodic, allowance, root_bytes, work, cancel)?
+                    endpoint_root(
+                        &operand,
+                        targets[endpoint],
+                        selection.search,
+                        selection.periodic,
+                        allowance,
+                        root_bytes,
+                        work,
+                        cancel,
+                    )?
                 };
             }
             endpoints
         };
-        let mut operator = Self { source, operand, endpoints, period: selection.periodic,
-            source_error_mm: 0.0, exact_endpoints: false,
-            original_knots: Vec::new(), knot_bands: Vec::new(), cover_cuts: Vec::new(),
-            original_master: None };
+        let mut operator = Self {
+            source,
+            operand,
+            endpoints,
+            period: selection.periodic,
+            source_error_mm: 0.0,
+            exact_endpoints: false,
+            original_knots: Vec::new(),
+            knot_bands: Vec::new(),
+            cover_cuts: Vec::new(),
+            original_master: None,
+        };
         let mut derivative = operator.derivative()?;
         if let Some(period) = operator.period {
             if !matches!(operator.endpoints[1], SourceEndpoint::FirstShift { .. })
                 && ((selection.increasing && derivative.hi <= 0.0)
-                    || (!selection.increasing && derivative.lo >= 0.0)) {
+                    || (!selection.increasing && derivative.lo >= 0.0))
+            {
                 let turns = if selection.increasing { 1 } else { -1 };
                 match &mut operator.endpoints[1] {
                     SourceEndpoint::Root { turns: shift, .. } => *shift += turns,
-                    _ => return Err(source_unavailable("declared original endpoints contradict selected source sense")),
+                    _ => {
+                        return Err(source_unavailable(
+                            "declared original endpoints contradict selected source sense",
+                        ));
+                    }
                 }
                 derivative = operator.derivative()?;
             }
             if derivative.lo.abs().max(derivative.hi.abs()) > period.hi
-                && selection.declared_endpoints.is_none() {
-                return Err(source_unavailable("original endpoint restriction exceeds its unique source period"));
+                && selection.declared_endpoints.is_none()
+            {
+                return Err(source_unavailable(
+                    "original endpoint restriction exceeds its unique source period",
+                ));
             }
         }
         if (selection.increasing && derivative.lo <= 0.0)
-            || (!selection.increasing && derivative.hi >= 0.0) {
-            return Err(source_unavailable("original endpoint roots do not prove the selected nonzero direction"));
+            || (!selection.increasing && derivative.hi >= 0.0)
+        {
+            return Err(source_unavailable(
+                "original endpoint roots do not prove the selected nonzero direction",
+            ));
         }
         let p = operator.parameters()?;
         let active = operator.operand.active_range();
-        if p.iter().any(|endpoint| endpoint.lo < active[0] || endpoint.hi > active[1]) {
-            return Err(source_unavailable("selected original endpoint recipe exceeds its actual coefficient domain"));
+        if p.iter()
+            .any(|endpoint| endpoint.lo < active[0] || endpoint.hi > active[1])
+        {
+            return Err(source_unavailable(
+                "selected original endpoint recipe exceeds its actual coefficient domain",
+            ));
         }
         operator.exact_endpoints = true;
         for endpoint in 0..2 {
-            let error = endpoint_error(&operator.operand, p[endpoint],
-                source.vertex_points_mm[endpoint], work, cancel)?;
+            let error = endpoint_error(
+                &operator.operand,
+                p[endpoint],
+                source.vertex_points_mm[endpoint],
+                work,
+                cancel,
+            )?;
             operator.source_error_mm = operator.source_error_mm.max(error);
             operator.exact_endpoints &= error == 0.0;
         }
         if operator.source_error_mm > allowance {
-            return Err(source_unavailable("selected original endpoint trace exceeds its proved source admission"));
+            return Err(source_unavailable(
+                "selected original endpoint trace exceeds its proved source admission",
+            ));
         }
         let (knots, _) = operator.operand.parameter_axis(work, cancel)?;
         let knot_count = knots.len();
@@ -564,10 +1007,14 @@ impl<'a> EndpointRestrictedOriginal<'a> {
         for index in 0..knot_count {
             work.charge(1, cancel)?;
             let knot = operator.operand.parameter_axis(work, cancel)?.0[index];
-            if operator.original_knots.last() == Some(&knot) { continue; }
+            if operator.original_knots.last() == Some(&knot) {
+                continue;
+            }
             let raw = Interval::point(knot);
             let band = raw.sub(p[0]).div(derivative)?;
-            let Some(band) = band.intersection(Interval::new(0.0, 1.0)?) else { continue; };
+            let Some(band) = band.intersection(Interval::new(0.0, 1.0)?) else {
+                continue;
+            };
             let live = fixed + operator.heap_bytes();
             admit_vec(&mut operator.original_knots, 1, live, remaining)?;
             let live = fixed + operator.heap_bytes();
@@ -575,41 +1022,65 @@ impl<'a> EndpointRestrictedOriginal<'a> {
             operator.original_knots.push(knot);
             operator.knot_bands.push(band);
         }
-        let fence_count = operator.knot_bands.len().checked_mul(2)
-            .and_then(|n| n.checked_add(2)).ok_or_else(source_capacity)?;
+        let fence_count = operator
+            .knot_bands
+            .len()
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(2))
+            .ok_or_else(source_capacity)?;
         let live = fixed + operator.heap_bytes();
         admit_vec(&mut operator.cover_cuts, fence_count, live, remaining)?;
         operator.cover_cuts.extend([0.0, 1.0]);
-        for band in &operator.knot_bands { operator.cover_cuts.extend([band.lo, band.hi]); }
-        work.charge((operator.cover_cuts.len() as u64).saturating_mul(
-            usize::BITS as u64), cancel)?;
+        for band in &operator.knot_bands {
+            operator.cover_cuts.extend([band.lo, band.hi]);
+        }
+        work.charge(
+            (operator.cover_cuts.len() as u64).saturating_mul(usize::BITS as u64),
+            cancel,
+        )?;
         operator.cover_cuts.sort_unstable_by(f64::total_cmp);
         operator.cover_cuts.dedup();
         Ok(operator)
     }
 }
 impl CurveEvaluator for EndpointRestrictedOriginal<'_> {
-    fn active_range(&self) -> [f64; 2] { [0.0, 1.0] }
-    fn exact_affine_coefficients(&self, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<Option<ExactAffineCurve>, GeometryError> {
+    fn active_range(&self) -> [f64; 2] {
+        [0.0, 1.0]
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<ExactAffineCurve>, GeometryError> {
         let parameter = |endpoint: SourceEndpoint| match endpoint {
             SourceEndpoint::Literal { value, turns: 0 } => Some(value),
             SourceEndpoint::Root { root, turns: 0, .. } => root.exact_parameter(),
             _ => None,
         };
         let (Some(a), Some(b)) = (parameter(self.endpoints[0]), parameter(self.endpoints[1]))
-            else { return Ok(None); };
-        let Some(mut affine) = self.operand.exact_affine_coefficients(work, cancel)?
-            else { return Ok(None); };
-        let Some(slope) = ExactCoefficient::difference(b, a) else { return Ok(None); };
+        else {
+            return Ok(None);
+        };
+        let Some(mut affine) = self.operand.exact_affine_coefficients(work, cancel)? else {
+            return Ok(None);
+        };
+        let Some(slope) = ExactCoefficient::difference(b, a) else {
+            return Ok(None);
+        };
         for axis in 0..3 {
-            let Some(offset) = affine.derivative[axis].product(
-                &ExactCoefficient::point(a), work, cancel)? else { return Ok(None); };
+            let Some(offset) =
+                affine.derivative[axis].product(&ExactCoefficient::point(a), work, cancel)?
+            else {
+                return Ok(None);
+            };
             for &term in &offset.terms[..offset.len] {
-                if affine.position[axis].push(term).is_none() { return Ok(None); }
+                if affine.position[axis].push(term).is_none() {
+                    return Ok(None);
+                }
             }
-            let Some(derivative) = affine.derivative[axis].product(&slope, work, cancel)?
-                else { return Ok(None); };
+            let Some(derivative) = affine.derivative[axis].product(&slope, work, cancel)? else {
+                return Ok(None);
+            };
             affine.derivative[axis] = derivative;
         }
         Ok(Some(affine))
@@ -617,75 +1088,135 @@ impl CurveEvaluator for EndpointRestrictedOriginal<'_> {
     fn source_parameter_map(&self) -> Option<[Interval; 2]> {
         Some([self.endpoint(0).ok()?, self.derivative().ok()?])
     }
-    fn source_parameter_image(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<Option<Interval>, GeometryError> {
-        work.charge(1, cancel)?; self.image(range).map(Some)
+    fn source_parameter_image(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Interval>, GeometryError> {
+        work.charge(1, cancel)?;
+        self.image(range).map(Some)
     }
-    fn tensor(&self, range: [f64; 2], order: usize, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<[[Interval; 3]; 4], GeometryError> {
-        if order > 3 { return Err(source_unavailable("original curve jet order exceeds three")); }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        if order > 3 {
+            return Err(source_unavailable("original curve jet order exceeds three"));
+        }
         let parameter = self.image(range)?;
-        let mut tensor = self.operand.evaluate_order([parameter.lo, parameter.hi], order, work, cancel)?;
+        let mut tensor =
+            self.operand
+                .evaluate_order([parameter.lo, parameter.hi], order, work, cancel)?;
         if order != 0 {
             let derivative = self.derivative()?;
             let mut factor = Interval::point(1.0);
             for row in tensor.iter_mut().take(order + 1).skip(1) {
                 factor = factor.mul(derivative);
-                for coordinate in row { *coordinate = coordinate.mul(factor); }
+                for coordinate in row {
+                    *coordinate = coordinate.mul(factor);
+                }
             }
         }
         Ok(tensor)
     }
-    fn continuous(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
         let p = self.image(range)?;
         self.operand.span_is_continuous([p.lo, p.hi], work, cancel)
     }
-    fn smooth(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
         let p = self.image(range)?;
         self.operand.span_is_smooth([p.lo, p.hi], work, cancel)
     }
-    fn parameter_spans(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<AxisSpans<'_>, GeometryError> {
-        self.image(range)?; AxisSpans::from_cover_cuts(&self.cover_cuts, range, work, cancel)
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<AxisSpans<'_>, GeometryError> {
+        self.image(range)?;
+        AxisSpans::from_cover_cuts(&self.cover_cuts, range, work, cancel)
     }
-    fn original_curve(&self) -> Option<&Curve> { Some(self.operand.source()) }
+    fn original_curve(&self) -> Option<&Curve> {
+        Some(self.operand.source())
+    }
 }
 impl CurveEvaluator for SourceSpatialRestriction<'_> {
-    fn active_range(&self) -> [f64; 2] { [0.0, 1.0] }
-    fn exact_affine_coefficients(&self, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<Option<ExactAffineCurve>, GeometryError> {
+    fn active_range(&self) -> [f64; 2] {
+        [0.0, 1.0]
+    }
+    fn exact_affine_coefficients(
+        &self,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<ExactAffineCurve>, GeometryError> {
         self.evaluator().exact_affine_coefficients(work, cancel)
     }
-    fn source_parameter_map(&self) -> Option<[Interval; 2]> { self.evaluator().source_parameter_map() }
-    fn source_parameter_image(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<Option<Interval>, GeometryError> {
+    fn source_parameter_map(&self) -> Option<[Interval; 2]> {
+        self.evaluator().source_parameter_map()
+    }
+    fn source_parameter_image(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Interval>, GeometryError> {
         self.evaluator().source_parameter_image(range, work, cancel)
     }
-    fn tensor(&self, range: [f64; 2], order: usize, work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<[[Interval; 3]; 4], GeometryError> {
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
         self.evaluator().tensor(range, order, work, cancel)
     }
-    fn continuous(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
         self.evaluator().continuous(range, work, cancel)
     }
-    fn smooth(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
         self.evaluator().smooth(range, work, cancel)
     }
-    fn parameter_spans(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool) -> Result<AxisSpans<'_>, GeometryError> {
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<AxisSpans<'_>, GeometryError> {
         self.evaluator().parameter_spans(range, work, cancel)
     }
-    fn original_curve(&self) -> Option<&Curve> { Some(self.source().spatial_curve.as_ref()) }
+    fn original_curve(&self) -> Option<&Curve> {
+        Some(self.source().spatial_curve.as_ref())
+    }
 }
 
 /// Fixed scratch reserved by source trim admission; the restriction owns no heap.
 pub(crate) const SOURCE_LINE_RESTRICTION_SCRATCH_BYTES: usize =
-    8 * std::mem::size_of::<ExactCoefficient>()
-        + 24 * std::mem::size_of::<Interval>();
+    8 * std::mem::size_of::<ExactCoefficient>() + 24 * std::mem::size_of::<Interval>();
 
 #[derive(Clone, Copy)]
 pub(crate) struct SourceLineRestriction<'a> {
@@ -704,84 +1235,161 @@ fn conditioning(message: &'static str) -> GeometryError {
     failure(GeometryErrorCode::ConditioningFailure, message)
 }
 fn dot(a: [Interval; 3], b: [Interval; 3]) -> Interval {
-    (0..3).fold(Interval::point(0.0), |sum, axis| sum.add(a[axis].mul(b[axis])))
+    (0..3).fold(Interval::point(0.0), |sum, axis| {
+        sum.add(a[axis].mul(b[axis]))
+    })
 }
 fn finite(value: Interval) -> Result<Interval, GeometryError> {
     Interval::new(value.lo, value.hi)
 }
-fn exact_collinear(origin: [f64; 3], direction: [f64; 3], point: [f64; 3],
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn exact_collinear(
+    origin: [f64; 3],
+    direction: [f64; 3],
+    point: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     // Fixed-size exact expansions: no coefficient-dependent allocation.
-    let displacement: [Option<ExactCoefficient>; 3] = std::array::from_fn(|axis|
-        ExactCoefficient::difference(point[axis], origin[axis]));
-    let [Some(x), Some(y), Some(z)] = displacement else { return Ok(false); };
+    let displacement: [Option<ExactCoefficient>; 3] =
+        std::array::from_fn(|axis| ExactCoefficient::difference(point[axis], origin[axis]));
+    let [Some(x), Some(y), Some(z)] = displacement else {
+        return Ok(false);
+    };
     let displacement = [x, y, z];
     for (a, b) in [(0, 1), (0, 2), (1, 2)] {
-        let Some(mut value) = displacement[a].product(&ExactCoefficient::point(direction[b]), work, cancel)? else { return Ok(false); };
-        let Some(other) = displacement[b].product(&ExactCoefficient::point(direction[a]), work, cancel)? else { return Ok(false); };
-        if value.subtract(&other).is_none() || value.sign() != 0 { return Ok(false); }
+        let Some(mut value) =
+            displacement[a].product(&ExactCoefficient::point(direction[b]), work, cancel)?
+        else {
+            return Ok(false);
+        };
+        let Some(other) =
+            displacement[b].product(&ExactCoefficient::point(direction[a]), work, cancel)?
+        else {
+            return Ok(false);
+        };
+        if value.subtract(&other).is_none() || value.sign() != 0 {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
 /// Tighten a proposed floating quotient only after an exact coefficient
 /// identity proves numerator = proposal * denominator. Rounded products alone
 /// cannot turn 1/3 into an exact trim parameter.
-fn exact_line_parameter(origin: [f64; 3], direction: [f64; 3], magnitude: f64,
-    point: [f64; 3], proposal: f64, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn exact_line_parameter(
+    origin: [f64; 3],
+    direction: [f64; 3],
+    magnitude: f64,
+    point: [f64; 3],
+    proposal: f64,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
-    if !proposal.is_finite() { return Ok(None); }
+    if !proposal.is_finite() {
+        return Ok(None);
+    }
     let mut numerator = ExactCoefficient::point(0.0);
     let mut norm = ExactCoefficient::point(0.0);
     for axis in 0..3 {
-        let Some(delta) = ExactCoefficient::difference(point[axis], origin[axis]) else { return Ok(None); };
+        let Some(delta) = ExactCoefficient::difference(point[axis], origin[axis]) else {
+            return Ok(None);
+        };
         let d = ExactCoefficient::point(direction[axis]);
-        let Some(product) = delta.product(&d, work, cancel)? else { return Ok(None); };
+        let Some(product) = delta.product(&d, work, cancel)? else {
+            return Ok(None);
+        };
         for &term in &product.terms[..product.len] {
-            if numerator.push(term).is_none() { return Ok(None); }
+            if numerator.push(term).is_none() {
+                return Ok(None);
+            }
         }
-        let Some(product) = d.product(&d, work, cancel)? else { return Ok(None); };
+        let Some(product) = d.product(&d, work, cancel)? else {
+            return Ok(None);
+        };
         for &term in &product.terms[..product.len] {
-            if norm.push(term).is_none() { return Ok(None); }
+            if norm.push(term).is_none() {
+                return Ok(None);
+            }
         }
     }
-    let Some(denominator) = norm.product(&ExactCoefficient::point(magnitude), work, cancel)? else { return Ok(None); };
-    let Some(product) = denominator.product(&ExactCoefficient::point(proposal), work, cancel)? else { return Ok(None); };
+    let Some(denominator) = norm.product(&ExactCoefficient::point(magnitude), work, cancel)? else {
+        return Ok(None);
+    };
+    let Some(product) = denominator.product(&ExactCoefficient::point(proposal), work, cancel)?
+    else {
+        return Ok(None);
+    };
     Ok((numerator.subtract(&product).is_some() && numerator.sign() == 0).then_some(proposal))
 }
 impl<'a> SourceLineRestriction<'a> {
     /// Only a literal selected LINE may enter this constructor. In particular,
     /// it does not unwrap a TRIMMED_CURVE, override a preferred source master,
     /// choose a PCURVE, or infer a source branch from native proximity.
-    pub(crate) fn new(curve: &'a Curve, vertices: &'a [[f64; 3]; 2], same_sense: bool,
-        maximum_source_error_mm: f64, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    pub(crate) fn new(
+        curve: &'a Curve,
+        vertices: &'a [[f64; 3]; 2],
+        same_sense: bool,
+        maximum_source_error_mm: f64,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
         work.charge(1, cancel)?;
-        let Curve::Line { origin, direction, magnitude } = curve else { return Ok(None); };
+        let Curve::Line {
+            origin,
+            direction,
+            magnitude,
+        } = curve
+        else {
+            return Ok(None);
+        };
         if !maximum_source_error_mm.is_finite() || maximum_source_error_mm < 0.0 {
-            return Err(failure(GeometryErrorCode::InvalidGeometry, "source LINE restriction needs its finite nonnegative source allowance"));
+            return Err(failure(
+                GeometryErrorCode::InvalidGeometry,
+                "source LINE restriction needs its finite nonnegative source allowance",
+            ));
         }
-        for value in origin.iter().chain(direction).chain(vertices.iter().flatten()).chain([magnitude]) {
+        for value in origin
+            .iter()
+            .chain(direction)
+            .chain(vertices.iter().flatten())
+            .chain([magnitude])
+        {
             Interval::new(*value, *value)?;
         }
         work.charge(32, cancel)?;
         let d = direction.map(Interval::point);
         let norm = finite(dot(d, d))?;
         if norm.lo <= 0.0 || *magnitude == 0.0 {
-            return Err(failure(GeometryErrorCode::SingularGeometry, "original source LINE has no nonzero coefficient direction"));
+            return Err(failure(
+                GeometryErrorCode::SingularGeometry,
+                "original source LINE has no nonzero coefficient direction",
+            ));
         }
         let denominator = finite(Interval::point(*magnitude).mul(norm))?;
-        if denominator.contains_zero() { return Err(conditioning("original LINE parameter denominator is unresolved")); }
+        if denominator.contains_zero() {
+            return Err(conditioning(
+                "original LINE parameter denominator is unresolved",
+            ));
+        }
         let mut parameters = [Interval::point(0.0); 2];
         let mut source_error_mm = 0.0_f64;
         let mut exact_endpoints = true;
         for endpoint in 0..2 {
             work.charge(32, cancel)?;
-            let delta = std::array::from_fn(|axis| Interval::point(vertices[endpoint][axis]).sub(Interval::point(origin[axis])));
+            let delta = std::array::from_fn(|axis| {
+                Interval::point(vertices[endpoint][axis]).sub(Interval::point(origin[axis]))
+            });
             let numerator = dot(delta, d);
             parameters[endpoint] = finite(numerator.div(denominator)?)?;
-            if let Some(parameter) = exact_line_parameter(*origin, *direction, *magnitude,
-                vertices[endpoint], parameters[endpoint].mid(), work, cancel)? {
+            if let Some(parameter) = exact_line_parameter(
+                *origin,
+                *direction,
+                *magnitude,
+                vertices[endpoint],
+                parameters[endpoint].mid(),
+                work,
+                cancel,
+            )? {
                 parameters[endpoint] = Interval::point(parameter);
             }
             let exact = exact_collinear(*origin, *direction, vertices[endpoint], work, cancel)?;
@@ -790,174 +1398,345 @@ impl<'a> SourceLineRestriction<'a> {
                 // Magnitude cancels from the actual projection expression; do
                 // not multiply an uncertain reciprocal back by a large scale.
                 let scalar = numerator.div(norm)?;
-                let residual: [Interval; 3] = std::array::from_fn(|axis| d[axis].mul(scalar).sub(delta[axis]));
-                let squared = residual.into_iter().fold(Interval::point(0.0), |sum, value| sum.add(value.square()));
+                let residual: [Interval; 3] =
+                    std::array::from_fn(|axis| d[axis].mul(scalar).sub(delta[axis]));
+                let squared = residual
+                    .into_iter()
+                    .fold(Interval::point(0.0), |sum, value| sum.add(value.square()));
                 source_error_mm = source_error_mm.max(finite(squared.sqrt()?)?.hi);
             }
         }
-        let ordered = if same_sense { parameters[0].hi < parameters[1].lo }
-            else { parameters[1].hi < parameters[0].lo };
+        let ordered = if same_sense {
+            parameters[0].hi < parameters[1].lo
+        } else {
+            parameters[1].hi < parameters[0].lo
+        };
         if !ordered {
-            return Err(failure(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original LINE endpoints do not prove the declared source direction and a nonzero active span"));
+            return Err(failure(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original LINE endpoints do not prove the declared source direction and a nonzero active span",
+            ));
         }
         if source_error_mm > maximum_source_error_mm {
-            return Err(failure(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original LINE endpoint projection exceeds the captured source allowance"));
+            return Err(failure(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original LINE endpoint projection exceeds the captured source allowance",
+            ));
         }
-        Ok(Some(Self { curve, vertices, denominator, direction_norm_squared: norm,
-            parameters, exact_endpoints, source_error_mm }))
+        Ok(Some(Self {
+            curve,
+            vertices,
+            denominator,
+            direction_norm_squared: norm,
+            parameters,
+            exact_endpoints,
+            source_error_mm,
+        }))
     }
-    pub(crate) fn source_curve(&self) -> &'a Curve { self.curve }
-    pub(crate) fn source_vertices(&self) -> &'a [[f64; 3]; 2] { self.vertices }
-    pub(crate) fn endpoint_parameters(&self) -> [Interval; 2] { self.parameters }
-    pub(crate) fn source_error_mm(&self) -> f64 { self.source_error_mm }
-    pub(crate) fn exact_source_endpoints(&self) -> bool { self.exact_endpoints }
+    pub(crate) fn source_curve(&self) -> &'a Curve {
+        self.curve
+    }
+    pub(crate) fn source_vertices(&self) -> &'a [[f64; 3]; 2] {
+        self.vertices
+    }
+    pub(crate) fn endpoint_parameters(&self) -> [Interval; 2] {
+        self.parameters
+    }
+    pub(crate) fn source_error_mm(&self) -> f64 {
+        self.source_error_mm
+    }
+    pub(crate) fn exact_source_endpoints(&self) -> bool {
+        self.exact_endpoints
+    }
     /// Actual original t of the selected reference C(s), s in [0,1]. This is an
     /// expression enclosure, never a rounded scalar trim or a native gauge.
-    pub(crate) fn parameter_image(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
+    pub(crate) fn parameter_image(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Interval, GeometryError> {
         work.charge(32, cancel)?;
         let s = Interval::new(range[0], range[1])?;
         if range[0] < 0.0 || range[1] > 1.0 {
-            return Err(failure(GeometryErrorCode::InvalidGeometry, "source LINE query exceeds its normalized captured edge"));
+            return Err(failure(
+                GeometryErrorCode::InvalidGeometry,
+                "source LINE query exceeds its normalized captured edge",
+            ));
         }
-        let Curve::Line { origin, direction, .. } = self.curve else { unreachable!("sealed LINE operand"); };
-        let delta = std::array::from_fn(|axis| Interval::point(self.vertices[0][axis]).sub(Interval::point(origin[axis]))
-            .add(s.mul(Interval::point(self.vertices[1][axis]).sub(Interval::point(self.vertices[0][axis])))));
+        let Curve::Line {
+            origin, direction, ..
+        } = self.curve
+        else {
+            unreachable!("sealed LINE operand");
+        };
+        let delta = std::array::from_fn(|axis| {
+            Interval::point(self.vertices[0][axis])
+                .sub(Interval::point(origin[axis]))
+                .add(
+                    s.mul(
+                        Interval::point(self.vertices[1][axis])
+                            .sub(Interval::point(self.vertices[0][axis])),
+                    ),
+                )
+        });
         finite(dot(delta, direction.map(Interval::point)).div(self.denominator)?)
     }
-    pub(crate) fn parameter_derivative(&self, work: &mut GeometryWorkBudget,
+    pub(crate) fn parameter_derivative(
+        &self,
+        work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Interval, GeometryError> {
         work.charge(24, cancel)?;
-        let Curve::Line { direction, .. } = self.curve else { unreachable!("sealed LINE operand"); };
-        let delta = std::array::from_fn(|axis| Interval::point(self.vertices[1][axis]).sub(Interval::point(self.vertices[0][axis])));
+        let Curve::Line { direction, .. } = self.curve else {
+            unreachable!("sealed LINE operand");
+        };
+        let delta = std::array::from_fn(|axis| {
+            Interval::point(self.vertices[1][axis]).sub(Interval::point(self.vertices[0][axis]))
+        });
         finite(dot(delta, direction.map(Interval::point)).div(self.denominator)?)
     }
     /// Enclose C(s), preserving the source's exact line restriction. Exact
     /// collinearity licenses the shared-endpoint cancellation, not epsilon snaps.
-    pub(crate) fn jet(&self, range: [f64; 2], work: &mut GeometryWorkBudget,
+    pub(crate) fn jet(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<CurveThirdEnclosure, GeometryError> {
         work.charge(48, cancel)?;
         let s = Interval::new(range[0], range[1])?;
         if range[0] < 0.0 || range[1] > 1.0 {
-            return Err(failure(GeometryErrorCode::InvalidGeometry, "source LINE query exceeds its normalized captured edge"));
+            return Err(failure(
+                GeometryErrorCode::InvalidGeometry,
+                "source LINE query exceeds its normalized captured edge",
+            ));
         }
-        let delta: [Interval; 3] = std::array::from_fn(|axis|
-            Interval::point(self.vertices[1][axis]).sub(Interval::point(self.vertices[0][axis])));
+        let delta: [Interval; 3] = std::array::from_fn(|axis| {
+            Interval::point(self.vertices[1][axis]).sub(Interval::point(self.vertices[0][axis]))
+        });
         let (position, derivative) = if self.exact_endpoints {
-            (std::array::from_fn(|axis| Interval::point(self.vertices[0][axis]).add(s.mul(delta[axis]))), delta)
+            (
+                std::array::from_fn(|axis| {
+                    Interval::point(self.vertices[0][axis]).add(s.mul(delta[axis]))
+                }),
+                delta,
+            )
         } else {
-            let Curve::Line { origin, direction, .. } = self.curve else { unreachable!("sealed LINE operand"); };
+            let Curve::Line {
+                origin, direction, ..
+            } = self.curve
+            else {
+                unreachable!("sealed LINE operand");
+            };
             let d = direction.map(Interval::point);
-            let start = std::array::from_fn(|axis| Interval::point(self.vertices[0][axis]).sub(Interval::point(origin[axis])));
+            let start = std::array::from_fn(|axis| {
+                Interval::point(self.vertices[0][axis]).sub(Interval::point(origin[axis]))
+            });
             let anchor = dot(start, d).div(self.direction_norm_squared)?;
             let slope = dot(delta, d).div(self.direction_norm_squared)?;
-            (std::array::from_fn(|axis| Interval::point(origin[axis]).add(d[axis].mul(anchor.add(s.mul(slope))))),
-                d.map(|component| component.mul(slope)))
+            (
+                std::array::from_fn(|axis| {
+                    Interval::point(origin[axis]).add(d[axis].mul(anchor.add(s.mul(slope))))
+                }),
+                d.map(|component| component.mul(slope)),
+            )
         };
-        for value in position.into_iter().chain(derivative) { finite(value)?; }
-        Ok(CurveThirdEnclosure { jet: CurveEnclosure { position, derivative,
-            second_derivative: [Interval::point(0.0); 3] }, third_derivative: [Interval::point(0.0); 3] })
+        for value in position.into_iter().chain(derivative) {
+            finite(value)?;
+        }
+        Ok(CurveThirdEnclosure {
+            jet: CurveEnclosure {
+                position,
+                derivative,
+                second_derivative: [Interval::point(0.0); 3],
+            },
+            third_derivative: [Interval::point(0.0); 3],
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn line() -> Curve { Curve::Line { origin: [0.0; 3], direction: [1.0, 0.0, 0.0], magnitude: 3.0 } }
+    fn line() -> Curve {
+        Curve::Line {
+            origin: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 3.0,
+        }
+    }
     #[test]
     fn preferred_opposite_pcurve_gauge_keeps_the_declared_3d_half_circle() {
         use solidcraft_step::geom as s;
         use std::sync::Arc;
         let record = crate::analysis::test_source::circular_prism([0.0, 0.0], 4.0, 3.0);
-        let placement = |z| s::Placement { origin: [0.0, 0.0, z],
-            axis: [0.0, 0.0, 1.0], ref_direction: [1.0, 0.0, 0.0] };
-        let carrier = Arc::new(s::Surface::Cylinder { position: placement(0.0), radius: 4.0 });
-        let edge_curves = record.edges.iter().map(|edge| {
-            let solidcraft_step::brep::Curve::Circle { .. } = &edge.curve else { return None; };
-            let z = record.vertices[edge.vertices[0] as usize].point[2];
-            Some(s::Curve::SurfaceCurve {
-                kind: s::SurfaceCurveKind::Surface,
-                curve_3d: Arc::new(s::Curve::Circle { position: placement(z), radius: 4.0 }),
-                associated: vec![s::Associated::Pcurve(s::Pcurve { surface: carrier.clone(),
-                    curve: Arc::new(s::Curve::Line { origin: [0.0, z, 0.0],
-                        direction: [-1.0, 0.0, 0.0], magnitude: 1.0 }) })],
-                master: s::PreferredRep::PcurveS1,
+        let placement = |z| s::Placement {
+            origin: [0.0, 0.0, z],
+            axis: [0.0, 0.0, 1.0],
+            ref_direction: [1.0, 0.0, 0.0],
+        };
+        let carrier = Arc::new(s::Surface::Cylinder {
+            position: placement(0.0),
+            radius: 4.0,
+        });
+        let edge_curves = record
+            .edges
+            .iter()
+            .map(|edge| {
+                let solidcraft_step::brep::Curve::Circle { .. } = &edge.curve else {
+                    return None;
+                };
+                let z = record.vertices[edge.vertices[0] as usize].point[2];
+                Some(s::Curve::SurfaceCurve {
+                    kind: s::SurfaceCurveKind::Surface,
+                    curve_3d: Arc::new(s::Curve::Circle {
+                        position: placement(z),
+                        radius: 4.0,
+                    }),
+                    associated: vec![s::Associated::Pcurve(s::Pcurve {
+                        surface: carrier.clone(),
+                        curve: Arc::new(s::Curve::Line {
+                            origin: [0.0, z, 0.0],
+                            direction: [-1.0, 0.0, 0.0],
+                            magnitude: 1.0,
+                        }),
+                    })],
+                    master: s::PreferredRep::PcurveS1,
+                })
             })
-        }).collect();
+            .collect();
         // Actual STEP writer/importer retains this deliberately independent,
         // oppositely directed source gauge. It is not a fake native chart.
         let definition = crate::analysis::test_source::original_definition(
-            crate::analysis::test_source::SourceBrep { record, edge_curves, face_surfaces: vec![] });
-        let source = definition.original_source().coedges.iter().find(|source|
-            source.vertex_points_mm[0] == [4.0, 0.0, 0.0]
-                && source.vertex_points_mm[1] == [-4.0, 0.0, 0.0]).unwrap();
+            crate::analysis::test_source::SourceBrep {
+                record,
+                edge_curves,
+                face_surfaces: vec![],
+            },
+        );
+        let source = definition
+            .original_source()
+            .coedges
+            .iter()
+            .find(|source| {
+                source.vertex_points_mm[0] == [4.0, 0.0, 0.0]
+                    && source.vertex_points_mm[1] == [-4.0, 0.0, 0.0]
+            })
+            .unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(2_000_000);
-        let operator = SourceSpatialRestriction::new(
-            source, 1.0e-6, 2 * 1024 * 1024, &mut work, &cancel).unwrap();
-        assert!(operator.parameter_derivative(&mut work, &cancel).unwrap().hi < 0.0);
+        let operator =
+            SourceSpatialRestriction::new(source, 1.0e-6, 2 * 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+        assert!(
+            operator
+                .parameter_derivative(&mut work, &cancel)
+                .unwrap()
+                .hi
+                < 0.0
+        );
         assert!(operator.original_master_association().is_some());
         let middle = operator.tensor([0.5; 2], 1, &mut work, &cancel).unwrap();
-        assert!(middle[0][1].lo > 3.99, "the complementary lower arc borrowed the master raw sense");
+        assert!(
+            middle[0][1].lo > 3.99,
+            "the complementary lower arc borrowed the master raw sense"
+        );
     }
     #[test]
     fn captured_box_spatial_operators_keep_authored_endpoints_and_shared_identity() {
         let definition = crate::analysis::test_source::original_definition(
-            crate::analysis::test_source::box_source(8.0, 5.0, 3.0));
+            crate::analysis::test_source::box_source(8.0, 5.0, 3.0),
+        );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(2_000_000);
         let coedges = &definition.original_source().coedges;
         assert!(!coedges.is_empty());
         for source in coedges {
-            let operator = SourceSpatialRestriction::new(
-                source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel).unwrap();
+            let operator =
+                SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                    .unwrap();
             assert!(operator.exact_source_endpoints());
             assert_eq!(operator.source_error_mm(), 0.0);
             for endpoint in 0..2 {
                 for axis in 0..3 {
-                    assert!(crate::parametric::curve_endpoint_coordinate_equal(
-                        &operator, endpoint as f64, axis, source.vertex_points_mm[endpoint][axis],
-                        &mut work, &cancel).unwrap());
+                    assert!(
+                        crate::parametric::curve_endpoint_coordinate_equal(
+                            &operator,
+                            endpoint as f64,
+                            axis,
+                            source.vertex_points_mm[endpoint][axis],
+                            &mut work,
+                            &cancel
+                        )
+                        .unwrap()
+                    );
                 }
             }
-            let paired = coedges.iter().find(|other|
-                other.edge_curve_id == source.edge_curve_id
-                    && other.oriented_edge_id != source.oriented_edge_id).unwrap();
-            let other = SourceSpatialRestriction::new(
-                paired, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel).unwrap();
+            let paired = coedges
+                .iter()
+                .find(|other| {
+                    other.edge_curve_id == source.edge_curve_id
+                        && other.oriented_edge_id != source.oriented_edge_id
+                })
+                .unwrap();
+            let other =
+                SourceSpatialRestriction::new(paired, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                    .unwrap();
             assert!(operator.same_operator(&other, &mut work, &cancel).unwrap());
         }
     }
     #[test]
     fn selected_rational_circle_keeps_original_knots_and_normalized_cover_distinct() {
         let definition = crate::analysis::test_source::original_definition(
-            crate::analysis::test_source::circular_prism([0.0, 0.0], 4.0, 3.0));
+            crate::analysis::test_source::circular_prism([0.0, 0.0], 4.0, 3.0),
+        );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(4_000_000);
         let mut inspected = false;
         for source in &definition.original_source().coedges {
-            let operator = SourceSpatialRestriction::new(
-                source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel).unwrap();
-            if operator.original_knots().is_empty() { continue; }
+            let operator =
+                SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                    .unwrap();
+            if operator.original_knots().is_empty() {
+                continue;
+            }
             inspected = true;
             assert_eq!(operator.original_knots().len(), operator.knot_bands().len());
-            assert!(operator.original_knots().windows(2).all(|pair| pair[0] < pair[1]));
-            let image = operator.source_parameter_image([0.0, 1.0], &mut work, &cancel)
-                .unwrap().unwrap();
+            assert!(
+                operator
+                    .original_knots()
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
+            let image = operator
+                .source_parameter_image([0.0, 1.0], &mut work, &cancel)
+                .unwrap()
+                .unwrap();
             let endpoints = operator.endpoint_parameters().unwrap();
             assert!(image.contains_interval(endpoints[0]));
             assert!(image.contains_interval(endpoints[1]));
-            for (index, (&knot, band)) in operator.original_knots().iter()
-                .zip(operator.knot_bands()).enumerate() {
-                assert!(operator.source_parameter_image([band.lo, band.hi], &mut work, &cancel)
-                    .unwrap().unwrap().contains(knot));
-                let jet = operator.original_knot_jet(index, 0, &mut work, &cancel).unwrap();
-                assert!(jet[0].iter().all(|coordinate| coordinate.lo.is_finite() && coordinate.hi.is_finite()));
+            for (index, (&knot, band)) in operator
+                .original_knots()
+                .iter()
+                .zip(operator.knot_bands())
+                .enumerate()
+            {
+                assert!(
+                    operator
+                        .source_parameter_image([band.lo, band.hi], &mut work, &cancel)
+                        .unwrap()
+                        .unwrap()
+                        .contains(knot)
+                );
+                let jet = operator
+                    .original_knot_jet(index, 0, &mut work, &cancel)
+                    .unwrap();
+                assert!(
+                    jet[0]
+                        .iter()
+                        .all(|coordinate| coordinate.lo.is_finite() && coordinate.hi.is_finite())
+                );
             }
         }
         assert!(inspected);
@@ -968,13 +1747,26 @@ mod tests {
         let vertices = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
         let mut work = GeometryWorkBudget::new(10_000);
         let cancel = AtomicBool::new(false);
-        let restriction = SourceLineRestriction::new(&curve, &vertices, true, 0.0, &mut work, &cancel).unwrap().unwrap();
+        let restriction =
+            SourceLineRestriction::new(&curve, &vertices, true, 0.0, &mut work, &cancel)
+                .unwrap()
+                .unwrap();
         assert_eq!(restriction.source_error_mm(), 0.0);
-        assert!(restriction.endpoint_parameters().iter().all(|parameter| parameter.width() > 0.0));
+        assert!(
+            restriction
+                .endpoint_parameters()
+                .iter()
+                .all(|parameter| parameter.width() > 0.0)
+        );
         let jet = restriction.jet([0.0, 1.0], &mut work, &cancel).unwrap();
         assert!(jet.jet.position[0].contains(1.0) && jet.jet.position[0].contains(2.0));
         assert!(jet.jet.derivative[0].contains(1.0));
-        assert!(restriction.parameter_derivative(&mut work, &cancel).unwrap().contains(1.0 / 3.0));
+        assert!(
+            restriction
+                .parameter_derivative(&mut work, &cancel)
+                .unwrap()
+                .contains(1.0 / 3.0)
+        );
     }
     #[test]
     fn source_line_restriction_preserves_declared_reversal() {
@@ -982,18 +1774,48 @@ mod tests {
         let vertices = [[2.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let mut work = GeometryWorkBudget::new(10_000);
         let cancel = AtomicBool::new(false);
-        let restriction = SourceLineRestriction::new(&curve, &vertices, false, 0.0, &mut work, &cancel).unwrap().unwrap();
-        assert!(restriction.parameter_derivative(&mut work, &cancel).unwrap().hi < 0.0);
-        assert!(restriction.jet([0.0, 1.0], &mut work, &cancel).unwrap().jet.derivative[0].hi < 0.0);
-        assert!(SourceLineRestriction::new(&curve, &vertices, true, 0.0, &mut work, &cancel).is_err());
+        let restriction =
+            SourceLineRestriction::new(&curve, &vertices, false, 0.0, &mut work, &cancel)
+                .unwrap()
+                .unwrap();
+        assert!(
+            restriction
+                .parameter_derivative(&mut work, &cancel)
+                .unwrap()
+                .hi
+                < 0.0
+        );
+        assert!(
+            restriction
+                .jet([0.0, 1.0], &mut work, &cancel)
+                .unwrap()
+                .jet
+                .derivative[0]
+                .hi
+                < 0.0
+        );
+        assert!(
+            SourceLineRestriction::new(&curve, &vertices, true, 0.0, &mut work, &cancel).is_err()
+        );
     }
     #[test]
     fn source_endpoint_error_is_checked_not_borrowed_from_native_tolerance() {
         let curve = line();
         let vertices = [[1.0, 1.0e-6, 0.0], [2.0, 1.0e-6, 0.0]];
         let mut work = GeometryWorkBudget::new(10_000);
-        let error = SourceLineRestriction::new(&curve, &vertices, true, 1.0e-7,
-            &mut work, &AtomicBool::new(false)).err().unwrap();
-        assert_eq!(error.code, GeometryErrorCode::ParameterCorrespondenceUnavailable);
+        let error = SourceLineRestriction::new(
+            &curve,
+            &vertices,
+            true,
+            1.0e-7,
+            &mut work,
+            &AtomicBool::new(false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        );
     }
 }

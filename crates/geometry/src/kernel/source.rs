@@ -5,10 +5,10 @@
 //! Original STEP operands and use genealogy, separate from generated native trims.
 //! Candidate associations are not correspondence or material certificates.
 
-use std::sync::Arc;
 use solidcore::FaceId;
 use solidcraft_step::geom::{Curve, Pcurve, Surface};
 use spiling_contracts::geometry::{GeometryError, GeometryErrorCode, StepEntityId};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct OriginalSourceTopology {
@@ -43,7 +43,8 @@ impl OriginalFaceSource {
 pub(crate) struct OriginalWireSource {
     pub(crate) bound_id: StepEntityId,
     pub(crate) loop_id: StepEntityId,
-    pub(crate) is_outer: bool,
+    /// Explicit FACE_OUTER_BOUND marker. Generic FACE_BOUND is not a hole proof.
+    pub(crate) declared_outer: bool,
     pub(crate) forward: bool,
     /// Original EDGE_LOOP order, without tolerance-driven repair or reordering.
     pub(crate) coedges: Vec<usize>,
@@ -81,12 +82,15 @@ pub(crate) struct OriginalPcurveSource {
 
 impl OriginalSourceTopology {
     pub(crate) fn face(&self, native: FaceId) -> Result<&OriginalFaceSource, GeometryError> {
-        self.faces.iter().find(|face| face.native_face == native).ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "native face has no original source operand binding",
-            )
-        })
+        self.faces
+            .iter()
+            .find(|face| face.native_face == native)
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "native face has no original source operand binding",
+                )
+            })
     }
 
     /// All original coedge candidates of this exact source-bound native face.
@@ -95,7 +99,9 @@ impl OriginalSourceTopology {
         &self,
         native_face: FaceId,
     ) -> impl Iterator<Item = (usize, &OriginalCoedgeSource)> {
-        self.faces.iter().filter(move |face| face.native_face == native_face)
+        self.faces
+            .iter()
+            .filter(move |face| face.native_face == native_face)
             .flat_map(|face| &face.wires)
             .flat_map(|wire| &wire.coedges)
             .filter_map(|&index| self.coedges.get(index).map(|coedge| (index, coedge)))

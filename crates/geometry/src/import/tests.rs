@@ -3,8 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
-use crate::{GeometryWorkBudget, corpus_fixtures as corpus};
 use crate::from_step_bytes_with_cancel;
+use crate::{GeometryWorkBudget, corpus_fixtures as corpus};
 use std::path::PathBuf;
 use step_p21::ast::{EntityInstance, Name, Parameter};
 fn fixture(name: &str) -> Vec<u8> {
@@ -46,7 +46,9 @@ fn lexical_caps_ignore_strings_comments_and_binary_strings() {
 fn source_cap_is_checked_before_parser() {
     let bytes = vec![b' '; MAX_SOURCE_BYTES as usize + 1];
     assert_eq!(
-        from_step_bytes_with_cancel(&bytes, &cancelled()).unwrap_err().code,
+        from_step_bytes_with_cancel(&bytes, &cancelled())
+            .unwrap_err()
+            .code,
         GeometryErrorCode::ResourceLimit
     );
 }
@@ -226,7 +228,8 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
             ),
         );
         let definition =
-            from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap();
+            from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled())
+                .unwrap();
         for axis in 0..3 {
             assert!((definition.bounds.max[axis] - [20.0, 10.0, 8.0][axis]).abs() < 1e-6);
         }
@@ -290,7 +293,8 @@ fn deep_acyclic_conversion_units_resolve_without_consuming_the_call_stack() {
         .find(|parameter| reference(parameter).ok() == Some(original_unit))
         .unwrap();
     *length = Parameter::Ref(Name::Entity(base));
-    let definition = from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancel).unwrap();
+    let definition =
+        from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancel).unwrap();
     assert_eq!(
         definition.provenance.source_unit,
         spiling_contracts::geometry::SourceUnit::Inch
@@ -333,7 +337,8 @@ fn frozen_occt_periodic_edges_admit_closed_solids_without_changing_source_face_s
         let shell_id = entities.named("CLOSED_SHELL", &cancel).unwrap()[0];
         let canonical =
             list(at(entities.record(shell_id, "CLOSED_SHELL").unwrap(), 1).unwrap()).unwrap();
-        let definition = from_step_bytes_with_cancel(&source, &cancel).expect("unchanged independent OCCT solid");
+        let definition = from_step_bytes_with_cancel(&source, &cancel)
+            .expect("unchanged independent OCCT solid");
         assert_eq!(definition.source_bytes as usize, source.len());
         assert_eq!(definition.provenance.source_hash.as_str(), hash);
         assert_eq!(definition.faces.len(), count);
@@ -392,7 +397,8 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
     let mut inconsistent = original;
     corpus::parameters(corpus::first(&mut inconsistent, "CIRCLE"))[2] = Parameter::Real(4.0);
     assert!(
-        from_step_bytes_with_cancel(corpus::serialize(&inconsistent).as_bytes(), &cancelled()).is_err(),
+        from_step_bytes_with_cancel(corpus::serialize(&inconsistent).as_bytes(), &cancelled())
+            .is_err(),
         "an inconsistent original radius must refuse, regardless of rejection stage",
     );
 }
@@ -400,7 +406,8 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
 #[test]
 fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictions() {
     let source = fixture("independent-exporters/occt-spline-housing-mm.step");
-    let definition = from_step_bytes_with_cancel(&source, &cancelled()).expect("unchanged rational closed edge");
+    let definition =
+        from_step_bytes_with_cancel(&source, &cancelled()).expect("unchanged rational closed edge");
     assert_eq!(definition.faces.len(), definition.brep().faces().len());
     assert!(
         solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
@@ -412,7 +419,10 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
 fn regular_native_families_import_with_original_face_and_edge_identity() {
     for (name, source_solid, metadata) in crate::parity_fixtures::recipes() {
         // Skip synthetic Monstertruck generator fixtures with invalid loop winding or lacking seam edges (solidcraft strict B-rep verification)
-        if name.contains("nurbs-cylinder") || name.contains("nurbs-torus") || name.contains("revolution") {
+        if name.contains("nurbs-cylinder")
+            || name.contains("nurbs-torus")
+            || name.contains("revolution")
+        {
             continue;
         }
         let source = crate::parity_fixtures::original(name, source_solid);
@@ -446,20 +456,13 @@ fn regular_native_families_import_with_original_face_and_edge_identity() {
                 "{name}: missing original {family:?}"
             );
         }
-        assert_eq!(
-            definition.faces.len(),
-            definition.brep().faces().len()
-        );
+        assert_eq!(definition.faces.len(), definition.brep().faces().len());
         assert!(
             solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
             "closed oriented manifold"
         );
     }
 }
-
-
-
-
 
 #[test]
 fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() {
@@ -475,14 +478,6 @@ fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() 
         "{failure:?}"
     );
 }
-
-
-
-
-
-
-
-
 
 #[test]
 fn a_true_rational_denominator_zero_refuses_before_geometric_consistency_sampling() {
@@ -513,7 +508,8 @@ fn newly_supported_geometry_does_not_admit_unimplemented_surface_wrappers() {
     );
     corpus::parameters(corpus::first(&mut exchange, "ADVANCED_FACE"))[2] =
         Parameter::Ref(Name::Entity(wrapper));
-    let error = from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap_err();
+    let error = from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled())
+        .unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
     assert!(error.message.contains("OFFSET_SURFACE"));
 }
@@ -583,91 +579,91 @@ fn sign_equivalent_and_nonzero_mixed_denominators_import_genuine_closed_sources(
         assert!(from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).is_err());
     }
 }
-    #[test]
-    fn frozen_perforated_plate_admission_preserves_every_hole_with_frozen_work_caps() {
-        let bytes = include_bytes!("../../../../fixtures/geometry/perforated-plate.step");
-        let definition = crate::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap();
-        assert_eq!(definition.faces.len(), 1030);
-        assert_eq!(
-            definition
-                .faces
-                .iter()
-                .filter(|face| { face.source_surface_entity_kind == "CYLINDRICAL_SURFACE" })
-                .count(),
-            1024,
-        );
-        let mut caps = 0;
-        for (native_id, face) in definition.face_ids().iter().zip(definition.faces()) {
-            if face.geometry.domain.inner_loop_count == 0 {
-                continue;
-            }
-            caps += 1;
-            assert_eq!(face.geometry.domain.inner_loop_count, 512);
-            assert_eq!(face.geometry.domain.trim_loop_count, 513);
-            let native_face = definition.brep().face(*native_id).unwrap();
-            assert_eq!(native_face.loops.len(), 513);
-            let original_face = definition.original_source().face(*native_id).unwrap();
-            assert_eq!(original_face.wires.len(), 513);
+#[test]
+fn frozen_perforated_plate_admission_preserves_every_hole_with_frozen_work_caps() {
+    let bytes = include_bytes!("../../../../fixtures/geometry/perforated-plate.step");
+    let definition = crate::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap();
+    assert_eq!(definition.faces.len(), 1030);
+    assert_eq!(
+        definition
+            .faces
+            .iter()
+            .filter(|face| { face.source_surface_entity_kind == "CYLINDRICAL_SURFACE" })
+            .count(),
+        1024,
+    );
+    let mut caps = 0;
+    for (native_id, face) in definition.face_ids().iter().zip(definition.faces()) {
+        if face.geometry.domain.inner_loop_count == 0 {
+            continue;
         }
-        assert_eq!(caps, 2);
-        for (axis, expected) in [[0.0, 1640.0], [0.0, 840.0], [0.0, 20.0]]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(definition.bounds.min[axis] <= expected[0]);
-            assert!(definition.bounds.max[axis] >= expected[1]);
-        }
+        caps += 1;
+        assert_eq!(face.geometry.domain.inner_loop_count, 512);
+        assert_eq!(face.geometry.domain.trim_loop_count, 513);
+        let native_face = definition.brep().face(*native_id).unwrap();
+        assert_eq!(native_face.loops.len(), 513);
+        let original_face = definition.original_source().face(*native_id).unwrap();
+        assert_eq!(original_face.wires.len(), 513);
     }
-    #[test]
-    fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
-        // This unchanged OCCT export has a six-to-four outer taper, a radius
-        // two bore and physical end planes at zero and twelve millimetres.
-        // Its cone apex is outside the admitted face, not a height witness.
-        let bytes = include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
-        );
-        let cancel = AtomicBool::new(false);
-        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
-        let tolerance = 0.00001;
-        for (axis, expected) in [[-6.0, 6.0], [-6.0, 6.0], [0.0, 12.0]]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(definition.bounds.min[axis] <= expected[0]);
-            assert!(definition.bounds.max[axis] >= expected[1]);
-            assert!(definition.bounds.min[axis] >= expected[0] - tolerance);
-            assert!(definition.bounds.max[axis] <= expected[1] + tolerance);
-        }
-        let mesh = crate::tessellate(
-            &definition,
-            spiling_contracts::geometry::DisplayProfile::MeshTrimmedMm005V2,
-            &cancel,
-        )
-        .unwrap();
-        assert!(mesh.triangle_count > 0 && mesh.vertex_count > 0);
-        assert!(!mesh.chunks.is_empty());
-        for chunk in &mesh.chunks {
-            let receipt = &chunk.descriptor;
-            assert_eq!(receipt.definition_id, definition.id);
-            assert_eq!(receipt.face_count as usize, definition.faces.len());
-            assert!(
-                receipt.carrier_deviation_mm
-                    + receipt.trim_deviation_mm
-                    + receipt.quantization_error_mm
-                    <= spiling_contracts::geometry::MESH_SURFACE_TOLERANCE_MM
-            );
-        }
-        let projected = crate::analysis::projected_bounds(
-            &definition,
-            [0.0, 0.0, 1.0],
-            crate::analysis::BoundsPolicy {
-                maximum_endpoint_uncertainty_mm: tolerance,
-            },
-            &mut GeometryWorkBudget::new(20_000_000),
-            &cancel,
-        )
-        .unwrap();
-        assert!(projected.minimum[0] <= 0.0 && 0.0 <= projected.minimum[1]);
-        assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
-        assert!(projected.achieved_uncertainty_mm <= tolerance);
+    assert_eq!(caps, 2);
+    for (axis, expected) in [[0.0, 1640.0], [0.0, 840.0], [0.0, 20.0]]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(definition.bounds.min[axis] <= expected[0]);
+        assert!(definition.bounds.max[axis] >= expected[1]);
     }
+}
+#[test]
+fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
+    // This unchanged OCCT export has a six-to-four outer taper, a radius
+    // two bore and physical end planes at zero and twelve millimetres.
+    // Its cone apex is outside the admitted face, not a height witness.
+    let bytes = include_bytes!(
+        "../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+    );
+    let cancel = AtomicBool::new(false);
+    let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+    let tolerance = 0.00001;
+    for (axis, expected) in [[-6.0, 6.0], [-6.0, 6.0], [0.0, 12.0]]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(definition.bounds.min[axis] <= expected[0]);
+        assert!(definition.bounds.max[axis] >= expected[1]);
+        assert!(definition.bounds.min[axis] >= expected[0] - tolerance);
+        assert!(definition.bounds.max[axis] <= expected[1] + tolerance);
+    }
+    let mesh = crate::tessellate(
+        &definition,
+        spiling_contracts::geometry::DisplayProfile::MeshTrimmedMm005V2,
+        &cancel,
+    )
+    .unwrap();
+    assert!(mesh.triangle_count > 0 && mesh.vertex_count > 0);
+    assert!(!mesh.chunks.is_empty());
+    for chunk in &mesh.chunks {
+        let receipt = &chunk.descriptor;
+        assert_eq!(receipt.definition_id, definition.id);
+        assert_eq!(receipt.face_count as usize, definition.faces.len());
+        assert!(
+            receipt.carrier_deviation_mm
+                + receipt.trim_deviation_mm
+                + receipt.quantization_error_mm
+                <= spiling_contracts::geometry::MESH_SURFACE_TOLERANCE_MM
+        );
+    }
+    let projected = crate::analysis::projected_bounds(
+        &definition,
+        [0.0, 0.0, 1.0],
+        crate::analysis::BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: tolerance,
+        },
+        &mut GeometryWorkBudget::new(20_000_000),
+        &cancel,
+    )
+    .unwrap();
+    assert!(projected.minimum[0] <= 0.0 && 0.0 <= projected.minimum[1]);
+    assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
+    assert!(projected.achieved_uncertainty_mm <= tolerance);
+}

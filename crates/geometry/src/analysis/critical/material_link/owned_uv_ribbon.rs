@@ -20,7 +20,8 @@ fn boundary_parameter_intervals<'c>(
     if range[0] >= range[1] {
         return Err(GeometryError::new(
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "original UV owning boundary has no nondegenerate complete domain"));
+            "original UV owning boundary has no nondegenerate complete domain",
+        ));
     }
     crate::parametric::curve2d_parameter_spans(chart, range, work, cancel)
 }
@@ -33,9 +34,7 @@ const _: () = assert!(
 const _: () = assert!(
     std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>() <= UV_EMBEDDING_STACK_BYTES
 );
-const _: () = assert!(
-    super::atlas::ORIGINAL_JOINT_UV_SCRATCH_BYTES <= UV_EMBEDDING_STACK_BYTES
-);
+const _: () = assert!(super::atlas::ORIGINAL_JOINT_UV_SCRATCH_BYTES <= UV_EMBEDDING_STACK_BYTES);
 
 /// Sealed whole-used-scope ownership. The contained pure receipt binds the
 /// exact original occurrence/map, source range, width, side and beta law.
@@ -247,9 +246,10 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     };
                     work.charge(1, cancel).map_err(&context)?;
                     let image = self.inner_image(a, error, work, cancel).map_err(&context)?;
-                    let boundary = crate::parametric::curve2d_piecewise_jet(
-                        &chart, b, work, cancel,
-                    ).map_err(&context)?.position;
+                    let boundary =
+                        crate::parametric::curve2d_piecewise_jet(&chart, b, work, cancel)
+                            .map_err(&context)?
+                            .position;
                     if apart(image, boundary) {
                         continue;
                     }
@@ -303,7 +303,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             if !complete {
                 return Err(GeometryError::new(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "owned original UV boundary has no complete parameter-cut inventory"));
+                    "owned original UV boundary has no complete parameter-cut inventory",
+                ));
             }
         }
         Ok(true)
@@ -380,32 +381,56 @@ mod tests {
 
     #[test]
     fn owning_boundary_cuts_keep_complete_original_pcurve_gauge() {
-        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, Logical, KnotSpec};
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
         let source = Curve::BSpline(Box::new(BSplineCurve {
             degree: 2,
-            points: [-2.0, -1.0, 2.0, 4.0].into_iter().map(|t| [t, 0.0, 0.0]).collect(),
-            weights: None, knots: vec![-2.0, 0.0, 4.0], multiplicities: vec![3, 1, 3],
-            form: CurveForm::Unspecified, closed: Logical::False,
-            self_intersect: Logical::False, knot_spec: KnotSpec::Unspecified,
+            points: [-2.0, -1.0, 2.0, 4.0]
+                .into_iter()
+                .map(|t| [t, 0.0, 0.0])
+                .collect(),
+            weights: None,
+            knots: vec![-2.0, 0.0, 4.0],
+            multiplicities: vec![3, 1, 3],
+            form: CurveForm::Unspecified,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
         }));
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let chart = crate::kernel::source_operand::PreparedOriginalCurve::new(
-            &source, [-2.0, 4.0], MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &source,
+            [-2.0, 4.0],
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let cuts: Vec<_> = boundary_parameter_intervals(&chart, &mut work, &cancel)
-            .unwrap().collect();
+            .unwrap()
+            .collect();
         assert_eq!(cuts, [[-2.0, 0.0], [0.0, 4.0]]);
         // A used spatial collar can occupy [0,1]; that does not erase the
         // selected PCurve's unused complement on either side of that gauge.
-        let boundary = crate::parametric::curve2d_piecewise_jet(
-            &chart, cuts[0], &mut work, &cancel,
-        ).unwrap().position;
+        let boundary =
+            crate::parametric::curve2d_piecewise_jet(&chart, cuts[0], &mut work, &cancel)
+                .unwrap()
+                .position;
         assert!(boundary[0].lo <= -2.0 && boundary[0].hi >= 0.0);
-        assert_eq!(boundary_parameter_intervals(&chart, &mut GeometryWorkBudget::new(0), &cancel)
-            .err().unwrap().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(boundary_parameter_intervals(&chart, &mut work, &AtomicBool::new(true))
-            .err().unwrap().code, GeometryErrorCode::Cancelled);
+        assert_eq!(
+            boundary_parameter_intervals(&chart, &mut GeometryWorkBudget::new(0), &cancel)
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            boundary_parameter_intervals(&chart, &mut work, &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]

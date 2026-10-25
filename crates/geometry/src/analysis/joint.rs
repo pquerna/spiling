@@ -10,8 +10,8 @@
 //! invariance never establishes a crossing of native curves.
 
 use super::collar::{
-    NativeCollarComplex, NativeCollarHeightSpace, NativeCriticalCollar,
-    NativeCriticalCollarTarget, NativeCriticalCollarTargetSide,
+    NativeCollarComplex, NativeCollarHeightSpace, NativeCriticalCollar, NativeCriticalCollarTarget,
+    NativeCriticalCollarTargetSide,
 };
 use super::{
     BoundsPolicy, GeometryWorkBudget, NativeEndpointStratum, ProjectedBounds, SlabAnalysis,
@@ -1494,21 +1494,28 @@ impl PendingNativeUnionProof {
     /// is TOTAL pending ownership plus temporary proof storage; borrowed caller
     /// storage is external. False issues no authority and retains legacy gates.
     pub fn certify_regular_interface_pair(
-        &mut self, lower: NativeCriticalCollarTarget<'_>, upper: NativeCriticalCollarTarget<'_>,
-        byte_limit: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+        &mut self,
+        lower: NativeCriticalCollarTarget<'_>,
+        upper: NativeCriticalCollarTarget<'_>,
+        byte_limit: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
         let (before, after) = (lower.leaf, upper.leaf);
         let cut = before.world_height_interval_mm[1];
-        if !before.is_positive() || !after.is_positive()
+        if !before.is_positive()
+            || !after.is_positive()
             || before.occurrence_id() != after.occurrence_id()
             || !before.source.same_material_recipe(&after.source)
             || before.pose() != after.pose()
             || cut.to_bits() != after.world_height_interval_mm[0].to_bits()
             || self.world_height_interval_mm != after.world_height_interval_mm
         {
-            return Err(error(GeometryErrorCode::InvalidGeometry,
-                "actual regular pair does not bind the same source/pose and exact adjacent closed cut"));
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "actual regular pair does not bind the same source/pose and exact adjacent closed cut",
+            ));
         }
         let mut current = false;
         for leaf in &self.positive_leaves {
@@ -1516,45 +1523,84 @@ impl PendingNativeUnionProof {
             current |= same_leaf(leaf, after);
         }
         if !current {
-            return Err(error(GeometryErrorCode::InvalidGeometry,
-                "actual regular pair current leaf is foreign to its pending source proof"));
+            return Err(error(
+                GeometryErrorCode::InvalidGeometry,
+                "actual regular pair current leaf is foreign to its pending source proof",
+            ));
         }
         verify_source_leaf_candidate(before, lower.actual_material, work, cancel)?;
         verify_source_leaf_candidate(after, upper.actual_material, work, cancel)?;
         // The independent original critical/coface/collar route remains owner
         // at either critical shared side; a sample pair cannot promote it.
-        if before.critical_interfaces[1] || after.critical_interfaces[0] { return Ok(false); }
+        if before.critical_interfaces[1] || after.critical_interfaces[0] {
+            return Ok(false);
+        }
         let limit = byte_limit.min(MAX_SCRATCH);
         let resident = self.retained_bytes();
         if resident > limit {
-            return Err(error(GeometryErrorCode::ResourceLimit,
-                "actual pair proof has no total pending/temporary byte allowance"));
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "actual pair proof has no total pending/temporary byte allowance",
+            ));
         }
-        let mut scratch = Scratch { bytes: MAX_SCRATCH - limit + resident };
+        let mut scratch = Scratch {
+            bytes: MAX_SCRATCH - limit + resident,
+        };
         let Some(matching) = regular_loop_matching(before, after, &mut scratch, work, cancel)?
-            else { return Ok(false); };
-        work.charge((before.sample_loops.len()+after.sample_loops.len()+2) as u64,cancel)?;
+        else {
+            return Ok(false);
+        };
+        work.charge(
+            (before.sample_loops.len() + after.sample_loops.len() + 2) as u64,
+            cancel,
+        )?;
         let lower_hash = leaf_fingerprint(before);
         let upper_hash = leaf_fingerprint(after);
         let matching_hash = matching_fingerprint(&matching);
         for receipt in &self.regular_interfaces {
-            work.charge(1,cancel)?;
-            if receipt.lower == lower_hash && receipt.upper == upper_hash
-                && receipt.cut_bits == cut.to_bits() && receipt.matching == matching_hash
-            { return Ok(true); }
+            work.charge(1, cancel)?;
+            if receipt.lower == lower_hash
+                && receipt.upper == upper_hash
+                && receipt.cut_bits == cut.to_bits()
+                && receipt.matching == matching_hash
+            {
+                return Ok(true);
+            }
         }
         let Some(geometry) = planar::actual_pair_collar(
-            lower.actual_material, upper.actual_material, &matching, &mut scratch, work, cancel,
-        )? else { return Ok(false); };
-        let receipt = NativeRegularInterfacePairReceipt { lower: lower_hash, upper: upper_hash,
-            cut_bits: cut.to_bits(), matching: matching_hash, geometry };
+            lower.actual_material,
+            upper.actual_material,
+            &matching,
+            &mut scratch,
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(false);
+        };
+        let receipt = NativeRegularInterfacePairReceipt {
+            lower: lower_hash,
+            upper: upper_hash,
+            cut_bits: cut.to_bits(),
+            matching: matching_hash,
+            geometry,
+        };
         if self.regular_interfaces.len() == self.regular_interfaces.capacity() {
             // Reserve admits growth. ALSO admit the old payload while a moved
             // new allocation may coexist with it; never refund numerical work.
-            scratch.owned(self.regular_interfaces.capacity()
-                .checked_mul(std::mem::size_of::<NativeRegularInterfacePairReceipt>())
-                .ok_or_else(||error(GeometryErrorCode::ResourceLimit,"actual pair receipt size overflow"))?,
-                work,cancel)?;
+            scratch.owned(
+                self.regular_interfaces
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<NativeRegularInterfacePairReceipt>())
+                    .ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::ResourceLimit,
+                            "actual pair receipt size overflow",
+                        )
+                    })?,
+                work,
+                cancel,
+            )?;
         }
         scratch.push(&mut self.regular_interfaces, receipt, work, cancel)?;
         Ok(true)
@@ -1694,8 +1740,10 @@ impl PendingNativeUnionProof {
                     .map(NativeCriticalCollarIncidence::retained_bytes)
                     .sum::<usize>(),
             )
-            .saturating_add(self.regular_interfaces.capacity()
-                * std::mem::size_of::<NativeRegularInterfacePairReceipt>())
+            .saturating_add(
+                self.regular_interfaces.capacity()
+                    * std::mem::size_of::<NativeRegularInterfacePairReceipt>(),
+            )
     }
     pub fn coverage(&self) -> NativeUnionCoverage {
         if self.requires_interface_complex {
@@ -1741,7 +1789,9 @@ fn same_leaf(a: &NativeSourceLeafReceipt, b: &NativeSourceLeafReceipt) -> bool {
         && a.endpoint_radial_products == b.endpoint_radial_products
         && a.sample_loop_clearance_mm == b.sample_loop_clearance_mm
         && a.sample_loops.len() == b.sample_loops.len()
-        && a.sample_loops.iter().zip(b.sample_loops.iter())
+        && a.sample_loops
+            .iter()
+            .zip(b.sample_loops.iter())
             .all(|(a, b)| a.registration == b.registration)
 }
 fn hash_source(hash: &mut Sha256, source: &NativeUnionSourceCapture) {
@@ -1827,7 +1877,9 @@ pub(super) fn leaf_fingerprint(leaf: &NativeSourceLeafReceipt) -> [u8; 32] {
 fn matching_fingerprint(matching: &[usize]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update((matching.len() as u64).to_le_bytes());
-    for &index in matching { hash.update((index as u64).to_le_bytes()); }
+    for &index in matching {
+        hash.update((index as u64).to_le_bytes());
+    }
     hash.finalize().into()
 }
 
@@ -2139,7 +2191,10 @@ fn boundary_loop_confinement(
     })?;
     let margin = Interval::point(distance).mul(Interval::point(2.0)).hi;
     work.charge(1, cancel)?;
-    if leaf.sample_loop_clearance_mm.is_some_and(|lower| lower > margin) {
+    if leaf
+        .sample_loop_clearance_mm
+        .is_some_and(|lower| lower > margin)
+    {
         // The complete Jordan/parent census was calibrated against the original
         // native cycles before coordinates were discarded. The SAME existing
         // two-tube margin keeps EVERY boundary pair apart throughout this
@@ -2177,37 +2232,53 @@ fn boundary_loop_confinement(
     Ok(())
 }
 fn regular_loop_matching(
-    before: &NativeSourceLeafReceipt, after: &NativeSourceLeafReceipt,
-    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    before: &NativeSourceLeafReceipt,
+    after: &NativeSourceLeafReceipt,
+    scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Option<Vec<usize>>, GeometryError> {
-    if before.sample_loops.len() != after.sample_loops.len() { return Ok(None); }
+    if before.sample_loops.len() != after.sample_loops.len() {
+        return Ok(None);
+    }
     let single = before.sample_loops.len() == 1
-        && !before.sample_loops[0].hole && !after.sample_loops[0].hole;
+        && !before.sample_loops[0].hole
+        && !after.sample_loops[0].hole;
     let mut matching = Vec::new();
     scratch.reserve(&mut matching, before.sample_loops.len(), work, cancel)?;
     for a in before.sample_loops.iter() {
         let mut found = None;
-        for (j,b) in after.sample_loops.iter().enumerate() {
-            work.charge(1,cancel)?;
-            if a.hole == b.hole && (single || !a.source_face_ordinals.is_empty()
-                && a.source_face_ordinals == b.source_face_ordinals)
+        for (j, b) in after.sample_loops.iter().enumerate() {
+            work.charge(1, cancel)?;
+            if a.hole == b.hole
+                && (single
+                    || !a.source_face_ordinals.is_empty()
+                        && a.source_face_ordinals == b.source_face_ordinals)
             {
-                if found.is_some() { return Ok(None); }
+                if found.is_some() {
+                    return Ok(None);
+                }
                 found = Some(j);
             }
         }
-        let Some(index) = found else { return Ok(None); };
+        let Some(index) = found else {
+            return Ok(None);
+        };
         for &previous in &matching {
-            work.charge(1,cancel)?;
-            if previous == index { return Ok(None); }
+            work.charge(1, cancel)?;
+            if previous == index {
+                return Ok(None);
+            }
         }
         matching.push(index);
     }
-    for (i,loop_) in before.sample_loops.iter().enumerate() {
-        work.charge(1,cancel)?;
-        if loop_.registration.parent.map(|parent|matching[parent])
+    for (i, loop_) in before.sample_loops.iter().enumerate() {
+        work.charge(1, cancel)?;
+        if loop_.registration.parent.map(|parent| matching[parent])
             != after.sample_loops[matching[i]].registration.parent
-        { return Ok(None); }
+        {
+            return Ok(None);
+        }
     }
     Ok(Some(matching))
 }
@@ -2240,12 +2311,14 @@ fn certify_regular_material_interface(
     {
         return Err(unresolved());
     }
-    let Some(matching) = regular_loop_matching(before,after,scratch,work,cancel)?
-        else { return Err(unresolved()); };
+    let Some(matching) = regular_loop_matching(before, after, scratch, work, cancel)? else {
+        return Err(unresolved());
+    };
     let mut identical = true;
-    for (i,&j) in matching.iter().enumerate() {
-        work.charge(1,cancel)?;
-        identical &= before.sample_loops[i].shape.xy_sha256 == after.sample_loops[j].shape.xy_sha256;
+    for (i, &j) in matching.iter().enumerate() {
+        work.charge(1, cancel)?;
+        identical &=
+            before.sample_loops[i].shape.xy_sha256 == after.sample_loops[j].shape.xy_sha256;
     }
     boundary_loop_confinement(before, before_tube, 1, interface, work, cancel)?;
     boundary_loop_confinement(after, after_tube, 0, interface, work, cancel)?;
@@ -2254,12 +2327,14 @@ fn certify_regular_material_interface(
     if identical {
         return Ok(());
     }
-    let (lower,upper) = (leaf_fingerprint(before),leaf_fingerprint(after));
+    let (lower, upper) = (leaf_fingerprint(before), leaf_fingerprint(after));
     let matching_hash = matching_fingerprint(&matching);
     for receipt in pairs {
-        work.charge(1,cancel)?;
-        if receipt.lower == lower && receipt.upper == upper
-            && receipt.cut_bits == interface.to_bits() && receipt.matching == matching_hash
+        work.charge(1, cancel)?;
+        if receipt.lower == lower
+            && receipt.upper == upper
+            && receipt.cut_bits == interface.to_bits()
+            && receipt.matching == matching_hash
         {
             // Source/cut/pose, directed scope, confinement and full branch
             // matching ABOVE remain mandatory. Only ACTUAL overlap topology
@@ -2988,7 +3063,7 @@ impl NativeUnionBindingLedger {
         }
         digest.update((pending.regular_interfaces.len() as u64).to_le_bytes());
         for receipt in &pending.regular_interfaces {
-            work.charge(1,cancel)?;
+            work.charge(1, cancel)?;
             digest.update(receipt.lower);
             digest.update(receipt.upper);
             digest.update(receipt.cut_bits.to_le_bytes());
@@ -3925,8 +4000,15 @@ fn certify_source_leaf(
                     "native rectangle/source sample loop provenance is not a unique occupied component",
                 ));
             }
-            scratch.push(&mut loop_recording.loops,
-                NativeLoopRegistration { native_index: 0, parent: None }, work, cancel)?;
+            scratch.push(
+                &mut loop_recording.loops,
+                NativeLoopRegistration {
+                    native_index: 0,
+                    parent: None,
+                },
+                work,
+                cancel,
+            )?;
             bound
         }
         None => certify_separated_candidate_recording(
@@ -6292,8 +6374,15 @@ fn certify_separated_candidate_impl(
         for &index in &exact {
             work.charge(1, cancel)?;
             if let Some(recording) = recording.as_mut() {
-                scratch.push(&mut recording.loops,
-                    NativeLoopRegistration { native_index: index, parent: None }, work, cancel)?;
+                scratch.push(
+                    &mut recording.loops,
+                    NativeLoopRegistration {
+                        native_index: index,
+                        parent: None,
+                    },
+                    work,
+                    cancel,
+                )?;
             }
             achieved = achieved.max(
                 Interval::point(budgets[index].0)
@@ -6308,7 +6397,15 @@ fn certify_separated_candidate_impl(
         // actual maximum rounding (zero here) also proves candidate clearance.
         if let Some(recording) = recording.as_mut() {
             recording.clearance_mm = planar::capture_loop_registration(
-                &native, &candidate_rings, &mut recording.loops, 0.0, true, scratch, work, cancel)?;
+                &native,
+                &candidate_rings,
+                &mut recording.loops,
+                0.0,
+                true,
+                scratch,
+                work,
+                cancel,
+            )?;
         } else {
             feature_clearance(&native, 0.0, scratch, work, cancel)?;
         }
@@ -6354,8 +6451,15 @@ fn certify_separated_candidate_impl(
             "final union candidate has no orientation-preserving source-cycle correspondence within policy"))?;
         used[index] = true;
         if let Some(recording) = recording.as_mut() {
-            scratch.push(&mut recording.loops,
-                NativeLoopRegistration { native_index: index, parent: None }, work, cancel)?;
+            scratch.push(
+                &mut recording.loops,
+                NativeLoopRegistration {
+                    native_index: index,
+                    parent: None,
+                },
+                work,
+                cancel,
+            )?;
         }
         achieved = achieved.max(
             Interval::point(budgets[index].0)
@@ -6368,7 +6472,15 @@ fn certify_separated_candidate_impl(
     // Hausdorff boundaries alone could erase a tiny hole or bridge.
     if let Some(recording) = recording.as_mut() {
         recording.clearance_mm = planar::capture_loop_registration(
-            &native, &candidate_rings, &mut recording.loops, max_rounding, false, scratch, work, cancel)?;
+            &native,
+            &candidate_rings,
+            &mut recording.loops,
+            max_rounding,
+            false,
+            scratch,
+            work,
+            cancel,
+        )?;
     } else {
         feature_clearance(&native, max_rounding, scratch, work, cancel)?;
         feature_clearance(&candidate_rings, 0.0, scratch, work, cancel)?;
@@ -6725,8 +6837,10 @@ fn exact_div(a: f64, b: f64) -> Option<f64> {
     (q.is_finite() && exact_mul(q, b) == Some(a)).then_some(q)
 }
 fn native_topology_error(cause: solidcore::SolidError) -> GeometryError {
-    error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-        format!("native union source topology: {cause}"))
+    error(
+        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        format!("native union source topology: {cause}"),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -6744,7 +6858,9 @@ fn native_affine_face(surface: &solidcore::surface::surface::Surface) -> Option<
             SurfaceKind::Step(step) => source = step.surface()?,
             _ => break,
         }
-        if depth == 32 { return None; }
+        if depth == 32 {
+            return None;
+        }
     }
     if let SurfaceKind::Plane(plane) = source.kind() {
         let position = plane.position();
@@ -6754,11 +6870,24 @@ fn native_affine_face(surface: &solidcore::surface::surface::Surface) -> Option<
         let scale = plane.uv_scale();
         let face = AffineFace {
             origin: [origin.x, origin.y, origin.z],
-            u: [exact_mul(u.x, scale.x)?, exact_mul(u.y, scale.x)?, exact_mul(u.z, scale.x)?],
-            v: [exact_mul(v.x, scale.y)?, exact_mul(v.y, scale.y)?, exact_mul(v.z, scale.y)?],
+            u: [
+                exact_mul(u.x, scale.x)?,
+                exact_mul(u.y, scale.x)?,
+                exact_mul(u.z, scale.x)?,
+            ],
+            v: [
+                exact_mul(v.x, scale.y)?,
+                exact_mul(v.y, scale.y)?,
+                exact_mul(v.z, scale.y)?,
+            ],
         };
-        return face.origin.iter().chain(&face.u).chain(&face.v)
-            .all(|value| value.is_finite()).then_some(face);
+        return face
+            .origin
+            .iter()
+            .chain(&face.u)
+            .chain(&face.v)
+            .all(|value| value.is_finite())
+            .then_some(face);
     }
     let surface = crate::parametric::native_surface_nurbs(surface).ok()??;
     if surface.degrees() != (1, 1) || surface.n() != 1 || surface.m() != 1 {
@@ -6766,24 +6895,40 @@ fn native_affine_face(surface: &solidcore::surface::surface::Surface) -> Option<
     }
     let ku = surface.u_knots();
     let kv = surface.v_knots();
-    if ku.len() != 4 || kv.len() != 4 || ku[0] != ku[1] || ku[2] != ku[3]
-        || kv[0] != kv[1] || kv[2] != kv[3] {
+    if ku.len() != 4
+        || kv.len() != 4
+        || ku[0] != ku[1]
+        || ku[2] != ku[3]
+        || kv[0] != kv[1]
+        || kv[2] != kv[3]
+    {
         return None;
     }
     let first = surface.cpt(0, 0).ok()?;
     let weight = if surface.is_rational() { first.w } else { 1.0 };
-    if !weight.is_finite() || weight == 0.0 { return None; }
+    if !weight.is_finite() || weight == 0.0 {
+        return None;
+    }
     let point = |u, v| -> Option<[f64; 3]> {
         let point = surface.cpt(u, v).ok()?;
-        if surface.is_rational() && point.w != weight { return None; }
-        Some([exact_div(point.x, weight)?, exact_div(point.y, weight)?, exact_div(point.z, weight)?])
+        if surface.is_rational() && point.w != weight {
+            return None;
+        }
+        Some([
+            exact_div(point.x, weight)?,
+            exact_div(point.y, weight)?,
+            exact_div(point.z, weight)?,
+        ])
     };
     let points = [[point(0, 0)?, point(0, 1)?], [point(1, 0)?, point(1, 1)?]];
     let domain = [[ku[1], ku[2]], [kv[1], kv[2]]];
     affine_tensor(points, domain)
 }
 fn affine_tensor(points: [[[f64; 3]; 2]; 2], domain: [[f64; 2]; 2]) -> Option<AffineFace> {
-    if domain.iter().any(|range| !range[0].is_finite() || !range[1].is_finite() || range[0] >= range[1]) {
+    if domain
+        .iter()
+        .any(|range| !range[0].is_finite() || !range[1].is_finite() || range[0] >= range[1])
+    {
         return None;
     }
     let origin = points[0][0];
@@ -6801,7 +6946,9 @@ fn affine_tensor(points: [[[f64; 3]; 2]; 2], domain: [[f64; 2]; 2]) -> Option<Af
 /// A source evaluator is inspected in its actual coefficient law. In
 /// particular an original-radian operator is never cast as a native surface.
 fn affine_face(surface: &dyn crate::parametric::SurfaceEvaluator) -> Option<AffineFace> {
-    if let Some(native) = surface.native_surface() { return native_affine_face(native); }
+    if let Some(native) = surface.native_surface() {
+        return native_affine_face(native);
+    }
     match surface.original_surface()? {
         solidcraft_step::geom::Surface::Plane { position } => {
             let a = position.axis;
@@ -6811,25 +6958,52 @@ fn affine_face(surface: &dyn crate::parametric::SurfaceEvaluator) -> Option<Affi
                 exact_add(exact_mul(a[2], b[0])?, -exact_mul(a[0], b[2])?)?,
                 exact_add(exact_mul(a[0], b[1])?, -exact_mul(a[1], b[0])?)?,
             ];
-            position.origin.iter().chain(&b).chain(&v).all(|value| value.is_finite())
-                .then_some(AffineFace { origin: position.origin, u: b, v })
+            position
+                .origin
+                .iter()
+                .chain(&b)
+                .chain(&v)
+                .all(|value| value.is_finite())
+                .then_some(AffineFace {
+                    origin: position.origin,
+                    u: b,
+                    v,
+                })
         }
         solidcraft_step::geom::Surface::BSpline(source) => {
-            if source.u_degree != 1 || source.v_degree != 1 || source.points.len() != 2
+            if source.u_degree != 1
+                || source.v_degree != 1
+                || source.points.len() != 2
                 || source.points.iter().any(|row| row.len() != 2)
-                || source.u_knots.len() != 2 || source.v_knots.len() != 2
-                || source.u_multiplicities != [2, 2] || source.v_multiplicities != [2, 2] {
+                || source.u_knots.len() != 2
+                || source.v_knots.len() != 2
+                || source.u_multiplicities != [2, 2]
+                || source.v_multiplicities != [2, 2]
+            {
                 return None;
             }
             if let Some(weights) = &source.weights {
-                if weights.len() != 2 || weights.iter().any(|row| row.len() != 2) { return None; }
+                if weights.len() != 2 || weights.iter().any(|row| row.len() != 2) {
+                    return None;
+                }
                 let weight = weights[0][0];
-                if !weight.is_finite() || weight <= 0.0
-                    || weights.iter().flatten().any(|&value| value != weight) { return None; }
+                if !weight.is_finite()
+                    || weight <= 0.0
+                    || weights.iter().flatten().any(|&value| value != weight)
+                {
+                    return None;
+                }
             }
-            affine_tensor([[source.points[0][0], source.points[0][1]],
-                [source.points[1][0], source.points[1][1]]],
-                [[source.u_knots[0], source.u_knots[1]], [source.v_knots[0], source.v_knots[1]]])
+            affine_tensor(
+                [
+                    [source.points[0][0], source.points[0][1]],
+                    [source.points[1][0], source.points[1][1]],
+                ],
+                [
+                    [source.u_knots[0], source.u_knots[1]],
+                    [source.v_knots[0], source.v_knots[1]],
+                ],
+            )
         }
         _ => None,
     }
@@ -6961,11 +7135,15 @@ fn native_profile<'a>(
         let definition = occurrence.source.definition();
         let source_view = occurrence.source.source_view()?;
         let brep = definition.brep();
-        let Some(&first_face) = definition.face_ids().first() else { return Ok(None); };
+        let Some(&first_face) = definition.face_ids().first() else {
+            return Ok(None);
+        };
         let physical_shell = brep.face(first_face).map_err(native_topology_error)?.shell;
         for &face in definition.face_ids() {
             work.charge(1, cancel)?;
-            if brep.face(face).map_err(native_topology_error)?.shell != physical_shell { return Ok(None); }
+            if brep.face(face).map_err(native_topology_error)?.shell != physical_shell {
+                return Ok(None);
+            }
         }
         let Some((axes, signs)) = signed_axis_pose(occurrence.pose) else {
             return Ok(None);
@@ -6980,8 +7158,13 @@ fn native_profile<'a>(
                     work.charge(1, cancel)?;
                     let edge = brep.edge(entry.edge).map_err(native_topology_error)?;
                     let p = source_view.trim_source().source_vertex_point(
-                        edge.vertices[usize::from(!entry.forward)], work, cancel)?;
-                    if p.iter().any(|value| !value.is_finite()) { return Ok(None); }
+                        edge.vertices[usize::from(!entry.forward)],
+                        work,
+                        cancel,
+                    )?;
+                    if p.iter().any(|value| !value.is_finite()) {
+                        return Ok(None);
+                    }
                     heights[0] = heights[0].min(p[vertical]);
                     heights[1] = heights[1].max(p[vertical]);
                 }
@@ -6999,8 +7182,12 @@ fn native_profile<'a>(
             // Borrow the SAME selected original domains used for this source's
             // slab. Raw native carrier metadata is not the affine material law.
             let domain = source_view.face_domain(face_index, scratch.remaining(), work, cancel)?;
-            let Some(affine) = affine_face(domain.surface_evaluator()) else { return Ok(None); };
-            if domain.source_chart_error_mm() != 0.0 { return Ok(None); }
+            let Some(affine) = affine_face(domain.surface_evaluator()) else {
+                return Ok(None);
+            };
+            if domain.source_chart_error_mm() != 0.0 {
+                return Ok(None);
+            }
             let normal = [
                 Interval::point(affine.u[1])
                     .mul(Interval::point(affine.v[2]))
@@ -7024,7 +7211,9 @@ fn native_profile<'a>(
             let constant = affine.origin[axis];
             let outward = if domain.orientation() {
                 normal[axis]
-            } else { normal[axis].neg() };
+            } else {
+                normal[axis].neg()
+            };
             let mut local = [[f64::INFINITY, f64::NEG_INFINITY]; 3];
             for &wire_id in &face.loops {
                 let wire = brep.loop_(wire_id).map_err(native_topology_error)?;
@@ -7032,7 +7221,10 @@ fn native_profile<'a>(
                     work.charge(1, cancel)?;
                     let edge = brep.edge(entry.edge).map_err(native_topology_error)?;
                     let p = source_view.trim_source().source_vertex_point(
-                        edge.vertices[usize::from(!entry.forward)], work, cancel)?;
+                        edge.vertices[usize::from(!entry.forward)],
+                        work,
+                        cancel,
+                    )?;
                     for a in 0..3 {
                         local[a][0] = local[a][0].min(p[a]);
                         local[a][1] = local[a][1].max(p[a]);
@@ -7066,7 +7258,12 @@ fn native_profile<'a>(
                         .face_id,
                 );
             } else if face.loops.len() != 1
-                || brep.loop_(face.loops[0]).map_err(native_topology_error)?.edges.len() != 4
+                || brep
+                    .loop_(face.loops[0])
+                    .map_err(native_topology_error)?
+                    .edges
+                    .len()
+                    != 4
                 || local[vertical] != heights
             {
                 return Ok(None);
@@ -7080,8 +7277,16 @@ fn native_profile<'a>(
                     work.charge(1, cancel)?;
                     let edge = brep.edge(entry.edge).map_err(native_topology_error)?;
                     let canonical = [
-                        source_view.trim_source().source_vertex_point(edge.vertices[0], work, cancel)?,
-                        source_view.trim_source().source_vertex_point(edge.vertices[1], work, cancel)?,
+                        source_view.trim_source().source_vertex_point(
+                            edge.vertices[0],
+                            work,
+                            cancel,
+                        )?,
+                        source_view.trim_source().source_vertex_point(
+                            edge.vertices[1],
+                            work,
+                            cancel,
+                        )?,
                     ];
                     let a = canonical[usize::from(!entry.forward)];
                     let b = canonical[usize::from(entry.forward)];
@@ -7102,40 +7307,70 @@ fn native_profile<'a>(
                     let index = ordinal;
                     ordinal += 1;
                     let correspondence = domain.original_coedge_correspondence(index)?;
-                    let binding = correspondence.binding().ok_or_else(|| error(
-                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "original affine profile has no sealed source binding"))?;
-                    if binding.face != face_id || binding.edge != entry.edge
+                    let binding = correspondence.binding().ok_or_else(|| {
+                        error(
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                            "original affine profile has no sealed source binding",
+                        )
+                    })?;
+                    if binding.face != face_id
+                        || binding.edge != entry.edge
                         || binding.endpoints != edge.vertices
                         || binding.native_interval != [edge.interval.min(), edge.interval.max()]
-                        || binding.owner != [face_index, wire_index, coedge_index] {
-                        return Err(error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                            "original affine profile changed its native incidence binding"));
+                        || binding.owner != [face_index, wire_index, coedge_index]
+                    {
+                        return Err(error(
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                            "original affine profile changed its native incidence binding",
+                        ));
                     }
-                    let straight = domain.with_original_spatial_curve(index, scratch.remaining(), work, cancel,
+                    let straight = domain.with_original_spatial_curve(
+                        index,
+                        scratch.remaining(),
+                        work,
+                        cancel,
                         |curve, work, cancel| {
-                            let Some(affine) = curve.exact_affine_coefficients(work, cancel)? else {
+                            let Some(affine) = curve.exact_affine_coefficients(work, cancel)?
+                            else {
                                 return Ok(false);
                             };
                             if affine.denominator.sign() == 0 {
-                                return Err(error(GeometryErrorCode::ConditioningFailure,
-                                    "original affine profile has zero homogeneous denominator"));
+                                return Err(error(
+                                    GeometryErrorCode::ConditioningFailure,
+                                    "original affine profile has zero homogeneous denominator",
+                                ));
                             }
                             for endpoint in 0..2 {
                                 let parameter = correspondence.spatial_endpoint(endpoint == 1);
                                 for axis in 0..3 {
-                                    if !affine.endpoint_coordinate_equal(parameter, axis,
-                                        canonical[endpoint][axis], work, cancel)? { return Ok(false); }
+                                    if !affine.endpoint_coordinate_equal(
+                                        parameter,
+                                        axis,
+                                        canonical[endpoint][axis],
+                                        work,
+                                        cancel,
+                                    )? {
+                                        return Ok(false);
+                                    }
                                 }
                             }
                             Ok(true)
-                        })?;
-                    if !straight { return Ok(None); }
+                        },
+                    )?;
+                    if !straight {
+                        return Ok(None);
+                    }
                     // Affine law plus both exact endpoint identities proves the
                     // complete selected source segment, not a sampled line fit.
                     let uv = domain.coedge_operand(index)?;
                     if !crate::kernel::certified_curve2d_is_straight_regular(
-                        &uv, correspondence.uv_range(), work, cancel)? { return Ok(None); }
+                        &uv,
+                        correspondence.uv_range(),
+                        work,
+                        cancel,
+                    )? {
+                        return Ok(None);
+                    }
                 }
             }
             if axis != vertical {
@@ -7879,7 +8114,13 @@ mod tests {
             let definition = original(name);
             let cancel = AtomicBool::new(false);
             let mut work = GeometryWorkBudget::new(50_000_000);
-            let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+            let source = crate::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             let pose = RigidPoseMm {
                 translation_mm: [10.0, 0.0, 0.0],
                 ..RigidPoseMm::IDENTITY
@@ -7901,18 +8142,26 @@ mod tests {
                 crate::kernel::MaterialRealizationIdentity::new(&definition),
             );
             let occurrences = [
-                NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose: RigidPoseMm::IDENTITY,
-                evidence: NativeUnionOccurrenceEvidence::Slab {
-                    analysis: &a,
-                    leaf: &leaf_a,
-                    endpoint_ownerships: &[],
-                }, },
-                NativeUnionOccurrence { occurrence_id: OccurrenceId::new(2).unwrap(), source: &source, pose,
-                evidence: NativeUnionOccurrenceEvidence::Slab {
-                    analysis: &b,
-                    leaf: &leaf_b,
-                    endpoint_ownerships: &[],
-                }, },
+                NativeUnionOccurrence {
+                    occurrence_id: OccurrenceId::new(1).unwrap(),
+                    source: &source,
+                    pose: RigidPoseMm::IDENTITY,
+                    evidence: NativeUnionOccurrenceEvidence::Slab {
+                        analysis: &a,
+                        leaf: &leaf_a,
+                        endpoint_ownerships: &[],
+                    },
+                },
+                NativeUnionOccurrence {
+                    occurrence_id: OccurrenceId::new(2).unwrap(),
+                    source: &source,
+                    pose,
+                    evidence: NativeUnionOccurrenceEvidence::Slab {
+                        analysis: &b,
+                        leaf: &leaf_b,
+                        endpoint_ownerships: &[],
+                    },
+                },
             ];
             let loops = [rectangle(0.0, 0.0, 30.0, 10.0)];
             let certificate=certify_native_union(&occurrences,&loops,policy(1e-8),&mut work,&cancel)
@@ -7950,7 +8199,13 @@ mod tests {
         let definition = original("native-parity-cone-frustum.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [100.0, 0.0, 0.0],
             ..RigidPoseMm::IDENTITY
@@ -7971,18 +8226,26 @@ mod tests {
         let leaf_a = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let leaf_b = source_leaf(&source, 2, pose, &b, &mut work);
         let occurrences = [
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &a,
-                leaf: &leaf_a,
-                endpoint_ownerships: &[],
-            }, },
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(2).unwrap(), source: &source, pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &b,
-                leaf: &leaf_b,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &a,
+                    leaf: &leaf_a,
+                    endpoint_ownerships: &[],
+                },
+            },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                source: &source,
+                pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &b,
+                    leaf: &leaf_b,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let proof =
             certify_native_union(&occurrences, &loops, policy(0.0), &mut work, &cancel).unwrap();
@@ -7996,7 +8259,13 @@ mod tests {
         let definition = original("native-parity-cone-frustum.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [1.0, 0.0, 0.0],
             ..RigidPoseMm::IDENTITY
@@ -8006,29 +8275,41 @@ mod tests {
         let leaf_a = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let leaf_b = source_leaf(&source, 2, pose, &b, &mut work);
         let occurrences = [
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &a,
-                leaf: &leaf_a,
-                endpoint_ownerships: &[],
-            }, },
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(2).unwrap(), source: &source, pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &b,
-                leaf: &leaf_b,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(1).unwrap(),
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &a,
+                    leaf: &leaf_a,
+                    endpoint_ownerships: &[],
+                },
+            },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                source: &source,
+                pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &b,
+                    leaf: &leaf_b,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let failure =
             certify_native_union(&occurrences, &[], policy(0.0), &mut work, &cancel).unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
         assert!(failure.message.contains("occurrence pair 1/2"));
-        let stale = [NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &a,
-            leaf: &leaf_a,
-            endpoint_ownerships: &[],
-        }, }];
+        let stale = [NativeUnionOccurrence {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &a,
+                leaf: &leaf_a,
+                endpoint_ownerships: &[],
+            },
+        }];
         assert_eq!(
             certify_native_union(&stale, &[], policy(0.0), &mut work, &cancel)
                 .unwrap_err()
@@ -8146,9 +8427,12 @@ mod tests {
         // Exercise the admitted operator source, not the deferred synthetic
         // source-corner/critical expansion. The planar test owns non-star cases.
         let definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+            ),
             &cancel,
-        ).unwrap();
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [100.0, 105.0, 0.0],
             rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -8157,135 +8441,334 @@ mod tests {
         let cut = 5.03;
         let before = ranged_slab(&definition, pose, [5.01, cut], 5.02, 0, &mut work);
         let after = ranged_slab(
-            &definition, pose, [cut, 5.05], 5.04, before.retained_bytes(), &mut work,
+            &definition,
+            pose,
+            [cut, 5.05],
+            5.04,
+            before.retained_bytes(),
+            &mut work,
         );
         let before_m = xy_candidate(&before, before.sample_world_z_mm().unwrap());
         let after_m = xy_candidate(&after, after.sample_world_z_mm().unwrap());
         let id = OccurrenceId::new(1).unwrap();
-        let before_leaf = certify_native_source_leaf(&SourceLeafRequest {
-            definition: &definition, occurrence_id: &id, pose, analysis: &before,
-            actual_used_source_loops: &before_m, policy: policy(0.0),
-        }, &mut work, &cancel).unwrap();
-        let after_leaf = certify_native_source_leaf(&SourceLeafRequest {
-            definition: &definition, occurrence_id: &id, pose, analysis: &after,
-            actual_used_source_loops: &after_m, policy: policy(0.0),
-        }, &mut work, &cancel).unwrap();
-        assert_eq!(before_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
-        assert_eq!(after_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
-        assert_eq!(after_leaf.sample_loops.iter().filter(|cycle| !cycle.hole).count(), 1);
+        let before_leaf = certify_native_source_leaf(
+            &SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                analysis: &before,
+                actual_used_source_loops: &before_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let after_leaf = certify_native_source_leaf(
+            &SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                analysis: &after,
+                actual_used_source_loops: &after_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            before_leaf.proof_kind(),
+            NativeSourceLeafProofKind::ClosedSlab
+        );
+        assert_eq!(
+            after_leaf.proof_kind(),
+            NativeSourceLeafProofKind::ClosedSlab
+        );
+        assert_eq!(
+            after_leaf
+                .sample_loops
+                .iter()
+                .filter(|cycle| !cycle.hole)
+                .count(),
+            1
+        );
         assert!(after_leaf.sample_loops.iter().any(|cycle| cycle.hole));
         let before_tube = source_boundary_tube(&before_leaf, &[], &mut work, &cancel).unwrap();
         let after_tube = source_boundary_tube(&after_leaf, &[], &mut work, &cancel).unwrap();
         boundary_loop_confinement(&before_leaf, &before_tube, 1, cut, &mut work, &cancel).unwrap();
         boundary_loop_confinement(&after_leaf, &after_tube, 0, cut, &mut work, &cancel).unwrap();
         let occurrences = [NativeUnionOccurrence {
-            occurrence_id: id, definition: &definition, pose,
-            evidence: source_evidence(&after,&after_leaf,None),
+            occurrence_id: id,
+            definition: &definition,
+            pose,
+            evidence: source_evidence(&after, &after_leaf, None),
         }];
-        let mut pending = super::certify_native_union(
-            &occurrences,&after_m,policy(0.0),&mut work,&cancel,
-        ).unwrap();
-        let lower_target = NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m };
-        let upper_target = NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&after_m };
+        let mut pending =
+            super::certify_native_union(&occurrences, &after_m, policy(0.0), &mut work, &cancel)
+                .unwrap();
+        let lower_target = NativeCriticalCollarTarget {
+            leaf: &before_leaf,
+            actual_material: &before_m,
+        };
+        let upper_target = NativeCriticalCollarTarget {
+            leaf: &after_leaf,
+            actual_material: &after_m,
+        };
         let original_bytes = pending.retained_bytes();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            original_bytes,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::ResourceLimit);
-        assert!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap(), "complete actual registered buffers issue a sealed pair receipt");
-        assert_eq!(pending.regular_interfaces.len(),1);
-        assert!(pending.retained_bytes() >= original_bytes+std::mem::size_of::<NativeRegularInterfacePairReceipt>());
-        certify_regular_material_interface(&before_leaf,&after_leaf,cut,&before_tube,&after_tube,
-            &pending.regular_interfaces,&mut Scratch { bytes:0 },&mut work,&cancel).unwrap();
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    original_bytes,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+            "complete actual registered buffers issue a sealed pair receipt"
+        );
+        assert_eq!(pending.regular_interfaces.len(), 1);
+        assert!(
+            pending.retained_bytes()
+                >= original_bytes + std::mem::size_of::<NativeRegularInterfacePairReceipt>()
+        );
+        certify_regular_material_interface(
+            &before_leaf,
+            &after_leaf,
+            cut,
+            &before_tube,
+            &after_tube,
+            &pending.regular_interfaces,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let sealed = pending.regular_interfaces[0];
         let mut wrong_cut = before_leaf.clone();
         wrong_cut.world_height_interval_mm[1] = cut.next_up();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf:&wrong_cut, actual_material:&before_m },
-            NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry);
-        assert_eq!(pending.regular_interfaces[0],sealed);
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &wrong_cut,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        assert_eq!(pending.regular_interfaces[0], sealed);
         let mut critical_lower = before_leaf.clone();
         critical_lower.critical_interfaces[1] = true;
-        assert!(!pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf: &critical_lower, actual_material: &before_m },
-            NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap(), "a critical shared side remains owned by the independent collar route");
+        assert!(
+            !pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &critical_lower,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+            "a critical shared side remains owned by the independent collar route"
+        );
         let mut exhausted = GeometryWorkBudget::new(0);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut exhausted, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut work, &AtomicBool::new(true),
-        ).unwrap_err().code, GeometryErrorCode::Cancelled);
-        assert_eq!(pending.regular_interfaces.as_slice(), &[sealed],
-            "critical, stale, exhausted and cancelled attempts grant no additional authority");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut exhausted,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &AtomicBool::new(true),
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
+        assert_eq!(
+            pending.regular_interfaces.as_slice(),
+            &[sealed],
+            "critical, stale, exhausted and cancelled attempts grant no additional authority"
+        );
         let clearance = after_leaf.sample_loop_clearance_mm.unwrap();
         assert!(clearance > 0.0);
 
         // Exercise equality/hash binding without adding point storage to the
         // receipt. These deliberately poisoned private metadata values cannot
         // be constructed through the public source-leaf API.
-        let mut changed = certify_native_source_leaf(&SourceLeafRequest {
-            definition: &definition, occurrence_id: &id, pose, analysis: &after,
-            actual_used_source_loops: &after_m, policy: policy(0.0),
-        }, &mut work, &cancel).unwrap();
+        let mut changed = certify_native_source_leaf(
+            &SourceLeafRequest {
+                definition: &definition,
+                occurrence_id: &id,
+                pose,
+                analysis: &after,
+                actual_used_source_loops: &after_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let mut foreign_current = changed.clone();
         foreign_current.sample_region_error_mm = foreign_current.sample_region_error_mm.next_up();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target },
-            NativeCriticalCollarTarget { leaf: &foreign_current, actual_material: &after_m },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "the current leaf must belong to this pending proof");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget {
+                        leaf: &foreign_current,
+                        actual_material: &after_m
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "the current leaf must belong to this pending proof"
+        );
         drop(foreign_current);
         let mut foreign = after_m;
         foreign.swap(0, 1);
-        assert_eq!(verify_source_leaf_candidate(&after_leaf, &foreign, &mut work, &cancel)
-            .unwrap_err().code, GeometryErrorCode::InvalidGeometry);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m },
-            NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&foreign },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry,
-            "an existing sealed receipt cannot be reused for foreign actual geometry");
+        assert_eq!(
+            verify_source_leaf_candidate(&after_leaf, &foreign, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "an existing sealed receipt cannot be reused for foreign actual geometry"
+        );
         foreign.swap(0, 1);
         let hole_index = foreign.iter().position(|cycle| cycle.is_hole).unwrap();
         foreign[hole_index].is_hole = false;
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target },
-            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "a sealed receipt cannot erase an actual protected hole");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "a sealed receipt cannot erase an actual protected hole"
+        );
         foreign[hole_index].is_hole = true;
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf: &before_leaf, actual_material: &foreign },
-            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "both actual buffers must be independently verified, including the lower one");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &foreign
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "both actual buffers must be independently verified, including the lower one"
+        );
         let lower_occurrences = [NativeUnionOccurrence {
-            occurrence_id: id, definition: &definition, pose,
+            occurrence_id: id,
+            definition: &definition,
+            pose,
             evidence: source_evidence(&before, &before_leaf, None),
         }];
         let lower_pending = super::certify_native_union(
-            &lower_occurrences, &before_m, policy(0.0), &mut work, &cancel,
-        ).unwrap();
+            &lower_occurrences,
+            &before_m,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let mut ledger = NativeUnionBindingLedger::new([5.01, 5.05], MAX_SCRATCH).unwrap();
-        ledger.record(lower_pending, &before_m, &[&before_leaf], &mut work, &cancel).unwrap();
-        ledger.record(pending, &foreign, &[&after_leaf], &mut work, &cancel).unwrap();
+        ledger
+            .record(
+                lower_pending,
+                &before_m,
+                &[&before_leaf],
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        ledger
+            .record(pending, &foreign, &[&after_leaf], &mut work, &cancel)
+            .unwrap();
         let completed = ledger.finalize(&mut work, &cancel).unwrap();
         assert_eq!(completed.world_height_interval_mm(), [5.01, 5.05]);
-        assert_eq!(completed.slab_count(), 2,
-            "the registered pair and adjacent source leaves retain closed stream binding");
+        assert_eq!(
+            completed.slab_count(),
+            2,
+            "the registered pair and adjacent source leaves retain closed stream binding"
+        );
         let hash = |leaf: &NativeSourceLeafReceipt| {
             let mut hash = Sha256::new();
             hash_leaf(&mut hash, leaf);
@@ -8297,16 +8780,28 @@ mod tests {
         assert_ne!(hash(&after_leaf), hash(&changed));
         changed.sample_loop_clearance_mm = Some(clearance);
         let original_index = changed.sample_loops[0].registration.native_index;
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = usize::MAX;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0]
+            .registration
+            .native_index = usize::MAX;
         assert!(!same_leaf(&after_leaf, &changed));
         assert_ne!(hash(&after_leaf), hash(&changed));
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = original_index;
-        let hole = changed.sample_loops.iter().position(|cycle| cycle.hole).unwrap();
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0]
+            .registration
+            .native_index = original_index;
+        let hole = changed
+            .sample_loops
+            .iter()
+            .position(|cycle| cycle.hole)
+            .unwrap();
         let original_parent = changed.sample_loops[hole].registration.parent;
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = None;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole]
+            .registration
+            .parent = None;
         assert!(!same_leaf(&after_leaf, &changed));
         assert_ne!(hash(&after_leaf), hash(&changed));
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = original_parent;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole]
+            .registration
+            .parent = original_parent;
 
         // Isolate the captured whole-boundary clearance consumer by discarding
         // alternative radial/kernel witnesses, never by inventing a source fact.
@@ -8322,16 +8817,24 @@ mod tests {
             distance_mm: Some(clearance * 0.25),
         };
         boundary_loop_confinement(&changed, &moving, 0, cut, &mut work, &cancel).unwrap();
-        let unavailable = NativeBoundaryTube { distance_mm: None, ..moving };
+        let unavailable = NativeBoundaryTube {
+            distance_mm: None,
+            ..moving
+        };
         assert_eq!(
             boundary_loop_confinement(&changed, &unavailable, 0, cut, &mut work, &cancel)
-                .unwrap_err().code,
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate,
         );
-        let exhausted = NativeBoundaryTube { distance_mm: Some(clearance * 0.5), ..moving };
+        let exhausted = NativeBoundaryTube {
+            distance_mm: Some(clearance * 0.5),
+            ..moving
+        };
         assert_eq!(
             boundary_loop_confinement(&changed, &exhausted, 0, cut, &mut work, &cancel)
-                .unwrap_err().code,
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate,
             "nonpositive remaining whole-boundary clearance supplies no confinement",
         );
@@ -8342,7 +8845,13 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm::IDENTITY;
         let analysis = slab(&source, pose, 0, &mut work);
         let leaf = source_leaf(&source, 1, pose, &analysis, &mut work);
@@ -8367,12 +8876,16 @@ mod tests {
         hash_source(&mut original_hash, &leaf.source);
         hash_source(&mut changed_hash, &changed.source);
         assert_ne!(original_hash.finalize(), changed_hash.finalize());
-        let occurrences = [NativeUnionOccurrence { occurrence_id: leaf.occurrence_id(), source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &analysis,
-            leaf: &changed,
-            endpoint_ownerships: &[],
-        }, }];
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: leaf.occurrence_id(),
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &analysis,
+                leaf: &changed,
+                endpoint_ownerships: &[],
+            },
+        }];
         let loops = xy_candidate(&analysis, analysis.sample_world_z_mm().unwrap());
         assert_eq!(
             certify_native_union(&occurrences, &loops, policy(0.0), &mut work, &cancel)
@@ -8387,7 +8900,13 @@ mod tests {
         let definition = original("cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm::IDENTITY;
         let analysis = slab(&source, pose, 0, &mut work);
         let baseline = source_leaf(&source, 1, pose, &analysis, &mut work);
@@ -8400,11 +8919,14 @@ mod tests {
         }
         rotated.reverse();
         let receipt = certify_native_source_leaf(
-            &SourceLeafRequest { source: &source, occurrence_id: &OccurrenceId::new(1).unwrap(),
-            pose,
-            analysis: &analysis,
-            actual_used_source_loops: &rotated,
-            policy: policy(0.0), },
+            &SourceLeafRequest {
+                source: &source,
+                occurrence_id: &OccurrenceId::new(1).unwrap(),
+                pose,
+                analysis: &analysis,
+                actual_used_source_loops: &rotated,
+                policy: policy(0.0),
+            },
             &mut work,
             &cancel,
         )
@@ -8462,7 +8984,13 @@ mod tests {
         ] {
             let definition = original(name);
             let mut work = GeometryWorkBudget::new(100_000_000);
-            let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+            let source = crate::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             for (interval, z, endpoint) in [([0.0, 0.02], 0.01, 0), ([7.98, 8.0], 7.99, 1)] {
                 let analysis = ranged_slab(&source, pose, interval, z, 0, &mut work);
                 assert!(!analysis.has_transition_material(), "{name}");
@@ -8480,9 +9008,12 @@ mod tests {
                 missing_incidence.native_endpoint_closure = [false; 2];
                 assert!(!same_leaf(&leaf, &missing_incidence));
                 let failure = super::certify_native_union(
-                    &[sampled_occurrence(&source, &analysis,
-                    &missing_incidence,
-                    None,)],
+                    &[sampled_occurrence(
+                        &source,
+                        &analysis,
+                        &missing_incidence,
+                        None,
+                    )],
                     &actual,
                     policy(0.0),
                     &mut work,
@@ -8552,7 +9083,13 @@ mod tests {
         ] {
             let definition = original(name);
             let mut work = GeometryWorkBudget::new(100_000_000);
-            let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+            let source = crate::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             let analysis = ranged_slab(&source, pose, interval, z, 0, &mut work);
             assert!(analysis.has_critical_collar(), "{name}");
             let leaf = source_leaf(&source, 13, pose, &analysis, &mut work);
@@ -8594,18 +9131,21 @@ mod tests {
             });
         }
         let cancel = AtomicBool::new(false);
-        let metric = source.certify_native_critical_collar(
-            analysis,
-            &targets,
-            super::super::collar::NativeCriticalCollarPolicy {
-                maximum_xy_cover_error_mm: 0.05,
-                maximum_distance_mm: leaf.native_shape_error_policy_mm(),
-                byte_limit: MAX_SCRATCH as u32,
-            },
-            work,
-            &cancel,
-        )
-        .expect("whole original native height-clipped boundary cover by actual positive source-M");
+        let metric = source
+            .certify_native_critical_collar(
+                analysis,
+                &targets,
+                super::super::collar::NativeCriticalCollarPolicy {
+                    maximum_xy_cover_error_mm: 0.05,
+                    maximum_distance_mm: leaf.native_shape_error_policy_mm(),
+                    byte_limit: MAX_SCRATCH as u32,
+                },
+                work,
+                &cancel,
+            )
+            .expect(
+                "whole original native height-clipped boundary cover by actual positive source-M",
+            );
         Some(certify_native_collar_incidence(analysis,leaf,&metric,&targets,work,&cancel)
             .expect("original source coface/coedge/neighbor loop incidence and actual source-M interface graph"))
     }
@@ -8666,46 +9206,50 @@ mod tests {
         let adapted: Vec<_> = occurrences
             .iter()
             .zip(&collars)
-            .map(|(original, collar)| NativeUnionOccurrence { occurrence_id: original.occurrence_id, source: original.source, pose: original.pose,
-            evidence: match (&original.evidence, collar) {
-                (NativeUnionOccurrenceEvidence::Slab { analysis, leaf, .. }, Some(collar)) => {
-                    NativeUnionOccurrenceEvidence::SlabWithCollar {
-                        analysis,
-                        leaf,
-                        endpoint_ownerships: &[],
-                        collar,
+            .map(|(original, collar)| NativeUnionOccurrence {
+                occurrence_id: original.occurrence_id,
+                source: original.source,
+                pose: original.pose,
+                evidence: match (&original.evidence, collar) {
+                    (NativeUnionOccurrenceEvidence::Slab { analysis, leaf, .. }, Some(collar)) => {
+                        NativeUnionOccurrenceEvidence::SlabWithCollar {
+                            analysis,
+                            leaf,
+                            endpoint_ownerships: &[],
+                            collar,
+                        }
                     }
-                }
-                (
-                    NativeUnionOccurrenceEvidence::Slab {
+                    (
+                        NativeUnionOccurrenceEvidence::Slab {
+                            analysis,
+                            leaf,
+                            endpoint_ownerships,
+                        },
+                        None,
+                    ) => NativeUnionOccurrenceEvidence::Slab {
                         analysis,
                         leaf,
                         endpoint_ownerships,
                     },
-                    None,
-                ) => NativeUnionOccurrenceEvidence::Slab {
-                    analysis,
-                    leaf,
-                    endpoint_ownerships,
-                },
-                (
-                    NativeUnionOccurrenceEvidence::SlabWithCollar {
+                    (
+                        NativeUnionOccurrenceEvidence::SlabWithCollar {
+                            analysis,
+                            leaf,
+                            endpoint_ownerships,
+                            collar,
+                        },
+                        _,
+                    ) => NativeUnionOccurrenceEvidence::SlabWithCollar {
                         analysis,
                         leaf,
                         endpoint_ownerships,
                         collar,
                     },
-                    _,
-                ) => NativeUnionOccurrenceEvidence::SlabWithCollar {
-                    analysis,
-                    leaf,
-                    endpoint_ownerships,
-                    collar,
+                    (NativeUnionOccurrenceEvidence::EndpointOwned(owner), _) => {
+                        NativeUnionOccurrenceEvidence::EndpointOwned(owner)
+                    }
                 },
-                (NativeUnionOccurrenceEvidence::EndpointOwned(owner), _) => {
-                    NativeUnionOccurrenceEvidence::EndpointOwned(owner)
-                }
-            }, })
+            })
             .collect();
         super::certify_native_union(&adapted, candidate, policy, work, cancel)
     }
@@ -8716,37 +9260,73 @@ mod tests {
         let cylinder = original("cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let box_source = crate::prepare_solid(&box_, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let cylinder_source = crate::prepare_solid(&cylinder, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let box_source = crate::prepare_solid(
+            &box_,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cylinder_source = crate::prepare_solid(
+            &cylinder,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let box_id = OccurrenceId::new(11).unwrap();
         let cylinder_id = OccurrenceId::new(29).unwrap();
         let cylinder_pose = RigidPoseMm {
             translation_mm: [100.0, 0.0, 4.0],
             ..RigidPoseMm::IDENTITY
         };
-        let old_box = ranged_slab(&box_source, RigidPoseMm::IDENTITY, [7.8, 8.0], 7.9, 0, &mut work);
-        let old_cylinder = ranged_slab(&cylinder_source, cylinder_pose,
-        [7.8, 8.0],
-        7.9,
-        old_box.retained_bytes(),
-        &mut work,);
+        let old_box = ranged_slab(
+            &box_source,
+            RigidPoseMm::IDENTITY,
+            [7.8, 8.0],
+            7.9,
+            0,
+            &mut work,
+        );
+        let old_cylinder = ranged_slab(
+            &cylinder_source,
+            cylinder_pose,
+            [7.8, 8.0],
+            7.9,
+            old_box.retained_bytes(),
+            &mut work,
+        );
         let receipt = source_leaf(&box_source, 11, RigidPoseMm::IDENTITY, &old_box, &mut work);
-        let cylinder_leaf = source_leaf(&cylinder_source, 29, cylinder_pose, &old_cylinder, &mut work);
+        let cylinder_leaf = source_leaf(
+            &cylinder_source,
+            29,
+            cylinder_pose,
+            &old_cylinder,
+            &mut work,
+        );
         let mut old_candidate = xy_candidate(&old_box, 7.9);
         old_candidate.extend(xy_candidate(&old_cylinder, 7.9));
         let old_occurrences = [
-            NativeUnionOccurrence { occurrence_id: box_id, source: &box_source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &old_box,
-                leaf: &receipt,
-                endpoint_ownerships: &[],
-            }, },
-            NativeUnionOccurrence { occurrence_id: cylinder_id, source: &cylinder_source, pose: cylinder_pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &old_cylinder,
-                leaf: &cylinder_leaf,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: box_id,
+                source: &box_source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &old_box,
+                    leaf: &receipt,
+                    endpoint_ownerships: &[],
+                },
+            },
+            NativeUnionOccurrence {
+                occurrence_id: cylinder_id,
+                source: &cylinder_source,
+                pose: cylinder_pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &old_cylinder,
+                    leaf: &cylinder_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let previous = certify_native_union(
             &old_occurrences,
@@ -8783,22 +9363,39 @@ mod tests {
                 .iter()
                 .map(|ring| ring.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
                 .sum::<usize>();
-        let cylinder_now = ranged_slab(&cylinder_source, cylinder_pose,
-        [8.0, 8.2],
-        8.1,
-        retained,
-        &mut work,);
-        let current_leaf = source_leaf(&cylinder_source, 29, cylinder_pose, &cylinder_now, &mut work);
+        let cylinder_now = ranged_slab(
+            &cylinder_source,
+            cylinder_pose,
+            [8.0, 8.2],
+            8.1,
+            retained,
+            &mut work,
+        );
+        let current_leaf = source_leaf(
+            &cylinder_source,
+            29,
+            cylinder_pose,
+            &cylinder_now,
+            &mut work,
+        );
         let candidate = xy_candidate(&cylinder_now, 8.1);
         let current = [
-            NativeUnionOccurrence { occurrence_id: box_id, source: &box_source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&ownership), },
-            NativeUnionOccurrence { occurrence_id: cylinder_id, source: &cylinder_source, pose: cylinder_pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &cylinder_now,
-                leaf: &current_leaf,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: box_id,
+                source: &box_source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&ownership),
+            },
+            NativeUnionOccurrence {
+                occurrence_id: cylinder_id,
+                source: &cylinder_source,
+                pose: cylinder_pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &cylinder_now,
+                    leaf: &current_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let proof =
             certify_native_union(&current, &candidate, policy(0.0), &mut work, &cancel).unwrap();
@@ -8879,16 +9476,26 @@ mod tests {
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let successor = ranged_slab(&source, pose, [8.0, 8.2], 8.1, 0, &mut work);
         let successor_candidate = xy_candidate(&successor, 8.1);
         let receipt = source_leaf(&source, 7, pose, &successor, &mut work);
-        let occurrence = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &successor,
-            leaf: &receipt,
-            endpoint_ownerships: &[],
-        }, }];
+        let occurrence = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &successor,
+                leaf: &receipt,
+                endpoint_ownerships: &[],
+            },
+        }];
         let future = certify_native_union(
             &occurrence,
             &successor_candidate,
@@ -8913,8 +9520,12 @@ mod tests {
         .unwrap();
         assert_eq!(endpoint.endpoint(), NativeOwnedEndpoint::Upper);
         assert!(endpoint.source_world_z_support().unwrap().minimum[0] >= 8.0);
-        let current = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&endpoint), }];
+        let current = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&endpoint),
+        }];
         let proof = certify_native_union(&current, &[], policy(0.0), &mut work, &cancel).unwrap();
         assert_eq!(proof.material_component_count(), 0);
         assert_eq!(
@@ -8962,23 +9573,35 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let a_id = OccurrenceId::new(41).unwrap();
         let b_id = OccurrenceId::new(97).unwrap();
         let b_pose = RigidPoseMm {
             translation_mm: [10.0, 0.0, 8.0],
             ..RigidPoseMm::IDENTITY
         };
-        let a = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [7.8, 8.0],
-        7.9,
-        0,
-        &mut work,);
-        let b = ranged_slab(&source, b_pose,
-        [8.0, 8.2],
-        8.1,
-        a.retained_bytes(),
-        &mut work,);
+        let a = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [7.8, 8.0],
+            7.9,
+            0,
+            &mut work,
+        );
+        let b = ranged_slab(
+            &source,
+            b_pose,
+            [8.0, 8.2],
+            8.1,
+            a.retained_bytes(),
+            &mut work,
+        );
         let a_candidate = xy_candidate(&a, 7.9);
         let b_candidate = xy_candidate(&b, 8.1);
         let a_leaf = source_leaf(&source, 41, RigidPoseMm::IDENTITY, &a, &mut work);
@@ -9016,24 +9639,40 @@ mod tests {
         )
         .unwrap();
         let before = [
-            NativeUnionOccurrence { occurrence_id: a_id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &a,
-                leaf: &a_leaf,
-                endpoint_ownerships: &[],
-            }, },
-            NativeUnionOccurrence { occurrence_id: b_id, source: &source, pose: b_pose,
-            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&upper_birth), },
+            NativeUnionOccurrence {
+                occurrence_id: a_id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &a,
+                    leaf: &a_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
+            NativeUnionOccurrence {
+                occurrence_id: b_id,
+                source: &source,
+                pose: b_pose,
+                evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&upper_birth),
+            },
         ];
         let after = [
-            NativeUnionOccurrence { occurrence_id: a_id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&lower_death), },
-            NativeUnionOccurrence { occurrence_id: b_id, source: &source, pose: b_pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &b,
-                leaf: &b_leaf,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: a_id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&lower_death),
+            },
+            NativeUnionOccurrence {
+                occurrence_id: b_id,
+                source: &source,
+                pose: b_pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &b,
+                    leaf: &b_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let first =
             certify_native_union(&before, &a_candidate, policy(0.0), &mut work, &cancel).unwrap();
@@ -9070,13 +9709,22 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let id = OccurrenceId::new(1).unwrap();
-        let a = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [7.8, 8.0],
-        7.9,
-        0,
-        &mut work,);
+        let a = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [7.8, 8.0],
+            7.9,
+            0,
+            &mut work,
+        );
         let a_leaf = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let contact = certify_endpoint_ownership(
             &EndpointOwnershipRequest {
@@ -9096,21 +9744,32 @@ mod tests {
             translation_mm: [20.0 - 1.0 / 1024.0, 0.0, 8.0],
             ..RigidPoseMm::IDENTITY
         };
-        let b = ranged_slab(&source, pose,
-        [8.0, 8.2],
-        8.1,
-        a.retained_bytes() + a_leaf.retained_bytes() + contact.retained_bytes(),
-        &mut work,);
+        let b = ranged_slab(
+            &source,
+            pose,
+            [8.0, 8.2],
+            8.1,
+            a.retained_bytes() + a_leaf.retained_bytes() + contact.retained_bytes(),
+            &mut work,
+        );
         let b_leaf = source_leaf(&source, 2, pose, &b, &mut work);
         let inputs = [
-            NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&contact), },
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(2).unwrap(), source: &source, pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &b,
-                leaf: &b_leaf,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&contact),
+            },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                source: &source,
+                pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &b,
+                    leaf: &b_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let failure = certify_native_union(
             &inputs,
@@ -9129,7 +9788,13 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(10_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let analysis = slab(&source, RigidPoseMm::IDENTITY, 0, &mut work);
         let mut actual = xy_candidate(&analysis, 4.0);
         for ring in &mut actual {
@@ -9139,21 +9804,28 @@ mod tests {
         }
         let id = OccurrenceId::new(1).unwrap();
         let leaf = certify_native_source_leaf(
-            &SourceLeafRequest { source: &source, occurrence_id: &id,
-            pose: RigidPoseMm::IDENTITY,
-            analysis: &analysis,
-            actual_used_source_loops: &actual,
-            policy: policy(0.01), },
+            &SourceLeafRequest {
+                source: &source,
+                occurrence_id: &id,
+                pose: RigidPoseMm::IDENTITY,
+                analysis: &analysis,
+                actual_used_source_loops: &actual,
+                policy: policy(0.01),
+            },
             &mut work,
             &cancel,
         )
         .unwrap();
-        let occurrences = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &analysis,
-            leaf: &leaf,
-            endpoint_ownerships: &[],
-        }, }];
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose: RigidPoseMm::IDENTITY,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &analysis,
+                leaf: &leaf,
+                endpoint_ownerships: &[],
+            },
+        }];
         let accepted =
             super::certify_native_union(&occurrences, &actual, policy(0.01), &mut work, &cancel)
                 .unwrap();
@@ -9176,31 +9848,41 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let a = slab(&source, RigidPoseMm::IDENTITY, 0, &mut work);
         let candidate = xy_candidate(&a, 4.0);
         let leaf = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
-        let changed_slab = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [3.99, 4.01],
-        4.005,
-        a.retained_bytes()
-            + leaf.retained_bytes()
-            + candidate.capacity() * std::mem::size_of::<SectionLoopMm>()
-            + candidate
-                .iter()
-                .map(|ring| ring.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
-                .sum::<usize>(),
-        &mut work,);
-        let stale = source_leaf(&source, 1,
-        RigidPoseMm::IDENTITY,
-        &changed_slab,
-        &mut work,);
-        let occurrences = [NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose: RigidPoseMm::IDENTITY,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &a,
-            leaf: &leaf,
-            endpoint_ownerships: &[],
-        }, }];
+        let changed_slab = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [3.99, 4.01],
+            4.005,
+            a.retained_bytes()
+                + leaf.retained_bytes()
+                + candidate.capacity() * std::mem::size_of::<SectionLoopMm>()
+                + candidate
+                    .iter()
+                    .map(|ring| ring.points_mm.capacity() * std::mem::size_of::<[f64; 3]>())
+                    .sum::<usize>(),
+            &mut work,
+        );
+        let stale = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &changed_slab, &mut work);
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            source: &source,
+            pose: RigidPoseMm::IDENTITY,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &a,
+                leaf: &leaf,
+                endpoint_ownerships: &[],
+            },
+        }];
         let make = |work: &mut GeometryWorkBudget| {
             certify_native_union(&occurrences, &candidate, policy(0.0), work, &cancel).unwrap()
         };
@@ -9258,7 +9940,13 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let id = OccurrenceId::new(7).unwrap();
         let pose = RigidPoseMm {
             translation_mm: [0.0, 0.0, 8.0],
@@ -9280,26 +9968,37 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let old_evidence = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&old_owner), }];
+        let old_evidence = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&old_owner),
+        }];
         let first =
             certify_native_union(&old_evidence, &[], policy(0.0), &mut work, &cancel).unwrap();
-        let refined = ranged_slab(&source, pose,
-        [8.0, 8.1],
-        8.05,
-        old.retained_bytes()
-            + old_leaf.retained_bytes()
-            + old_owner.retained_bytes()
-            + first.retained_bytes(),
-        &mut work,);
+        let refined = ranged_slab(
+            &source,
+            pose,
+            [8.0, 8.1],
+            8.05,
+            old.retained_bytes()
+                + old_leaf.retained_bytes()
+                + old_owner.retained_bytes()
+                + first.retained_bytes(),
+            &mut work,
+        );
         let refined_leaf = source_leaf(&source, 7, pose, &refined, &mut work);
         let refined_m = xy_candidate(&refined, 8.05);
-        let refined_evidence = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &refined,
-            leaf: &refined_leaf,
-            endpoint_ownerships: &[],
-        }, }];
+        let refined_evidence = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &refined,
+                leaf: &refined_leaf,
+                endpoint_ownerships: &[],
+            },
+        }];
         let successor = certify_native_union(
             &refined_evidence,
             &refined_m,
@@ -9331,8 +10030,12 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let evidence = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&owner), }];
+        let evidence = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&owner),
+        }];
         let first = certify_native_union(&evidence, &[], policy(0.0), &mut work, &cancel).unwrap();
         let successor = certify_native_union(
             &refined_evidence,
@@ -9358,7 +10061,13 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [0.0, 0.0, 20.0],
             ..RigidPoseMm::IDENTITY
@@ -9366,12 +10075,16 @@ mod tests {
         let empty = slab(&source, pose, 0, &mut work);
         let leaf = source_leaf(&source, 1, pose, &empty, &mut work);
         assert!(!leaf.is_positive());
-        let inputs = [NativeUnionOccurrence { occurrence_id: OccurrenceId::new(1).unwrap(), source: &source, pose,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &empty,
-            leaf: &leaf,
-            endpoint_ownerships: &[],
-        }, }];
+        let inputs = [NativeUnionOccurrence {
+            occurrence_id: OccurrenceId::new(1).unwrap(),
+            source: &source,
+            pose,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &empty,
+                leaf: &leaf,
+                endpoint_ownerships: &[],
+            },
+        }];
         let pending = certify_native_union(&inputs, &[], policy(0.0), &mut work, &cancel).unwrap();
         assert!(pending.positive_source_leaves().is_empty());
         let mut ledger = NativeUnionBindingLedger::new([3.99, 4.01], MAX_SCRATCH).unwrap();
@@ -9390,7 +10103,13 @@ mod tests {
             let definition = original(name);
             let cancel = AtomicBool::new(false);
             let mut work = GeometryWorkBudget::new(200_000_000);
-            let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+            let source = crate::prepare_solid(
+                &definition,
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             if name.contains("nurbs") {
                 assert!(definition.face_ids().iter().any(|&face| {
                     definition.face_surface(face).is_some_and(|surface| {
@@ -9401,16 +10120,22 @@ mod tests {
                 }));
             }
             let id = OccurrenceId::new(83).unwrap();
-            let below = ranged_slab(&source, RigidPoseMm::IDENTITY,
-            [3.8, 4.0],
-            3.9,
-            0,
-            &mut work,);
-            let above = ranged_slab(&source, RigidPoseMm::IDENTITY,
-            [4.0, 4.2],
-            4.1,
-            below.retained_bytes(),
-            &mut work,);
+            let below = ranged_slab(
+                &source,
+                RigidPoseMm::IDENTITY,
+                [3.8, 4.0],
+                3.9,
+                0,
+                &mut work,
+            );
+            let above = ranged_slab(
+                &source,
+                RigidPoseMm::IDENTITY,
+                [4.0, 4.2],
+                4.1,
+                below.retained_bytes(),
+                &mut work,
+            );
             let below_m = xy_candidate(&below, 3.9);
             let above_m = xy_candidate(&above, 4.1);
             assert_eq!(below_m.iter().filter(|loop_| loop_.is_hole).count(), 0);
@@ -9418,26 +10143,40 @@ mod tests {
             let below_leaf = source_leaf(&source, 83, RigidPoseMm::IDENTITY, &below, &mut work);
             let above_leaf = source_leaf(&source, 83, RigidPoseMm::IDENTITY, &above, &mut work);
             assert!(above_leaf.closed_shape_error_mm().is_none());
-            let below_collar = collar_for(&source, &below,
-            &below_leaf,
-            &below_m,
-            &[NativeCriticalCollarTarget {
-                leaf: &above_leaf,
-                actual_material: &above_m,
-            }],
-            &mut work,);
-            let above_collar = collar_for(&source, &above,
-            &above_leaf,
-            &above_m,
-            &[NativeCriticalCollarTarget {
-                leaf: &below_leaf,
-                actual_material: &below_m,
-            }],
-            &mut work,);
-            let first = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: source_evidence(&below, &below_leaf, below_collar.as_ref()), }];
-            let second = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: source_evidence(&above, &above_leaf, above_collar.as_ref()), }];
+            let below_collar = collar_for(
+                &source,
+                &below,
+                &below_leaf,
+                &below_m,
+                &[NativeCriticalCollarTarget {
+                    leaf: &above_leaf,
+                    actual_material: &above_m,
+                }],
+                &mut work,
+            );
+            let above_collar = collar_for(
+                &source,
+                &above,
+                &above_leaf,
+                &above_m,
+                &[NativeCriticalCollarTarget {
+                    leaf: &below_leaf,
+                    actual_material: &below_m,
+                }],
+                &mut work,
+            );
+            let first = [NativeUnionOccurrence {
+                occurrence_id: id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: source_evidence(&below, &below_leaf, below_collar.as_ref()),
+            }];
+            let second = [NativeUnionOccurrence {
+                occurrence_id: id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: source_evidence(&above, &above_leaf, above_collar.as_ref()),
+            }];
             let before =
                 certify_native_union(&first, &below_m, policy(0.0), &mut work, &cancel).unwrap();
             let after =
@@ -9477,18 +10216,30 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let id = OccurrenceId::new(63).unwrap();
-        let below = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [1.05, 1.07],
-        1.06,
-        0,
-        &mut work,);
-        let above = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [1.07, 1.09],
-        1.08,
-        below.retained_bytes(),
-        &mut work,);
+        let below = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [1.05, 1.07],
+            1.06,
+            0,
+            &mut work,
+        );
+        let above = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [1.07, 1.09],
+            1.08,
+            below.retained_bytes(),
+            &mut work,
+        );
         let below_m = xy_candidate(&below, 1.06);
         let above_m = xy_candidate(&above, 1.08);
         assert_eq!(below_m.iter().filter(|loop_| loop_.is_hole).count(), 0);
@@ -9522,38 +10273,56 @@ mod tests {
                 GeometryErrorCode::AnalysisIndeterminate
             );
         }
-        let below_collar = collar_for(&source, &below,
-        &below_leaf,
-        &below_m,
-        &[NativeCriticalCollarTarget {
-            leaf: &above_leaf,
-            actual_material: &above_m,
-        }],
-        &mut work,);
-        let above_collar = collar_for(&source, &above,
-        &above_leaf,
-        &above_m,
-        &[NativeCriticalCollarTarget {
-            leaf: &below_leaf,
-            actual_material: &below_m,
-        }],
-        &mut work,);
-        let previous = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-        evidence: source_evidence(&below, &below_leaf, below_collar.as_ref()), }];
-        let missing = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-        evidence: NativeUnionOccurrenceEvidence::Slab {
-            analysis: &above,
-            leaf: &above_leaf,
-            endpoint_ownerships: &[],
-        }, }];
+        let below_collar = collar_for(
+            &source,
+            &below,
+            &below_leaf,
+            &below_m,
+            &[NativeCriticalCollarTarget {
+                leaf: &above_leaf,
+                actual_material: &above_m,
+            }],
+            &mut work,
+        );
+        let above_collar = collar_for(
+            &source,
+            &above,
+            &above_leaf,
+            &above_m,
+            &[NativeCriticalCollarTarget {
+                leaf: &below_leaf,
+                actual_material: &below_m,
+            }],
+            &mut work,
+        );
+        let previous = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose: RigidPoseMm::IDENTITY,
+            evidence: source_evidence(&below, &below_leaf, below_collar.as_ref()),
+        }];
+        let missing = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose: RigidPoseMm::IDENTITY,
+            evidence: NativeUnionOccurrenceEvidence::Slab {
+                analysis: &above,
+                leaf: &above_leaf,
+                endpoint_ownerships: &[],
+            },
+        }];
         assert_eq!(
             super::certify_native_union(&missing, &above_m, policy(0.0), &mut work, &cancel)
                 .unwrap_err()
                 .code,
             GeometryErrorCode::AnalysisIndeterminate
         );
-        let current = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-        evidence: source_evidence(&above, &above_leaf, above_collar.as_ref()), }];
+        let current = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose: RigidPoseMm::IDENTITY,
+            evidence: source_evidence(&above, &above_leaf, above_collar.as_ref()),
+        }];
         let before =
             certify_native_union(&previous, &below_m, policy(0.0), &mut work, &cancel).unwrap();
         let after =
@@ -9589,12 +10358,21 @@ mod tests {
         let id = OccurrenceId::new(1).unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let previous = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [7.3, 7.5],
-        7.4,
-        0,
-        &mut work,);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let previous = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [7.3, 7.5],
+            7.4,
+            0,
+            &mut work,
+        );
         let cert = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &previous, &mut work);
         assert_eq!(
             certify_endpoint_ownership(
@@ -9615,15 +10393,15 @@ mod tests {
             GeometryErrorCode::AnalysisIndeterminate
         );
         drop((previous, cert));
-        let previous_slab = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [7.8, 8.0],
-        7.9,
-        0,
-        &mut work,);
-        let previous = source_leaf(&source, 1,
-        RigidPoseMm::IDENTITY,
-        &previous_slab,
-        &mut work,);
+        let previous_slab = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [7.8, 8.0],
+            7.9,
+            0,
+            &mut work,
+        );
+        let previous = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &previous_slab, &mut work);
         let endpoint = certify_endpoint_ownership(
             &EndpointOwnershipRequest {
                 definition: &definition,
@@ -9642,21 +10420,32 @@ mod tests {
             translation_mm: [20.0, 10.0, 8.0],
             ..RigidPoseMm::IDENTITY
         };
-        let corner = ranged_slab(&source, corner_pose,
-        [8.0, 8.2],
-        8.1,
-        previous_slab.retained_bytes() + previous.retained_bytes() + endpoint.retained_bytes(),
-        &mut work,);
+        let corner = ranged_slab(
+            &source,
+            corner_pose,
+            [8.0, 8.2],
+            8.1,
+            previous_slab.retained_bytes() + previous.retained_bytes() + endpoint.retained_bytes(),
+            &mut work,
+        );
         let corner_leaf = source_leaf(&source, 2, corner_pose, &corner, &mut work);
         let current = [
-            NativeUnionOccurrence { occurrence_id: id, source: &source, pose: RigidPoseMm::IDENTITY,
-            evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&endpoint), },
-            NativeUnionOccurrence { occurrence_id: OccurrenceId::new(2).unwrap(), source: &source, pose: corner_pose,
-            evidence: NativeUnionOccurrenceEvidence::Slab {
-                analysis: &corner,
-                leaf: &corner_leaf,
-                endpoint_ownerships: &[],
-            }, },
+            NativeUnionOccurrence {
+                occurrence_id: id,
+                source: &source,
+                pose: RigidPoseMm::IDENTITY,
+                evidence: NativeUnionOccurrenceEvidence::EndpointOwned(&endpoint),
+            },
+            NativeUnionOccurrence {
+                occurrence_id: OccurrenceId::new(2).unwrap(),
+                source: &source,
+                pose: corner_pose,
+                evidence: NativeUnionOccurrenceEvidence::Slab {
+                    analysis: &corner,
+                    leaf: &corner_leaf,
+                    endpoint_ownerships: &[],
+                },
+            },
         ];
         let failure = certify_native_union(
             &current,
@@ -9713,7 +10502,13 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let dx = 10.123456789;
         let dy = 0.234567891;
         let pose = RigidPoseMm {
@@ -9722,16 +10517,22 @@ mod tests {
         };
         let mut ledger = NativeUnionBindingLedger::new([3.98, 4.02], MAX_SCRATCH).unwrap();
         for (interval, z) in [([3.98, 4.0], 3.99), ([4.0, 4.02], 4.01)] {
-            let a = ranged_slab(&source, RigidPoseMm::IDENTITY,
-            interval,
-            z,
-            ledger.retained_bytes(),
-            &mut work,);
-            let b = ranged_slab(&source, pose,
-            interval,
-            z,
-            ledger.retained_bytes() + a.retained_bytes(),
-            &mut work,);
+            let a = ranged_slab(
+                &source,
+                RigidPoseMm::IDENTITY,
+                interval,
+                z,
+                ledger.retained_bytes(),
+                &mut work,
+            );
+            let b = ranged_slab(
+                &source,
+                pose,
+                interval,
+                z,
+                ledger.retained_bytes() + a.retained_bytes(),
+                &mut work,
+            );
             let a_leaf = source_leaf(&source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
             let b_leaf = source_leaf(&source, 2, pose, &b, &mut work);
             assert!(b_leaf.rectangle.as_ref().unwrap().coordinate_error_mm > 0.0);
@@ -9783,31 +10584,49 @@ mod tests {
         let definition = original("box-mm.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(300_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [10.0, 0.0, 8.0],
             ..RigidPoseMm::IDENTITY
         };
-        let a0 = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [7.8, 8.0],
-        7.9,
-        0,
-        &mut work,);
-        let b0 = ranged_slab(&source, pose,
-        [7.8, 8.0],
-        7.9,
-        a0.retained_bytes(),
-        &mut work,);
-        let a1 = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [8.0, 8.2],
-        8.1,
-        a0.retained_bytes() + b0.retained_bytes(),
-        &mut work,);
-        let b1 = ranged_slab(&source, pose,
-        [8.0, 8.2],
-        8.1,
-        a0.retained_bytes() + b0.retained_bytes() + a1.retained_bytes(),
-        &mut work,);
+        let a0 = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [7.8, 8.0],
+            7.9,
+            0,
+            &mut work,
+        );
+        let b0 = ranged_slab(
+            &source,
+            pose,
+            [7.8, 8.0],
+            7.9,
+            a0.retained_bytes(),
+            &mut work,
+        );
+        let a1 = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [8.0, 8.2],
+            8.1,
+            a0.retained_bytes() + b0.retained_bytes(),
+            &mut work,
+        );
+        let b1 = ranged_slab(
+            &source,
+            pose,
+            [8.0, 8.2],
+            8.1,
+            a0.retained_bytes() + b0.retained_bytes() + a1.retained_bytes(),
+            &mut work,
+        );
         let am0 = xy_candidate(&a0, 7.9);
         let bm0 = xy_candidate(&b0, 7.9);
         let am1 = xy_candidate(&a1, 8.1);
@@ -9818,22 +10637,28 @@ mod tests {
         let al1 = source_leaf(&source, 41, RigidPoseMm::IDENTITY, &a1, &mut work);
         let bl1 = source_leaf(&source, 97, pose, &b1, &mut work);
         let ac0 = collar_for(&source, &a0, &al0, &am0, &[], &mut work);
-        let bc0 = collar_for(&source, &b0,
-        &bl0,
-        &bm0,
-        &[NativeCriticalCollarTarget {
-            leaf: &bl1,
-            actual_material: &bm1,
-        }],
-        &mut work,);
-        let ac1 = collar_for(&source, &a1,
-        &al1,
-        &am1,
-        &[NativeCriticalCollarTarget {
-            leaf: &al0,
-            actual_material: &am0,
-        }],
-        &mut work,);
+        let bc0 = collar_for(
+            &source,
+            &b0,
+            &bl0,
+            &bm0,
+            &[NativeCriticalCollarTarget {
+                leaf: &bl1,
+                actual_material: &bm1,
+            }],
+            &mut work,
+        );
+        let ac1 = collar_for(
+            &source,
+            &a1,
+            &al1,
+            &am1,
+            &[NativeCriticalCollarTarget {
+                leaf: &al0,
+                actual_material: &am0,
+            }],
+            &mut work,
+        );
         let bc1 = collar_for(&source, &b1, &bl1, &bm1, &[], &mut work);
         let before = [
             sampled_occurrence(&source, &a0, &al0, ac0.as_ref()),
@@ -9879,22 +10704,34 @@ mod tests {
         let definition = original("native-parity-blind-pocket.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(300_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [0.0, 0.0, 0.13],
             ..RigidPoseMm::IDENTITY
         };
         let lower = ranged_slab(&source, pose, [3.98, 4.08], 4.03, 0, &mut work);
-        let current = ranged_slab(&source, pose,
-        [4.08, 4.18],
-        4.10,
-        lower.retained_bytes(),
-        &mut work,);
-        let upper = ranged_slab(&source, pose,
-        [4.18, 4.28],
-        4.23,
-        lower.retained_bytes() + current.retained_bytes(),
-        &mut work,);
+        let current = ranged_slab(
+            &source,
+            pose,
+            [4.08, 4.18],
+            4.10,
+            lower.retained_bytes(),
+            &mut work,
+        );
+        let upper = ranged_slab(
+            &source,
+            pose,
+            [4.18, 4.28],
+            4.23,
+            lower.retained_bytes() + current.retained_bytes(),
+            &mut work,
+        );
         let lm = xy_candidate(&lower, 4.03);
         let cm = xy_candidate(&current, 4.10);
         let um = xy_candidate(&upper, 4.23);
@@ -9903,14 +10740,17 @@ mod tests {
         let ul = source_leaf(&source, 67, pose, &upper, &mut work);
         assert_eq!(cm.iter().filter(|loop_| loop_.is_hole).count(), 0);
         assert_eq!(um.iter().filter(|loop_| loop_.is_hole).count(), 1);
-        let cc = collar_for(&source, &current,
-        &cl,
-        &cm,
-        &[NativeCriticalCollarTarget {
-            leaf: &ul,
-            actual_material: &um,
-        }],
-        &mut work,)
+        let cc = collar_for(
+            &source,
+            &current,
+            &cl,
+            &cm,
+            &[NativeCriticalCollarTarget {
+                leaf: &ul,
+                actual_material: &um,
+            }],
+            &mut work,
+        )
         .unwrap();
         assert!(cc.native_collar().native_event_ports().iter().any(|port| {
             let height = port.height_interval_mm();
@@ -10005,22 +10845,37 @@ mod tests {
         let definition = original_opposing_pockets();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(500_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let lower = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [3.85, 3.95],
-        3.9,
-        0,
-        &mut work,);
-        let current = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [3.95, 4.05],
-        4.0,
-        lower.retained_bytes(),
-        &mut work,);
-        let upper = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [4.05, 4.15],
-        4.1,
-        lower.retained_bytes() + current.retained_bytes(),
-        &mut work,);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let lower = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [3.85, 3.95],
+            3.9,
+            0,
+            &mut work,
+        );
+        let current = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [3.95, 4.05],
+            4.0,
+            lower.retained_bytes(),
+            &mut work,
+        );
+        let upper = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [4.05, 4.15],
+            4.1,
+            lower.retained_bytes() + current.retained_bytes(),
+            &mut work,
+        );
         let lm = xy_candidate(&lower, 3.9);
         let cm = xy_candidate(&current, 4.0);
         let um = xy_candidate(&upper, 4.1);
@@ -10030,20 +10885,23 @@ mod tests {
         let ll = source_leaf(&source, 71, RigidPoseMm::IDENTITY, &lower, &mut work);
         let cl = source_leaf(&source, 71, RigidPoseMm::IDENTITY, &current, &mut work);
         let ul = source_leaf(&source, 71, RigidPoseMm::IDENTITY, &upper, &mut work);
-        let cc = collar_for(&source, &current,
-        &cl,
-        &cm,
-        &[
-            NativeCriticalCollarTarget {
-                leaf: &ll,
-                actual_material: &lm,
-            },
-            NativeCriticalCollarTarget {
-                leaf: &ul,
-                actual_material: &um,
-            },
-        ],
-        &mut work,)
+        let cc = collar_for(
+            &source,
+            &current,
+            &cl,
+            &cm,
+            &[
+                NativeCriticalCollarTarget {
+                    leaf: &ll,
+                    actual_material: &lm,
+                },
+                NativeCriticalCollarTarget {
+                    leaf: &ul,
+                    actual_material: &um,
+                },
+            ],
+            &mut work,
+        )
         .unwrap();
         assert!(
             cc.native_collar()
@@ -10092,17 +10950,29 @@ mod tests {
         );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let before = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [4.0 - 1.0 / 64.0, 4.0],
-        4.0 - 1.0 / 128.0,
-        0,
-        &mut work,);
-        let after = ranged_slab(&source, RigidPoseMm::IDENTITY,
-        [4.0, 4.0 + 1.0 / 64.0],
-        4.0 + 1.0 / 128.0,
-        before.retained_bytes(),
-        &mut work,);
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let before = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [4.0 - 1.0 / 64.0, 4.0],
+            4.0 - 1.0 / 128.0,
+            0,
+            &mut work,
+        );
+        let after = ranged_slab(
+            &source,
+            RigidPoseMm::IDENTITY,
+            [4.0, 4.0 + 1.0 / 64.0],
+            4.0 + 1.0 / 128.0,
+            before.retained_bytes(),
+            &mut work,
+        );
         let bm = xy_candidate(&before, before.sample_world_z_mm().unwrap());
         let am = xy_candidate(&after, after.sample_world_z_mm().unwrap());
         let bl = source_leaf(&source, 79, RigidPoseMm::IDENTITY, &before, &mut work);
@@ -10169,8 +11039,20 @@ mod tests {
         let cone = original("native-parity-cone-frustum.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(500_000_000);
-        let boxes_source = crate::prepare_solid(&boxes, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let cone_source = crate::prepare_solid(&cone, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let boxes_source = crate::prepare_solid(
+            &boxes,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cone_source = crate::prepare_solid(
+            &cone,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let dx = 10.123456789;
         let dy = 0.234567891;
         let box_pose = RigidPoseMm {
@@ -10206,24 +11088,57 @@ mod tests {
                 ] {
                     let mut ledger = NativeUnionBindingLedger::new(domain, MAX_SCRATCH).unwrap();
                     for (layer, (interval, z)) in layers.into_iter().enumerate() {
-                        let a =
-                            ranged_slab(&boxes_source, RigidPoseMm::IDENTITY, interval, z, 0, &mut work);
-                        let b = ranged_slab(&boxes_source, box_pose,
-                        interval,
-                        z,
-                        a.retained_bytes(),
-                        &mut work,);
-                        let c = ranged_slab(&cone_source, cone_pose,
-                        interval,
-                        z,
-                        a.retained_bytes() + b.retained_bytes(),
-                        &mut work,);
-                        let al = source_leaf(&boxes_source, ids[0], RigidPoseMm::IDENTITY, &a, &mut work);
+                        let a = ranged_slab(
+                            &boxes_source,
+                            RigidPoseMm::IDENTITY,
+                            interval,
+                            z,
+                            0,
+                            &mut work,
+                        );
+                        let b = ranged_slab(
+                            &boxes_source,
+                            box_pose,
+                            interval,
+                            z,
+                            a.retained_bytes(),
+                            &mut work,
+                        );
+                        let c = ranged_slab(
+                            &cone_source,
+                            cone_pose,
+                            interval,
+                            z,
+                            a.retained_bytes() + b.retained_bytes(),
+                            &mut work,
+                        );
+                        let al = source_leaf(
+                            &boxes_source,
+                            ids[0],
+                            RigidPoseMm::IDENTITY,
+                            &a,
+                            &mut work,
+                        );
                         let bl = source_leaf(&boxes_source, ids[1], box_pose, &b, &mut work);
                         let cl = source_leaf(&cone_source, ids[2], cone_pose, &c, &mut work);
-                        let ac = collar_for(&boxes_source, &a, &al, &xy_candidate(&a, z), &[], &mut work);
-                        let bc = collar_for(&boxes_source, &b, &bl, &xy_candidate(&b, z), &[], &mut work);
-                        let cc = collar_for(&cone_source, &c, &cl, &xy_candidate(&c, z), &[], &mut work);
+                        let ac = collar_for(
+                            &boxes_source,
+                            &a,
+                            &al,
+                            &xy_candidate(&a, z),
+                            &[],
+                            &mut work,
+                        );
+                        let bc = collar_for(
+                            &boxes_source,
+                            &b,
+                            &bl,
+                            &xy_candidate(&b, z),
+                            &[],
+                            &mut work,
+                        );
+                        let cc =
+                            collar_for(&cone_source, &c, &cl, &xy_candidate(&c, z), &[], &mut work);
                         if critical && layer == 0 {
                             assert!(cc.is_some());
                         }
@@ -10360,8 +11275,20 @@ mod tests {
         let cone = original("native-parity-cone-frustum.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let boxes_source = crate::prepare_solid(&boxes, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let cone_source = crate::prepare_solid(&cone, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let boxes_source = crate::prepare_solid(
+            &boxes,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cone_source = crate::prepare_solid(
+            &cone,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let dx = 10.123456789;
         let dy = 0.234567891;
         let box_pose = RigidPoseMm {
@@ -10374,9 +11301,12 @@ mod tests {
         };
         let a = slab(&boxes_source, RigidPoseMm::IDENTITY, 0, &mut work);
         let b = slab(&boxes_source, box_pose, a.retained_bytes(), &mut work);
-        let c = slab(&cone_source, cone_pose,
-        a.retained_bytes() + b.retained_bytes(),
-        &mut work,);
+        let c = slab(
+            &cone_source,
+            cone_pose,
+            a.retained_bytes() + b.retained_bytes(),
+            &mut work,
+        );
         let al = source_leaf(&boxes_source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let bl = source_leaf(&boxes_source, 2, box_pose, &b, &mut work);
         let cl = source_leaf(&cone_source, 3, cone_pose, &c, &mut work);
@@ -10409,8 +11339,20 @@ mod tests {
         let cone = original("native-parity-cone-frustum.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let boxes_source = crate::prepare_solid(&boxes, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let cone_source = crate::prepare_solid(&cone, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let boxes_source = crate::prepare_solid(
+            &boxes,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let cone_source = crate::prepare_solid(
+            &cone,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let dx = 10.123456789;
         let dy = 0.234567891;
         let box_pose = RigidPoseMm {
@@ -10423,9 +11365,12 @@ mod tests {
         };
         let a = slab(&boxes_source, RigidPoseMm::IDENTITY, 0, &mut work);
         let b = slab(&boxes_source, box_pose, a.retained_bytes(), &mut work);
-        let c = slab(&cone_source, cone_pose,
-        a.retained_bytes() + b.retained_bytes(),
-        &mut work,);
+        let c = slab(
+            &cone_source,
+            cone_pose,
+            a.retained_bytes() + b.retained_bytes(),
+            &mut work,
+        );
         let al = source_leaf(&boxes_source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let bl = source_leaf(&boxes_source, 2, box_pose, &b, &mut work);
         let cl = source_leaf(&cone_source, 3, cone_pose, &c, &mut work);
@@ -10470,8 +11415,20 @@ mod tests {
         let pocket = original("native-parity-blind-pocket.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let boxes_source = crate::prepare_solid(&boxes, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
-        let pocket_source = crate::prepare_solid(&pocket, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let boxes_source = crate::prepare_solid(
+            &boxes,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let pocket_source = crate::prepare_solid(
+            &pocket,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let dx = 10.123456789;
         let dy = 0.234567891;
         let box_pose = RigidPoseMm {
@@ -10482,21 +11439,30 @@ mod tests {
             translation_mm: [80.0, 0.0, 0.0],
             ..RigidPoseMm::IDENTITY
         };
-        let a = ranged_slab(&boxes_source, RigidPoseMm::IDENTITY,
-        [4.99, 5.01],
-        5.0,
-        0,
-        &mut work,);
-        let b = ranged_slab(&boxes_source, box_pose,
-        [4.99, 5.01],
-        5.0,
-        a.retained_bytes(),
-        &mut work,);
-        let c = ranged_slab(&pocket_source, pocket_pose,
-        [4.99, 5.01],
-        5.0,
-        a.retained_bytes() + b.retained_bytes(),
-        &mut work,);
+        let a = ranged_slab(
+            &boxes_source,
+            RigidPoseMm::IDENTITY,
+            [4.99, 5.01],
+            5.0,
+            0,
+            &mut work,
+        );
+        let b = ranged_slab(
+            &boxes_source,
+            box_pose,
+            [4.99, 5.01],
+            5.0,
+            a.retained_bytes(),
+            &mut work,
+        );
+        let c = ranged_slab(
+            &pocket_source,
+            pocket_pose,
+            [4.99, 5.01],
+            5.0,
+            a.retained_bytes() + b.retained_bytes(),
+            &mut work,
+        );
         let al = source_leaf(&boxes_source, 1, RigidPoseMm::IDENTITY, &a, &mut work);
         let bl = source_leaf(&boxes_source, 2, box_pose, &b, &mut work);
         let cl = source_leaf(&pocket_source, 3, pocket_pose, &c, &mut work);
@@ -10523,135 +11489,355 @@ mod tests {
         // Exercise the admitted operator source, not the deferred synthetic
         // source-corner/critical expansion. The planar test owns non-star cases.
         let definition = crate::from_step_bytes_with_cancel(
-            include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+            ),
             &cancel,
-        ).unwrap();
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [100.0, 105.0, 0.0],
             rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
         };
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel).unwrap();
+        let source = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let cut = 5.03;
         let before = ranged_slab(&source, pose, [5.01, cut], 5.02, 0, &mut work);
-        let after = ranged_slab(&source, pose, [cut, 5.05], 5.04, before.retained_bytes(), &mut work,);
+        let after = ranged_slab(
+            &source,
+            pose,
+            [cut, 5.05],
+            5.04,
+            before.retained_bytes(),
+            &mut work,
+        );
         let before_m = xy_candidate(&before, before.sample_world_z_mm().unwrap());
         let after_m = xy_candidate(&after, after.sample_world_z_mm().unwrap());
         let id = OccurrenceId::new(1).unwrap();
-        let before_leaf = certify_native_source_leaf(&SourceLeafRequest { source: &source, occurrence_id: &id, pose, analysis: &before,
-        actual_used_source_loops: &before_m, policy: policy(0.0), }, &mut work, &cancel).unwrap();
-        let after_leaf = certify_native_source_leaf(&SourceLeafRequest { source: &source, occurrence_id: &id, pose, analysis: &after,
-        actual_used_source_loops: &after_m, policy: policy(0.0), }, &mut work, &cancel).unwrap();
-        assert_eq!(before_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
-        assert_eq!(after_leaf.proof_kind(), NativeSourceLeafProofKind::ClosedSlab);
-        assert_eq!(after_leaf.sample_loops.iter().filter(|cycle| !cycle.hole).count(), 1);
+        let before_leaf = certify_native_source_leaf(
+            &SourceLeafRequest {
+                source: &source,
+                occurrence_id: &id,
+                pose,
+                analysis: &before,
+                actual_used_source_loops: &before_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let after_leaf = certify_native_source_leaf(
+            &SourceLeafRequest {
+                source: &source,
+                occurrence_id: &id,
+                pose,
+                analysis: &after,
+                actual_used_source_loops: &after_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            before_leaf.proof_kind(),
+            NativeSourceLeafProofKind::ClosedSlab
+        );
+        assert_eq!(
+            after_leaf.proof_kind(),
+            NativeSourceLeafProofKind::ClosedSlab
+        );
+        assert_eq!(
+            after_leaf
+                .sample_loops
+                .iter()
+                .filter(|cycle| !cycle.hole)
+                .count(),
+            1
+        );
         assert!(after_leaf.sample_loops.iter().any(|cycle| cycle.hole));
         let before_tube = source_boundary_tube(&before_leaf, &[], &mut work, &cancel).unwrap();
         let after_tube = source_boundary_tube(&after_leaf, &[], &mut work, &cancel).unwrap();
         boundary_loop_confinement(&before_leaf, &before_tube, 1, cut, &mut work, &cancel).unwrap();
         boundary_loop_confinement(&after_leaf, &after_tube, 0, cut, &mut work, &cancel).unwrap();
-        let occurrences = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: source_evidence(&after,&after_leaf,None), }];
-        let mut pending = super::certify_native_union(
-            &occurrences,&after_m,policy(0.0),&mut work,&cancel,
-        ).unwrap();
-        let lower_target = NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m };
-        let upper_target = NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&after_m };
+        let occurrences = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: source_evidence(&after, &after_leaf, None),
+        }];
+        let mut pending =
+            super::certify_native_union(&occurrences, &after_m, policy(0.0), &mut work, &cancel)
+                .unwrap();
+        let lower_target = NativeCriticalCollarTarget {
+            leaf: &before_leaf,
+            actual_material: &before_m,
+        };
+        let upper_target = NativeCriticalCollarTarget {
+            leaf: &after_leaf,
+            actual_material: &after_m,
+        };
         let original_bytes = pending.retained_bytes();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            original_bytes,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::ResourceLimit);
-        assert!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap(), "complete actual registered buffers issue a sealed pair receipt");
-        assert_eq!(pending.regular_interfaces.len(),1);
-        assert!(pending.retained_bytes() >= original_bytes+std::mem::size_of::<NativeRegularInterfacePairReceipt>());
-        certify_regular_material_interface(&before_leaf,&after_leaf,cut,&before_tube,&after_tube,
-            &pending.regular_interfaces,&mut Scratch { bytes:0 },&mut work,&cancel).unwrap();
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    original_bytes,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+            "complete actual registered buffers issue a sealed pair receipt"
+        );
+        assert_eq!(pending.regular_interfaces.len(), 1);
+        assert!(
+            pending.retained_bytes()
+                >= original_bytes + std::mem::size_of::<NativeRegularInterfacePairReceipt>()
+        );
+        certify_regular_material_interface(
+            &before_leaf,
+            &after_leaf,
+            cut,
+            &before_tube,
+            &after_tube,
+            &pending.regular_interfaces,
+            &mut Scratch { bytes: 0 },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let sealed = pending.regular_interfaces[0];
         let mut wrong_cut = before_leaf.clone();
         wrong_cut.world_height_interval_mm[1] = cut.next_up();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf:&wrong_cut, actual_material:&before_m },
-            NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry);
-        assert_eq!(pending.regular_interfaces[0],sealed);
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &wrong_cut,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        assert_eq!(pending.regular_interfaces[0], sealed);
         let mut critical_lower = before_leaf.clone();
         critical_lower.critical_interfaces[1] = true;
-        assert!(!pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf: &critical_lower, actual_material: &before_m },
-            NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap(), "a critical shared side remains owned by the independent collar route");
+        assert!(
+            !pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &critical_lower,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap(),
+            "a critical shared side remains owned by the independent collar route"
+        );
         let mut exhausted = GeometryWorkBudget::new(0);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut exhausted, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target }, NativeCriticalCollarTarget { ..upper_target },
-            MAX_SCRATCH, &mut work, &AtomicBool::new(true),
-        ).unwrap_err().code, GeometryErrorCode::Cancelled);
-        assert_eq!(pending.regular_interfaces.as_slice(), &[sealed],
-            "critical, stale, exhausted and cancelled attempts grant no additional authority");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut exhausted,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget { ..upper_target },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &AtomicBool::new(true),
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
+        assert_eq!(
+            pending.regular_interfaces.as_slice(),
+            &[sealed],
+            "critical, stale, exhausted and cancelled attempts grant no additional authority"
+        );
         let clearance = after_leaf.sample_loop_clearance_mm.unwrap();
         assert!(clearance > 0.0);
 
         // Exercise equality/hash binding without adding point storage to the
         // receipt. These deliberately poisoned private metadata values cannot
         // be constructed through the public source-leaf API.
-        let mut changed = certify_native_source_leaf(&SourceLeafRequest { source: &source, occurrence_id: &id, pose, analysis: &after,
-        actual_used_source_loops: &after_m, policy: policy(0.0), }, &mut work, &cancel).unwrap();
+        let mut changed = certify_native_source_leaf(
+            &SourceLeafRequest {
+                source: &source,
+                occurrence_id: &id,
+                pose,
+                analysis: &after,
+                actual_used_source_loops: &after_m,
+                policy: policy(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let mut foreign_current = changed.clone();
         foreign_current.sample_region_error_mm = foreign_current.sample_region_error_mm.next_up();
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target },
-            NativeCriticalCollarTarget { leaf: &foreign_current, actual_material: &after_m },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "the current leaf must belong to this pending proof");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget {
+                        leaf: &foreign_current,
+                        actual_material: &after_m
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "the current leaf must belong to this pending proof"
+        );
         drop(foreign_current);
         let mut foreign = after_m;
         foreign.swap(0, 1);
-        assert_eq!(verify_source_leaf_candidate(&after_leaf, &foreign, &mut work, &cancel)
-            .unwrap_err().code, GeometryErrorCode::InvalidGeometry);
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf:&before_leaf, actual_material:&before_m },
-            NativeCriticalCollarTarget { leaf:&after_leaf, actual_material:&foreign },
-            MAX_SCRATCH,&mut work,&cancel,
-        ).unwrap_err().code,GeometryErrorCode::InvalidGeometry,
-            "an existing sealed receipt cannot be reused for foreign actual geometry");
+        assert_eq!(
+            verify_source_leaf_candidate(&after_leaf, &foreign, &mut work, &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry
+        );
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &before_m
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "an existing sealed receipt cannot be reused for foreign actual geometry"
+        );
         foreign.swap(0, 1);
         let hole_index = foreign.iter().position(|cycle| cycle.is_hole).unwrap();
         foreign[hole_index].is_hole = false;
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { ..lower_target },
-            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "a sealed receipt cannot erase an actual protected hole");
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget { ..lower_target },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "a sealed receipt cannot erase an actual protected hole"
+        );
         foreign[hole_index].is_hole = true;
-        assert_eq!(pending.certify_regular_interface_pair(
-            NativeCriticalCollarTarget { leaf: &before_leaf, actual_material: &foreign },
-            NativeCriticalCollarTarget { leaf: &after_leaf, actual_material: &foreign },
-            MAX_SCRATCH, &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry,
-            "both actual buffers must be independently verified, including the lower one");
-        let lower_occurrences = [NativeUnionOccurrence { occurrence_id: id, source: &source, pose,
-        evidence: source_evidence(&before, &before_leaf, None), }];
+        assert_eq!(
+            pending
+                .certify_regular_interface_pair(
+                    NativeCriticalCollarTarget {
+                        leaf: &before_leaf,
+                        actual_material: &foreign
+                    },
+                    NativeCriticalCollarTarget {
+                        leaf: &after_leaf,
+                        actual_material: &foreign
+                    },
+                    MAX_SCRATCH,
+                    &mut work,
+                    &cancel,
+                )
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::InvalidGeometry,
+            "both actual buffers must be independently verified, including the lower one"
+        );
+        let lower_occurrences = [NativeUnionOccurrence {
+            occurrence_id: id,
+            source: &source,
+            pose,
+            evidence: source_evidence(&before, &before_leaf, None),
+        }];
         let lower_pending = super::certify_native_union(
-            &lower_occurrences, &before_m, policy(0.0), &mut work, &cancel,
-        ).unwrap();
+            &lower_occurrences,
+            &before_m,
+            policy(0.0),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let mut ledger = NativeUnionBindingLedger::new([5.01, 5.05], MAX_SCRATCH).unwrap();
-        ledger.record(lower_pending, &before_m, &[&before_leaf], &mut work, &cancel).unwrap();
-        ledger.record(pending, &foreign, &[&after_leaf], &mut work, &cancel).unwrap();
+        ledger
+            .record(
+                lower_pending,
+                &before_m,
+                &[&before_leaf],
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        ledger
+            .record(pending, &foreign, &[&after_leaf], &mut work, &cancel)
+            .unwrap();
         let completed = ledger.finalize(&mut work, &cancel).unwrap();
         assert_eq!(completed.world_height_interval_mm(), [5.01, 5.05]);
-        assert_eq!(completed.slab_count(), 2,
-            "the registered pair and adjacent source leaves retain closed stream binding");
+        assert_eq!(
+            completed.slab_count(),
+            2,
+            "the registered pair and adjacent source leaves retain closed stream binding"
+        );
         let hash = |leaf: &NativeSourceLeafReceipt| {
             let mut hash = Sha256::new();
             hash_leaf(&mut hash, leaf);
@@ -10663,16 +11849,28 @@ mod tests {
         assert_ne!(hash(&after_leaf), hash(&changed));
         changed.sample_loop_clearance_mm = Some(clearance);
         let original_index = changed.sample_loops[0].registration.native_index;
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = usize::MAX;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0]
+            .registration
+            .native_index = usize::MAX;
         assert!(!same_leaf(&after_leaf, &changed));
         assert_ne!(hash(&after_leaf), hash(&changed));
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[0].registration.native_index = original_index;
-        let hole = changed.sample_loops.iter().position(|cycle| cycle.hole).unwrap();
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[0]
+            .registration
+            .native_index = original_index;
+        let hole = changed
+            .sample_loops
+            .iter()
+            .position(|cycle| cycle.hole)
+            .unwrap();
         let original_parent = changed.sample_loops[hole].registration.parent;
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = None;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole]
+            .registration
+            .parent = None;
         assert!(!same_leaf(&after_leaf, &changed));
         assert_ne!(hash(&after_leaf), hash(&changed));
-        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole].registration.parent = original_parent;
+        Arc::get_mut(&mut changed.sample_loops).unwrap()[hole]
+            .registration
+            .parent = original_parent;
 
         // Isolate the captured whole-boundary clearance consumer by discarding
         // alternative radial/kernel witnesses, never by inventing a source fact.
@@ -10688,16 +11886,24 @@ mod tests {
             distance_mm: Some(clearance * 0.25),
         };
         boundary_loop_confinement(&changed, &moving, 0, cut, &mut work, &cancel).unwrap();
-        let unavailable = NativeBoundaryTube { distance_mm: None, ..moving };
+        let unavailable = NativeBoundaryTube {
+            distance_mm: None,
+            ..moving
+        };
         assert_eq!(
             boundary_loop_confinement(&changed, &unavailable, 0, cut, &mut work, &cancel)
-                .unwrap_err().code,
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate,
         );
-        let exhausted = NativeBoundaryTube { distance_mm: Some(clearance * 0.5), ..moving };
+        let exhausted = NativeBoundaryTube {
+            distance_mm: Some(clearance * 0.5),
+            ..moving
+        };
         assert_eq!(
             boundary_loop_confinement(&changed, &exhausted, 0, cut, &mut work, &cancel)
-                .unwrap_err().code,
+                .unwrap_err()
+                .code,
             GeometryErrorCode::AnalysisIndeterminate,
             "nonpositive remaining whole-boundary clearance supplies no confinement",
         );

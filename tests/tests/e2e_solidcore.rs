@@ -5,11 +5,11 @@
 //! Master E2E integration runner for Spiling RFC 07 SolidCore Kernel Adoption.
 //! Orchestrates and validates end-to-end consistency across Tier 1, 2, 3, and 4 test suites.
 
-use std::sync::atomic::AtomicBool;
 use spiling_contracts::geometry::*;
-use spiling_geometry::*;
 use spiling_e2e_tests::fixtures::*;
 use spiling_e2e_tests::helpers::*;
+use spiling_geometry::*;
+use std::sync::atomic::AtomicBool;
 
 #[test]
 fn test_e2e_occt_reference_corpus_integrity() {
@@ -26,16 +26,17 @@ fn test_e2e_occt_reference_corpus_integrity() {
         assert!(b.max[2] >= b.min[2], "valid z bounds for {fixture_path}");
 
         // 2. Midplane section must succeed
-        let sec = section_midplane(&def).unwrap_or_else(|e| {
-            panic!("failed midplane section on {fixture_path}: {e:?}")
-        });
+        let sec = section_midplane(&def)
+            .unwrap_or_else(|e| panic!("failed midplane section on {fixture_path}: {e:?}"));
         assert!(!sec.loops().is_empty(), "midplane loops for {fixture_path}");
 
         // 3. Tessellation must produce valid mesh
-        let mesh = tessellate_display(&def).unwrap_or_else(|e| {
-            panic!("failed tessellation on {fixture_path}: {e:?}")
-        });
-        assert!(!mesh.vertex_positions.is_empty(), "mesh vertices for {fixture_path}");
+        let mesh = tessellate_display(&def)
+            .unwrap_or_else(|e| panic!("failed tessellation on {fixture_path}: {e:?}"));
+        assert!(
+            !mesh.vertex_positions.is_empty(),
+            "mesh vertices for {fixture_path}"
+        );
         assert!(!mesh.indices.is_empty(), "mesh indices for {fixture_path}");
     }
 }
@@ -71,9 +72,17 @@ fn test_e2e_work_budget_governor_pipeline() {
         "consumed budget must increase monotonically"
     );
 
-    let _mesh = tessellate_with_budget(&def, DisplayProfile::MeshTrimmedMm005V2, &mut budget, &cancel)
-        .expect("budgeted tessellation");
-    assert!(budget.consumed() <= 50_000, "must stay within allocated budget");
+    let _mesh = tessellate_with_budget(
+        &def,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &mut budget,
+        &cancel,
+    )
+    .expect("budgeted tessellation");
+    assert!(
+        budget.consumed() <= 50_000,
+        "must stay within allocated budget"
+    );
 }
 
 #[test]

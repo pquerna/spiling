@@ -244,7 +244,10 @@ fn chart_jet(
 /// The recipe's SAME spatial-parameter beta=x(1-x), restricted to a proved
 /// subinterval. In particular an endpoint subdivision must not keep the
 /// unrelated whole-edge upper bound 1/4.
-fn spatial_endpoint_bubble(whole: [f64; 2], parameter: Interval) -> Result<Interval, GeometryError> {
+fn spatial_endpoint_bubble(
+    whole: [f64; 2],
+    parameter: Interval,
+) -> Result<Interval, GeometryError> {
     if !whole[0].is_finite()
         || !whole[1].is_finite()
         || whole[0] >= whole[1]
@@ -318,7 +321,10 @@ pub(crate) fn constant_material_face_height(
 ) -> Result<Option<f64>, GeometryError> {
     let domain = source.face_domain(face_index, MAX_SCRATCH_BYTES, work, cancel)?;
     let Some(height) = super::super::slab::constant_spline_height(
-        &domain.surface_operand(), functional, work, cancel,
+        &domain.surface_operand(),
+        functional,
+        work,
+        cancel,
     )?
     else {
         return Ok(None);
@@ -329,10 +335,12 @@ pub(crate) fn constant_material_face_height(
     for (index, coedge) in domain.coedges().iter().enumerate() {
         work.charge(1, cancel)?;
         let curve_height = domain.with_original_spatial_curve(
-            index, MAX_SCRATCH_BYTES, work, cancel, |curve, work, cancel| {
-                super::super::slab::constant_native_curve_height(
-                    curve, functional, work, cancel,
-                )
+            index,
+            MAX_SCRATCH_BYTES,
+            work,
+            cancel,
+            |curve, work, cancel| {
+                super::super::slab::constant_native_curve_height(curve, functional, work, cancel)
             },
         )?;
         if curve_height.is_none_or(|value| value.lo != height.lo || value.hi != height.hi) {
@@ -342,7 +350,9 @@ pub(crate) fn constant_material_face_height(
         // cover every incident apex without checking each twice. The coordinate
         // is the exact original VertexPoint from the complete admitted star.
         let vertex = coedge.vertices[usize::from(!coedge.forward)];
-        let point = source.trim_source().source_vertex_point(vertex, work, cancel)?;
+        let point = source
+            .trim_source()
+            .source_vertex_point(vertex, work, cancel)?;
         let value = functional.vertex(point);
         if value.lo != height.lo || value.hi != height.hi {
             return Ok(None);
@@ -416,12 +426,13 @@ type UvPairCell = ([f64; 2], [f64; 2], u8);
 pub(super) const UV_EMBEDDING_STACK_BYTES: usize = std::mem::size_of::<
     [UvPairCell; 2 * MAX_DEPTH as usize + 1],
 >() + if SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-    > crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES {
-        SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-    } else {
-        crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
-    }
-    + 2 * std::mem::size_of::<SurfaceFirstEnclosure>();
+    > crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+{
+    SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+} else {
+    crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+} + 2
+    * std::mem::size_of::<SurfaceFirstEnclosure>();
 
 fn normal_uv_jet(
     jet: &ChartCurveEnclosure,
@@ -502,7 +513,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let spatial_orientation = binding.material_forward;
         let range = proof.spatial_range();
         let margin = proof.margin_uv();
-        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance()
+            == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(Some(Self {
@@ -625,7 +637,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let proof = self
             .domain
             .original_coedge_correspondence(self.use_.coedge)?;
-        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
+        if proof.provenance()
+            == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
         {
             return Ok(None);
         }
@@ -816,17 +829,21 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 hi: value[1],
             });
         let proof = domain.original_coedge_correspondence(coedge)?;
-        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance()
+            == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(position);
         }
         let jet = crate::parametric::curve2d_piecewise_jet(
-            &domain.coedge_operand(coedge)?, range, work, cancel,
+            &domain.coedge_operand(coedge)?,
+            range,
+            work,
+            cancel,
         )?;
-        let derivative = jet.derivative.map(|value| {
-            mul(value, proof.uv_parameter_derivative())
-        });
+        let derivative = jet
+            .derivative
+            .map(|value| mul(value, proof.uv_parameter_derivative()));
         let v = rotate(derivative, 1.0);
         let spatial_range = proof.spatial_range();
         let width = (spatial_range[1] - spatial_range[0])
@@ -863,7 +880,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
     ) -> Result<[Interval; 2], GeometryError> {
         let jet = chart_jet(domain, coedge, range, work, cancel)?;
         let proof = domain.original_coedge_correspondence(coedge)?;
-        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance()
+            == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(jet.position);
@@ -1274,21 +1292,23 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         }
         {
             let surface = &self.domain.surface_operand();
-            let enclosure =
-                |surface: &PreparedTrimSurface<'_, '_>, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
-                    if piecewise {
-                        surface_piecewise_first_enclosure(surface, uv, work, cancel)
-                    } else {
-                        // Keep the existing strict source/C1 qualification before
-                        // extracting only the fields this first-matrix proof uses.
-                        let jet = surface_enclosure(surface, uv, work, cancel)?;
-                        Ok(SurfaceFirstEnclosure {
-                            position: jet.position,
-                            du: jet.du,
-                            dv: jet.dv,
-                        })
-                    }
-                };
+            let enclosure = |surface: &PreparedTrimSurface<'_, '_>,
+                             uv,
+                             work: &mut GeometryWorkBudget,
+                             cancel: &AtomicBool| {
+                if piecewise {
+                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
+                } else {
+                    // Keep the existing strict source/C1 qualification before
+                    // extracting only the fields this first-matrix proof uses.
+                    let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    Ok(SurfaceFirstEnclosure {
+                        position: jet.position,
+                        du: jet.du,
+                        dv: jet.dv,
+                    })
+                }
+            };
             let boundary = enclosure(
                 surface,
                 uv_box(add_margin(uv.position, self.margin)),
@@ -1416,7 +1436,11 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
             || a_binding.owner != [first.face, first.wire, first.index]
             || b_binding.owner != [second.face, second.wire, second.index]
             || !first_domain.same_original_spatial_trace(
-                first.coedge, second_domain, second.coedge, work, cancel,
+                first.coedge,
+                second_domain,
+                second.coedge,
+                work,
+                cancel,
             )?
         {
             return Ok(None);

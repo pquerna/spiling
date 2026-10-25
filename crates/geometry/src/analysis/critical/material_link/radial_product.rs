@@ -249,8 +249,12 @@ mod tests {
         let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
         let owner = crate::analysis::material_source::prepare_solid(
-            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let coordinates = ActualMaterialCoordinates::source(
             &definition,
             &request.frame,
@@ -301,8 +305,12 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
         let owner = crate::analysis::material_source::prepare_solid(
-            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let coordinates = ActualMaterialCoordinates::source(
             &definition,
             &request.frame,

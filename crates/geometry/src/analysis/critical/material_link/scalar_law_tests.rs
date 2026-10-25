@@ -3,59 +3,96 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
-use crate::analysis::source_incidence::{boundary_loop, native_coedge, native_face, face_orientation};
+use crate::analysis::source_incidence::{
+    boundary_loop, face_orientation, native_coedge, native_face,
+};
 
 fn assert_original_vertex_anchor(
     source: crate::analysis::material_source::MaterialSourceView<'_, '_>,
-    incidence: &SourceEdgeIncidence<'_>, vertex: solidcore::VertexId, available: usize,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    incidence: &SourceEdgeIncidence<'_>,
+    vertex: solidcore::VertexId,
+    available: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) {
-    let canonical = source.trim_source().source_vertex_point(vertex, work, cancel).unwrap();
+    let canonical = source
+        .trim_source()
+        .source_vertex_point(vertex, work, cancel)
+        .unwrap();
     let mut source_vertex = None;
     let mut occurrences = 0;
     for edge in incidence.vertex_edges(vertex) {
         let pair = incidence.get(edge).unwrap();
         for use_ in std::iter::once(pair.first).chain(pair.second) {
-            let domain = source.face_domain(use_.face, available, work, cancel).unwrap();
+            let domain = source
+                .face_domain(use_.face, available, work, cancel)
+                .unwrap();
             let proof = domain.original_coedge_correspondence(use_.coedge).unwrap();
-            let binding = proof.binding().expect("verified original endpoint ownership");
+            let binding = proof
+                .binding()
+                .expect("verified original endpoint ownership");
             assert_eq!(binding.endpoints, pair.vertices);
-            let original = source.definition().original_source().coedge(binding.source.source_index).unwrap();
+            let original = source
+                .definition()
+                .original_source()
+                .coedge(binding.source.source_index)
+                .unwrap();
             for (native_end, &endpoint) in pair.vertices.iter().enumerate() {
-                if endpoint != vertex { continue; }
+                if endpoint != vertex {
+                    continue;
+                }
                 work.charge(1, cancel).unwrap();
                 // The sealed query/native association supplies the original ID.
                 // Gauge-B parameter images may reverse the literal basis, so
                 // neither same_sense nor coordinate equality selects an endpoint.
                 let id = binding.source_vertex_ids[native_end];
                 if let Some(previous) = source_vertex {
-                    assert_eq!(id, previous, "the complete selected star has one original VertexPoint identity");
-                } else { source_vertex = Some(id); }
+                    assert_eq!(
+                        id, previous,
+                        "the complete selected star has one original VertexPoint identity"
+                    );
+                } else {
+                    source_vertex = Some(id);
+                }
                 let point = binding.source_vertex_points_mm[native_end];
                 let mut literal_matches = 0;
-                for (&literal_id, &literal_point) in original.vertex_ids.iter().zip(&original.vertex_points_mm) {
-                    if literal_id != id { continue; }
-                    assert_eq!(point, literal_point, "the sealed ID retains its literal original coordinates");
+                for (&literal_id, &literal_point) in
+                    original.vertex_ids.iter().zip(&original.vertex_points_mm)
+                {
+                    if literal_id != id {
+                        continue;
+                    }
+                    assert_eq!(
+                        point, literal_point,
+                        "the sealed ID retains its literal original coordinates"
+                    );
                     literal_matches += 1;
                 }
-                assert!(literal_matches > 0, "the sealed canonical ID belongs to this actual original EDGE_CURVE");
-                assert_eq!(canonical, point,
-                    "the material apex is the captured original VertexPoint, not a healed native vertex");
+                assert!(
+                    literal_matches > 0,
+                    "the sealed canonical ID belongs to this actual original EDGE_CURVE"
+                );
+                assert_eq!(
+                    canonical, point,
+                    "the material apex is the captured original VertexPoint, not a healed native vertex"
+                );
                 occurrences += 1;
             }
         }
     }
-    assert!(source_vertex.is_some() && occurrences > 0, "complete actual source vertex star");
+    assert!(
+        source_vertex.is_some() && occurrences > 0,
+        "complete actual source vertex star"
+    );
 }
 
 #[test]
 fn nonowner_collar_bubble_contracts_at_original_native_endpoints() {
     let whole = [10.0, 12.0];
     let first =
-        spatial_endpoint_bubble(whole, Interval::new(10.0, 10.0 + 1.0 / 1024.0).unwrap())
-            .unwrap();
-    let last = spatial_endpoint_bubble(whole, Interval::new(12.0 - 1.0 / 1024.0, 12.0).unwrap())
-        .unwrap();
+        spatial_endpoint_bubble(whole, Interval::new(10.0, 10.0 + 1.0 / 1024.0).unwrap()).unwrap();
+    let last =
+        spatial_endpoint_bubble(whole, Interval::new(12.0 - 1.0 / 1024.0, 12.0).unwrap()).unwrap();
     assert!(first.lo >= 0.0 && first.hi < 1.0 / 1024.0);
     assert!(last.lo >= 0.0 && last.hi < 1.0 / 1024.0);
     let center = spatial_endpoint_bubble(whole, Interval::point(11.0)).unwrap();
@@ -75,10 +112,14 @@ fn actual_fitting_complete_paired_source_collars_have_local_geometry() {
     let cancel = AtomicBool::new(false);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step");
-    let definition = crate::from_step_bytes_with_cancel(&std::fs::read(path).unwrap(), &cancel).unwrap();
+    let definition =
+        crate::from_step_bytes_with_cancel(&std::fs::read(path).unwrap(), &cancel).unwrap();
     let mut work = GeometryWorkBudget::new(20_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-    let source = prepared.source_view().expect("one immutable original-domain owner");
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+    let source = prepared
+        .source_view()
+        .expect("one immutable original-domain owner");
     let available = MAX_SCRATCH_BYTES - prepared.retained_bytes();
     let mut incidence =
         SourceEdgeIncidence::new(&definition, available, &mut work, &cancel).unwrap();
@@ -111,17 +152,24 @@ fn actual_fitting_complete_paired_source_collars_have_local_geometry() {
         )
         .unwrap()
         .expect("the unchanged canonical source-only NativeV plan");
-        plan.visit_spatial_exits(&mut work, &cancel, &mut |edge, source_high, parameter, _work| {
-            if let Some(&(_, _, previous)) = exits
-                .iter()
-                .find(|&&(candidate, end, _)| candidate == edge && end == source_high)
-            {
-                assert_eq!(previous, parameter, "same actual source-spatial endpoint germ");
-            } else {
-                exits.push((edge, source_high, parameter));
-            }
-            Ok(())
-        })
+        plan.visit_spatial_exits(
+            &mut work,
+            &cancel,
+            &mut |edge, source_high, parameter, _work| {
+                if let Some(&(_, _, previous)) = exits
+                    .iter()
+                    .find(|&&(candidate, end, _)| candidate == edge && end == source_high)
+                {
+                    assert_eq!(
+                        previous, parameter,
+                        "same actual source-spatial endpoint germ"
+                    );
+                } else {
+                    exits.push((edge, source_high, parameter));
+                }
+                Ok(())
+            },
+        )
         .unwrap();
     }
 
@@ -165,9 +213,7 @@ fn actual_fitting_complete_paired_source_collars_have_local_geometry() {
         )
         .unwrap()
         .unwrap_or_else(|| {
-            panic!(
-                "whole used paired UV embedding: {first_owner:?} {second_owner:?} {central:?}"
-            )
+            panic!("whole used paired UV embedding: {first_owner:?} {second_owner:?} {central:?}")
         });
         // Prepare original knots before borrowing the same physical edge.
         let cuts = original_coedge_parameter_cuts(
@@ -269,10 +315,14 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
     let cancel = AtomicBool::new(false);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step");
-    let definition = crate::from_step_bytes_with_cancel(&std::fs::read(path).unwrap(), &cancel).unwrap();
+    let definition =
+        crate::from_step_bytes_with_cancel(&std::fs::read(path).unwrap(), &cancel).unwrap();
     let mut work = GeometryWorkBudget::new(20_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-    let source = prepared.source_view().expect("one owner for the unchanged original trim domains");
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+    let source = prepared
+        .source_view()
+        .expect("one owner for the unchanged original trim domains");
     let available = MAX_SCRATCH_BYTES - prepared.retained_bytes();
     let mut incidence =
         SourceEdgeIncidence::new(&definition, available, &mut work, &cancel).unwrap();
@@ -288,7 +338,9 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
     let (_, face) = native_face(&definition, face_index).unwrap();
     assert_eq!(face.loops.len(), 2);
     let material_forward = face_orientation(&definition, face_index, &mut work, &cancel).unwrap();
-    let annulus = source.face_domain(face_index, available, &mut work, &cancel).unwrap();
+    let annulus = source
+        .face_domain(face_index, available, &mut work, &cancel)
+        .unwrap();
     let mut uses = Vec::new();
     let mut vertices = Vec::new();
     let mut flat = 0;
@@ -334,20 +386,24 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
         )
         .unwrap()
         .expect("actual rim NativeV has its unchanged source-only geometry plan");
-        plan.visit_spatial_exits(&mut work, &cancel, &mut |edge, source_high, parameter, _work| {
-            if let Some(&(_, _, previous)) = exits
-                .iter()
-                .find(|&&(candidate, end, _)| candidate == edge && end == source_high)
-            {
-                assert_eq!(
-                    previous, parameter,
-                    "one literal exit per original endpoint germ"
-                );
-            } else {
-                exits.push((edge, source_high, parameter));
-            }
-            Ok(())
-        })
+        plan.visit_spatial_exits(
+            &mut work,
+            &cancel,
+            &mut |edge, source_high, parameter, _work| {
+                if let Some(&(_, _, previous)) = exits
+                    .iter()
+                    .find(|&&(candidate, end, _)| candidate == edge && end == source_high)
+                {
+                    assert_eq!(
+                        previous, parameter,
+                        "one literal exit per original endpoint germ"
+                    );
+                } else {
+                    exits.push((edge, source_high, parameter));
+                }
+                Ok(())
+            },
+        )
         .unwrap();
     }
     let mut nonzero_collars = 0;
@@ -356,7 +412,8 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
             .face_domain(use_.face, available, &mut work, &cancel)
             .unwrap();
         let (face_id, _) = native_face(&definition, use_.face).unwrap();
-        let (edge, native_edge) = native_coedge(&definition, use_.face, use_.wire, use_.index).unwrap();
+        let (edge, native_edge) =
+            native_coedge(&definition, use_.face, use_.wire, use_.index).unwrap();
         // The receipt seals the verified selected branch. Independently check
         // its IDs against the retained original STEP genealogy; the raw census
         // alone must never supply the correspondence authority.
@@ -365,18 +422,29 @@ fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
         let original = definition.original_source();
         let source_face = original.face(face_id).unwrap();
         let source_use = original.coedge(binding.source.source_index).unwrap();
-        assert!(source_face.wires.iter().any(|wire| wire.coedges.contains(&binding.source.source_index)));
+        assert!(
+            source_face
+                .wires
+                .iter()
+                .any(|wire| wire.coedges.contains(&binding.source.source_index))
+        );
         assert_eq!(source_use.source_face, source_face.source_face);
         assert_eq!(binding.face, face_id);
         assert_eq!(binding.edge, edge.edge);
         assert_eq!(binding.owner, [use_.face, use_.wire, use_.index]);
         assert_eq!(binding.edgeuse, use_.edgeuse);
         assert_eq!(binding.source.source_edge, Some(source_use.edge_curve_id.0));
-        assert_eq!(binding.source.source_coedge, Some(source_use.oriented_edge_id.0));
+        assert_eq!(
+            binding.source.source_coedge,
+            Some(source_use.oriented_edge_id.0)
+        );
         assert_eq!(binding.source_face, Some(source_face.source_face.0));
         assert_eq!(binding.source.native_orientation, edge.forward);
         assert_eq!(binding.endpoints, native_edge.vertices);
-        assert_eq!(binding.native_interval, [native_edge.interval.min(), native_edge.interval.max()]);
+        assert_eq!(
+            binding.native_interval,
+            [native_edge.interval.min(), native_edge.interval.max()]
+        );
         let slope = proof.uv_parameter_derivative();
         let context = format!(
             "face={} coedge={} wire={} index={} source={source_use:?} spatial={:?} uv={:?} map_derivative={:?} margin={:?} physical_error_mm={}",
@@ -600,8 +668,13 @@ fn actual_generic_transport_floor_preserves_complete_exact_scalar_law() {
         offset: Interval::point(0.0),
     };
     let mut work = GeometryWorkBudget::new(20_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES,
-        &mut work, &AtomicBool::new(false)).unwrap();
+    let prepared = crate::prepare_solid(
+        &definition,
+        MAX_SCRATCH_BYTES,
+        &mut work,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let source = prepared.source_view().unwrap();
     assert!(
         !definition
@@ -629,8 +702,13 @@ fn complete_material_scalar_law_rejects_sub_roundoff_functional_tilt() {
         offset: Interval::point(0.0),
     };
     let mut work = GeometryWorkBudget::new(20_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES,
-        &mut work, &AtomicBool::new(false)).unwrap();
+    let prepared = crate::prepare_solid(
+        &definition,
+        MAX_SCRATCH_BYTES,
+        &mut work,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let source = prepared.source_view().unwrap();
     assert_eq!(
         constant_material_face_height(

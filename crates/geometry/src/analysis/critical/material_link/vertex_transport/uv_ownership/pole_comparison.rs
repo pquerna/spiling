@@ -53,7 +53,6 @@ struct ExitSupport<'a, 'd> {
 
 type ExitEvidence<'a, 'd> = Result<ExitSupport<'a, 'd>, (Interval, Interval)>;
 
-
 impl SharedPolarGerm<'_, '_> {
     /// No two-dimensional inverse is needed for this scalar support. The
     /// sealed affine FUNCTION identity makes phi(s) common to every piece and
@@ -83,7 +82,11 @@ impl SharedPolarGerm<'_, '_> {
         // actual parameter law. No radians, pole swap, or angular re-labeling
         // is imposed on a rational native coefficient chart.
         let (q, qs, _) = chart.covering_jet(
-            germ.position, germ.derivative, germ.second_derivative, work, cancel,
+            germ.position,
+            germ.derivative,
+            germ.second_derivative,
+            work,
+            cancel,
         )?;
         let (position, _, _) = chart.graph_jet(q, ZERO2)?;
         if !chart.same_hemisphere(position) {
@@ -186,28 +189,33 @@ fn raw_boundary(
             .margin_uv(),
         Piece::Middle => [0.0; 2],
     };
-    { let surface = &domain.surface_operand(); (|| {
-        let jet = surface_enclosure(surface, uv_box(boundary.uv), work, cancel)?;
-        let margin_box = margin.map(|radius| Interval {
-            lo: -radius,
-            hi: radius,
-        });
-        let margin_jet = surface_enclosure(
-            surface,
-            uv_box(std::array::from_fn(|i| boundary.uv[i].add(margin_box[i]))),
-            work,
-            cancel,
-        )?;
-        let margin_shift = compose_first(&margin_jet.du, &margin_jet.dv, margin_box);
-        Ok(RawBoundary {
-            source_uv: boundary.uv,
-            position: jet.position,
-            derivative_uv,
-            // The finite collar boundary can be the spatial source C rather
-            // than S(U). Retain that SAME actual B minus raw carrier trace.
-            displacement: std::array::from_fn(|i| boundary.displacement[i].add(margin_shift[i])),
-        })
-    })() }
+    {
+        let surface = &domain.surface_operand();
+        (|| {
+            let jet = surface_enclosure(surface, uv_box(boundary.uv), work, cancel)?;
+            let margin_box = margin.map(|radius| Interval {
+                lo: -radius,
+                hi: radius,
+            });
+            let margin_jet = surface_enclosure(
+                surface,
+                uv_box(std::array::from_fn(|i| boundary.uv[i].add(margin_box[i]))),
+                work,
+                cancel,
+            )?;
+            let margin_shift = compose_first(&margin_jet.du, &margin_jet.dv, margin_box);
+            Ok(RawBoundary {
+                source_uv: boundary.uv,
+                position: jet.position,
+                derivative_uv,
+                // The finite collar boundary can be the spatial source C rather
+                // than S(U). Retain that SAME actual B minus raw carrier trace.
+                displacement: std::array::from_fn(|i| {
+                    boundary.displacement[i].add(margin_shift[i])
+                }),
+            })
+        })()
+    }
 }
 
 impl PoleComparison {
@@ -250,8 +258,7 @@ impl PoleComparison {
         if joint.vertex_id != vertex
             || !same_native_use(joint.outgoing, outgoing)
             || !same_native_use(joint.incoming, incoming)
-            || length(vertex_residual)?
-            .hi > allowance
+            || length(vertex_residual)?.hi > allowance
         {
             return Ok(None);
         }
@@ -262,7 +269,10 @@ impl PoleComparison {
                 return Ok(None);
             };
             let (entry, edge) = crate::analysis::source_incidence::native_coedge(
-                domain.definition(), end.use_.face, end.use_.wire, end.use_.index,
+                domain.definition(),
+                end.use_.face,
+                end.use_.wire,
+                end.use_.index,
             )?;
             let range = proof.spatial_range();
             let delta = Interval::point(end.exit).sub(Interval::point(end.endpoint));
@@ -275,10 +285,12 @@ impl PoleComparison {
                 || binding.source.native_orientation != entry.forward
                 || binding.endpoints != edge.vertices
                 || binding.native_interval != [edge.interval.min(), edge.interval.max()]
-                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] != vertex
+                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)]
+                    != vertex
                 || !joint_owns_source_endpoint(joint, binding, end.spatial_high, vertex)
                 || end.endpoint != range[usize::from(end.spatial_high)]
-                || (end.spatial_high ^ !binding.spatial_forward) != (end.use_.orientation == (i == 1))
+                || (end.spatial_high ^ !binding.spatial_forward)
+                    != (end.use_.orientation == (i == 1))
                 || end.delta_t.lo != delta.lo
                 || end.delta_t.hi != delta.hi
                 || !end.exit.is_finite()
@@ -313,9 +325,12 @@ impl PoleComparison {
                 provenance: proof.provenance(),
             });
         }
-        let chart_ok = if let Some(chart) = PoleChart::coefficients(&domain.surface_operand(), pole)? {
+        let chart_ok = if let Some(chart) =
+            PoleChart::coefficients(&domain.surface_operand(), pole)?
+        {
             polar_axis == chart.polar_axis()
-                && source_chart::SphereChart::new(&domain.surface_operand(), domain, work, cancel)?.is_some()
+                && source_chart::SphereChart::new(&domain.surface_operand(), domain, work, cancel)?
+                    .is_some()
         } else {
             false
         };
@@ -381,9 +396,9 @@ impl PoleComparison {
             if pole == self.pole && polar_axis == self.polar_axis);
         if vertex != self.vertex
             || joint.vertex_id != vertex
-            || !self.ends.iter().all(|end| joint_owns_source_endpoint(
-                joint, &end.binding, end.spatial_high, vertex,
-            ))
+            || !self.ends.iter().all(|end| {
+                joint_owns_source_endpoint(joint, &end.binding, end.spatial_high, vertex)
+            })
             || !kind_matches
             || !same_native_use(joint.outgoing, outgoing)
             || !same_native_use(joint.incoming, incoming)
@@ -475,15 +490,18 @@ impl PoleComparison {
             }
             raw_uv = hull2(raw_uv, boundary_uv);
             phase = "whole raw boundary/reference box source hemisphere";
-            let raw_position = { let surface = &domain.surface_operand(); (|| {
-                crate::parametric::surface_piecewise_enclosure(
-                    surface,
-                    uv_box(raw_uv),
-                    work,
-                    cancel,
-                )
-                .map(|jet| jet.position)
-            })() }?;
+            let raw_position = {
+                let surface = &domain.surface_operand();
+                (|| {
+                    crate::parametric::surface_piecewise_enclosure(
+                        surface,
+                        uv_box(raw_uv),
+                        work,
+                        cancel,
+                    )
+                    .map(|jet| jet.position)
+                })()
+            }?;
             if !chart.same_hemisphere(raw_position) {
                 return Ok(SourcePositionOvercover::Unavailable(
                     "SphericalPole full raw source box hemisphere unresolved",
@@ -512,15 +530,18 @@ impl PoleComparison {
                 let source = if same_raw_box {
                     raw_position
                 } else {
-                    { let surface = &domain.surface_operand(); (|| {
-                        crate::parametric::surface_piecewise_enclosure(
-                            surface,
-                            uv_box(clipped),
-                            work,
-                            cancel,
-                        )
-                        .map(|jet| jet.position)
-                    })() }?
+                    {
+                        let surface = &domain.surface_operand();
+                        (|| {
+                            crate::parametric::surface_piecewise_enclosure(
+                                surface,
+                                uv_box(clipped),
+                                work,
+                                cancel,
+                            )
+                            .map(|jet| jet.position)
+                        })()
+                    }?
                 };
                 position = hull3(position, source);
             }
@@ -536,11 +557,14 @@ impl PoleComparison {
     }
 
     fn chart(&self, domain: &PreparedFaceTrimDomain<'_>) -> Result<PoleChart, GeometryError> {
-        { let surface = &domain.surface_operand(); (|| {
-            PoleChart::coefficients(surface, self.pole)?.ok_or_else(|| {
-                refusal("pole comparison lost its literal analytic source coefficients")
-            })
-        })() }
+        {
+            let surface = &domain.surface_operand();
+            (|| {
+                PoleChart::coefficients(surface, self.pole)?.ok_or_else(|| {
+                    refusal("pole comparison lost its literal analytic source coefficients")
+                })
+            })()
+        }
     }
 
     fn star_jet(
@@ -628,10 +652,11 @@ impl PoleComparison {
         };
         let chart = self.chart(domain)?;
         let exit = end_curve(domain, end, Interval::point(1.0), work, cancel)?;
-        let position = { let surface = &domain.surface_operand(); (|| {
-            surface_enclosure(surface, uv_box(exit.position), work, cancel)
-        })() }?
-            .position;
+        let position = {
+            let surface = &domain.surface_operand();
+            (|| surface_enclosure(surface, uv_box(exit.position), work, cancel))()
+        }?
+        .position;
         if !chart.same_hemisphere(position) {
             return Ok(None);
         }
@@ -665,7 +690,10 @@ impl PoleComparison {
                         let (range, depth) = stack[pending];
                         work.charge(1, cancel)?;
                         let source = crate::parametric::curve_enclosure(
-                            spatial, (range[0], range[1]), work, cancel,
+                            spatial,
+                            (range[0], range[1]),
+                            work,
+                            cancel,
                         )?;
                         let s = Interval::new(range[0], range[1])?
                             .sub(Interval::point(end.endpoint))
@@ -678,7 +706,10 @@ impl PoleComparison {
                             comparison_transport::relative_error(source_derivative, derivative)?;
                         let midpoint = range[0] * 0.5 + range[1] * 0.5;
                         let source_midpoint = crate::parametric::curve_enclosure(
-                            spatial, (midpoint, midpoint), work, cancel,
+                            spatial,
+                            (midpoint, midpoint),
+                            work,
+                            cancel,
                         )?;
                         let sm = Interval::point(midpoint)
                             .sub(Interval::point(end.endpoint))
@@ -813,7 +844,10 @@ impl PoleComparison {
                 "pole physical comparison exceeds frozen allowance",
             ));
         }
-        let source = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))() }?;
+        let source = {
+            let surface = &domain.surface_operand();
+            (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))()
+        }?;
         Ok(ComparisonSourceCost {
             source: hull3(homotopy_image.position, source.position),
             displacement,
@@ -856,7 +890,10 @@ impl PoleComparison {
             work,
             cancel,
         )?;
-        let raw_surface = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))() }?;
+        let raw_surface = {
+            let surface = &domain.surface_operand();
+            (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))()
+        }?;
         if !chart.same_hemisphere(boundary.position) || !chart.same_hemisphere(raw_surface.position)
         {
             return Err(ownership_failure(
@@ -917,24 +954,30 @@ impl PoleComparison {
             {
                 continue;
             }
-            let result = { let surface = &domain.surface_operand(); (|| {
-                let jet = surface_enclosure(surface, uv, work, cancel)?;
-                let FiberNewton::Enclosure { uv, unique: true } =
-                    fiber_krawczyk(surface, uv, &jet, &fiber, work, cancel)?
-                else {
-                    return Ok(None);
-                };
-                let jet = surface_enclosure(surface, uv, work, cancel)?;
-                let relative =
-                    std::array::from_fn(|i| jet.position[i].sub(Interval::point(center[i])));
-                if !chart.same_hemisphere(jet.position)
-                    || dot(forward, relative).lo <= min_forward
-                    || !chart.principal_polar(Interval { lo: uv[self.polar_axis][0], hi: uv[self.polar_axis][1] })
-                {
-                    return Ok(None);
-                }
-                Ok(Some((uv.map(|v| Interval { lo: v[0], hi: v[1] }), jet)))
-            })() }?;
+            let result = {
+                let surface = &domain.surface_operand();
+                (|| {
+                    let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    let FiberNewton::Enclosure { uv, unique: true } =
+                        fiber_krawczyk(surface, uv, &jet, &fiber, work, cancel)?
+                    else {
+                        return Ok(None);
+                    };
+                    let jet = surface_enclosure(surface, uv, work, cancel)?;
+                    let relative =
+                        std::array::from_fn(|i| jet.position[i].sub(Interval::point(center[i])));
+                    if !chart.same_hemisphere(jet.position)
+                        || dot(forward, relative).lo <= min_forward
+                        || !chart.principal_polar(Interval {
+                            lo: uv[self.polar_axis][0],
+                            hi: uv[self.polar_axis][1],
+                        })
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some((uv.map(|v| Interval { lo: v[0], hi: v[1] }), jet)))
+                })()
+            }?;
             if result.is_some() {
                 return Ok(result);
             }
@@ -951,8 +994,11 @@ impl PoleComparison {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         let chart = self.chart(domain)?;
-        let other_world = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(other), work, cancel))() }?
-            .position;
+        let other_world = {
+            let surface = &domain.surface_operand();
+            (|| surface_enclosure(surface, uv_box(other), work, cancel))()
+        }?
+        .position;
         // Projection is two-to-one globally. Never confuse the opposite pole
         // with a collision, or use the projection to identify source sheets.
         if chart.opposite_hemisphere(other_world) {
@@ -1586,10 +1632,11 @@ impl PoleComparison {
                     ));
                     continue;
                 }
-                let other_world = { let surface = &domain.surface_operand(); (|| {
-                    surface_enclosure(surface, uv_box(other), work, cancel)
-                })() }?
-                    .position;
+                let other_world = {
+                    let surface = &domain.surface_operand();
+                    (|| surface_enclosure(surface, uv_box(other), work, cancel))()
+                }?
+                .position;
                 let other_local = chart.project(other_world);
                 let other_q = [other_local[0], other_local[1]];
                 let mut all_pieces = true;
@@ -1807,12 +1854,15 @@ mod properties {
         )
         .unwrap();
         let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
-        let geometry_before =
-            format!("{:?}", definition.brep());
+        let geometry_before = format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
         let prepared = crate::analysis::prepare_solid(
-            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = prepared.source_view().unwrap().with_vertex_plans(None);
         let available = MAX_SCRATCH_BYTES;
         let mut poles = Vec::new();
@@ -1873,27 +1923,72 @@ mod properties {
                     .unwrap();
                 comparison.validate(&domain, recipe, vertex).unwrap();
                 let joint = &domain.original_joints().unwrap()[comparison.joint_index];
-                let incoming_endpoint = if joint.connector_endpoint_is_bound(
-                    &domain, 0, recipe.incoming.use_.coedge, recipe.incoming.spatial_high,
-                    &mut work, &cancel,
-                ).unwrap() { 0 } else { 1 };
-                assert!(joint.connector_endpoint_is_bound(
-                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
-                    recipe.incoming.spatial_high, &mut work, &cancel,
-                ).unwrap());
-                assert!(joint.connector_endpoint_is_bound(
-                    &domain, 1 - incoming_endpoint, recipe.outgoing.use_.coedge,
-                    recipe.outgoing.spatial_high, &mut work, &cancel,
-                ).unwrap());
-                assert!(!joint.connector_endpoint_is_bound(
-                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
-                    !recipe.incoming.spatial_high, &mut work, &cancel,
-                ).unwrap(), "closed-edge source germs require their exact directed endpoint key");
+                let incoming_endpoint = if joint
+                    .connector_endpoint_is_bound(
+                        &domain,
+                        0,
+                        recipe.incoming.use_.coedge,
+                        recipe.incoming.spatial_high,
+                        &mut work,
+                        &cancel,
+                    )
+                    .unwrap()
+                {
+                    0
+                } else {
+                    1
+                };
+                assert!(
+                    joint
+                        .connector_endpoint_is_bound(
+                            &domain,
+                            incoming_endpoint,
+                            recipe.incoming.use_.coedge,
+                            recipe.incoming.spatial_high,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                );
+                assert!(
+                    joint
+                        .connector_endpoint_is_bound(
+                            &domain,
+                            1 - incoming_endpoint,
+                            recipe.outgoing.use_.coedge,
+                            recipe.outgoing.spatial_high,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap()
+                );
+                assert!(
+                    !joint
+                        .connector_endpoint_is_bound(
+                            &domain,
+                            incoming_endpoint,
+                            recipe.incoming.use_.coedge,
+                            !recipe.incoming.spatial_high,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap(),
+                    "closed-edge source germs require their exact directed endpoint key"
+                );
                 let copied_joint = *joint;
-                assert!(!copied_joint.connector_endpoint_is_bound(
-                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
-                    recipe.incoming.spatial_high, &mut work, &cancel,
-                ).unwrap(), "equal copied endpoint tubes cannot forge immutable domain membership");
+                assert!(
+                    !copied_joint
+                        .connector_endpoint_is_bound(
+                            &domain,
+                            incoming_endpoint,
+                            recipe.incoming.use_.coedge,
+                            recipe.incoming.spatial_high,
+                            &mut work,
+                            &cancel,
+                        )
+                        .unwrap(),
+                    "equal copied endpoint tubes cannot forge immutable domain membership"
+                );
                 let original = OriginalCornerComparison::SphericalPole(comparison);
                 assert!(
                     original
@@ -2050,10 +2145,7 @@ mod properties {
             polar_laws > 0,
             "original affine polar functions exercise the closed support lemma"
         );
-        assert_eq!(
-            geometry_before,
-            format!("{:?}", definition.brep()),
-        );
+        assert_eq!(geometry_before, format!("{:?}", definition.brep()),);
     }
 
     #[test]
@@ -2065,12 +2157,15 @@ mod properties {
         )
         .unwrap();
         let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
-        let geometry_before =
-            format!("{:?}", definition.brep());
+        let geometry_before = format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
         let prepared = crate::analysis::prepare_solid(
-            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = prepared.source_view().unwrap().with_vertex_plans(None);
         let available = MAX_SCRATCH_BYTES;
 
@@ -2179,7 +2274,10 @@ mod properties {
             "the pole comparison must cover actual fixed G cells"
         );
 
-        let foreign = incidence.vertices().unwrap().find(|&endpoint| endpoint != vertex);
+        let foreign = incidence
+            .vertices()
+            .unwrap()
+            .find(|&endpoint| endpoint != vertex);
         let error = comparison
             .validate(
                 &domain,
@@ -2252,27 +2350,42 @@ mod properties {
                 .map(|v| [v.lo.to_bits(), v.hi.to_bits()]),
             bulge_before,
         );
-        assert_eq!(
-            geometry_before,
-            format!("{:?}", definition.brep()),
-        );
+        assert_eq!(geometry_before, format!("{:?}", definition.brep()),);
     }
 
     #[test]
     fn original_affine_sphere_graph_keeps_opposite_hemispheres_and_closed_cap_distinct() {
-        use solidcore::{geom::{Extent2d, Point3, Vec3},
-            surface::{sphere::{Sphere, SphereOptions}, surface::{Surface, StepSurface}}};
+        use solidcore::{
+            geom::{Extent2d, Point3, Vec3},
+            surface::{
+                sphere::{Sphere, SphereOptions},
+                surface::{StepSurface, Surface},
+            },
+        };
         let kernel = crate::kernel::make_kernel_context();
         let natural: Surface = Sphere::new(
-            &kernel, Point3::new(10.0, 11.0, 12.0),
-            Vec3::new(1.0, 1.0, 0.0), Vec3::new(-1.0, 1.0, 1.0),
-            Extent2d::from_bounds(-180.0, -90.0, 180.0, 90.0), 2.0,
+            &kernel,
+            Point3::new(10.0, 11.0, 12.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+            Extent2d::from_bounds(-180.0, -90.0, 180.0, 90.0),
+            2.0,
             SphereOptions::default(),
-        ).unwrap().into();
-        assert!(PoleChart::coefficients(&natural, SphericalPole::North).unwrap().is_none(),
-            "a natural rational chart cannot borrow the explicit angular law");
+        )
+        .unwrap()
+        .into();
+        assert!(
+            PoleChart::coefficients(&natural, SphericalPole::North)
+                .unwrap()
+                .is_none(),
+            "a natural rational chart cannot borrow the explicit angular law"
+        );
         let native_step: Surface = StepSurface::new(natural, true).unwrap().into();
-        assert!(PoleChart::coefficients(&native_step, SphericalPole::North).unwrap().is_some());
+        assert!(
+            PoleChart::coefficients(&native_step, SphericalPole::North)
+                .unwrap()
+                .is_some()
+        );
 
         // Retain the original nonorthogonal affine-coefficient boundary case,
         // not merely a native rigid-placement sphere with a different label.
@@ -2287,8 +2400,13 @@ mod properties {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let surface = crate::kernel::source_operand::PreparedOriginalSurface::new(
-            &original, [[-1.0, 1.0], [-0.5, 0.5]], MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &original,
+            [[-1.0, 1.0], [-0.5, 0.5]],
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let xy = [0.125, -0.25].map(Interval::point);
         let north = PoleChart::coefficients(&surface, SphericalPole::North)
             .unwrap()

@@ -28,9 +28,9 @@
 //! Native coefficient geometry is already in millimetres; the only subsequent
 //! spatial transform is the captured pose polynomial and its outward error.
 
-use super::{GeometryWorkBudget, SlabAnalysis, SlabRequest};
 use super::material_source::{MaterialSourceView, PreparedSolid, prepare_solid};
 use super::source_incidence::{boundary_loop, face_orientation, native_coedge, native_face};
+use super::{GeometryWorkBudget, SlabAnalysis, SlabRequest};
 use crate::parametric::{Interval, up};
 use crate::{Definition, GeometryError, SectionLoopMm};
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode, RigidPoseMm};
@@ -983,8 +983,7 @@ fn neighbor_use(
                 if use_.edge != edge.edge || (fi, wi, ei) == own {
                     continue;
                 }
-                if neighbor.is_some() || (use_.forward == outward) == orientation
-                {
+                if neighbor.is_some() || (use_.forward == outward) == orientation {
                     return Err(error(
                         GeometryErrorCode::SingularGeometry,
                         "protected void native coedge is not paired with opposite material orientation",
@@ -998,8 +997,11 @@ fn neighbor_use(
 }
 
 fn source_coedge_index(
-    domain: &crate::kernel::PreparedFaceTrimDomain<'_>, wire: usize, coedge: usize,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>,
+    wire: usize,
+    coedge: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<usize, GeometryError> {
     for (index, use_) in domain.coedges().iter().enumerate() {
         work.charge(1, cancel)?;
@@ -1008,7 +1010,9 @@ fn source_coedge_index(
             return Ok(index);
         }
     }
-    Err(unresolved("protected void lost its selected original coedge occurrence"))
+    Err(unresolved(
+        "protected void lost its selected original coedge occurrence",
+    ))
 }
 
 fn wire_area(
@@ -1023,43 +1027,53 @@ fn wire_area(
     let mut area = Interval::point(0.0);
     for (index, coedge) in domain.coedges().iter().enumerate() {
         work.charge(1, cancel)?;
-        if coedge.identity().wire_index != wire_index { continue; }
+        if coedge.identity().wire_index != wire_index {
+            continue;
+        }
         let correspondence = domain.original_coedge_correspondence(index)?;
-        let binding = correspondence.binding()
+        let binding = correspondence
+            .binding()
             .ok_or_else(|| unresolved("void rim lacks a sealed original parameter binding"))?;
         let range = correspondence.spatial_range();
         let contribution = domain.with_original_spatial_curve(
-            index, remaining, work, cancel, |curve, work, cancel| {
-            let mut sum = Interval::point(0.0);
-            for [lo, hi] in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
-                // A quadrature ENCLOSURE: each integrand interval covers its
-                // whole parameter cell. No point evaluations certify an arc.
-                for i in 0..128 {
-                    let a = if i == 0 {
-                        lo
-                    } else {
-                        lo + (hi - lo) * (i as f64 / 128.0)
-                    };
-                    let b = if i == 127 {
-                        hi
-                    } else {
-                        lo + (hi - lo) * ((i + 1) as f64 / 128.0)
-                    };
-                    if a >= b {
-                        return Err(error(
-                            GeometryErrorCode::ConditioningFailure,
-                            "native void rim integral cannot subdivide",
-                        ));
+            index,
+            remaining,
+            work,
+            cancel,
+            |curve, work, cancel| {
+                let mut sum = Interval::point(0.0);
+                for [lo, hi] in
+                    crate::parametric::curve_parameter_spans(curve, range, work, cancel)?
+                {
+                    // A quadrature ENCLOSURE: each integrand interval covers its
+                    // whole parameter cell. No point evaluations certify an arc.
+                    for i in 0..128 {
+                        let a = if i == 0 {
+                            lo
+                        } else {
+                            lo + (hi - lo) * (i as f64 / 128.0)
+                        };
+                        let b = if i == 127 {
+                            hi
+                        } else {
+                            lo + (hi - lo) * ((i + 1) as f64 / 128.0)
+                        };
+                        if a >= b {
+                            return Err(error(
+                                GeometryErrorCode::ConditioningFailure,
+                                "native void rim integral cannot subdivide",
+                            ));
+                        }
+                        let jet = crate::parametric::curve_enclosure(curve, (a, b), work, cancel)?;
+                        let integrand = jet.position[0]
+                            .mul(jet.derivative[1])
+                            .sub(jet.position[1].mul(jet.derivative[0]));
+                        sum = sum.add(integrand.mul(Interval::point(b).sub(Interval::point(a))));
                     }
-                    let jet = crate::parametric::curve_enclosure(curve, (a, b), work, cancel)?;
-                    let integrand = jet.position[0]
-                        .mul(jet.derivative[1])
-                        .sub(jet.position[1].mul(jet.derivative[0]));
-                    sum = sum.add(integrand.mul(Interval::point(b).sub(Interval::point(a))));
                 }
-            }
-            Ok::<_, GeometryError>(sum)
-        })?;
+                Ok::<_, GeometryError>(sum)
+            },
+        )?;
         area = area.add(if binding.material_forward {
             contribution
         } else {
@@ -1078,7 +1092,9 @@ fn edge_vertical(
 ) -> Result<bool, GeometryError> {
     let domain = source.face_domain(a.0, remaining, work, cancel)?;
     let index = source_coedge_index(domain, a.1, a.2, work, cancel)?;
-    let range = domain.original_coedge_correspondence(index)?.spatial_range();
+    let range = domain
+        .original_coedge_correspondence(index)?
+        .spatial_range();
     domain.with_original_spatial_curve(index, remaining, work, cancel, |curve, work, cancel| {
         for span in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
             let jet = crate::parametric::curve_enclosure(curve, (span[0], span[1]), work, cancel)?;
@@ -1218,7 +1234,8 @@ fn native_height_scopes(
             let fi = component[cursor];
             cursor += 1;
             let (_, face) = native_face(definition, fi)?;
-            let domain = source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
+            let domain =
+                source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
             for wi in 0..face.loops.len() {
                 let wire = boundary_loop(definition, fi, wi)?;
                 for (ei, _) in wire.edges.iter().enumerate() {
@@ -1227,10 +1244,18 @@ fn native_height_scopes(
                         ColumnFace::Cap { height, .. } => {
                             let index = source_coedge_index(domain, wi, ei, work, cancel)?;
                             let h = domain.with_original_spatial_curve(
-                                index, storage.limit.saturating_sub(storage.used), work, cancel,
-                                |curve, work, cancel| super::slab::constant_native_curve_height(
-                                    curve, source_z(), work, cancel,
-                                ),
+                                index,
+                                storage.limit.saturating_sub(storage.used),
+                                work,
+                                cancel,
+                                |curve, work, cancel| {
+                                    super::slab::constant_native_curve_height(
+                                        curve,
+                                        source_z(),
+                                        work,
+                                        cancel,
+                                    )
+                                },
                             )?;
                             if h.is_none_or(|h| h.lo > height.hi || h.hi < height.lo) {
                                 valid = false;
@@ -1293,18 +1318,25 @@ fn native_height_scopes(
             let (_, face) = native_face(definition, fi)?;
             for wi in 0..face.loops.len() {
                 for edge in &boundary_loop(definition, fi, wi)?.edges {
-                    let record = definition.brep().edge(edge.edge)
-                        .map_err(|e| GeometryError::new(
+                    let record = definition.brep().edge(edge.edge).map_err(|e| {
+                        GeometryError::new(
                             GeometryErrorCode::AnalysisIndeterminate,
                             format!("void source edge: {e}"),
-                        ))?;
+                        )
+                    })?;
                     for vertex in record.vertices {
                         work.charge(1, cancel)?;
-                        let z = definition.brep().vertex(vertex)
-                            .map_err(|e| GeometryError::new(
-                                GeometryErrorCode::AnalysisIndeterminate,
-                                format!("void source vertex: {e}"),
-                            ))?.point.z;
+                        let z = definition
+                            .brep()
+                            .vertex(vertex)
+                            .map_err(|e| {
+                                GeometryError::new(
+                                    GeometryErrorCode::AnalysisIndeterminate,
+                                    format!("void source vertex: {e}"),
+                                )
+                            })?
+                            .point
+                            .z;
                         if z > lower_safe && z < upper_safe {
                             valid = false;
                         }
@@ -1319,12 +1351,15 @@ fn native_height_scopes(
         // vertex declaration. The sealed selected-use binding retains both
         // original points in canonical native endpoint order, without rounding.
         for &fi in &component {
-            let domain = source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
+            let domain =
+                source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
             for index in 0..domain.coedges().len() {
                 let correspondence = domain.original_coedge_correspondence(index)?;
-                let binding = correspondence.binding()
-                    .ok_or_else(|| unresolved("void column lost its selected original endpoint binding"))?;
-                for (native_back, point) in binding.source_vertex_points_mm.into_iter().enumerate() {
+                let binding = correspondence.binding().ok_or_else(|| {
+                    unresolved("void column lost its selected original endpoint binding")
+                })?;
+                for (native_back, point) in binding.source_vertex_points_mm.into_iter().enumerate()
+                {
                     work.charge(1, cancel)?;
                     if point[2] > lower_safe && point[2] < upper_safe {
                         valid = false;
@@ -1332,12 +1367,22 @@ fn native_height_scopes(
                     }
                     let parameter = correspondence.spatial_endpoint(native_back != 0);
                     let interior = domain.with_original_spatial_curve(
-                        index, storage.limit.saturating_sub(storage.used), work, cancel,
+                        index,
+                        storage.limit.saturating_sub(storage.used),
+                        work,
+                        cancel,
                         |curve, work, cancel| {
                             let z = super::slab::original_endpoint_height(
-                                curve, parameter, point, source_z(), work, cancel,
+                                curve,
+                                parameter,
+                                point,
+                                source_z(),
+                                work,
+                                cancel,
                             )?;
-                            if z.hi <= lower_safe || z.lo >= upper_safe { return Ok(false); }
+                            if z.hi <= lower_safe || z.lo >= upper_safe {
+                                return Ok(false);
+                            }
                             // Only a literal source coefficient identity owns a
                             // boundary whose outward endpoint jet straddles it.
                             Ok(!crate::parametric::curve_endpoint_coordinate_equal(
@@ -1347,7 +1392,9 @@ fn native_height_scopes(
                             )?)
                         },
                     )?;
-                    if interior { valid = false; }
+                    if interior {
+                        valid = false;
+                    }
                 }
             }
         }
@@ -1411,11 +1458,14 @@ fn native_height_scopes(
                     if !valid {
                         continue;
                     }
-                    let area = wire_area(source, neighbor.0,
-                    neighbor.1,
-                    storage.limit.saturating_sub(storage.used),
-                    work,
-                    cancel,)?;
+                    let area = wire_area(
+                        source,
+                        neighbor.0,
+                        neighbor.1,
+                        storage.limit.saturating_sub(storage.used),
+                        work,
+                        cancel,
+                    )?;
                     // Original inward rim degree is positive at the source
                     // lower end and negative at the upper end. An exterior
                     // column cannot impersonate an original native Hole.
@@ -1435,41 +1485,60 @@ fn native_height_scopes(
                     }
                     opening = Some(is_open);
                     if let Some(height) =
-                        super::critical::material_link::constant_material_face_height(source, neighbor.0,
-                        super::slab::HeightFunctional {
-                            direction: matrix[2],
-                            offset: Interval::point(translation[2]),
-                        },
-                        work,
-                        cancel,)?
+                        super::critical::material_link::constant_material_face_height(
+                            source,
+                            neighbor.0,
+                            super::slab::HeightFunctional {
+                                direction: matrix[2],
+                                offset: Interval::point(translation[2]),
+                            },
+                            work,
+                            cancel,
+                        )?
                     {
                         lower_world = lower_world.min(height);
                         continue;
                     }
                     let cap_domain = source.face_domain(
-                        neighbor.0, storage.limit.saturating_sub(storage.used), work, cancel,
+                        neighbor.0,
+                        storage.limit.saturating_sub(storage.used),
+                        work,
+                        cancel,
                     )?;
                     for (rim_index, _) in cap_wire.edges.iter().enumerate() {
-                        let index = source_coedge_index(cap_domain, neighbor.1, rim_index, work, cancel)?;
-                        let range = cap_domain.original_coedge_correspondence(index)?.spatial_range();
+                        let index =
+                            source_coedge_index(cap_domain, neighbor.1, rim_index, work, cancel)?;
+                        let range = cap_domain
+                            .original_coedge_correspondence(index)?
+                            .spatial_range();
                         cap_domain.with_original_spatial_curve(
-                            index, storage.limit.saturating_sub(storage.used), work, cancel,
+                            index,
+                            storage.limit.saturating_sub(storage.used),
+                            work,
+                            cancel,
                             |curve, work, cancel| {
-                            for span in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
-                                let position = crate::parametric::curve_enclosure(
-                                    curve, (span[0], span[1]), work, cancel,
-                                )?.position;
-                                lower_world = lower_world.min(
-                                    finite(
-                                        dot(matrix[2], position)
-                                            .add(Interval::point(translation[2]))
-                                            .sub(floor_transport_error),
+                                for span in crate::parametric::curve_parameter_spans(
+                                    curve, range, work, cancel,
+                                )? {
+                                    let position = crate::parametric::curve_enclosure(
+                                        curve,
+                                        (span[0], span[1]),
+                                        work,
+                                        cancel,
                                     )?
-                                    .lo,
-                                );
-                            }
-                            Ok::<_, GeometryError>(())
-                        })?;
+                                    .position;
+                                    lower_world = lower_world.min(
+                                        finite(
+                                            dot(matrix[2], position)
+                                                .add(Interval::point(translation[2]))
+                                                .sub(floor_transport_error),
+                                        )?
+                                        .lo,
+                                    );
+                                }
+                                Ok::<_, GeometryError>(())
+                            },
+                        )?;
                     }
                 }
             }
@@ -2067,7 +2136,8 @@ mod tests {
             limit: MAX_BYTES,
         };
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
+        let prepared =
+            prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
         let error = original_column_faces(
             prepared.source_view().unwrap(),
             &holes,
@@ -2082,16 +2152,16 @@ mod tests {
     }
 
     fn analytic_bore() -> Definition {
-        super::super::test_source::original_definition(
-            super::super::test_source::protected_bore(false),
-        )
+        super::super::test_source::original_definition(super::super::test_source::protected_bore(
+            false,
+        ))
     }
     /// The fixture owns a genuine rational cylindrical wall and sewn original
     /// rational rims/seam/pcurves, not an analytic family rename or sampled circle.
     fn rational_bore() -> Definition {
-        super::super::test_source::original_definition(
-            super::super::test_source::protected_bore(true),
-        )
+        super::super::test_source::original_definition(super::super::test_source::protected_bore(
+            true,
+        ))
     }
     fn captured(
         definition: &Definition,
@@ -2101,7 +2171,12 @@ mod tests {
         work: &mut GeometryWorkBudget,
     ) -> NativeVoidProjectionCapture {
         let cancel = AtomicBool::new(false);
-        let source = prepare_solid(definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, work, &cancel)
+        let source = prepare_solid(
+            definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            work,
+            &cancel,
+        )
         .unwrap();
         let analysis = source
             .analyze_placed_slab(
@@ -2184,13 +2259,20 @@ mod tests {
     #[test]
     fn independent_housing_upper_hole_preserves_frozen_projection_accuracy() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ),
-        &cancel,)
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+            ),
+            &cancel,
+        )
         .unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        let source = prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         // This actual upper housing section needs bounded reference-cycle
         // correspondence as well as native curve, Boolean and physical G error.
@@ -2259,7 +2341,8 @@ mod tests {
         );
         // A captured regular slab is NOT the endpoint inventory of the whole
         // original wall: its upper edge cuts live material, not a source cap.
-        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
+        let prepared =
+            prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
         let error = super::super::critical::material_link::prove_source_wall_component(
             prepared.source_view().unwrap(),
             &capture.holes[0].source_faces,
@@ -2307,10 +2390,12 @@ mod tests {
 
     #[test]
     fn actual_analytic_rational_and_independent_through_bores_preserve_diagonal_corridors() {
-        let independent = crate::from_step_bytes_with_cancel(include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"
-        ),
-        &AtomicBool::new(false),)
+        let independent = crate::from_step_bytes_with_cancel(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"
+            ),
+            &AtomicBool::new(false),
+        )
         .unwrap();
         for (definition, center, radius) in [
             (analytic_bore(), [10.0, 10.0], 3.0),
@@ -2394,10 +2479,12 @@ mod tests {
 
     #[test]
     fn independent_rounded_floor_is_not_the_global_source_minimum() {
-        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-        ),
-        &AtomicBool::new(false),)
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+            ),
+            &AtomicBool::new(false),
+        )
         .unwrap();
         let mut work = GeometryWorkBudget::new(300_000_000);
         let capture = captured(
@@ -2513,7 +2600,12 @@ mod tests {
         let definition = recipe("native-parity-nurbs-cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        let source = prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         let analysis = source
             .analyze_slab(
@@ -2554,8 +2646,10 @@ mod tests {
     fn closed_birth_without_sample_holes_requires_complete_original_disk_product() {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-        &cancel,)
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
         .unwrap();
         let capture = captured(
             &definition,
@@ -2605,7 +2699,12 @@ mod tests {
         let definition = recipe("native-parity-ring-torus.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        let source = prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         let analysis = source
             .analyze_slab(
@@ -2651,10 +2750,12 @@ mod tests {
 
     #[test]
     fn independent_submillimeter_pocket_does_not_alias_away_its_native_floor() {
-        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-            "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
-        ),
-        &AtomicBool::new(false),)
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!(
+                "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
+            ),
+            &AtomicBool::new(false),
+        )
         .unwrap();
         let mut work = GeometryWorkBudget::new(200_000_000);
         let capture = captured(

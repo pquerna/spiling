@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use std::sync::atomic::AtomicBool;
 use spiling_contracts::geometry::{DisplayProfile, GeometryError, PlaneMm};
-use spiling_geometry::{Definition, MeshArtifact, NativeSection, SectionLoopMm, import_step, section, tessellate};
+use spiling_geometry::{
+    Definition, MeshArtifact, NativeSection, SectionLoopMm, import_step, section, tessellate,
+};
+use std::sync::atomic::AtomicBool;
 
 pub fn assert_close(actual: f64, expected: f64, tolerance: f64, context: &str) {
     let diff = (actual - expected).abs();
@@ -36,7 +38,11 @@ pub fn section_midplane(def: &Definition) -> Result<NativeSection, GeometryError
 }
 
 pub fn tessellate_display(def: &Definition) -> Result<MeshArtifact, GeometryError> {
-    tessellate(def, DisplayProfile::MeshTrimmedMm005V2, &AtomicBool::new(false))
+    tessellate(
+        def,
+        DisplayProfile::MeshTrimmedMm005V2,
+        &AtomicBool::new(false),
+    )
 }
 
 pub fn loop_area(result: &NativeSection, boundary: &SectionLoopMm) -> f64 {

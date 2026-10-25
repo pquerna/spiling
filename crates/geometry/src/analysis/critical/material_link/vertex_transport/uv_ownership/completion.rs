@@ -202,39 +202,42 @@ pub(super) fn propose(
         let homotopy =
             std::array::from_fn(|i| original.position[i].add(UNIT.mul(correction.position[i])));
         let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
-        let cheap_enough = { let surface = &domain.surface_operand(); (|| {
-            let jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
-            let position = compose_first(&jet.du, &jet.dv, correction.position);
-            // Integral Hessian identity bounds the change of the surface first
-            // jet along the WHOLE UV homotopy. Include the derivative correction
-            // itself, not just the endpoint positional displacement.
-            let derivative: Box3 = std::array::from_fn(|axis| {
-                jet.du[axis]
-                    .mul(correction.derivative[0])
-                    .add(jet.dv[axis].mul(correction.derivative[1]))
-                    .add(
-                        jet.duu[axis]
-                            .mul(correction.position[0])
-                            .mul(original.derivative[0]),
-                    )
-                    .add(
-                        jet.duv[axis].mul(
-                            correction.position[0]
-                                .mul(original.derivative[1])
-                                .add(correction.position[1].mul(original.derivative[0])),
-                        ),
-                    )
-                    .add(
-                        jet.dvv[axis]
-                            .mul(correction.position[1])
-                            .mul(original.derivative[1]),
-                    )
-            });
-            let cost = Interval::point(proof.position_error_mm())
-                .add(Interval::point(length(position)?.hi))
-                .add(Interval::point(length(derivative)?.hi));
-            Ok::<_, GeometryError>(cost.hi.is_finite() && cost.hi < allowance)
-        })() }?;
+        let cheap_enough = {
+            let surface = &domain.surface_operand();
+            (|| {
+                let jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
+                let position = compose_first(&jet.du, &jet.dv, correction.position);
+                // Integral Hessian identity bounds the change of the surface first
+                // jet along the WHOLE UV homotopy. Include the derivative correction
+                // itself, not just the endpoint positional displacement.
+                let derivative: Box3 = std::array::from_fn(|axis| {
+                    jet.du[axis]
+                        .mul(correction.derivative[0])
+                        .add(jet.dv[axis].mul(correction.derivative[1]))
+                        .add(
+                            jet.duu[axis]
+                                .mul(correction.position[0])
+                                .mul(original.derivative[0]),
+                        )
+                        .add(
+                            jet.duv[axis].mul(
+                                correction.position[0]
+                                    .mul(original.derivative[1])
+                                    .add(correction.position[1].mul(original.derivative[0])),
+                            ),
+                        )
+                        .add(
+                            jet.dvv[axis]
+                                .mul(correction.position[1])
+                                .mul(original.derivative[1]),
+                        )
+                });
+                let cost = Interval::point(proof.position_error_mm())
+                    .add(Interval::point(length(position)?.hi))
+                    .add(Interval::point(length(derivative)?.hi));
+                Ok::<_, GeometryError>(cost.hi.is_finite() && cost.hi < allowance)
+            })()
+        }?;
         if !cheap_enough {
             return Ok(None);
         }

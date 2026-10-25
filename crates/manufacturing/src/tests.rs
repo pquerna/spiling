@@ -86,8 +86,9 @@ struct Scene {
 }
 impl Scene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
-        let native =
-            Arc::new(spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap());
+        let native = Arc::new(
+            spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap(),
+        );
         let id = native.id().clone();
         let mut provenance = native.provenance().clone();
         provenance.source_name = "operator captured source.step".into();
@@ -1764,7 +1765,9 @@ fn vertical_slab_transition_keeps_upper_material_inside_fresh_native_sections() 
     use spiling_contracts::geometry::PlaneMm;
 
     let mut scene = Scene::new(BOX, &[RigidPoseMm::IDENTITY]);
-    let upper = Arc::new(spiling_geometry::from_step_bytes_with_cancel(CYLINDER, &AtomicBool::new(false)).unwrap());
+    let upper = Arc::new(
+        spiling_geometry::from_step_bytes_with_cancel(CYLINDER, &AtomicBool::new(false)).unwrap(),
+    );
     let upper_id = upper.id().clone();
     scene.stored.push(StoredDefinition {
         definition_id: upper_id.clone(),

@@ -5,28 +5,43 @@
 use super::*;
 use solidcore::{
     curve::curve::Curve,
-    nurbs::{b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface,
-        crv_basic, srf_basic, math::{CPoint, NOW, NOZ}},
+    nurbs::{
+        b_spline_curve::BSplineCurve,
+        b_spline_surface::BSplineSurface,
+        crv_basic,
+        math::{CPoint, NOW, NOZ},
+        srf_basic,
+    },
     surface::surface::{Surface, p2::SurfaceKind},
 };
 
 fn bezier_knots(degree: usize) -> Vec<f64> {
     std::iter::repeat_n(0.0, degree + 1)
-        .chain(std::iter::repeat_n(1.0, degree + 1)).collect()
+        .chain(std::iter::repeat_n(1.0, degree + 1))
+        .collect()
 }
 
 fn native_surface(knots: [Vec<f64>; 2], points: Vec<Vec<CPoint>>) -> Surface {
-    let degree = [knots[0].len() - points.len() - 1,
-        knots[1].len() - points[0].len() - 1];
+    let degree = [
+        knots[0].len() - points.len() - 1,
+        knots[1].len() - points[0].len() - 1,
+    ];
     let [u, v] = knots;
     let coefficients = srf_basic::Surface::new(points, degree[0], degree[1], u, v).unwrap();
-    Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(coefficients, true)))
+    Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(
+        coefficients,
+        true,
+    )))
 }
 
 fn native_curve(knots: Vec<f64>, points: Vec<CPoint>, dimension: u64) -> Curve {
     let degree = knots.len() - points.len() - 1;
-    BSplineCurve::from_nurb(crv_basic::Curve::new(points, degree, knots).unwrap(),
-        dimension, true).into()
+    BSplineCurve::from_nurb(
+        crv_basic::Curve::new(points, degree, knots).unwrap(),
+        dimension,
+        true,
+    )
+    .into()
 }
 
 #[test]
@@ -49,8 +64,7 @@ fn reference_centroid_is_invariant_to_native_boundary_sampling_density() {
     dense.push(sparse[0]);
     let mut work = GeometryWorkBudget::new(1000);
     for points in [sparse.as_slice(), dense.as_slice()] {
-        let center =
-            reference_centroid(points, frame, &mut work, &AtomicBool::new(false)).unwrap();
+        let center = reference_centroid(points, frame, &mut work, &AtomicBool::new(false)).unwrap();
         assert!(center[0].abs() < 1.0e-12 && center[1].abs() < 1.0e-12);
         assert!((center[2] - 2.0).abs() < 1.0e-12);
     }
@@ -477,7 +491,12 @@ fn native_rational_and_polynomial_caps_share_the_critical_complex() {
     ] {
         let definition = source(name);
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         // The bottom-right edge changes source face incidence at height 12.
         // Both encodings take the same oriented patch/trim construction.
@@ -519,7 +538,12 @@ fn imported_rational_torus_has_generic_terminal_metric_and_cycle_incidence() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus.step");
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let frame = PlaneFrameMm {
         origin_mm: [0.0; 3],
@@ -569,21 +593,31 @@ fn original_circle_callbacks_keep_radian_gauge_separate_from_native_interval() {
     use crate::parametric::CurveEvaluator;
     use solidcraft_step::geom::{Curve as OriginalCurve, PreferredRep};
     let cancel = AtomicBool::new(false);
-    let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-        "../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
-    ), &cancel).unwrap();
+    let definition = crate::from_step_bytes_with_cancel(
+        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"),
+        &cancel,
+    )
+    .unwrap();
     let mut work = GeometryWorkBudget::new(30_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
     let source = prepared.source_view().unwrap();
     let remaining = MAX_SCRATCH_BYTES - prepared.retained_bytes();
     let mut circles = 0;
     for face in 0..definition.face_ids().len() {
-        let domain = source.face_domain(face, remaining, &mut work, &cancel).unwrap();
+        let domain = source
+            .face_domain(face, remaining, &mut work, &cancel)
+            .unwrap();
         for index in 0..domain.coedges().len() {
             let proof = domain.original_coedge_correspondence(index).unwrap();
-            let binding = *proof.binding().expect("sealed selected original occurrence");
+            let binding = *proof
+                .binding()
+                .expect("sealed selected original occurrence");
             let native = definition.brep().edge(binding.edge).unwrap();
-            assert_eq!(binding.native_interval, [native.interval.min(), native.interval.max()]);
+            assert_eq!(
+                binding.native_interval,
+                [native.interval.min(), native.interval.max()]
+            );
             let spatial = proof.spatial_range();
             domain.with_original_spatial_curve(index, remaining, &mut work, &cancel, |curve, work, cancel| {
                 let mut original = curve.original_curve().expect("original callback operand, not a native carrier");
@@ -630,38 +664,68 @@ fn original_circle_callbacks_keep_radian_gauge_separate_from_native_interval() {
             }).unwrap();
         }
     }
-    assert!(circles > 0, "all actual selected circular uses are exercised");
+    assert!(
+        circles > 0,
+        "all actual selected circular uses are exercised"
+    );
 }
 #[test]
 fn source_normal_matching_uses_independent_uv_and_native_edge_parameters() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus-independent-parameters.step");
     let mut work = GeometryWorkBudget::new(10_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES / 2, &mut work, &cancel).unwrap();
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES / 2, &mut work, &cancel).unwrap();
     let source = prepared.source_view().unwrap();
     let remaining = MAX_SCRATCH_BYTES - prepared.retained_bytes();
-    let domain = source.face_domain(0, remaining, &mut work, &cancel).unwrap();
+    let domain = source
+        .face_domain(0, remaining, &mut work, &cancel)
+        .unwrap();
     for index in 0..domain.coedges().len() {
         let correspondence = domain.original_coedge_correspondence(index).unwrap();
         // Source pcurves retain [0,2]/[2,4]; spatial source leaders
         // retain [10,14]/[14,18]. No numeric parameter is shared.
         assert!(correspondence.spatial_range()[0] >= 10.0);
-        assert!(correspondence.uv_range().into_iter().all(|value| value <= 4.0));
-        domain.with_original_spatial_curve(index, remaining, &mut work, &cancel, |prepared, work, cancel| {
-            let [lo, hi] = crate::parametric::curve_parameter_spans(
-                prepared, correspondence.spatial_range(), work, cancel)?.next().unwrap();
-            let t = lo + (hi - lo) * 0.37;
-            let child = crate::parametric::curve_enclosure(
-                prepared, (t, t + (hi - lo) * 0.005), work, cancel).unwrap();
-            let n = coedge_normal_enclosure(domain, index, child.position, work, cancel)
-                .unwrap();
-            assert!(length(n).unwrap().lo > 0.0);
-            let p = child.position.map(Interval::mid);
-            let rho = p[0].hypot(p[1]);
-            let outward = [p[0] * (rho - 6.0) / rho, p[1] * (rho - 6.0) / rho, p[2]];
-            assert!(dot(n, outward.map(Interval::point)).lo > 0.0);
-            Ok(())
-        }).unwrap();
+        assert!(
+            correspondence
+                .uv_range()
+                .into_iter()
+                .all(|value| value <= 4.0)
+        );
+        domain
+            .with_original_spatial_curve(
+                index,
+                remaining,
+                &mut work,
+                &cancel,
+                |prepared, work, cancel| {
+                    let [lo, hi] = crate::parametric::curve_parameter_spans(
+                        prepared,
+                        correspondence.spatial_range(),
+                        work,
+                        cancel,
+                    )?
+                    .next()
+                    .unwrap();
+                    let t = lo + (hi - lo) * 0.37;
+                    let child = crate::parametric::curve_enclosure(
+                        prepared,
+                        (t, t + (hi - lo) * 0.005),
+                        work,
+                        cancel,
+                    )
+                    .unwrap();
+                    let n = coedge_normal_enclosure(domain, index, child.position, work, cancel)
+                        .unwrap();
+                    assert!(length(n).unwrap().lo > 0.0);
+                    let p = child.position.map(Interval::mid);
+                    let rho = p[0].hypot(p[1]);
+                    let outward = [p[0] * (rho - 6.0) / rho, p[1] * (rho - 6.0) / rho, p[2]];
+                    assert!(dot(n, outward.map(Interval::point)).lo > 0.0);
+                    Ok(())
+                },
+            )
+            .unwrap();
         let complete = coedge_normal_enclosure(
             &domain,
             index,
@@ -701,46 +765,65 @@ fn imported_exact_tensor_proves_internal_and_periodic_projective_g1_identities()
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus.step");
     let mut work = GeometryWorkBudget::new(10_000_000);
-    let prepared = crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+    let prepared =
+        crate::prepare_solid(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
     let source = prepared.source_view().unwrap();
-    let domain = source.face_domain(0, MAX_SCRATCH_BYTES - prepared.retained_bytes(),
-        &mut work, &cancel).unwrap();
+    let domain = source
+        .face_domain(
+            0,
+            MAX_SCRATCH_BYTES - prepared.retained_bytes(),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
     let surface = domain.surface_evaluator();
-    let mut original = surface.original_surface().expect("selected original tensor coefficients");
+    let mut original = surface
+        .original_surface()
+        .expect("selected original tensor coefficients");
     while let solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } = original {
         original = basis;
     }
     let solidcraft_step::geom::Surface::BSpline(tensor) = original else {
         panic!("the original rational torus retains its actual B-spline coefficient net");
     };
-    assert!(tensor.weights.is_some(), "the selected original tensor retains its rational weights");
-    let source_domain = domain.certified_uv_domain().expect("independently proved original source chart domain");
-        for axis in 0..2 {
-            assert!(periodic_regular_join(surface, axis, source_domain, &mut work, &cancel).unwrap());
-        }
-        let mut joins = 0;
-        assert!(critical_face_gluing(surface, source_domain, &mut work, &cancel).unwrap(),
-            "the complete exact rational torus is admitted by coefficient identities, not a knot-count shortcut");
-        for interface in surface_crease_interfaces(surface, source_domain, &mut work, &cancel).unwrap() {
-            assert!(interface_regular_join(surface, interface, &mut work, &cancel).unwrap());
-            let fixed_axis = usize::from(interface[1][0] == interface[1][1]);
-            let mut uncertain_band = interface;
-            uncertain_band[fixed_axis] = [down(interface[fixed_axis][0]), up(interface[fixed_axis][1])];
-            assert!(!interface_regular_join(surface, uncertain_band, &mut work, &cancel).unwrap(),
-                "a reflected knot enclosure is not either nominal endpoint");
-            joins += 1;
-        }
-        // Three internal knot lines in each axis, each split into four
-        // one-sided spans by the other axis's original knot partition.
-        assert_eq!(joins, 24);
+    assert!(
+        tensor.weights.is_some(),
+        "the selected original tensor retains its rational weights"
+    );
+    let source_domain = domain
+        .certified_uv_domain()
+        .expect("independently proved original source chart domain");
+    for axis in 0..2 {
+        assert!(periodic_regular_join(surface, axis, source_domain, &mut work, &cancel).unwrap());
+    }
+    let mut joins = 0;
+    assert!(
+        critical_face_gluing(surface, source_domain, &mut work, &cancel).unwrap(),
+        "the complete exact rational torus is admitted by coefficient identities, not a knot-count shortcut"
+    );
+    for interface in surface_crease_interfaces(surface, source_domain, &mut work, &cancel).unwrap()
+    {
+        assert!(interface_regular_join(surface, interface, &mut work, &cancel).unwrap());
+        let fixed_axis = usize::from(interface[1][0] == interface[1][1]);
+        let mut uncertain_band = interface;
+        uncertain_band[fixed_axis] = [down(interface[fixed_axis][0]), up(interface[fixed_axis][1])];
+        assert!(
+            !interface_regular_join(surface, uncertain_band, &mut work, &cancel).unwrap(),
+            "a reflected knot enclosure is not either nominal endpoint"
+        );
+        joins += 1;
+    }
+    // Three internal knot lines in each axis, each split into four
+    // one-sided spans by the other axis's original knot partition.
+    assert_eq!(joins, 24);
 }
 #[test]
 fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {
     let cancel = AtomicBool::new(false);
-    let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-        "../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
-    ),
-    &cancel,)
+    let definition = crate::from_step_bytes_with_cancel(
+        include_bytes!("../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"),
+        &cancel,
+    )
     .unwrap();
     let angle = std::f64::consts::PI / 180.0;
     let (sine, cosine) = angle.sin_cos();
@@ -752,7 +835,12 @@ fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {
     };
     let terminal = 8.0 * cosine + 5.0 * sine;
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let request = SlabRequest {
         frame,
@@ -784,15 +872,35 @@ fn original_one_degree_tilted_cylinder_retains_its_terminal_slab() {
 }
 #[test]
 fn trimmed_uv_pose_and_sense_preserve_only_exact_chart_linear_identities() {
-    use solidcore::{geom::{axis2_placement::Axis2Placement, extent1d::Extent1d},
-        nurbs::b_spline_curve_n_lib::TrimMode, Point3, Vec3};
+    use solidcore::{
+        Point3, Vec3,
+        geom::{axis2_placement::Axis2Placement, extent1d::Extent1d},
+        nurbs::b_spline_curve_n_lib::TrimMode,
+    };
     let kernel = solidcore::Kernel::default();
-    let mut curve = native_curve(bezier_knots(1),
-        vec![CPoint::new(0.0, 1.0, NOZ, NOW), CPoint::new(0.0, 2.0, NOZ, NOW)], 2);
+    let mut curve = native_curve(
+        bezier_knots(1),
+        vec![
+            CPoint::new(0.0, 1.0, NOZ, NOW),
+            CPoint::new(0.0, 2.0, NOZ, NOW),
+        ],
+        2,
+    );
     let mut interval = Extent1d::from_min_max(0.2, 0.8);
-    curve.trim(&kernel, &mut interval, TrimMode::Silent).unwrap();
-    curve.transform(&kernel, &Axis2Placement::new(Point3::new(4.0, -3.0, 0.0),
-        Vec3::new(0.0, 1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)), None).unwrap();
+    curve
+        .trim(&kernel, &mut interval, TrimMode::Silent)
+        .unwrap();
+    curve
+        .transform(
+            &kernel,
+            &Axis2Placement::new(
+                Point3::new(4.0, -3.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+            ),
+            None,
+        )
+        .unwrap();
     curve.reverse_parameterization(&kernel, &interval).unwrap();
     let coefficients = [0.0, 1.0, 3.0].map(ExactCoefficient::point);
     let mut work = GeometryWorkBudget::new(10_000);
@@ -805,16 +913,19 @@ fn trimmed_uv_pose_and_sense_preserve_only_exact_chart_linear_identities() {
 fn diagonal_stationary_cover_retains_a_whole_critical_line_and_excludes_nonroots() {
     // Equivalent native encodings of z=(2u-1)^2 retain the complete
     // stationary line u=1/2 even though the full Hessian is singular.
-    let surface = native_surface([bezier_knots(2), bezier_knots(1)], [0.0, 0.5, 1.0]
-        .into_iter()
-        .zip([1.0, -1.0, 1.0])
-        .map(|(x, z)| {
-            [-1000.0, 1000.0]
-                .into_iter()
-                .map(|y| CPoint::new(x, y, z, NOW))
-                .collect()
-        })
-        .collect());
+    let surface = native_surface(
+        [bezier_knots(2), bezier_knots(1)],
+        [0.0, 0.5, 1.0]
+            .into_iter()
+            .zip([1.0, -1.0, 1.0])
+            .map(|(x, z)| {
+                [-1000.0, 1000.0]
+                    .into_iter()
+                    .map(|y| CPoint::new(x, y, z, NOW))
+                    .collect()
+            })
+            .collect(),
+    );
     let height = HeightFunctional {
         direction: [0.0, 0.0, 1.0].map(Interval::point),
         offset: Interval::point(0.0),
@@ -834,17 +945,28 @@ fn diagonal_stationary_cover_retains_a_whole_critical_line_and_excludes_nonroots
     );
     // Tensor interval dependency may prevent contraction; that is not
     // evidence of exclusion. The direct profile supplies a sharp diagonal.
-    use solidcore::{geom::extent2d::Extent2d, surface::surf_of_extrusion::SurfOfExtrusion,
-        Point2, Point3, Vec3};
+    use solidcore::{
+        Point2, Point3, Vec3, geom::extent2d::Extent2d, surface::surf_of_extrusion::SurfOfExtrusion,
+    };
     let kernel = solidcore::Kernel::default();
-    let profile = native_curve(bezier_knots(2), vec![
-        CPoint::new(0.0, -1000.0, 1.0, NOW),
-        CPoint::new(0.5, -1000.0, -1.0, NOW),
-        CPoint::new(1.0, -1000.0, 1.0, NOW),
-    ], 3);
-    let mut extrusion = SurfOfExtrusion::new(&kernel, profile,
-        Point3::new(0.0, -1000.0, 1.0), Vec3::new(0.0, 2000.0, 0.0),
-        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)), false).unwrap();
+    let profile = native_curve(
+        bezier_knots(2),
+        vec![
+            CPoint::new(0.0, -1000.0, 1.0, NOW),
+            CPoint::new(0.5, -1000.0, -1.0, NOW),
+            CPoint::new(1.0, -1000.0, 1.0, NOW),
+        ],
+        3,
+    );
+    let mut extrusion = SurfOfExtrusion::new(
+        &kernel,
+        profile,
+        Point3::new(0.0, -1000.0, 1.0),
+        Vec3::new(0.0, 2000.0, 0.0),
+        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)),
+        false,
+    )
+    .unwrap();
     extrusion.make_nurb(&kernel).unwrap();
     let surface = Surface::new(SurfaceKind::SurfOfExtrusion(extrusion));
     let jet = surface_enclosure(&surface, uv, &mut work, &cancel).unwrap();
@@ -879,10 +1001,19 @@ fn mixed_stationary_cover_retains_true_saddles_and_original_pole_corners() {
     // h=8+(u-1/2)(v-1/2) has a genuine interior saddle, with
     // zero diagonal Hessians. Its nonsingular mixed entry supplies
     // necessary contraction, while Krawczyk separately proves existence.
-    let saddle = native_surface([bezier_knots(1), bezier_knots(1)], vec![
-        vec![CPoint::new(0.0, 0.0, 8.25, NOW), CPoint::new(0.0, 1.0, 7.75, NOW)],
-        vec![CPoint::new(1.0, 0.0, 7.75, NOW), CPoint::new(1.0, 1.0, 8.25, NOW)],
-    ]);
+    let saddle = native_surface(
+        [bezier_knots(1), bezier_knots(1)],
+        vec![
+            vec![
+                CPoint::new(0.0, 0.0, 8.25, NOW),
+                CPoint::new(0.0, 1.0, 7.75, NOW),
+            ],
+            vec![
+                CPoint::new(1.0, 0.0, 7.75, NOW),
+                CPoint::new(1.0, 1.0, 8.25, NOW),
+            ],
+        ],
+    );
     let uv = [[0.4, 0.6]; 2];
     let jet = surface_enclosure(&saddle, uv, &mut work, &cancel).unwrap();
     let root = necessary_stationary_domain(&saddle, uv, &jet, height, &mut work, &cancel)
@@ -907,15 +1038,28 @@ fn mixed_stationary_cover_retains_true_saddles_and_original_pole_corners() {
     // The SAME horizontal-axis sphere uses native longitude/latitude degrees:
     // h=8+2 cos(latitude)sin(longitude). The original polar corner is
     // (longitude,latitude)=(0,-90), not an interior approximate sample.
-    use solidcore::{geom::extent2d::Extent2d, surface::{sphere::{Sphere, SphereOptions},
-        surface::StepSurface}, Point2, Point3, Vec3};
+    use solidcore::{
+        Point2, Point3, Vec3,
+        geom::extent2d::Extent2d,
+        surface::{
+            sphere::{Sphere, SphereOptions},
+            surface::StepSurface,
+        },
+    };
     let kernel = solidcore::Kernel::default();
-    let sphere = Sphere::new(&kernel, Point3::new(0.0, 0.0, 8.0),
-        Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0),
+    let sphere = Sphere::new(
+        &kernel,
+        Point3::new(0.0, 0.0, 8.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
         Extent2d::from_points(Point2::new(0.0, -90.0), Point2::new(360.0, 90.0)),
-        2.0, SphereOptions::default()).unwrap();
-    let pole = Surface::new(SurfaceKind::Step(StepSurface::new(
-        Surface::new(SurfaceKind::Sphere(sphere)), true).unwrap()));
+        2.0,
+        SphereOptions::default(),
+    )
+    .unwrap();
+    let pole = Surface::new(SurfaceKind::Step(
+        StepSurface::new(Surface::new(SurfaceKind::Sphere(sphere)), true).unwrap(),
+    ));
     let uv = [[0.0, 45.0], [-90.0, -90.0 + 4e-7_f64.to_degrees()]];
     let jet = surface_enclosure(&pole, uv, &mut work, &cancel).unwrap();
     assert!(height.dot(jet.duu).contains_zero() && height.dot(jet.dvv).contains_zero());
@@ -954,13 +1098,19 @@ fn a_piecewise_hessian_cannot_exclude_a_true_source_knot_cusp() {
                 .collect()
         })
         .collect();
-    let surface = native_surface([vec![-1.0, -1.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]], controls);
+    let surface = native_surface(
+        [
+            vec![-1.0, -1.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        ],
+        controls,
+    );
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(100_000);
     assert!(!critical_face_gluing(&surface, [[-1.0, 1.0]; 2], &mut work, &cancel).unwrap());
     let uv = [[-0.125, 0.125]; 2];
-    let jet = crate::parametric::surface_piecewise_enclosure(&surface, uv, &mut work, &cancel)
-        .unwrap();
+    let jet =
+        crate::parametric::surface_piecewise_enclosure(&surface, uv, &mut work, &cancel).unwrap();
     let height = HeightFunctional {
         direction: [0.0, 0.0, 1.0].map(Interval::point),
         offset: Interval::point(0.0),
@@ -988,40 +1138,83 @@ fn a_piecewise_hessian_cannot_exclude_a_true_source_knot_cusp() {
 }
 #[test]
 fn original_folded_profile_cannot_gain_global_convexity_by_partitioning() {
-    use solidcore::{curve::crv_on_surf::CrvOnSurf, geom::extent2d::Extent2d,
-        surface::surf_of_extrusion::SurfOfExtrusion, Point2, Point3, Vec3};
+    use solidcore::{
+        Point2, Point3, Vec3, curve::crv_on_surf::CrvOnSurf, geom::extent2d::Extent2d,
+        surface::surf_of_extrusion::SurfOfExtrusion,
+    };
     let kernel = solidcore::Kernel::default();
     let carrier = native_surface(
         [vec![0.0, 0.0, 0.5, 1.0, 1.0], bezier_knots(1)],
         vec![
-            vec![CPoint::new(0.0, 0.0, 0.0, NOW), CPoint::new(0.0, 1.0, 0.0, NOW)],
-            vec![CPoint::new(0.5, 0.25, 0.0, NOW), CPoint::new(0.5, 1.25, 0.0, NOW)],
-            vec![CPoint::new(1.0, 0.0, 0.0, NOW), CPoint::new(1.0, 1.0, 0.0, NOW)],
+            vec![
+                CPoint::new(0.0, 0.0, 0.0, NOW),
+                CPoint::new(0.0, 1.0, 0.0, NOW),
+            ],
+            vec![
+                CPoint::new(0.5, 0.25, 0.0, NOW),
+                CPoint::new(0.5, 1.25, 0.0, NOW),
+            ],
+            vec![
+                CPoint::new(1.0, 0.0, 0.0, NOW),
+                CPoint::new(1.0, 1.0, 0.0, NOW),
+            ],
         ],
     );
-    let chart = native_curve(bezier_knots(1), vec![
-        CPoint::new(0.0, 0.0, NOZ, NOW), CPoint::new(1.0, 0.0, NOZ, NOW),
-    ], 2);
-    let nested: Curve = CrvOnSurf::new(&kernel, chart, carrier, None, 0).unwrap().into();
-    assert!(!crate::parametric::curve_parameter_span_smooth(
-        &nested, [0.0, 1.0], &mut GeometryWorkBudget::new(100_000),
-        &AtomicBool::new(false)).unwrap());
-    let rejection = SurfOfExtrusion::new(&kernel, nested,
-        Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0),
-        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)), false)
-        .expect_err("pinned native kernel cannot construct a curve-on-surface generator");
-    assert!(rejection.to_string().contains("generator is not derived from SmBSplineCurve"));
+    let chart = native_curve(
+        bezier_knots(1),
+        vec![
+            CPoint::new(0.0, 0.0, NOZ, NOW),
+            CPoint::new(1.0, 0.0, NOZ, NOW),
+        ],
+        2,
+    );
+    let nested: Curve = CrvOnSurf::new(&kernel, chart, carrier, None, 0)
+        .unwrap()
+        .into();
+    assert!(
+        !crate::parametric::curve_parameter_span_smooth(
+            &nested,
+            [0.0, 1.0],
+            &mut GeometryWorkBudget::new(100_000),
+            &AtomicBool::new(false)
+        )
+        .unwrap()
+    );
+    let rejection = SurfOfExtrusion::new(
+        &kernel,
+        nested,
+        Point3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)),
+        false,
+    )
+    .expect_err("pinned native kernel cannot construct a curve-on-surface generator");
+    assert!(
+        rejection
+            .to_string()
+            .contains("generator is not derived from SmBSplineCurve")
+    );
     // Native extrusion accepts only B-spline-derived generators and owns its
     // original stored tensor. Keep the SAME exact fold in that reachable
     // generator as well: subdivision cannot erase its true interior C0 knot.
-    let profile = native_curve(vec![0.0, 0.0, 0.5, 1.0, 1.0], vec![
-        CPoint::new(0.0, 0.0, 0.0, NOW),
-        CPoint::new(0.5, 0.25, 0.0, NOW),
-        CPoint::new(1.0, 0.0, 0.0, NOW),
-    ], 3);
-    let mut extrusion = SurfOfExtrusion::new(&kernel, profile,
-        Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0),
-        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)), false).unwrap();
+    let profile = native_curve(
+        vec![0.0, 0.0, 0.5, 1.0, 1.0],
+        vec![
+            CPoint::new(0.0, 0.0, 0.0, NOW),
+            CPoint::new(0.5, 0.25, 0.0, NOW),
+            CPoint::new(1.0, 0.0, 0.0, NOW),
+        ],
+        3,
+    );
+    let mut extrusion = SurfOfExtrusion::new(
+        &kernel,
+        profile,
+        Point3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)),
+        false,
+    )
+    .unwrap();
     extrusion.make_nurb(&kernel).unwrap();
     let surface = Surface::new(SurfaceKind::SurfOfExtrusion(extrusion));
     assert!(
@@ -1059,33 +1252,45 @@ fn exact_expansion_never_rounds_a_residual_or_underflow_product_to_an_identity()
 fn a_nonzero_g1_coefficient_residual_is_not_a_small_jump_certificate() {
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(10_000);
-    let center = |_: usize, coordinate: usize, _: &mut GeometryWorkBudget|
-        Ok(Some(ExactCoefficient::point(if coordinate == 3 { 1.0 } else { 0.0 })));
-    let derivative =
-        |other: usize, coordinate: usize, left: bool, _: &mut GeometryWorkBudget| {
-            let value = if coordinate == 0 {
-                1.0
-            } else if !left && other == 1 && coordinate == 1 {
-                f64::EPSILON
-            } else {
-                0.0
-            };
-            Ok(Some(ExactCoefficient::point(value)))
+    let center = |_: usize, coordinate: usize, _: &mut GeometryWorkBudget| {
+        Ok(Some(ExactCoefficient::point(if coordinate == 3 {
+            1.0
+        } else {
+            0.0
+        })))
+    };
+    let derivative = |other: usize, coordinate: usize, left: bool, _: &mut GeometryWorkBudget| {
+        let value = if coordinate == 0 {
+            1.0
+        } else if !left && other == 1 && coordinate == 1 {
+            f64::EPSILON
+        } else {
+            0.0
         };
+        Ok(Some(ExactCoefficient::point(value)))
+    };
     assert!(!coefficient_tangent_join(2, center, derivative, &mut work, &cancel).unwrap());
 }
 #[test]
 fn krawczyk_proves_native_morse_root_and_excludes_no_root_patch() {
     let cancel = AtomicBool::new(false);
-    let surface = native_surface([bezier_knots(2), bezier_knots(2)], (0..3)
-        .map(|u| {
-            (0..3)
-                .map(|v| {
-                    CPoint::new(u as f64 * 0.5, v as f64 * 0.5, [0.25, -0.25, 0.25][u] + [0.25, -0.25, 0.25][v], NOW)
-                })
-                .collect()
-        })
-        .collect());
+    let surface = native_surface(
+        [bezier_knots(2), bezier_knots(2)],
+        (0..3)
+            .map(|u| {
+                (0..3)
+                    .map(|v| {
+                        CPoint::new(
+                            u as f64 * 0.5,
+                            v as f64 * 0.5,
+                            [0.25, -0.25, 0.25][u] + [0.25, -0.25, 0.25][v],
+                            NOW,
+                        )
+                    })
+                    .collect()
+            })
+            .collect(),
+    );
     let frame = PlaneFrameMm {
         origin_mm: [0.0; 3],
         x_axis: [1.0, 0.0, 0.0],
@@ -1125,9 +1330,11 @@ fn krawczyk_proves_native_morse_root_and_excludes_no_root_patch() {
 #[test]
 fn flat_native_rank_zero_is_not_a_fake_isolated_root() {
     let cancel = AtomicBool::new(false);
-    use solidcore::{geom::extent2d::Extent2d, surface::plane::Plane, Point2, Point3, Vec2, Vec3};
+    use solidcore::{Point2, Point3, Vec2, Vec3, geom::extent2d::Extent2d, surface::plane::Plane};
     let surface = Surface::new(SurfaceKind::Plane(Plane::new(
-        Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
         Vec2::new(1.0, 1.0),
         &Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)),
     )));
@@ -1272,7 +1479,12 @@ fn closed_capture_excludes_original_pocket_only_when_its_whole_height_is_disjoin
     ] {
         let definition = source(name);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
         .unwrap();
         // The SAME immutable source has real void-facing walls above Z=4.
         // Below that floor its actual closed material intersection is a disk.
@@ -1317,7 +1529,12 @@ fn actual_whole_source_convexity_is_not_replaced_by_capture_exclusions() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-box.step");
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let proof = horizontal_critical(
         &prepared,
@@ -1337,7 +1554,12 @@ fn original_halfspace_cap_degree_requires_a_strictly_interior_native_witness() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-blind-pocket.step");
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let request = horizontal_request([1.9, 2.1], 2.0);
     let section = horizontal_section(&prepared, 2.0, &mut work, &cancel);
@@ -1376,7 +1598,12 @@ fn closed_caps_enclose_the_whole_native_core_not_only_its_center() {
     let cancel = AtomicBool::new(false);
     let definition = source("native-parity-nurbs-torus.step");
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let request = horizontal_request([-0.01, 0.01], 0.0);
     let section = horizontal_section(&prepared, 0.0, &mut work, &cancel);
@@ -1415,14 +1642,27 @@ fn closed_caps_enclose_the_whole_native_core_not_only_its_center() {
 
 #[test]
 fn complete_radial_material_link_preserves_a_genuine_nonconvex_star() {
-    let solid = crate::analysis::test_source::polygon_prism(&[
-        [0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [12.0, 20.0],
-        [10.0, 18.0], [8.0, 20.0], [0.0, 20.0],
-    ], 4.0);
+    let solid = crate::analysis::test_source::polygon_prism(
+        &[
+            [0.0, 0.0],
+            [20.0, 0.0],
+            [20.0, 20.0],
+            [12.0, 20.0],
+            [10.0, 18.0],
+            [8.0, 20.0],
+            [0.0, 20.0],
+        ],
+        4.0,
+    );
     let definition = crate::analysis::test_source::original_definition(solid);
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let proof = horizontal_critical(
         &prepared,
@@ -1454,13 +1694,20 @@ fn complete_radial_material_link_preserves_a_genuine_nonconvex_star() {
 #[test]
 fn original_housing_layer_one_has_a_complete_paired_material_link() {
     let cancel = AtomicBool::new(false);
-    let definition = crate::from_step_bytes_with_cancel(include_bytes!(
-        "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-    ),
-    &cancel,)
+    let definition = crate::from_step_bytes_with_cancel(
+        include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &cancel,
+    )
     .unwrap();
     let mut work = GeometryWorkBudget::new(100_000_000);
-    let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+    let prepared = crate::prepare_solid(
+        &definition,
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
+        &cancel,
+    )
     .unwrap();
     let proof = horizontal_critical(
         &prepared,

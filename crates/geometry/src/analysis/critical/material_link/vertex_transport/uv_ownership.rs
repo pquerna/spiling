@@ -298,7 +298,8 @@ fn native_endpoint_operands(
         let binding = proof
             .binding()
             .ok_or(UvPrepareStage::NativeOperandAssociation)?;
-        let prepared = domain.coedges()
+        let prepared = domain
+            .coedges()
             .get(end.use_.coedge)
             .ok_or(UvPrepareStage::NativeOperandAssociation)?;
         let expected = NativeUse {
@@ -321,10 +322,12 @@ fn native_endpoint_operands(
         uses[i] = Some(prepared.identity());
     }
     let [outgoing, incoming] = uses.map(|use_| use_.expect("both operands associated"));
-    let ordinal = definition.face_ordinal(domain.face())
+    let ordinal = definition
+        .face_ordinal(domain.face())
         .ok_or(UvPrepareStage::NativeAdjacency)?;
-    let wire = crate::analysis::source_incidence::boundary_loop(definition, ordinal, outgoing.wire_index)
-        .map_err(|_| UvPrepareStage::NativeAdjacency)?;
+    let wire =
+        crate::analysis::source_incidence::boundary_loop(definition, ordinal, outgoing.wire_index)
+            .map_err(|_| UvPrepareStage::NativeAdjacency)?;
     if incoming.wire_index != outgoing.wire_index || wire.edges.is_empty() {
         return Err(UvPrepareStage::NativeAdjacency);
     }
@@ -335,9 +338,13 @@ fn native_endpoint_operands(
     };
     let incoming_entry = wire.edges[absolute_in.coedge_index];
     let outgoing_entry = wire.edges[absolute_out.coedge_index];
-    let incoming_edge = definition.brep().edge(incoming_entry.edge)
+    let incoming_edge = definition
+        .brep()
+        .edge(incoming_entry.edge)
         .map_err(|_| UvPrepareStage::NativeAdjacency)?;
-    let outgoing_edge = definition.brep().edge(outgoing_entry.edge)
+    let outgoing_edge = definition
+        .brep()
+        .edge(outgoing_entry.edge)
         .map_err(|_| UvPrepareStage::NativeAdjacency)?;
     if (absolute_in.coedge_index + 1) % wire.edges.len() != absolute_out.coedge_index
         || incoming_edge.vertices[usize::from(incoming_entry.forward)] != vertex
@@ -372,23 +379,18 @@ fn native_endpoint_authority(
             let Some(binding) = proof.binding() else {
                 return Ok(Err(UvPrepareStage::NativeBinding));
             };
-            owns_original_vertex &= joint_owns_source_endpoint(
-                joint, binding, end.spatial_high, vertex,
-            );
+            owns_original_vertex &=
+                joint_owns_source_endpoint(joint, binding, end.spatial_high, vertex);
         }
         if authority.is_some() || !owns_original_vertex {
             return Ok(Err(UvPrepareStage::UnsupportedNativeJoint));
         }
         authority = Some(match joint.kind {
-            TrimJointKind::EndpointUncertainty => {
-                EndpointAuthority::EndpointUncertaintyJoint {
-                    index,
-                    enclosure: joint.enclosure,
-                }
-            }
-            TrimJointKind::SphericalPole { .. } => {
-                EndpointAuthority::SphericalPoleJoint { index }
-            }
+            TrimJointKind::EndpointUncertainty => EndpointAuthority::EndpointUncertaintyJoint {
+                index,
+                enclosure: joint.enclosure,
+            },
+            TrimJointKind::SphericalPole { .. } => EndpointAuthority::SphericalPoleJoint { index },
         });
     }
     // This is the COMPLETE prepared chart's closed-adjacency theorem, only
@@ -470,7 +472,8 @@ impl OriginalCornerComparison {
                 binding_present: proof.is_some_and(|proof| proof.binding().is_some()),
                 native_vertex_matches: proof.and_then(|proof| proof.binding()).is_some_and(
                     |binding| {
-                        binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] == vertex
+                        binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)]
+                            == vertex
                     },
                 ),
             }
@@ -520,7 +523,10 @@ impl OriginalCornerComparison {
                 return Ok(reject(UvPrepareStage::NativeVertex, Some(i)));
             }
             let Ok((entry, edge)) = crate::analysis::source_incidence::native_coedge(
-                domain.definition(), end.use_.face, end.use_.wire, end.use_.index,
+                domain.definition(),
+                end.use_.face,
+                end.use_.wire,
+                end.use_.index,
             ) else {
                 return Ok(reject(UvPrepareStage::NativeEdge, Some(i)));
             };
@@ -705,15 +711,18 @@ impl OriginalCornerComparison {
                 let Some(clipped) = original_domain_intersection(domain, cover) else {
                     return Ok(SourcePositionOvercover::EmptyOriginalDomain);
                 };
-                { let surface = &domain.surface_operand(); (|| {
-                    crate::parametric::surface_piecewise_enclosure(
-                        surface,
-                        uv_box(clipped),
-                        work,
-                        cancel,
-                    )
-                    .map(|jet| SourcePositionOvercover::Bounded(jet.position))
-                })() }
+                {
+                    let surface = &domain.surface_operand();
+                    (|| {
+                        crate::parametric::surface_piecewise_enclosure(
+                            surface,
+                            uv_box(clipped),
+                            work,
+                            cancel,
+                        )
+                        .map(|jet| SourcePositionOvercover::Bounded(jet.position))
+                    })()
+                }
             }
             Self::SphericalPole(comparison) => {
                 comparison.source_position_overcover(domain, recipe, vertex, work, cancel)
@@ -747,17 +756,13 @@ impl OriginalCornerComparison {
             return Ok(false);
         };
         let matches = match (self, joint.kind) {
-            (
-                Self::NativeUv(comparison),
-                TrimJointKind::EndpointUncertainty,
-            ) => {
+            (Self::NativeUv(comparison), TrimJointKind::EndpointUncertainty) => {
                 matches!(comparison.authority,
                     EndpointAuthority::EndpointUncertaintyJoint { index, .. } if index == joint_index)
             }
-            (
-                Self::SphericalPole(comparison),
-                TrimJointKind::SphericalPole { .. },
-            ) => comparison.joint_index_matches(joint_index),
+            (Self::SphericalPole(comparison), TrimJointKind::SphericalPole { .. }) => {
+                comparison.joint_index_matches(joint_index)
+            }
             _ => false,
         };
         if !matches {
@@ -828,7 +833,8 @@ impl UvJointComparison {
                 .binding()
                 .ok_or_else(|| refusal("comparison lost NativeUse binding"))?;
             if !same_end(self.ends[i], end, proof)
-                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] != self.vertex
+                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)]
+                    != self.vertex
             {
                 return Err(refusal(
                     "UV comparison belongs to different original endpoint germs",
@@ -855,10 +861,14 @@ impl UvJointComparison {
             }
             EndpointAuthority::EndpointUncertaintyJoint { index, enclosure } => {
                 if let Some(joint) = domain.original_joints()?.get(index) {
-                    self.ends.iter().all(|end| joint_owns_source_endpoint(
-                        joint, &end.binding, end.spatial_high, self.vertex,
-                    ))
-                        && same_native_use(joint.incoming, incoming)
+                    self.ends.iter().all(|end| {
+                        joint_owns_source_endpoint(
+                            joint,
+                            &end.binding,
+                            end.spatial_high,
+                            self.vertex,
+                        )
+                    }) && same_native_use(joint.incoming, incoming)
                         && same_native_use(joint.outgoing, outgoing)
                         && matches!(joint.kind, TrimJointKind::EndpointUncertainty)
                         && equal_box(enclosure, joint.enclosure)
@@ -927,10 +937,7 @@ impl UvJointComparison {
                 // validates checked this exact joint's two original NativeUse
                 // operands, vertex, kind and complete retained enclosure.
                 let joint = &domain.original_joints()?[index];
-                cover = hull2(
-                    cover,
-                    joint.enclosure,
-                );
+                cover = hull2(cover, joint.enclosure);
             }
             EndpointAuthority::SphericalPoleJoint { .. } => return Ok(None),
         }
@@ -1270,69 +1277,72 @@ impl UvJointComparison {
             cancel,
         )?;
         let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
-        { let surface = &domain.surface_operand(); (|| {
-            let comparison = surface_enclosure(surface, uv_box(completed.uv), work, cancel)?;
-            let whole_jet = if whole_ray {
-                comparison
-            } else {
-                surface_enclosure(surface, uv_box(whole.uv), work, cancel)?
-            };
-            let at_joint = centered_source_point(surface, self.joint, point, work, cancel)?;
-            let acceleration: Box3 = std::array::from_fn(|i| {
-                whole_jet.duu[i]
-                    .mul(whole.ds[0].square())
-                    .add(
-                        Interval::point(2.0)
-                            .mul(whole_jet.duv[i])
-                            .mul(whole.ds[0])
-                            .mul(whole.ds[1]),
-                    )
-                    .add(whole_jet.dvv[i].mul(whole.ds[1].square()))
-                    .add(whole_jet.du[i].mul(whole.dss[0]))
-                    .add(whole_jet.dv[i].mul(whole.dss[1]))
-            });
-            let face_displacement = source_chord_displacement(
-                at_joint.map(Interval::neg),
-                boundary.displacement,
-                acceleration,
-                s,
-            )?;
-            let homotopy = surface_enclosure(
-                surface,
-                uv_box(hull2(actual.uv, completed.uv)),
-                work,
-                cancel,
-            )?;
-            let physical_shift = compose_first(&homotopy.du, &homotopy.dv, correction.position);
-            let homotopy_mm = length(physical_shift)?.hi;
-            let transport_mm = self.transport.map_or(0.0, |bounds| {
-                bounds[0].position_error_mm.max(bounds[1].position_error_mm)
-            });
-            let displacement: Box3 = std::array::from_fn(|i| {
-                // The correspondence can be traversed in either direction.
-                let cost = physical_shift[i].abs_upper();
-                face_displacement[i].add(Interval {
-                    lo: -cost,
-                    hi: cost,
+        {
+            let surface = &domain.surface_operand();
+            (|| {
+                let comparison = surface_enclosure(surface, uv_box(completed.uv), work, cancel)?;
+                let whole_jet = if whole_ray {
+                    comparison
+                } else {
+                    surface_enclosure(surface, uv_box(whole.uv), work, cancel)?
+                };
+                let at_joint = centered_source_point(surface, self.joint, point, work, cancel)?;
+                let acceleration: Box3 = std::array::from_fn(|i| {
+                    whole_jet.duu[i]
+                        .mul(whole.ds[0].square())
+                        .add(
+                            Interval::point(2.0)
+                                .mul(whole_jet.duv[i])
+                                .mul(whole.ds[0])
+                                .mul(whole.ds[1]),
+                        )
+                        .add(whole_jet.dvv[i].mul(whole.ds[1].square()))
+                        .add(whole_jet.du[i].mul(whole.dss[0]))
+                        .add(whole_jet.dv[i].mul(whole.dss[1]))
+                });
+                let face_displacement = source_chord_displacement(
+                    at_joint.map(Interval::neg),
+                    boundary.displacement,
+                    acceleration,
+                    s,
+                )?;
+                let homotopy = surface_enclosure(
+                    surface,
+                    uv_box(hull2(actual.uv, completed.uv)),
+                    work,
+                    cancel,
+                )?;
+                let physical_shift = compose_first(&homotopy.du, &homotopy.dv, correction.position);
+                let homotopy_mm = length(physical_shift)?.hi;
+                let transport_mm = self.transport.map_or(0.0, |bounds| {
+                    bounds[0].position_error_mm.max(bounds[1].position_error_mm)
+                });
+                let displacement: Box3 = std::array::from_fn(|i| {
+                    // The correspondence can be traversed in either direction.
+                    let cost = physical_shift[i].abs_upper();
+                    face_displacement[i].add(Interval {
+                        lo: -cost,
+                        hi: cost,
+                    })
+                });
+                // These are distinct reference paths, not concatenated transports:
+                // M -> F(original H) uses the face and UV-homotopy bounds;
+                // F(completed germ) -> original C uses the fresh receipt. The
+                // original-C -> M chord bound is consumed separately by the plan.
+                let error_mm = up(length(face_displacement)?.hi + homotopy_mm).max(transport_mm);
+                if !error_mm.is_finite() || !homotopy_mm.is_finite() {
+                    return Err(refusal(
+                        "fixed source comparison has no finite physical error bound",
+                    ));
+                }
+                Ok(ComparisonSourceCost {
+                    source: homotopy.position,
+                    displacement,
+                    error_mm,
+                    homotopy_mm,
                 })
-            });
-            // These are distinct reference paths, not concatenated transports:
-            // M -> F(original H) uses the face and UV-homotopy bounds;
-            // F(completed germ) -> original C uses the fresh receipt. The
-            // original-C -> M chord bound is consumed separately by the plan.
-            let error_mm = up(length(face_displacement)?.hi + homotopy_mm).max(transport_mm);
-            if !error_mm.is_finite() || !homotopy_mm.is_finite() {
-                return Err(refusal(
-                    "fixed source comparison has no finite physical error bound",
-                ));
-            }
-            Ok(ComparisonSourceCost {
-                source: homotopy.position,
-                displacement,
-                error_mm,
-                homotopy_mm,
-            })
-        })() }
+            })()
+        }
     }
 }
 
@@ -2055,8 +2065,10 @@ impl UvJointComparison {
                     && joint.outgoing.coedge_index == recipe.outgoing.use_.index
                     && joint.incoming.edge_id == recipe.incoming.edge
                     && joint.outgoing.edge_id == recipe.outgoing.edge
-                    && joint.incoming.orientation == (recipe.incoming.use_.orientation == domain.native_orientation())
-                    && joint.outgoing.orientation == (recipe.outgoing.use_.orientation == domain.native_orientation())
+                    && joint.incoming.orientation
+                        == (recipe.incoming.use_.orientation == domain.native_orientation())
+                    && joint.outgoing.orientation
+                        == (recipe.outgoing.use_.orientation == domain.native_orientation())
                     && joint.incoming.edgeuse == recipe.incoming.use_.edgeuse
                     && joint.outgoing.edgeuse == recipe.outgoing.use_.edgeuse;
                 if owned {
@@ -2170,8 +2182,12 @@ mod properties {
             .prepare_vertices(MAX_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
         let prepared = crate::analysis::prepare_solid(
-            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = prepared.source_view().unwrap().with_vertex_plans(None);
         for &vertex in &vertices {
             let foreign = *vertices
@@ -2198,8 +2214,14 @@ mod properties {
                 }
             };
             let point = plan.point;
-            assert_eq!(point, source.trim_source().source_vertex_point(vertex, &mut work, &cancel).unwrap(),
-                "native vertex IDs key incidence, not healed realization positions");
+            assert_eq!(
+                point,
+                source
+                    .trim_source()
+                    .source_vertex_point(vertex, &mut work, &cancel)
+                    .unwrap(),
+                "native vertex IDs key incidence, not healed realization positions"
+            );
             for &recipe in &plan.recipes {
                 let outgoing = recipe.outgoing;
                 let incoming = recipe.incoming;
@@ -2289,11 +2311,16 @@ mod properties {
                     assert!(nonregular.validates(&domain, &recipe, vertex).is_err());
                 }
                 for (index, end) in [outgoing, incoming].into_iter().enumerate() {
-                    let proof = domain.original_coedge_correspondence(end.use_.coedge).unwrap();
+                    let proof = domain
+                        .original_coedge_correspondence(end.use_.coedge)
+                        .unwrap();
                     let binding = proof.binding().unwrap();
                     let native_back = end.spatial_high ^ !binding.spatial_forward;
-                    assert_eq!(native_back, end.use_.orientation == (index == 1),
-                        "sealed source direction must preserve the actual native endpoint germ");
+                    assert_eq!(
+                        native_back,
+                        end.use_.orientation == (index == 1),
+                        "sealed source direction must preserve the actual native endpoint germ"
+                    );
                     assert_eq!(binding.endpoints[usize::from(native_back)], vertex);
                     let range = proof.spatial_range();
                     let expected_exit = end.endpoint
@@ -2389,22 +2416,38 @@ mod properties {
                 let mut wrong_spatial_direction = comparison;
                 wrong_spatial_direction.ends[0].binding.spatial_forward =
                     !wrong_spatial_direction.ends[0].binding.spatial_forward;
-                assert!(wrong_spatial_direction.validates(&domain, &recipe, vertex).is_err(),
-                    "closed-edge vertex equality cannot replace the sealed source germ mapping");
+                assert!(
+                    wrong_spatial_direction
+                        .validates(&domain, &recipe, vertex)
+                        .is_err(),
+                    "closed-edge vertex equality cannot replace the sealed source germ mapping"
+                );
                 let mut wrong_native_interval = comparison;
                 wrong_native_interval.ends[0].binding.native_interval[0] =
                     up(wrong_native_interval.ends[0].binding.native_interval[0]);
-                assert!(wrong_native_interval.validates(&domain, &recipe, vertex).is_err(),
-                    "the original spatial gauge cannot replace native interval identity");
+                assert!(
+                    wrong_native_interval
+                        .validates(&domain, &recipe, vertex)
+                        .is_err(),
+                    "the original spatial gauge cannot replace native interval identity"
+                );
                 let mut wrong_uv_direction = comparison;
                 wrong_uv_direction.ends[0].uv_ends.swap(0, 1);
-                assert!(wrong_uv_direction.validates(&domain, &recipe, vertex).is_err(),
-                    "equal sorted UV ranges cannot replace a directed original parameter map");
+                assert!(
+                    wrong_uv_direction
+                        .validates(&domain, &recipe, vertex)
+                        .is_err(),
+                    "equal sorted UV ranges cannot replace a directed original parameter map"
+                );
                 let mut wrong_source_vertex = comparison;
                 wrong_source_vertex.ends[0].binding.source_vertex_points_mm[0][0] =
                     up(wrong_source_vertex.ends[0].binding.source_vertex_points_mm[0][0]);
-                assert!(wrong_source_vertex.validates(&domain, &recipe, vertex).is_err(),
-                    "native incidence cannot substitute different original vertex coefficients");
+                assert!(
+                    wrong_source_vertex
+                        .validates(&domain, &recipe, vertex)
+                        .is_err(),
+                    "native incidence cannot substitute different original vertex coefficients"
+                );
                 let anchor = comparison
                     .star_jet(
                         &domain,
@@ -2518,10 +2561,7 @@ mod properties {
                 "every original NativeUse face corner must be exercised once: covered={covered_corners:?} expected={expected_corners:?}",
             ));
         }
-        assert_eq!(
-            original,
-            format!("{:?}", definition.brep())
-        );
+        assert_eq!(original, format!("{:?}", definition.brep()));
         assert!(
             failures.is_empty(),
             "actual all-NativeUse UV qualification:\n{}",

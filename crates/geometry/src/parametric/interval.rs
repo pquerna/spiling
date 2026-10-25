@@ -46,11 +46,7 @@ pub fn next_after(from: f64, toward: f64) -> f64 {
     if from == toward {
         return toward;
     }
-    if toward > from {
-        up(from)
-    } else {
-        down(from)
-    }
+    if toward > from { up(from) } else { down(from) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -268,13 +264,24 @@ impl Interval {
         }
         // Divide endpoints directly: forming 1/denominator first can overflow
         // even when a ratio of two subnormal homogeneous coefficients is finite.
-        let quotients = [self.lo / other.lo, self.lo / other.hi, self.hi / other.lo, self.hi / other.hi];
+        let quotients = [
+            self.lo / other.lo,
+            self.lo / other.hi,
+            self.hi / other.lo,
+            self.hi / other.hi,
+        ];
         if quotients.into_iter().any(f64::is_nan) {
-            return Err(GeometryError::new(GeometryErrorCode::ConditioningFailure, "indeterminate interval quotient"));
+            return Err(GeometryError::new(
+                GeometryErrorCode::ConditioningFailure,
+                "indeterminate interval quotient",
+            ));
         }
         let lo = quotients.into_iter().fold(f64::INFINITY, f64::min);
         let hi = quotients.into_iter().fold(f64::NEG_INFINITY, f64::max);
-        Ok(Self { lo: down(lo), hi: up(hi) })
+        Ok(Self {
+            lo: down(lo),
+            hi: up(hi),
+        })
     }
 
     pub fn square(self) -> Self {
@@ -358,15 +365,24 @@ impl std::ops::Neg for Interval {
 /// a bounded Taylor remainder replaces assumptions about platform libm ulps.
 pub fn sin_cos_interval(angle: Interval) -> (Interval, Interval) {
     let full = Interval { lo: -1.0, hi: 1.0 };
-    if !angle.lo.is_finite() || !angle.hi.is_finite() || angle.lo > angle.hi
-        || angle.abs_upper() > 1_000_000.0 || angle.width() > 1.0 {
+    if !angle.lo.is_finite()
+        || !angle.hi.is_finite()
+        || angle.lo > angle.hi
+        || angle.abs_upper() > 1_000_000.0
+        || angle.width() > 1.0
+    {
         return (full, full);
     }
     let n = (angle.mid() / std::f64::consts::FRAC_PI_2).round() as i64;
-    let half_pi = Interval { lo: down(std::f64::consts::PI), hi: up(std::f64::consts::PI) }
-        .mul(Interval::point(0.5));
+    let half_pi = Interval {
+        lo: down(std::f64::consts::PI),
+        hi: up(std::f64::consts::PI),
+    }
+    .mul(Interval::point(0.5));
     let x = angle.sub(Interval::point(n as f64).mul(half_pi));
-    if x.abs_upper() > 2.0 { return (full, full); }
+    if x.abs_upper() > 2.0 {
+        return (full, full);
+    }
     let minus_square = x.square().neg();
     let mut cos_term = Interval::point(1.0);
     let mut sin_term = x;
@@ -374,21 +390,43 @@ pub fn sin_cos_interval(angle: Interval) -> (Interval, Interval) {
     let mut sine = sin_term;
     for k in 1..=16 {
         // Small integer denominators are exact binary64 coefficients.
-        cos_term = cos_term.mul(minus_square)
-            .mul(Interval::point(((2 * k - 1) * (2 * k)) as f64).reciprocal().unwrap());
-        sin_term = sin_term.mul(minus_square)
-            .mul(Interval::point(((2 * k) * (2 * k + 1)) as f64).reciprocal().unwrap());
+        cos_term = cos_term.mul(minus_square).mul(
+            Interval::point(((2 * k - 1) * (2 * k)) as f64)
+                .reciprocal()
+                .unwrap(),
+        );
+        sin_term = sin_term.mul(minus_square).mul(
+            Interval::point(((2 * k) * (2 * k + 1)) as f64)
+                .reciprocal()
+                .unwrap(),
+        );
         cosine = cosine.add(cos_term);
         sine = sine.add(sin_term);
     }
-    let cos_error = cos_term.mul(x.square())
-        .mul(Interval::point((33 * 34) as f64).reciprocal().unwrap()).abs_upper();
-    let sin_error = sin_term.mul(x.square())
-        .mul(Interval::point((34 * 35) as f64).reciprocal().unwrap()).abs_upper();
-    cosine = cosine.add(Interval { lo: -cos_error, hi: cos_error });
-    sine = sine.add(Interval { lo: -sin_error, hi: sin_error });
-    cosine = Interval { lo: cosine.lo.max(-1.0), hi: cosine.hi.min(1.0) };
-    sine = Interval { lo: sine.lo.max(-1.0), hi: sine.hi.min(1.0) };
+    let cos_error = cos_term
+        .mul(x.square())
+        .mul(Interval::point((33 * 34) as f64).reciprocal().unwrap())
+        .abs_upper();
+    let sin_error = sin_term
+        .mul(x.square())
+        .mul(Interval::point((34 * 35) as f64).reciprocal().unwrap())
+        .abs_upper();
+    cosine = cosine.add(Interval {
+        lo: -cos_error,
+        hi: cos_error,
+    });
+    sine = sine.add(Interval {
+        lo: -sin_error,
+        hi: sin_error,
+    });
+    cosine = Interval {
+        lo: cosine.lo.max(-1.0),
+        hi: cosine.hi.min(1.0),
+    };
+    sine = Interval {
+        lo: sine.lo.max(-1.0),
+        hi: sine.hi.min(1.0),
+    };
     match n.rem_euclid(4) {
         0 => (sine, cosine),
         1 => (cosine, sine.neg()),
@@ -593,11 +631,7 @@ impl IntervalVec3 {
 
     #[inline]
     pub fn norm_squared(self) -> Interval {
-        let sq = self
-            .x
-            .square()
-            .add(self.y.square())
-            .add(self.z.square());
+        let sq = self.x.square().add(self.y.square()).add(self.z.square());
         // Sums of squares are analytically non-negative; outward rounding of zero
         // could produce a negative subnormal lower bound.
         Interval {

@@ -12,19 +12,15 @@ mod units;
 
 use crate::{check_cancel, kernel::Definition};
 use ast::*;
-use solidcore::math::{Point3, Vec3};
 use sha2::{Digest, Sha256};
+use solidcore::math::{Point3, Vec3};
 use spiling_contracts::geometry::{
     AnalyticSurfaceDescription, DefinitionId, FaceDomainSummary, FaceGeometryInfo, FaceId,
     FaceInfo, GeometryError, GeometryErrorCode, MAX_NATIVE_FACES, MAX_SOURCE_BYTES, PlaneFrameMm,
     SourceHash, SourceProvenance, StepEntityId, SurfaceFamily, TorusKind,
 };
-use std::{
-    collections::BTreeSet,
-    sync::atomic::AtomicBool,
-};
+use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 use step_p21::ast::Parameter;
-
 
 pub(crate) const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
 fn error(code: GeometryErrorCode, message: &str) -> GeometryError {
@@ -39,7 +35,6 @@ fn unsupported(message: &str) -> GeometryError {
 fn kernel(message: &str) -> GeometryError {
     error(GeometryErrorCode::KernelFailure, message)
 }
-
 
 fn array(p: Point3) -> [f64; 3] {
     [p.x, p.y, p.z]
@@ -249,7 +244,9 @@ fn resolve_face(entities: &Entities<'_>, canonical: u64) -> Result<(u64, bool), 
             return Err(invalid("recursive ORIENTED_FACE"));
         }
         let records = entities.records(id)?;
-        if let Some(face) = records.iter().copied()
+        if let Some(face) = records
+            .iter()
+            .copied()
             .find(|record| matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE"))
         {
             return Ok((id, forward == source::source_bool(at(face, 3)?)?));
@@ -304,7 +301,9 @@ pub(crate) fn import_step(
                     | "MAPPED_ITEM"
                     | "REPRESENTATION_MAP"
             ) {
-                return Err(unsupported("assembly, void-shell or oriented-shell STEP representation"));
+                return Err(unsupported(
+                    "assembly, void-shell or oriented-shell STEP representation",
+                ));
             }
         }
     }
@@ -355,15 +354,20 @@ pub(crate) fn import_step(
     let mut context = solidcraft_step::units::Context::default();
     context.units.len = scale;
     context.uncertainty = uncertainty_mm;
-    let solid = solidcraft_step::topology::read_solid(&ex, solid_id, context)
-        .map_err(|cause| invalid(&format!("normalized STEP topology extraction failed: {cause:?}")))?;
+    let solid = solidcraft_step::topology::read_solid(&ex, solid_id, context).map_err(|cause| {
+        invalid(&format!(
+            "normalized STEP topology extraction failed: {cause:?}"
+        ))
+    })?;
     check_cancel(cancel)?;
     if solid.sheet {
-        return Err(invalid("open shell / surface model not supported, solid required"));
+        return Err(invalid(
+            "open shell / surface model not supported, solid required",
+        ));
     }
 
     let mut k = crate::kernel::make_kernel_context();
-    let brep = brep_data_bridge::from_schema4_brep(&mut k, &solid.brep, false)
+    let mut brep = brep_data_bridge::from_schema4_brep(&mut k, &solid.brep, false)
         .map_err(|e| kernel(&format!("B-rep bridge failure: {e}")))?;
 
     if !solidcore::topology::brep::p2::is_manifold_solid(&brep).unwrap_or(false) {
@@ -379,7 +383,9 @@ pub(crate) fn import_step(
 
     let native_faces = brep.faces().ids().collect::<Vec<_>>();
     if native_faces.len() != solid.face_origin.len() || native_faces.len() != faces.len() {
-        return Err(invalid("native face inventory changed the original face-use census"));
+        return Err(invalid(
+            "native face inventory changed the original face-use census",
+        ));
     }
     let mut source_faces = std::collections::BTreeMap::new();
     for (native, source) in native_faces.into_iter().zip(&solid.face_origin) {
@@ -390,15 +396,23 @@ pub(crate) fn import_step(
     let mut face_ids = Vec::with_capacity(faces.len());
     let mut face_step_ids = Vec::with_capacity(faces.len());
     for info in &faces {
-        let source = info.surface_face_entity.parse::<u64>()
+        let source = info
+            .surface_face_entity
+            .parse::<u64>()
             .map_err(|_| invalid("original face provenance is not a STEP entity"))?;
-        face_ids.push(source_faces.remove(&source)
-            .ok_or_else(|| invalid("native face lost its original source identity"))?);
+        face_ids.push(
+            source_faces
+                .remove(&source)
+                .ok_or_else(|| invalid("native face lost its original source identity"))?,
+        );
         face_step_ids.push(StepEntityId(info.face_id.step_entity()));
     }
     if !source_faces.is_empty() {
-        return Err(invalid("native face inventory includes an unbound source face"));
+        return Err(invalid(
+            "native face inventory includes an unbound source face",
+        ));
     }
+    prepare_loop_edge_cache(&mut brep, &face_ids, query_proof_byte_limit, cancel)?;
 
     let face_surface_maps: Vec<crate::kernel::SurfaceParameterMap> =
         compute_face_surface_maps(&solid.brep);
@@ -408,9 +422,7 @@ pub(crate) fn import_step(
         .ids()
         .next()
         .ok_or_else(|| invalid("native solid has no shell"))?;
-    let original_source = source::capture(
-        &entities, &ex, &faces, &face_ids, scale, cancel,
-    )?;
+    let original_source = source::capture(&entities, &ex, &faces, &face_ids, scale, cancel)?;
 
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     let definition = Definition {
@@ -441,6 +453,141 @@ pub(crate) fn import_step(
     }
 
     Ok(definition)
+}
+
+/// Materialize the decoder's optional loop cache once, from the authoritative
+/// reciprocal edge-use cycles. Consumers still independently check incidence;
+/// this cache supplies ordered indexing, not source correspondence or material.
+fn prepare_loop_edge_cache(
+    brep: &mut solidcore::topology::Brep,
+    faces: &[solidcore::FaceId],
+    byte_limit: usize,
+    cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+    use solidcore::topology::{EdgeuseOwner, LoopEdge, LoopuseStart};
+    fn native(cause: solidcore::SolidError) -> GeometryError {
+        kernel(&format!("native loop inventory: {cause}"))
+    }
+    let mut retained = 0usize;
+    for &face_id in faces {
+        check_cancel(cancel)?;
+        let face = brep.face(face_id).map_err(native)?;
+        let owner = face
+            .faceuse
+            .ok_or_else(|| invalid("native face has no loop owner"))?;
+        let loop_count = face.loops.len();
+        let faceuse = brep.faceuse(owner).map_err(native)?;
+        if faceuse.face != Some(face_id) || faceuse.loopuses.len() != loop_count {
+            return Err(invalid("native face and faceuse loop inventories disagree"));
+        }
+        for wire in 0..loop_count {
+            let loop_id = brep.face(face_id).map_err(native)?.loops[wire];
+            let loopuse_id = brep.faceuse(owner).map_err(native)?.loopuses[wire];
+            let record = brep.loop_(loop_id).map_err(native)?;
+            let loopuse = brep.loopuse(loopuse_id).map_err(native)?;
+            if record.face != face_id
+                || loopuse.loop_ != Some(loop_id)
+                || loopuse.faceuse != Some(owner)
+            {
+                return Err(invalid("native loop belongs to a different face or use"));
+            }
+            let first = match loopuse.start {
+                LoopuseStart::Edgeuse(Some(first)) => first,
+                LoopuseStart::Vertexuse(Some(_)) if record.edges.is_empty() => continue,
+                _ => {
+                    return Err(invalid(
+                        "native loop has no complete edge-use or vertex-use owner",
+                    ));
+                }
+            };
+            // Count without allocating an intermediate edge-use vector. A
+            // finite arena bound also rejects a circuit that never returns.
+            let mut count = 0usize;
+            let mut current = first;
+            loop {
+                check_cancel(cancel)?;
+                if count == brep.edgeuses().len() {
+                    return Err(invalid("native loop edge-use circuit does not close"));
+                }
+                let use_ = brep.edgeuse(current).map_err(native)?;
+                if use_.owner != EdgeuseOwner::Loopuse(Some(loopuse_id)) {
+                    return Err(invalid("native loop edge-use circuit crosses owners"));
+                }
+                let next = use_
+                    .ccw
+                    .ok_or_else(|| invalid("native loop has no next edge use"))?;
+                if brep.edgeuse(next).map_err(native)?.cw != Some(current) {
+                    return Err(invalid("native loop edge-use links are not reciprocal"));
+                }
+                count += 1;
+                current = next;
+                if current == first {
+                    break;
+                }
+            }
+            let bytes = count
+                .checked_mul(std::mem::size_of::<LoopEdge>())
+                .and_then(|bytes| retained.checked_add(bytes))
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native loop inventory capacity overflow",
+                    )
+                })?;
+            if bytes > byte_limit {
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native loop inventory allowance exhausted",
+                ));
+            }
+            let mut entries = Vec::new();
+            entries.try_reserve_exact(count).map_err(|_| {
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native loop inventory allocation refused",
+                )
+            })?;
+            retained = retained
+                .checked_add(
+                    entries
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LoopEdge>()),
+                )
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "native loop inventory capacity overflow",
+                    )
+                })?;
+            if retained > byte_limit {
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "native loop inventory retained allowance exhausted",
+                ));
+            }
+            current = first;
+            for _ in 0..count {
+                check_cancel(cancel)?;
+                let use_ = brep.edgeuse(current).map_err(native)?;
+                let edge = use_
+                    .edge
+                    .ok_or_else(|| invalid("native loop edge use has no edge"))?;
+                brep.edge(edge).map_err(native)?;
+                let forward = match use_.orientation {
+                    OrientType::Same => true,
+                    OrientType::Opposite => false,
+                    _ => return Err(invalid("native loop edge use has unknown orientation")),
+                };
+                entries.push(LoopEdge { edge, forward });
+                current = use_
+                    .ccw
+                    .ok_or_else(|| invalid("native loop has no next edge use"))?;
+            }
+            brep.loop_mut(loop_id).map_err(native)?.edges = entries;
+        }
+    }
+    Ok(())
 }
 
 fn compute_face_surface_maps(
@@ -513,9 +660,15 @@ pub fn from_step_file(path: impl AsRef<std::path::Path>) -> Result<Definition, G
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)
-        .and_then(|file| file.take(u64::from(MAX_SOURCE_BYTES) + 1).read_to_end(&mut bytes))
-        .map_err(|cause| GeometryError::new(
-            GeometryErrorCode::SourceIo, format!("failed to read STEP file: {cause}"),
-        ))?;
+        .and_then(|file| {
+            file.take(u64::from(MAX_SOURCE_BYTES) + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|cause| {
+            GeometryError::new(
+                GeometryErrorCode::SourceIo,
+                format!("failed to read STEP file: {cause}"),
+            )
+        })?;
     from_step_bytes(&bytes)
 }

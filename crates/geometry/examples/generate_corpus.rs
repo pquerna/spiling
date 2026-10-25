@@ -214,8 +214,9 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         files.insert(name.into(), bytes.into_bytes());
     }
     for (name, bytes, expectation) in implicit_sources {
-        let definition = spiling_geometry::from_step_bytes_with_cancel(bytes.as_bytes(), &cancel)
-            .map_err(|error| format!("original implicit {name} admission: {error:?}"))?;
+        let definition =
+            spiling_geometry::from_step_bytes_with_cancel(bytes.as_bytes(), &cancel)
+                .map_err(|error| format!("original implicit {name} admission: {error:?}"))?;
         let mesh =
             spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
         let mesh_triangle_count = mesh.triangle_count;
@@ -488,7 +489,8 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         wrong_master.into_bytes(),
     );
     for adversary in corpus::adversaries(&mm, &inch) {
-        let result = spiling_geometry::from_step_bytes_with_cancel(adversary.bytes.as_bytes(), &cancel);
+        let result =
+            spiling_geometry::from_step_bytes_with_cancel(adversary.bytes.as_bytes(), &cancel);
         if adversary.expected == "accepted" {
             let definition = result
                 .map_err(|e| format!("equivalent {} source import: {e:?}", adversary.name))?;

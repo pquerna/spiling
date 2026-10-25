@@ -11,7 +11,7 @@ use spiling_contracts::geometry::{
     StepEntityId,
 };
 use spiling_geometry::{
-    from_step_bytes, from_step_bytes_with_limits, make_kernel_context, SurfaceParameterMap,
+    SurfaceParameterMap, from_step_bytes, from_step_bytes_with_limits, make_kernel_context,
 };
 
 fn fixture_path(rel_path: &str) -> PathBuf {
@@ -72,7 +72,10 @@ fn challenge1a_section_curve_serde_roundtrip() {
         let json = serde_json::to_string(curve).expect("serialization failed");
         let deserialized: SectionCurve2d =
             serde_json::from_str(&json).expect("deserialization failed");
-        assert_eq!(curve, &deserialized, "curve serde roundtrip failed for {json}");
+        assert_eq!(
+            curve, &deserialized,
+            "curve serde roundtrip failed for {json}"
+        );
     }
 }
 
@@ -88,8 +91,7 @@ fn challenge1b_section_span_serde_roundtrip() {
         achieved_plane_error_mm: 1.2e-7,
     };
     let json = serde_json::to_string(&span).expect("serialization failed");
-    let deserialized: SectionSpan2d =
-        serde_json::from_str(&json).expect("deserialization failed");
+    let deserialized: SectionSpan2d = serde_json::from_str(&json).expect("deserialization failed");
     assert_eq!(span, deserialized);
 }
 
@@ -163,7 +165,10 @@ fn challenge1d_section_curve_malformed_json_rejection() {
 
     for bad in bad_json_samples {
         let res: Result<SectionCurve2d, _> = serde_json::from_str(bad);
-        assert!(res.is_err(), "malformed json '{bad}' should fail to deserialize");
+        assert!(
+            res.is_err(),
+            "malformed json '{bad}' should fail to deserialize"
+        );
     }
 }
 
@@ -212,8 +217,8 @@ fn challenge2_concurrent_step_import_thread_isolation() {
             thread::spawn(move || {
                 let mut defs = Vec::with_capacity(iterations_per_thread);
                 for _ in 0..iterations_per_thread {
-                    let def = from_step_bytes(&data)
-                        .expect("concurrent from_step_bytes must succeed");
+                    let def =
+                        from_step_bytes(&data).expect("concurrent from_step_bytes must succeed");
                     defs.push(def);
                 }
                 defs
@@ -230,11 +235,31 @@ fn challenge2_concurrent_step_import_thread_isolation() {
     for handle in handles {
         let thread_defs = handle.join().expect("thread join must succeed");
         for def in thread_defs {
-            assert_eq!(def.id(), &baseline_id, "definition ID must be deterministic across threads");
-            assert_eq!(def.faces().len(), baseline_faces, "face count must match baseline");
-            assert_eq!(def.bounds_mm().min, baseline_bounds.min, "bounds min must match baseline");
-            assert_eq!(def.bounds_mm().max, baseline_bounds.max, "bounds max must match baseline");
-            assert_eq!(def.retained_query_proof_bytes(), baseline_retained_bytes, "retained proof bytes must match");
+            assert_eq!(
+                def.id(),
+                &baseline_id,
+                "definition ID must be deterministic across threads"
+            );
+            assert_eq!(
+                def.faces().len(),
+                baseline_faces,
+                "face count must match baseline"
+            );
+            assert_eq!(
+                def.bounds_mm().min,
+                baseline_bounds.min,
+                "bounds min must match baseline"
+            );
+            assert_eq!(
+                def.bounds_mm().max,
+                baseline_bounds.max,
+                "bounds max must match baseline"
+            );
+            assert_eq!(
+                def.retained_query_proof_bytes(),
+                baseline_retained_bytes,
+                "retained proof bytes must match"
+            );
         }
     }
 }
@@ -354,8 +379,12 @@ fn challenge4b_import_query_proof_byte_limits() {
 
     // 2. Setting limit below actual retained bytes: must reject with ResourceLimit
     let err = from_step_bytes_with_limits(
-        &bytes, &cancel, spiling_contracts::geometry::MAX_NATIVE_FACES, actual_bytes / 2,
-    ).unwrap_err();
+        &bytes,
+        &cancel,
+        spiling_contracts::geometry::MAX_NATIVE_FACES,
+        actual_bytes / 2,
+    )
+    .unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::ResourceLimit);
 }
 
@@ -367,18 +396,36 @@ fn challenge4b_import_query_proof_byte_limits() {
 fn challenge5_adversarial_step_corpus_rejection() {
     let fixtures = &[
         ("missing-units.step", GeometryErrorCode::UnsupportedUnits),
-        ("conflicting-units.step", GeometryErrorCode::UnsupportedUnits),
+        (
+            "conflicting-units.step",
+            GeometryErrorCode::UnsupportedUnits,
+        ),
         ("missing-reference.step", GeometryErrorCode::InvalidGeometry),
         ("open-shell.step", GeometryErrorCode::InvalidGeometry),
-        ("non-manifold-shell.step", GeometryErrorCode::InvalidGeometry),
-        ("reachable-unsupported.step", GeometryErrorCode::UnsupportedGeometry),
+        (
+            "non-manifold-shell.step",
+            GeometryErrorCode::InvalidGeometry,
+        ),
+        (
+            "reachable-unsupported.step",
+            GeometryErrorCode::UnsupportedGeometry,
+        ),
         ("assembly.step", GeometryErrorCode::UnsupportedGeometry),
-        ("nonfinite-coordinate.step", GeometryErrorCode::InvalidGeometry),
+        (
+            "nonfinite-coordinate.step",
+            GeometryErrorCode::InvalidGeometry,
+        ),
         ("truncated.step", GeometryErrorCode::InvalidGeometry),
-        ("wrong-conversion-dimension.step", GeometryErrorCode::UnsupportedUnits),
+        (
+            "wrong-conversion-dimension.step",
+            GeometryErrorCode::UnsupportedUnits,
+        ),
         ("recursive-units.step", GeometryErrorCode::UnsupportedUnits),
         ("degrees.step", GeometryErrorCode::UnsupportedUnits),
-        ("duplicate-face-use.step", GeometryErrorCode::InvalidGeometry),
+        (
+            "duplicate-face-use.step",
+            GeometryErrorCode::InvalidGeometry,
+        ),
     ];
 
     for &(name, expected_code) in fixtures {

@@ -3,16 +3,23 @@
 // Licensed under the Open Software License version 3.0
 
 use super::super::*;
-use solidcore::{VertexId, curve::{curve::Curve, curve::p2::CurveKind},
-    surface::surface::p2::SurfaceKind};
-use crate::analysis::source_incidence::{boundary_loop, native_coedge, native_face, face_orientation};
 use crate::analysis::MaterialSourceView;
+use crate::analysis::source_incidence::{
+    boundary_loop, face_orientation, native_coedge, native_face,
+};
 use crate::parametric::{CurveEvaluator, SurfaceEvaluator};
+use solidcore::{
+    VertexId,
+    curve::{curve::Curve, curve::p2::CurveKind},
+    surface::surface::p2::SurfaceKind,
+};
 use solidcraft_step::geom::{Curve as SourceCurve, Surface as SourceSurface};
 
 fn native_topology_error(error: solidcore::SolidError) -> GeometryError {
-    GeometryError::new(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-        format!("original vertex fan native topology: {error}"))
+    GeometryError::new(
+        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        format!("original vertex fan native topology: {error}"),
+    )
 }
 
 /// Prove a positive, degree-one projected fan in the supplied original order.
@@ -158,7 +165,9 @@ pub(super) fn original_vertex_fan(
             "original vertex support lost its immutable source or admitted correction allowance",
         ));
     }
-    let vertex_point = source.trim_source().source_vertex_point(vertex, work, cancel)?;
+    let vertex_point = source
+        .trim_source()
+        .source_vertex_point(vertex, work, cancel)?;
     let mut support = None;
     let mut incident_count = 0_usize;
     for edge_id in incidence.vertex_edges(vertex) {
@@ -183,23 +192,33 @@ pub(super) fn original_vertex_fan(
             let orientation = face_orientation(definition, use_.face, work, cancel)?;
             let wire = boundary_loop(definition, use_.face, use_.wire)?;
             let (entry, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
-            let coedge = domain.coedges().get(use_.coedge).ok_or_else(|| GeometryError::new(
-                GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original vertex coedge has no native chart occurrence"))?;
-            if entry.edge != edge_id || (entry.forward == orientation) != use_.orientation
-                || coedge.edgeuse != use_.edgeuse || !uses.vertices.contains(&vertex)
-                || domain.face() != face_id {
+            let coedge = domain.coedges().get(use_.coedge).ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original vertex coedge has no native chart occurrence",
+                )
+            })?;
+            if entry.edge != edge_id
+                || (entry.forward == orientation) != use_.orientation
+                || coedge.edgeuse != use_.edgeuse
+                || !uses.vertices.contains(&vertex)
+                || domain.face() != face_id
+            {
                 return Err(GeometryError::new(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
                     "original vertex coedge ownership changed",
                 ));
             }
             let proof = domain.original_coedge_correspondence(use_.coedge)?;
-            let binding = proof.binding().ok_or_else(|| GeometryError::new(
-                GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "original vertex coedge lost its selected spatial provider binding"))?;
+            let binding = proof.binding().ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original vertex coedge lost its selected spatial provider binding",
+                )
+            })?;
             if binding.owner != [use_.face, use_.wire, use_.index]
-                || binding.face != face_id || binding.edge != entry.edge
+                || binding.face != face_id
+                || binding.edge != entry.edge
                 || binding.edgeuse != use_.edgeuse
                 || binding.native_interval != [edge.interval.min(), edge.interval.max()]
                 || binding.endpoints != edge.vertices
@@ -207,7 +226,8 @@ pub(super) fn original_vertex_fan(
             {
                 return Err(GeometryError::new(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "original vertex spatial binding changed its native interval or endpoints"));
+                    "original vertex spatial binding changed its native interval or endpoints",
+                ));
             }
             if use_ == uses.first {
                 let range = proof.spatial_range();
@@ -247,8 +267,14 @@ pub(super) fn original_vertex_fan(
             // Each absolute wire corner is owned by its incoming occurrence.
             // Both sides of paired edges are visited, including same-face
             // seams. A closed original edge may own two endpoint parameters.
-            if edge.vertices[usize::from(entry.forward)] != vertex { continue; }
-            let next_index = if use_.index + 1 == wire.edges.len() { 0 } else { use_.index + 1 };
+            if edge.vertices[usize::from(entry.forward)] != vertex {
+                continue;
+            }
+            let next_index = if use_.index + 1 == wire.edges.len() {
+                0
+            } else {
+                use_.index + 1
+            };
             let (next_entry, next) = native_coedge(definition, use_.face, use_.wire, next_index)?;
             if next.vertices[usize::from(!next_entry.forward)] != vertex {
                 return Err(GeometryError::new(
@@ -259,7 +285,10 @@ pub(super) fn original_vertex_fan(
             let mut uv: Option<[Interval; 2]> = None;
             let mut corner = [None; 2];
             let mut corner_sources = [None; 2];
-            for (slot, (index, back)) in [(use_.index, true), (next_index, false)].into_iter().enumerate() {
+            for (slot, (index, back)) in [(use_.index, true), (next_index, false)]
+                .into_iter()
+                .enumerate()
+            {
                 let mut selected = None;
                 for (flat, coedge) in domain.coedges().iter().enumerate() {
                     work.charge(1, cancel)?;
@@ -287,21 +316,27 @@ pub(super) fn original_vertex_fan(
                 })?;
                 corner[slot] = Some(coedge.identity());
                 let proof = domain.original_coedge_correspondence(flat)?;
-                let binding = proof.binding().ok_or_else(|| GeometryError::new(
-                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "original vertex corner lost its original parameter endpoint binding"))?;
+                let binding = proof.binding().ok_or_else(|| {
+                    GeometryError::new(
+                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                        "original vertex corner lost its original parameter endpoint binding",
+                    )
+                })?;
                 let (corner_entry, corner_edge) =
                     native_coedge(definition, use_.face, use_.wire, index)?;
                 if binding.owner != [use_.face, use_.wire, index]
-                    || binding.face != face_id || binding.edge != corner_entry.edge
+                    || binding.face != face_id
+                    || binding.edge != corner_entry.edge
                     || binding.edgeuse != coedge.edgeuse
-                    || binding.native_interval != [corner_edge.interval.min(), corner_edge.interval.max()]
+                    || binding.native_interval
+                        != [corner_edge.interval.min(), corner_edge.interval.max()]
                     || binding.endpoints != corner_edge.vertices
                     || binding.source.native_orientation != corner_entry.forward
                 {
                     return Err(GeometryError::new(
                         GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "original vertex corner binding changed its native ownership"));
+                        "original vertex corner binding changed its native ownership",
+                    ));
                 }
                 let native_high = back == wire.edges[index].forward;
                 let spatial_high = native_high == binding.spatial_forward;
@@ -311,7 +346,8 @@ pub(super) fn original_vertex_fan(
                 {
                     return Err(GeometryError::new(
                         GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "original vertex corner changed its captured source endpoint"));
+                        "original vertex corner changed its captured source endpoint",
+                    ));
                 }
                 corner_sources[slot] = Some(binding.source_vertex_ids[endpoint]);
                 let spatial_range = proof.spatial_range();
@@ -319,9 +355,9 @@ pub(super) fn original_vertex_fan(
                 // Preserve the selected gamma branch over the SOURCE endpoint
                 // support. A fraction of native/raw UV t is not this support
                 // when the original correspondence is nonlinear or reversed.
-                let mut image = domain.original_coedge_uv_piecewise_jet(
-                    flat, spatial_span, work, cancel,
-                )?.position;
+                let mut image = domain
+                    .original_coedge_uv_piecewise_jet(flat, spatial_span, work, cancel)?
+                    .position;
                 if proof.position_error_mm() != 0.0 {
                     let jet = domain.original_coedge_uv_jet(flat, spatial_span, work, cancel)?;
                     let width = Interval::point(spatial_range[1])
@@ -350,7 +386,9 @@ pub(super) fn original_vertex_fan(
             let surface = domain.surface_operand();
             for joint in domain.original_joints()? {
                 work.charge(1, cancel)?;
-                if joint.vertex_id != vertex { continue; }
+                if joint.vertex_id != vertex {
+                    continue;
+                }
                 let (incoming, outgoing) = if orientation {
                     (corner[0], corner[1])
                 } else {
@@ -364,10 +402,14 @@ pub(super) fn original_vertex_fan(
                 {
                     return Err(GeometryError::new(
                         GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                        "original vertex joint changed its captured source apex"));
+                        "original vertex joint changed its captured source apex",
+                    ));
                 }
                 let image = super::atlas::original_joint_uv_enclosure(joint, work, cancel)?;
-                if matches!(joint.kind, crate::kernel::trim::TrimJointKind::SphericalPole { .. }) {
+                if matches!(
+                    joint.kind,
+                    crate::kernel::trim::TrimJointKind::SphericalPole { .. }
+                ) {
                     let image = source_chart::qualify_original_pole_joint(
                         &surface, domain, joint, image.map(|v| [v.lo, v.hi]), work, cancel,
                     )?.ok_or_else(|| GeometryError::new(
@@ -393,9 +435,12 @@ pub(super) fn original_vertex_fan(
                     hi: margin[axis],
                 });
             }
-            for patch in surface_parameter_boxes(&surface, uv.map(|v| [v.lo, v.hi]), work, cancel)? {
+            for patch in surface_parameter_boxes(&surface, uv.map(|v| [v.lo, v.hi]), work, cancel)?
+            {
                 work.charge(1, cancel)?;
-                let image = crate::parametric::surface_piecewise_enclosure(&surface, patch, work, cancel)?.position;
+                let image =
+                    crate::parametric::surface_piecewise_enclosure(&surface, patch, work, cancel)?
+                        .position;
                 hull_vertex_support(&mut support, image);
             }
         }
@@ -451,12 +496,26 @@ fn exact_affine_vertex_fan(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     work.charge(1, cancel)?;
-    if incident_count < 3 { return Ok(false); }
-    let Some(&first_face) = definition.face_ids().first() else { return Ok(false); };
-    let first_shell = definition.brep().face(first_face).map_err(native_topology_error)?.shell;
+    if incident_count < 3 {
+        return Ok(false);
+    }
+    let Some(&first_face) = definition.face_ids().first() else {
+        return Ok(false);
+    };
+    let first_shell = definition
+        .brep()
+        .face(first_face)
+        .map_err(native_topology_error)?
+        .shell;
     for &face_id in definition.face_ids() {
         work.charge(1, cancel)?;
-        if definition.brep().face(face_id).map_err(native_topology_error)?.shell != first_shell {
+        if definition
+            .brep()
+            .face(face_id)
+            .map_err(native_topology_error)?
+            .shell
+            != first_shell
+        {
             return Ok(false);
         }
     }
@@ -476,13 +535,20 @@ fn exact_affine_vertex_fan(
     for candidate in [first_uses.first, second_use] {
         work.charge(1, cancel)?;
         let orientation = face_orientation(definition, candidate.face, work, cancel)?;
-        let (entry, edge) = native_coedge(definition, candidate.face, candidate.wire, candidate.index)?;
+        let (entry, edge) =
+            native_coedge(definition, candidate.face, candidate.wire, candidate.index)?;
         let front = edge.vertices[usize::from(!entry.forward)];
         let back = edge.vertices[usize::from(entry.forward)];
-        if front == back { return Ok(false); }
+        if front == back {
+            return Ok(false);
+        }
         if (front == vertex) == orientation {
             start = Some(candidate);
-            target = Some(source.trim_source().source_vertex_point(vertex, work, cancel)?);
+            target = Some(
+                source
+                    .trim_source()
+                    .source_vertex_point(vertex, work, cancel)?,
+            );
             break;
         }
     }
@@ -558,12 +624,25 @@ fn exact_affine_vertex_fan(
         if edge.vertices[0] == edge.vertices[1]
             || (edge.vertices[usize::from(!entry.forward)] == vertex) != orientation
             || (entry.forward == orientation) != current.orientation
-            || domain.coedges().get(current.coedge).is_none_or(|c| c.edgeuse != current.edgeuse) {
+            || domain
+                .coedges()
+                .get(current.coedge)
+                .is_none_or(|c| c.edgeuse != current.edgeuse)
+        {
             return Ok(false);
         }
         let Some(direction) = original_affine_edge_direction(
-            source, domain, current.coedge, edge, domain_bytes, work, cancel,
-        )? else { return Ok(false); };
+            source,
+            domain,
+            current.coedge,
+            edge,
+            domain_bytes,
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(false);
+        };
         let outward = if edge.vertices[0] == vertex {
             direction
         } else if edge.vertices[1] == vertex {
@@ -592,7 +671,8 @@ fn exact_affine_vertex_fan(
         for wire_index in 0..face.loops.len() {
             let boundary = boundary_loop(definition, current.face, wire_index)?;
             for (index, boundary_entry) in boundary.edges.iter().enumerate() {
-                let (_, boundary_edge) = native_coedge(definition, current.face, wire_index, index)?;
+                let (_, boundary_edge) =
+                    native_coedge(definition, current.face, wire_index, index)?;
                 work.charge(1, cancel)?;
                 let proof = domain.original_coedge_correspondence(flat)?;
                 let Some(binding) = proof.binding() else {
@@ -608,27 +688,53 @@ fn exact_affine_vertex_fan(
                 let coedge = flat;
                 flat += 1;
                 let low = binding.native_endpoint_index(false);
-                let a = source.trim_source().source_vertex_point(boundary_edge.vertices[low], work, cancel)?;
-                let b = source.trim_source().source_vertex_point(boundary_edge.vertices[1 - low], work, cancel)?;
-                if binding.native_interval != [boundary_edge.interval.min(), boundary_edge.interval.max()] {
+                let a = source.trim_source().source_vertex_point(
+                    boundary_edge.vertices[low],
+                    work,
+                    cancel,
+                )?;
+                let b = source.trim_source().source_vertex_point(
+                    boundary_edge.vertices[1 - low],
+                    work,
+                    cancel,
+                )?;
+                if binding.native_interval
+                    != [boundary_edge.interval.min(), boundary_edge.interval.max()]
+                {
                     return Ok(false);
                 }
                 let Some(d) = original_affine_edge_direction(
-                    source, domain, coedge, boundary_edge, domain_bytes, work, cancel,
-                )? else { return Ok(false); };
+                    source,
+                    domain,
+                    coedge,
+                    boundary_edge,
+                    domain_bytes,
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(false);
+                };
                 // Endpoint affinity of the raw PCurve does not flatten a
                 // nonlinear retained gamma map into a zero-transport law.
-                if proof.affine_spatial_parameter_preimage(proof.uv_range())?.is_none() {
+                if proof
+                    .affine_spatial_parameter_preimage(proof.uv_range())?
+                    .is_none()
+                {
                     return Ok(false);
                 }
                 let chart = domain.coedge_operand(coedge)?;
                 if !exact_affine_trace(
-                    &carrier, &chart, proof.uv_endpoints(), [a, b], work, cancel,
+                    &carrier,
+                    &chart,
+                    proof.uv_endpoints(),
+                    [a, b],
+                    work,
+                    cancel,
                 )? {
                     return Ok(false);
                 }
-                if boundary_edge.vertices[0] != vertex && boundary_edge.vertices[1] != vertex
-                {
+                if boundary_edge.vertices[0] != vertex && boundary_edge.vertices[1] != vertex {
                     let va = std::array::from_fn(|i| point[i].sub(Interval::point(a[i])));
                     let vb = std::array::from_fn(|i| point[i].sub(Interval::point(b[i])));
                     if length(cross(d, va))?.lo <= 0.0 && dot(va, vb).lo <= 0.0 {
@@ -637,28 +743,42 @@ fn exact_affine_vertex_fan(
                 }
             }
         }
-        if flat != domain.coedges().len() { return Ok(false); }
+        if flat != domain.coedges().len() {
+            return Ok(false);
+        }
         for joint in domain.original_joints()? {
             work.charge(1, cancel)?;
-            if joint.vertex_id != vertex { continue; }
-            if joint.vertex_point != target { return Ok(false); }
+            if joint.vertex_id != vertex {
+                continue;
+            }
+            if joint.vertex_point != target {
+                return Ok(false);
+            }
             let mut endpoints = [(0, 0.0); 2];
             for (slot, identity) in [joint.incoming, joint.outgoing].into_iter().enumerate() {
                 let mut selected = None;
                 for (flat, coedge) in domain.coedges().iter().enumerate() {
                     work.charge(1, cancel)?;
                     if coedge.identity() == identity {
-                        if selected.is_some() { return Ok(false); }
+                        if selected.is_some() {
+                            return Ok(false);
+                        }
                         selected = Some(flat);
                     }
                 }
-                let Some(flat) = selected else { return Ok(false); };
+                let Some(flat) = selected else {
+                    return Ok(false);
+                };
                 let proof = domain.original_coedge_correspondence(flat)?;
-                let Some(binding) = proof.binding() else { return Ok(false); };
+                let Some(binding) = proof.binding() else {
+                    return Ok(false);
+                };
                 let spatial_high = binding.material_forward == (slot == 0);
                 let endpoint = binding.native_endpoint_index(spatial_high);
-                if binding.face != domain.face() || binding.edgeuse != identity.edgeuse
-                    || binding.edge != identity.edge_id || binding.endpoints[endpoint] != vertex
+                if binding.face != domain.face()
+                    || binding.edgeuse != identity.edgeuse
+                    || binding.edge != identity.edge_id
+                    || binding.endpoints[endpoint] != vertex
                     || binding.source_vertex_ids[endpoint] != joint.source_vertex_id
                     || binding.source_vertex_points_mm[endpoint] != target
                 {
@@ -674,7 +794,12 @@ fn exact_affine_vertex_fan(
             // identities above put it at ORIGINAL V. Neither a joint label nor
             // an interval enclosure's width can discharge this obligation.
             if !original_uv_endpoints_equal(
-                &incoming, endpoints[0].1, &outgoing, endpoints[1].1, work, cancel,
+                &incoming,
+                endpoints[0].1,
+                &outgoing,
+                endpoints[1].1,
+                work,
+                cancel,
             )? {
                 return Ok(false);
             }
@@ -690,11 +815,21 @@ fn exact_affine_vertex_fan(
         } else {
             current.index + 1
         };
-        let (neighbor_entry, neighbor) = native_coedge(definition, current.face, current.wire, adjacent)?;
+        let (neighbor_entry, neighbor) =
+            native_coedge(definition, current.face, current.wire, adjacent)?;
         let adjacent_flat = current.coedge - current.index + adjacent;
         let Some(d) = original_affine_edge_direction(
-            source, domain, adjacent_flat, neighbor, domain_bytes, work, cancel,
-        )? else { return Ok(false); };
+            source,
+            domain,
+            adjacent_flat,
+            neighbor,
+            domain_bytes,
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(false);
+        };
         let next_outward = if neighbor.vertices[0] == vertex {
             d
         } else if neighbor.vertices[1] == vertex {
@@ -706,11 +841,19 @@ fn exact_affine_vertex_fan(
             return Ok(false);
         }
         rays.push([dot(outward, rows[0]), dot(outward, rows[1])]);
-        let Some(pair) = incidence.get(neighbor_entry.edge) else { return Ok(false); };
-        let Some(chart) = domain.coedges().get(adjacent_flat) else { return Ok(false); };
+        let Some(pair) = incidence.get(neighbor_entry.edge) else {
+            return Ok(false);
+        };
+        let Some(chart) = domain.coedges().get(adjacent_flat) else {
+            return Ok(false);
+        };
         let selected = crate::analysis::source_incidence::CoedgeUse {
-            face: current.face, wire: current.wire, index: adjacent, coedge: adjacent_flat,
-            orientation: neighbor_entry.forward == orientation, edgeuse: chart.edgeuse,
+            face: current.face,
+            wire: current.wire,
+            index: adjacent,
+            coedge: adjacent_flat,
+            orientation: neighbor_entry.forward == orientation,
+            edgeuse: chart.edgeuse,
         };
         current = if pair.first == selected {
             let Some(other) = pair.second else {
@@ -745,12 +888,22 @@ fn original_affine_edge_direction(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<[Interval; 3]>, GeometryError> {
-    let Some(chart) = domain.coedges().get(coedge) else { return Ok(None); };
+    let Some(chart) = domain.coedges().get(coedge) else {
+        return Ok(None);
+    };
     let identity = chart.identity();
     let proof = domain.original_coedge_correspondence(coedge)?;
-    let Some(binding) = proof.binding() else { return Ok(None); };
-    if binding.owner != [domain.face_index(), identity.wire_index, identity.coedge_index]
-        || binding.face != domain.face() || binding.edge != identity.edge_id
+    let Some(binding) = proof.binding() else {
+        return Ok(None);
+    };
+    if binding.owner
+        != [
+            domain.face_index(),
+            identity.wire_index,
+            identity.coedge_index,
+        ]
+        || binding.face != domain.face()
+        || binding.edge != identity.edge_id
         || binding.edgeuse != identity.edgeuse
         || binding.native_interval != [edge.interval.min(), edge.interval.max()]
         || binding.endpoints != edge.vertices
@@ -759,19 +912,33 @@ fn original_affine_edge_direction(
         return Ok(None);
     }
     let low = binding.native_endpoint_index(false);
-    let front = source.trim_source().source_vertex_point(edge.vertices[low], work, cancel)?;
-    let back = source.trim_source().source_vertex_point(edge.vertices[1 - low], work, cancel)?;
+    let front = source
+        .trim_source()
+        .source_vertex_point(edge.vertices[low], work, cancel)?;
+    let back = source
+        .trim_source()
+        .source_vertex_point(edge.vertices[1 - low], work, cancel)?;
     let range = proof.spatial_range();
-    domain.with_original_spatial_curve(coedge, remaining_bytes, work, cancel,
+    domain.with_original_spatial_curve(
+        coedge,
+        remaining_bytes,
+        work,
+        cancel,
         |curve, work, cancel| {
             if !crate::parametric::curve_parameter_span_continuous(curve, range, work, cancel)? {
                 return Ok(None);
             }
-            let Some(direction) = affine_line_direction(curve, range, front, back, work, cancel)? else {
+            let Some(direction) = affine_line_direction(curve, range, front, back, work, cancel)?
+            else {
                 return Ok(None);
             };
-            Ok(Some(if binding.spatial_forward { direction } else { direction.map(Interval::neg) }))
-        })
+            Ok(Some(if binding.spatial_forward {
+                direction
+            } else {
+                direction.map(Interval::neg)
+            }))
+        },
+    )
 }
 
 /// Numerators of O + u*A + v*B over one nonzero exact denominator.
@@ -841,18 +1008,35 @@ fn exact_affine_surface(
             return Ok(None);
         };
         let active = evaluator.active_domain();
-        let support = carrier.support.map_or(active, |support| std::array::from_fn(|axis|
-            [active[axis][0].max(support[axis][0]), active[axis][1].min(support[axis][1])]));
-        if support.iter().any(|r| !r[0].is_finite() || !r[1].is_finite() || r[0] >= r[1]) {
+        let support = carrier.support.map_or(active, |support| {
+            std::array::from_fn(|axis| {
+                [
+                    active[axis][0].max(support[axis][0]),
+                    active[axis][1].min(support[axis][1]),
+                ]
+            })
+        });
+        if support
+            .iter()
+            .any(|r| !r[0].is_finite() || !r[1].is_finite() || r[0] >= r[1])
+        {
             return Ok(None);
         }
         carrier.support = Some(support);
         return Ok(Some(carrier));
     }
-    let Some(mut surface) = evaluator.native_surface() else { return Ok(None); };
+    let Some(mut surface) = evaluator.native_surface() else {
+        return Ok(None);
+    };
     let active = surface.natural_uv_domain();
-    let active = [[active.u_min(), active.u_max()], [active.v_min(), active.v_max()]];
-    if active.iter().any(|r| !r[0].is_finite() || !r[1].is_finite() || r[0] >= r[1]) {
+    let active = [
+        [active.u_min(), active.u_max()],
+        [active.v_min(), active.v_max()],
+    ];
+    if active
+        .iter()
+        .any(|r| !r[0].is_finite() || !r[1].is_finite() || r[0] >= r[1])
+    {
         return Ok(None);
     }
     for depth in 0..=32 {
@@ -860,12 +1044,19 @@ fn exact_affine_surface(
         match surface.kind() {
             SurfaceKind::CurveBounded(bound) if depth < 32 => surface = bound.basis(),
             SurfaceKind::Step(step) if depth < 32 => {
-                surface = step.surface().ok_or_else(|| GeometryError::new(
-                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "original affine surface has an empty STEP carrier"))?;
+                surface = step.surface().ok_or_else(|| {
+                    GeometryError::new(
+                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                        "original affine surface has an empty STEP carrier",
+                    )
+                })?;
             }
-            SurfaceKind::CurveBounded(_) | SurfaceKind::Step(_) => return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit, "original affine surface nesting exceeds source limit")),
+            SurfaceKind::CurveBounded(_) | SurfaceKind::Step(_) => {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "original affine surface nesting exceeds source limit",
+                ));
+            }
             _ => break,
         }
     }
@@ -878,23 +1069,48 @@ fn exact_affine_surface(
         let origin = [p.x, p.y, p.z];
         let x = [x.x, x.y, x.z];
         let y = [y.x, y.y, y.z];
-        if origin.into_iter().chain(x).chain(y).chain([scale.x, scale.y]).any(|v| !v.is_finite()) {
+        if origin
+            .into_iter()
+            .chain(x)
+            .chain(y)
+            .chain([scale.x, scale.y])
+            .any(|v| !v.is_finite())
+        {
             return Ok(None);
         }
         let mut du = std::array::from_fn(|_| ExactCoefficient::point(0.0));
         let mut dv = std::array::from_fn(|_| ExactCoefficient::point(0.0));
         for axis in 0..3 {
-            let Some(u) = ExactCoefficient::point(x[axis]).product(&ExactCoefficient::point(scale.x), work, cancel)? else { return Ok(None); };
-            let Some(v) = ExactCoefficient::point(y[axis]).product(&ExactCoefficient::point(scale.y), work, cancel)? else { return Ok(None); };
+            let Some(u) = ExactCoefficient::point(x[axis]).product(
+                &ExactCoefficient::point(scale.x),
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(v) = ExactCoefficient::point(y[axis]).product(
+                &ExactCoefficient::point(scale.y),
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(None);
+            };
             du[axis] = u;
             dv[axis] = v;
         }
         return Ok(Some(ExactAffineSurface {
-            origin: origin.map(ExactCoefficient::point), du, dv,
-            denominator: ExactCoefficient::point(1.0), support: Some(active),
+            origin: origin.map(ExactCoefficient::point),
+            du,
+            dv,
+            denominator: ExactCoefficient::point(1.0),
+            support: Some(active),
         }));
     }
-    let Some(n) = crate::parametric::native_surface_nurbs(surface)? else { return Ok(None); };
+    let Some(n) = crate::parametric::native_surface_nurbs(surface)? else {
+        return Ok(None);
+    };
     let (u_degree, v_degree) = n.degrees();
     let knots = [n.u_knots(), n.v_knots()];
     let degree = [u_degree, v_degree];
@@ -922,21 +1138,38 @@ fn exact_affine_surface(
         }
         support[axis] = [lower, upper];
     }
-    affine_tensor_coefficients(support, degree, count,
-    |axis, index, degree, work, cancel| exact_knot_sum(knots[axis], index, degree, work, cancel),
-    |u, v| {
-        let p = n.cpt(u, v).map_err(|error| GeometryError::new(
-            GeometryErrorCode::ConditioningFailure, format!("original tensor coefficient unavailable: {error}")))?;
-        Ok([p.x, p.y, p.z, if n.is_rational() { p.w } else { 1.0 }])
-    }, work, cancel)
+    affine_tensor_coefficients(
+        support,
+        degree,
+        count,
+        |axis, index, degree, work, cancel| {
+            exact_knot_sum(knots[axis], index, degree, work, cancel)
+        },
+        |u, v| {
+            let p = n.cpt(u, v).map_err(|error| {
+                GeometryError::new(
+                    GeometryErrorCode::ConditioningFailure,
+                    format!("original tensor coefficient unavailable: {error}"),
+                )
+            })?;
+            Ok([p.x, p.y, p.z, if n.is_rational() { p.w } else { 1.0 }])
+        },
+        work,
+        cancel,
+    )
 }
 
 fn affine_tensor_coefficients(
     active: [[f64; 2]; 2],
     degree: [usize; 2],
     count: [usize; 2],
-    knot_sum: impl Fn(usize, usize, usize, &mut GeometryWorkBudget, &AtomicBool)
-        -> Result<Option<ExactCoefficient>, GeometryError>,
+    knot_sum: impl Fn(
+        usize,
+        usize,
+        usize,
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+    ) -> Result<Option<ExactCoefficient>, GeometryError>,
     control: impl Fn(usize, usize) -> Result<[f64; 4], GeometryError>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -960,9 +1193,7 @@ fn affine_tensor_coefficients(
         let Some(begin) = knot_sum(axis, 0, degree[axis], work, cancel)? else {
             return Ok(None);
         };
-        let Some(mut end) =
-            knot_sum(axis, count[axis] - 1, degree[axis], work, cancel)?
-        else {
+        let Some(mut end) = knot_sum(axis, count[axis] - 1, degree[axis], work, cancel)? else {
             return Ok(None);
         };
         if end.subtract(&begin).is_none() || end.sign() <= 0 {
@@ -1097,26 +1328,43 @@ struct SourceKnots<'a> {
 }
 
 impl SourceKnots<'_> {
-    fn value(&self, mut index: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool)
-        -> Result<Option<f64>, GeometryError>
-    {
-        if self.values.len() != self.multiplicities.len() { return Ok(None); }
+    fn value(
+        &self,
+        mut index: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<f64>, GeometryError> {
+        if self.values.len() != self.multiplicities.len() {
+            return Ok(None);
+        }
         for (&value, &count) in self.values.iter().zip(self.multiplicities) {
             work.charge(1, cancel)?;
-            if !value.is_finite() || count == 0 { return Ok(None); }
-            if index < count { return Ok(Some(value)); }
+            if !value.is_finite() || count == 0 {
+                return Ok(None);
+            }
+            if index < count {
+                return Ok(Some(value));
+            }
             index -= count;
         }
         Ok(None)
     }
 
-    fn sum(&self, index: usize, degree: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool)
-        -> Result<Option<ExactCoefficient>, GeometryError>
-    {
+    fn sum(
+        &self,
+        index: usize,
+        degree: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<ExactCoefficient>, GeometryError> {
         let mut sum = ExactCoefficient::point(0.0);
         for i in index + 1..index + degree + 1 {
-            let Some(value) = self.value(i, work, cancel)? else { return Ok(None); };
-            if sum.push(value).is_none() { return Ok(None); }
+            let Some(value) = self.value(i, work, cancel)? else {
+                return Ok(None);
+            };
+            if sum.push(value).is_none() {
+                return Ok(None);
+            }
         }
         Ok(Some(sum))
     }
@@ -1132,73 +1380,141 @@ fn original_affine_basis<'a>(
         source = match source {
             SourceCurve::Trimmed { basis, .. } => basis,
             SourceCurve::SurfaceCurve {
-                curve_3d, master: solidcraft_step::geom::PreferredRep::Curve3d, ..
+                curve_3d,
+                master: solidcraft_step::geom::PreferredRep::Curve3d,
+                ..
             } => curve_3d,
             _ => return Ok(source),
         };
     }
-    Err(GeometryError::new(GeometryErrorCode::ResourceLimit,
-        "original affine coefficient wrapper depth exceeded"))
+    Err(GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "original affine coefficient wrapper depth exceeded",
+    ))
 }
 
-fn original_source_affine(source: &SourceCurve, work: &mut GeometryWorkBudget, cancel: &AtomicBool)
-    -> Result<bool, GeometryError>
-{
+fn original_source_affine(
+    source: &SourceCurve,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
     match original_affine_basis(source, work, cancel)? {
-        SourceCurve::Line { origin, direction, magnitude } =>
-            Ok(origin.iter().chain(direction).chain([magnitude]).all(|v| v.is_finite())),
+        SourceCurve::Line {
+            origin,
+            direction,
+            magnitude,
+        } => Ok(origin
+            .iter()
+            .chain(direction)
+            .chain([magnitude])
+            .all(|v| v.is_finite())),
         SourceCurve::BSpline(spline) => {
             let count = spline.points.len();
-            if count == 0 { return Ok(false); }
+            if count == 0 {
+                return Ok(false);
+            }
             if let Some(weights) = &spline.weights {
-                if weights.len() != count || !weights[0].is_finite() || weights[0] == 0.0
-                    || weights.iter().any(|&weight| weight != weights[0]) { return Ok(false); }
+                if weights.len() != count
+                    || !weights[0].is_finite()
+                    || weights[0] == 0.0
+                    || weights.iter().any(|&weight| weight != weights[0])
+                {
+                    return Ok(false);
+                }
             }
             let base = spline.points[0];
-            if base.into_iter().any(|v| !v.is_finite()) { return Ok(false); }
+            if base.into_iter().any(|v| !v.is_finite()) {
+                return Ok(false);
+            }
             if spline.degree == 0 {
                 for point in &spline.points {
                     work.charge(1, cancel)?;
-                    if *point != base { return Ok(false); }
+                    if *point != base {
+                        return Ok(false);
+                    }
                 }
                 return Ok(true);
             }
-            let knots = SourceKnots { values: &spline.knots, multiplicities: &spline.multiplicities };
-            let Some(first) = knots.sum(0, spline.degree, work, cancel)? else { return Ok(false); };
-            let Some(mut span) = knots.sum(count - 1, spline.degree, work, cancel)? else { return Ok(false); };
-            if span.subtract(&first).is_none() || span.sign() <= 0 { return Ok(false); }
+            let knots = SourceKnots {
+                values: &spline.knots,
+                multiplicities: &spline.multiplicities,
+            };
+            let Some(first) = knots.sum(0, spline.degree, work, cancel)? else {
+                return Ok(false);
+            };
+            let Some(mut span) = knots.sum(count - 1, spline.degree, work, cancel)? else {
+                return Ok(false);
+            };
+            if span.subtract(&first).is_none() || span.sign() <= 0 {
+                return Ok(false);
+            }
             let last = spline.points[count - 1];
             for (i, point) in spline.points.iter().enumerate() {
                 work.charge(1, cancel)?;
-                if point.iter().any(|v| !v.is_finite()) { return Ok(false); }
-                let Some(mut coordinate) = knots.sum(i, spline.degree, work, cancel)? else { return Ok(false); };
-                if coordinate.subtract(&first).is_none() { return Ok(false); }
+                if point.iter().any(|v| !v.is_finite()) {
+                    return Ok(false);
+                }
+                let Some(mut coordinate) = knots.sum(i, spline.degree, work, cancel)? else {
+                    return Ok(false);
+                };
+                if coordinate.subtract(&first).is_none() {
+                    return Ok(false);
+                }
                 for axis in 0..3 {
-                    let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else { return Ok(false); };
-                    let Some(difference) = ExactCoefficient::difference(point[axis], base[axis]) else { return Ok(false); };
-                    let Some(mut residual) = difference.product(&span, work, cancel)? else { return Ok(false); };
-                    let Some(reference) = delta.product(&coordinate, work, cancel)? else { return Ok(false); };
-                    if residual.subtract(&reference).is_none() || residual.sign() != 0 { return Ok(false); }
+                    let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else {
+                        return Ok(false);
+                    };
+                    let Some(difference) = ExactCoefficient::difference(point[axis], base[axis])
+                    else {
+                        return Ok(false);
+                    };
+                    let Some(mut residual) = difference.product(&span, work, cancel)? else {
+                        return Ok(false);
+                    };
+                    let Some(reference) = delta.product(&coordinate, work, cancel)? else {
+                        return Ok(false);
+                    };
+                    if residual.subtract(&reference).is_none() || residual.sign() != 0 {
+                        return Ok(false);
+                    }
                 }
             }
             Ok(true)
         }
         SourceCurve::Polyline(points) => {
-            if points.len() < 2 { return Ok(false); }
+            if points.len() < 2 {
+                return Ok(false);
+            }
             for (index, point) in points.iter().enumerate() {
                 work.charge(1, cancel)?;
                 for axis in 0..3 {
-                    if !point[axis].is_finite() { return Ok(false); }
-                    let Some(delta) = ExactCoefficient::difference(points[1][axis], points[0][axis]) else { return Ok(false); };
-                    let Some(mut reference) = delta.product(&ExactCoefficient::point(index as f64), work, cancel)? else { return Ok(false); };
-                    let Some(value) = ExactCoefficient::difference(point[axis], points[0][axis]) else { return Ok(false); };
-                    if reference.subtract(&value).is_none() || reference.sign() != 0 { return Ok(false); }
+                    if !point[axis].is_finite() {
+                        return Ok(false);
+                    }
+                    let Some(delta) =
+                        ExactCoefficient::difference(points[1][axis], points[0][axis])
+                    else {
+                        return Ok(false);
+                    };
+                    let Some(mut reference) =
+                        delta.product(&ExactCoefficient::point(index as f64), work, cancel)?
+                    else {
+                        return Ok(false);
+                    };
+                    let Some(value) = ExactCoefficient::difference(point[axis], points[0][axis])
+                    else {
+                        return Ok(false);
+                    };
+                    if reference.subtract(&value).is_none() || reference.sign() != 0 {
+                        return Ok(false);
+                    }
                 }
             }
             Ok(true)
         }
         source @ SourceCurve::SurfaceCurve { .. } => {
-            let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(source)? else {
+            let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(source)?
+            else {
                 return Ok(false);
             };
             Ok(original_source_affine(&pcurve.curve, work, cancel)?
@@ -1217,17 +1533,32 @@ fn original_affine_surface_coefficients(
     for depth in 0..=16 {
         work.charge(1, cancel)?;
         match source {
-            SourceSurface::RectangularTrimmed { basis, u1, u2, v1, v2, .. } if depth < 16 => {
+            SourceSurface::RectangularTrimmed {
+                basis,
+                u1,
+                u2,
+                v1,
+                v2,
+                ..
+            } if depth < 16 => {
                 let bounds = [[u1.min(*u2), u1.max(*u2)], [v1.min(*v2), v1.max(*v2)]];
                 support = Some(match support {
-                    Some(previous) => std::array::from_fn(|i|
-                        [previous[i][0].max(bounds[i][0]), previous[i][1].min(bounds[i][1])]),
+                    Some(previous) => std::array::from_fn(|i| {
+                        [
+                            previous[i][0].max(bounds[i][0]),
+                            previous[i][1].min(bounds[i][1]),
+                        ]
+                    }),
                     None => bounds,
                 });
                 source = basis;
             }
-            SourceSurface::RectangularTrimmed { .. } => return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit, "original affine surface wrapper depth exceeded")),
+            SourceSurface::RectangularTrimmed { .. } => {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "original affine surface wrapper depth exceeded",
+                ));
+            }
             _ => break,
         }
     }
@@ -1235,43 +1566,95 @@ fn original_affine_surface_coefficients(
         origin: std::array::from_fn(|_| ExactCoefficient::point(0.0)),
         du: std::array::from_fn(|_| ExactCoefficient::point(0.0)),
         dv: std::array::from_fn(|_| ExactCoefficient::point(0.0)),
-        denominator: ExactCoefficient::point(1.0), support,
+        denominator: ExactCoefficient::point(1.0),
+        support,
     };
     match source {
         SourceSurface::Plane { position } => {
-            if position.origin.iter().chain(&position.axis).chain(&position.ref_direction)
-                .any(|v| !v.is_finite()) { return Ok(None); }
+            if position
+                .origin
+                .iter()
+                .chain(&position.axis)
+                .chain(&position.ref_direction)
+                .any(|v| !v.is_finite())
+            {
+                return Ok(None);
+            }
             carrier.origin = position.origin.map(ExactCoefficient::point);
             carrier.du = position.ref_direction.map(ExactCoefficient::point);
             for i in 0..3 {
-                let j = (i + 1) % 3; let k = (i + 2) % 3;
-                let Some(mut y) = ExactCoefficient::point(position.axis[j])
-                    .product(&ExactCoefficient::point(position.ref_direction[k]), work, cancel)? else { return Ok(None); };
-                let Some(other) = ExactCoefficient::point(position.axis[k])
-                    .product(&ExactCoefficient::point(position.ref_direction[j]), work, cancel)? else { return Ok(None); };
-                if y.subtract(&other).is_none() { return Ok(None); }
+                let j = (i + 1) % 3;
+                let k = (i + 2) % 3;
+                let Some(mut y) = ExactCoefficient::point(position.axis[j]).product(
+                    &ExactCoefficient::point(position.ref_direction[k]),
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let Some(other) = ExactCoefficient::point(position.axis[k]).product(
+                    &ExactCoefficient::point(position.ref_direction[j]),
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(None);
+                };
+                if y.subtract(&other).is_none() {
+                    return Ok(None);
+                }
                 carrier.dv[i] = y;
             }
             Ok(Some(carrier))
         }
-        SourceSurface::Extrusion { profile, direction, magnitude } => {
+        SourceSurface::Extrusion {
+            profile,
+            direction,
+            magnitude,
+        } => {
             if direction.iter().chain([magnitude]).any(|v| !v.is_finite())
-                || !original_source_affine(profile, work, cancel)? { return Ok(None); }
+                || !original_source_affine(profile, work, cancel)?
+            {
+                return Ok(None);
+            }
             let zero = ExactCoefficient::point(0.0);
             let one = ExactCoefficient::point(1.0);
             // These are symbolic values of the coefficient-proved affine
             // extension, not geometry samples outside a restricted profile.
-            let Some(a) = source_affine_point(profile, [&zero, &one], work, cancel)? else { return Ok(None); };
-            let Some(b) = source_affine_point(profile, [&one, &one], work, cancel)? else { return Ok(None); };
-            let Some(denominator) = a[3].product(&b[3], work, cancel)? else { return Ok(None); };
-            if denominator.sign() == 0 { return Ok(None); }
+            let Some(a) = source_affine_point(profile, [&zero, &one], work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(b) = source_affine_point(profile, [&one, &one], work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(denominator) = a[3].product(&b[3], work, cancel)? else {
+                return Ok(None);
+            };
+            if denominator.sign() == 0 {
+                return Ok(None);
+            }
             for axis in 0..3 {
-                let Some(origin) = a[axis].product(&b[3], work, cancel)? else { return Ok(None); };
-                let Some(mut du) = b[axis].product(&a[3], work, cancel)? else { return Ok(None); };
-                if du.subtract(&origin).is_none() { return Ok(None); }
-                let Some(dv) = ExactCoefficient::point(direction[axis])
-                    .product(&ExactCoefficient::point(*magnitude), work, cancel)? else { return Ok(None); };
-                let Some(dv) = dv.product(&denominator, work, cancel)? else { return Ok(None); };
+                let Some(origin) = a[axis].product(&b[3], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(mut du) = b[axis].product(&a[3], work, cancel)? else {
+                    return Ok(None);
+                };
+                if du.subtract(&origin).is_none() {
+                    return Ok(None);
+                }
+                let Some(dv) = ExactCoefficient::point(direction[axis]).product(
+                    &ExactCoefficient::point(*magnitude),
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let Some(dv) = dv.product(&denominator, work, cancel)? else {
+                    return Ok(None);
+                };
                 carrier.origin[axis] = origin;
                 carrier.du[axis] = du;
                 carrier.dv[axis] = dv;
@@ -1281,36 +1664,70 @@ fn original_affine_surface_coefficients(
         }
         SourceSurface::BSpline(spline) => {
             let degree = [spline.u_degree, spline.v_degree];
-            let count = [spline.points.len(), spline.points.first().map_or(0, Vec::len)];
-            if degree.contains(&0) || count.into_iter().any(|n| n < 2)
-                || spline.points.iter().any(|row| row.len() != count[1]) { return Ok(None); }
+            let count = [
+                spline.points.len(),
+                spline.points.first().map_or(0, Vec::len),
+            ];
+            if degree.contains(&0)
+                || count.into_iter().any(|n| n < 2)
+                || spline.points.iter().any(|row| row.len() != count[1])
+            {
+                return Ok(None);
+            }
             let knots = [
-                SourceKnots { values: &spline.u_knots, multiplicities: &spline.u_multiplicities },
-                SourceKnots { values: &spline.v_knots, multiplicities: &spline.v_multiplicities },
+                SourceKnots {
+                    values: &spline.u_knots,
+                    multiplicities: &spline.u_multiplicities,
+                },
+                SourceKnots {
+                    values: &spline.v_knots,
+                    multiplicities: &spline.v_multiplicities,
+                },
             ];
             let mut active = [[0.0; 2]; 2];
             for axis in 0..2 {
-                let Some(lower) = knots[axis].value(degree[axis], work, cancel)? else { return Ok(None); };
-                let Some(upper) = knots[axis].value(count[axis], work, cancel)? else { return Ok(None); };
+                let Some(lower) = knots[axis].value(degree[axis], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(upper) = knots[axis].value(count[axis], work, cancel)? else {
+                    return Ok(None);
+                };
                 active[axis] = [lower, upper];
                 if let Some(support) = support {
                     active[axis] = [lower.max(support[axis][0]), upper.min(support[axis][1])];
                 }
-                if active[axis][0] >= active[axis][1] { return Ok(None); }
+                if active[axis][0] >= active[axis][1] {
+                    return Ok(None);
+                }
             }
             if let Some(weights) = &spline.weights {
-                let Some(&weight) = weights.first().and_then(|row| row.first()) else { return Ok(None); };
-                if !weight.is_finite() || weight == 0.0 || weights.len() != count[0]
-                    || weights.iter().any(|row| row.len() != count[1] || row.iter().any(|&w| w != weight)) {
+                let Some(&weight) = weights.first().and_then(|row| row.first()) else {
+                    return Ok(None);
+                };
+                if !weight.is_finite()
+                    || weight == 0.0
+                    || weights.len() != count[0]
+                    || weights
+                        .iter()
+                        .any(|row| row.len() != count[1] || row.iter().any(|&w| w != weight))
+                {
                     return Ok(None);
                 }
             }
             // Equal source weights cancel symbolically, before multiplication;
             // no rounded homogeneous conversion supplies the original tensor.
-            affine_tensor_coefficients(active, degree, count,
+            affine_tensor_coefficients(
+                active,
+                degree,
+                count,
                 |axis, index, degree, work, cancel| knots[axis].sum(index, degree, work, cancel),
-                |u, v| { let p = spline.points[u][v]; Ok([p[0], p[1], p[2], 1.0]) },
-                work, cancel)
+                |u, v| {
+                    let p = spline.points[u][v];
+                    Ok([p[0], p[1], p[2], 1.0])
+                },
+                work,
+                cancel,
+            )
         }
         _ => Ok(None),
     }
@@ -1328,15 +1745,32 @@ fn original_affine_point(
     if !parameter.is_finite() || parameter < active[0] || parameter > active[1] {
         return Ok(None);
     }
-    let Some([offset, slope]) = curve.source_parameter_map() else { return Ok(None); };
+    let Some([offset, slope]) = curve.source_parameter_map() else {
+        return Ok(None);
+    };
     // Normalized LINE providers supply their unrounded physical law through
     // exact_affine_coefficients. Only an explicit point-valued raw map may
     // enter this literal source-coefficient fallback.
-    if offset.lo != offset.hi || slope.lo != slope.hi { return Ok(None); }
-    let Some(mut numerator) = ExactCoefficient::point(parameter)
-        .product(&ExactCoefficient::point(slope.lo), work, cancel)? else { return Ok(None); };
-    if numerator.push(offset.lo).is_none() { return Ok(None); }
-    source_affine_point(source, [&numerator, &ExactCoefficient::point(1.0)], work, cancel)
+    if offset.lo != offset.hi || slope.lo != slope.hi {
+        return Ok(None);
+    }
+    let Some(mut numerator) = ExactCoefficient::point(parameter).product(
+        &ExactCoefficient::point(slope.lo),
+        work,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    if numerator.push(offset.lo).is_none() {
+        return Ok(None);
+    }
+    source_affine_point(
+        source,
+        [&numerator, &ExactCoefficient::point(1.0)],
+        work,
+        cancel,
+    )
 }
 
 fn coefficient_affine_point(
@@ -1348,13 +1782,26 @@ fn coefficient_affine_point(
 ) -> Result<Option<[ExactCoefficient; 4]>, GeometryError> {
     work.charge(1, cancel)?;
     let active = curve.active_range();
-    if !parameter.is_finite() || parameter < active[0] || parameter > active[1]
-        || coefficients.denominator.sign() == 0 { return Ok(None); }
+    if !parameter.is_finite()
+        || parameter < active[0]
+        || parameter > active[1]
+        || coefficients.denominator.sign() == 0
+    {
+        return Ok(None);
+    }
     let mut point = std::array::from_fn(|_| ExactCoefficient::point(0.0));
     for axis in 0..3 {
-        let Some(mut value) = coefficients.derivative[axis]
-            .product(&ExactCoefficient::point(parameter), work, cancel)? else { return Ok(None); };
-        if !add_exact(&mut value, &coefficients.position[axis]) { return Ok(None); }
+        let Some(mut value) = coefficients.derivative[axis].product(
+            &ExactCoefficient::point(parameter),
+            work,
+            cancel,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !add_exact(&mut value, &coefficients.position[axis]) {
+            return Ok(None);
+        }
         point[axis] = value;
     }
     point[3] = coefficients.denominator.clone();
@@ -1372,14 +1819,31 @@ fn source_affine_point(
     let source = original_affine_basis(source, work, cancel)?;
     let mut point = std::array::from_fn(|_| ExactCoefficient::point(0.0));
     match source {
-        SourceCurve::Line { origin, direction, magnitude } => {
+        SourceCurve::Line {
+            origin,
+            direction,
+            magnitude,
+        } => {
             for axis in 0..3 {
-                let Some(velocity) = ExactCoefficient::point(direction[axis])
-                    .product(&ExactCoefficient::point(*magnitude), work, cancel)? else { return Ok(None); };
-                let Some(mut value) = velocity.product(parameter[0], work, cancel)? else { return Ok(None); };
-                let Some(origin) = ExactCoefficient::point(origin[axis])
-                    .product(parameter[1], work, cancel)? else { return Ok(None); };
-                if !add_exact(&mut value, &origin) { return Ok(None); }
+                let Some(velocity) = ExactCoefficient::point(direction[axis]).product(
+                    &ExactCoefficient::point(*magnitude),
+                    work,
+                    cancel,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let Some(mut value) = velocity.product(parameter[0], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(origin) =
+                    ExactCoefficient::point(origin[axis]).product(parameter[1], work, cancel)?
+                else {
+                    return Ok(None);
+                };
+                if !add_exact(&mut value, &origin) {
+                    return Ok(None);
+                }
                 point[axis] = value;
             }
             point[3] = parameter[1].clone();
@@ -1387,55 +1851,113 @@ fn source_affine_point(
         SourceCurve::BSpline(spline) => {
             let base = spline.points[0];
             if spline.degree == 0 {
-                return Ok(Some([base[0], base[1], base[2], 1.0].map(ExactCoefficient::point)));
+                return Ok(Some(
+                    [base[0], base[1], base[2], 1.0].map(ExactCoefficient::point),
+                ));
             }
-            let knots = SourceKnots { values: &spline.knots, multiplicities: &spline.multiplicities };
-            let Some(first) = knots.sum(0, spline.degree, work, cancel)? else { return Ok(None); };
-            let Some(mut span) = knots.sum(spline.points.len() - 1, spline.degree, work, cancel)? else { return Ok(None); };
-            if span.subtract(&first).is_none() || span.sign() <= 0 { return Ok(None); }
-            let Some(mut coordinate) = parameter[0]
-                .product(&ExactCoefficient::point(spline.degree as f64), work, cancel)? else { return Ok(None); };
-            let Some(offset) = first.product(parameter[1], work, cancel)? else { return Ok(None); };
-            if coordinate.subtract(&offset).is_none() { return Ok(None); }
-            let Some(denominator) = span.product(parameter[1], work, cancel)? else { return Ok(None); };
+            let knots = SourceKnots {
+                values: &spline.knots,
+                multiplicities: &spline.multiplicities,
+            };
+            let Some(first) = knots.sum(0, spline.degree, work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(mut span) = knots.sum(spline.points.len() - 1, spline.degree, work, cancel)?
+            else {
+                return Ok(None);
+            };
+            if span.subtract(&first).is_none() || span.sign() <= 0 {
+                return Ok(None);
+            }
+            let Some(mut coordinate) = parameter[0].product(
+                &ExactCoefficient::point(spline.degree as f64),
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(offset) = first.product(parameter[1], work, cancel)? else {
+                return Ok(None);
+            };
+            if coordinate.subtract(&offset).is_none() {
+                return Ok(None);
+            }
+            let Some(denominator) = span.product(parameter[1], work, cancel)? else {
+                return Ok(None);
+            };
             let last = spline.points[spline.points.len() - 1];
             for axis in 0..3 {
-                let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else { return Ok(None); };
-                let Some(mut value) = delta.product(&coordinate, work, cancel)? else { return Ok(None); };
-                let Some(origin) = ExactCoefficient::point(base[axis]).product(&denominator, work, cancel)? else { return Ok(None); };
-                if !add_exact(&mut value, &origin) { return Ok(None); }
+                let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else {
+                    return Ok(None);
+                };
+                let Some(mut value) = delta.product(&coordinate, work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(origin) =
+                    ExactCoefficient::point(base[axis]).product(&denominator, work, cancel)?
+                else {
+                    return Ok(None);
+                };
+                if !add_exact(&mut value, &origin) {
+                    return Ok(None);
+                }
                 point[axis] = value;
             }
             point[3] = denominator;
         }
         SourceCurve::Polyline(points) => {
             for axis in 0..3 {
-                let Some(delta) = ExactCoefficient::difference(points[1][axis], points[0][axis]) else { return Ok(None); };
-                let Some(mut value) = delta.product(parameter[0], work, cancel)? else { return Ok(None); };
-                let Some(origin) = ExactCoefficient::point(points[0][axis]).product(parameter[1], work, cancel)? else { return Ok(None); };
-                if !add_exact(&mut value, &origin) { return Ok(None); }
+                let Some(delta) = ExactCoefficient::difference(points[1][axis], points[0][axis])
+                else {
+                    return Ok(None);
+                };
+                let Some(mut value) = delta.product(parameter[0], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(origin) =
+                    ExactCoefficient::point(points[0][axis]).product(parameter[1], work, cancel)?
+                else {
+                    return Ok(None);
+                };
+                if !add_exact(&mut value, &origin) {
+                    return Ok(None);
+                }
                 point[axis] = value;
             }
             point[3] = parameter[1].clone();
         }
         source @ SourceCurve::SurfaceCurve { .. } => {
-            let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(source)? else {
+            let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(source)?
+            else {
                 return Ok(None);
             };
             let Some(uv) = source_affine_point(&pcurve.curve, parameter, work, cancel)? else {
                 return Ok(None);
             };
-            let Some(carrier) = original_affine_surface_coefficients(&pcurve.surface, work, cancel)? else {
+            let Some(carrier) =
+                original_affine_surface_coefficients(&pcurve.surface, work, cancel)?
+            else {
                 return Ok(None);
             };
             for axis in 0..3 {
-                let Some(mut value) = carrier.origin[axis].product(&uv[3], work, cancel)? else { return Ok(None); };
-                let Some(u) = carrier.du[axis].product(&uv[0], work, cancel)? else { return Ok(None); };
-                let Some(v) = carrier.dv[axis].product(&uv[1], work, cancel)? else { return Ok(None); };
-                if !add_exact(&mut value, &u) || !add_exact(&mut value, &v) { return Ok(None); }
+                let Some(mut value) = carrier.origin[axis].product(&uv[3], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(u) = carrier.du[axis].product(&uv[0], work, cancel)? else {
+                    return Ok(None);
+                };
+                let Some(v) = carrier.dv[axis].product(&uv[1], work, cancel)? else {
+                    return Ok(None);
+                };
+                if !add_exact(&mut value, &u) || !add_exact(&mut value, &v) {
+                    return Ok(None);
+                }
                 point[axis] = value;
             }
-            let Some(weight) = carrier.denominator.product(&uv[3], work, cancel)? else { return Ok(None); };
+            let Some(weight) = carrier.denominator.product(&uv[3], work, cancel)? else {
+                return Ok(None);
+            };
             point[3] = weight;
         }
         _ => return Ok(None),
@@ -1471,11 +1993,15 @@ pub(super) fn original_uv_affine(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    if curve.exact_affine_coefficients(work, cancel)?.is_some() { return Ok(true); }
+    if curve.exact_affine_coefficients(work, cancel)?.is_some() {
+        return Ok(true);
+    }
     if let Some(source) = curve.original_curve() {
         return original_source_affine(source, work, cancel);
     }
-    let Some(native) = curve.native_curve() else { return Ok(false); };
+    let Some(native) = curve.native_curve() else {
+        return Ok(false);
+    };
     if native.dim() != 2 {
         work.charge(1, cancel)?;
         return Ok(false);
@@ -1491,17 +2017,25 @@ fn native_curve_affine(
     work.charge(1, cancel)?;
     let range = curve.natural_interval();
     if !matches!(curve.dim(), 2 | 3)
-        || range.min().is_nan() || range.max().is_nan() || range.min() >= range.max() {
+        || range.min().is_nan()
+        || range.max().is_nan()
+        || range.min() >= range.max()
+    {
         return Ok(false);
     }
     if let CurveKind::Line(line) = curve.kind() {
         let c = line.canonical_unit();
         let p = [c.point.x, c.point.y, c.point.z];
         let v = [c.vector.x, c.vector.y, c.vector.z];
-        return Ok(p[..curve.dim() as usize].iter().chain(&v[..curve.dim() as usize])
-            .chain([&c.scale]).all(|v| v.is_finite())
-            && (!line.is_bounded() || [range.min(), range.max(), c.domain.min(), c.domain.max()]
-                .into_iter().all(f64::is_finite)));
+        return Ok(p[..curve.dim() as usize]
+            .iter()
+            .chain(&v[..curve.dim() as usize])
+            .chain([&c.scale])
+            .all(|v| v.is_finite())
+            && (!line.is_bounded()
+                || [range.min(), range.max(), c.domain.min(), c.domain.max()]
+                    .into_iter()
+                    .all(f64::is_finite)));
     }
     let Some(n) = crate::parametric::native_curve_nurbs(curve)? else {
         return Ok(false);
@@ -1516,14 +2050,22 @@ fn native_curve_affine(
     let (Some(&lower), Some(&upper)) = (knots.get(degree), knots.get(count)) else {
         return Ok(false);
     };
-    if count <= degree || knots.len() != count + degree + 1 || lower >= upper
-        || range.min() < lower || range.max() > upper {
+    if count <= degree
+        || knots.len() != count + degree + 1
+        || lower >= upper
+        || range.min() < lower
+        || range.max() > upper
+    {
         return Ok(false);
     }
     let control = |i: usize| {
         let p = n.cpts()[i];
-        [p.x, p.y, if curve.dim() == 2 { 0.0 } else { p.z },
-            if n.is_rational() { p.w } else { 1.0 }]
+        [
+            p.x,
+            p.y,
+            if curve.dim() == 2 { 0.0 } else { p.z },
+            if n.is_rational() { p.w } else { 1.0 },
+        ]
     };
     let base = control(0);
     if base.into_iter().any(|v| !v.is_finite()) || base[3] == 0.0 {
@@ -1532,26 +2074,50 @@ fn native_curve_affine(
     if degree == 0 {
         for i in 0..count {
             work.charge(1, cancel)?;
-            if control(i) != base { return Ok(false); }
+            if control(i) != base {
+                return Ok(false);
+            }
         }
         return Ok(true);
     }
-    let Some(first) = exact_knot_sum(knots, 0, degree, work, cancel)? else { return Ok(false); };
-    let Some(mut span) = exact_knot_sum(knots, count - 1, degree, work, cancel)? else { return Ok(false); };
-    if span.subtract(&first).is_none() || span.sign() <= 0 { return Ok(false); }
+    let Some(first) = exact_knot_sum(knots, 0, degree, work, cancel)? else {
+        return Ok(false);
+    };
+    let Some(mut span) = exact_knot_sum(knots, count - 1, degree, work, cancel)? else {
+        return Ok(false);
+    };
+    if span.subtract(&first).is_none() || span.sign() <= 0 {
+        return Ok(false);
+    }
     let last = control(count - 1);
     for i in 0..count {
         work.charge(1, cancel)?;
         let p = control(i);
-        if p.into_iter().any(|v| !v.is_finite()) || p[3] != base[3] { return Ok(false); }
-        let Some(mut coordinate) = exact_knot_sum(knots, i, degree, work, cancel)? else { return Ok(false); };
-        if coordinate.subtract(&first).is_none() { return Ok(false); }
+        if p.into_iter().any(|v| !v.is_finite()) || p[3] != base[3] {
+            return Ok(false);
+        }
+        let Some(mut coordinate) = exact_knot_sum(knots, i, degree, work, cancel)? else {
+            return Ok(false);
+        };
+        if coordinate.subtract(&first).is_none() {
+            return Ok(false);
+        }
         for axis in 0..3 {
-            let Some(difference) = ExactCoefficient::difference(p[axis], base[axis]) else { return Ok(false); };
-            let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else { return Ok(false); };
-            let Some(mut residual) = difference.product(&span, work, cancel)? else { return Ok(false); };
-            let Some(reference) = delta.product(&coordinate, work, cancel)? else { return Ok(false); };
-            if residual.subtract(&reference).is_none() || residual.sign() != 0 { return Ok(false); }
+            let Some(difference) = ExactCoefficient::difference(p[axis], base[axis]) else {
+                return Ok(false);
+            };
+            let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else {
+                return Ok(false);
+            };
+            let Some(mut residual) = difference.product(&span, work, cancel)? else {
+                return Ok(false);
+            };
+            let Some(reference) = delta.product(&coordinate, work, cancel)? else {
+                return Ok(false);
+            };
+            if residual.subtract(&reference).is_none() || residual.sign() != 0 {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
@@ -1620,9 +2186,7 @@ pub(super) fn original_uv_affine_coordinate_functions_equal(
     {
         return Ok(false);
     }
-    if !original_uv_affine(first, work, cancel)?
-        || !original_uv_affine(second, work, cancel)?
-    {
+    if !original_uv_affine(first, work, cancel)? || !original_uv_affine(second, work, cancel)? {
         return Ok(false);
     }
     for parameter in parameters {
@@ -1669,18 +2233,23 @@ fn affine_uv_point(
     cancel: &AtomicBool,
 ) -> Result<Option<[ExactCoefficient; 3]>, GeometryError> {
     if let Some(coefficients) = curve.exact_affine_coefficients(work, cancel)? {
-        let Some([x, y, _, w]) = coefficient_affine_point(
-            curve, &coefficients, parameter, work, cancel,
-        )? else { return Ok(None); };
-        return Ok(Some([x, y, w]));
-    }
-    if let Some(source) = curve.original_curve() {
-        let Some([x, y, _, w]) = original_affine_point(curve, source, parameter, work, cancel)? else {
+        let Some([x, y, _, w]) =
+            coefficient_affine_point(curve, &coefficients, parameter, work, cancel)?
+        else {
             return Ok(None);
         };
         return Ok(Some([x, y, w]));
     }
-    let Some(curve) = curve.native_curve() else { return Ok(None); };
+    if let Some(source) = curve.original_curve() {
+        let Some([x, y, _, w]) = original_affine_point(curve, source, parameter, work, cancel)?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some([x, y, w]));
+    }
+    let Some(curve) = curve.native_curve() else {
+        return Ok(None);
+    };
     let Some([x, y, _, w]) = native_affine_point(curve, parameter, work, cancel)? else {
         return Ok(None);
     };
@@ -1706,59 +2275,136 @@ fn native_affine_point(
         let c = line.canonical_unit();
         let sign = ExactCoefficient::point(if c.inside_out { -1.0 } else { 1.0 });
         let (mapped, denominator) = if line.is_bounded() {
-            let Some(denominator) = ExactCoefficient::difference(range.max(), range.min()) else { return Ok(None); };
-            let Some(active) = ExactCoefficient::difference(c.domain.max(), c.domain.min()) else { return Ok(None); };
-            let origin = if c.inside_out { range.max() } else { range.min() };
-            let Some(delta) = ExactCoefficient::difference(parameter, origin) else { return Ok(None); };
-            let Some(mapped) = delta.product(&active, work, cancel)? else { return Ok(None); };
-            let Some(mut mapped) = mapped.product(&sign, work, cancel)? else { return Ok(None); };
-            let Some(offset) = denominator.product(&ExactCoefficient::point(c.domain.min()), work, cancel)? else { return Ok(None); };
-            if denominator.sign() <= 0 || !add_exact(&mut mapped, &offset) { return Ok(None); }
+            let Some(denominator) = ExactCoefficient::difference(range.max(), range.min()) else {
+                return Ok(None);
+            };
+            let Some(active) = ExactCoefficient::difference(c.domain.max(), c.domain.min()) else {
+                return Ok(None);
+            };
+            let origin = if c.inside_out {
+                range.max()
+            } else {
+                range.min()
+            };
+            let Some(delta) = ExactCoefficient::difference(parameter, origin) else {
+                return Ok(None);
+            };
+            let Some(mapped) = delta.product(&active, work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(mut mapped) = mapped.product(&sign, work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(offset) =
+                denominator.product(&ExactCoefficient::point(c.domain.min()), work, cancel)?
+            else {
+                return Ok(None);
+            };
+            if denominator.sign() <= 0 || !add_exact(&mut mapped, &offset) {
+                return Ok(None);
+            }
             (mapped, denominator)
         } else {
-            let Some(mapped) = ExactCoefficient::point(parameter).product(&sign, work, cancel)? else { return Ok(None); };
+            let Some(mapped) = ExactCoefficient::point(parameter).product(&sign, work, cancel)?
+            else {
+                return Ok(None);
+            };
             (mapped, ExactCoefficient::point(1.0))
         };
-        let p = [c.point.x, c.point.y, if curve.dim() == 2 { 0.0 } else { c.point.z }];
-        let v = [c.vector.x, c.vector.y, if curve.dim() == 2 { 0.0 } else { c.vector.z }];
+        let p = [
+            c.point.x,
+            c.point.y,
+            if curve.dim() == 2 { 0.0 } else { c.point.z },
+        ];
+        let v = [
+            c.vector.x,
+            c.vector.y,
+            if curve.dim() == 2 { 0.0 } else { c.vector.z },
+        ];
         for axis in 0..3 {
-            let Some(velocity) = ExactCoefficient::point(v[axis]).product(&ExactCoefficient::point(c.scale), work, cancel)? else { return Ok(None); };
-            let Some(mut value) = velocity.product(&mapped, work, cancel)? else { return Ok(None); };
-            let Some(origin) = ExactCoefficient::point(p[axis]).product(&denominator, work, cancel)? else { return Ok(None); };
-            if !add_exact(&mut value, &origin) { return Ok(None); }
+            let Some(velocity) = ExactCoefficient::point(v[axis]).product(
+                &ExactCoefficient::point(c.scale),
+                work,
+                cancel,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(mut value) = velocity.product(&mapped, work, cancel)? else {
+                return Ok(None);
+            };
+            let Some(origin) =
+                ExactCoefficient::point(p[axis]).product(&denominator, work, cancel)?
+            else {
+                return Ok(None);
+            };
+            if !add_exact(&mut value, &origin) {
+                return Ok(None);
+            }
             point[axis] = value;
         }
         point[3] = denominator;
         return Ok(Some(point));
     }
-    let Some(n) = crate::parametric::native_curve_nurbs(curve)? else { return Ok(None); };
+    let Some(n) = crate::parametric::native_curve_nurbs(curve)? else {
+        return Ok(None);
+    };
     let (knots, degree, count) = (n.knots(), n.degree(), n.cpts().len());
     let control = |i: usize| {
         let p = n.cpts()[i];
-        [p.x, p.y, if curve.dim() == 2 { 0.0 } else { p.z },
-            if n.is_rational() { p.w } else { 1.0 }]
+        [
+            p.x,
+            p.y,
+            if curve.dim() == 2 { 0.0 } else { p.z },
+            if n.is_rational() { p.w } else { 1.0 },
+        ]
     };
     let base = control(0);
-    if degree == 0 { return Ok(Some(base.map(ExactCoefficient::point))); }
-    let Some(first) = exact_knot_sum(knots, 0, degree, work, cancel)? else { return Ok(None); };
-    let Some(mut span) = exact_knot_sum(knots, count - 1, degree, work, cancel)? else { return Ok(None); };
-    if span.subtract(&first).is_none() || span.sign() <= 0 { return Ok(None); }
-    let Some(mut coordinate) = ExactCoefficient::point(parameter)
-        .product(&ExactCoefficient::point(degree as f64), work, cancel)? else { return Ok(None); };
-    if coordinate.subtract(&first).is_none() { return Ok(None); }
+    if degree == 0 {
+        return Ok(Some(base.map(ExactCoefficient::point)));
+    }
+    let Some(first) = exact_knot_sum(knots, 0, degree, work, cancel)? else {
+        return Ok(None);
+    };
+    let Some(mut span) = exact_knot_sum(knots, count - 1, degree, work, cancel)? else {
+        return Ok(None);
+    };
+    if span.subtract(&first).is_none() || span.sign() <= 0 {
+        return Ok(None);
+    }
+    let Some(mut coordinate) = ExactCoefficient::point(parameter).product(
+        &ExactCoefficient::point(degree as f64),
+        work,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    if coordinate.subtract(&first).is_none() {
+        return Ok(None);
+    }
     let last = control(count - 1);
     for axis in 0..3 {
-        let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else { return Ok(None); };
-        let Some(mut value) = delta.product(&coordinate, work, cancel)? else { return Ok(None); };
-        let Some(origin) = ExactCoefficient::point(base[axis]).product(&span, work, cancel)? else { return Ok(None); };
-        if !add_exact(&mut value, &origin) { return Ok(None); }
+        let Some(delta) = ExactCoefficient::difference(last[axis], base[axis]) else {
+            return Ok(None);
+        };
+        let Some(mut value) = delta.product(&coordinate, work, cancel)? else {
+            return Ok(None);
+        };
+        let Some(origin) = ExactCoefficient::point(base[axis]).product(&span, work, cancel)? else {
+            return Ok(None);
+        };
+        if !add_exact(&mut value, &origin) {
+            return Ok(None);
+        }
         point[axis] = value;
     }
-    let Some(weight) = ExactCoefficient::point(base[3]).product(&span, work, cancel)? else { return Ok(None); };
+    let Some(weight) = ExactCoefficient::point(base[3]).product(&span, work, cancel)? else {
+        return Ok(None);
+    };
     point[3] = weight;
     Ok(Some(point))
 }
-
 
 /// Evaluate the literal affine coefficient law, preserving rational values.
 fn affine_curve_endpoints(
@@ -1768,19 +2414,33 @@ fn affine_curve_endpoints(
     cancel: &AtomicBool,
 ) -> Result<Option<[[ExactCoefficient; 4]; 2]>, GeometryError> {
     let (a, b) = if let Some(coefficients) = curve.exact_affine_coefficients(work, cancel)? {
-        (coefficient_affine_point(curve, &coefficients, parameters[0], work, cancel)?,
-         coefficient_affine_point(curve, &coefficients, parameters[1], work, cancel)?)
+        (
+            coefficient_affine_point(curve, &coefficients, parameters[0], work, cancel)?,
+            coefficient_affine_point(curve, &coefficients, parameters[1], work, cancel)?,
+        )
     } else if let Some(source) = curve.original_curve() {
-        if !original_source_affine(source, work, cancel)? { return Ok(None); }
-        (original_affine_point(curve, source, parameters[0], work, cancel)?,
-         original_affine_point(curve, source, parameters[1], work, cancel)?)
+        if !original_source_affine(source, work, cancel)? {
+            return Ok(None);
+        }
+        (
+            original_affine_point(curve, source, parameters[0], work, cancel)?,
+            original_affine_point(curve, source, parameters[1], work, cancel)?,
+        )
     } else {
-        let Some(curve) = curve.native_curve() else { return Ok(None); };
-        if !native_curve_affine(curve, work, cancel)? { return Ok(None); }
-        (native_affine_point(curve, parameters[0], work, cancel)?,
-         native_affine_point(curve, parameters[1], work, cancel)?)
+        let Some(curve) = curve.native_curve() else {
+            return Ok(None);
+        };
+        if !native_curve_affine(curve, work, cancel)? {
+            return Ok(None);
+        }
+        (
+            native_affine_point(curve, parameters[0], work, cancel)?,
+            native_affine_point(curve, parameters[1], work, cancel)?,
+        )
     };
-    let (Some(a), Some(b)) = (a, b) else { return Ok(None); };
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(None);
+    };
     Ok(Some([a, b]))
 }
 
@@ -1802,9 +2462,15 @@ fn affine_line_direction(
         return Ok(None);
     };
     for (endpoint, target) in points.iter().zip([front, back]) {
-        if endpoint[3].sign() == 0 { return Ok(None); }
+        if endpoint[3].sign() == 0 {
+            return Ok(None);
+        }
         for i in 0..3 {
-            let Some(reference) = endpoint[3].product(&ExactCoefficient::point(target[i]), work, cancel)? else { return Ok(None); };
+            let Some(reference) =
+                endpoint[3].product(&ExactCoefficient::point(target[i]), work, cancel)?
+            else {
+                return Ok(None);
+            };
             let mut residual = endpoint[i].clone();
             if residual.subtract(&reference).is_none() || residual.sign() != 0 {
                 return Ok(None);
@@ -1935,15 +2601,20 @@ fn endpoint_support_span(range: [f64; 2], high: bool) -> Result<[f64; 2], Geomet
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solidcore::surface::surface::Surface;
     use crate::kernel::source_operand::{PreparedOriginalCurve, PreparedOriginalSurface};
-    use solidcraft_step::geom::{self as original, Logical, CurveForm, KnotSpec};
+    use solidcore::surface::surface::Surface;
+    use solidcraft_step::geom::{self as original, CurveForm, KnotSpec, Logical};
 
     fn source_spline(points: Vec<[f64; 3]>, weights: Option<Vec<f64>>) -> SourceCurve {
         SourceCurve::BSpline(Box::new(original::BSplineCurve {
-            degree: 2, points, weights, knots: vec![-2.0, 0.0, 4.0],
-            multiplicities: vec![3, 1, 3], form: CurveForm::Unspecified,
-            closed: Logical::False, self_intersect: Logical::False,
+            degree: 2,
+            points,
+            weights,
+            knots: vec![-2.0, 0.0, 4.0],
+            multiplicities: vec![3, 1, 3],
+            form: CurveForm::Unspecified,
+            closed: Logical::False,
+            self_intersect: Logical::False,
             knot_spec: KnotSpec::Unspecified,
         }))
     }
@@ -1952,53 +2623,126 @@ mod tests {
     fn original_fan_affinity_follows_declared_master_not_spatial_counterpart() {
         use std::sync::Arc;
         let placement = original::Placement {
-            origin: [10.0, 20.0, 30.0], axis: [0.0, 0.0, 1.0],
+            origin: [10.0, 20.0, 30.0],
+            axis: [0.0, 0.0, 1.0],
             ref_direction: [1.0, 0.0, 0.0],
         };
         let counterpart = Arc::new(SourceCurve::Line {
-            origin: [0.0; 3], direction: [1.0, 0.0, 0.0], magnitude: 1.0,
+            origin: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 1.0,
         });
         let chart = Arc::new(SourceCurve::Line {
-            origin: [0.0; 3], direction: [1.0, 0.0, 0.0], magnitude: 1.0,
+            origin: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 1.0,
         });
         let make = |surface, master| SourceCurve::SurfaceCurve {
-            kind: original::SurfaceCurveKind::Surface, curve_3d: counterpart.clone(),
+            kind: original::SurfaceCurveKind::Surface,
+            curve_3d: counterpart.clone(),
             associated: vec![original::Associated::Pcurve(original::Pcurve {
-                surface: Arc::new(surface), curve: chart.clone(),
-            })], master,
+                surface: Arc::new(surface),
+                curve: chart.clone(),
+            })],
+            master,
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let plane = make(SourceSurface::Plane { position: placement }, original::PreferredRep::PcurveS1);
-        let selected = PreparedOriginalCurve::new(&plane, [0.0, 1.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        assert!(affine_line_direction(&selected, [0.0, 1.0],
-            [10.0, 20.0, 30.0], [11.0, 20.0, 30.0], &mut work, &cancel).unwrap().is_some());
-        assert!(affine_line_direction(&selected, [0.0, 1.0],
-            [0.0; 3], [1.0, 0.0, 0.0], &mut work, &cancel).unwrap().is_none());
+        let plane = make(
+            SourceSurface::Plane {
+                position: placement,
+            },
+            original::PreferredRep::PcurveS1,
+        );
+        let selected =
+            PreparedOriginalCurve::new(&plane, [0.0, 1.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
+        assert!(
+            affine_line_direction(
+                &selected,
+                [0.0, 1.0],
+                [10.0, 20.0, 30.0],
+                [11.0, 20.0, 30.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            affine_line_direction(
+                &selected,
+                [0.0, 1.0],
+                [0.0; 3],
+                [1.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
 
-        let cylinder = make(SourceSurface::Cylinder { position: placement, radius: 1.0 },
-            original::PreferredRep::PcurveS1);
-        let selected = PreparedOriginalCurve::new(&cylinder, [0.0, 1.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+        let cylinder = make(
+            SourceSurface::Cylinder {
+                position: placement,
+                radius: 1.0,
+            },
+            original::PreferredRep::PcurveS1,
+        );
+        let selected = PreparedOriginalCurve::new(
+            &cylinder,
+            [0.0, 1.0],
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         assert!(!original_source_affine(&cylinder, &mut work, &cancel).unwrap());
-        assert!(affine_line_direction(&selected, [0.0, 1.0],
-            [0.0; 3], [1.0, 0.0, 0.0], &mut work, &cancel).unwrap().is_none(),
-            "an affine unselected 3D counterpart cannot qualify a preferred circular PCurve image");
+        assert!(
+            affine_line_direction(
+                &selected,
+                [0.0, 1.0],
+                [0.0; 3],
+                [1.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none(),
+            "an affine unselected 3D counterpart cannot qualify a preferred circular PCurve image"
+        );
 
-        let spatial = make(SourceSurface::Cylinder { position: placement, radius: 1.0 },
-            original::PreferredRep::Curve3d);
-        let selected = PreparedOriginalCurve::new(&spatial, [0.0, 1.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        assert!(affine_line_direction(&selected, [0.0, 1.0],
-            [0.0; 3], [1.0, 0.0, 0.0], &mut work, &cancel).unwrap().is_some());
+        let spatial = make(
+            SourceSurface::Cylinder {
+                position: placement,
+                radius: 1.0,
+            },
+            original::PreferredRep::Curve3d,
+        );
+        let selected =
+            PreparedOriginalCurve::new(&spatial, [0.0, 1.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
+        assert!(
+            affine_line_direction(
+                &selected,
+                [0.0, 1.0],
+                [0.0; 3],
+                [1.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[test]
     fn normalized_original_line_fan_keeps_nondyadic_parameter_image_and_reversal() {
         use crate::analysis::source_restriction::SourceLineRestriction;
         let source = SourceCurve::Line {
-            origin: [0.0; 3], direction: [1.0, 0.0, 0.0], magnitude: 3.0,
+            origin: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 3.0,
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
@@ -2006,111 +2750,284 @@ mod tests {
             ([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], true),
             ([[2.0, 0.0, 0.0], [1.0, 0.0, 0.0]], false),
         ] {
-            let curve = SourceLineRestriction::new(
-                &source, &vertices, same_sense, 0.0, &mut work, &cancel,
-            ).unwrap().unwrap();
+            let curve =
+                SourceLineRestriction::new(&source, &vertices, same_sense, 0.0, &mut work, &cancel)
+                    .unwrap()
+                    .unwrap();
             assert!(curve.endpoint_parameters().iter().all(|p| p.lo < p.hi));
-            assert!(affine_line_direction(&curve, [0.0, 1.0], vertices[0], vertices[1],
-                &mut work, &cancel).unwrap().is_some());
-            assert!(affine_line_direction(&curve, [0.0, 1.0], [0.0; 3], [3.0, 0.0, 0.0],
-                &mut work, &cancel).unwrap().is_none(),
-                "raw source t must not replace the normalized query gauge");
-            assert!(affine_line_direction(&curve, [16.0, 48.0], vertices[0], vertices[1],
-                &mut work, &cancel).unwrap().is_none(),
-                "a native stored interval is not the original spatial query range");
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [0.0, 1.0],
+                    vertices[0],
+                    vertices[1],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_some()
+            );
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [0.0, 1.0],
+                    [0.0; 3],
+                    [3.0, 0.0, 0.0],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_none(),
+                "raw source t must not replace the normalized query gauge"
+            );
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [16.0, 48.0],
+                    vertices[0],
+                    vertices[1],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_none(),
+                "a native stored interval is not the original spatial query range"
+            );
             let mut perturbed = vertices[1];
             perturbed[0] = perturbed[0].next_up();
-            assert!(affine_line_direction(&curve, [0.0, 1.0], vertices[0], perturbed,
-                &mut work, &cancel).unwrap().is_none());
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [0.0, 1.0],
+                    vertices[0],
+                    perturbed,
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_none()
+            );
         }
     }
 
     #[test]
     fn original_affine_fan_coefficients_use_raw_source_gauge_and_all_controls() {
-        let points: Vec<_> = [-2.0, -1.0, 2.0, 4.0].into_iter()
-            .map(|t| [t + 2.0, 2.0 * t + 1.0, 3.0 * t]).collect();
+        let points: Vec<_> = [-2.0, -1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|t| [t + 2.0, 2.0 * t + 1.0, 3.0 * t])
+            .collect();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         for weights in [None, Some(vec![3.0; 4])] {
             let source = source_spline(points.clone(), weights);
-            let curve = PreparedOriginalCurve::new(&source, [-2.0, 4.0],
-                MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-            assert!(affine_line_direction(&curve, [-2.0, 4.0],
-                [0.0, -3.0, -6.0], [6.0, 9.0, 12.0], &mut work, &cancel).unwrap().is_some());
-            assert!(affine_line_direction(&curve, [-2.0, 4.0],
-                [0.0, -3.0, -6.0], [6.0, 9.0, 12.0_f64.next_up()],
-                &mut work, &cancel).unwrap().is_none());
-            assert!(original_uv_endpoints_equal(&curve, 0.0, &curve, 0.0,
-                &mut work, &cancel).unwrap());
-            assert!(!original_uv_endpoints_equal(&curve, -3.0, &curve, -2.0,
-                &mut work, &cancel).unwrap());
+            let curve = PreparedOriginalCurve::new(
+                &source,
+                [-2.0, 4.0],
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [-2.0, 4.0],
+                    [0.0, -3.0, -6.0],
+                    [6.0, 9.0, 12.0],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_some()
+            );
+            assert!(
+                affine_line_direction(
+                    &curve,
+                    [-2.0, 4.0],
+                    [0.0, -3.0, -6.0],
+                    [6.0, 9.0, 12.0_f64.next_up()],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(
+                original_uv_endpoints_equal(&curve, 0.0, &curve, 0.0, &mut work, &cancel).unwrap()
+            );
+            assert!(
+                !original_uv_endpoints_equal(&curve, -3.0, &curve, -2.0, &mut work, &cancel)
+                    .unwrap()
+            );
         }
         let mut bent = points;
         bent[1][0] = bent[1][0].next_up();
         let source = source_spline(bent, None);
-        let curve = PreparedOriginalCurve::new(&source, [-2.0, 4.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+        let curve =
+            PreparedOriginalCurve::new(&source, [-2.0, 4.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
         assert!(!original_uv_affine(&curve, &mut work, &cancel).unwrap());
-        assert_eq!(original_uv_affine(&curve, &mut GeometryWorkBudget::new(0), &cancel)
-            .unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(original_uv_affine(&curve, &mut work, &AtomicBool::new(true))
-            .unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert_eq!(
+            original_uv_affine(&curve, &mut GeometryWorkBudget::new(0), &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            original_uv_affine(&curve, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
     fn original_affine_trace_composes_selected_source_plane_and_pcurve() {
-        let source = SourceSurface::Plane { position: original::Placement {
-            origin: [10.0, 20.0, 30.0], axis: [0.0, 0.0, 1.0],
-            ref_direction: [1.0, 0.0, 0.0],
-        }};
+        let source = SourceSurface::Plane {
+            position: original::Placement {
+                origin: [10.0, 20.0, 30.0],
+                axis: [0.0, 0.0, 1.0],
+                ref_direction: [1.0, 0.0, 0.0],
+            },
+        };
         let pcurve = SourceCurve::Line {
-            origin: [1.0, 2.0, 0.0], direction: [1.0, 2.0, 0.0], magnitude: 3.0,
+            origin: [1.0, 2.0, 0.0],
+            direction: [1.0, 2.0, 0.0],
+            magnitude: 3.0,
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let surface = PreparedOriginalSurface::new(&source, [[-16.0, 16.0]; 2],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        let chart = PreparedOriginalCurve::new(&pcurve, [-2.0, 4.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        let affine = exact_affine_surface(&surface, &mut work, &cancel).unwrap().unwrap();
-        assert!(exact_affine_trace(&affine, &chart, [-2.0, 2.0],
-            [[5.0, 10.0, 30.0], [17.0, 34.0, 30.0]], &mut work, &cancel).unwrap());
-        assert!(exact_affine_trace(&affine, &chart, [2.0, -2.0],
-            [[17.0, 34.0, 30.0], [5.0, 10.0, 30.0]], &mut work, &cancel).unwrap());
-        assert!(!exact_affine_trace(&affine, &chart, [-2.0, 2.0],
-            [[17.0, 34.0, 30.0], [5.0, 10.0, 30.0]], &mut work, &cancel).unwrap(),
-            "sorting a reversed selected-PCurve map loses its spatial endpoint binding");
-        assert!(!exact_affine_trace(&affine, &chart, [-2.0, 2.0],
-            [[5.0, 10.0, 30.0], [17.0, 34.0_f64.next_up(), 30.0]], &mut work, &cancel).unwrap());
+        let surface = PreparedOriginalSurface::new(
+            &source,
+            [[-16.0, 16.0]; 2],
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let chart =
+            PreparedOriginalCurve::new(&pcurve, [-2.0, 4.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
+        let affine = exact_affine_surface(&surface, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(
+            exact_affine_trace(
+                &affine,
+                &chart,
+                [-2.0, 2.0],
+                [[5.0, 10.0, 30.0], [17.0, 34.0, 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            exact_affine_trace(
+                &affine,
+                &chart,
+                [2.0, -2.0],
+                [[17.0, 34.0, 30.0], [5.0, 10.0, 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !exact_affine_trace(
+                &affine,
+                &chart,
+                [-2.0, 2.0],
+                [[17.0, 34.0, 30.0], [5.0, 10.0, 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap(),
+            "sorting a reversed selected-PCurve map loses its spatial endpoint binding"
+        );
+        assert!(
+            !exact_affine_trace(
+                &affine,
+                &chart,
+                [-2.0, 2.0],
+                [[5.0, 10.0, 30.0], [17.0, 34.0_f64.next_up(), 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn original_affine_tensor_trace_retains_source_nonunit_knots_and_weights() {
-        let points: Vec<Vec<_>> = [-2.0, -1.0, 2.0, 4.0].into_iter().map(|u|
-            [1.0, 3.0].into_iter().map(|v| [u + 2.0, v - 1.0, u + 2.0 * v]).collect()).collect();
+        let points: Vec<Vec<_>> = [-2.0, -1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|u| {
+                [1.0, 3.0]
+                    .into_iter()
+                    .map(|v| [u + 2.0, v - 1.0, u + 2.0 * v])
+                    .collect()
+            })
+            .collect();
         let pcurve = SourceCurve::Line {
-            origin: [-2.0, 1.0, 0.0], direction: [3.0, 1.0, 0.0], magnitude: 2.0,
+            origin: [-2.0, 1.0, 0.0],
+            direction: [3.0, 1.0, 0.0],
+            magnitude: 2.0,
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let chart = PreparedOriginalCurve::new(&pcurve, [0.0, 1.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+        let chart =
+            PreparedOriginalCurve::new(&pcurve, [0.0, 1.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
         for weights in [None, Some(vec![vec![3.0; 2]; 4])] {
             let source = SourceSurface::BSpline(Box::new(original::BSplineSurface {
-                u_degree: 2, v_degree: 1, points: points.clone(), weights,
-                u_knots: vec![-2.0, 0.0, 4.0], u_multiplicities: vec![3, 1, 3],
-                v_knots: vec![1.0, 3.0], v_multiplicities: vec![2, 2],
-                form: original::SurfaceForm::Unspecified, u_closed: Logical::False,
-                v_closed: Logical::False, self_intersect: Logical::False,
+                u_degree: 2,
+                v_degree: 1,
+                points: points.clone(),
+                weights,
+                u_knots: vec![-2.0, 0.0, 4.0],
+                u_multiplicities: vec![3, 1, 3],
+                v_knots: vec![1.0, 3.0],
+                v_multiplicities: vec![2, 2],
+                form: original::SurfaceForm::Unspecified,
+                u_closed: Logical::False,
+                v_closed: Logical::False,
+                self_intersect: Logical::False,
                 knot_spec: KnotSpec::Unspecified,
             }));
-            let surface = PreparedOriginalSurface::new(&source, [[-2.0, 4.0], [1.0, 3.0]],
-                MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-            let affine = exact_affine_surface(&surface, &mut work, &cancel).unwrap().unwrap();
-            assert!(exact_affine_trace(&affine, &chart, [0.0, 1.0],
-                [[0.0; 3], [6.0, 2.0, 10.0]], &mut work, &cancel).unwrap());
-            assert!(!exact_affine_trace(&affine, &chart, [0.0, 1.0],
-                [[0.0; 3], [6.0, 2.0, 10.0_f64.next_up()]], &mut work, &cancel).unwrap());
+            let surface = PreparedOriginalSurface::new(
+                &source,
+                [[-2.0, 4.0], [1.0, 3.0]],
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let affine = exact_affine_surface(&surface, &mut work, &cancel)
+                .unwrap()
+                .unwrap();
+            assert!(
+                exact_affine_trace(
+                    &affine,
+                    &chart,
+                    [0.0, 1.0],
+                    [[0.0; 3], [6.0, 2.0, 10.0]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
+            assert!(
+                !exact_affine_trace(
+                    &affine,
+                    &chart,
+                    [0.0, 1.0],
+                    [[0.0; 3], [6.0, 2.0, 10.0_f64.next_up()]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
         }
     }
 
@@ -2118,46 +3035,101 @@ mod tests {
     fn original_affine_extrusion_keeps_profile_u_and_physical_v_laws() {
         let source = SourceSurface::Extrusion {
             profile: std::sync::Arc::new(SourceCurve::Line {
-                origin: [2.0, -1.0, 0.0], direction: [1.0, 0.0, 1.0], magnitude: 1.0,
+                origin: [2.0, -1.0, 0.0],
+                direction: [1.0, 0.0, 1.0],
+                magnitude: 1.0,
             }),
-            direction: [0.0, 1.0, 2.0], magnitude: 1.0,
+            direction: [0.0, 1.0, 2.0],
+            magnitude: 1.0,
         };
         let pcurve = SourceCurve::Line {
-            origin: [-2.0, 1.0, 0.0], direction: [3.0, 1.0, 0.0], magnitude: 2.0,
+            origin: [-2.0, 1.0, 0.0],
+            direction: [3.0, 1.0, 0.0],
+            magnitude: 2.0,
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let surface = PreparedOriginalSurface::new(&source, [[-2.0, 4.0], [1.0, 3.0]],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        let chart = PreparedOriginalCurve::new(&pcurve, [0.0, 1.0],
-            MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
-        let affine = exact_affine_surface(&surface, &mut work, &cancel).unwrap().unwrap();
-        assert!(exact_affine_trace(&affine, &chart, [0.0, 1.0],
-            [[0.0; 3], [6.0, 2.0, 10.0]], &mut work, &cancel).unwrap());
-        assert!(length(exact_affine_normal(&affine, &mut work, &cancel).unwrap().unwrap())
-            .unwrap().lo > 0.0);
+        let surface = PreparedOriginalSurface::new(
+            &source,
+            [[-2.0, 4.0], [1.0, 3.0]],
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let chart =
+            PreparedOriginalCurve::new(&pcurve, [0.0, 1.0], MAX_SCRATCH_BYTES, &mut work, &cancel)
+                .unwrap();
+        let affine = exact_affine_surface(&surface, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(
+            exact_affine_trace(
+                &affine,
+                &chart,
+                [0.0, 1.0],
+                [[0.0; 3], [6.0, 2.0, 10.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            length(
+                exact_affine_normal(&affine, &mut work, &cancel)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .lo > 0.0
+        );
     }
 
-
-    use solidcore::{Point3, Vec3, Vec2, nurbs::{
-        b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface,
-        crv_basic, srf_basic, math::{CPoint, NOW, NOZ},
-    }};
+    use solidcore::{
+        Point3, Vec2, Vec3,
+        nurbs::{
+            b_spline_curve::BSplineCurve,
+            b_spline_surface::BSplineSurface,
+            crv_basic,
+            math::{CPoint, NOW, NOZ},
+            srf_basic,
+        },
+    };
 
     fn native_curve(points: Vec<CPoint>, degree: usize, knots: Vec<f64>, dim: u64) -> Curve {
-        BSplineCurve::from_nurb(crv_basic::Curve::new(points, degree, knots).unwrap(), dim, true).into()
+        BSplineCurve::from_nurb(
+            crv_basic::Curve::new(points, degree, knots).unwrap(),
+            dim,
+            true,
+        )
+        .into()
     }
 
     fn uv_curve(points: &[[f64; 3]], degree: usize, knots: Vec<f64>) -> Curve {
-        native_curve(points.iter().map(|p| CPoint::new(p[0], p[1], NOZ, p[2])).collect(),
-            degree, knots, 2)
+        native_curve(
+            points
+                .iter()
+                .map(|p| CPoint::new(p[0], p[1], NOZ, p[2]))
+                .collect(),
+            degree,
+            knots,
+            2,
+        )
     }
 
     fn uv_line(a: [f64; 2], b: [f64; 2]) -> Curve {
-        uv_curve(&[[a[0], a[1], NOW], [b[0], b[1], NOW]], 1, vec![0.0, 0.0, 1.0, 1.0])
+        uv_curve(
+            &[[a[0], a[1], NOW], [b[0], b[1], NOW]],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
     }
 
-    fn native_tensor(points: Vec<Vec<CPoint>>, degree: [usize; 2], knots: [Vec<f64>; 2]) -> Surface {
+    fn native_tensor(
+        points: Vec<Vec<CPoint>>,
+        degree: [usize; 2],
+        knots: [Vec<f64>; 2],
+    ) -> Surface {
         let [u, v] = knots;
         let raw = srf_basic::Surface::new(points, degree[0], degree[1], u, v).unwrap();
         Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)))
@@ -2165,23 +3137,59 @@ mod tests {
 
     fn plane() -> Surface {
         solidcore::surface::plane::Plane::new(
-            Point3::new(10.0, 20.0, 30.0), Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0), Vec2::new(3.0, 6.0),
+            Point3::new(10.0, 20.0, 30.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec2::new(3.0, 6.0),
             &solidcore::geom::extent2d::Extent2d::from_bounds(-16.0, -16.0, 16.0, 16.0),
-        ).into()
+        )
+        .into()
     }
 
     // Importer-style literal members keep both the natural interval and the
     // declared analytic reflection anchor, without constructor normalization.
-    fn analytic_line(point: [f64; 3], vector: [f64; 3], domain: [f64; 2], reflected: bool, dim: u64) -> Curve {
-        let ends = if reflected { [domain[1], domain[0]] } else { domain };
-        let points = ends.map(|t| CPoint::new(point[0] + vector[0] * t,
-            point[1] + vector[1] * t, if dim == 2 { NOZ } else { point[2] + vector[2] * t }, NOW));
-        let base = BSplineCurve::from_nurb(crv_basic::Curve::new(points.to_vec(), 1,
-            vec![domain[0], domain[0], domain[1], domain[1]]).unwrap(), dim, true);
+    fn analytic_line(
+        point: [f64; 3],
+        vector: [f64; 3],
+        domain: [f64; 2],
+        reflected: bool,
+        dim: u64,
+    ) -> Curve {
+        let ends = if reflected {
+            [domain[1], domain[0]]
+        } else {
+            domain
+        };
+        let points = ends.map(|t| {
+            CPoint::new(
+                point[0] + vector[0] * t,
+                point[1] + vector[1] * t,
+                if dim == 2 {
+                    NOZ
+                } else {
+                    point[2] + vector[2] * t
+                },
+                NOW,
+            )
+        });
+        let base = BSplineCurve::from_nurb(
+            crv_basic::Curve::new(
+                points.to_vec(),
+                1,
+                vec![domain[0], domain[0], domain[1], domain[1]],
+            )
+            .unwrap(),
+            dim,
+            true,
+        );
         Curve::new(CurveKind::Line(solidcore::curve::line::Line::from_parts(
-            base, Point3::new(point[0], point[1], point[2]), Vec3::new(vector[0], vector[1], vector[2]),
-            solidcore::geom::extent1d::Extent1d::from_min_max(domain[0], domain[1]), 1.0, reflected)))
+            base,
+            Point3::new(point[0], point[1], point[2]),
+            Vec3::new(vector[0], vector[1], vector[2]),
+            solidcore::geom::extent1d::Extent1d::from_min_max(domain[0], domain[1]),
+            1.0,
+            reflected,
+        )))
     }
 
     #[test]
@@ -2192,38 +3200,126 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         for parameters in [[0.0, 1.0], [0.25, 0.75], [1.0, 0.0]] {
-            assert!(original_uv_affine_coordinate_functions_equal(&a, &b, parameters, 0, &mut work, &cancel).unwrap());
+            assert!(
+                original_uv_affine_coordinate_functions_equal(
+                    &a, &b, parameters, 0, &mut work, &cancel
+                )
+                .unwrap()
+            );
         }
-        assert!(!original_uv_affine_coordinate_functions_equal(&a, &b, [0.0, 1.0], 1, &mut work, &cancel).unwrap());
-        assert!(!original_uv_affine_coordinate_functions_equal(&a, &perturbed, [0.0, 1.0], 0, &mut work, &cancel).unwrap());
-        let nonlinear = uv_curve(&[[3.0, 7.0, NOW], [2.75, 7.0, NOW], [2.0, 7.0, NOW]],
-            2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        assert!(!original_uv_affine_coordinate_functions_equal(&a, &nonlinear, [0.0, 1.0], 0, &mut work, &cancel).unwrap());
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &b,
+                [0.0, 1.0],
+                1,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &perturbed,
+                [0.0, 1.0],
+                0,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        let nonlinear = uv_curve(
+            &[[3.0, 7.0, NOW], [2.75, 7.0, NOW], [2.0, 7.0, NOW]],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        );
+        assert!(
+            !original_uv_affine_coordinate_functions_equal(
+                &a,
+                &nonlinear,
+                [0.0, 1.0],
+                0,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
         for parameters in [[-0.25, 1.0], [0.5, 0.5]] {
-            assert!(!original_uv_affine_coordinate_functions_equal(&a, &b, parameters, 0, &mut work, &cancel).unwrap());
+            assert!(
+                !original_uv_affine_coordinate_functions_equal(
+                    &a, &b, parameters, 0, &mut work, &cancel
+                )
+                .unwrap()
+            );
         }
-        assert_eq!(original_uv_affine_coordinate_functions_equal(&a, &b, [0.0, 1.0], 0,
-            &mut GeometryWorkBudget::new(0), &cancel).unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(original_uv_affine_coordinate_functions_equal(&a, &b, [0.0, 1.0], 0,
-            &mut work, &AtomicBool::new(true)).unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert_eq!(
+            original_uv_affine_coordinate_functions_equal(
+                &a,
+                &b,
+                [0.0, 1.0],
+                0,
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            original_uv_affine_coordinate_functions_equal(
+                &a,
+                &b,
+                [0.0, 1.0],
+                0,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
     fn original_uv_endpoint_identity_preserves_rational_values_and_rejects_rounding() {
-        let rational = |s| uv_curve(&[[s, 0.0, 3.0 * s], [4.0 * s, 0.0, 3.0 * s]],
-            1, vec![0.0, 0.0, 1.0, 1.0]);
+        let rational = |s| {
+            uv_curve(
+                &[[s, 0.0, 3.0 * s], [4.0 * s, 0.0, 3.0 * s]],
+                1,
+                vec![0.0, 0.0, 1.0, 1.0],
+            )
+        };
         let first = rational(1.0);
         let scaled = rational(2.0);
         let rounded = uv_line([5.0 / 6.0, 0.0], [5.0 / 6.0, 0.0]);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
-        assert!(original_uv_endpoints_equal(&first, 0.5, &scaled, 0.5, &mut work, &cancel).unwrap());
-        assert!(!original_uv_endpoints_equal(&first, 0.5, &rounded, 0.0, &mut work, &cancel).unwrap());
-        assert!(!original_uv_endpoints_equal(&first, 0.0, &scaled, 1.0, &mut work, &cancel).unwrap());
-        let polynomial = uv_curve(&[[0.0, 0.0, NOW], [1.0, 1.5, NOW], [2.0, 3.0, NOW]],
-            2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        assert!(original_uv_endpoints_equal(&polynomial, 0.5,
-            &uv_line([0.0, 0.0], [2.0, 3.0]), 0.5, &mut work, &cancel).unwrap());
+        assert!(
+            original_uv_endpoints_equal(&first, 0.5, &scaled, 0.5, &mut work, &cancel).unwrap()
+        );
+        assert!(
+            !original_uv_endpoints_equal(&first, 0.5, &rounded, 0.0, &mut work, &cancel).unwrap()
+        );
+        assert!(
+            !original_uv_endpoints_equal(&first, 0.0, &scaled, 1.0, &mut work, &cancel).unwrap()
+        );
+        let polynomial = uv_curve(
+            &[[0.0, 0.0, NOW], [1.0, 1.5, NOW], [2.0, 3.0, NOW]],
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        );
+        assert!(
+            original_uv_endpoints_equal(
+                &polynomial,
+                0.5,
+                &uv_line([0.0, 0.0], [2.0, 3.0]),
+                0.5,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -2233,19 +3329,48 @@ mod tests {
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
         assert!(original_uv_endpoints_equal(&curve, 2.0, &point, 0.0, &mut work, &cancel).unwrap());
-        assert!(!original_uv_endpoints_equal(&curve, 5.0, &point, 0.0, &mut work, &cancel).unwrap());
-        assert_eq!(original_uv_endpoints_equal(&curve, 2.0, &point, 0.0,
-            &mut GeometryWorkBudget::new(0), &cancel).unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(original_uv_endpoints_equal(&curve, 2.0, &point, 0.0,
-            &mut work, &AtomicBool::new(true)).unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert!(
+            !original_uv_endpoints_equal(&curve, 5.0, &point, 0.0, &mut work, &cancel).unwrap()
+        );
+        assert_eq!(
+            original_uv_endpoints_equal(
+                &curve,
+                2.0,
+                &point,
+                0.0,
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            original_uv_endpoints_equal(
+                &curve,
+                2.0,
+                &point,
+                0.0,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
     fn original_uv_affine_uses_every_polynomial_and_homogeneous_coefficient() {
         let knots = vec![-2.0, -2.0, -2.0, 0.0, 4.0, 4.0, 4.0];
-        let points: Vec<_> = [-2.0, -1.0, 2.0, 4.0].into_iter()
-            .map(|u| [u + 2.0, 2.0 * u + 1.0, NOW]).collect();
-        let weighted: Vec<_> = points.iter().map(|p| [2.0 * p[0], 2.0 * p[1], 2.0]).collect();
+        let points: Vec<_> = [-2.0, -1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|u| [u + 2.0, 2.0 * u + 1.0, NOW])
+            .collect();
+        let weighted: Vec<_> = points
+            .iter()
+            .map(|p| [2.0 * p[0], 2.0 * p[1], 2.0])
+            .collect();
         let polynomial = uv_curve(&points, 2, knots.clone());
         let rational = uv_curve(&weighted, 2, knots.clone());
         let cancel = AtomicBool::new(false);
@@ -2254,10 +3379,15 @@ mod tests {
         assert!(original_uv_affine(&rational, &mut work, &cancel).unwrap());
         let mut bent = points;
         bent[1][0] = bent[1][0].next_up();
-        assert!(!original_uv_affine(&uv_curve(&bent, 2, knots.clone()), &mut work, &cancel).unwrap());
+        assert!(
+            !original_uv_affine(&uv_curve(&bent, 2, knots.clone()), &mut work, &cancel).unwrap()
+        );
         let mut nonconstant_weight = weighted;
         nonconstant_weight[1][2] = 3.0;
-        assert!(!original_uv_affine(&uv_curve(&nonconstant_weight, 2, knots), &mut work, &cancel).unwrap());
+        assert!(
+            !original_uv_affine(&uv_curve(&nonconstant_weight, 2, knots), &mut work, &cancel)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -2268,14 +3398,27 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         assert!(original_uv_affine(&curve, &mut work, &cancel).unwrap());
-        assert!(!original_uv_endpoints_equal(&curve, -2.0, &curve, -1.0, &mut work, &cancel).unwrap());
-        let projective = uv_curve(&[[-1.0, -3.0, 0.75], [5.0, 9.0, 2.25]],
-            1, vec![-2.0, -2.0, 4.0, 4.0]);
+        assert!(
+            !original_uv_endpoints_equal(&curve, -2.0, &curve, -1.0, &mut work, &cancel).unwrap()
+        );
+        let projective = uv_curve(
+            &[[-1.0, -3.0, 0.75], [5.0, 9.0, 2.25]],
+            1,
+            vec![-2.0, -2.0, 4.0, 4.0],
+        );
         assert!(!original_uv_affine(&projective, &mut work, &cancel).unwrap());
-        assert_eq!(original_uv_affine(&curve, &mut GeometryWorkBudget::new(0), &cancel).unwrap_err().code,
-            GeometryErrorCode::ResourceLimit);
-        assert_eq!(original_uv_affine(&curve, &mut work, &AtomicBool::new(true)).unwrap_err().code,
-            GeometryErrorCode::Cancelled);
+        assert_eq!(
+            original_uv_affine(&curve, &mut GeometryWorkBudget::new(0), &cancel)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            original_uv_affine(&curve, &mut work, &AtomicBool::new(true))
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
@@ -2283,39 +3426,126 @@ mod tests {
         let curve = analytic_line([0.0; 3], [2.0, 3.0, 4.0], [0.0, 1.0], false, 3);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
-        assert!(affine_line_direction(&curve, [0.0, 1.0], [0.0; 3], [2.0, 3.0, 4.0], &mut work, &cancel).unwrap().is_some());
-        assert!(affine_line_direction(&curve, [0.0, 1.0], [f64::from_bits(1), 0.0, 0.0],
-            [2.0, 3.0, 4.0], &mut work, &cancel).unwrap().is_none());
-        assert!(affine_line_direction(&curve, [0.0, 1.0], [2.0, 3.0, 4.0], [0.0; 3],
-            &mut work, &cancel).unwrap().is_none());
-        let zero = native_curve(vec![CPoint::new(0.0, 0.0, 0.0, NOW); 2], 1,
-            vec![0.0, 0.0, 1.0, 1.0], 3);
-        assert!(affine_line_direction(&zero, [0.0, 1.0], [0.0; 3], [0.0; 3], &mut work, &cancel).unwrap().is_none());
+        assert!(
+            affine_line_direction(
+                &curve,
+                [0.0, 1.0],
+                [0.0; 3],
+                [2.0, 3.0, 4.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            affine_line_direction(
+                &curve,
+                [0.0, 1.0],
+                [f64::from_bits(1), 0.0, 0.0],
+                [2.0, 3.0, 4.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            affine_line_direction(
+                &curve,
+                [0.0, 1.0],
+                [2.0, 3.0, 4.0],
+                [0.0; 3],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        let zero = native_curve(
+            vec![CPoint::new(0.0, 0.0, 0.0, NOW); 2],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            3,
+        );
+        assert!(
+            affine_line_direction(&zero, [0.0, 1.0], [0.0; 3], [0.0; 3], &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn complete_affine_tensor_coefficients_cover_nonunit_knots_and_constant_weights() {
-        let knots = [vec![-2.0, -2.0, -2.0, 0.0, 4.0, 4.0, 4.0], vec![1.0, 1.0, 3.0, 3.0]];
-        let points: Vec<Vec<_>> = [-2.0, -1.0, 2.0, 4.0].into_iter().map(|u|
-            [1.0, 3.0].into_iter().map(|v| CPoint::new(u + 2.0, v - 1.0, u + 2.0 * v, NOW)).collect()).collect();
+        let knots = [
+            vec![-2.0, -2.0, -2.0, 0.0, 4.0, 4.0, 4.0],
+            vec![1.0, 1.0, 3.0, 3.0],
+        ];
+        let points: Vec<Vec<_>> = [-2.0, -1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|u| {
+                [1.0, 3.0]
+                    .into_iter()
+                    .map(|v| CPoint::new(u + 2.0, v - 1.0, u + 2.0 * v, NOW))
+                    .collect()
+            })
+            .collect();
         let polynomial = native_tensor(points.clone(), [2, 1], knots.clone());
-        let weighted = points.iter().map(|row| row.iter()
-            .map(|p| CPoint::new(2.0 * p.x, 2.0 * p.y, 2.0 * p.z, 2.0)).collect()).collect();
+        let weighted = points
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|p| CPoint::new(2.0 * p.x, 2.0 * p.y, 2.0 * p.z, 2.0))
+                    .collect()
+            })
+            .collect();
         let rational = native_tensor(weighted, [2, 1], knots.clone());
         let trace = uv_line([-2.0, 1.0], [4.0, 3.0]);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
         for surface in [&polynomial, &rational] {
-            let affine = exact_affine_surface(surface, &mut work, &cancel).unwrap().unwrap();
-            assert!(exact_affine_trace(&affine, &trace, [0.0, 1.0],
-                [[0.0; 3], [6.0, 2.0, 10.0]], &mut work, &cancel).unwrap());
-            assert!(length(exact_affine_normal(&affine, &mut work, &cancel).unwrap().unwrap()).unwrap().lo > 0.0);
-            assert!(!exact_affine_trace(&affine, &trace, [0.0, 1.0],
-                [[0.0; 3], [6.0, 2.0, 10.0_f64.next_up()]], &mut work, &cancel).unwrap());
+            let affine = exact_affine_surface(surface, &mut work, &cancel)
+                .unwrap()
+                .unwrap();
+            assert!(
+                exact_affine_trace(
+                    &affine,
+                    &trace,
+                    [0.0, 1.0],
+                    [[0.0; 3], [6.0, 2.0, 10.0]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
+            assert!(
+                length(
+                    exact_affine_normal(&affine, &mut work, &cancel)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap()
+                .lo > 0.0
+            );
+            assert!(
+                !exact_affine_trace(
+                    &affine,
+                    &trace,
+                    [0.0, 1.0],
+                    [[0.0; 3], [6.0, 2.0, 10.0_f64.next_up()]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
         }
         let mut wrong = points;
         wrong[1][0].z = wrong[1][0].z.next_up();
-        assert!(exact_affine_surface(&native_tensor(wrong, [2, 1], knots), &mut work, &cancel).unwrap().is_none());
+        assert!(
+            exact_affine_surface(&native_tensor(wrong, [2, 1], knots), &mut work, &cancel)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2323,33 +3553,84 @@ mod tests {
         let plane = plane();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let affine = exact_affine_surface(&plane, &mut work, &cancel).unwrap().unwrap();
-        let chart = |s| uv_curve(&[[s, s, 3.0 * s], [4.0 * s, 4.0 * s, 3.0 * s]],
-            1, vec![-2.0, -2.0, 4.0, 4.0]);
+        let affine = exact_affine_surface(&plane, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        let chart = |s| {
+            uv_curve(
+                &[[s, s, 3.0 * s], [4.0 * s, 4.0 * s, 3.0 * s]],
+                1,
+                vec![-2.0, -2.0, 4.0, 4.0],
+            )
+        };
         for scale in [-2.0, 1.0] {
-            assert!(exact_affine_trace(&affine, &chart(scale), [-2.0, 4.0],
-                [[11.0, 22.0, 30.0], [14.0, 28.0, 30.0]], &mut work, &cancel).unwrap());
-            assert!(!exact_affine_trace(&affine, &chart(scale), [-2.0, 4.0],
-                [[11.0, 22.0, 30.0], [14.0_f64.next_up(), 28.0, 30.0]], &mut work, &cancel).unwrap());
+            assert!(
+                exact_affine_trace(
+                    &affine,
+                    &chart(scale),
+                    [-2.0, 4.0],
+                    [[11.0, 22.0, 30.0], [14.0, 28.0, 30.0]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
+            assert!(
+                !exact_affine_trace(
+                    &affine,
+                    &chart(scale),
+                    [-2.0, 4.0],
+                    [[11.0, 22.0, 30.0], [14.0_f64.next_up(), 28.0, 30.0]],
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
         }
         // Exact realized native coefficients of the original reflected,
         // translated homogeneous chart on its nonunit active restriction.
-        let reflected = uv_curve(&[[12.0, 18.0, 6.0], [9.0, 15.0, 6.0]],
-            1, vec![-1.0, -1.0, 2.0, 2.0]);
-        assert!(exact_affine_trace(&affine, &reflected, [-1.0, 2.0],
-            [[16.0, 38.0, 30.0], [14.5, 35.0, 30.0]], &mut work, &cancel).unwrap());
+        let reflected = uv_curve(
+            &[[12.0, 18.0, 6.0], [9.0, 15.0, 6.0]],
+            1,
+            vec![-1.0, -1.0, 2.0, 2.0],
+        );
+        assert!(
+            exact_affine_trace(
+                &affine,
+                &reflected,
+                [-1.0, 2.0],
+                [[16.0, 38.0, 30.0], [14.5, 35.0, 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn native_planar_rational_chart_has_exact_affine_trace() {
         let surface = plane();
-        let chart = uv_curve(&[[1.0, 1.0, 3.0], [4.0, 4.0, 3.0]],
-            1, vec![0.0, 0.0, 1.0, 1.0]);
+        let chart = uv_curve(
+            &[[1.0, 1.0, 3.0], [4.0, 4.0, 3.0]],
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+        );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let affine = exact_affine_surface(&surface, &mut work, &cancel).unwrap().unwrap();
-        assert!(exact_affine_trace(&affine, &chart, [0.0, 1.0],
-            [[11.0, 22.0, 30.0], [14.0, 28.0, 30.0]], &mut work, &cancel).unwrap());
+        let affine = exact_affine_surface(&surface, &mut work, &cancel)
+            .unwrap()
+            .unwrap();
+        assert!(
+            exact_affine_trace(
+                &affine,
+                &chart,
+                [0.0, 1.0],
+                [[11.0, 22.0, 30.0], [14.0, 28.0, 30.0]],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -2357,48 +3638,135 @@ mod tests {
         let curve = analytic_line([10.0, 2.0, 3.0], [1.0, 0.0, 0.0], [2.0, 5.0], true, 3);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let cancel = AtomicBool::new(false);
-        assert!(affine_line_direction(&curve, [2.0, 5.0], [15.0, 2.0, 3.0], [12.0, 2.0, 3.0],
-            &mut work, &cancel).unwrap().is_some());
-        assert!(affine_line_direction(&curve, [2.0, 5.0], [12.0, 2.0, 3.0], [15.0, 2.0, 3.0],
-            &mut work, &cancel).unwrap().is_none());
-        assert_eq!(affine_line_direction(&curve, [2.0, 5.0], [15.0, 2.0, 3.0], [12.0, 2.0, 3.0],
-            &mut GeometryWorkBudget::new(0), &cancel).unwrap_err().code, GeometryErrorCode::ResourceLimit);
-        assert_eq!(affine_line_direction(&curve, [2.0, 5.0], [15.0, 2.0, 3.0], [12.0, 2.0, 3.0],
-            &mut work, &AtomicBool::new(true)).unwrap_err().code, GeometryErrorCode::Cancelled);
+        assert!(
+            affine_line_direction(
+                &curve,
+                [2.0, 5.0],
+                [15.0, 2.0, 3.0],
+                [12.0, 2.0, 3.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            affine_line_direction(
+                &curve,
+                [2.0, 5.0],
+                [12.0, 2.0, 3.0],
+                [15.0, 2.0, 3.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            affine_line_direction(
+                &curve,
+                [2.0, 5.0],
+                [15.0, 2.0, 3.0],
+                [12.0, 2.0, 3.0],
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            affine_line_direction(
+                &curve,
+                [2.0, 5.0],
+                [15.0, 2.0, 3.0],
+                [12.0, 2.0, 3.0],
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
     }
 
     #[test]
     fn complete_exact_original_affine_corner_has_positive_active_degree() {
-        let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/geometry/box-mm.step")).unwrap();
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/box-mm.step"),
+        )
+        .unwrap();
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let prepared = crate::analysis::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &mut work, &cancel).unwrap();
+        let prepared = crate::analysis::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let bounds = definition.bounds_mm();
         let height = (bounds.min[2] + bounds.max[2]) * 0.5;
         let request = SlabRequest {
-            frame: PlaneFrameMm { origin_mm: [0.0; 3], x_axis: [1.0, 0.0, 0.0],
-                y_axis: [0.0, 1.0, 0.0], z_axis: [0.0, 0.0, 1.0] },
-            height_interval_mm: [bounds.min[2], bounds.max[2]], sample_height_mm: height,
+            frame: PlaneFrameMm {
+                origin_mm: [0.0; 3],
+                x_axis: [1.0, 0.0, 0.0],
+                y_axis: [0.0, 1.0, 0.0],
+                z_axis: [0.0, 0.0, 1.0],
+            },
+            height_interval_mm: [bounds.min[2], bounds.max[2]],
+            sample_height_mm: height,
             native_shape_error_mm: 0.1,
         };
-        let section = prepared.section_for_query(&crate::section::SectionQuery {
-            plane: crate::PlaneMm { origin_mm: [0.0, 0.0, height], normal: [0.0, 0.0, 1.0] },
-            maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
-            maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
-        }, &cancel, (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,
-            &mut work).unwrap();
-        let prism = SamplePrism::new(&section, &request, HeightFunctional::from_frame(request.frame),
-            Interval::point(height), &mut work, &cancel).unwrap();
+        let section = prepared
+            .section_for_query(
+                &crate::section::SectionQuery {
+                    plane: crate::PlaneMm {
+                        origin_mm: [0.0, 0.0, height],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    maximum_chord_error_mm:
+                        spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                    maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+                },
+                &cancel,
+                (crate::MAX_PREPARED_SECTION_BYTES - prepared.retained_bytes()) as u32,
+                &mut work,
+            )
+            .unwrap();
+        let prism = SamplePrism::new(
+            &section,
+            &request,
+            HeightFunctional::from_frame(request.frame),
+            Interval::point(height),
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let source = prepared.source_view().unwrap();
-        let mut incidence = SourceEdgeIncidence::new(&definition, MAX_EDGE_BYTES, &mut work, &cancel).unwrap();
-        incidence.prepare_vertices(MAX_EDGE_BYTES, &mut work, &cancel).unwrap();
+        let mut incidence =
+            SourceEdgeIncidence::new(&definition, MAX_EDGE_BYTES, &mut work, &cancel).unwrap();
+        incidence
+            .prepare_vertices(MAX_EDGE_BYTES, &mut work, &cancel)
+            .unwrap();
         for vertex in incidence.vertices().unwrap() {
             let count = incidence.vertex_edges(vertex).count();
-            assert!(exact_affine_vertex_fan(&definition, source, &incidence, vertex, count,
-                &prism, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap());
+            assert!(
+                exact_affine_vertex_fan(
+                    &definition,
+                    source,
+                    &incidence,
+                    vertex,
+                    count,
+                    &prism,
+                    MAX_SCRATCH_BYTES,
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+            );
         }
     }
 

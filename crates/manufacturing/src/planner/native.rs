@@ -772,8 +772,16 @@ pub(super) fn collect_span(
                 .map_or(&[][..], |stage| stage.positive.as_slice());
             let coexisting = resident_bytes
                 .saturating_add(state.retained_proof_bytes())
-                .saturating_add(frontier.capacity().saturating_mul(std::mem::size_of::<DraftStage>()))
-                .saturating_add(settled.capacity().saturating_mul(std::mem::size_of::<ReadyStage>()))
+                .saturating_add(
+                    frontier
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<DraftStage>()),
+                )
+                .saturating_add(
+                    settled
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<ReadyStage>()),
+                )
                 .saturating_add(frontier.iter().fold(0usize, |bytes, stage| {
                     bytes.saturating_add(stage.retained_bytes())
                 }))
@@ -2795,24 +2803,30 @@ fn certify_stage<'a>(
         })?;
         // False grants no authority; the existing ledger still owns every
         // unmatched regular, critical, coface and whole-closed-cut obligation.
-        pending.certify_regular_interface_pair(
-            spiling_geometry::NativeCriticalCollarTarget {
-                leaf: &previous.leaf,
-                actual_material: &previous.actual,
-            },
-            spiling_geometry::NativeCriticalCollarTarget {
-                leaf: &material.leaf,
-                actual_material: &material.actual,
-            },
-            byte_limit,
-            work,
-            cancel,
-        ).map_err(|failure| {
-            super::native_error(failure, &format!(
-                "actual adjacent native source pair at layer {}, occurrence {}",
-                current.index, material.leaf.occurrence_id().get(),
-            ))
-        })?;
+        pending
+            .certify_regular_interface_pair(
+                spiling_geometry::NativeCriticalCollarTarget {
+                    leaf: &previous.leaf,
+                    actual_material: &previous.actual,
+                },
+                spiling_geometry::NativeCriticalCollarTarget {
+                    leaf: &material.leaf,
+                    actual_material: &material.actual,
+                },
+                byte_limit,
+                work,
+                cancel,
+            )
+            .map_err(|failure| {
+                super::native_error(
+                    failure,
+                    &format!(
+                        "actual adjacent native source pair at layer {}, occurrence {}",
+                        current.index,
+                        material.leaf.occurrence_id().get(),
+                    ),
+                )
+            })?;
     }
     Ok(pending)
 }

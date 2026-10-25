@@ -554,7 +554,13 @@ impl SectionCurve2d {
 
     /// True if the curve is a rational NURBS span.
     pub fn is_rational(&self) -> bool {
-        matches!(self, Self::NurbsSpan { weights: Some(_), .. })
+        matches!(
+            self,
+            Self::NurbsSpan {
+                weights: Some(_),
+                ..
+            }
+        )
     }
 }
 

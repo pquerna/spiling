@@ -1837,9 +1837,7 @@ fn native_error(
 
 type PreparedSources<'a> = BTreeMap<DefinitionId, spiling_geometry::PreparedSolid<'a>>;
 
-fn geometry_query_limit(
-    sources: &PreparedSources<'_>,
-) -> Result<usize, ManufacturingError> {
+fn geometry_query_limit(sources: &PreparedSources<'_>) -> Result<usize, ManufacturingError> {
     sources.values().try_fold(
         spiling_geometry::MAX_PREPARED_SECTION_BYTES,
         |remaining, source| {
@@ -1875,12 +1873,14 @@ fn admit_source_captures(
     sources.values().try_fold(available, |remaining, source| {
         work.charge(1, cancel)
             .map_err(|failure| native_error(failure, "native source capture admission"))?;
-        remaining.checked_sub(source.retained_bytes()).ok_or_else(|| {
-            error(
-                ManufacturingErrorCode::ResourceLimit,
-                "aggregate prepared native material capacity exceeded",
-            )
-        })
+        remaining
+            .checked_sub(source.retained_bytes())
+            .ok_or_else(|| {
+                error(
+                    ManufacturingErrorCode::ResourceLimit,
+                    "aggregate prepared native material capacity exceeded",
+                )
+            })
     })?;
     Ok(())
 }

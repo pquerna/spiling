@@ -8,8 +8,8 @@
 
 use super::radial_product::RadialRegionKind;
 use super::*;
-use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::analysis::source_incidence::native_coedge;
 use crate::parametric::{
     SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, SurfaceFirstEnclosure, SurfaceFunctional,
@@ -22,8 +22,7 @@ type Box3 = [Interval; 3];
 /// physical collapse. It remains valid without trusting a nominal UV box to
 /// include a connector or a separate endpoint-expression enclosure.
 pub(super) const ORIGINAL_JOINT_UV_SCRATCH_BYTES: usize =
-    std::mem::size_of::<[[Interval; 3]; 4]>()
-        + 4 * std::mem::size_of::<[Interval; 2]>();
+    std::mem::size_of::<[[Interval; 3]; 4]>() + 4 * std::mem::size_of::<[Interval; 2]>();
 
 pub(super) fn original_joint_uv_enclosure(
     joint: &crate::kernel::trim::PreparedTrimJoint,
@@ -33,30 +32,37 @@ pub(super) fn original_joint_uv_enclosure(
     use crate::parametric::CurveEvaluator as _;
     work.charge(1, cancel)?;
     let mut image = joint.enclosure;
-    for value in image { Interval::new(value.lo, value.hi)?; }
+    for value in image {
+        Interval::new(value.lo, value.hi)?;
+    }
     for endpoint in joint.endpoint_uv {
         for axis in 0..2 {
-            image[axis] = image[axis].hull(Interval::new(
-                endpoint[axis][0], endpoint[axis][1],
-            )?);
+            image[axis] = image[axis].hull(Interval::new(endpoint[axis][0], endpoint[axis][1])?);
         }
     }
     let connector = joint.connector.tensor([0.0, 1.0], 0, work, cancel)?[0];
-    for axis in 0..2 { image[axis] = image[axis].hull(connector[axis]); }
+    for axis in 0..2 {
+        image[axis] = image[axis].hull(connector[axis]);
+    }
     if let crate::kernel::trim::TrimJointKind::SphericalPole {
-        connector, polar_axis, polar_coordinate, ..
-    } = &joint.kind {
+        connector,
+        polar_axis,
+        polar_coordinate,
+        ..
+    } = &joint.kind
+    {
         if *polar_axis >= 2 {
             return Err(GeometryError::new(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
                 "original pole joint has no valid selected polar axis",
             ));
         }
-        image[*polar_axis] = image[*polar_axis].hull(Interval::new(
-            polar_coordinate.lo, polar_coordinate.hi,
-        )?);
+        image[*polar_axis] =
+            image[*polar_axis].hull(Interval::new(polar_coordinate.lo, polar_coordinate.hi)?);
         let connector = connector.tensor([0.0, 1.0], 0, work, cancel)?[0];
-        for axis in 0..2 { image[axis] = image[axis].hull(connector[axis]); }
+        for axis in 0..2 {
+            image[axis] = image[axis].hull(connector[axis]);
+        }
     }
     Ok(image)
 }
@@ -67,9 +73,11 @@ pub(super) fn original_joint_uv_enclosure(
 pub(super) const ORIGINAL_JOINT_POSITION_SCRATCH_BYTES: usize =
     (if SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
         > crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
-    { SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES }
-    else { crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES })
-        + ORIGINAL_JOINT_UV_SCRATCH_BYTES
+    {
+        SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    } else {
+        crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+    }) + ORIGINAL_JOINT_UV_SCRATCH_BYTES
         + std::mem::size_of::<SurfaceFirstEnclosure>()
         + std::mem::size_of::<[[Interval; 3]; 4]>()
         + 4 * std::mem::size_of::<Box3>()
@@ -90,16 +98,22 @@ pub(super) fn original_joint_position_enclosure(
     let surface = domain.surface_operand();
     let joint_uv = original_joint_uv_enclosure(joint, work, cancel)?;
     let mut image = crate::parametric::surface_position_enclosure(
-        &surface, joint_uv.map(|value| [value.lo, value.hi]), work, cancel,
+        &surface,
+        joint_uv.map(|value| [value.lo, value.hi]),
+        work,
+        cancel,
     )?;
     let mut include = |position: Box3| -> Result<(), GeometryError> {
-        for value in position { Interval::new(value.lo, value.hi)?; }
+        for value in position {
+            Interval::new(value.lo, value.hi)?;
+        }
         image = std::array::from_fn(|axis| image[axis].hull(position[axis]));
         Ok(())
     };
     if let crate::kernel::trim::TrimJointKind::SphericalPole {
         world_enclosure, ..
-    } = &joint.kind {
+    } = &joint.kind
+    {
         include(*world_enclosure)?;
     }
     include(joint.vertex_point.map(Interval::point))?;
@@ -112,18 +126,24 @@ pub(super) fn original_joint_position_enclosure(
                 break;
             }
         }
-        let coedge = coedge.ok_or_else(|| GeometryError::new(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "original joint image lost its actual material coedge",
-        ))?;
+        let coedge = coedge.ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original joint image lost its actual material coedge",
+            )
+        })?;
         let correspondence = domain.original_coedge_correspondence(coedge)?;
-        let binding = correspondence.binding().ok_or_else(|| GeometryError::new(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "original joint image lost its selected source endpoint binding",
-        ))?;
+        let binding = correspondence.binding().ok_or_else(|| {
+            GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original joint image lost its selected source endpoint binding",
+            )
+        })?;
         let spatial_high = binding.material_forward == incoming;
-        include(binding.source_vertex_points_mm[binding.native_endpoint_index(spatial_high)]
-            .map(Interval::point))?;
+        include(
+            binding.source_vertex_points_mm[binding.native_endpoint_index(spatial_high)]
+                .map(Interval::point),
+        )?;
     }
     Ok(image)
 }
@@ -210,10 +230,16 @@ impl PairedTrace {
             return Ok(None);
         }
         let (first_use, first_edge) = native_coedge(
-            first.domain.definition(), first.use_.face, first.use_.wire, first.use_.index,
+            first.domain.definition(),
+            first.use_.face,
+            first.use_.wire,
+            first.use_.index,
         )?;
         let (second_use, second_edge) = native_coedge(
-            second.domain.definition(), second.use_.face, second.use_.wire, second.use_.index,
+            second.domain.definition(),
+            second.use_.face,
+            second.use_.wire,
+            second.use_.index,
         )?;
         if a.edge != b.edge
             || first.range != second.range
@@ -223,7 +249,11 @@ impl PairedTrace {
             || a.native_interval != b.native_interval
             || a.spatial_forward != b.spatial_forward
             || !first.domain.same_original_spatial_trace(
-                first.use_.coedge, second.domain, second.use_.coedge, work, cancel,
+                first.use_.coedge,
+                second.domain,
+                second.use_.coedge,
+                work,
+                cancel,
             )?
         {
             return Ok(None);
@@ -233,9 +263,7 @@ impl PairedTrace {
                 // The inward UV half must agree with the literal boundary
                 // traversal. Otherwise the normal convention alone would
                 // silently reverse the physical material half-neighbourhood.
-                if (inward > 0.0)
-                    != (collar.spatial_orientation == collar.domain.orientation())
-                {
+                if (inward > 0.0) != (collar.spatial_orientation == collar.domain.orientation()) {
                     return Ok(None);
                 }
             }
@@ -255,11 +283,18 @@ fn seam_transverse(
     let surface = &collar.domain.surface_operand();
     (|| {
         let jet = surface_piecewise_first_enclosure(
-            surface, uv_box(add_margin(uv.position, collar.margin)), work, cancel,
+            surface,
+            uv_box(add_margin(uv.position, collar.margin)),
+            work,
+            cancel,
         )?;
         let (offset, correction) = match collar.transport {
             CarrierTransport::Exact => {
-                let sign = if collar.domain.orientation() { 1.0 } else { -1.0 };
+                let sign = if collar.domain.orientation() {
+                    1.0
+                } else {
+                    -1.0
+                };
                 (rotate(uv.derivative, sign), [Interval::point(0.0); 3])
             }
             CarrierTransport::Collar { width, inward } => {
@@ -276,9 +311,15 @@ fn seam_transverse(
         };
         let across = compose_first(&jet.du, &jet.dv, offset);
         let across: Box3 = std::array::from_fn(|i| across[i].sub(correction[i]));
-        Ok(if matches!(collar.transport, CarrierTransport::Collar { .. })
-            && !collar.spatial_orientation
-        { across.map(Interval::neg) } else { across })
+        Ok(
+            if matches!(collar.transport, CarrierTransport::Collar { .. })
+                && !collar.spatial_orientation
+            {
+                across.map(Interval::neg)
+            } else {
+                across
+            },
+        )
     })()
 }
 
@@ -489,8 +530,12 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     work.charge(1, cancel)?;
                     let image = self.normal_image(a, normal, work, cancel)?;
                     let reference_position = surface_piecewise_first_enclosure(
-                        &self.domain.surface_operand(), uv_box(image), work, cancel,
-                    )?.position;
+                        &self.domain.surface_operand(),
+                        uv_box(image),
+                        work,
+                        cancel,
+                    )?
+                    .position;
                     if position_boxes_disjoint(reference_position, joint_position) {
                         continue;
                     }
@@ -713,9 +758,8 @@ fn visit_original_faces(
             // before excluding any carrier by height. Discontinuous knots and
             // nested poles remain real Native errors. Only this immutable
             // coefficient proof is reusable; every partial jet below is fresh.
-            let whole = surface_piecewise_first_enclosure(
-                surface, domain.uv_domain(), work, cancel,
-            )?;
+            let whole =
+                surface_piecewise_first_enclosure(surface, domain.uv_domain(), work, cancel)?;
             // Original connector/world images need not be subsets of S(domain),
             // so their independent closed-image gates above must run first.
             if outside(height.height(whole.position), target) {
@@ -793,11 +837,7 @@ fn visit_original_faces(
                             chart.normal(jet.position)?
                         } else {
                             let n = cross(jet.du, jet.dv);
-                            if orientation {
-                                n
-                            } else {
-                                n.map(Interval::neg)
-                            }
+                            if orientation { n } else { n.map(Interval::neg) }
                         };
                         let included = inventory.include(
                             BoundaryCell {
@@ -824,9 +864,8 @@ fn visit_original_faces(
                         // fibre census remain independent and mandatory.
                         phase = "raw F unresolved-cell trim exclusion";
                         if !trim_inside {
-                            let classification = domain.classify_with_byte_limit(
-                                uv, remaining_bytes, work, cancel,
-                            );
+                            let classification =
+                                domain.classify_with_byte_limit(uv, remaining_bytes, work, cancel);
                             match classification? {
                                 TrimClassification::Outside => continue,
                                 TrimClassification::Inside => trim_inside = true,
@@ -1076,7 +1115,10 @@ fn visit_original_links(
                         return Ok(false);
                     }
                     crate::parametric::curve_enclosure(
-                        prepared, (central[0], central[1]), work, cancel,
+                        prepared,
+                        (central[0], central[1]),
+                        work,
+                        cancel,
                     )?;
                     // A crossing terminal needs the EXACT qualified original
                     // NativeV/edge/absolute-germ/exit, not vertex activity. Its
@@ -1090,7 +1132,10 @@ fn visit_original_links(
                         phase = "closed terminal exclusion or qualified literal cutover";
                         active_spatial = Some(([endpoint; 2], 0));
                         let curve = crate::parametric::curve_enclosure(
-                            prepared, (endpoint, endpoint), work, cancel,
+                            prepared,
+                            (endpoint, endpoint),
+                            work,
+                            cancel,
                         )?;
                         let qualified = links.qualified_closed_cutover(
                             uses.vertices[binding.native_endpoint_index(germ == 1)],
@@ -1131,7 +1176,10 @@ fn visit_original_links(
                             let mid = range[0] * 0.5 + range[1] * 0.5;
                             let can_refine = depth < MAX_DEPTH && range[0] < mid && mid < range[1];
                             let curve = crate::parametric::curve_enclosure(
-                                prepared, (range[0], range[1]), work, cancel,
+                                prepared,
+                                (range[0], range[1]),
+                                work,
+                                cancel,
                             )?;
                             let supports = [
                                 first.swept_enclosure(range, &curve, allowance, work, cancel)?,
@@ -1549,9 +1597,8 @@ mod tests {
         let uv_surface_image = [Interval { lo: 2.0, hi: 3.0 }; 3];
         assert!(position_boxes_disjoint(reference, uv_surface_image));
         let retained_world = [Interval::point(1.0); 3];
-        let complete = std::array::from_fn(|axis| {
-            uv_surface_image[axis].hull(retained_world[axis])
-        });
+        let complete =
+            std::array::from_fn(|axis| uv_surface_image[axis].hull(retained_world[axis]));
         assert!(!position_boxes_disjoint(reference, complete));
     }
 }

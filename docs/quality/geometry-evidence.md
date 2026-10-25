@@ -17,43 +17,38 @@ result establishes physical printability or machine readiness.
 ## Entry points and immutable source identity
 
 - Start at [`crates/geometry/src/lib.rs`](../../crates/geometry/src/lib.rs):
-  `import_step`, `ImportLimits`, `Definition`, prepared-source APIs and query
-  results are the public facade. Native representation stays inside the crate;
-  `KERNEL_VERSION` / `KERNEL_REVISION` identify the actual producer.
-- [`import/mod.rs`](../../crates/geometry/src/import/mod.rs) owns STEP admission,
-  lossless source/native face-use correspondence and diagnostic conversion.
-  [`ast.rs`](../../crates/geometry/src/import/ast.rs) bounds reachable entities;
-  [`units.rs`](../../crates/geometry/src/import/units.rs) owns physical unit
-  conversion. Unsupported conversion is not evidence of malformed source.
-- [`kernel/mod.rs`](../../crates/geometry/src/kernel/mod.rs) owns immutable
-  `Definition`, `FaceBoundaryRefs`, `BoundaryCoedgeRef` and source parameter
-  witnesses. Original face/use identity is not regenerated from display
-  triangles or section-loop ordinals. Occurrences add poses, not new definitions.
-- [`source_trim.rs`](../../crates/geometry/src/import/source_trim.rs) retains
-  literal source PCURVEs and original continuations. `OriginalCoedgeCorrespondence`
-  in [`trim_certificate.rs`](../../crates/geometry/src/import/trim_certificate.rs)
-  proves whole-range physical position and relative tangent correspondence under
-  the captured parameter map, retaining both incident continuous pieces at knots.
-  Taylor estimates require independent C1 qualification. Samples, inverse guesses
-  and chart guides do not supply this authority; correspondence alone does not
-  prove trim topology, inverse coverage or native incidence.
+  `from_step_bytes`, its bounded/cancellable variants, `Definition`,
+  `prepare_solid` and query results are the public facade. `KERNEL_VERSION` /
+  `KERNEL_REVISION` identify the actual SolidCore producer; historical
+  Monstertruck results do not qualify the SolidCore development cutover.
+- [`import/mod.rs`](../../crates/geometry/src/import/mod.rs) owns bounded STEP
+  admission and physical unit conversion. SolidCraft decodes the admitted
+  single-solid subset; [`brep_data_bridge.rs`](../../crates/geometry/src/import/brep_data_bridge.rs)
+  constructs native carriers. Unsupported conversion is not malformed source.
+- [`import/source.rs`](../../crates/geometry/src/import/source.rs) captures
+  literal original face, loop, coedge, vertex and selected-curve identities in
+  [`kernel/source.rs`](../../crates/geometry/src/kernel/source.rs). These facts
+  are not reconstructed from native arena ordinals, generated UV curves,
+  display triangles or section-loop order. Occurrences add poses, not definitions.
+- [`kernel/trim.rs`](../../crates/geometry/src/kernel/trim.rs) prepares original
+  domains and complete correspondence receipts with
+  [`analysis/source_restriction.rs`](../../crates/geometry/src/analysis/source_restriction.rs).
+  Literal PCurve associations and the selected original master remain distinct
+  from generated native chart proposals. Missing correspondence refuses the
+  material query; a native mesh or fitted inverse cannot fill that gap.
 
-The pinned kernel owns closed-edge subdivision and rational curve bounds.
-Unclamped NURBS use the homogeneous B-spline's regular domain
-`[U_degree, U_control_count]`, not the exterior knot support. Point evaluation and
-strict curve enclosures use interior one-sided endpoint branches; internal knots
-retain both incident bounds after each rational piece is dehomogenized.
-Reversed UV uses preserve literal spline knots behind parameter operators.
-Nonrepresentable transported knots remain outward parameter bands for continuous
-position/winding proofs; strict boundary jets and C1/Taylor consumers retain
-their independent qualification.
-Shared exact children retain the original source restrictions in every oriented
-use. Inclusion sampling borrows those active knot spans rather than allocating
-unique-knot vectors or evaluating exterior support. A singular point-inverse
-solve may retain an independently matching seed; this grants neither a unique
-inverse nor regularity. Explicit carrier contradictions on declared closed edges
-are fatal; unsupported conversion still uses the loader's loss report, which
-Spiling admission must reject.
+The importer materializes the decoder's optional `Loop.edges` cache once from
+bounded, reciprocal, owner-checked Loopuse/Edgeuse cycles and charges its retained
+capacity. Consumers still cross-check native incidence; the cache does not supply
+original-source correspondence or material authority.
+
+[`parametric.rs`](../../crates/geometry/src/parametric.rs) and its coefficient
+providers own bounded original-surface/curve evaluation. Unclamped splines use
+their regular domains, not exterior knot support. Knot crossings retain both
+incident continuous pieces; outward transported parameter bands are not feasible
+point witnesses or C1 authority. Whole-range position correspondence does not
+prove relative tangent correspondence, trim topology, inverse coverage or
+native incidence. Samples and native tolerance fields do not discharge them.
 
 Generic `FaceInfo.geometry` may carry optional exact analytic metadata. That
 metadata describes a face; it does not authorize a finish, slab reuse or a
@@ -63,52 +58,32 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 
 ## Prepared owners and placed inspection
 
-| Owner / operation                          | Invariant and navigation                                                                                                                                                                                                            |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PreparedGeometrySource`                   | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): original trim domains and canonical source-vertex plans, without native Boolean seeds. Supports placed material bounds and height analysis. |
-| `PreparedGeometrySource::prepare_sections` | Consumes the geometry owner, moves its domains/plans and adds boundary inventory plus native seeds. Its allowance is the total replacement-source allowance, not extra capacity.                                                    |
-| `PreparedMaterialSource`                   | Same module: job-local shared immutable preparation across occurrences/retries; does not cache posed slab, metric or incidence authority.                                                                                           |
-| `PreparedSectionSource`                    | [`section/mod.rs`](../../crates/geometry/src/section/mod.rs): bounded native Boolean preparation for raw sections. Raw inspection does not require material admission.                                                              |
-| Placed queries                             | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): bounds, height and section transforms use the actual accepted quaternion polynomial, not an assumed exactly orthogonal transpose.                             |
+| Owner / operation | Invariant and navigation |
+| --- | --- |
+| `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for original domains, source-vertex plans and query preparation. No promotion to a second material owner or native Boolean seed phase. |
+| `PreparedSectionSource` | Raw native inspection wrapper in the facade; [`section/mod.rs`](../../crates/geometry/src/section/mod.rs) constructs direct native surface/plane intersection graphs. Raw inspection does not require material admission. |
+| Placed queries | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose. |
 
 `NativeSection` in the facade carries plane/frame, original-face lineage and
 achieved chord/plane errors. A raw native intersection is not closure of
 source material. Conservative slab envelopes are explicitly distinguishable
 from intersections and cannot be promoted into manufactured layers.
 
-Native Boolean guide construction in the pinned kernel restricts paired polygon
-and projected guides to both original trim-contact parameters **before** binding
-their exact vertices. Every interior raw-index control is retained; snapping an
-unrestricted guide end can preserve an outside-trim tail and reverse its tangent.
-Contact inversion constructs the candidate; fresh original-root inventories,
-coverage and oriented material-side checks remain independent authority.
+Sections intersect the retained native carriers directly. Complete root/span
+inventories, original face lineage, ordered closure, Jordan and achieved
+chord/plane checks remain independent requirements; unresolved tangencies or
+branch ambiguities refuse rather than synthesize a closed loop. There is no
+SolidCore Boolean-clipping or old-kernel fallback.
 
-[`section/reference.rs`](../../crates/geometry/src/section/reference.rs) can erase
-sampled crossing cycles only with complete bidirectional 3D Hausdorff bounds,
-cumulatively inside the declared sampling ledger and without changing the plane
-bound or swallowing another boundary. Each cut's changed edges must also be
-proved clear of the retained same-loop edges; adjacent edges may share only
-their genuine endpoint, never overlap or backtrack. Untouched raw crossings
-need not disappear in one proposal. These checks do not replace the final
-actual-world Jordan or native material proof. Common slab preparation passes
-the same reference to source analysis, world-candidate proof and planner conversion.
+Raw section success does not establish source-material occupancy. Material slabs
+bind their actual reference to original-domain analysis, placed-world proof and
+planner conversion. Source chord, placement arithmetic, plane drift and complete
+realized/native-shape bounds retain their separate budgets; a differently sampled
+hole or topology-conditioned precision retry cannot silently change the contract.
 
-The first uniform material sample keeps its established 0.0025 mm proposal,
-half the declared sampling allowance. Reference normalization may use the
-existing 0.005 mm declared sampling ledger: actual original chord plus the sum
-of complete bidirectional 3D cut bounds is charged in the same `NativeSection`.
-This does not guarantee spare world-placement room. Placed sigma times actual
-source chord plus actual arithmetic must still be at most 0.005 mm; the separate
-0.0001 mm plane, 0.00001 mm Boolean and complete actual-G/native-shape 0.1 mm
-gates remain unchanged, as do byte and cumulative work admissions. These are
-distinct certificates, not a claim that all contributors sum to 0.005 mm.
-No topology-conditioned precision retry or differently sampled Hole is allowed.
-
-[`analysis::section_regularity`](../../crates/geometry/src/analysis/mod.rs) uses
-the import-certified native bounds only to exclude empty cuts; literal critical
-census and complete crossing certification remain mandatory. Native carrier
-callbacks hold a non-reentrant mutex: comparison queries that acquire the same
-carrier must finish before entering `Face::with_surface`.
+Native definitions contain non-`Sync` kernel caches. The engine confines them to
+owning workers rather than adding a reentrant carrier lock or cloning the BREP
+for each query.
 
 [`parametric.rs`](../../crates/geometry/src/parametric.rs) separates batched
 `SurfaceFunctionalEnclosure` and spatial `SurfaceFirstEnclosure` from full
@@ -135,21 +110,13 @@ closed-cone law `G(s,t)=V+s(B(t)-V)`: extrema come from the apex and complete
 boundary, so only `t` needs adaptive search. Feasible boundary/apex witnesses
 tighten achieved endpoints without clipping the complete original comparison
 inventory or changing the selected G. They assert no global Original-F/G distance.
-`parametric/section_coverage.rs` caches successful whole-original first enclosures
-only for the same immutable definition, face and domain. Neither cache carries
-C1, posed metric, incidence or signed-census authority.
 
-[`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs), its
-`coverage` / `boundary` modules and the display protocol own whole-triangle
-coverage and packed-mesh checks. `display_trim` can supply an ephemeral native
-covering rectangle for source-unbound tensor seams only after complete original
-oriented boundary/natural-row/knot equivalence, ordered closure and the same
-filled triangle-chain, boundary-bijection, error and normal proofs. Retained UV
-expressions are borrowed unchanged. Its single-wire lane refuses additional
-wires/holes rather than omitting them. It neither fabricates original PCURVE
-bindings nor changes `Unproved`/absent source metadata: operation-domain
-preparation still returns `ParameterCorrespondenceUnavailable`. Display is not a
-slicing representation.
+[`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs) obtains
+bounded SolidCore mesh candidates. Its `audit` and `trim` modules independently
+check whole-triangle carriers, normals, native trim/triangle coverage and packed
+output. Candidate deviation estimates or generated UV curves are not original-F
+correspondence or material authority. Unqualified collapsed/singular coverage
+refuses display rather than dropping triangles or publishing an empty mesh.
 [`apps/engine/src/geometry/worker.rs`](../../apps/engine/src/geometry/worker.rs)
 keeps native admission independent of display failure: `DefinitionDisplay::Unavailable`
 means no mesh artifact or GPU face picking, not an empty successful mesh.
@@ -222,30 +189,21 @@ must never be converted into display unavailability.
 
 ## Original source correspondence
 
-[`import/master.rs`](../../crates/geometry/src/import/master.rs) retains at most
-one import-local selected-master receipt per original continuation owner.
-Each current face still resolves its actual source association. Position reuse
-requires the same function, original range, affine map and frame: independently
-certify selected/current image discrepancy, then fit the achieved root error
-and discrepancy inside the actual remaining allowance. This grants no UV or
-relative-tangent authority; those proofs remain on the complete actual tube.
+Original source operands retain literal coefficients, trim restrictions,
+preferred-master selection and PCurve association order. Source restriction
+preparation must prove a complete correspondence to the actual retained native
+use; endpoint proximity and native labels cannot replace whole-range evidence.
+Source edge/vertex census checks complete original-use ownership against native
+incidence, including opposed uses, rather than matching stars by coordinates.
+`FACE_OUTER_BOUND` is an explicit outer marker; generic `FACE_BOUND` is not a
+declaration of a hole. Whole-domain winding and nesting retain the actual
+outer/hole qualification.
 
-A new selected-plane owner may derive one conditional quality target from the
-original carrier metrics before requesting its independent whole proof.
-The hypothetical residual and half-budget search headroom are not certificates
-or bounds on a later periodic image. Only an achieved whole proof discharges
-that premise; ordinary nonproof uses the original admission path. This avoids
-duplicating coarse and strong whole-root proofs without relaxing work limits.
-The original implicit import/display/bounds/section gate and piecewise-C0
-counterexample are reproducible independently:
-
-```sh
-cargo test --locked -p spiling-geometry --lib \
-  import::tests::original_implicit_carrier_edges_import_display_bound_and_section_without_branch_reselection \
-  -- --exact --test-threads=1
-cargo test --locked -p spiling-geometry --lib \
-  c0_carrier_bumps_cannot_use_a_hull_of_piecewise_zero_hessians -- --test-threads=1
-```
+`PreparedSolid` readiness means its actual selected realization operands are
+prepared. It is not a global Original-F embedding, filled-material, attachment
+or manufacturing certificate. Slab, critical-collar, pair and final binding-ledger
+queries retain those independent obligations. Unsupported original associations
+remain explicit refusals without disabling unrelated raw native inspection.
 
 ## Refusals and support boundary
 
@@ -258,40 +216,38 @@ Resource exhaustion, cancellation, unavailable parameter correspondence,
 conditioning, unsupported operations and invalid geometry remain distinct failures.
 No partial proof, stale job or failed display grants successful material authority.
 
-Import's chart pass shares one 128M-unit work allowance; each correspondence
-is capped at 8M units from that same allowance. Neither changes geometry
-tolerances or the separate retained-proof byte limits.
+This is a development cutover, not transferred kernel qualification. Historical
+Monstertruck fitting/housing CLI and hardware-workbench journeys do not establish
+SolidCore parity. The unchanged original fixtures and operator workflows remain
+the reproduction inputs; report the SolidCore paths actually exercised and their
+explicit refusals before expanding support claims.
 
-The independent unclamped spline housing admits native import and saved-source
-reopening with original face identity and closed-edge restrictions. Placement
-can still exhaust directional-support work; raw sections can refuse
-natural-boundary chart preparation. This source is not admitted to manufacturing.
-
-The independent tapered fitting and rounded housing complete the unchanged
-complete-sparse operator through CLI and the hardware workbench: native face
-picking, placement, Compile, fresh emitted-byte replay/export, save and
-source-deleted fresh read-only reopen. These representative flows do not qualify
-general geometry or full G0–G3 parity. Inward-ramp conditioning, broader
-mixed-source/tilted-placement critical interfaces and support constraints remain
-outside the exercised envelope. Singular/nonmanifold geometry, unsupported STEP
-conversions and unproved charts retain explicit refusals. General AP242
-document/assembly expansion and arbitrary freeform finishes are not implied by
-generic face descriptors.
+General STEP documents/assemblies, unproved charts, arbitrary freeform finishes,
+singular/nonmanifold material and unqualified critical interfaces remain outside
+support. Native descriptors and successful raw inspection do not broaden it.
 
 ## Minimal user flows
 
-After the canonical build, run from the repository root:
+Build the coordinated engine and client together, then run from the repository
+root. Mixing binaries from different semantic generations is a handshake refusal:
 
 ```sh
-target/debug/spiling-cli geometry \
-  --scene fixtures/geometry/scenes/realistic-native.scene.json \
-  --section 0,0,6:0,0,1 --engine "$PWD/target/debug/spiling-engine"
+cargo build --locked -p spiling-engine -p spiling-cli
+target/debug/spiling-cli geometry --source fixtures/geometry/box-mm.step \
+  --section 0,0,4:0,0,1 --engine "$PWD/target/debug/spiling-engine"
+```
+
+Inspect `DefinitionDisplay` as well as the command status: an explicit unavailable
+display is not proof of a working mesh. The CLI validates transferred mesh and
+section payloads; raw inspection does not qualify manufacturing.
+
+The broader fitting/housing scene and hardware picking control remain separate:
+
+```sh
 node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \
   --scenario geometry --scene fixtures/geometry/scenes/realistic-native.scene.json \
   --port 9222
 ```
 
-The existing scene supplies fitting, housing and a repeated fitting occurrence.
-CLI inspection exercises native transfer/query paths; the desktop flow exercises
-visible geometry and picking with the hardware setup in development. Neither
-command is a manufacturing or packaged-platform qualification gate.
+A box CLI result does not qualify that scene, the desktop surface, physical
+printability or packaged platforms.

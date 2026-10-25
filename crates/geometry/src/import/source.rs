@@ -42,11 +42,15 @@ pub(super) fn capture(
         check_cancel(cancel)?;
         let source_face = info.face_id.step_entity();
         let (resolved, orientation) = resolve_face(entities, source_face)?;
-        let face = entities.records(resolved)?.iter().copied()
+        let face = entities
+            .records(resolved)?
+            .iter()
+            .copied()
             .find(|record| matches!(record.name.as_str(), "ADVANCED_FACE" | "FACE_SURFACE"))
             .ok_or_else(|| invalid("original face has no surface-use record"))?;
         let carrier_id = reference(at(face, 2)?)?;
-        let carrier = reader.surface(carrier_id)
+        let carrier = reader
+            .surface(carrier_id)
             .map_err(|cause| invalid(&format!("original surface #{carrier_id}: {cause}")))?;
         let mut captured = OriginalFaceSource {
             native_face,
@@ -61,25 +65,31 @@ pub(super) fn capture(
         for bound in list(at(face, 1)?)? {
             check_cancel(cancel)?;
             let bound_id = reference(bound)?;
-            let bound = entities.records(bound_id)?.iter().copied()
+            let bound = entities
+                .records(bound_id)?
+                .iter()
+                .copied()
                 .find(|record| matches!(record.name.as_str(), "FACE_BOUND" | "FACE_OUTER_BOUND"))
                 .ok_or_else(|| invalid("original face bound has no supported loop use"))?;
             let loop_id = reference(at(bound, 1)?)?;
             let mut wire = OriginalWireSource {
                 bound_id: StepEntityId(bound_id),
                 loop_id: StepEntityId(loop_id),
-                is_outer: bound.name == "FACE_OUTER_BOUND",
+                declared_outer: bound.name == "FACE_OUTER_BOUND",
                 forward: source_bool(at(bound, 2)?)?,
                 coedges: Vec::new(),
                 vertex_loop: None,
             };
-            if let Some(vertex_loop) = entities.records(loop_id)?.iter()
+            if let Some(vertex_loop) = entities
+                .records(loop_id)?
+                .iter()
                 .find(|record| record.name == "VERTEX_LOOP")
             {
                 let vertex_id = reference(at(vertex_loop, 1)?)?;
                 let vertex = entities.record(vertex_id, "VERTEX_POINT")?;
                 let point_id = reference(at(vertex, 1)?)?;
-                let point = reader.point(point_id)
+                let point = reader
+                    .point(point_id)
                     .map_err(|cause| invalid(&format!("original vertex #{vertex_id}: {cause}")))?;
                 wire.vertex_loop = Some((StepEntityId(vertex_id), point));
                 captured.wires.push(wire);
@@ -96,12 +106,14 @@ pub(super) fn capture(
                 for (slot, id) in vertex_points_mm.iter_mut().zip(vertex_ids) {
                     let vertex = entities.record(id, "VERTEX_POINT")?;
                     let point = reference(at(vertex, 1)?)?;
-                    *slot = reader.point(point)
+                    *slot = reader
+                        .point(point)
                         .map_err(|cause| invalid(&format!("original vertex #{id}: {cause}")))?;
                 }
                 let curve_id = reference(at(edge, 3)?)?;
-                let spatial_curve = reader.curve(curve_id)
-                    .map_err(|cause| invalid(&format!("original edge curve #{curve_id}: {cause}")))?;
+                let spatial_curve = reader.curve(curve_id).map_err(|cause| {
+                    invalid(&format!("original edge curve #{curve_id}: {cause}"))
+                })?;
                 let pcurves = original_pcurves(entities, curve_id, &spatial_curve, 0)?;
                 let index = result.coedges.len();
                 result.coedges.push(OriginalCoedgeSource {
@@ -129,7 +141,9 @@ pub(super) fn capture(
                 let end = current.vertex_ids[usize::from(current.forward)];
                 let start = next.vertex_ids[usize::from(!next.forward)];
                 if end != start {
-                    return Err(invalid("original EDGE_LOOP is not closed by vertex identity"));
+                    return Err(invalid(
+                        "original EDGE_LOOP is not closed by vertex identity",
+                    ));
                 }
             }
             captured.wires.push(wire);
@@ -145,7 +159,9 @@ pub(super) fn source_bool(parameter: &step_p21::ast::Parameter) -> Result<bool, 
     } else if enumeration(parameter, "F") {
         Ok(false)
     } else {
-        Err(invalid("original topology orientation is not a STEP boolean"))
+        Err(invalid(
+            "original topology orientation is not a STEP boolean",
+        ))
     }
 }
 
@@ -161,7 +177,9 @@ fn original_edge_use(entities: &Entities<'_>, original: u64) -> Result<(u64, boo
         forward = forward == source_bool(at(oriented, 4)?)?;
         id = reference(at(oriented, 3)?)?;
     }
-    Err(invalid("original oriented-edge nesting exceeds the source cap"))
+    Err(invalid(
+        "original oriented-edge nesting exceeds the source cap",
+    ))
 }
 
 fn original_pcurves(
@@ -171,26 +189,37 @@ fn original_pcurves(
     depth: usize,
 ) -> Result<Vec<OriginalPcurveSource>, GeometryError> {
     if depth > 32 {
-        return Err(invalid("original PCurve selector nesting exceeds the source cap"));
+        return Err(invalid(
+            "original PCurve selector nesting exceeds the source cap",
+        ));
     }
     if let Curve::Trimmed { basis, .. } = curve.as_ref() {
         let trimmed = entities.record(curve_id, "TRIMMED_CURVE")?;
         return original_pcurves(entities, reference(at(trimmed, 1)?)?, basis, depth + 1);
     }
     let Some(record) = entities.records(curve_id)?.iter().copied().find(|record| {
-        matches!(record.name.as_str(), "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE" | "BOUNDED_SURFACE_CURVE")
+        matches!(
+            record.name.as_str(),
+            "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE" | "BOUNDED_SURFACE_CURVE"
+        )
     }) else {
         return Ok(Vec::new());
     };
     let Curve::SurfaceCurve { associated, .. } = curve.as_ref() else {
-        return Err(invalid("original associated geometry lost its surface-curve operand"));
+        return Err(invalid(
+            "original associated geometry lost its surface-curve operand",
+        ));
     };
     let declarations = list(at(record, 2)?)?;
     if declarations.len() != associated.len() {
-        return Err(invalid("original associated-geometry census changed during decoding"));
+        return Err(invalid(
+            "original associated-geometry census changed during decoding",
+        ));
     }
     let mut result = Vec::new();
-    for (association_index, (declaration, operand)) in declarations.iter().zip(associated).enumerate() {
+    for (association_index, (declaration, operand)) in
+        declarations.iter().zip(associated).enumerate()
+    {
         let Associated::Pcurve(Pcurve { surface, curve }) = operand else {
             continue;
         };
@@ -201,7 +230,10 @@ fn original_pcurves(
             source_pcurve: StepEntityId(source_pcurve),
             carrier_id: StepEntityId(carrier_id),
             association_index,
-            operands: Pcurve { surface: Arc::clone(surface), curve: Arc::clone(curve) },
+            operands: Pcurve {
+                surface: Arc::clone(surface),
+                curve: Arc::clone(curve),
+            },
         });
     }
     Ok(result)

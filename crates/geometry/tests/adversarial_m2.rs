@@ -4,8 +4,8 @@
 
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use solidcore::geom::vector3d::{Point3, Vec3};
@@ -16,7 +16,7 @@ use solidcore::surface::plane::Plane as SolidPlane;
 use solidcore::surface::surface::p2::{Surface as SolidSurface, SurfaceKind};
 use spiling_contracts::geometry::{FaceId, GeometryErrorCode, PlaneMm};
 use spiling_geometry::parametric::*;
-use spiling_geometry::{from_step_bytes, GeometryWorkBudget};
+use spiling_geometry::{GeometryWorkBudget, from_step_bytes};
 
 fn fixture_path(rel_path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -440,9 +440,7 @@ fn test_adversarial_prepared_validated_curve_box_edges() {
             let mid_pt = prepared.evaluate(0.5, &mut work, &cancel).unwrap();
 
             // Evaluate enclosure jet
-            let enc = prepared
-                .jet([0.0, 1.0], &mut work, &cancel)
-                .unwrap();
+            let enc = prepared.jet([0.0, 1.0], &mut work, &cancel).unwrap();
 
             // Verify mid point is inside enclosure
             assert!(enc.position[0].contains(mid_pt.position[0]));
@@ -450,11 +448,21 @@ fn test_adversarial_prepared_validated_curve_box_edges() {
             assert!(enc.position[2].contains(mid_pt.position[2]));
 
             // Smoothness qualification
-            assert!(prepared.is_smooth_on([0.0, 1.0], &mut work, &cancel).unwrap());
+            assert!(
+                prepared
+                    .is_smooth_on([0.0, 1.0], &mut work, &cancel)
+                    .unwrap()
+            );
 
             // Projected jet along X axis
             let proj = prepared
-                .projected_jet([0.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], &mut work, &cancel)
+                .projected_jet(
+                    [0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    &mut work,
+                    &cancel,
+                )
                 .unwrap();
             assert!(proj.position.contains(mid_pt.position[0]));
         }
@@ -473,7 +481,9 @@ fn test_adversarial_coplane_classification() {
     // Carrier plane: Z = 50.0, normal = [0, 0, 1]
     let normal_vec = Vec3::new(0.0, 0.0, 1.0);
     let pt_vec = Point3::new(10.0, 20.0, 50.0);
-    let plane_surf = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(pt_vec, normal_vec)));
+    let plane_surf = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(
+        pt_vec, normal_vec,
+    )));
 
     // 1. Same normal, distance = 0
     let q_same = PlaneMm {
@@ -501,7 +511,16 @@ fn test_adversarial_coplane_classification() {
         normal: [0.0, 0.0, 1.0],
     };
     assert_eq!(
-        classify_face_coplane(true, &plane_surf, &q_parallel, 1e-5, 1e-4, &mut work, &cancel).unwrap(),
+        classify_face_coplane(
+            true,
+            &plane_surf,
+            &q_parallel,
+            1e-5,
+            1e-4,
+            &mut work,
+            &cancel
+        )
+        .unwrap(),
         CoplaneClassification::ParallelDisjoint
     );
 
@@ -520,7 +539,10 @@ fn test_adversarial_coplane_classification() {
     let eps_ang = 5e-6;
     let normal_pert = Vec3::new(eps_ang, 0.0, (1.0 - eps_ang * eps_ang).sqrt());
     let pt_pert = Point3::new(0.0, 0.0, 50.0 + 5e-5);
-    let plane_pert = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(pt_pert, normal_pert)));
+    let plane_pert = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(
+        pt_pert,
+        normal_pert,
+    )));
     assert_eq!(
         classify_face_coplane(true, &plane_pert, &q_same, 1e-5, 1e-4, &mut work, &cancel).unwrap(),
         CoplaneClassification::CoplanarSameNormal
@@ -528,7 +550,9 @@ fn test_adversarial_coplane_classification() {
 
     // 6. Outside positional tolerance (distance 2e-4 mm > 1e-4 mm) -> ParallelDisjoint
     let pt_far = Point3::new(0.0, 0.0, 50.0 + 2e-4);
-    let plane_far = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(pt_far, normal_vec)));
+    let plane_far = SolidSurface::new(SurfaceKind::Plane(SolidPlane::from_normal(
+        pt_far, normal_vec,
+    )));
     assert_eq!(
         classify_face_coplane(true, &plane_far, &q_same, 1e-5, 1e-4, &mut work, &cancel).unwrap(),
         CoplaneClassification::ParallelDisjoint

@@ -11,8 +11,8 @@ mod wall;
 pub(crate) use trim::{
     OriginalCoedgeBinding, OriginalCoedgeCorrespondence, OriginalCorrespondenceProvenance,
     OriginalSpanInventory, PreparedFaceTrimDomain, PreparedNativeTrimSource, PreparedTrimCurve,
-    PreparedTrimJoint, PreparedTrimSurface, SourceEndpointConnector, TrimClassification, TrimJointKind,
-    certified_curve2d_is_straight_regular,
+    PreparedTrimJoint, PreparedTrimSurface, SourceEndpointConnector, TrimClassification,
+    TrimJointKind, certified_curve2d_is_straight_regular,
 };
 
 use serde::{Deserialize, Serialize};
@@ -123,9 +123,7 @@ pub struct Definition {
     pub(crate) face_surface_maps: Vec<SurfaceParameterMap>,
     pub(crate) source_units_scale_to_mm: f64,
     pub(crate) original_source: source::OriginalSourceTopology,
-
 }
-
 
 /// Whole-source covering-chart authority. A pole graph does not prove a
 /// regular longitude inverse; its physical and UV bounds remain on the coedge.
@@ -148,7 +146,6 @@ impl SourceChartCertificate {
         matches!(self, Self::InverseOrExact)
     }
 }
-
 
 /// Source-relative realization recipe identity, independent of slabs, poses,
 /// adaptive proof cells and available work. This descriptor grants no collar
@@ -225,14 +222,17 @@ impl<'a> OriginalMaterialRealization<'a> {
     }
 }
 
-
 impl Definition {
     /// Zero transport is a coefficient theorem, not a small residual or a
     /// source-family assertion. This narrow lane also proves every original
     /// curve endpoint equals its actual normalized topology vertex.
-    pub(crate) fn material_transport_is_proved_zero(&self,
-    work: &mut crate::GeometryWorkBudget,
-    cancel: &std::sync::atomic::AtomicBool,) -> Result<bool, crate::GeometryError> { crate::analysis::certify_zero_material_transport(self, work, cancel) }
+    pub(crate) fn material_transport_is_proved_zero(
+        &self,
+        work: &mut crate::GeometryWorkBudget,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, crate::GeometryError> {
+        crate::analysis::certify_zero_material_transport(self, work, cancel)
+    }
     /// Prepares the actual retained native edge law. Original STEP operands have
     /// their own provider and must not be silently substituted for this binding.
     pub(crate) fn prepare_boundary_curve<'a>(
@@ -244,14 +244,22 @@ impl Definition {
         work: &mut crate::GeometryWorkBudget,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::parametric::PreparedValidatedCurve<'a>, crate::GeometryError> {
-        if !self.edge_curve(edge).is_some_and(|retained| std::ptr::eq(retained, curve)) {
+        if !self
+            .edge_curve(edge)
+            .is_some_and(|retained| std::ptr::eq(retained, curve))
+        {
             return Err(crate::GeometryError::new(
                 spiling_contracts::geometry::GeometryErrorCode::InvalidGeometry,
                 "prepared native curve is not the retained edge operand",
             ));
         }
         crate::parametric::PreparedValidatedCurve::new(
-            curve, [range.0, range.1], 1.0, remaining_bytes, work, cancel,
+            curve,
+            [range.0, range.1],
+            1.0,
+            remaining_bytes,
+            work,
+            cancel,
         )
     }
     pub fn id(&self) -> &DefinitionId {
@@ -286,7 +294,10 @@ impl Definition {
     }
     /// Zero-mutex borrow of a face's underlying surface.
     #[inline]
-    pub fn face_surface(&self, id: solidcore::FaceId) -> Option<&solidcore::surface::surface::Surface> {
+    pub fn face_surface(
+        &self,
+        id: solidcore::FaceId,
+    ) -> Option<&solidcore::surface::surface::Surface> {
         self.brep.face(id).ok().and_then(|f| f.surface.as_ref())
     }
 
@@ -359,7 +370,16 @@ impl Definition {
         total += self.brep.edges().len() * std::mem::size_of::<solidcore::topology::Edge>();
         total += self.brep.edgeuses().len() * std::mem::size_of::<solidcore::topology::Edgeuse>();
         total += self.brep.vertices().len() * std::mem::size_of::<solidcore::topology::Vertex>();
-        total += self.brep.vertexuses().len() * std::mem::size_of::<solidcore::topology::Vertexuse>();
+        total +=
+            self.brep.vertexuses().len() * std::mem::size_of::<solidcore::topology::Vertexuse>();
+        for (_, loop_) in self.brep.loops().iter() {
+            total = total.saturating_add(
+                loop_
+                    .edges
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<solidcore::topology::LoopEdge>()),
+            );
+        }
 
         // 2. Face Surfaces
         for (_, face) in self.brep.faces().iter() {
@@ -428,9 +448,7 @@ pub(crate) fn surface_owned_bytes(surface: &solidcore::surface::surface::Surface
         SurfaceKind::OffsetSurface(_) => {
             std::mem::size_of::<solidcore::surface::offset_surface::OffsetSurface>()
         }
-        SurfaceKind::Step(_) => {
-            std::mem::size_of::<solidcore::surface::surface::p1::StepSurface>()
-        }
+        SurfaceKind::Step(_) => std::mem::size_of::<solidcore::surface::surface::p1::StepSurface>(),
         SurfaceKind::SrfInVolume(_) => {
             std::mem::size_of::<solidcore::surface::srf_in_volume::SrfInVolume>()
         }
@@ -461,22 +479,14 @@ pub(crate) fn curve_owned_bytes(curve: &solidcore::curve::curve::Curve) -> usize
         CurveKind::Composite(_) => {
             std::mem::size_of::<solidcore::curve::composite_curve::CompositeCurve>()
         }
-        CurveKind::CrvOnSurf(_) => {
-            std::mem::size_of::<solidcore::curve::crv_on_surf::CrvOnSurf>()
-        }
-        CurveKind::Hyperbola(_) => {
-            std::mem::size_of::<solidcore::curve::hyperbola::Hyperbola>()
-        }
-        CurveKind::Parabola(_) => {
-            std::mem::size_of::<solidcore::curve::parabola::Parabola>()
-        }
+        CurveKind::CrvOnSurf(_) => std::mem::size_of::<solidcore::curve::crv_on_surf::CrvOnSurf>(),
+        CurveKind::Hyperbola(_) => std::mem::size_of::<solidcore::curve::hyperbola::Hyperbola>(),
+        CurveKind::Parabola(_) => std::mem::size_of::<solidcore::curve::parabola::Parabola>(),
         CurveKind::Projected(_) => {
             std::mem::size_of::<solidcore::curve::projected_curve::ProjectedCurve>()
         }
         CurveKind::Iso(_) => std::mem::size_of::<solidcore::curve::iso_curve::IsoCurve>(),
-        CurveKind::Offset(_) => {
-            std::mem::size_of::<solidcore::curve::offset_curve::OffsetCurve>()
-        }
+        CurveKind::Offset(_) => std::mem::size_of::<solidcore::curve::offset_curve::OffsetCurve>(),
         CurveKind::CrvInVolume(_) => {
             std::mem::size_of::<solidcore::curve::crv_in_volume::CrvInVolume>()
         }
@@ -508,7 +518,10 @@ mod zero_material_transport_tests {
     #[test]
     fn exact_normalized_box_endpoints_prove_zero_but_missing_receipt_cannot() {
         let cancel = AtomicBool::new(false);
-        let mut definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"), &cancel)
+        let mut definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+            &cancel,
+        )
         .unwrap();
         let mut work = crate::GeometryWorkBudget::new(1_000_000);
         assert!(

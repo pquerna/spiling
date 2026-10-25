@@ -330,23 +330,28 @@ pub(crate) fn source_transport_supports(
                 continue;
             }
             let (edge_use, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
-            let coedge = domain.coedges().get(use_.coedge).ok_or_else(|| {
-                unavailable("source support lost its original coedge binding")
-            })?;
+            let coedge = domain
+                .coedges()
+                .get(use_.coedge)
+                .ok_or_else(|| unavailable("source support lost its original coedge binding"))?;
             if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
-                return Err(unavailable("source support belongs to another original native use"));
+                return Err(unavailable(
+                    "source support belongs to another original native use",
+                ));
             }
             let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
-            let binding = correspondence.binding().ok_or_else(|| {
-                unavailable("source support lost its original native binding")
-            })?;
+            let binding = correspondence
+                .binding()
+                .ok_or_else(|| unavailable("source support lost its original native binding"))?;
             if binding.edge != edge_use.edge
                 || binding.owner != [use_.face, use_.wire, use_.index]
                 || binding.endpoints != edge.vertices
                 || binding.native_interval != [edge.interval.min(), edge.interval.max()]
                 || correspondence.spatial_range() != collar.range
             {
-                return Err(unavailable("source support collar has a different original spatial/native binding"));
+                return Err(unavailable(
+                    "source support collar has a different original spatial/native binding",
+                ));
             }
             let before = work.consumed();
             let surface = domain.surface_operand();
@@ -683,11 +688,7 @@ pub(crate) fn source_transport_projection_cover(
                 let domain = source.face_domain(use_.face, available, work, cancel)?;
                 let scratch = available;
                 let collar = OriginalCollar::for_enclosure_with_byte_limit(
-                    domain,
-                    use_,
-                    scratch,
-                    work,
-                    cancel,
+                    domain, use_, scratch, work, cancel,
                 )?
                 .ok_or_else(|| unavailable("actual-G ribbon has no complete original recipe"))?;
                 if matches!(collar.transport, CarrierTransport::Exact) {
@@ -699,7 +700,9 @@ pub(crate) fn source_transport_projection_cover(
                     unavailable("actual-G ribbon lost its original coedge binding")
                 })?;
                 if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
-                    return Err(unavailable("actual-G ribbon belongs to another original native use"));
+                    return Err(unavailable(
+                        "actual-G ribbon belongs to another original native use",
+                    ));
                 }
                 let mut central = [None; 2];
                 for exit in &exits {
@@ -728,9 +731,13 @@ pub(crate) fn source_transport_projection_cover(
                     || binding.native_interval != [edge.interval.min(), edge.interval.max()]
                     || correspondence.spatial_range() != collar.range
                 {
-                    return Err(unavailable("actual-G ribbon has a different original spatial/native binding"));
+                    return Err(unavailable(
+                        "actual-G ribbon has a different original spatial/native binding",
+                    ));
                 }
-                let provider_query_bytes = scratch.checked_add(EVALUATION_SCRATCH_BYTES).ok_or_else(resource)?;
+                let provider_query_bytes = scratch
+                    .checked_add(EVALUATION_SCRATCH_BYTES)
+                    .ok_or_else(resource)?;
                 domain.with_original_spatial_curve(
                     use_.coedge, provider_query_bytes, work, cancel,
                     |prepared, work, cancel| {
@@ -809,9 +816,7 @@ pub(crate) fn source_transport_projection_cover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::source_operand::{
-        PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
-    };
+    use crate::kernel::source_operand::{PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES};
 
     #[test]
     fn source_scalar_support_preserves_original_radian_surface_law() {
@@ -831,7 +836,8 @@ mod tests {
             SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
             &mut work,
             &cancel,
-        ).unwrap();
+        )
+        .unwrap();
         let angle = 0.73_f64;
         let (height, derivative) = scalar_surface_jet(
             &prepared,
@@ -839,7 +845,8 @@ mod tests {
             [1.0, 0.0, 0.0].map(Interval::point),
             &mut work,
             &cancel,
-        ).unwrap();
+        )
+        .unwrap();
         let expected = 3.0 + 2.0 * angle.cos();
         let expected_du = -2.0 * angle.sin();
         assert!(height.lo <= expected && expected <= height.hi);

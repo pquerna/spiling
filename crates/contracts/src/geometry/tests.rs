@@ -525,4 +525,3 @@ fn step_entity_and_section_ir_types_work() {
     let deserialized: SectionSpan2d = serde_json::from_str(&json).unwrap();
     assert_eq!(span, deserialized);
 }
-

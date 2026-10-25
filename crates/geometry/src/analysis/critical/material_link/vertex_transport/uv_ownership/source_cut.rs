@@ -260,7 +260,9 @@ impl UvJointComparison {
                     let (range, depth) = stack[pending];
                     work.charge(1, cancel)?;
                     let image = if own.is_some() {
-                        OriginalCollar::spatial_collar_overcover(domain, index, range, work, cancel)?
+                        OriginalCollar::spatial_collar_overcover(
+                            domain, index, range, work, cancel,
+                        )?
                     } else {
                         OriginalCollar::other_collar_overcover(domain, index, range, work, cancel)?
                     };
@@ -284,10 +286,7 @@ impl UvJointComparison {
             {
                 continue;
             }
-            if !disjoint(
-                envelope,
-                joint.enclosure,
-            ) {
+            if !disjoint(envelope, joint.enclosure) {
                 return Ok(false);
             }
         }

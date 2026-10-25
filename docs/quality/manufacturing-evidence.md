@@ -12,6 +12,12 @@ at one boundary does not qualify the next. The [protocol](../protocol/manufactur
 executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-material contract](../adr/004-native-geometry-parity.md) define authority.
 
+The **SolidCore development cutover is not manufacturing-qualified**. Material
+preparation currently requires actual declared source PCurves on the used
+carriers; missing evidence explicitly refuses instead of promoting generated
+native UV curves. Historical Monstertruck operator journeys below are the
+previous baseline, not transferred SolidCore qualification.
+
 ## Entry points and immutable capture
 
 - [`CompilerInput`, `compile`, `inspect_bundle`](../../crates/manufacturing/src/lib.rs)

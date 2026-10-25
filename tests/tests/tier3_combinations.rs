@@ -5,13 +5,13 @@
 //! Tier 3: Cross-Feature Combination Tests.
 //! 55 multi-feature interaction and pairwise tests covering complex CAD/CAM interplay.
 
+use spiling_contracts::geometry::*;
+use spiling_e2e_tests::fixtures::*;
+use spiling_e2e_tests::helpers::*;
+use spiling_geometry::*;
 use std::f64::consts::PI;
 use std::sync::atomic::AtomicBool;
 use std::thread;
-use spiling_contracts::geometry::*;
-use spiling_geometry::*;
-use spiling_e2e_tests::fixtures::*;
-use spiling_e2e_tests::helpers::*;
 
 // =========================================================================
 // 1. Multi-feature interplay: Cylinder + Section + Tessellation
@@ -51,9 +51,17 @@ fn test_comb_02_through_hole_section_loops_and_net_area() {
     assert_close(bounds.max[0], 20.0, 1e-3, "max x");
 
     let sec = section_at_z(&def, 4.0).expect("through-hole midplane section");
-    assert_eq!(sec.loops().len(), 2, "through-hole must have exactly 2 loops");
+    assert_eq!(
+        sec.loops().len(),
+        2,
+        "through-hole must have exactly 2 loops"
+    );
 
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let outer_area = areas[0];
     let hole_area = areas[1];
@@ -76,9 +84,17 @@ fn test_comb_03_tapered_fitting_multi_strata_oracle_z1() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered fitting import");
     let sec = section_at_z(&def, 1.0).expect("section at z=1.0");
-    assert_eq!(sec.loops().len(), 2, "tapered fitting must have 2 loops at z=1.0");
+    assert_eq!(
+        sec.loops().len(),
+        2,
+        "tapered fitting must have 2 loops at z=1.0"
+    );
 
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     // Oracle: 94.33504607029349
@@ -90,9 +106,17 @@ fn test_comb_04_tapered_fitting_multi_strata_oracle_z6() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered fitting import");
     let sec = section_at_z(&def, 6.0).expect("section at z=6.0");
-    assert_eq!(sec.loops().len(), 2, "tapered fitting must have 2 loops at z=6.0");
+    assert_eq!(
+        sec.loops().len(),
+        2,
+        "tapered fitting must have 2 loops at z=6.0"
+    );
 
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     // Oracle: 65.97344572538566
@@ -104,9 +128,17 @@ fn test_comb_05_tapered_fitting_multi_strata_oracle_z11() {
     let bytes = fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step");
     let def = import_test_step(&bytes).expect("tapered fitting import");
     let sec = section_at_z(&def, 11.0).expect("section at z=11.0");
-    assert_eq!(sec.loops().len(), 2, "tapered fitting must have 2 loops at z=11.0");
+    assert_eq!(
+        sec.loops().len(),
+        2,
+        "tapered fitting must have 2 loops at z=11.0"
+    );
 
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     // Oracle: 41.97516851046363
@@ -135,8 +167,16 @@ fn test_comb_07_narrow_pocket_floor_transition_above() {
     let def = import_test_step(&bytes).expect("narrow pocket import");
     // Pocket floor is at z=1.07. At z=1.1, above pocket floor, loop count is 2.
     let sec = section_at_z(&def, 1.1).expect("section at z=1.1");
-    assert_eq!(sec.loops().len(), 2, "narrow pocket above floor has 2 loops");
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    assert_eq!(
+        sec.loops().len(),
+        2,
+        "narrow pocket above floor has 2 loops"
+    );
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     // Oracle: 115.2 mm2
@@ -149,7 +189,11 @@ fn test_comb_08_narrow_pocket_slot_width_geometry() {
     let def = import_test_step(&bytes).expect("narrow pocket import");
     let sec = section_at_z(&def, 5.0).expect("section at z=5.0");
     assert_eq!(sec.loops().len(), 2, "narrow pocket at z=5.0 has 2 loops");
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     assert_close(net_area, 115.2, 0.5, "narrow pocket z=5.0 net area");
@@ -185,7 +229,10 @@ fn test_comb_10_ribbed_bracket_t_junction_section() {
     let def = import_test_step(&bytes).expect("ribbed bracket import");
     // Slicing across ribs at z=3.0
     let sec = section_at_z(&def, 3.0).expect("section at z=3.0");
-    assert!(!sec.loops().is_empty(), "ribbed bracket mid section has loops");
+    assert!(
+        !sec.loops().is_empty(),
+        "ribbed bracket mid section has loops"
+    );
     let mesh = tessellate_display(&def).expect("ribbed bracket mesh");
     assert!(mesh.vertex_positions.len() >= 100);
 }
@@ -220,7 +267,11 @@ fn test_comb_13_rounded_housing_section_z4_16() {
     let def = import_test_step(&bytes).expect("rounded housing import");
     let sec = section_at_z(&def, 4.16).expect("section at z=4.16");
     assert_eq!(sec.loops().len(), 2, "loop count at z=4.16");
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     assert_close(net_area, 400.2920, 1.0, "rounded housing z=4.16 net area");
@@ -232,7 +283,11 @@ fn test_comb_14_rounded_housing_section_z9_5() {
     let def = import_test_step(&bytes).expect("rounded housing import");
     let sec = section_at_z(&def, 9.5).expect("section at z=9.5");
     assert_eq!(sec.loops().len(), 2, "loop count at z=9.5");
-    let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area = areas[0] - areas[1];
     assert_close(net_area, 347.1790, 1.0, "rounded housing z=9.5 net area");
@@ -253,7 +308,11 @@ fn test_comb_15_spline_housing_multi_strata_oracle() {
 
     let sec1 = section_at_z(&def, 9.5).expect("section at z=9.5");
     assert_eq!(sec1.loops().len(), 2);
-    let mut areas: Vec<f64> = sec1.loops().iter().map(|lp| loop_area(&sec1, lp).abs()).collect();
+    let mut areas: Vec<f64> = sec1
+        .loops()
+        .iter()
+        .map(|lp| loop_area(&sec1, lp).abs())
+        .collect();
     areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
     let net_area1 = areas[0] - areas[1];
     assert_close(net_area1, 347.1790, 1.5, "spline housing z=9.5 net area");
@@ -282,7 +341,11 @@ fn test_comb_17_perforated_plate_midplane_loops_and_area() {
     let def = import_test_step(&bytes).expect("perforated plate import");
     let sec = section_at_z(&def, 10.0).expect("section at z=10.0");
     // 1 outer loop + 512 hole loops = 513 loops
-    assert_eq!(sec.loops().len(), 513, "perforated plate must have 513 loops");
+    assert_eq!(
+        sec.loops().len(),
+        513,
+        "perforated plate must have 513 loops"
+    );
 
     let mut outer_area = 0.0f64;
     let mut hole_area_sum = 0.0f64;
@@ -298,7 +361,12 @@ fn test_comb_17_perforated_plate_midplane_loops_and_area() {
     assert_close(outer_area, 1640.0 * 840.0, 1000.0, "outer perimeter area");
     let expected_single_hole = PI * 20.0 * 20.0;
     let expected_holes_total = 512.0 * expected_single_hole;
-    assert_close(hole_area_sum, expected_holes_total, 2000.0, "512 holes area");
+    assert_close(
+        hole_area_sum,
+        expected_holes_total,
+        2000.0,
+        "512 holes area",
+    );
 }
 
 // =========================================================================
@@ -339,9 +407,16 @@ fn test_comb_19_determinism_step_import_and_tessellation() {
     let m1 = tessellate_display(&def1).expect("m1");
     let m2 = tessellate_display(&def2).expect("m2");
 
-    assert_eq!(m1.vertex_positions.len(), m2.vertex_positions.len(), "vertex count");
+    assert_eq!(
+        m1.vertex_positions.len(),
+        m2.vertex_positions.len(),
+        "vertex count"
+    );
     assert_eq!(m1.indices.len(), m2.indices.len(), "index count");
-    assert_eq!(m1.vertex_positions, m2.vertex_positions, "vertex positions bitwise identical");
+    assert_eq!(
+        m1.vertex_positions, m2.vertex_positions,
+        "vertex positions bitwise identical"
+    );
 }
 
 // =========================================================================
@@ -356,7 +431,10 @@ fn test_comb_20_work_budget_monotony_import_and_section() {
     let cancel = AtomicBool::new(false);
     let initial = budget.consumed();
 
-    let plane = PlaneMm { origin_mm: [0.0, 0.0, 4.0], normal: [0.0, 0.0, 1.0] };
+    let plane = PlaneMm {
+        origin_mm: [0.0, 0.0, 4.0],
+        normal: [0.0, 0.0, 1.0],
+    };
     let _sec = section_with_budget(&def, plane, &mut budget, &cancel).expect("sec");
     assert!(budget.consumed() > initial, "budget consumed must increase");
 }
@@ -367,7 +445,10 @@ fn test_comb_21_work_budget_exhaustion_graceful_error() {
     let def = import_test_step(&bytes).expect("cylinder");
     let mut budget = GeometryWorkBudget::new(0); // zero budget
     let cancel = AtomicBool::new(false);
-    let plane = PlaneMm { origin_mm: [0.0, 0.0, 4.0], normal: [0.0, 0.0, 1.0] };
+    let plane = PlaneMm {
+        origin_mm: [0.0, 0.0, 4.0],
+        normal: [0.0, 0.0, 1.0],
+    };
     let res = section_with_budget(&def, plane, &mut budget, &cancel);
     assert!(res.is_err(), "must fail on zero budget");
 }
@@ -381,7 +462,10 @@ fn test_comb_22_cooperative_cancellation_during_section() {
     let bytes = fixture_bytes("perforated-plate.step");
     let def = import_test_step(&bytes).expect("plate");
     let cancel = AtomicBool::new(true); // already cancelled
-    let plane = PlaneMm { origin_mm: [0.0, 0.0, 10.0], normal: [0.0, 0.0, 1.0] };
+    let plane = PlaneMm {
+        origin_mm: [0.0, 0.0, 10.0],
+        normal: [0.0, 0.0, 1.0],
+    };
     let res = section(&def, plane, &cancel);
     assert!(res.is_err(), "must abort when cancelled");
 }
@@ -395,7 +479,10 @@ fn test_comb_23_provenance_preservation_across_pipeline() {
     let bytes = fixture_bytes("independent-exporters/occt-cylinder-mm.step");
     let def = import_test_step(&bytes).expect("cyl");
     let prov = def.provenance();
-    assert!(!prov.source_hash.is_empty(), "source hash must be populated");
+    assert!(
+        !prov.source_hash.is_empty(),
+        "source hash must be populated"
+    );
     assert_eq!(prov.source_unit, "millimetre");
 }
 
@@ -425,12 +512,28 @@ fn test_comb_25_multi_axis_slicing_box_mm() {
     assert_close(az, 200.0, 0.5, "z area");
 
     // X-slice at x=10 (10x8 = 80)
-    let sx = section(&def, PlaneMm { origin_mm: [10.0, 0.0, 0.0], normal: [1.0, 0.0, 0.0] }, &AtomicBool::new(false)).expect("sx");
+    let sx = section(
+        &def,
+        PlaneMm {
+            origin_mm: [10.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        },
+        &AtomicBool::new(false),
+    )
+    .expect("sx");
     let ax = loop_area(&sx, &sx.loops()[0]).abs();
     assert_close(ax, 80.0, 0.5, "x area");
 
     // Y-slice at y=5 (20x8 = 160)
-    let sy = section(&def, PlaneMm { origin_mm: [0.0, 5.0, 0.0], normal: [0.0, 1.0, 0.0] }, &AtomicBool::new(false)).expect("sy");
+    let sy = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 5.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+        },
+        &AtomicBool::new(false),
+    )
+    .expect("sy");
     let ay = loop_area(&sy, &sy.loops()[0]).abs();
     assert_close(ay, 160.0, 0.5, "y area");
 }
@@ -466,9 +569,23 @@ fn test_comb_27_coplanar_boundary_face_slicing() {
 fn test_comb_28_coplanar_side_face_slicing() {
     let bytes = fixture_bytes("box-mm.step");
     let def = import_test_step(&bytes).expect("box");
-    let res_x0 = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [1.0, 0.0, 0.0] }, &AtomicBool::new(false));
+    let res_x0 = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        },
+        &AtomicBool::new(false),
+    );
     assert!(res_x0.is_ok());
-    let res_x20 = section(&def, PlaneMm { origin_mm: [20.0, 0.0, 0.0], normal: [1.0, 0.0, 0.0] }, &AtomicBool::new(false));
+    let res_x20 = section(
+        &def,
+        PlaneMm {
+            origin_mm: [20.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        },
+        &AtomicBool::new(false),
+    );
     assert!(res_x20.is_ok());
 }
 
@@ -476,7 +593,14 @@ fn test_comb_28_coplanar_side_face_slicing() {
 fn test_comb_29_tangent_plane_slicing_cylinder() {
     let bytes = fixture_bytes("cylinder.step");
     let def = import_test_step(&bytes).expect("cyl");
-    let res = section(&def, PlaneMm { origin_mm: [5.0, 0.0, 0.0], normal: [1.0, 0.0, 0.0] }, &AtomicBool::new(false));
+    let res = section(
+        &def,
+        PlaneMm {
+            origin_mm: [5.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        },
+        &AtomicBool::new(false),
+    );
     assert!(res.is_ok(), "tangent plane slice must not crash");
 }
 
@@ -511,7 +635,10 @@ fn test_comb_32_tessellate_profile_resolution_scaling() {
     let cancel = AtomicBool::new(false);
     let m_coarse = tessellate(&def, DisplayProfile::MeshTrimmedMm05V2, &cancel).expect("coarse");
     let m_fine = tessellate(&def, DisplayProfile::MeshTrimmedMm005V2, &cancel).expect("fine");
-    assert!(m_fine.vertex_positions.len() >= m_coarse.vertex_positions.len(), "fine mesh has >= vertices");
+    assert!(
+        m_fine.vertex_positions.len() >= m_coarse.vertex_positions.len(),
+        "fine mesh has >= vertices"
+    );
 }
 
 #[test]
@@ -602,10 +729,18 @@ fn test_comb_39_taper_area_monotonic_decrease() {
     for step in 1..=10 {
         let z = step as f64;
         let sec = section_at_z(&def, z).expect("slice");
-        let mut areas: Vec<f64> = sec.loops().iter().map(|lp| loop_area(&sec, lp).abs()).collect();
+        let mut areas: Vec<f64> = sec
+            .loops()
+            .iter()
+            .map(|lp| loop_area(&sec, lp).abs())
+            .collect();
         areas.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let outer = areas[0];
-        assert!(outer < prev_area, "outer area at z={z} must be strictly less than at z={}", z - 1.0);
+        assert!(
+            outer < prev_area,
+            "outer area at z={z} must be strictly less than at z={}",
+            z - 1.0
+        );
         prev_area = outer;
     }
 }
@@ -658,15 +793,17 @@ fn test_comb_43_thread_safe_concurrent_sections() {
     let bytes = fixture_bytes("box-mm.step");
     let def = Arc::new(import_test_step(&bytes).expect("box"));
 
-    let handles: Vec<_> = (1..=4).map(|i| {
-        let def_clone = Arc::clone(&def);
-        thread::spawn(move || {
-            let z = (i as f64) * 1.5;
-            let sec = section_at_z(&def_clone, z).expect("concurrent sec");
-            let area = loop_area(&sec, &sec.loops()[0]).abs();
-            assert_close(area, 200.0, 0.5, "concurrent area");
+    let handles: Vec<_> = (1..=4)
+        .map(|i| {
+            let def_clone = Arc::clone(&def);
+            thread::spawn(move || {
+                let z = (i as f64) * 1.5;
+                let sec = section_at_z(&def_clone, z).expect("concurrent sec");
+                let area = loop_area(&sec, &sec.loops()[0]).abs();
+                assert_close(area, 200.0, 0.5, "concurrent area");
+            })
         })
-    }).collect();
+        .collect();
 
     for h in handles {
         h.join().expect("thread join");
@@ -679,13 +816,15 @@ fn test_comb_44_thread_safe_concurrent_tessellation() {
     let bytes = fixture_bytes("independent-exporters/occt-cylinder-mm.step");
     let def = Arc::new(import_test_step(&bytes).expect("cyl"));
 
-    let handles: Vec<_> = (0..3).map(|_| {
-        let def_clone = Arc::clone(&def);
-        thread::spawn(move || {
-            let mesh = tessellate_display(&def_clone).expect("tessellate");
-            assert!(!mesh.vertex_positions.is_empty());
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            let def_clone = Arc::clone(&def);
+            thread::spawn(move || {
+                let mesh = tessellate_display(&def_clone).expect("tessellate");
+                assert!(!mesh.vertex_positions.is_empty());
+            })
         })
-    }).collect();
+        .collect();
 
     for h in handles {
         h.join().expect("thread join");
@@ -701,7 +840,10 @@ fn test_comb_45_adversarial_rejection_suite() {
     for &(fixture_name, _expected_err) in ALL_ADVERSARIAL_FIXTURES {
         let bytes = fixture_bytes(fixture_name);
         let res = import_test_step(&bytes);
-        assert!(res.is_err(), "adversarial fixture {fixture_name} must be rejected");
+        assert!(
+            res.is_err(),
+            "adversarial fixture {fixture_name} must be rejected"
+        );
     }
 }
 
@@ -710,7 +852,10 @@ fn test_comb_46_unsupported_nurbs_fixture_acceptance() {
     let bytes = fixture_bytes("unsupported-nurbs.step");
     let res = import_test_step(&bytes);
     // As per manifest.json, unsupported-nurbs.step is accepted under solidcore kernel
-    assert!(res.is_ok(), "unsupported-nurbs.step is supported under RFC 07");
+    assert!(
+        res.is_ok(),
+        "unsupported-nurbs.step is supported under RFC 07"
+    );
 }
 
 // =========================================================================
@@ -754,9 +899,21 @@ fn test_comb_50_display_mesh_triangle_area_positivity() {
             let i0 = tri[0] as usize * 3;
             let i1 = tri[1] as usize * 3;
             let i2 = tri[2] as usize * 3;
-            let v0 = [mesh.vertex_positions[i0], mesh.vertex_positions[i0 + 1], mesh.vertex_positions[i0 + 2]];
-            let v1 = [mesh.vertex_positions[i1], mesh.vertex_positions[i1 + 1], mesh.vertex_positions[i1 + 2]];
-            let v2 = [mesh.vertex_positions[i2], mesh.vertex_positions[i2 + 1], mesh.vertex_positions[i2 + 2]];
+            let v0 = [
+                mesh.vertex_positions[i0],
+                mesh.vertex_positions[i0 + 1],
+                mesh.vertex_positions[i0 + 2],
+            ];
+            let v1 = [
+                mesh.vertex_positions[i1],
+                mesh.vertex_positions[i1 + 1],
+                mesh.vertex_positions[i1 + 2],
+            ];
+            let v2 = [
+                mesh.vertex_positions[i2],
+                mesh.vertex_positions[i2 + 1],
+                mesh.vertex_positions[i2 + 2],
+            ];
 
             let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
             let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
@@ -791,7 +948,10 @@ fn test_comb_52_loop_vertex_winding_orientation() {
     // Outer loop should have positive area, inner hole should have negative area (or vice versa depending on convention)
     let a0 = loop_area(&sec, &sec.loops()[0]);
     let a1 = loop_area(&sec, &sec.loops()[1]);
-    assert!(a0 * a1 < 0.0, "outer and inner loops must have opposite winding signs");
+    assert!(
+        a0 * a1 < 0.0,
+        "outer and inner loops must have opposite winding signs"
+    );
 }
 
 #[test]
@@ -817,9 +977,21 @@ fn test_comb_54_total_surface_area_estimation() {
             let i0 = tri[0] as usize * 3;
             let i1 = tri[1] as usize * 3;
             let i2 = tri[2] as usize * 3;
-            let v0 = [mesh.vertex_positions[i0], mesh.vertex_positions[i0 + 1], mesh.vertex_positions[i0 + 2]];
-            let v1 = [mesh.vertex_positions[i1], mesh.vertex_positions[i1 + 1], mesh.vertex_positions[i1 + 2]];
-            let v2 = [mesh.vertex_positions[i2], mesh.vertex_positions[i2 + 1], mesh.vertex_positions[i2 + 2]];
+            let v0 = [
+                mesh.vertex_positions[i0],
+                mesh.vertex_positions[i0 + 1],
+                mesh.vertex_positions[i0 + 2],
+            ];
+            let v1 = [
+                mesh.vertex_positions[i1],
+                mesh.vertex_positions[i1 + 1],
+                mesh.vertex_positions[i1 + 2],
+            ];
+            let v2 = [
+                mesh.vertex_positions[i2],
+                mesh.vertex_positions[i2 + 1],
+                mesh.vertex_positions[i2 + 2],
+            ];
             let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
             let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
             let cp = [

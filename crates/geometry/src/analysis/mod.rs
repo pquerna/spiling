@@ -12,9 +12,9 @@ mod planar;
 mod slab;
 pub(crate) mod source_incidence;
 pub(crate) mod source_restriction;
-mod voids;
 #[cfg(test)]
 pub(crate) mod test_source;
+mod voids;
 
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, check_cancel};
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
@@ -30,18 +30,17 @@ pub use critical::CriticalEventNeighborhood;
 pub(crate) use critical::PreparedSourceVertexPlans;
 pub use joint::{
     CompletedNativeUnionProofSet, EndpointOwnershipRequest, NativeCriticalCollarIncidence,
-    NativeInterfaceAttachment, NativeOwnedEndpoint, NativeSourceLeafProofKind,
-    NativeInnerMaterialPrism,
-    NativeSourceLeafReceipt, NativeUnionBindingLedger, NativeUnionBoundaryEdge,
-    NativeUnionBoundarySource, NativeUnionCoverage, NativeUnionOccurrence,
+    NativeInnerMaterialPrism, NativeInterfaceAttachment, NativeOwnedEndpoint,
+    NativeSourceLeafProofKind, NativeSourceLeafReceipt, NativeUnionBindingLedger,
+    NativeUnionBoundaryEdge, NativeUnionBoundarySource, NativeUnionCoverage, NativeUnionOccurrence,
     NativeUnionOccurrenceEvidence, NativeUnionPolicy, NativeUnionProofKind,
     NativeUnionSourceCapture, PendingNativeUnionProof, SourceLeafRequest,
     certify_endpoint_ownership, certify_endpoint_stratum_ownership,
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub use material_source::{PreparedSolid, prepare_solid};
 pub(crate) use material_source::{MaterialSourceView, certify_zero_material_transport};
+pub use material_source::{PreparedSolid, prepare_solid};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
     placed_material_bounds,
@@ -567,7 +566,6 @@ impl SlabAnalysis {
             .map(|capture| capture.native_shape_error_mm)
     }
 }
-
 
 #[cfg(test)]
 mod work_tests {

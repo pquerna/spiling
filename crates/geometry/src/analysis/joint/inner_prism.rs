@@ -250,37 +250,112 @@ mod tests {
         let mut work = GeometryWorkBudget::new(128_000_000);
         let definition = crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"), &cancel).unwrap();
-        let occurrence: spiling_contracts::geometry::OccurrenceRecord = serde_json::from_slice(include_bytes!(
-            "../../../../../fixtures/manufacturing/rounded-housing-bed-occurrence.json")).unwrap();
-        let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &mut work, &cancel).unwrap();
+        let occurrence: spiling_contracts::geometry::OccurrenceRecord =
+            serde_json::from_slice(include_bytes!(
+                "../../../../../fixtures/manufacturing/rounded-housing-bed-occurrence.json"
+            ))
+            .unwrap();
+        let prepared = crate::prepare_solid(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let interval = [8.014650488771121, 8.311510884034451];
         let sample = 8.163080686402786;
-        let analysis = prepared.analyze_placed_slab(&crate::PlacedSlabRequest {
-            pose: occurrence.pose, world_height_interval_mm: interval,
-            sample_world_z_mm: sample, native_shape_error_mm: 0.1,
-        }, crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(), &mut work, &cancel).unwrap();
-        assert_eq!(analysis.section.loops.iter().filter(|boundary| boundary.is_hole).count(), 1);
+        let analysis = prepared
+            .analyze_placed_slab(
+                &crate::PlacedSlabRequest {
+                    pose: occurrence.pose,
+                    world_height_interval_mm: interval,
+                    sample_world_z_mm: sample,
+                    native_shape_error_mm: 0.1,
+                },
+                crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(),
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(
+            analysis
+                .section
+                .loops
+                .iter()
+                .filter(|boundary| boundary.is_hole)
+                .count(),
+            1
+        );
         let actual = &analysis.section.loops;
-        let leaf = certify_native_source_leaf(&SourceLeafRequest {
-            source: &prepared, occurrence_id: &occurrence.occurrence_id, pose: occurrence.pose,
-            analysis: &analysis, actual_used_source_loops: actual,
-            policy: NativeUnionPolicy { candidate_coordinate_error_mm: 0.0 },
-        }, &mut work, &cancel).unwrap();
-        let prism = leaf.capture_constant_inner_prism().expect("complete closed source radial material authority");
-        let candidate = |min: [f64; 2], max: [f64; 2]| vec![SectionLoopMm {
-            is_hole: false, points_mm: vec![
-                [min[0], min[1], sample], [max[0], min[1], sample],
-                [max[0], max[1], sample], [min[0], max[1], sample], [min[0], min[1], sample],
-            ],
-        }];
+        let leaf = certify_native_source_leaf(
+            &SourceLeafRequest {
+                source: &prepared,
+                occurrence_id: &occurrence.occurrence_id,
+                pose: occurrence.pose,
+                analysis: &analysis,
+                actual_used_source_loops: actual,
+                policy: NativeUnionPolicy {
+                    candidate_coordinate_error_mm: 0.0,
+                },
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let prism = leaf
+            .capture_constant_inner_prism()
+            .expect("complete closed source radial material authority");
+        let candidate = |min: [f64; 2], max: [f64; 2]| {
+            vec![SectionLoopMm {
+                is_hole: false,
+                points_mm: vec![
+                    [min[0], min[1], sample],
+                    [max[0], min[1], sample],
+                    [max[0], max[1], sample],
+                    [min[0], max[1], sample],
+                    [min[0], min[1], sample],
+                ],
+            }]
+        };
         let shift = occurrence.pose.translation_mm;
-        let inside = candidate([shift[0] + 4., shift[1] + 4.], [shift[0] + 7., shift[1] + 7.]);
-        let hole = candidate([shift[0] + 11., shift[1] + 8.], [shift[0] + 13., shift[1] + 10.]);
-        assert!(prism.certify_region(&leaf.source, actual, &inside, interval, 0.225,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(), &mut work, &cancel).unwrap().is_some());
-        assert!(prism.certify_region(&leaf.source, actual, &hole, interval, 0.225,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(), &mut work, &cancel).unwrap().is_none());
+        let inside = candidate(
+            [shift[0] + 4., shift[1] + 4.],
+            [shift[0] + 7., shift[1] + 7.],
+        );
+        let hole = candidate(
+            [shift[0] + 11., shift[1] + 8.],
+            [shift[0] + 13., shift[1] + 10.],
+        );
+        assert!(
+            prism
+                .certify_region(
+                    &leaf.source,
+                    actual,
+                    &inside,
+                    interval,
+                    0.225,
+                    crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(),
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            prism
+                .certify_region(
+                    &leaf.source,
+                    actual,
+                    &hole,
+                    interval,
+                    0.225,
+                    crate::MAX_PREPARED_SECTION_SOURCE_BYTES - prepared.retained_bytes(),
+                    &mut work,
+                    &cancel
+                )
+                .unwrap()
+                .is_none()
+        );
         assert!(work.consumed() <= 128_000_000);
     }
 

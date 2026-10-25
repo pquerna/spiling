@@ -111,9 +111,9 @@ impl FiberSearchJet {
                     || jets[2].position.hi < fiber.min_forward
                     || !overlaps(jets[3].position, restriction.request.height_interval_mm)
             }
-            Self::Spatial(jet) => fiber_image_excluded(
-                fiber, jet.position, restriction.height, restriction.request,
-            ),
+            Self::Spatial(jet) => {
+                fiber_image_excluded(fiber, jet.position, restriction.height, restriction.request)
+            }
         }
     }
 
@@ -340,7 +340,11 @@ fn census_original_fiber(
                 // original C0 span. Subdivision cannot manufacture C1 authority.
                 let smooth = surface_parameter_span_smooth(surface, span, work, cancel)?;
                 let mut pending = 1_usize;
-                stack[0] = Some(FiberCell { uv: span, depth: 0, trim_inside: false });
+                stack[0] = Some(FiberCell {
+                    uv: span,
+                    depth: 0,
+                    trim_inside: false,
+                });
                 while pending != 0 {
                     work.charge(1, cancel)?;
                     pending -= 1;
@@ -357,13 +361,24 @@ fn census_original_fiber(
                     // need no full spatial/Hessian jet on every search cell.
                     // Original C1 qualification remains mandatory below.
                     let jet = fiber_search_jet(
-                        surface, cell.uv, smooth, fiber, restriction.height, work, cancel,
+                        surface,
+                        cell.uv,
+                        smooth,
+                        fiber,
+                        restriction.height,
+                        work,
+                        cancel,
                     );
                     let jet = match jet {
                         Ok(jet) => jet,
-                        Err(error) if matches!(error.code,
-                            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
-                        ) => return Err(error),
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                            ) =>
+                        {
+                            return Err(error);
+                        }
                         Err(error) => {
                             // Preserve the former trim-first behavior for a
                             // carrier pole/interface wholly outside original F.
@@ -371,7 +386,10 @@ fn census_original_fiber(
                             // or discarded by this optional exclusion query.
                             phase = "failed original carrier trim exclusion";
                             let classification = domain.classify_with_byte_limit(
-                                cell.uv, domain_bytes, work, cancel,
+                                cell.uv,
+                                domain_bytes,
+                                work,
+                                cancel,
                             );
                             if classification? == TrimClassification::Outside {
                                 continue;
@@ -389,9 +407,8 @@ fn census_original_fiber(
                     let mut trim_inside = cell.trim_inside;
                     if !trim_inside {
                         phase = "original root trim classification";
-                        let classification = domain.classify_with_byte_limit(
-                            cell.uv, domain_bytes, work, cancel,
-                        );
+                        let classification =
+                            domain.classify_with_byte_limit(cell.uv, domain_bytes, work, cancel);
                         match classification? {
                             TrimClassification::Outside => continue,
                             TrimClassification::Inside => trim_inside = true,
@@ -403,7 +420,12 @@ fn census_original_fiber(
                     }
                     phase = "uniform affine-family Krawczyk root";
                     let root = fiber_krawczyk_jacobian(
-                        surface, cell.uv, jet.jacobian(fiber), fiber, work, cancel,
+                        surface,
+                        cell.uv,
+                        jet.jacobian(fiber),
+                        fiber,
+                        work,
+                        cancel,
                     );
                     match root? {
                         FiberNewton::Excluded => continue,
@@ -629,8 +651,12 @@ pub(super) fn fiber_krawczyk(
     cancel: &AtomicBool,
 ) -> Result<FiberNewton, GeometryError> {
     fiber_krawczyk_jacobian(
-        surface, uv, fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]),
-        fiber, work, cancel,
+        surface,
+        uv,
+        fiber.rows.map(|row| [dot(row, jet.du), dot(row, jet.dv)]),
+        fiber,
+        work,
+        cancel,
     )
 }
 
@@ -665,7 +691,11 @@ fn fiber_krawczyk_jacobian(
     }
     let center = uv.map(|v| v[0] * 0.5 + v[1] * 0.5);
     let at_center = surface_functional_enclosures(
-        surface, center.map(|v| [v, v]), &fiber_equations(fiber), work, cancel,
+        surface,
+        center.map(|v| [v, v]),
+        &fiber_equations(fiber),
+        work,
+        cancel,
     )?;
     let value = at_center.map(|jet| jet.position);
     let remainder: [[Interval; 2]; 2] = std::array::from_fn(|i| {
@@ -770,9 +800,9 @@ fn qualify_fiber_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solidcore::{Point3, Vec3};
     use solidcore::geom::{extent2d::Extent2d, vector2d::Vec2};
     use solidcore::surface::{plane::Plane, surface::p2::SurfaceKind};
+    use solidcore::{Point3, Vec3};
 
     fn affine_surface() -> Surface {
         Surface::new(SurfaceKind::Plane(Plane::new(
@@ -786,10 +816,10 @@ mod tests {
 
     #[test]
     fn captured_original_radian_carrier_keeps_its_physical_fiber_root() {
-        use crate::kernel::trim::PreparedTrimSurface;
         use crate::kernel::source_operand::{
             PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
         };
+        use crate::kernel::trim::PreparedTrimSurface;
         let source = solidcraft_step::geom::Surface::Cylinder {
             position: solidcraft_step::geom::Placement {
                 origin: [0.0; 3],
@@ -802,8 +832,13 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let prepared = PreparedOriginalSurface::new(
-            &source, uv, SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024, &mut work, &cancel,
-        ).unwrap();
+            &source,
+            uv,
+            SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let operand = PreparedTrimSurface::Original(&prepared);
         let jet = surface_enclosure(&operand, uv, &mut work, &cancel).unwrap();
         let cell = super::super::BoundaryCell {
@@ -992,8 +1027,12 @@ mod tests {
             let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
             let mut work = GeometryWorkBudget::new(100_000_000);
             let owner = crate::analysis::material_source::prepare_solid(
-                &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
-            ).unwrap();
+                &definition,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             let source = owner.source_view().unwrap();
             let fiber = fiber([1.23456789, 2.34567891, 2.0]);
             assert!(
@@ -1040,8 +1079,12 @@ mod tests {
         request.height_interval_mm = [-100.0, 100.0];
         let mut work = GeometryWorkBudget::new(100_000_000);
         let owner = crate::analysis::material_source::prepare_solid(
-            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         assert!(
             original_fiber_degree_one(
                 owner.source_view().unwrap(),
@@ -1068,9 +1111,12 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
         let owner = crate::analysis::material_source::prepare_solid(
-            &definition, MAX_SCRATCH_BYTES,
-            &mut GeometryWorkBudget::new(100_000_000), &cancel,
-        ).unwrap();
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut GeometryWorkBudget::new(100_000_000),
+            &cancel,
+        )
+        .unwrap();
         let source = owner.source_view().unwrap();
         let fiber = fiber([1.25, 2.25, 2.0]);
         let mut work = GeometryWorkBudget::new(100);
@@ -1242,8 +1288,12 @@ mod tests {
         };
         let mut work = GeometryWorkBudget::new(100_000_000);
         let owner = crate::analysis::material_source::prepare_solid(
-            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let census = original_cylinder_fiber_census(
             owner.source_view().unwrap(),
             &ray,

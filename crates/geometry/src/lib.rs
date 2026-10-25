@@ -27,23 +27,22 @@ pub use analysis::{
     MaterialProjectedBounds, NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar,
     NativeCriticalCollarCell, NativeCriticalCollarIncidence, NativeCriticalCollarMaterialTarget,
     NativeCriticalCollarPolicy, NativeCriticalCollarTarget, NativeCriticalCollarTargetSide,
-    NativeEndpointStratum, NativeInterfaceAttachment, NativeOwnedEndpoint, NativeProjectedVoids,
-    NativeInnerMaterialPrism,
-    NativeProtectedVoidEnvelope, NativeSourceLeafProofKind, NativeSourceLeafReceipt,
-    NativeUnionBindingLedger, NativeUnionBoundaryEdge, NativeUnionBoundarySource,
-    NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
-    NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
-    PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
-    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedSolid,
-    ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy,
-    SlabAnalysis, SlabRequest, SourceLeafRequest, analyze_height_domain,
-    analyze_placed_height_domain, capture_projected_voids, certify_endpoint_ownership,
-    certify_endpoint_stratum_ownership, certify_native_collar_incidence,
-    certify_native_critical_collar, certify_native_one_sided_source_leaf,
-    certify_native_source_leaf, certify_native_union, certify_planar_capsule_clearance,
-    certify_planar_capsule_pair_clearance, material_projected_bounds, placed_bounds,
-    placed_material_bounds, prepare_solid, projected_bounds,
-    projected_protected_void_envelopes,
+    NativeEndpointStratum, NativeInnerMaterialPrism, NativeInterfaceAttachment,
+    NativeOwnedEndpoint, NativeProjectedVoids, NativeProtectedVoidEnvelope,
+    NativeSourceLeafProofKind, NativeSourceLeafReceipt, NativeUnionBindingLedger,
+    NativeUnionBoundaryEdge, NativeUnionBoundarySource, NativeUnionCoverage, NativeUnionOccurrence,
+    NativeUnionOccurrenceEvidence, NativeUnionPolicy, NativeUnionProofKind,
+    NativeUnionSourceCapture, NativeVoidProjectionCapture, PendingNativeUnionProof,
+    PlacedMaterialProjectedBounds, PlacedSlabRequest, PlanarCapsuleClearance,
+    PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedSolid, ProjectedBounds,
+    ProtectedVoidHeightScope, ProtectedVoidPolicy, SlabAnalysis, SlabRequest, SourceLeafRequest,
+    analyze_height_domain, analyze_placed_height_domain, capture_projected_voids,
+    certify_endpoint_ownership, certify_endpoint_stratum_ownership,
+    certify_native_collar_incidence, certify_native_critical_collar,
+    certify_native_one_sided_source_leaf, certify_native_source_leaf, certify_native_union,
+    certify_planar_capsule_clearance, certify_planar_capsule_pair_clearance,
+    material_projected_bounds, placed_bounds, placed_material_bounds, prepare_solid,
+    projected_bounds, projected_protected_void_envelopes,
 };
 pub use import::{
     from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
@@ -60,8 +59,7 @@ pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
 use spiling_contracts::geometry::GeometryErrorCode;
 pub use spiling_contracts::geometry::{
-    DisplayProfile, FaceId, FaceInfo, GeometryError, PlaneFrameMm, PlaneMm,
-    KERNEL_NAME,
+    DisplayProfile, FaceId, FaceInfo, GeometryError, KERNEL_NAME, PlaneFrameMm, PlaneMm,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -95,7 +93,6 @@ pub struct VerticalCylinderFace {
     pub max_z_mm: f64,
 }
 
-
 impl PreparedSectionSource<'_> {
     /// Intersect the actual placed native source with an arbitrary world plane.
     /// The query allowance excludes every retained source and other coexisting
@@ -109,10 +106,16 @@ impl PreparedSectionSource<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<NativeSection, GeometryError> {
-        analysis::section_placed_with_work(self.definition(), pose, plane, query_byte_limit, work, cancel)
+        analysis::section_placed_with_work(
+            self.definition(),
+            pose,
+            plane,
+            query_byte_limit,
+            work,
+            cancel,
+        )
     }
 }
-
 
 pub fn tessellate(
     definition: &Definition,

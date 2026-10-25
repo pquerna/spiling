@@ -299,18 +299,25 @@ fn run(commands: Receiver<Command>, results: SyncSender<Event>, live: Live) {
         let mut pending = BTreeMap::new();
         let mut pending_records = BTreeMap::new();
         let result = match work {
-            Work::ImportAppearancePalette { source, retained_budget } =>
-                super::appearance::import_palette(source, retained_budget, &cancel)
-                    .map(Product::AppearancePalette).map_err(JobError::from),
-            Work::CompareAppearance { asset, target, limits } => {
-                super::appearance::compare_palette(asset, target, limits, &cancel)
-                    .map(Product::AppearanceReport).map_err(JobError::from)
-            }
-            Work::GetAppearanceReport { report } => {
-                check_cancel(&cancel).map_err(super::project_geometry_error)
-                    .and_then(|()| super::appearance::ReportPublication::new(report))
-                    .map(Arc::new).map(Product::AppearanceReport).map_err(JobError::from)
-            }
+            Work::ImportAppearancePalette {
+                source,
+                retained_budget,
+            } => super::appearance::import_palette(source, retained_budget, &cancel)
+                .map(Product::AppearancePalette)
+                .map_err(JobError::from),
+            Work::CompareAppearance {
+                asset,
+                target,
+                limits,
+            } => super::appearance::compare_palette(asset, target, limits, &cancel)
+                .map(Product::AppearanceReport)
+                .map_err(JobError::from),
+            Work::GetAppearanceReport { report } => check_cancel(&cancel)
+                .map_err(super::project_geometry_error)
+                .and_then(|()| super::appearance::ReportPublication::new(report))
+                .map(Arc::new)
+                .map(Product::AppearanceReport)
+                .map_err(JobError::from),
             Work::ImportSurfaceImage {
                 source,
                 canonical_budget,
@@ -755,8 +762,12 @@ fn open(
             })?,
         spiling_core::MAX_APPEARANCE_RETAINED_BYTES
             .checked_sub(retained_appearance_bytes)
-            .ok_or_else(|| ProjectError::new(ProjectErrorCode::ResourceLimit,
-                "retained appearance palette budget exceeded"))?,
+            .ok_or_else(|| {
+                ProjectError::new(
+                    ProjectErrorCode::ResourceLimit,
+                    "retained appearance palette budget exceeded",
+                )
+            })?,
     )?;
     let mut capacity = Capacity::new(definitions, budget);
     let incoming_source_bytes = loaded.sources.values().fold(0usize, |bytes, source| {

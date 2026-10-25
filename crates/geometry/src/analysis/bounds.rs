@@ -10,7 +10,9 @@
 //! correction supports and feasible witnesses. Native spatial edges are not
 //! assumed equal to either the literal chart trim or the corrected boundary.
 
-use super::{BoundsPolicy, GeometryWorkBudget, ProjectedBounds, material_source::MaterialSourceView};
+use super::{
+    BoundsPolicy, GeometryWorkBudget, ProjectedBounds, material_source::MaterialSourceView,
+};
 use crate::{
     Definition, GeometryError,
     kernel::{PreparedNativeTrimSource, PreparedTrimSurface, TrimClassification},
@@ -37,14 +39,21 @@ pub fn projected_bounds(
     validate_query(direction, policy)?;
     let remaining = MAX_SCRATCH_ALLOCATION_BYTES
         .checked_sub(definition.retained_query_proof_bytes())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "retained native query proof exhausts directional allocation cap"))?;
-    let source = PreparedNativeTrimSource::prepare_charts(
-        definition, remaining, work, cancel,
-    )?;
-    let remaining = remaining.checked_sub(source.retained_bytes())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "retained native trim source exhausts directional allocation cap"))?;
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "retained native query proof exhausts directional allocation cap",
+            )
+        })?;
+    let source = PreparedNativeTrimSource::prepare_charts(definition, remaining, work, cancel)?;
+    let remaining = remaining
+        .checked_sub(source.retained_bytes())
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "retained native trim source exhausts directional allocation cap",
+            )
+        })?;
     projected_bounds_with_scratch_limit(&source, direction, policy, remaining, work, cancel)
 }
 
@@ -105,16 +114,28 @@ pub fn material_projected_bounds(
     work.charge(1, cancel)?;
     validate_query(direction, policy)?;
     let prepared = super::material_source::prepare_solid(
-        definition, MAX_SCRATCH_ALLOCATION_BYTES, work, cancel,
+        definition,
+        MAX_SCRATCH_ALLOCATION_BYTES,
+        work,
+        cancel,
     )?;
-    let remaining = MAX_SCRATCH_ALLOCATION_BYTES.checked_sub(prepared.retained_bytes())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "retained native material source exhausts directional allocation cap"))?;
+    let remaining = MAX_SCRATCH_ALLOCATION_BYTES
+        .checked_sub(prepared.retained_bytes())
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "retained native material source exhausts directional allocation cap",
+            )
+        })?;
     material_projected_bounds_with_scratch_limit(
-        prepared.source_view()?, direction, policy, remaining, work, cancel,
+        prepared.source_view()?,
+        direction,
+        policy,
+        remaining,
+        work,
+        cancel,
     )
 }
-
 
 /// `remaining_bytes` excludes the enclosing owner's retained source and every
 /// coexisting allocation. An authoring-only chart owner cannot mint this receipt.
@@ -127,45 +148,81 @@ pub(super) fn material_projected_bounds_with_scratch_limit(
     cancel: &AtomicBool,
 ) -> Result<MaterialProjectedBounds, GeometryError> {
     work.charge(1, cancel)?;
-    source.trim_source().require_source_correspondence(work, cancel)?;
+    source
+        .trim_source()
+        .require_source_correspondence(work, cancel)?;
     let definition = source.definition();
     // Reserve receipt storage while the search is live, before heap growth.
     let capture_bytes = std::mem::size_of::<MaterialProjectedBounds>()
         .checked_add(definition.id().as_str().len())
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "material directional capture size overflow"))?;
-    let remaining_bytes = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES)
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "material directional capture size overflow",
+            )
+        })?;
+    let remaining_bytes = remaining_bytes
+        .min(MAX_SCRATCH_ALLOCATION_BYTES)
         .checked_sub(capture_bytes)
-        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-            "material directional capture exhausts allocation cap"))?;
+        .ok_or_else(|| {
+            error(
+                GeometryErrorCode::ResourceLimit,
+                "material directional capture exhausts allocation cap",
+            )
+        })?;
     // Raw chart search and correction preparation run sequentially and share
     // the same remaining cap. No source support is skipped by an assumed zero.
     let raw_before = work.consumed();
     let raw = projected_bounds_with_scratch_limit(
-        source.trim_source(), direction,
+        source.trim_source(),
+        direction,
         BoundsPolicy {
             maximum_endpoint_uncertainty_mm: policy.maximum_endpoint_uncertainty_mm * 0.5,
         },
-        remaining_bytes, work, cancel,
-    ).map_err(|failure| work.annotate_error(failure, raw_before, format_args!(
-        "material directional raw support search; direction={direction:?}"
-    )))?;
+        remaining_bytes,
+        work,
+        cancel,
+    )
+    .map_err(|failure| {
+        work.annotate_error(
+            failure,
+            raw_before,
+            format_args!("material directional raw support search; direction={direction:?}"),
+        )
+    })?;
     let before = work.consumed();
     let supports = super::critical::material_link::source_transport_supports(
         source,
         normalized_direction(direction)?,
-        Some(([
-            raw.minimum[1].min(raw.maximum[0]),
-            raw.minimum[1].max(raw.maximum[0]),
-        ], policy.maximum_endpoint_uncertainty_mm * 0.125)),
-        remaining_bytes, work, cancel,
-    ).map_err(|failure| work.annotate_error(failure, before, format_args!(
-        "material directional source-support preparation; direction={direction:?}"
-    )))?;
+        Some((
+            [
+                raw.minimum[1].min(raw.maximum[0]),
+                raw.minimum[1].max(raw.maximum[0]),
+            ],
+            policy.maximum_endpoint_uncertainty_mm * 0.125,
+        )),
+        remaining_bytes,
+        work,
+        cancel,
+    )
+    .map_err(|failure| {
+        work.annotate_error(
+            failure,
+            before,
+            format_args!(
+                "material directional source-support preparation; direction={direction:?}"
+            ),
+        )
+    })?;
     let (bounds, source_realization_error_mm, scalar_transport_is_identically_zero) =
         aggregate_material_supports(
-            raw, direction, &supports, definition.provenance().uncertainty_mm,
-            policy, work, cancel,
+            raw,
+            direction,
+            &supports,
+            definition.provenance().uncertainty_mm,
+            policy,
+            work,
+            cancel,
         )?;
     drop(supports);
     work.charge(1, cancel)?;
@@ -238,16 +295,24 @@ fn aggregate_material_supports(
         }
         source_error_mm = source_error_mm.max(support.source_error_mm);
         scalar_transport_is_identically_zero &= displacement.lo == 0.0 && displacement.hi == 0.0;
-        if corrected.lo < bounds.minimum[0] { winners[0] = Some(index); }
-        if corrected.hi > bounds.maximum[1] { winners[3] = Some(index); }
+        if corrected.lo < bounds.minimum[0] {
+            winners[0] = Some(index);
+        }
+        if corrected.hi > bounds.maximum[1] {
+            winners[3] = Some(index);
+        }
         bounds.minimum[0] = bounds.minimum[0].min(corrected.lo);
         bounds.maximum[1] = bounds.maximum[1].max(corrected.hi);
         if base.lo <= raw.minimum[1] && raw.minimum[0] <= base.hi {
-            if displacement.hi > minimum_witness_displacement { winners[1] = Some(index); }
+            if displacement.hi > minimum_witness_displacement {
+                winners[1] = Some(index);
+            }
             minimum_witness_displacement = minimum_witness_displacement.max(displacement.hi);
         }
         if base.lo <= raw.maximum[1] && raw.maximum[0] <= base.hi {
-            if displacement.lo < maximum_witness_displacement { winners[2] = Some(index); }
+            if displacement.lo < maximum_witness_displacement {
+                winners[2] = Some(index);
+            }
             maximum_witness_displacement = maximum_witness_displacement.min(displacement.lo);
         }
         if let Some(witness) = support.realized_witness_interval {
@@ -281,11 +346,19 @@ fn aggregate_material_supports(
     // Independently proved selected-source points tighten only feasible ends,
     // never the complete outward RANGE enclosures.
     bounds.minimum[1] = Interval::point(raw.minimum[1])
-        .add(Interval::point(minimum_witness_displacement)).hi.min(realized_minimum_witness);
+        .add(Interval::point(minimum_witness_displacement))
+        .hi
+        .min(realized_minimum_witness);
     bounds.maximum[0] = Interval::point(raw.maximum[0])
-        .add(Interval::point(maximum_witness_displacement)).lo.max(realized_maximum_witness);
+        .add(Interval::point(maximum_witness_displacement))
+        .lo
+        .max(realized_maximum_witness);
     bounds.achieved_uncertainty_mm = uncertainty(&bounds);
-    if bounds.minimum.iter().chain(bounds.maximum.iter()).any(|x| !x.is_finite())
+    if bounds
+        .minimum
+        .iter()
+        .chain(bounds.maximum.iter())
+        .any(|x| !x.is_finite())
         || bounds.minimum[0] > bounds.minimum[1]
         || bounds.maximum[0] > bounds.maximum[1]
         || bounds.achieved_uncertainty_mm > tolerance
@@ -300,13 +373,24 @@ fn aggregate_material_supports(
              achieved_endpoint_uncertainty_mm={:?}; maximum_physical_source_error_mm={source_error_mm:?}; \
              minHi_witness_displacement={minimum_witness_displacement:?}; \
              maxLo_witness_displacement={maximum_witness_displacement:?}",
-            raw.minimum, raw.maximum, bounds.minimum, bounds.maximum,
+            raw.minimum,
+            raw.maximum,
+            bounds.minimum,
+            bounds.maximum,
             bounds.achieved_uncertainty_mm,
         );
         for (label, winner) in [
-            "minLo", "minHi", "maxLo", "maxHi", "physicalError",
-            "minHi_actual_G", "maxLo_actual_G",
-        ].into_iter().zip(winners) {
+            "minLo",
+            "minHi",
+            "maxLo",
+            "maxHi",
+            "physicalError",
+            "minHi_actual_G",
+            "maxLo_actual_G",
+        ]
+        .into_iter()
+        .zip(winners)
+        {
             if let Some(index) = winner {
                 let support = &supports[index];
                 let _ = write!(
@@ -326,7 +410,11 @@ fn aggregate_material_supports(
         }
         return Err(error(GeometryErrorCode::AnalysisIndeterminate, &message));
     }
-    Ok((bounds, source_error_mm, scalar_transport_is_identically_zero))
+    Ok((
+        bounds,
+        source_error_mm,
+        scalar_transport_is_identically_zero,
+    ))
 }
 
 /// Uncorrected support with borrowed, already admitted chart domains and their
@@ -359,8 +447,10 @@ fn native_projected_bounds(
         .max(crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES);
     let byte_limit = remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES);
     if evaluator_bytes > byte_limit {
-        return Err(error(GeometryErrorCode::ResourceLimit,
-            "native coefficient scratch exhausts directional allocation cap"));
+        return Err(error(
+            GeometryErrorCode::ResourceLimit,
+            "native coefficient scratch exhausts directional allocation cap",
+        ));
     }
     let mut scratch = Scratch {
         allocated_bytes: evaluator_bytes,
@@ -372,8 +462,10 @@ fn native_projected_bounds(
     for ordinal in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
         let trim = source.face_domain(ordinal).ok_or_else(|| {
-            error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "native directional source omitted an original face trim domain")
+            error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "native directional source omitted an original face trim domain",
+            )
         })?;
         // The admitted domain selects its own coefficient carrier and chart
         // units. Original STEP radians must not be evaluated on a native
@@ -382,9 +474,9 @@ fn native_projected_bounds(
         let before = work.consumed();
         let uv = trim.uv_domain();
         let native_boxes = match &surface {
-            PreparedTrimSurface::Native(native) => Some(
-                parametric::surface_parameter_boxes(*native, uv, work, cancel)?,
-            ),
+            PreparedTrimSurface::Native(native) => Some(parametric::surface_parameter_boxes(
+                *native, uv, work, cancel,
+            )?),
             PreparedTrimSurface::Original(_) => None,
         };
         // Original position bounds cover the complete source expression,
@@ -450,52 +542,71 @@ fn native_projected_bounds(
         combine(&mut aggregate, support);
     }
     let mut result = aggregate.ok_or_else(|| {
-        error(GeometryErrorCode::InvalidGeometry, "native definition has no bounded faces")
+        error(
+            GeometryErrorCode::InvalidGeometry,
+            "native definition has no bounded faces",
+        )
     })?;
     result.achieved_uncertainty_mm = uncertainty(&result);
     if result.achieved_uncertainty_mm > tolerance {
-        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-            "directional endpoint brackets do not meet the requested uncertainty"));
+        return Err(error(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "directional endpoint brackets do not meet the requested uncertainty",
+        ));
     }
     work.charge(1, cancel)?;
     Ok(result)
 }
 
-
 fn validate_query(
-    direction: [f64; 3], policy: BoundsPolicy,
+    direction: [f64; 3],
+    policy: BoundsPolicy,
 ) -> Result<[Interval; 3], GeometryError> {
     if !policy.maximum_endpoint_uncertainty_mm.is_finite()
         || policy.maximum_endpoint_uncertainty_mm <= 0.0
     {
-        return Err(error(GeometryErrorCode::InvalidGeometry,
-            "directional bounds require a finite positive endpoint uncertainty"));
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "directional bounds require a finite positive endpoint uncertainty",
+        ));
     }
     normalized_direction(direction)
 }
 
 fn normalized_direction(direction: [f64; 3]) -> Result<[Interval; 3], GeometryError> {
     if direction.iter().any(|value| !value.is_finite()) {
-        return Err(error(GeometryErrorCode::InvalidGeometry, "nonfinite support direction"));
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "nonfinite support direction",
+        ));
     }
     // Scaling avoids overflow/underflow before outward interval normalization.
     let scale = direction.iter().copied().map(f64::abs).fold(0.0, f64::max);
     if scale == 0.0 {
-        return Err(error(GeometryErrorCode::InvalidGeometry, "zero support direction"));
+        return Err(error(
+            GeometryErrorCode::InvalidGeometry,
+            "zero support direction",
+        ));
     }
     if direction.iter().filter(|value| **value != 0.0).count() == 1 {
-        return Ok(direction.map(|value| {
-            Interval::point(if value == 0.0 { 0.0 } else { value.signum() })
-        }));
+        return Ok(
+            direction.map(|value| Interval::point(if value == 0.0 { 0.0 } else { value.signum() }))
+        );
     }
     let scaled = [
         Interval::point(direction[0]).div(Interval::point(scale))?,
         Interval::point(direction[1]).div(Interval::point(scale))?,
         Interval::point(direction[2]).div(Interval::point(scale))?,
     ];
-    let norm = scaled.iter()
-        .fold(Interval::point(0.0), |sum, value| sum.add(value.square())).sqrt()?;
-    Ok([scaled[0].div(norm)?, scaled[1].div(norm)?, scaled[2].div(norm)?])
+    let norm = scaled
+        .iter()
+        .fold(Interval::point(0.0), |sum, value| sum.add(value.square()))
+        .sqrt()?;
+    Ok([
+        scaled[0].div(norm)?,
+        scaled[1].div(norm)?,
+        scaled[2].div(norm)?,
+    ])
 }
 
 fn project(position: [Interval; 3], direction: [Interval; 3]) -> Result<Interval, GeometryError> {
@@ -507,10 +618,12 @@ fn project(position: [Interval; 3], direction: [Interval; 3]) -> Result<Interval
 
 fn intersect(a: Interval, b: Interval) -> Result<Interval, GeometryError> {
     Interval::new(a.lo.max(b.lo), a.hi.min(b.hi)).map_err(|_| {
-        error(GeometryErrorCode::ConditioningFailure, "native support enclosures disagree")
+        error(
+            GeometryErrorCode::ConditioningFailure,
+            "native support enclosures disagree",
+        )
     })
 }
-
 
 #[derive(Clone, Copy)]
 struct Evaluation {
@@ -527,14 +640,20 @@ struct Cell {
     depth: u16,
 }
 impl PartialEq for Cell {
-    fn eq(&self, other: &Self) -> bool { self.priority == other.priority }
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
 }
 impl Eq for Cell {}
 impl PartialOrd for Cell {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for Cell {
-    fn cmp(&self, other: &Self) -> Ordering { self.priority.total_cmp(&other.priority) }
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority.total_cmp(&other.priority)
+    }
 }
 
 struct Scratch {
@@ -545,38 +664,62 @@ struct Scratch {
 }
 impl Default for Scratch {
     fn default() -> Self {
-        Self { cells: BinaryHeap::new(), created: 0, allocated_bytes: 0,
-            byte_limit: MAX_SCRATCH_ALLOCATION_BYTES }
+        Self {
+            cells: BinaryHeap::new(),
+            created: 0,
+            allocated_bytes: 0,
+            byte_limit: MAX_SCRATCH_ALLOCATION_BYTES,
+        }
     }
 }
 impl Scratch {
-    fn push(&mut self, cell: Cell, work: &mut GeometryWorkBudget, cancel: &AtomicBool)
-        -> Result<(), GeometryError>
-    {
+    fn push(
+        &mut self,
+        cell: Cell,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<(), GeometryError> {
         work.charge(1, cancel)?;
         if self.created >= MAX_CREATED_CELLS || self.cells.len() >= MAX_LIVE_CELLS {
-            return Err(error(GeometryErrorCode::ResourceLimit,
-                "directional subdivision cell cap exhausted"));
+            return Err(error(
+                GeometryErrorCode::ResourceLimit,
+                "directional subdivision cell cap exhausted",
+            ));
         }
         if self.cells.len() == self.cells.capacity() {
-            let additional = self.cells.capacity().max(16)
+            let additional = self
+                .cells
+                .capacity()
+                .max(16)
                 .min(MAX_LIVE_CELLS - self.cells.len());
-            let bytes = additional.checked_mul(std::mem::size_of::<Cell>())
+            let bytes = additional
+                .checked_mul(std::mem::size_of::<Cell>())
                 .and_then(|bytes| self.allocated_bytes.checked_add(bytes))
-                .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
-                    "directional scratch size overflow"))?;
+                .ok_or_else(|| {
+                    error(
+                        GeometryErrorCode::ResourceLimit,
+                        "directional scratch size overflow",
+                    )
+                })?;
             if bytes > self.byte_limit {
-                return Err(error(GeometryErrorCode::ResourceLimit,
-                    "cumulative directional scratch allocation cap exhausted"));
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "cumulative directional scratch allocation cap exhausted",
+                ));
             }
             let before = self.cells.capacity();
             self.cells.try_reserve_exact(additional).map_err(|_| {
-                error(GeometryErrorCode::ResourceLimit, "directional scratch allocation failed")
+                error(
+                    GeometryErrorCode::ResourceLimit,
+                    "directional scratch allocation failed",
+                )
             })?;
             self.allocated_bytes += (self.cells.capacity() - before) * std::mem::size_of::<Cell>();
             if self.allocated_bytes > self.byte_limit {
-                return Err(error(GeometryErrorCode::ResourceLimit,
-                    "directional allocator capacity exceeds cap"));
+                return Err(error(
+                    GeometryErrorCode::ResourceLimit,
+                    "directional allocator capacity exceeds cap",
+                ));
             }
         }
         self.created += 1;
@@ -594,7 +737,10 @@ pub(super) fn source_recipe_curve_bounds(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     mut evaluate: impl FnMut(
-        [f64; 2], &mut GeometryWorkBudget, &AtomicBool, usize,
+        [f64; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+        usize,
     ) -> Result<(Interval, Interval), GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
     let mut scratch = Scratch {
@@ -602,11 +748,20 @@ pub(super) fn source_recipe_curve_bounds(
         ..Scratch::default()
     };
     search_domains_with_query_scratch(
-        std::iter::once([range, [0.0, 0.0]]), 1, tolerance, None,
-        &mut scratch, work, cancel,
+        std::iter::once([range, [0.0, 0.0]]),
+        1,
+        tolerance,
+        None,
+        &mut scratch,
+        work,
+        cancel,
         |cell, work, cancel, remaining_bytes| {
             let (height, witness) = evaluate(cell[0], work, cancel, remaining_bytes)?;
-            Ok(Some(Evaluation { height, witness: Some(witness), split_axis: 0 }))
+            Ok(Some(Evaluation {
+                height,
+                witness: Some(witness),
+                split_axis: 0,
+            }))
         },
     )
 }
@@ -622,23 +777,33 @@ pub(super) fn source_recipe_scalar_support(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     mut evaluate: impl FnMut(
-        [[f64; 2]; 2], &mut GeometryWorkBudget, &AtomicBool,
+        [[f64; 2]; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
     ) -> Result<(Interval, Option<Interval>, usize), GeometryError>,
 ) -> Result<Interval, GeometryError> {
     validate_domain(domain, 2)?;
     let target = Interval::new(endpoint_reference[0], endpoint_reference[1])?.add(Interval {
-        lo: -tolerance, hi: tolerance,
+        lo: -tolerance,
+        hi: tolerance,
     });
     let mut scratch = Scratch {
         byte_limit: remaining_bytes.min(MAX_SCRATCH_ALLOCATION_BYTES),
         ..Scratch::default()
     };
-    scratch.push(Cell {
-        uv: domain,
-        ancestor: Interval { lo: f64::NEG_INFINITY, hi: f64::INFINITY },
-        priority: f64::INFINITY,
-        depth: 0,
-    }, work, cancel)?;
+    scratch.push(
+        Cell {
+            uv: domain,
+            ancestor: Interval {
+                lo: f64::NEG_INFINITY,
+                hi: f64::INFINITY,
+            },
+            priority: f64::INFINITY,
+            depth: 0,
+        },
+        work,
+        cancel,
+    )?;
     let mut feasible_min = f64::INFINITY;
     let mut feasible_max = f64::NEG_INFINITY;
     let mut outer_min = f64::INFINITY;
@@ -669,27 +834,41 @@ pub(super) fn source_recipe_scalar_support(
                 (height, split_axis, false)
             }
             Err(failure) if failure.code == GeometryErrorCode::ConditioningFailure => (
-                cell.ancestor, usize::from(width(cell.uv[1]) > width(cell.uv[0])), true,
+                cell.ancestor,
+                usize::from(width(cell.uv[1]) > width(cell.uv[0])),
+                true,
             ),
             Err(failure) => return Err(failure),
         };
         if cell.depth >= MAX_DEPTH {
             return Err(error(
-                if conditioning { GeometryErrorCode::ConditioningFailure }
-                else { GeometryErrorCode::AnalysisIndeterminate },
+                if conditioning {
+                    GeometryErrorCode::ConditioningFailure
+                } else {
+                    GeometryErrorCode::AnalysisIndeterminate
+                },
                 "source recipe subdivision cannot resolve scalar range uncertainty",
             ));
         }
-        let axis = if suggested_axis < 2 { suggested_axis } else { 0 };
-        let axis = if midpoint(cell.uv[axis]).is_some() { axis }
-            else if midpoint(cell.uv[1 - axis]).is_some() { 1 - axis }
-            else {
-                return Err(error(
-                    if conditioning { GeometryErrorCode::ConditioningFailure }
-                    else { GeometryErrorCode::AnalysisIndeterminate },
-                    "source recipe parameters cannot resolve scalar range uncertainty",
-                ));
-            };
+        let axis = if suggested_axis < 2 {
+            suggested_axis
+        } else {
+            0
+        };
+        let axis = if midpoint(cell.uv[axis]).is_some() {
+            axis
+        } else if midpoint(cell.uv[1 - axis]).is_some() {
+            1 - axis
+        } else {
+            return Err(error(
+                if conditioning {
+                    GeometryErrorCode::ConditioningFailure
+                } else {
+                    GeometryErrorCode::AnalysisIndeterminate
+                },
+                "source recipe parameters cannot resolve scalar range uncertainty",
+            ));
+        };
         let middle = midpoint(cell.uv[axis]).expect("splittable source recipe interval");
         let mut left = cell.uv;
         let mut right = cell.uv;
@@ -697,14 +876,23 @@ pub(super) fn source_recipe_scalar_support(
         right[axis][0] = middle;
         let priority = (target.lo - height.lo).max(height.hi - target.hi);
         for uv in [left, right] {
-            scratch.push(Cell {
-                uv, ancestor: height, priority, depth: cell.depth + 1,
-            }, work, cancel)?;
+            scratch.push(
+                Cell {
+                    uv,
+                    ancestor: height,
+                    priority,
+                    depth: cell.depth + 1,
+                },
+                work,
+                cancel,
+            )?;
         }
     }
     if !outer_min.is_finite() || !outer_max.is_finite() {
-        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-            "source recipe has no finite complete scalar range enclosure"));
+        return Err(error(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "source recipe has no finite complete scalar range enclosure",
+        ));
     }
     Interval::new(outer_min, outer_max)
 }
@@ -720,11 +908,20 @@ fn search_domains(
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-    mut evaluate: impl FnMut([[f64; 2]; 2], &mut GeometryWorkBudget, &AtomicBool)
-        -> Result<Option<Evaluation>, GeometryError>,
+    mut evaluate: impl FnMut(
+        [[f64; 2]; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+    ) -> Result<Option<Evaluation>, GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
     search_domains_with_query_scratch(
-        domains, dimensions, tolerance, seed, scratch, work, cancel,
+        domains,
+        dimensions,
+        tolerance,
+        seed,
+        scratch,
+        work,
+        cancel,
         |cell, work, cancel, _| evaluate(cell, work, cancel),
     )
 }
@@ -737,18 +934,29 @@ fn search_domains_with_query_scratch(
     scratch: &mut Scratch,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-    mut evaluate: impl FnMut([[f64; 2]; 2], &mut GeometryWorkBudget, &AtomicBool, usize)
-        -> Result<Option<Evaluation>, GeometryError>,
+    mut evaluate: impl FnMut(
+        [[f64; 2]; 2],
+        &mut GeometryWorkBudget,
+        &AtomicBool,
+        usize,
+    ) -> Result<Option<Evaluation>, GeometryError>,
 ) -> Result<ProjectedBounds, GeometryError> {
     scratch.cells.clear();
     for domain in domains {
         validate_domain(domain, dimensions)?;
-        scratch.push(Cell {
-            uv: domain,
-            ancestor: Interval { lo: f64::NEG_INFINITY, hi: f64::INFINITY },
-            priority: f64::INFINITY,
-            depth: 0,
-        }, work, cancel)?;
+        scratch.push(
+            Cell {
+                uv: domain,
+                ancestor: Interval {
+                    lo: f64::NEG_INFINITY,
+                    hi: f64::INFINITY,
+                },
+                priority: f64::INFINITY,
+                depth: 0,
+            },
+            work,
+            cancel,
+        )?;
     }
     let mut feasible_min = seed.map_or(f64::INFINITY, |value| value.minimum[1]);
     let mut feasible_max = seed.map_or(f64::NEG_INFINITY, |value| value.maximum[0]);
@@ -758,7 +966,10 @@ fn search_domains_with_query_scratch(
         work.charge(1, cancel)?;
         let mut conditioning = false;
         let evaluation = match evaluate(
-            cell.uv, work, cancel, scratch.byte_limit - scratch.allocated_bytes,
+            cell.uv,
+            work,
+            cancel,
+            scratch.byte_limit - scratch.allocated_bytes,
         ) {
             Ok(None) => continue,
             Ok(Some(mut value)) => {
@@ -776,7 +987,8 @@ fn search_domains_with_query_scratch(
                 feasible_min = feasible_min.min(witness.hi);
                 feasible_max = feasible_max.max(witness.lo);
             }
-            if feasible_min.is_finite() && feasible_max.is_finite()
+            if feasible_min.is_finite()
+                && feasible_max.is_finite()
                 && parametric::up(feasible_min - evaluation.height.lo) <= tolerance
                 && parametric::up(evaluation.height.hi - feasible_max) <= tolerance
             {
@@ -786,25 +998,44 @@ fn search_domains_with_query_scratch(
             }
             (evaluation.height, evaluation.split_axis)
         } else {
-            (cell.ancestor, if width(cell.uv[0]) >= width(cell.uv[1]) { 0 } else { 1 })
+            (
+                cell.ancestor,
+                if width(cell.uv[0]) >= width(cell.uv[1]) {
+                    0
+                } else {
+                    1
+                },
+            )
         };
         if cell.depth >= MAX_DEPTH {
             return Err(error(
-                if conditioning { GeometryErrorCode::ConditioningFailure }
-                else { GeometryErrorCode::AnalysisIndeterminate },
+                if conditioning {
+                    GeometryErrorCode::ConditioningFailure
+                } else {
+                    GeometryErrorCode::AnalysisIndeterminate
+                },
                 "native directional subdivision depth cannot resolve endpoint uncertainty",
             ));
         }
-        let axis = if suggested_axis < dimensions { suggested_axis } else { 0 };
-        let axis = if midpoint(cell.uv[axis]).is_some() { axis }
-            else if dimensions == 2 && midpoint(cell.uv[1 - axis]).is_some() { 1 - axis }
-            else {
-                return Err(error(
-                    if conditioning { GeometryErrorCode::ConditioningFailure }
-                    else { GeometryErrorCode::AnalysisIndeterminate },
-                    "native directional parameters cannot resolve endpoint uncertainty",
-                ));
-            };
+        let axis = if suggested_axis < dimensions {
+            suggested_axis
+        } else {
+            0
+        };
+        let axis = if midpoint(cell.uv[axis]).is_some() {
+            axis
+        } else if dimensions == 2 && midpoint(cell.uv[1 - axis]).is_some() {
+            1 - axis
+        } else {
+            return Err(error(
+                if conditioning {
+                    GeometryErrorCode::ConditioningFailure
+                } else {
+                    GeometryErrorCode::AnalysisIndeterminate
+                },
+                "native directional parameters cannot resolve endpoint uncertainty",
+            ));
+        };
         let middle = midpoint(cell.uv[axis]).expect("splittable parameter interval");
         let mut left = cell.uv;
         let mut right = cell.uv;
@@ -812,29 +1043,46 @@ fn search_domains_with_query_scratch(
         right[axis][0] = middle;
         let priority = if height.lo.is_finite() && height.hi.is_finite() {
             height.width()
-        } else { f64::INFINITY };
+        } else {
+            f64::INFINITY
+        };
         for uv in [left, right] {
-            scratch.push(Cell {
-                uv, ancestor: height, priority, depth: cell.depth + 1,
-            }, work, cancel)?;
+            scratch.push(
+                Cell {
+                    uv,
+                    ancestor: height,
+                    priority,
+                    depth: cell.depth + 1,
+                },
+                work,
+                cancel,
+            )?;
         }
     }
-    if !feasible_min.is_finite() || !feasible_max.is_finite()
-        || !outer_min.is_finite() || !outer_max.is_finite()
+    if !feasible_min.is_finite()
+        || !feasible_max.is_finite()
+        || !outer_min.is_finite()
+        || !outer_max.is_finite()
     {
-        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
-            "true native trimmed domain has no certified feasible support witness"));
+        return Err(error(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "true native trimmed domain has no certified feasible support witness",
+        ));
     }
     let mut result = ProjectedBounds {
-        minimum: [outer_min, feasible_min], maximum: [feasible_max, outer_max],
+        minimum: [outer_min, feasible_min],
+        maximum: [feasible_max, outer_max],
         achieved_uncertainty_mm: 0.0,
     };
     result.achieved_uncertainty_mm = uncertainty(&result);
-    if result.minimum[0] > result.minimum[1] || result.maximum[0] > result.maximum[1]
+    if result.minimum[0] > result.minimum[1]
+        || result.maximum[0] > result.maximum[1]
         || result.achieved_uncertainty_mm > tolerance
     {
-        return Err(error(GeometryErrorCode::ConditioningFailure,
-            "native feasible witnesses disagree with directional exclusion bounds"));
+        return Err(error(
+            GeometryErrorCode::ConditioningFailure,
+            "native feasible witnesses disagree with directional exclusion bounds",
+        ));
     }
     Ok(result)
 }
@@ -845,23 +1093,30 @@ fn combine(aggregate: &mut Option<ProjectedBounds>, next: ProjectedBounds) {
             value.minimum[endpoint] = value.minimum[endpoint].min(next.minimum[endpoint]);
             value.maximum[endpoint] = value.maximum[endpoint].max(next.maximum[endpoint]);
         }
-    } else { *aggregate = Some(next); }
+    } else {
+        *aggregate = Some(next);
+    }
 }
 fn uncertainty(value: &ProjectedBounds) -> f64 {
     parametric::up(value.minimum[1] - value.minimum[0])
         .max(parametric::up(value.maximum[1] - value.maximum[0]))
 }
-fn width(span: [f64; 2]) -> f64 { parametric::up(span[1] - span[0]) }
+fn width(span: [f64; 2]) -> f64 {
+    parametric::up(span[1] - span[0])
+}
 fn midpoint(span: [f64; 2]) -> Option<f64> {
     let value = span[0] * 0.5 + span[1] * 0.5;
     (span[0] < value && value < span[1]).then_some(value)
 }
 fn validate_domain(domain: [[f64; 2]; 2], dimensions: usize) -> Result<(), GeometryError> {
-    if domain[..dimensions].iter()
+    if domain[..dimensions]
+        .iter()
         .any(|span| !span[0].is_finite() || !span[1].is_finite() || span[0] >= span[1])
     {
-        return Err(error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "native trimmed support domain is not finite and ordered"));
+        return Err(error(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "native trimmed support domain is not finite and ordered",
+        ));
     }
     Ok(())
 }
@@ -875,20 +1130,29 @@ mod tests {
 
     fn exact_scalar_bounds() -> ProjectedBounds {
         ProjectedBounds {
-            minimum: [0.0, 0.0], maximum: [10.0, 10.0], achieved_uncertainty_mm: 0.0,
+            minimum: [0.0, 0.0],
+            maximum: [10.0, 10.0],
+            achieved_uncertainty_mm: 0.0,
         }
     }
 
     fn scalar_transport(
-        base_interval: [f64; 2], corrected_interval: [f64; 2],
-        displacement_interval: [f64; 2], source_error_mm: f64,
+        base_interval: [f64; 2],
+        corrected_interval: [f64; 2],
+        displacement_interval: [f64; 2],
+        source_error_mm: f64,
     ) -> super::super::critical::material_link::SourceTransportSupport {
         super::super::critical::material_link::SourceTransportSupport {
             owner: super::super::critical::material_link::SourceTransportOwner::OriginalCoedge {
-                face: 0, coedge: 0,
+                face: 0,
+                coedge: 0,
             },
-            base_interval, corrected_interval, displacement_interval,
-            realized_witness_interval: None, realized_endpoint_witnesses: None, source_error_mm,
+            base_interval,
+            corrected_interval,
+            displacement_interval,
+            realized_witness_interval: None,
+            realized_endpoint_witnesses: None,
+            source_error_mm,
         }
     }
 
@@ -898,26 +1162,53 @@ mod tests {
         tolerance: f64,
     ) -> Result<(ProjectedBounds, f64), GeometryError> {
         aggregate_material_supports(
-            raw, [0.0, 0.0, 1.0], supports, Some(1.0),
-            BoundsPolicy { maximum_endpoint_uncertainty_mm: tolerance },
-            &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-        ).map(|(bounds, source_error_mm, _)| (bounds, source_error_mm))
+            raw,
+            [0.0, 0.0, 1.0],
+            supports,
+            Some(1.0),
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: tolerance,
+            },
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+        )
+        .map(|(bounds, source_error_mm, _)| (bounds, source_error_mm))
     }
 
     #[test]
     fn scalar_identity_requires_every_complete_support_displacement_to_be_exact_zero() {
         for (supports, expected) in [
             (vec![], true),
-            (vec![scalar_transport([5.0, 6.0], [5.0, 6.0], [0.0, 0.0], 0.25)], true),
-            (vec![scalar_transport([5.0, 6.0], [5.0, 6.25], [0.0, 0.25], 0.25)], false),
-            (vec![scalar_transport([5.0, 6.0], [5.0, 6.0],
-                [-f64::from_bits(1), f64::from_bits(1)], 0.25)], false),
+            (
+                vec![scalar_transport([5.0, 6.0], [5.0, 6.0], [0.0, 0.0], 0.25)],
+                true,
+            ),
+            (
+                vec![scalar_transport([5.0, 6.0], [5.0, 6.25], [0.0, 0.25], 0.25)],
+                false,
+            ),
+            (
+                vec![scalar_transport(
+                    [5.0, 6.0],
+                    [5.0, 6.0],
+                    [-f64::from_bits(1), f64::from_bits(1)],
+                    0.25,
+                )],
+                false,
+            ),
         ] {
             let (_, _, scalar_identity) = aggregate_material_supports(
-                exact_scalar_bounds(), [0.0, 0.0, 1.0], &supports, Some(1.0),
-                BoundsPolicy { maximum_endpoint_uncertainty_mm: 0.00001 },
-                &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-            ).unwrap();
+                exact_scalar_bounds(),
+                [0.0, 0.0, 1.0],
+                &supports,
+                Some(1.0),
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 0.00001,
+                },
+                &mut GeometryWorkBudget::new(100),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
             assert_eq!(scalar_identity, expected);
         }
     }
@@ -992,18 +1283,16 @@ mod tests {
 
     #[test]
     fn realized_endpoint_witnesses_resolve_minimum_and_maximum_independently() {
-        let mut support = scalar_transport(
-            [0.0, 10.0], [0.0, 10.0], [-0.25, 0.25], 0.25,
-        );
+        let mut support = scalar_transport([0.0, 10.0], [0.0, 10.0], [-0.25, 0.25], 0.25);
         support.realized_endpoint_witnesses = Some([2.0e-8, 10.0 - 2.0e-8]);
-        let (bounds, _) = scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6)
-            .unwrap();
+        let (bounds, _) =
+            scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6).unwrap();
         assert_eq!(bounds.minimum, [0.0, 2.0e-8]);
         assert_eq!(bounds.maximum, [10.0 - 2.0e-8, 10.0]);
         for endpoints in [[f64::NAN, 10.0], [0.0, f64::INFINITY]] {
             support.realized_endpoint_witnesses = Some(endpoints);
-            let failure = scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6)
-                .unwrap_err();
+            let failure =
+                scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6).unwrap_err();
             assert_eq!(failure.code, GeometryErrorCode::ConditioningFailure);
         }
     }
@@ -1011,13 +1300,16 @@ mod tests {
     #[test]
     fn material_feasible_witness_intervals_must_be_finite_and_ordered() {
         for witness in [
-            [f64::NAN, 0.0], [0.0, f64::NAN], [f64::NEG_INFINITY, 0.0],
-            [0.0, f64::INFINITY], [1.0, 0.0],
+            [f64::NAN, 0.0],
+            [0.0, f64::NAN],
+            [f64::NEG_INFINITY, 0.0],
+            [0.0, f64::INFINITY],
+            [1.0, 0.0],
         ] {
             let mut support = scalar_transport([4.0, 6.0], [4.0, 6.0], [0.0, 0.0], 0.0);
             support.realized_witness_interval = Some(witness);
-            let failure = scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6)
-                .unwrap_err();
+            let failure =
+                scalar_material_bounds(exact_scalar_bounds(), &[support], 1.0e-6).unwrap_err();
             assert_eq!(failure.code, GeometryErrorCode::ConditioningFailure);
         }
     }
@@ -1043,23 +1335,38 @@ mod tests {
         assert_eq!(failure.code, GeometryErrorCode::AnalysisIndeterminate);
         let diagnostic = failure.to_string();
         for detail in [
-            "query_direction=[0.0, 0.0, 1.0]", "raw_min=", "raw_max=",
-            "material_min=", "material_max=", "requested_endpoint_uncertainty_mm=0.001",
+            "query_direction=[0.0, 0.0, 1.0]",
+            "raw_min=",
+            "raw_max=",
+            "material_min=",
+            "material_max=",
+            "requested_endpoint_uncertainty_mm=0.001",
             "maximum_physical_source_error_mm=0.05",
             "minLo_winner=index:0,owner:(original face 0, coedge 0)",
-            "minHi_winner=raw_or_zero", "maxLo_winner=raw_or_zero",
-            "maxHi_winner=raw_or_zero", "physicalError_winner=index:0",
+            "minHi_winner=raw_or_zero",
+            "maxLo_winner=raw_or_zero",
+            "maxHi_winner=raw_or_zero",
+            "physicalError_winner=index:0",
             "BASE:[0.0, 0.1],G:[-0.05, 0.1],D:[-0.05, 0.0]",
         ] {
             assert!(diagnostic.contains(detail), "{diagnostic}");
         }
         let failure = aggregate_material_supports(
-            exact_scalar_bounds(), [0.0, 0.0, 1.0],
-            &[scalar_transport([5.0, 6.0], [5.0, 6.05], [0.0, 0.05], 0.05)], Some(0.01),
-            BoundsPolicy { maximum_endpoint_uncertainty_mm: 0.001 },
-            &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-        ).unwrap_err();
-        assert_eq!(failure.code, GeometryErrorCode::ParameterCorrespondenceUnavailable);
+            exact_scalar_bounds(),
+            [0.0, 0.0, 1.0],
+            &[scalar_transport([5.0, 6.0], [5.0, 6.05], [0.0, 0.05], 0.05)],
+            Some(0.01),
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: 0.001,
+            },
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.code,
+            GeometryErrorCode::ParameterCorrespondenceUnavailable
+        );
     }
 
     #[test]
@@ -1069,10 +1376,17 @@ mod tests {
             (100, true, GeometryErrorCode::Cancelled),
         ] {
             let failure = aggregate_material_supports(
-                exact_scalar_bounds(), [0.0, 0.0, 1.0], &[], None,
-                BoundsPolicy { maximum_endpoint_uncertainty_mm: 0.001 },
-                &mut GeometryWorkBudget::new(maximum_work), &AtomicBool::new(cancelled),
-            ).unwrap_err();
+                exact_scalar_bounds(),
+                [0.0, 0.0, 1.0],
+                &[],
+                None,
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 0.001,
+                },
+                &mut GeometryWorkBudget::new(maximum_work),
+                &AtomicBool::new(cancelled),
+            )
+            .unwrap_err();
             assert_eq!(failure.code, expected);
         }
     }
@@ -1091,19 +1405,23 @@ mod tests {
         let cancel = AtomicBool::new(false);
         // The selected affine recipe really extends beyond both raw references.
         let base = source_recipe_scalar_support(
-            [[0.0, 1.0]; 2], [0.0, 10.0], 0.0001, MAX_SCRATCH_ALLOCATION_BYTES,
-            &mut work, &cancel,
+            [[0.0, 1.0]; 2],
+            [0.0, 10.0],
+            0.0001,
+            MAX_SCRATCH_ALLOCATION_BYTES,
+            &mut work,
+            &cancel,
             |uv, _, _| {
-                let evaluate = |u: Interval| {
-                    Interval::point(-0.01).add(Interval::point(10.02).mul(u))
-                };
+                let evaluate =
+                    |u: Interval| Interval::point(-0.01).add(Interval::point(10.02).mul(u));
                 Ok((
                     evaluate(Interval::new(uv[0][0], uv[0][1])?),
                     Some(evaluate(Interval::point(uv[0][0] * 0.5 + uv[0][1] * 0.5))),
                     0,
                 ))
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(base.lo <= -0.01 && 10.01 <= base.hi, "{base:?}");
         let support = scalar_transport([base.lo, base.hi], [base.lo, base.hi], [0.0, 0.0], 0.0);
         let failure = scalar_material_bounds(exact_scalar_bounds(), &[support], 0.001).unwrap_err();
@@ -1112,32 +1430,54 @@ mod tests {
     }
 
     fn search(
-        domain: [[f64; 2]; 2], dimensions: usize, tolerance: f64,
-        scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
-        evaluate: impl FnMut([[f64; 2]; 2], &mut GeometryWorkBudget, &AtomicBool)
-            -> Result<Option<Evaluation>, GeometryError>,
+        domain: [[f64; 2]; 2],
+        dimensions: usize,
+        tolerance: f64,
+        scratch: &mut Scratch,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        evaluate: impl FnMut(
+            [[f64; 2]; 2],
+            &mut GeometryWorkBudget,
+            &AtomicBool,
+        ) -> Result<Option<Evaluation>, GeometryError>,
     ) -> Result<ProjectedBounds, GeometryError> {
-        search_domains(std::iter::once(domain), dimensions, tolerance, None,
-            scratch, work, cancel, evaluate)
+        search_domains(
+            std::iter::once(domain),
+            dimensions,
+            tolerance,
+            None,
+            scratch,
+            work,
+            cancel,
+            evaluate,
+        )
     }
 
     #[test]
     fn interior_extremum_is_not_replaced_by_boundary_or_control_box_contact() {
         let result = search(
-            [[-1.0, 1.0]; 2], 2, 0.001, &mut Scratch::default(),
-            &mut GeometryWorkBudget::new(100_000), &AtomicBool::new(false),
+            [[-1.0, 1.0]; 2],
+            2,
+            0.001,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(100_000),
+            &AtomicBool::new(false),
             |uv, _, _| {
                 let u = Interval::new(uv[0][0], uv[0][1])?;
                 let v = Interval::new(uv[1][0], uv[1][1])?;
                 Ok(Some(Evaluation {
                     height: Interval::point(2.0).sub(u.square()).sub(v.square()),
-                    witness: Some(Interval::point(2.0)
-                        .sub(Interval::point(u.mid()).square())
-                        .sub(Interval::point(v.mid()).square())),
+                    witness: Some(
+                        Interval::point(2.0)
+                            .sub(Interval::point(u.mid()).square())
+                            .sub(Interval::point(v.mid()).square()),
+                    ),
                     split_axis: if u.width() >= v.width() { 0 } else { 1 },
                 }))
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.minimum[0] <= 0.0 && result.minimum[1] >= 0.0);
         assert!(result.maximum[0] <= 2.0 && result.maximum[1] >= 2.0);
         assert!(result.achieved_uncertainty_mm <= 0.001);
@@ -1146,10 +1486,16 @@ mod tests {
     #[test]
     fn outside_trim_never_supplies_a_witness() {
         let result = search(
-            [[0.0, 1.0], [0.0, 0.0]], 1, 0.001, &mut Scratch::default(),
-            &mut GeometryWorkBudget::new(10_000), &AtomicBool::new(false),
+            [[0.0, 1.0], [0.0, 0.0]],
+            1,
+            0.001,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(10_000),
+            &AtomicBool::new(false),
             |uv, _, _| {
-                if uv[0][1] < 0.75 { return Ok(None); }
+                if uv[0][1] < 0.75 {
+                    return Ok(None);
+                }
                 let height = Interval::new(uv[0][0], uv[0][1])?;
                 let middle = height.mid();
                 Ok(Some(Evaluation {
@@ -1158,7 +1504,8 @@ mod tests {
                     split_axis: 0,
                 }))
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.minimum[0] <= 0.75 && result.minimum[1] >= 0.75);
         assert!(result.minimum[0] > 0.74);
         assert!(result.maximum[0] <= 1.0 && result.maximum[1] >= 1.0);
@@ -1167,12 +1514,21 @@ mod tests {
     #[test]
     fn chart_exclusion_alone_never_becomes_a_feasible_witness() {
         let failure = search(
-            [[0.0, 1.0], [0.0, 0.0]], 1, 0.001, &mut Scratch::default(),
-            &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-            |_, _, _| Ok(Some(Evaluation {
-                height: Interval::point(0.0), witness: None, split_axis: 0,
-            })),
-        ).unwrap_err();
+            [[0.0, 1.0], [0.0, 0.0]],
+            1,
+            0.001,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+            |_, _, _| {
+                Ok(Some(Evaluation {
+                    height: Interval::point(0.0),
+                    witness: None,
+                    split_axis: 0,
+                }))
+            },
+        )
+        .unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
     }
 
@@ -1180,10 +1536,17 @@ mod tests {
     fn trim_seam_span_shares_only_genuine_feasible_witnesses() {
         let domains = [[[-1.0, 0.0], [0.0, 0.0]], [[0.0, 1.0], [0.0, 0.0]]];
         let result = search_domains(
-            domains.into_iter(), 1, 0.001, None, &mut Scratch::default(),
-            &mut GeometryWorkBudget::new(10_000), &AtomicBool::new(false),
+            domains.into_iter(),
+            1,
+            0.001,
+            None,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(10_000),
+            &AtomicBool::new(false),
             |uv, _, _| {
-                if uv[0][1] < 0.0 { return Ok(None); }
+                if uv[0][1] < 0.0 {
+                    return Ok(None);
+                }
                 let height = Interval::new(uv[0][0], uv[0][1])?;
                 let middle = height.mid();
                 Ok(Some(Evaluation {
@@ -1192,7 +1555,8 @@ mod tests {
                     split_axis: 0,
                 }))
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.minimum[0] <= 0.0 && result.minimum[1] >= 0.0);
         assert!(result.maximum[0] <= 1.0 && result.maximum[1] >= 1.0);
         assert!(result.achieved_uncertainty_mm <= 0.001);
@@ -1201,11 +1565,17 @@ mod tests {
     #[test]
     fn feasible_seed_does_not_clip_an_unevaluated_interior_extremum() {
         let seed = ProjectedBounds {
-            minimum: [0.0, 0.0], maximum: [0.0, 0.0], achieved_uncertainty_mm: 0.0,
+            minimum: [0.0, 0.0],
+            maximum: [0.0, 0.0],
+            achieved_uncertainty_mm: 0.0,
         };
         let result = search_domains(
-            std::iter::once([[-1.0, 1.0], [0.0, 0.0]]), 1, 0.001, Some(seed),
-            &mut Scratch::default(), &mut GeometryWorkBudget::new(100_000),
+            std::iter::once([[-1.0, 1.0], [0.0, 0.0]]),
+            1,
+            0.001,
+            Some(seed),
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(100_000),
             &AtomicBool::new(false),
             |uv, _, _| {
                 let u = Interval::new(uv[0][0], uv[0][1])?;
@@ -1215,7 +1585,8 @@ mod tests {
                     split_axis: 0,
                 }))
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.minimum[0] <= 0.0 && result.minimum[1] >= 0.0);
         assert!(result.maximum[0] <= 1.0 && result.maximum[1] >= 1.0);
     }
@@ -1227,26 +1598,47 @@ mod tests {
             (100, true, GeometryErrorCode::Cancelled),
         ] {
             let failure = search(
-                [[0.0, 1.0], [0.0, 0.0]], 1, 0.001, &mut Scratch::default(),
-                &mut GeometryWorkBudget::new(maximum_work), &AtomicBool::new(cancelled),
-                |_, _, _| Ok(Some(Evaluation {
-                    height: Interval::point(0.0), witness: Some(Interval::point(0.0)), split_axis: 0,
-                })),
-            ).unwrap_err();
+                [[0.0, 1.0], [0.0, 0.0]],
+                1,
+                0.001,
+                &mut Scratch::default(),
+                &mut GeometryWorkBudget::new(maximum_work),
+                &AtomicBool::new(cancelled),
+                |_, _, _| {
+                    Ok(Some(Evaluation {
+                        height: Interval::point(0.0),
+                        witness: Some(Interval::point(0.0)),
+                        split_axis: 0,
+                    }))
+                },
+            )
+            .unwrap_err();
             assert_eq!(failure.code, expected);
         }
     }
 
     #[test]
     fn enclosing_job_capacity_narrows_search_allocation_before_growth() {
-        let mut scratch = Scratch { byte_limit: 1, ..Scratch::default() };
+        let mut scratch = Scratch {
+            byte_limit: 1,
+            ..Scratch::default()
+        };
         let failure = search(
-            [[0.0, 1.0], [0.0, 0.0]], 1, 0.001, &mut scratch,
-            &mut GeometryWorkBudget::new(100), &AtomicBool::new(false),
-            |_, _, _| Ok(Some(Evaluation {
-                height: Interval::point(0.0), witness: Some(Interval::point(0.0)), split_axis: 0,
-            })),
-        ).unwrap_err();
+            [[0.0, 1.0], [0.0, 0.0]],
+            1,
+            0.001,
+            &mut scratch,
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+            |_, _, _| {
+                Ok(Some(Evaluation {
+                    height: Interval::point(0.0),
+                    witness: Some(Interval::point(0.0)),
+                    split_axis: 0,
+                }))
+            },
+        )
+        .unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ResourceLimit);
         assert_eq!(scratch.allocated_bytes, 0);
     }
@@ -1254,12 +1646,20 @@ mod tests {
     #[test]
     fn unresolved_rational_conditioning_remains_a_typed_failure() {
         let failure = search(
-            [[0.0, f64::from_bits(1)], [0.0, 0.0]], 1, 0.001,
-            &mut Scratch::default(), &mut GeometryWorkBudget::new(1_000),
+            [[0.0, f64::from_bits(1)], [0.0, 0.0]],
+            1,
+            0.001,
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(1_000),
             &AtomicBool::new(false),
-            |_, _, _| Err(error(GeometryErrorCode::ConditioningFailure,
-                "denominator contains zero")),
-        ).unwrap_err();
+            |_, _, _| {
+                Err(error(
+                    GeometryErrorCode::ConditioningFailure,
+                    "denominator contains zero",
+                ))
+            },
+        )
+        .unwrap_err();
         assert_eq!(failure.code, GeometryErrorCode::ConditioningFailure);
     }
 

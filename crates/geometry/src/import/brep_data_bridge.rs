@@ -36,6 +36,7 @@ use solidcore::surface::sphere::Sphere;
 use solidcore::surface::surface::Surface;
 use solidcore::surface::surface::p1::StepSurface;
 use solidcore::surface::torus::{Torus, TorusOptions};
+use solidcore::topology::Brep;
 use solidcore::topology::brep::p10::{
     HEALER_VERSION, MakeTopologyOptions, TopologyEnv, make_topology_from_data,
 };
@@ -43,7 +44,6 @@ use solidcore::topology::brep_data::{
     BrepData, DataSourceType, EdgeData, EuData, FaceData, FaceuseData, Keyed, LoopData, RegionData,
     ShellData, VertexData,
 };
-use solidcore::topology::Brep;
 use solidcraft_geom::brep as b;
 use solidcraft_geom::brep::eval::{CurveEval, SurfaceEval};
 
@@ -226,7 +226,12 @@ pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<
         .skip(1)
         .filter_map(|(r, region)| region.shells.first().map(|&s| (s, r)))
         .collect();
-    let listed = |s: u32| brep.regions.iter().filter(|r| r.shells.contains(&s)).count();
+    let listed = |s: u32| {
+        brep.regions
+            .iter()
+            .filter(|r| r.shells.contains(&s))
+            .count()
+    };
 
     for (r, region) in brep.regions.iter().enumerate() {
         let start_shell = d.shells.len() as u64;
@@ -426,11 +431,7 @@ pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<
                             .copied()
                             .unwrap_or(0)
                             != 0;
-                        let target_entry = if next_upper {
-                            next_rec
-                        } else {
-                            -next_rec - 1
-                        };
+                        let target_entry = if next_upper { next_rec } else { -next_rec - 1 };
                         let (next_eu, mate_next_eu) = if here_upper {
                             // Enters at `eu1` (`here_i64`), steps to `eu2` (`-here_i64 - 1`),
                             // and exits from `eu2` to `target_entry`.
@@ -507,8 +508,9 @@ fn strip_lamina_spurs(brep: &b::Brep) -> R<Cow<'_, b::Brep>> {
     };
     let has_spur = brep.faces.iter().any(|f| {
         f.loops.iter().any(|l| match l {
-            b::Loop::Edges { edges } if edges.len() > 2 => (0..edges.len())
-                .any(|i| is_spur_pair(&edges[i], &edges[(i + 1) % edges.len()])),
+            b::Loop::Edges { edges } if edges.len() > 2 => {
+                (0..edges.len()).any(|i| is_spur_pair(&edges[i], &edges[(i + 1) % edges.len()]))
+            }
             _ => false,
         })
     });
@@ -803,7 +805,11 @@ fn build_surface(
             let u0_deg = u_range[0].to_degrees();
             let u1_deg = u_range[1].to_degrees();
             let dom = Extent2d::from_bounds(u0_deg, v0, u1_deg, v1);
-            Ok((Surface::from(StepSurface::new(Surface::from(cyl), true)?), dom, false))
+            Ok((
+                Surface::from(StepSurface::new(Surface::from(cyl), true)?),
+                dom,
+                false,
+            ))
         }
         b::Surface::Cone {
             frame,
@@ -829,7 +835,11 @@ fn build_surface(
             let u0_deg = u_range[0].to_degrees();
             let u1_deg = u_range[1].to_degrees();
             let dom = Extent2d::from_bounds(u0_deg, v0, u1_deg, v1);
-            Ok((Surface::from(StepSurface::new(Surface::from(cone), true)?), dom, false))
+            Ok((
+                Surface::from(StepSurface::new(Surface::from(cone), true)?),
+                dom,
+                false,
+            ))
         }
         b::Surface::Sphere { frame, radius } => {
             let mut f = frame.clone();
@@ -845,7 +855,11 @@ fn build_surface(
             let v0_deg = v0.to_degrees();
             let v1_deg = v1.to_degrees();
             let dom = Extent2d::from_bounds(u0_deg, v0_deg, u1_deg, v1_deg);
-            Ok((Surface::from(StepSurface::new(Surface::from(sph), true)?), dom, false))
+            Ok((
+                Surface::from(StepSurface::new(Surface::from(sph), true)?),
+                dom,
+                false,
+            ))
         }
         b::Surface::Torus {
             frame,
@@ -875,7 +889,11 @@ fn build_surface(
             let v0_deg = v_range[0].to_degrees();
             let v1_deg = v_range[1].to_degrees();
             let dom = Extent2d::from_bounds(u0_deg, v0_deg, u1_deg, v1_deg);
-            Ok((Surface::from(StepSurface::new(Surface::from(tor), true)?), dom, false))
+            Ok((
+                Surface::from(StepSurface::new(Surface::from(tor), true)?),
+                dom,
+                false,
+            ))
         }
         b::Surface::Spline {
             u_knots,
@@ -1026,10 +1044,9 @@ fn build_revolution_surface(
     domain: [[f64; 2]; 2],
 ) -> R<(Surface, Extent2d, bool)> {
     let (knots, pts): (Vec<f64>, Vec<([f64; 3], f64)>) = match profile {
-        b::Curve::Line { start, end } => (
-            vec![0.0, 0.0, 1.0, 1.0],
-            vec![(*start, 1.0), (*end, 1.0)],
-        ),
+        b::Curve::Line { start, end } => {
+            (vec![0.0, 0.0, 1.0, 1.0], vec![(*start, 1.0), (*end, 1.0)])
+        }
         b::Curve::Spline { knots, points } => {
             (knots.clone(), points.iter().map(|p| (*p, 1.0)).collect())
         }
@@ -1043,7 +1060,7 @@ fn build_revolution_surface(
         _ => {
             return Err(BridgeError::NotYet(
                 "revolutions of conic, polyline or intersection profiles",
-            ))
+            ));
         }
     };
     let len = dot(axis, axis).sqrt();
@@ -1057,9 +1074,8 @@ fn build_revolution_surface(
         (domain[1], domain[0])
     };
     let t1 = circle_param(a1 - a0);
-    let place = |p: [f64; 3]| {
-        [0, 1, 2].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r])
-    };
+    let place =
+        |p: [f64; 3]| [0, 1, 2].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
     let det = {
         let col = |c: usize| [m[c][0], m[c][1], m[c][2]];
         dot(cross(col(0), col(1)), col(2))
@@ -1081,7 +1097,10 @@ fn build_revolution_surface(
                 let (sk, ck) = (k as f64 * std::f64::consts::FRAC_PI_4).sin_cos();
                 let (f, wk) = if k % 2 == 1 { (1.0 / c, c) } else { (1.0, 1.0) };
                 (
-                    p3(place(add(centre, scale(add(scale(x, ck), scale(y, sk)), f)))),
+                    p3(place(add(
+                        centre,
+                        scale(add(scale(x, ck), scale(y, sk)), f),
+                    ))),
                     w * wk,
                 )
             })
@@ -1119,9 +1138,7 @@ fn build_revolution_surface(
 
 fn build_trim_curve(c: &b::Curve2, forward: bool, shift: f64) -> R<Curve> {
     let (knots, mut pts): (&[f64], Vec<([f64; 2], f64)>) = match c {
-        b::Curve2::Spline { knots, points } => {
-            (knots, points.iter().map(|p| (*p, 1.0)).collect())
-        }
+        b::Curve2::Spline { knots, points } => (knots, points.iter().map(|p| (*p, 1.0)).collect()),
         b::Curve2::RationalSpline { knots, homogeneous } => (
             knots,
             homogeneous
@@ -1140,7 +1157,10 @@ fn build_trim_curve(c: &b::Curve2, forward: bool, shift: f64) -> R<Curve> {
         pts.reverse();
         k_flat = k_flat.iter().rev().map(|t| -t).collect();
     }
-    let cps: Vec<Point3> = pts.iter().map(|&(p, _)| Point3::new(p[0], p[1], 0.0)).collect();
+    let cps: Vec<Point3> = pts
+        .iter()
+        .map(|&(p, _)| Point3::new(p[0], p[1], 0.0))
+        .collect();
     let weights: Vec<f64> = pts.iter().map(|&(_, w)| w).collect();
     let (uk, mults) = unique_knots_and_multiplicities(&k_flat);
     let bsc = BSplineCurve::create_canonical(&CanonicalData {
@@ -1168,16 +1188,26 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
         }
         b::Curve::Circle { frame, radius } => {
             let ax = placement(frame.origin, z_axis(frame), frame.x_axis)?;
-            let step_ivl = Extent1d::from_min_max(interval[0].to_degrees(), interval[1].to_degrees());
-            let circle = Ellipse::create_canonical_circle(k, &ax, *radius, Some(&step_ivl), Some(false))?;
+            let step_ivl =
+                Extent1d::from_min_max(interval[0].to_degrees(), interval[1].to_degrees());
+            let circle =
+                Ellipse::create_canonical_circle(k, &ax, *radius, Some(&step_ivl), Some(false))?;
             let curve = Curve::from(circle);
             let nurb_ivl = curve.natural_interval();
             Ok((curve, nurb_ivl))
         }
         b::Curve::Ellipse { frame, radii } => {
             let ax = placement(frame.origin, z_axis(frame), frame.x_axis)?;
-            let step_ivl = Extent1d::from_min_max(interval[0].to_degrees(), interval[1].to_degrees());
-            let ell = Ellipse::create_canonical(k, &ax, radii[0], radii[1], Some(&step_ivl), Some(false))?;
+            let step_ivl =
+                Extent1d::from_min_max(interval[0].to_degrees(), interval[1].to_degrees());
+            let ell = Ellipse::create_canonical(
+                k,
+                &ax,
+                radii[0],
+                radii[1],
+                Some(&step_ivl),
+                Some(false),
+            )?;
             let curve = Curve::from(ell);
             let nurb_ivl = curve.natural_interval();
             Ok((curve, nurb_ivl))
@@ -1200,7 +1230,10 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
                 weights: None,
                 trim: None,
             })?;
-            Ok((Curve::from(bsc), Extent1d::from_raw(interval[0], interval[1])))
+            Ok((
+                Curve::from(bsc),
+                Extent1d::from_raw(interval[0], interval[1]),
+            ))
         }
         b::Curve::Spline { knots, points } => {
             let order = knots
@@ -1221,7 +1254,10 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
                 weights: None,
                 trim: None,
             })?;
-            Ok((Curve::from(bsc), Extent1d::from_raw(interval[0], interval[1])))
+            Ok((
+                Curve::from(bsc),
+                Extent1d::from_raw(interval[0], interval[1]),
+            ))
         }
         b::Curve::RationalSpline { knots, homogeneous } => {
             let order = knots
@@ -1246,7 +1282,10 @@ fn build_curve_3d(k: &Kernel, c: &b::Curve, interval: [f64; 2]) -> R<(Curve, Ext
                 weights: Some(&weights),
                 trim: None,
             })?;
-            Ok((Curve::from(bsc), Extent1d::from_raw(interval[0], interval[1])))
+            Ok((
+                Curve::from(bsc),
+                Extent1d::from_raw(interval[0], interval[1]),
+            ))
         }
         b::Curve::SurfaceIntersection { .. } => {
             Err(BridgeError::NotYet("traced intersection curves"))
@@ -1344,8 +1383,7 @@ pub(crate) mod analytic {
         domain: [[f64; 2]; 2],
         tol: f64,
     ) -> Option<(b::Surface, [[f64; 2]; 2])> {
-        let linear =
-            |k: &[f64]| k.len() == 4 && k[0] == k[1] && k[2] == k[3] && k[1] < k[2];
+        let linear = |k: &[f64]| k.len() == 4 && k[0] == k[1] && k[2] == k[3] && k[1] < k[2];
         let (rows, arc_knots, arc_range, line_knots, line_range): (
             [Vec<[f64; 4]>; 2],
             &[f64],
@@ -1398,7 +1436,8 @@ pub(crate) mod analytic {
         let mut angle = 0.0;
         let mut prev = 0.0;
         for i in 1..=32 {
-            let q = arc.point(arc_range[0] + (arc_range[1] - arc_range[0]) * f64::from(i) / 32.0)?
+            let q = arc
+                .point(arc_range[0] + (arc_range[1] - arc_range[0]) * f64::from(i) / 32.0)?
                 - center;
             let mut a = q.dot(y).atan2(q.dot(x));
             while a - prev > PI {
@@ -1547,15 +1586,21 @@ pub(crate) mod analytic {
 
         fn analytic(&self, domain: [[f64; 2]; 2]) -> R<(b::Surface, [[f64; 2]; 2])> {
             let (t, angle) = self.ranges(domain);
-            let at =
-                |s: f64| self.profile.point(s).ok_or(BridgeError::Invalid("revolution profile"));
+            let at = |s: f64| {
+                self.profile
+                    .point(s)
+                    .ok_or(BridgeError::Invalid("revolution profile"))
+            };
             let samples: Vec<ScVec3> = (0..=16)
                 .map(|i| at(t[0] + (t[1] - t[0]) * f64::from(i) / 16.0))
                 .collect::<R<_>>()?;
-            let far = samples.iter().map(|p| self.split(*p).2).fold(
-                ScVec3::ZERO,
-                |best, r| if r.len() > best.len() { r } else { best },
-            );
+            let far = samples
+                .iter()
+                .map(|p| self.split(*p).2)
+                .fold(
+                    ScVec3::ZERO,
+                    |best, r| if r.len() > best.len() { r } else { best },
+                );
             let x = far.normalized().ok_or(NOT_ANALYTIC)?;
             let y = self.z.cross(x);
             let frame = |o: ScVec3| b::Frame {
@@ -1591,8 +1636,12 @@ pub(crate) mod analytic {
                         .flat_map(|a| [ra, rb].map(|r| [r * a.cos(), r * a.sin()]))
                         .collect();
                     let lo = |k: usize| corners.iter().map(|c| c[k]).fold(f64::INFINITY, f64::min);
-                    let hi =
-                        |k: usize| corners.iter().map(|c| c[k]).fold(f64::NEG_INFINITY, f64::max);
+                    let hi = |k: usize| {
+                        corners
+                            .iter()
+                            .map(|c| c[k])
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    };
                     let plane = b::Surface::Plane {
                         origin: arr(foot),
                         u_axis: arr(x),
@@ -1945,7 +1994,10 @@ mod tests {
                         None,
                     )
                     .unwrap_or_else(|e| {
-                        panic!("{name} face {}: global_surface_intersect failed: {e}", fid.index())
+                        panic!(
+                            "{name} face {}: global_surface_intersect failed: {e}",
+                            fid.index()
+                        )
                     });
                 for c in &res.curves_3d {
                     total_curves += 1;

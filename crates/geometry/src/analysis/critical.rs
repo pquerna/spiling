@@ -17,21 +17,21 @@ pub(super) mod ray_index;
 mod source_chart;
 pub(in crate::analysis) use source_chart::{SourcePoleJoint, certify_source_pole_connection};
 mod tensor_g1;
-pub(super) use tensor_g1::interface_regular_join;
 #[cfg(test)]
 use tensor_g1::coefficient_tangent_join;
+pub(super) use tensor_g1::interface_regular_join;
 use tensor_g1::periodic_regular_join;
 
 use super::slab::HeightFunctional;
 use super::source_incidence::SourceEdgeIncidence;
 use super::{GeometryWorkBudget, SlabRequest};
-use crate::kernel::{PreparedFaceTrimDomain, TrimClassification};
-use crate::parametric::{
-    Interval, SurfaceEnclosure, down, surface_crease_interfaces, surface_enclosure,
-    surface_parameter_boxes, surface_parameter_span_smooth, up, SurfaceEvaluator, CurveEvaluator,
-};
 use crate::analysis::material_source::MaterialSourceView;
 use crate::kernel::trim::PreparedTrimSurface;
+use crate::kernel::{PreparedFaceTrimDomain, TrimClassification};
+use crate::parametric::{
+    CurveEvaluator, Interval, SurfaceEnclosure, SurfaceEvaluator, down, surface_crease_interfaces,
+    surface_enclosure, surface_parameter_boxes, surface_parameter_span_smooth, up,
+};
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, SectionLoopMm};
 use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::surface::surface::SurfaceKind;
@@ -723,7 +723,6 @@ pub(super) fn exact_unit_vector_identity(
     Ok(residual.sign() == 0)
 }
 
-
 /// A coefficient identity on the selected immutable UV operand. Restrictions
 /// and reversals preserve its image; no fitted endpoint line or rounded
 /// homogenization/knot insertion is used as identity evidence.
@@ -763,7 +762,11 @@ fn chart_linear_identity(
                 // This provider evaluates the literal spatial operand;
                 // preferred-master equivalence is separate source admission.
                 SourceCurve::SurfaceCurve { curve_3d, .. } => original = curve_3d,
-                SourceCurve::Line { origin, direction, magnitude } => {
+                SourceCurve::Line {
+                    origin,
+                    direction,
+                    magnitude,
+                } => {
                     return Ok(magnitude.is_finite()
                         && point_identity([origin[0], origin[1], 1.0], work)?
                         && (*magnitude == 0.0
@@ -772,8 +775,13 @@ fn chart_linear_identity(
                 SourceCurve::BSpline(spline) => {
                     for (index, point) in spline.points.iter().enumerate() {
                         work.charge(1, cancel)?;
-                        let weight = spline.weights.as_ref().map_or(1.0, |weights| weights[index]);
-                        if !weight.is_finite() { return Ok(false); }
+                        let weight = spline
+                            .weights
+                            .as_ref()
+                            .map_or(1.0, |weights| weights[index]);
+                        if !weight.is_finite() {
+                            return Ok(false);
+                        }
                         // Original controls are Euclidean. A nonzero weight
                         // multiplies this exact entire affine identity, so no
                         // rounded xyz*weight need be constructed.
@@ -797,14 +805,18 @@ fn chart_linear_identity(
         }
         return Ok(false);
     }
-    let Some(native) = curve.native_curve() else { return Ok(false); };
+    let Some(native) = curve.native_curve() else {
+        return Ok(false);
+    };
     if let CurveKind::Line(line) = native.kind() {
         let canonical = line.canonical_unit();
         // The affine identity holds throughout the line iff it annihilates
         // both the stored origin and stored direction. Scale, domain mapping
         // and reversal do not change this exact image identity.
-        return Ok(point_identity([canonical.point.x, canonical.point.y, 1.0], work)?
-            && point_identity([canonical.vector.x, canonical.vector.y, 0.0], work)?);
+        return Ok(
+            point_identity([canonical.point.x, canonical.point.y, 1.0], work)?
+                && point_identity([canonical.vector.x, canonical.vector.y, 0.0], work)?,
+        );
     }
     let Some(nurbs) = crate::parametric::native_curve_nurbs(curve)? else {
         return Ok(false);
@@ -812,7 +824,11 @@ fn chart_linear_identity(
     for point in nurbs.cpts() {
         work.charge(1, cancel)?;
         if !point_identity(
-            [point.x, point.y, if nurbs.is_rational() { point.w } else { 1.0 }],
+            [
+                point.x,
+                point.y,
+                if nurbs.is_rational() { point.w } else { 1.0 },
+            ],
             work,
         )? {
             return Ok(false);
@@ -850,7 +866,8 @@ fn spline_seam_join(
         });
         chart_linear_identity(&domain.coedge_operand(coedge)?, &coefficients, work, cancel)
     };
-    let Some(axes) = tensor_g1::direct_tensor_axes(surface, domain.uv_domain(), work, cancel)? else {
+    let Some(axes) = tensor_g1::direct_tensor_axes(surface, domain.uv_domain(), work, cancel)?
+    else {
         return Ok(false);
     };
     for (axis, (knots, degree, count)) in axes.into_iter().enumerate() {
@@ -870,12 +887,16 @@ fn spline_seam_join(
 /// interiors do not establish the link of an identified endpoint.
 fn intrinsically_smooth_profile(curve: &Curve) -> bool {
     match curve.kind() {
-        CurveKind::Line(_) | CurveKind::Ellipse(_)
-        | CurveKind::Hyperbola(_) | CurveKind::Parabola(_) => true,
-        CurveKind::CrvOnSurf(curve) =>
-            matches!(curve.uv_curve().kind(), CurveKind::Ellipse(_)
-                | CurveKind::Hyperbola(_) | CurveKind::Parabola(_))
-                && matches!(curve.surface().kind(), SurfaceKind::Plane(_)),
+        CurveKind::Line(_)
+        | CurveKind::Ellipse(_)
+        | CurveKind::Hyperbola(_)
+        | CurveKind::Parabola(_) => true,
+        CurveKind::CrvOnSurf(curve) => {
+            matches!(
+                curve.uv_curve().kind(),
+                CurveKind::Ellipse(_) | CurveKind::Hyperbola(_) | CurveKind::Parabola(_)
+            ) && matches!(curve.surface().kind(), SurfaceKind::Plane(_))
+        }
         _ => false,
     }
 }
@@ -885,9 +906,12 @@ fn intrinsically_smooth_carrier(surface: &(impl SurfaceEvaluator + ?Sized)) -> b
         for _ in 0..32 {
             match original {
                 SourceSurface::RectangularTrimmed { basis, .. } => original = basis,
-                SourceSurface::Plane { .. } | SourceSurface::Cylinder { .. }
-                | SourceSurface::Cone { .. } | SourceSurface::Sphere { .. }
-                | SourceSurface::Torus { .. } | SourceSurface::DegenerateTorus { .. } => return true,
+                SourceSurface::Plane { .. }
+                | SourceSurface::Cylinder { .. }
+                | SourceSurface::Cone { .. }
+                | SourceSurface::Sphere { .. }
+                | SourceSurface::Torus { .. }
+                | SourceSurface::DegenerateTorus { .. } => return true,
                 SourceSurface::Extrusion { profile, .. }
                 | SourceSurface::Revolution { profile, .. } => {
                     let mut profile = profile.as_ref();
@@ -895,8 +919,10 @@ fn intrinsically_smooth_carrier(surface: &(impl SurfaceEvaluator + ?Sized)) -> b
                         match profile {
                             SourceCurve::Trimmed { basis, .. } => profile = basis,
                             SourceCurve::SurfaceCurve { curve_3d, .. } => profile = curve_3d,
-                            SourceCurve::Line { .. } | SourceCurve::Circle { .. }
-                            | SourceCurve::Ellipse { .. } | SourceCurve::Parabola { .. } => return true,
+                            SourceCurve::Line { .. }
+                            | SourceCurve::Circle { .. }
+                            | SourceCurve::Ellipse { .. }
+                            | SourceCurve::Parabola { .. } => return true,
                             _ => return false,
                         }
                     }
@@ -907,17 +933,29 @@ fn intrinsically_smooth_carrier(surface: &(impl SurfaceEvaluator + ?Sized)) -> b
         }
         return false;
     }
-    let Some(mut surface) = surface.native_surface() else { return false; };
+    let Some(mut surface) = surface.native_surface() else {
+        return false;
+    };
     for _ in 0..32 {
         match surface.kind() {
-            SurfaceKind::Plane(_) | SurfaceKind::Sphere(_) | SurfaceKind::Torus(_)
+            SurfaceKind::Plane(_)
+            | SurfaceKind::Sphere(_)
+            | SurfaceKind::Torus(_)
             | SurfaceKind::Cone(_) => return true,
-            SurfaceKind::SurfOfRevolution(surface) =>
-                return surface.gen_curve().is_some_and(intrinsically_smooth_profile),
-            SurfaceKind::SurfOfExtrusion(surface) =>
-                return surface.gen_curve().is_some_and(intrinsically_smooth_profile),
+            SurfaceKind::SurfOfRevolution(surface) => {
+                return surface
+                    .gen_curve()
+                    .is_some_and(intrinsically_smooth_profile);
+            }
+            SurfaceKind::SurfOfExtrusion(surface) => {
+                return surface
+                    .gen_curve()
+                    .is_some_and(intrinsically_smooth_profile);
+            }
             SurfaceKind::Step(wrapper) => {
-                let Some(basis) = wrapper.surface() else { return false; };
+                let Some(basis) = wrapper.surface() else {
+                    return false;
+                };
                 surface = basis;
             }
             SurfaceKind::CurveBounded(wrapper) => surface = wrapper.basis(),
@@ -951,8 +989,7 @@ pub(super) fn same_face_source_seam_join(
         },
         _ => false,
     };
-    if !same_carrier || first == second || a.edge != b.edge || a.forward == b.forward
-    {
+    if !same_carrier || first == second || a.edge != b.edge || a.forward == b.forward {
         return Ok(false);
     }
     if tensor_g1::direct_tensor_axes(surface, domain.uv_domain(), work, cancel)?.is_some() {
@@ -1039,9 +1076,8 @@ impl<'a, 'd> GluedSourceFace<'a, 'd> {
                 ));
             }
         }
-        match crate::parametric::surface_geometric_normal_enclosure(
-            &self.surface, uv, work, cancel,
-        ) {
+        match crate::parametric::surface_geometric_normal_enclosure(&self.surface, uv, work, cancel)
+        {
             Ok(normal) => Ok(normal),
             Err(error)
                 if error.code == GeometryErrorCode::AnalysisIndeterminate
@@ -1051,7 +1087,12 @@ impl<'a, 'd> GluedSourceFace<'a, 'd> {
                 // incident tangent planes. One-sided nonzero native jets supply
                 // their common NORMAL DIRECTION, never a fictitious C1 jet.
                 Ok(normal(
-                    &crate::parametric::surface_piecewise_enclosure(&self.surface, uv, work, cancel)?,
+                    &crate::parametric::surface_piecewise_enclosure(
+                        &self.surface,
+                        uv,
+                        work,
+                        cancel,
+                    )?,
                     true,
                 ))
             }
@@ -2375,28 +2416,29 @@ fn coedge_normal_enclosure(
             // a genuine parameter derivative jump, so evaluating a single jet
             // across it would refuse an otherwise exact regular source seam.
             let compatible = (|| -> Result<Option<PositionNormalEnclosure>, GeometryError> {
-                    let mut result: Option<PositionNormalEnclosure> = None;
-                    for patch in surface_parameter_boxes(surface, uv, work, cancel)? {
-                        let jet = crate::parametric::surface_piecewise_enclosure(surface, patch, work, cancel)?;
-                        if (0..3)
-                            .any(|axis| intersection(position[axis], jet.position[axis]).is_none())
-                        {
-                            continue;
-                        }
-                        let n = match &source_chart {
-                            Some(chart) => chart.normal(jet.position)?,
-                            None => normal(&jet, domain.orientation()),
-                        };
-                        result = Some(match result {
-                            Some((p, previous)) => (
-                                std::array::from_fn(|axis| p[axis].hull(jet.position[axis])),
-                                std::array::from_fn(|axis| previous[axis].hull(n[axis])),
-                            ),
-                            None => (jet.position, n),
-                        });
+                let mut result: Option<PositionNormalEnclosure> = None;
+                for patch in surface_parameter_boxes(surface, uv, work, cancel)? {
+                    let jet = crate::parametric::surface_piecewise_enclosure(
+                        surface, patch, work, cancel,
+                    )?;
+                    if (0..3).any(|axis| intersection(position[axis], jet.position[axis]).is_none())
+                    {
+                        continue;
                     }
-                    Ok(result)
-                })()?;
+                    let n = match &source_chart {
+                        Some(chart) => chart.normal(jet.position)?,
+                        None => normal(&jet, domain.orientation()),
+                    };
+                    result = Some(match result {
+                        Some((p, previous)) => (
+                            std::array::from_fn(|axis| p[axis].hull(jet.position[axis])),
+                            std::array::from_fn(|axis| previous[axis].hull(n[axis])),
+                        ),
+                        None => (jet.position, n),
+                    });
+                }
+                Ok(result)
+            })()?;
             let Some((image, n)) = compatible else {
                 continue;
             };
@@ -3063,17 +3105,13 @@ pub(super) fn certify_critical_slab(
             )
         })?;
         let first_domain = source.face_domain(first.face, chart_bytes, work, cancel)?;
-        let second_domain = source.face_domain(
-            second.face,
-            chart_bytes,
-            work,
-            cancel,
-        )?;
+        let second_domain = source.face_domain(second.face, chart_bytes, work, cancel)?;
         let edge = first_domain.coedges()[first.coedge].edge;
         let central_range = material_links.central_spatial_range(
             edge,
             first_domain
-                .original_coedge_correspondence(first.coedge)?.spatial_range(),
+                .original_coedge_correspondence(first.coedge)?
+                .spatial_range(),
             [first.face, first.wire, first.index],
         )?;
         let paired_scratch = chart_bytes;
@@ -3090,19 +3128,19 @@ pub(super) fn certify_critical_slab(
         )?;
         let excluded_link_enclosure = if material_link.is_none() {
             let a = crate::parametric::surface_piecewise_enclosure(
-                    &first_domain.surface_operand(),
-                    first_domain.uv_domain(),
-                    work,
-                    cancel,
-                )
-                .map(|jet| jet.position)?;
+                &first_domain.surface_operand(),
+                first_domain.uv_domain(),
+                work,
+                cancel,
+            )
+            .map(|jet| jet.position)?;
             let b = crate::parametric::surface_piecewise_enclosure(
-                    &second_domain.surface_operand(),
-                    second_domain.uv_domain(),
-                    work,
-                    cancel,
-                )
-                .map(|jet| jet.position)?;
+                &second_domain.surface_operand(),
+                second_domain.uv_domain(),
+                work,
+                cancel,
+            )
+            .map(|jet| jet.position)?;
             Some(std::array::from_fn(|axis| {
                 a[axis].hull(b[axis]).add(Interval {
                     lo: -source_allowance,
@@ -3123,17 +3161,22 @@ pub(super) fn certify_critical_slab(
             work,
             cancel,
         )?;
-        let range = first_domain.original_coedge_correspondence(first.coedge)?.spatial_range();
+        let range = first_domain
+            .original_coedge_correspondence(first.coedge)?
+            .spatial_range();
         // Events grow while the source operator remains borrowed. Reserve all
         // coexistent events, knots and sample storage before preparing it.
         let occupied_scratch = fixed_scratch
             + prism.heap_bytes()
             + source_cuts.capacity() * std::mem::size_of::<f64>();
-        let remaining = scratch_limit.checked_sub(occupied_scratch).ok_or_else(|| failure(
-            GeometryErrorCode::ResourceLimit,
-            "critical scratch capacity exhausted before original spatial curve capture",
-            first.face, range,
-        ))?;
+        let remaining = scratch_limit.checked_sub(occupied_scratch).ok_or_else(|| {
+            failure(
+                GeometryErrorCode::ResourceLimit,
+                "critical scratch capacity exhausted before original spatial curve capture",
+                first.face,
+                range,
+            )
+        })?;
         first_domain.with_original_spatial_curve(
             first.coedge, remaining, work, cancel, |curve, work, cancel| {
             // A C0 original edge can carry a height event even when each

@@ -439,7 +439,8 @@ impl projects_server::Projects for Service {
         ))
     }
     async fn import_appearance_palette(
-        &self, req: Request<ImportAppearancePaletteRequest>,
+        &self,
+        req: Request<ImportAppearancePaletteRequest>,
     ) -> Result<Response<Operation>, Status> {
         let mut req = req.into_inner();
         let id = std::mem::take(&mut req.request_id);
@@ -448,12 +449,24 @@ impl projects_server::Projects for Service {
         let command = req.try_into().map_err(|error: String| {
             request_error(spiling_contracts::native::project_request_status(&error))
         })?;
-        Ok(Response::new(self.jobs.start_native(self.native.clone(), jobs::NativeAdmission {
-            parent, request_id: id, digest, command: Control::Project(command), reservation: 0,
-        }).await?))
+        Ok(Response::new(
+            self.jobs
+                .start_native(
+                    self.native.clone(),
+                    jobs::NativeAdmission {
+                        parent,
+                        request_id: id,
+                        digest,
+                        command: Control::Project(command),
+                        reservation: 0,
+                    },
+                )
+                .await?,
+        ))
     }
     async fn compare_appearance(
-        &self, req: Request<CompareAppearanceRequest>,
+        &self,
+        req: Request<CompareAppearanceRequest>,
     ) -> Result<Response<Operation>, Status> {
         let mut req = req.into_inner();
         let id = std::mem::take(&mut req.request_id);
@@ -462,13 +475,25 @@ impl projects_server::Projects for Service {
         let command = req.try_into().map_err(|error: String| {
             request_error(spiling_contracts::native::project_request_status(&error))
         })?;
-        Ok(Response::new(self.jobs.start_native(self.native.clone(), jobs::NativeAdmission {
-            parent, request_id: id, digest, command: Control::Project(command),
-            reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
-        }).await?))
+        Ok(Response::new(
+            self.jobs
+                .start_native(
+                    self.native.clone(),
+                    jobs::NativeAdmission {
+                        parent,
+                        request_id: id,
+                        digest,
+                        command: Control::Project(command),
+                        reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES
+                            as u64,
+                    },
+                )
+                .await?,
+        ))
     }
     async fn get_appearance_report(
-        &self, req: Request<GetAppearanceReportRequest>,
+        &self,
+        req: Request<GetAppearanceReportRequest>,
     ) -> Result<Response<Operation>, Status> {
         let mut req = req.into_inner();
         let id = std::mem::take(&mut req.request_id);
@@ -477,10 +502,21 @@ impl projects_server::Projects for Service {
         let command = req.try_into().map_err(|error: String| {
             request_error(spiling_contracts::native::project_request_status(&error))
         })?;
-        Ok(Response::new(self.jobs.start_native(self.native.clone(), jobs::NativeAdmission {
-            parent, request_id: id, digest, command: Control::Project(command),
-            reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES as u64,
-        }).await?))
+        Ok(Response::new(
+            self.jobs
+                .start_native(
+                    self.native.clone(),
+                    jobs::NativeAdmission {
+                        parent,
+                        request_id: id,
+                        digest,
+                        command: Control::Project(command),
+                        reservation: spiling_contracts::appearance::MAX_APPEARANCE_REPORT_BYTES
+                            as u64,
+                    },
+                )
+                .await?,
+        ))
     }
 }
 #[tonic::async_trait]

@@ -19,9 +19,7 @@ use std::sync::atomic::AtomicBool;
 use spiling_contracts::geometry::{
     FaceId, GeometryErrorCode, MAX_SOURCE_BYTES, SourceUnit, StepEntityId,
 };
-use spiling_geometry::{
-    from_step_bytes, from_step_bytes_with_cancel, from_step_file,
-};
+use spiling_geometry::{from_step_bytes, from_step_bytes_with_cancel, from_step_file};
 
 const MAX_QUERY_PROOF_BYTES: usize = 32 * 1024 * 1024;
 
@@ -283,7 +281,10 @@ fn challenge_retained_query_proof_bytes_monotonicity_and_bounds() {
     assert!(b_box_mm > 0, "box_mm retained bytes must be > 0");
     assert!(b_box_inch > 0, "box_inch retained bytes must be > 0");
     assert!(b_cylinder > 0, "cylinder retained bytes must be > 0");
-    assert!(b_through_hole > 0, "through-hole retained bytes must be > 0");
+    assert!(
+        b_through_hole > 0,
+        "through-hole retained bytes must be > 0"
+    );
     assert!(b_plate > 0, "plate retained bytes must be > 0");
 
     // 2. Determinism: repeated calculation gives identical bytes
@@ -342,8 +343,7 @@ fn challenge_manifest_all_14_adversaries() {
             let err = result.unwrap_err();
             let err_code_val = serde_json::to_value(err.code).unwrap();
             assert_eq!(
-                err_code_val,
-                expected_err_str,
+                err_code_val, expected_err_str,
                 "fixture '{path}' expected error '{expected_err_str}' but got '{err_code_val}' (msg: {})",
                 err.message
             );
@@ -391,7 +391,11 @@ fn challenge_baseline_accepted_fixtures_geometry_and_scaling() {
 
     // 2. Cylinder
     let cyl = from_step_bytes(&load_fixture("cylinder.step")).expect("cylinder");
-    assert_eq!(cyl.faces().len(), 4, "cylinder has 2 semi-cylinders + 2 planar caps = 4 faces");
+    assert_eq!(
+        cyl.faces().len(),
+        4,
+        "cylinder has 2 semi-cylinders + 2 planar caps = 4 faces"
+    );
     let b_cyl = cyl.bounds_mm();
     assert!((b_cyl.min[0] - (-5.0)).abs() < 1e-5);
     assert!((b_cyl.min[1] - (-5.0)).abs() < 1e-5);
@@ -424,7 +428,10 @@ fn challenge_reproduce_box_inch_bounds_double_scaling_bug() {
 
     // Verify double-scaling fix:
     // manifest.json and RFC 07 specify expected bounds max: [20.0, 10.0, 8.0] mm.
-    println!("Empirical box-inch bounds: min={:?}, max={:?}", b_in.min, b_in.max);
+    println!(
+        "Empirical box-inch bounds: min={:?}, max={:?}",
+        b_in.min, b_in.max
+    );
     assert_eq!(box_inch.provenance().source_unit, SourceUnit::Inch);
     assert!(
         (b_in.max[0] - 20.0).abs() < 1e-4,

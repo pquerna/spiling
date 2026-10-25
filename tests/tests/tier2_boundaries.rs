@@ -7,11 +7,11 @@
 //! Derived from fixtures/geometry/manifest.json adversaries, extreme aspect ratios,
 //! degenerate cuts, coordinate extremes, zero thickness, and resource limits.
 
-use std::sync::atomic::AtomicBool;
 use spiling_contracts::geometry::*;
-use spiling_geometry::*;
 use spiling_e2e_tests::fixtures::*;
 use spiling_e2e_tests::helpers::*;
+use spiling_geometry::*;
+use std::sync::atomic::AtomicBool;
 
 // =========================================================================
 // Feature 1 Corner Cases: Large entity IDs, u32 limits, float loss prevention
@@ -58,7 +58,10 @@ fn test_f01_corner_source_edge_id_max() {
 
 #[test]
 fn test_f02_corner_bounds_non_cube() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let b = def.bounds_mm();
     assert!(b.max[0] > b.min[0]);
     assert!(b.max[1] > b.min[1]);
@@ -88,9 +91,7 @@ fn test_f02_corner_multi_thread_definition_access() {
     let mut handles = Vec::new();
     for _ in 0..8 {
         let d = Arc::clone(&def);
-        handles.push(std::thread::spawn(move || {
-            d.faces().len()
-        }));
+        handles.push(std::thread::spawn(move || d.faces().len()));
     }
     for h in handles {
         assert_eq!(h.join().unwrap(), 3);
@@ -99,7 +100,10 @@ fn test_f02_corner_multi_thread_definition_access() {
 
 #[test]
 fn test_f02_corner_proof_bytes_positive() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     assert!(def.retained_query_proof_bytes() > 1000);
 }
 
@@ -141,7 +145,10 @@ fn test_f03_corner_repeated_inspect_face() {
 
 #[test]
 fn test_f03_corner_all_faces_have_valid_kind() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     for f in def.faces() {
         assert!(!f.source_entity_kind.is_empty());
     }
@@ -213,7 +220,6 @@ fn test_f05_corner_resource_limit_five_faces_on_box() {
     let err = from_step_bytes_with_limits(&bytes, &cancel, 5, 10_000_000).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::ResourceLimit);
 }
-
 
 #[test]
 fn test_f05_corner_retained_bytes_cylinder() {
@@ -352,37 +358,59 @@ fn test_f08_corner_inch_conversion_accuracy() {
 
 #[test]
 fn test_f09_corner_spline_housing_midplane() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 4.1).unwrap();
     assert_eq!(sec.loops().len(), 1);
 }
 
 #[test]
 fn test_f09_corner_spline_housing_above_floor() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 4.16).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
 #[test]
 fn test_f09_corner_spline_housing_high_cut() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 9.5).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
 #[test]
 fn test_f09_corner_spline_housing_outside_cut() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 15.0).unwrap();
     assert!(sec.loops().is_empty());
 }
 
 #[test]
 fn test_f09_corner_spline_housing_degenerate_boundary() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let cancel = AtomicBool::new(false);
-    let top = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 10.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let top = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 10.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -412,13 +440,19 @@ fn test_f10_corner_through_hole_face_count() {
 
 #[test]
 fn test_f10_corner_narrow_pocket_face_count() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 8);
 }
 
 #[test]
 fn test_f10_corner_ribbed_bracket_face_count() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 10);
 }
 
@@ -638,7 +672,10 @@ fn test_f15_corner_budget_cumulative_tracking() {
 
 #[test]
 fn test_f16_corner_spline_housing_extreme_cuts() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let sec1 = section_at_z(&def, 0.01).unwrap();
     assert_eq!(sec1.loops().len(), 1);
     let sec2 = section_at_z(&def, 9.99).unwrap();
@@ -647,15 +684,28 @@ fn test_f16_corner_spline_housing_extreme_cuts() {
 
 #[test]
 fn test_f16_corner_spline_housing_tangent_cut() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let cancel = AtomicBool::new(false);
-    let bot = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let bot = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
 #[test]
 fn test_f16_corner_rounded_housing_pocket_floor_boundary() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let sec_below = section_at_z(&def, 4.12).unwrap();
     let sec_above = section_at_z(&def, 4.14).unwrap();
     assert_eq!(sec_below.loops().len(), 1);
@@ -664,14 +714,20 @@ fn test_f16_corner_rounded_housing_pocket_floor_boundary() {
 
 #[test]
 fn test_f16_corner_spline_housing_tessellation() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.triangle_count >= 80);
 }
 
 #[test]
 fn test_f16_corner_spline_housing_bounds_exactness() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     assert_close(def.bounds_mm().min[2], 0.0, 1e-4, "min Z");
 }
 
@@ -681,7 +737,10 @@ fn test_f16_corner_spline_housing_bounds_exactness() {
 
 #[test]
 fn test_f17_corner_rounded_housing_multi_strata() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     for z in [1.0, 2.0, 3.0, 5.0, 7.0, 9.0] {
         let sec = section_at_z(&def, z).unwrap();
         assert!(!sec.loops().is_empty());
@@ -690,7 +749,10 @@ fn test_f17_corner_rounded_housing_multi_strata() {
 
 #[test]
 fn test_f17_corner_rounded_housing_floor_area_jump() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let s_low = section_at_z(&def, 4.1).unwrap();
     let s_high = section_at_z(&def, 4.16).unwrap();
     let a_low = loop_area(&s_low, &s_low.loops()[0]);
@@ -701,21 +763,33 @@ fn test_f17_corner_rounded_housing_floor_area_jump() {
 
 #[test]
 fn test_f17_corner_rounded_housing_mesh_valid() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.chunks.len() >= 8);
 }
 
 #[test]
 fn test_f17_corner_rounded_housing_reproducibility() {
-    let def1 = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
-    let def2 = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def1 = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
+    let def2 = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     assert_eq!(def1.faces().len(), def2.faces().len());
 }
 
 #[test]
 fn test_f17_corner_rounded_housing_bounds() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     assert_close(def.bounds_mm().max[0], 24.0, 1e-4, "X");
 }
 
@@ -727,7 +801,14 @@ fn test_f17_corner_rounded_housing_bounds() {
 fn test_f18_corner_cylinder_at_z_zero_boundary() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let bot = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let bot = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -735,13 +816,23 @@ fn test_f18_corner_cylinder_at_z_zero_boundary() {
 fn test_f18_corner_cylinder_at_z_eight_boundary() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let top = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 8.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let top = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 8.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
 #[test]
 fn test_f18_corner_tapered_fitting_cone_slope() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let s1 = section_at_z(&def, 1.0).unwrap();
     let s2 = section_at_z(&def, 6.0).unwrap();
     let a1 = loop_area(&s1, &s1.loops()[0]);
@@ -865,7 +956,14 @@ fn test_f20_corner_near_miss_z() {
 fn test_f21_corner_box_coplanar_top() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let top = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 8.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let top = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 8.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -873,7 +971,14 @@ fn test_f21_corner_box_coplanar_top() {
 fn test_f21_corner_box_coplanar_bottom() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let bot = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let bot = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -881,7 +986,14 @@ fn test_f21_corner_box_coplanar_bottom() {
 fn test_f21_corner_cylinder_coplanar_top() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let top = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 8.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let top = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 8.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -889,7 +1001,14 @@ fn test_f21_corner_cylinder_coplanar_top() {
 fn test_f21_corner_cylinder_coplanar_bottom() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let bot = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let bot = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -924,13 +1043,19 @@ fn test_f22_corner_zero_legacy_panics_through_hole() {
 
 #[test]
 fn test_f22_corner_zero_legacy_panics_tapered() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 3);
 }
 
 #[test]
 fn test_f22_corner_zero_legacy_panics_bracket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 10);
 }
 
@@ -959,7 +1084,9 @@ fn test_f23_corner_circular_arc_full_circle() {
         sweep_angle_rad: std::f64::consts::TAU,
     };
     match arc {
-        SectionCurve2d::CircularArc { sweep_angle_rad, .. } => assert_close(sweep_angle_rad, std::f64::consts::TAU, 1e-9, "tau"),
+        SectionCurve2d::CircularArc {
+            sweep_angle_rad, ..
+        } => assert_close(sweep_angle_rad, std::f64::consts::TAU, 1e-9, "tau"),
         _ => panic!(),
     }
 }
@@ -974,7 +1101,9 @@ fn test_f23_corner_elliptic_arc_circular() {
         end_param_rad: std::f64::consts::PI,
     };
     match ellipse {
-        SectionCurve2d::EllipticArc { minor_radius_mm, .. } => assert_eq!(minor_radius_mm, 3.0),
+        SectionCurve2d::EllipticArc {
+            minor_radius_mm, ..
+        } => assert_eq!(minor_radius_mm, 3.0),
         _ => panic!(),
     }
 }
@@ -996,7 +1125,10 @@ fn test_f23_corner_nurbs_span_rational() {
 #[test]
 fn test_f23_corner_section_span_zero_error() {
     let span = SectionSpan2d {
-        curve: SectionCurve2d::Line { start_mm: [0.0, 0.0], end_mm: [1.0, 0.0] },
+        curve: SectionCurve2d::Line {
+            start_mm: [0.0, 0.0],
+            end_mm: [1.0, 0.0],
+        },
         source_face: SourceFaceId(0),
         source_edge: None,
         achieved_plane_error_mm: 0.0,
@@ -1097,7 +1229,12 @@ fn test_f26_corner_box_midplane_area() {
 fn test_f26_corner_cylinder_midplane_area() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
-    assert_close(loop_area(&sec, &sec.loops()[0]), 25.0 * std::f64::consts::PI, 0.2, "area");
+    assert_close(
+        loop_area(&sec, &sec.loops()[0]),
+        25.0 * std::f64::consts::PI,
+        0.2,
+        "area",
+    );
 }
 
 #[test]
@@ -1111,14 +1248,27 @@ fn test_f26_corner_through_hole_outer_area() {
 fn test_f26_corner_through_hole_hole_area() {
     let def = import_test_step(&fixture_bytes("through-hole.step")).unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
-    assert_close(loop_area(&sec, &sec.loops()[1]), -9.0 * std::f64::consts::PI, 0.2, "hole area");
+    assert_close(
+        loop_area(&sec, &sec.loops()[1]),
+        -9.0 * std::f64::consts::PI,
+        0.2,
+        "hole area",
+    );
 }
 
 #[test]
 fn test_f26_corner_narrow_pocket_area() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 1.0).unwrap();
-    assert_close(loop_area(&sec, &sec.loops()[0]), 120.0, 1e-4, "pocket base area");
+    assert_close(
+        loop_area(&sec, &sec.loops()[0]),
+        120.0,
+        1e-4,
+        "pocket base area",
+    );
 }
 
 // =========================================================================
@@ -1148,7 +1298,10 @@ fn test_f27_corner_through_hole_clipping() {
 
 #[test]
 fn test_f27_corner_tapered_fitting_clipping() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 6.0).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
@@ -1187,14 +1340,20 @@ fn test_f28_corner_cylinder_positive() {
 
 #[test]
 fn test_f28_corner_tapered_hole_negative() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 6.0).unwrap();
     assert!(loop_area(&sec, &sec.loops()[1]) < 0.0);
 }
 
 #[test]
 fn test_f28_corner_narrow_pocket_hole_negative() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 5.0).unwrap();
     assert!(loop_area(&sec, &sec.loops()[1]) < 0.0);
 }
@@ -1207,7 +1366,14 @@ fn test_f28_corner_narrow_pocket_hole_negative() {
 fn test_f29_corner_box_coplanar_top_degenerate() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let top = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 8.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let top = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 8.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(top.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -1215,7 +1381,14 @@ fn test_f29_corner_box_coplanar_top_degenerate() {
 fn test_f29_corner_box_coplanar_bottom_degenerate() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let cancel = AtomicBool::new(false);
-    let bot = section(&def, PlaneMm { origin_mm: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0] }, &cancel);
+    let bot = section(
+        &def,
+        PlaneMm {
+            origin_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        &cancel,
+    );
     assert_eq!(bot.unwrap_err().code, GeometryErrorCode::DegenerateSection);
 }
 
@@ -1235,7 +1408,10 @@ fn test_f29_corner_box_near_bottom_valid() {
 
 #[test]
 fn test_f29_corner_pocket_transition() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let s1 = section_at_z(&def, 4.1).unwrap();
     let s2 = section_at_z(&def, 4.16).unwrap();
     assert_eq!(s1.loops().len(), 1);
@@ -1269,7 +1445,10 @@ fn test_f30_corner_through_hole_chaining() {
 
 #[test]
 fn test_f30_corner_bracket_chaining() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
     assert!(!sec.loops().is_empty());
 }
@@ -1308,14 +1487,20 @@ fn test_f31_corner_cylinder_chord_error() {
 
 #[test]
 fn test_f31_corner_housing_chord_error() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 0.5).unwrap();
     assert!(sec.achieved_chord_error_mm() <= 0.005);
 }
 
 #[test]
 fn test_f31_corner_tapered_chord_error() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 6.0).unwrap();
     assert!(sec.achieved_chord_error_mm() <= 0.005);
 }
@@ -1363,23 +1548,16 @@ fn test_f32_corner_plate_retained_bytes() {
 // Feature 33 Corner Cases: PreparedSolid unification
 // =========================================================================
 
-
 #[test]
 fn test_f33_corner_prepare_with_cancelled_token() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(true);
-    let err = prepare_solid(
-        &def,
-        MAX_PREPARED_SECTION_SOURCE_BYTES,
-        &mut work,
-        &cancel,
-    )
-    .err()
-    .expect("cancelled source preparation must fail");
+    let err = prepare_solid(&def, MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
+        .err()
+        .expect("cancelled source preparation must fail");
     assert_eq!(err.code, GeometryErrorCode::Cancelled);
 }
-
 
 // =========================================================================
 // Feature 34 Corner Cases: Toleranced topology
@@ -1405,13 +1583,19 @@ fn test_f34_corner_through_hole_faces() {
 
 #[test]
 fn test_f34_corner_narrow_pocket_faces() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 8);
 }
 
 #[test]
 fn test_f34_corner_bracket_faces() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     assert!(def.faces().len() >= 10);
 }
 
@@ -1461,8 +1645,14 @@ fn test_f36_corner_height_domain_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
 }
@@ -1472,9 +1662,16 @@ fn test_f36_corner_height_domain_cancelled() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(true);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
-    let err = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap_err();
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
+    let err =
+        analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::Cancelled);
 }
 
@@ -1483,8 +1680,14 @@ fn test_f36_corner_height_domain_zero_work() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(0);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let _ = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel);
 }
 
@@ -1493,8 +1696,14 @@ fn test_f36_corner_height_domain_narrow_interval() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [2.0, 4.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
 }
@@ -1504,8 +1713,14 @@ fn test_f36_corner_height_domain_outside_interval() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [10.0, 15.0], policy, &mut work, &cancel);
     assert!(h.is_ok());
 }
@@ -1541,7 +1756,10 @@ fn test_f37_corner_bounds_through_hole() {
 
 #[test]
 fn test_f37_corner_bounds_bracket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let b = def.bounds_mm();
     assert_close(b.max[0], 30.0, 1e-4, "max X");
 }
@@ -1562,8 +1780,14 @@ fn test_f38_corner_strata_box() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
 }
@@ -1573,41 +1797,74 @@ fn test_f38_corner_strata_cylinder() {
     let def = import_test_step(&fixture_bytes("cylinder.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 8.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
 }
 
 #[test]
 fn test_f38_corner_strata_pocket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 6.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
 }
 
 #[test]
 fn test_f38_corner_strata_housing() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 10.0], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
 }
 
 #[test]
 fn test_f38_corner_strata_bracket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let frame = PlaneFrameMm { origin_mm: [0.0, 0.0, 0.0], x_axis: [1.0, 0.0, 0.0], y_axis: [0.0, 1.0, 0.0] };
-    let policy = AnalysisPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let frame = PlaneFrameMm {
+        origin_mm: [0.0, 0.0, 0.0],
+        x_axis: [1.0, 0.0, 0.0],
+        y_axis: [0.0, 1.0, 0.0],
+    };
+    let policy = AnalysisPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let h = analyze_height_domain(&def, frame, [0.0, 7.6], policy, &mut work, &cancel).unwrap();
     assert!(h.retained_bytes() > 0);
 }
@@ -1621,7 +1878,9 @@ fn test_f39_corner_projected_bounds_negative_dir() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let policy = BoundsPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let policy = BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let p = projected_bounds(&def, [-1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert!(p.maximum[0].is_finite());
 }
@@ -1631,7 +1890,9 @@ fn test_f39_corner_projected_bounds_diagonal() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let policy = BoundsPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let policy = BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let p = projected_bounds(&def, [1.0, 1.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert!(p.maximum[0].is_finite());
 }
@@ -1641,7 +1902,9 @@ fn test_f39_corner_projected_bounds_cancelled() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(true);
-    let policy = BoundsPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let policy = BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let err = projected_bounds(&def, [1.0, 0.0, 0.0], policy, &mut work, &cancel).unwrap_err();
     assert_eq!(err.code, GeometryErrorCode::Cancelled);
 }
@@ -1651,7 +1914,9 @@ fn test_f39_corner_material_projected_bounds_y() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let policy = BoundsPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let policy = BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let p = material_projected_bounds(&def, [0.0, 1.0, 0.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.bounds().maximum[0], 10.0, 1e-4, "material Y");
 }
@@ -1661,7 +1926,9 @@ fn test_f39_corner_material_projected_bounds_z() {
     let def = import_test_step(&fixture_bytes("box-mm.step")).unwrap();
     let mut work = GeometryWorkBudget::new(1000);
     let cancel = AtomicBool::new(false);
-    let policy = BoundsPolicy { maximum_endpoint_uncertainty_mm: 1e-6 };
+    let policy = BoundsPolicy {
+        maximum_endpoint_uncertainty_mm: 1e-6,
+    };
     let p = material_projected_bounds(&def, [0.0, 0.0, 1.0], policy, &mut work, &cancel).unwrap();
     assert_close(p.bounds().maximum[0], 8.0, 1e-4, "material Z");
 }
@@ -1696,14 +1963,20 @@ fn test_f40_corner_many_voids_plate() {
 
 #[test]
 fn test_f40_corner_pocket_void() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 5.0).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
 #[test]
 fn test_f40_corner_housing_void() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 9.5).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
@@ -1738,7 +2011,10 @@ fn test_f41_corner_occt_box_faces() {
 
 #[test]
 fn test_f41_corner_occt_cylinder_faces() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-cylinder-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-cylinder-mm.step",
+    ))
+    .unwrap();
     assert_eq!(def.faces().len(), 3);
 }
 
@@ -1769,14 +2045,20 @@ fn test_f42_corner_through_hole_triangles() {
 
 #[test]
 fn test_f42_corner_tapered_triangles() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.triangle_count >= 40);
 }
 
 #[test]
 fn test_f42_corner_bracket_triangles() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.triangle_count >= 100);
 }
@@ -1808,14 +2090,20 @@ fn test_f43_corner_through_hole_vertices() {
 
 #[test]
 fn test_f43_corner_housing_vertices() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.vertex_count >= 50);
 }
 
 #[test]
 fn test_f43_corner_bracket_vertices() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.vertex_count >= 100);
 }
@@ -1833,28 +2121,40 @@ fn test_f44_corner_cylinder_mesh_finite() {
 
 #[test]
 fn test_f44_corner_tapered_mesh_finite() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-tapered-fitting-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-tapered-fitting-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.total_bytes > 0);
 }
 
 #[test]
 fn test_f44_corner_narrow_pocket_mesh_finite() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.total_bytes > 0);
 }
 
 #[test]
 fn test_f44_corner_housing_mesh_finite() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.total_bytes > 0);
 }
 
 #[test]
 fn test_f44_corner_spline_mesh_finite() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-spline-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-spline-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(mesh.total_bytes > 0);
 }
@@ -1886,14 +2186,20 @@ fn test_f45_corner_through_hole_chunks() {
 
 #[test]
 fn test_f45_corner_housing_chunks() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-rounded-housing-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-rounded-housing-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(!mesh.chunks.is_empty());
 }
 
 #[test]
 fn test_f45_corner_bracket_chunks() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let mesh = tessellate_display(&def).unwrap();
     assert!(!mesh.chunks.is_empty());
 }
@@ -1911,7 +2217,8 @@ fn test_f46_corner_mesh_budget_triangles() {
         triangles: 100,
         bytes: 100_000,
     };
-    let artifact = tessellate_with_budget(&def, DisplayProfile::MeshTrimmedMm005V2, &cancel, budget);
+    let artifact =
+        tessellate_with_budget(&def, DisplayProfile::MeshTrimmedMm005V2, &cancel, budget);
     assert!(artifact.is_ok());
 }
 
@@ -1978,14 +2285,20 @@ fn test_f47_corner_section_loops_hole() {
 
 #[test]
 fn test_f47_corner_section_loops_pocket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-narrow-pocket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-narrow-pocket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 1.1).unwrap();
     assert_eq!(sec.loops().len(), 2);
 }
 
 #[test]
 fn test_f47_corner_section_loops_bracket() {
-    let def = import_test_step(&fixture_bytes("independent-exporters/occt-ribbed-bracket-mm.step")).unwrap();
+    let def = import_test_step(&fixture_bytes(
+        "independent-exporters/occt-ribbed-bracket-mm.step",
+    ))
+    .unwrap();
     let sec = section_at_z(&def, 4.0).unwrap();
     assert!(!sec.loops().is_empty());
 }

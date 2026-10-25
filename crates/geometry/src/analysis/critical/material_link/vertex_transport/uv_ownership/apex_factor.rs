@@ -142,7 +142,11 @@ mod properties {
     use super::*;
     use solidcore::{
         curve::curve::Curve,
-        nurbs::{b_spline_curve::BSplineCurve, crv_basic, math::{CPoint, NOW, NOZ}},
+        nurbs::{
+            b_spline_curve::BSplineCurve,
+            crv_basic,
+            math::{CPoint, NOW, NOZ},
+        },
     };
 
     fn point(x: f64, y: f64) -> Box2 {
@@ -150,9 +154,8 @@ mod properties {
     }
 
     fn native_quadratic(points: [CPoint; 3]) -> Curve {
-        let raw = crv_basic::Curve::new(
-            points.to_vec(), 2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        ).unwrap();
+        let raw =
+            crv_basic::Curve::new(points.to_vec(), 2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap();
         BSplineCurve::from_nurb(raw, 2, true).into()
     }
 
@@ -167,9 +170,14 @@ mod properties {
 
     fn second(curve: &Curve, hi: f64) -> Box2 {
         crate::parametric::curve2d_c1_jet(
-            curve, [0.0, hi], &mut GeometryWorkBudget::new(1_000_000),
+            curve,
+            [0.0, hi],
+            &mut GeometryWorkBudget::new(1_000_000),
             &AtomicBool::new(false),
-        ).unwrap().expect("one smooth native Bernstein restriction").second_derivative
+        )
+        .unwrap()
+        .expect("one smooth native Bernstein restriction")
+        .second_derivative
     }
 
     #[test]

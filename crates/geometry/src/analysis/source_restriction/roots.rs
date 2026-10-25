@@ -2,12 +2,10 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-use crate::{GeometryError, GeometryWorkBudget};
 use crate::exact_coefficient::ExactCoefficient;
 use crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES;
-use crate::parametric::{
-    AxisSpans, CurveEvaluator, Interval, curve_endpoint_coordinate_equal,
-};
+use crate::parametric::{AxisSpans, CurveEvaluator, Interval, curve_endpoint_coordinate_equal};
+use crate::{GeometryError, GeometryWorkBudget};
 use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
@@ -30,17 +28,28 @@ pub(super) struct EndpointRoot {
     error_mm: f64,
 }
 impl EndpointRoot {
-    pub(super) fn enclosure(&self) -> Interval { self.parameter }
-    pub(super) fn exact_parameter(&self) -> Option<f64> { self.exact }
-    pub(super) fn source_error_mm(&self) -> f64 { self.error_mm }
+    pub(super) fn enclosure(&self) -> Interval {
+        self.parameter
+    }
+    pub(super) fn exact_parameter(&self) -> Option<f64> {
+        self.exact
+    }
+    pub(super) fn source_error_mm(&self) -> f64 {
+        self.error_mm
+    }
 }
 
 fn unavailable(message: &'static str) -> GeometryError {
-    GeometryError::new(GeometryErrorCode::ParameterCorrespondenceUnavailable, message)
+    GeometryError::new(
+        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+        message,
+    )
 }
 fn resource() -> GeometryError {
-    GeometryError::new(GeometryErrorCode::ResourceLimit,
-        "original endpoint root inventory exceeds its admitted live byte/depth allowance")
+    GeometryError::new(
+        GeometryErrorCode::ResourceLimit,
+        "original endpoint root inventory exceeds its admitted live byte/depth allowance",
+    )
 }
 fn finite(value: Interval) -> Result<Interval, GeometryError> {
     Interval::new(value.lo, value.hi)
@@ -49,15 +58,25 @@ fn displacement(position: [Interval; 3], vertex: [f64; 3]) -> [Interval; 3] {
     std::array::from_fn(|axis| position[axis].sub(Interval::point(vertex[axis])))
 }
 fn dot(a: [Interval; 3], b: [Interval; 3]) -> Interval {
-    (0..3).fold(Interval::point(0.0), |sum, axis| sum.add(a[axis].mul(b[axis])))
+    (0..3).fold(Interval::point(0.0), |sum, axis| {
+        sum.add(a[axis].mul(b[axis]))
+    })
 }
 fn distance(delta: [Interval; 3]) -> Result<Interval, GeometryError> {
-    finite(delta.into_iter().fold(Interval::point(0.0), |sum, value|
-        sum.add(value.square())).sqrt()?)
+    finite(
+        delta
+            .into_iter()
+            .fold(Interval::point(0.0), |sum, value| sum.add(value.square()))
+            .sqrt()?,
+    )
 }
 
-fn exact_vertex(curve: &dyn CurveEvaluator, parameter: f64, vertex: [f64; 3],
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn exact_vertex(
+    curve: &dyn CurveEvaluator,
+    parameter: f64,
+    vertex: [f64; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     // This provider checks actual coefficient/clamped-control-point identities.
     // Overlapping endpoint position intervals cannot enter this proof.
@@ -70,8 +89,12 @@ fn exact_vertex(curve: &dyn CurveEvaluator, parameter: f64, vertex: [f64; 3],
     Ok(true)
 }
 
-fn retain(roots: &mut Vec<EndpointRoot>, mut root: EndpointRoot,
-    maximum_retained_bytes: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+fn retain(
+    roots: &mut Vec<EndpointRoot>,
+    mut root: EndpointRoot,
+    maximum_retained_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     let mut index = 0;
     while index < roots.len() {
@@ -84,10 +107,16 @@ fn retain(roots: &mut Vec<EndpointRoot>, mut root: EndpointRoot,
         // Both tubes have g' > 0. Their connected union therefore has at most
         // one root. This is equivalence by proof, not by bracket proximity.
         let Some(parameter) = previous.parameter.intersection(root.parameter) else {
-            return Err(unavailable("overlapping monotonic endpoint tubes have inconsistent root enclosures"));
+            return Err(unavailable(
+                "overlapping monotonic endpoint tubes have inconsistent root enclosures",
+            ));
         };
         if let (Some(a), Some(b)) = (previous.exact, root.exact) {
-            if a != b { return Err(unavailable("endpoint coefficient identities contradict monotonic root authority")); }
+            if a != b {
+                return Err(unavailable(
+                    "endpoint coefficient identities contradict monotonic root authority",
+                ));
+            }
         }
         root = EndpointRoot {
             parameter,
@@ -100,29 +129,44 @@ fn retain(roots: &mut Vec<EndpointRoot>, mut root: EndpointRoot,
         // transitively rather than leaving duplicate roots in the inventory.
         index = 0;
     }
-    if roots.len() >= MAX_RETAINED_ROOTS { return Err(resource()); }
-    let live = roots.capacity().checked_mul(std::mem::size_of::<EndpointRoot>())
+    if roots.len() >= MAX_RETAINED_ROOTS {
+        return Err(resource());
+    }
+    let live = roots
+        .capacity()
+        .checked_mul(std::mem::size_of::<EndpointRoot>())
         .ok_or_else(resource)?;
     super::admit_vec(roots, 1, live, maximum_retained_bytes)?;
     roots.push(root);
     Ok(())
 }
 
-pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
-    search: [f64; 2], maximum_source_error_mm: f64, maximum_live_bytes: usize,
-    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+pub(super) fn isolate_endpoint(
+    curve: &dyn CurveEvaluator,
+    vertex: [f64; 3],
+    search: [f64; 2],
+    maximum_source_error_mm: f64,
+    maximum_live_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
 ) -> Result<Vec<EndpointRoot>, GeometryError> {
     work.charge(1, cancel)?;
     let search = Interval::new(search[0], search[1])?;
-    for value in vertex { Interval::new(value, value)?; }
+    for value in vertex {
+        Interval::new(value, value)?;
+    }
     if !maximum_source_error_mm.is_finite() || maximum_source_error_mm < 0.0 {
-        return Err(GeometryError::new(GeometryErrorCode::InvalidGeometry,
-            "original endpoint solving requires a finite nonnegative source allowance"));
+        return Err(GeometryError::new(
+            GeometryErrorCode::InvalidGeometry,
+            "original endpoint solving requires a finite nonnegative source allowance",
+        ));
     }
     let active = curve.active_range();
     Interval::new(active[0], active[1])?;
     if search.lo < active[0] || search.hi > active[1] {
-        return Err(unavailable("original endpoint search exceeds the selected source parameter branch"));
+        return Err(unavailable(
+            "original endpoint search exceeds the selected source parameter branch",
+        ));
     }
 
     // Admit stack, retained capacity and the provider's bounded recursive
@@ -133,9 +177,13 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
         + 8 * std::mem::size_of::<ExactCoefficient>()
         + std::mem::size_of::<AxisSpans<'static>>()
         + std::mem::size_of::<Vec<EndpointRoot>>();
-    let retained_bytes = maximum_live_bytes.checked_sub(FIXED_BYTES).ok_or_else(resource)?;
+    let retained_bytes = maximum_live_bytes
+        .checked_sub(FIXED_BYTES)
+        .ok_or_else(resource)?;
     let capacity = (retained_bytes / std::mem::size_of::<EndpointRoot>()).min(MAX_RETAINED_ROOTS);
-    if capacity == 0 { return Err(resource()); }
+    if capacity == 0 {
+        return Err(resource());
+    }
 
     // Inventory the complete actual evaluator cover, including shared knots.
     // C1 authority is required at closed fences too: a nonsmooth shared knot
@@ -146,24 +194,36 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
         work.charge(1, cancel)?;
         let span = Interval::new(span[0], span[1])?;
         if span.lo < search.lo || span.hi > search.hi || span.lo > covered {
-            return Err(unavailable("original endpoint parameter span inventory does not cover its search"));
+            return Err(unavailable(
+                "original endpoint parameter span inventory does not cover its search",
+            ));
         }
         if !curve.continuous([span.lo, span.hi], work, cancel)?
-            || !curve.smooth([span.lo, span.hi], work, cancel)? {
-            return Err(unavailable("original endpoint search meets a nonsmooth source knot without endpoint root authority"));
+            || !curve.smooth([span.lo, span.hi], work, cancel)?
+        {
+            return Err(unavailable(
+                "original endpoint search meets a nonsmooth source knot without endpoint root authority",
+            ));
         }
         covered = covered.max(span.hi);
         span_count = span_count.checked_add(1).ok_or_else(resource)?;
     }
-    if span_count == 0 || covered != search.hi
-        || !curve.smooth([search.lo, search.hi], work, cancel)? {
-        return Err(unavailable("original endpoint search lacks a complete smooth source span inventory"));
+    if span_count == 0
+        || covered != search.hi
+        || !curve.smooth([search.lo, search.hi], work, cancel)?
+    {
+        return Err(unavailable(
+            "original endpoint search lacks a complete smooth source span inventory",
+        ));
     }
 
     let mut roots: Vec<EndpointRoot> = Vec::new();
     // Allocate only roots actually established, not the maximum admissible
     // census for every elementary source endpoint.
-    let empty = Pending { range: search, depth: 0 };
+    let empty = Pending {
+        range: search,
+        depth: 0,
+    };
     let mut stack = [empty; MAX_DEPTH + 1];
     let mut live = 1usize;
     while live != 0 {
@@ -174,15 +234,24 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
         let mut owned = false;
         for root in &roots {
             work.charge(1, cancel)?;
-            if root.tube.contains_interval(range) { owned = true; break; }
+            if root.tube.contains_interval(range) {
+                owned = true;
+                break;
+            }
         }
-        if owned { continue; }
+        if owned {
+            continue;
+        }
 
         let jet = curve.tensor([range.lo, range.hi], 2, work, cancel)?;
         let delta = displacement(jet[0], vertex);
-        if distance(delta)?.lo > maximum_source_error_mm { continue; }
+        if distance(delta)?.lo > maximum_source_error_mm {
+            continue;
+        }
         let g = finite(dot(delta, jet[1]))?;
-        if !g.contains_zero() { continue; }
+        if !g.contains_zero() {
+            continue;
+        }
         let derivative = finite(dot(jet[1], jet[1]).add(dot(delta, jet[2])))?;
         if derivative.lo > 0.0 {
             let midpoint = range.mid();
@@ -200,8 +269,18 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
                 }
             }
             if let Some(parameter) = exact {
-                retain(&mut roots, EndpointRoot { parameter: Interval::point(parameter),
-                    tube: range, exact: Some(parameter), error_mm: 0.0 }, retained_bytes, work, cancel)?;
+                retain(
+                    &mut roots,
+                    EndpointRoot {
+                        parameter: Interval::point(parameter),
+                        tube: range,
+                        exact: Some(parameter),
+                        error_mm: 0.0,
+                    },
+                    retained_bytes,
+                    work,
+                    cancel,
+                )?;
                 continue;
             }
 
@@ -216,31 +295,51 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
                 // by subtracting their independently enclosed root recipes.
                 for _ in 0..16 {
                     work.charge(1, cancel)?;
-                    if parameter.is_point() { break; }
+                    if parameter.is_point() {
+                        break;
+                    }
                     let local = curve.tensor([parameter.lo, parameter.hi], 2, work, cancel)?;
-                    if local[0].iter().all(|coordinate|
-                        coordinate.width() <= maximum_source_error_mm / 64.0) { break; }
+                    if local[0]
+                        .iter()
+                        .all(|coordinate| coordinate.width() <= maximum_source_error_mm / 64.0)
+                    {
+                        break;
+                    }
                     let local_delta = displacement(local[0], vertex);
-                    let local_derivative = finite(dot(local[1], local[1])
-                        .add(dot(local_delta, local[2])))?;
+                    let local_derivative =
+                        finite(dot(local[1], local[1]).add(dot(local_delta, local[2])))?;
                     // The saved positive whole-tube derivative remains valid
                     // on every contraction even when a new enclosure is wider.
-                    let slope = local_derivative.intersection(derivative)
-                        .ok_or_else(|| unavailable("endpoint derivative contractions contradict their proved tube"))?;
+                    let slope = local_derivative.intersection(derivative).ok_or_else(|| {
+                        unavailable("endpoint derivative contractions contradict their proved tube")
+                    })?;
                     let center = parameter.mid();
                     let center_jet = curve.tensor([center; 2], 1, work, cancel)?;
                     let center_g = finite(dot(displacement(center_jet[0], vertex), center_jet[1]))?;
                     let image = finite(Interval::point(center).sub(center_g.div(slope)?))?;
-                    let next = parameter.intersection(image).ok_or_else(||
-                        unavailable("endpoint Newton contraction lost its established root"))?;
-                    if next.lo == parameter.lo && next.hi == parameter.hi { break; }
+                    let next = parameter.intersection(image).ok_or_else(|| {
+                        unavailable("endpoint Newton contraction lost its established root")
+                    })?;
+                    if next.lo == parameter.lo && next.hi == parameter.hi {
+                        break;
+                    }
                     parameter = next;
                 }
                 let position = curve.tensor([parameter.lo, parameter.hi], 0, work, cancel)?[0];
                 let error_mm = distance(displacement(position, vertex))?.hi;
                 if error_mm <= maximum_source_error_mm {
-                    retain(&mut roots, EndpointRoot { parameter, tube: range,
-                        exact: parameter.is_point().then_some(parameter.lo), error_mm }, retained_bytes, work, cancel)?;
+                    retain(
+                        &mut roots,
+                        EndpointRoot {
+                            parameter,
+                            tube: range,
+                            exact: parameter.is_point().then_some(parameter.lo),
+                            error_mm,
+                        },
+                        retained_bytes,
+                        work,
+                        cancel,
+                    )?;
                     continue;
                 }
             }
@@ -256,10 +355,18 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
         let left_end = midpoint * 0.75 + range.hi * 0.25;
         let right_start = range.lo * 0.25 + midpoint * 0.75;
         if !(range.lo < right_start && right_start < left_end && left_end < range.hi) {
-            return Err(unavailable("original endpoint root at a search fence or machine-width box lacks an exact identity or strict Newton existence proof"));
+            return Err(unavailable(
+                "original endpoint root at a search fence or machine-width box lacks an exact identity or strict Newton existence proof",
+            ));
         }
-        stack[live] = Pending { range: Interval::new(right_start, range.hi)?, depth: pending.depth + 1 };
-        stack[live + 1] = Pending { range: Interval::new(range.lo, left_end)?, depth: pending.depth + 1 };
+        stack[live] = Pending {
+            range: Interval::new(right_start, range.hi)?,
+            depth: pending.depth + 1,
+        };
+        stack[live + 1] = Pending {
+            range: Interval::new(range.lo, left_end)?,
+            depth: pending.depth + 1,
+        };
         live += 2;
     }
     Ok(roots)
@@ -269,9 +376,7 @@ pub(super) fn isolate_endpoint(curve: &dyn CurveEvaluator, vertex: [f64; 3],
 mod tests {
     use super::*;
     use crate::kernel::source_operand::PreparedOriginalCurve;
-    use solidcraft_step::geom::{
-        BSplineCurve, Curve, CurveForm, KnotSpec, Logical, Placement,
-    };
+    use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical, Placement};
     use std::f64::consts::TAU;
 
     const BYTES: usize = 16 * 1024 * 1024;
@@ -279,7 +384,8 @@ mod tests {
     fn circle() -> Curve {
         Curve::Circle {
             position: Placement {
-                origin: [0.0; 3], axis: [0.0, 0.0, 1.0],
+                origin: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
                 ref_direction: [1.0, 0.0, 0.0],
             },
             radius: 2.0,
@@ -295,8 +401,16 @@ mod tests {
         let curve = PreparedOriginalCurve::new(&source, range, BYTES, &mut work, &cancel).unwrap();
         // The nearest point to (2,1) has phase atan(1/2), not the search midpoint.
         // Its radial gap sqrt(5)-2 is strictly below the admitted 0.3 mm.
-        let roots = isolate_endpoint(&curve, [2.0, 1.0, 0.0], range, 0.3,
-            BYTES, &mut work, &cancel).unwrap();
+        let roots = isolate_endpoint(
+            &curve,
+            [2.0, 1.0, 0.0],
+            range,
+            0.3,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         assert_eq!(roots.len(), 1);
         let root = roots[0];
         let phase = 0.5_f64.atan();
@@ -309,14 +423,38 @@ mod tests {
 
         // Re-evaluate the actual provider on the retained tube: g' is positive
         // throughout, rather than merely at a rounded candidate parameter.
-        let jet = curve.tensor([root.tube.lo, root.tube.hi], 2, &mut work, &cancel).unwrap();
+        let jet = curve
+            .tensor([root.tube.lo, root.tube.hi], 2, &mut work, &cancel)
+            .unwrap();
         let delta = displacement(jet[0], [2.0, 1.0, 0.0]);
         assert!(dot(jet[1], jet[1]).add(dot(delta, jet[2])).lo > 0.0);
-        assert!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], [0.7, 1.0], 0.3,
-            BYTES, &mut work, &cancel).unwrap().is_empty());
+        assert!(
+            isolate_endpoint(
+                &curve,
+                [2.0, 1.0, 0.0],
+                [0.7, 1.0],
+                0.3,
+                BYTES,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_empty()
+        );
         // Even the nearest stationary point is outside this smaller allowance.
-        assert!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], range, 0.2,
-            BYTES, &mut work, &cancel).unwrap().is_empty());
+        assert!(
+            isolate_endpoint(
+                &curve,
+                [2.0, 1.0, 0.0],
+                range,
+                0.2,
+                BYTES,
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -326,14 +464,27 @@ mod tests {
         let mut work = GeometryWorkBudget::new(10_000_000);
         let range = [-0.4, 2.0 * TAU - 0.4];
         let curve = PreparedOriginalCurve::new(&source, range, BYTES, &mut work, &cancel).unwrap();
-        let mut roots = isolate_endpoint(&curve, [2.0, 1.0, 0.0], range, 0.3,
-            BYTES, &mut work, &cancel).unwrap();
+        let mut roots = isolate_endpoint(
+            &curve,
+            [2.0, 1.0, 0.0],
+            range,
+            0.3,
+            BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         roots.sort_by(|a, b| a.enclosure().lo.total_cmp(&b.enclosure().lo));
         assert_eq!(roots.len(), 2);
         let phase = 0.5_f64.atan();
         assert!(roots[0].enclosure().contains(phase));
         assert!(roots[1].enclosure().contains(phase + TAU));
-        assert!(roots[0].enclosure().intersection(roots[1].enclosure()).is_none());
+        assert!(
+            roots[0]
+                .enclosure()
+                .intersection(roots[1].enclosure())
+                .is_none()
+        );
         assert!(roots[0].tube.intersection(roots[1].tube).is_none());
     }
 
@@ -341,33 +492,52 @@ mod tests {
     fn clamped_rational_endpoints_use_exact_control_point_identity() {
         let points = [[1.0, 2.0, 3.0], [2.0, 3.0, 3.0], [4.0, 2.0, 3.0]];
         let source = Curve::BSpline(Box::new(BSplineCurve {
-            degree: 2, points: points.to_vec(), weights: Some(vec![2.0, 3.0, 4.0]),
-            knots: vec![0.0, 1.0], multiplicities: vec![3, 3],
-            form: CurveForm::Unspecified, closed: Logical::False,
-            self_intersect: Logical::False, knot_spec: KnotSpec::Unspecified,
+            degree: 2,
+            points: points.to_vec(),
+            weights: Some(vec![2.0, 3.0, 4.0]),
+            knots: vec![0.0, 1.0],
+            multiplicities: vec![3, 3],
+            form: CurveForm::Unspecified,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
         }));
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(10_000_000);
-        let curve = PreparedOriginalCurve::new(&source, [0.0, 1.0], BYTES, &mut work, &cancel).unwrap();
+        let curve =
+            PreparedOriginalCurve::new(&source, [0.0, 1.0], BYTES, &mut work, &cancel).unwrap();
         for (parameter, vertex, search) in [
             (0.0, points[0], [0.0, 0.0625]),
             (1.0, points[2], [0.9375, 1.0]),
         ] {
-            let roots = isolate_endpoint(&curve, vertex, search, 0.0,
-                BYTES, &mut work, &cancel).unwrap();
+            let roots =
+                isolate_endpoint(&curve, vertex, search, 0.0, BYTES, &mut work, &cancel).unwrap();
             assert_eq!(roots.len(), 1);
             assert_eq!(roots[0].exact_parameter(), Some(parameter));
             assert_eq!(roots[0].enclosure().lo, parameter);
             assert_eq!(roots[0].enclosure().hi, parameter);
             assert_eq!(roots[0].source_error_mm(), 0.0);
             for axis in 0..3 {
-                assert!(curve_endpoint_coordinate_equal(&curve, parameter, axis, vertex[axis],
-                    &mut work, &cancel).unwrap());
+                assert!(
+                    curve_endpoint_coordinate_equal(
+                        &curve,
+                        parameter,
+                        axis,
+                        vertex[axis],
+                        &mut work,
+                        &cancel
+                    )
+                    .unwrap()
+                );
             }
             // An overlapping floating enclosure is not an endpoint identity.
             let adjacent_x = f64::from_bits(vertex[0].to_bits() + 1);
-            assert!(!curve_endpoint_coordinate_equal(&curve, parameter, 0, adjacent_x,
-                &mut work, &cancel).unwrap());
+            assert!(
+                !curve_endpoint_coordinate_equal(
+                    &curve, parameter, 0, adjacent_x, &mut work, &cancel
+                )
+                .unwrap()
+            );
         }
     }
 
@@ -376,18 +546,66 @@ mod tests {
         let source = circle();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(10_000_000);
-        let curve = PreparedOriginalCurve::new(&source, [0.0, 1.0], BYTES, &mut work, &cancel).unwrap();
+        let curve =
+            PreparedOriginalCurve::new(&source, [0.0, 1.0], BYTES, &mut work, &cancel).unwrap();
         for bytes in [0, SOURCE_OPERAND_SCRATCH_BYTES] {
-            assert_eq!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], [0.0, 1.0], 0.3,
-                bytes, &mut work, &cancel).err().unwrap().code, GeometryErrorCode::ResourceLimit);
+            assert_eq!(
+                isolate_endpoint(
+                    &curve,
+                    [2.0, 1.0, 0.0],
+                    [0.0, 1.0],
+                    0.3,
+                    bytes,
+                    &mut work,
+                    &cancel
+                )
+                .err()
+                .unwrap()
+                .code,
+                GeometryErrorCode::ResourceLimit
+            );
         }
-        assert_eq!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], [0.0, 1.0], 0.3,
-            BYTES, &mut GeometryWorkBudget::new(0), &cancel).err().unwrap().code,
-            GeometryErrorCode::ResourceLimit);
-        assert_eq!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], [0.0, 1.0], 0.3,
-            BYTES, &mut work, &AtomicBool::new(true)).err().unwrap().code,
-            GeometryErrorCode::Cancelled);
-        assert!(isolate_endpoint(&curve, [2.0, 1.0, 0.0], [-0.1, 1.0], 0.3,
-            BYTES, &mut work, &cancel).is_err());
+        assert_eq!(
+            isolate_endpoint(
+                &curve,
+                [2.0, 1.0, 0.0],
+                [0.0, 1.0],
+                0.3,
+                BYTES,
+                &mut GeometryWorkBudget::new(0),
+                &cancel
+            )
+            .err()
+            .unwrap()
+            .code,
+            GeometryErrorCode::ResourceLimit
+        );
+        assert_eq!(
+            isolate_endpoint(
+                &curve,
+                [2.0, 1.0, 0.0],
+                [0.0, 1.0],
+                0.3,
+                BYTES,
+                &mut work,
+                &AtomicBool::new(true)
+            )
+            .err()
+            .unwrap()
+            .code,
+            GeometryErrorCode::Cancelled
+        );
+        assert!(
+            isolate_endpoint(
+                &curve,
+                [2.0, 1.0, 0.0],
+                [-0.1, 1.0],
+                0.3,
+                BYTES,
+                &mut work,
+                &cancel
+            )
+            .is_err()
+        );
     }
 }

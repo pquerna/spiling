@@ -12,11 +12,11 @@ use super::*;
 use crate::analysis::critical::material_link::{BoundaryCell, BoundaryVisit};
 use crate::analysis::critical::ray_index::RayEdgeIndex;
 use crate::analysis::critical::{ClosedRadialMaterialProduct, RadialRegionKind};
-use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::placed::ActualMaterialCoordinates;
 use crate::parametric::{
-    SurfaceEvaluator, SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_scratch_bytes,
-    surface_functional_enclosures,
+    SurfaceEvaluator, SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_enclosures,
+    surface_functional_scratch_bytes,
 };
 
 const CORRELATED_SUPPORT_SCRATCH_BYTES: usize = surface_functional_scratch_bytes::<1>()
@@ -208,7 +208,11 @@ impl RadialCandidate<'_> {
         cancel: &AtomicBool,
     ) -> Result<Option<f64>, GeometryError> {
         self.distance_with_support(
-            point, inward, f64::INFINITY, work, cancel,
+            point,
+            inward,
+            f64::INFINITY,
+            work,
+            cancel,
             &mut |_, enclosure, _, _| Ok(enclosure),
         )
     }
@@ -221,7 +225,10 @@ impl RadialCandidate<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
         support: &mut impl FnMut(
-            [Interval; 2], Interval, &mut GeometryWorkBudget, &AtomicBool,
+            [Interval; 2],
+            Interval,
+            &mut GeometryWorkBudget,
+            &AtomicBool,
         ) -> Result<Interval, GeometryError>,
     ) -> Result<Option<f64>, GeometryError> {
         let radius = point[0].square().add(point[1].square()).sqrt()?;
@@ -254,7 +261,9 @@ impl RadialCandidate<'_> {
                 return Ok(());
             }
             let coarse_distance = if denominator.lo > 0.0 {
-                radius.mul(Interval::point(1.0).sub(numerator.div(denominator)?)).abs_upper()
+                radius
+                    .mul(Interval::point(1.0).sub(numerator.div(denominator)?))
+                    .abs_upper()
             } else {
                 f64::INFINITY
             };
@@ -293,7 +302,9 @@ fn original_face_support(
     let rows = coordinates.affine_rows();
     let functional = SurfaceFunctional {
         direction: std::array::from_fn(|i| {
-            rows[0][i].mul(direction[1]).sub(rows[1][i].mul(direction[0]))
+            rows[0][i]
+                .mul(direction[1])
+                .sub(rows[1][i].mul(direction[0]))
         }),
         origin: coordinates.source_anchor().map(Interval::point),
         offset: cross(coordinates.center_offset_family(), direction),
@@ -301,12 +312,21 @@ fn original_face_support(
     let [whole] = surface_functional_enclosures(surface, uv, &[functional], work, cancel)?;
     let center = uv.map(|range| range[0] * 0.5 + range[1] * 0.5);
     let [at_center] = surface_functional_enclosures(
-        surface, center.map(|value| [value; 2]), &[functional], work, cancel,
+        surface,
+        center.map(|value| [value; 2]),
+        &[functional],
+        work,
+        cancel,
     )?;
     let delta: [Interval; 2] = std::array::from_fn(|axis| {
-        Interval { lo: uv[axis][0], hi: uv[axis][1] }.sub(Interval::point(center[axis]))
+        Interval {
+            lo: uv[axis][0],
+            hi: uv[axis][1],
+        }
+        .sub(Interval::point(center[axis]))
     });
-    let mean_value = at_center.position
+    let mean_value = at_center
+        .position
         .add(whole.du.mul(delta[0]))
         .add(whole.dv.mul(delta[1]));
     let lo = coarse.lo.max(whole.position.lo).max(mean_value.lo);
@@ -368,7 +388,8 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
         })?;
     let index_allowance = remaining_bytes
         .checked_sub(
-            std::mem::size_of::<RadialCandidate<'_>>() + std::mem::size_of::<ClosedRadialSlab>()
+            std::mem::size_of::<RadialCandidate<'_>>()
+                + std::mem::size_of::<ClosedRadialSlab>()
                 + CORRELATED_SUPPORT_SCRATCH_BYTES,
         )
         .ok_or_else(|| {
@@ -499,7 +520,9 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
             .hi,
         native_xy_sha256: polygon_hash(actual_native_loops, work, cancel)?,
         inner_displacement_mm: Some(
-            Interval::point(maximum).add(Interval::point(source_error)).hi,
+            Interval::point(maximum)
+                .add(Interval::point(source_error))
+                .hi,
         ),
     }))
 }
@@ -525,8 +548,15 @@ mod tests {
         let rows = ActualMaterialCoordinates::source_rows(&frame).unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
         let coordinates = ActualMaterialCoordinates::source(
-            &definition, &frame, &rows, [0.6, 1.2], 0.9, &mut work, &cancel,
-        ).unwrap();
+            &definition,
+            &frame,
+            &rows,
+            [0.6, 1.2],
+            0.9,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
         let kernel = solidcore::Kernel::default();
         assert!(!definition.face_ids().is_empty());
         for &face_id in definition.face_ids() {
@@ -540,8 +570,11 @@ mod tests {
                 let width = range[1] - range[0];
                 [range[0] + 0.2 * width, range[0] + 0.8 * width]
             });
-            assert!(uv.iter().all(|range| range[0].is_finite()
-                && range[1].is_finite() && range[0] < range[1]));
+            assert!(
+                uv.iter().all(|range| range[0].is_finite()
+                    && range[1].is_finite()
+                    && range[0] < range[1])
+            );
             // Sample the native scalar coefficient evaluator independently of
             // the interval functional. A STEP analytic chart has no NURBS
             // substitution; a stored NURBS chart uses its literal coefficients.
@@ -550,34 +583,51 @@ mod tests {
                 if let Some(nurbs) = nurbs {
                     nurbs.eval(u, v, Side::Left, Side::Left).unwrap()
                 } else {
-                    surface.evaluate_point(&kernel, solidcore::Vec2::new(u, v)).unwrap()
+                    surface
+                        .evaluate_point(&kernel, solidcore::Vec2::new(u, v))
+                        .unwrap()
                 }
             };
-            let jet = crate::parametric::surface_piecewise_enclosure(
-                surface, uv, &mut work, &cancel,
-            ).unwrap();
-            let point = coordinates.position_relative_to_center_family(jet.position).unwrap();
+            let jet =
+                crate::parametric::surface_piecewise_enclosure(surface, uv, &mut work, &cancel)
+                    .unwrap();
+            let point = coordinates
+                .position_relative_to_center_family(jet.position)
+                .unwrap();
             let center_uv = uv.map(|range| range[0] * 0.5 + range[1] * 0.5);
             let center = sample(center_uv[0], center_uv[1]);
-            let center = coordinates.position_relative_to_center_family(
-                [center.x, center.y, center.z].map(Interval::point),
-            ).unwrap();
+            let center = coordinates
+                .position_relative_to_center_family(
+                    [center.x, center.y, center.z].map(Interval::point),
+                )
+                .unwrap();
             let direction = [center[1].neg(), center[0]];
             let coarse = cross([point[0], point[1]], direction);
             let support = original_face_support(
-                surface, uv, &coordinates, direction, coarse, &mut work, &cancel,
-            ).unwrap();
+                surface,
+                uv,
+                &coordinates,
+                direction,
+                coarse,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
             for i in 0..=8 {
                 for j in 0..=6 {
                     let u = uv[0][0] + (uv[0][1] - uv[0][0]) * f64::from(i) / 8.0;
                     let v = uv[1][0] + (uv[1][1] - uv[1][0]) * f64::from(j) / 6.0;
                     let native = sample(u, v);
-                    let native = coordinates.position_relative_to_center_family(
-                        [native.x, native.y, native.z].map(Interval::point),
-                    ).unwrap();
+                    let native = coordinates
+                        .position_relative_to_center_family(
+                            [native.x, native.y, native.z].map(Interval::point),
+                        )
+                        .unwrap();
                     let value = cross([native[0], native[1]], direction);
-                    assert!(support.lo <= value.hi && value.lo <= support.hi,
-                        "original native facet image escaped its whole-cell enclosure");
+                    assert!(
+                        support.lo <= value.hi && value.lo <= support.hi,
+                        "original native facet image escaped its whole-cell enclosure"
+                    );
                 }
             }
         }

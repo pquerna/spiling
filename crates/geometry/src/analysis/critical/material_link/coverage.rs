@@ -21,8 +21,12 @@ fn vertex_diagnostic(
     let id = incidence.vertex_edges(vertex).next()?;
     let owner = incidence.get(id)?.first;
     let (_, edge) = crate::analysis::source_incidence::native_coedge(
-        definition, owner.face, owner.wire, owner.index,
-    ).ok()?;
+        definition,
+        owner.face,
+        owner.wire,
+        owner.index,
+    )
+    .ok()?;
     if !edge.vertices.contains(&vertex) {
         return None;
     }
@@ -55,83 +59,87 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
     let mut phase = "original source/domain binding";
     let mut active_coedge = None;
     let mut active_vertex = None;
-    let outcome = (|| {
-        work.charge(1, cancel)?;
-        let available = remaining_bytes
-            .min(MAX_SCRATCH_BYTES)
-            .checked_sub(FIXED_BYTES)
-            .ok_or_else(|| {
-                failure(
-                    GeometryErrorCode::ResourceLimit,
-                    "retained original-F witness exceeds remaining scratch",
-                    face_index,
-                    (),
-                )
-            })?;
-        if uv
-            .iter()
-            .any(|v| !v[0].is_finite() || !v[1].is_finite() || v[0] > v[1])
-            || position
+    let outcome =
+        (|| {
+            work.charge(1, cancel)?;
+            let available = remaining_bytes
+                .min(MAX_SCRATCH_BYTES)
+                .checked_sub(FIXED_BYTES)
+                .ok_or_else(|| {
+                    failure(
+                        GeometryErrorCode::ResourceLimit,
+                        "retained original-F witness exceeds remaining scratch",
+                        face_index,
+                        (),
+                    )
+                })?;
+            if uv
                 .iter()
-                .any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
-        {
-            return Ok(false);
-        }
-        let definition = source.definition();
-        let (face_id, face) = native_face(definition, face_index)?;
-        if !incidence.owns_definition(definition)
-            || !std::ptr::eq(domain.definition(), definition)
-            || domain.face() != face_id
-            || !std::ptr::eq(domain, source.face_domain(face_index, available, work, cancel)?)
-            || face.loops.is_empty()
-        {
-            return Ok(false);
-        }
-        let orientation = domain.orientation();
-        phase = "strict whole original trim Inside";
-        if domain.classify_with_byte_limit(uv, available, work, cancel)?
-            != TrimClassification::Inside
-        {
-            return Ok(false);
-        }
-        phase = "all complete original reference-R overcovers";
-        let point_uv = uv.map(|v| Interval { lo: v[0], hi: v[1] });
-        let mut flat = 0;
-        for wire_index in 0..face.loops.len() {
-            let wire = boundary_loop(definition, face_index, wire_index)?;
-            if wire.edges.is_empty() {
+                .any(|v| !v[0].is_finite() || !v[1].is_finite() || v[0] > v[1])
+                || position
+                    .iter()
+                    .any(|v| !v.lo.is_finite() || !v.hi.is_finite() || v.lo > v.hi)
+            {
                 return Ok(false);
             }
-            for (index, edge) in wire.edges.iter().enumerate() {
-                work.charge(1, cancel)?;
-                active_coedge = Some((wire_index, index, flat));
-                let Some(coedge) = domain.coedges().get(flat) else {
-                    return Ok(false);
-                };
-                if coedge.edge != edge.edge || coedge.forward != edge.forward {
+            let definition = source.definition();
+            let (face_id, face) = native_face(definition, face_index)?;
+            if !incidence.owns_definition(definition)
+                || !std::ptr::eq(domain.definition(), definition)
+                || domain.face() != face_id
+                || !std::ptr::eq(
+                    domain,
+                    source.face_domain(face_index, available, work, cancel)?,
+                )
+                || face.loops.is_empty()
+            {
+                return Ok(false);
+            }
+            let orientation = domain.orientation();
+            phase = "strict whole original trim Inside";
+            if domain.classify_with_byte_limit(uv, available, work, cancel)?
+                != TrimClassification::Inside
+            {
+                return Ok(false);
+            }
+            phase = "all complete original reference-R overcovers";
+            let point_uv = uv.map(|v| Interval { lo: v[0], hi: v[1] });
+            let mut flat = 0;
+            for wire_index in 0..face.loops.len() {
+                let wire = boundary_loop(definition, face_index, wire_index)?;
+                if wire.edges.is_empty() {
                     return Ok(false);
                 }
-                let use_ = CoedgeUse {
-                    face: face_index,
-                    coedge: flat,
-                    wire: wire_index,
-                    index,
-                    orientation: edge.forward == orientation,
-                    edgeuse: coedge.edgeuse,
-                };
-                let Some(uses) = incidence.get(edge.edge) else {
-                    return Ok(false);
-                };
-                if (uses.first != use_ && uses.second != Some(use_))
-                    || uses.vertices != coedge.vertices
-                {
-                    return Ok(false);
-                }
-                let proof = domain.original_coedge_correspondence(flat)?;
-                let Some(binding) = proof.binding() else {
-                    return Ok(false);
-                };
-                if binding.face != face_id
+                for (index, edge) in wire.edges.iter().enumerate() {
+                    work.charge(1, cancel)?;
+                    active_coedge = Some((wire_index, index, flat));
+                    let Some(coedge) = domain.coedges().get(flat) else {
+                        return Ok(false);
+                    };
+                    if coedge.edge != edge.edge || coedge.forward != edge.forward {
+                        return Ok(false);
+                    }
+                    let use_ = CoedgeUse {
+                        face: face_index,
+                        coedge: flat,
+                        wire: wire_index,
+                        index,
+                        orientation: edge.forward == orientation,
+                        edgeuse: coedge.edgeuse,
+                    };
+                    let Some(uses) = incidence.get(edge.edge) else {
+                        return Ok(false);
+                    };
+                    if (uses.first != use_ && uses.second != Some(use_))
+                        || uses.vertices != coedge.vertices
+                    {
+                        return Ok(false);
+                    }
+                    let proof = domain.original_coedge_correspondence(flat)?;
+                    let Some(binding) = proof.binding() else {
+                        return Ok(false);
+                    };
+                    if binding.face != face_id
                     || binding.edge != edge.edge
                     || binding.owner != [face_index, wire_index, index]
                     || binding.edgeuse != coedge.edgeuse
@@ -142,116 +150,115 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
                 {
                     return Ok(false);
                 }
-                let mapped = proof.uv_range();
-                if proof.affine_spatial_parameter_preimage([
-                    mapped[0].min(mapped[1]),
-                    mapped[0].max(mapped[1]),
-                ])?
-                    .is_none()
-                {
-                    return Ok(false);
-                }
-                let range = proof.spatial_range();
-                let width = (range[1] - range[0])
-                    * domain.material_realization().collar_parameter_fraction();
-                if !width.is_finite() || width <= 0.0 {
-                    return Ok(false);
-                }
-                // beta∈[0,1/4], w∈[0,1], and BOTH possible inward signs.
-                // The complete original piecewise first jet includes knots
-                // and closed endpoints; no gamma C1/embedding is inferred.
-                let jet = domain.original_coedge_uv_piecewise_jet(flat, range, work, cancel)?;
-                let radius = mul(Interval::point(width), Interval::point(0.25)).hi;
-                let rotated = rotate(jet.derivative, 1.0);
-                let tube = add_margin(
-                    std::array::from_fn(|i| {
-                        add(
-                            jet.position[i],
-                            mul(
-                                rotated[i],
-                                Interval {
-                                    lo: -radius,
-                                    hi: radius,
-                                },
-                            ),
-                        )
-                    }),
-                    proof.margin_uv(),
-                );
-                if !(0..2).any(|i| point_uv[i].hi < tube[i].lo || tube[i].hi < point_uv[i].lo) {
-                    return Ok(false);
-                }
-                flat += 1;
-            }
-        }
-        if flat != domain.coedges().len() {
-            return Ok(false);
-        }
-        // Only a source-coefficient identity may eliminate all K_F recipes.
-        if source.material_transport_is_proved_zero(work, cancel)? {
-            return Ok(true);
-        }
-        let Some(vertices) = incidence.vertices() else {
-            return Ok(false);
-        };
-        let mut found_owner = false;
-        phase = "all owning original reference-K_F position overcovers";
-        for vertex in vertices {
-            work.charge(1, cancel)?;
-            let mut owns_face = false;
-            for edge in incidence.vertex_edges(vertex) {
-                work.charge(1, cancel)?;
-                let Some(uses) = incidence.get(edge) else {
-                    return Ok(false);
-                };
-                if uses.first.face == face_index
-                    || uses.second.is_some_and(|use_| use_.face == face_index)
-                {
-                    owns_face = true;
-                    break;
+                    let mapped = proof.uv_range();
+                    if proof
+                        .affine_spatial_parameter_preimage([
+                            mapped[0].min(mapped[1]),
+                            mapped[0].max(mapped[1]),
+                        ])?
+                        .is_none()
+                    {
+                        return Ok(false);
+                    }
+                    let range = proof.spatial_range();
+                    let width = (range[1] - range[0])
+                        * domain.material_realization().collar_parameter_fraction();
+                    if !width.is_finite() || width <= 0.0 {
+                        return Ok(false);
+                    }
+                    // beta∈[0,1/4], w∈[0,1], and BOTH possible inward signs.
+                    // The complete original piecewise first jet includes knots
+                    // and closed endpoints; no gamma C1/embedding is inferred.
+                    let jet = domain.original_coedge_uv_piecewise_jet(flat, range, work, cancel)?;
+                    let radius = mul(Interval::point(width), Interval::point(0.25)).hi;
+                    let rotated = rotate(jet.derivative, 1.0);
+                    let tube = add_margin(
+                        std::array::from_fn(|i| {
+                            add(
+                                jet.position[i],
+                                mul(
+                                    rotated[i],
+                                    Interval {
+                                        lo: -radius,
+                                        hi: radius,
+                                    },
+                                ),
+                            )
+                        }),
+                        proof.margin_uv(),
+                    );
+                    if !(0..2).any(|i| point_uv[i].hi < tube[i].lo || tube[i].hi < point_uv[i].lo) {
+                        return Ok(false);
+                    }
+                    flat += 1;
                 }
             }
-            if !owns_face {
-                continue;
+            if flat != domain.coedges().len() {
+                return Ok(false);
             }
-            found_owner = true;
-            active_vertex = vertex_diagnostic(definition, incidence, vertex);
-            let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
-                source, incidence, vertex, available, work, cancel,
-            )?
-            else {
+            // Only a source-coefficient identity may eliminate all K_F recipes.
+            if source.material_transport_is_proved_zero(work, cancel)? {
+                return Ok(true);
+            }
+            let Some(vertices) = incidence.vertices() else {
                 return Ok(false);
             };
-            let scratch = available
-                .checked_sub(selection.owned_bytes())
-                .ok_or_else(|| {
-                    failure(
-                        GeometryErrorCode::ResourceLimit,
-                        "retained original-F corner selection exceeds scratch",
-                        face_index,
-                        (),
-                    )
-                })?;
-            let mut failed_cover = None;
-            if !selection.plan().complete_incident_positions_miss(
-                source,
-                scratch,
-                work,
-                cancel,
-                &mut failed_cover,
-                &mut |cover| {
-                    Ok(
-                        (0..3)
-                            .any(|i| position[i].hi < cover[i].lo || cover[i].hi < position[i].lo),
-                    )
-                },
-            )? {
-                // No promotion of cell.source and no implicit empty support.
-                return Ok(false);
+            let mut found_owner = false;
+            phase = "all owning original reference-K_F position overcovers";
+            for vertex in vertices {
+                work.charge(1, cancel)?;
+                let mut owns_face = false;
+                for edge in incidence.vertex_edges(vertex) {
+                    work.charge(1, cancel)?;
+                    let Some(uses) = incidence.get(edge) else {
+                        return Ok(false);
+                    };
+                    if uses.first.face == face_index
+                        || uses.second.is_some_and(|use_| use_.face == face_index)
+                    {
+                        owns_face = true;
+                        break;
+                    }
+                }
+                if !owns_face {
+                    continue;
+                }
+                found_owner = true;
+                active_vertex = vertex_diagnostic(definition, incidence, vertex);
+                let Some(selection) = vertex_transport::SourceVertexPlan::prepare(
+                    source, incidence, vertex, available, work, cancel,
+                )?
+                else {
+                    return Ok(false);
+                };
+                let scratch = available
+                    .checked_sub(selection.owned_bytes())
+                    .ok_or_else(|| {
+                        failure(
+                            GeometryErrorCode::ResourceLimit,
+                            "retained original-F corner selection exceeds scratch",
+                            face_index,
+                            (),
+                        )
+                    })?;
+                let mut failed_cover = None;
+                if !selection.plan().complete_incident_positions_miss(
+                    source,
+                    scratch,
+                    work,
+                    cancel,
+                    &mut failed_cover,
+                    &mut |cover| {
+                        Ok((0..3)
+                            .any(|i| position[i].hi < cover[i].lo || cover[i].hi < position[i].lo))
+                    },
+                )? {
+                    // No promotion of cell.source and no implicit empty support.
+                    return Ok(false);
+                }
             }
-        }
-        Ok(found_owner)
-    })();
+            Ok(found_owner)
+        })();
     outcome.map_err(|error| work.annotate_error(error, before, format_args!(
         "retained original-F negative witness face={face_index} uv={uv:?} phase={phase} coedge={active_coedge:?} vertex_owner_mm={active_vertex:?}"
     )))
@@ -450,7 +457,9 @@ impl<'d> ClosedRadialLinks<'d> {
                         (),
                     ));
                 };
-                let point = source.trim_source().source_vertex_point(vertex, work, cancel)?;
+                let point = source
+                    .trim_source()
+                    .source_vertex_point(vertex, work, cancel)?;
                 active_vertex = Some((owner, point));
                 if unchanged_source {
                     // A native cycle alone is not a complete projected-star
@@ -770,21 +779,17 @@ impl<'d> ClosedRadialLinks<'d> {
             plan.visit_position_supports(work, cancel, &mut |_realized, homotopy| {
                 result.record_support_with_byte_limit(homotopy, support_limit)
             })?;
-            plan.visit_spatial_exits(
-                work,
-                cancel,
-                &mut |edge, spatial_high, parameter, _work| {
-                    result.record_exit_with_byte_limit(
-                        SpatialEndpointExit {
-                            edge,
-                            spatial_high,
-                            parameter,
-                            closed_atlas_vertex: None,
-                        },
-                        support_limit,
-                    )
-                },
-            )?;
+            plan.visit_spatial_exits(work, cancel, &mut |edge, spatial_high, parameter, _work| {
+                result.record_exit_with_byte_limit(
+                    SpatialEndpointExit {
+                        edge,
+                        spatial_high,
+                        parameter,
+                        closed_atlas_vertex: None,
+                    },
+                    support_limit,
+                )
+            })?;
         }
         Ok(result)
     }
@@ -921,14 +926,18 @@ impl<'d> ClosedRadialLinks<'d> {
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
         let remaining_bytes = remaining_bytes
-            .checked_sub(super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES
-                + 2 * std::mem::size_of::<[Interval; 3]>())
-            .ok_or_else(|| failure(
-                GeometryErrorCode::ResourceLimit,
-                "original joint physical-image gate exceeds scratch allowance",
-                0,
-                joint_index,
-            ))?;
+            .checked_sub(
+                super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES
+                    + 2 * std::mem::size_of::<[Interval; 3]>(),
+            )
+            .ok_or_else(|| {
+                failure(
+                    GeometryErrorCode::ResourceLimit,
+                    "original joint physical-image gate exceeds scratch allowance",
+                    0,
+                    joint_index,
+                )
+            })?;
         let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(false);
         };
@@ -965,12 +974,10 @@ impl<'d> ClosedRadialLinks<'d> {
                 },
             )
         });
-        let position = super::atlas::original_joint_position_enclosure(
-            domain, joint, work, cancel,
-        )?;
+        let position =
+            super::atlas::original_joint_position_enclosure(domain, joint, work, cancel)?;
         if !(0..3).all(|axis| {
-            vertex_cube[axis].lo <= position[axis].lo
-                && position[axis].hi <= vertex_cube[axis].hi
+            vertex_cube[axis].lo <= position[axis].lo && position[axis].hi <= vertex_cube[axis].hi
         }) {
             return Ok(false);
         }
@@ -1142,12 +1149,11 @@ impl<'d> ClosedRadialLinks<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<[Interval; 3], GeometryError> {
-        const STACK_BYTES: usize =
-            crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
-                + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-                + 3 * std::mem::size_of::<[Interval; 3]>()
-                + std::mem::size_of::<crate::kernel::trim::PreparedTrimSurface<'_, '_>>()
-                + super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES;
+        const STACK_BYTES: usize = crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+            + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+            + 3 * std::mem::size_of::<[Interval; 3]>()
+            + std::mem::size_of::<crate::kernel::trim::PreparedTrimSurface<'_, '_>>()
+            + super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES;
         let before = work.consumed();
         let mut active_face = None;
         let outcome = (|| {
@@ -1159,14 +1165,20 @@ impl<'d> ClosedRadialLinks<'d> {
                 ));
             }
             let available = remaining_bytes.checked_sub(STACK_BYTES).ok_or_else(|| {
-                GeometryError::new(GeometryErrorCode::ResourceLimit,
-                    "whole-original/source-G cap bound exceeds remaining scratch")
+                GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "whole-original/source-G cap bound exceeds remaining scratch",
+                )
             })?;
             let mut cover: Option<[Interval; 3]> = None;
             let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {
-                for value in position { Interval::new(value.lo, value.hi)?; }
+                for value in position {
+                    Interval::new(value.lo, value.hi)?;
+                }
                 cover = Some(match cover {
-                    Some(previous) => std::array::from_fn(|axis| previous[axis].hull(position[axis])),
+                    Some(previous) => {
+                        std::array::from_fn(|axis| previous[axis].hull(position[axis]))
+                    }
                     None => position,
                 });
                 Ok(())
@@ -1177,7 +1189,10 @@ impl<'d> ClosedRadialLinks<'d> {
                 let domain = source.face_domain(face, available, work, cancel)?;
                 let surface = domain.surface_operand();
                 include(crate::parametric::surface_position_enclosure(
-                    &surface, domain.uv_domain(), work, cancel,
+                    &surface,
+                    domain.uv_domain(),
+                    work,
+                    cancel,
                 )?)?;
                 for joint in domain.original_joints()? {
                     include(super::atlas::original_joint_position_enclosure(
@@ -1186,18 +1201,24 @@ impl<'d> ClosedRadialLinks<'d> {
                 }
                 for coedge in 0..domain.coedges().len() {
                     work.charge(1, cancel)?;
-                    let error = domain.original_coedge_correspondence(coedge)?.position_error_mm();
+                    let error = domain
+                        .original_coedge_correspondence(coedge)?
+                        .position_error_mm();
                     if !error.is_finite() || error < 0.0 {
-                        return Err(GeometryError::new(GeometryErrorCode::ConditioningFailure,
-                            "whole-source cap bound has an invalid original forward receipt"));
+                        return Err(GeometryError::new(
+                            GeometryErrorCode::ConditioningFailure,
+                            "whole-source cap bound has an invalid original forward receipt",
+                        ));
                     }
                     forward_padding_mm = forward_padding_mm.max(error);
                 }
             }
-            let original = cover.ok_or_else(|| GeometryError::new(
-                GeometryErrorCode::InvalidGeometry,
-                "whole-source cap bound has no original face inventory",
-            ))?;
+            let original = cover.ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "whole-source cap bound has no original face inventory",
+                )
+            })?;
             // R is owned in the original carrier domains above, and every
             // central G point is F(U)+lambda*(1-w)*delta with |delta| bounded
             // by the selected whole-source forward receipt. This is an
@@ -1206,14 +1227,20 @@ impl<'d> ClosedRadialLinks<'d> {
             let mut result = original.map(|value| value.add(padding));
             for support in &self.supports {
                 work.charge(1, cancel)?;
-                for value in *support { Interval::new(value.lo, value.hi)?; }
+                for value in *support {
+                    Interval::new(value.lo, value.hi)?;
+                }
                 result = std::array::from_fn(|axis| result[axis].hull(support[axis]));
             }
             Ok(result)
         })();
-        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
-            "degree-one whole-original/source-G cap bound face={active_face:?}",
-        )))
+        outcome.map_err(|error| {
+            work.annotate_error(
+                error,
+                before,
+                format_args!("degree-one whole-original/source-G cap bound face={active_face:?}",),
+            )
+        })
     }
 
     pub fn degree_one(
@@ -1254,7 +1281,8 @@ impl<'d> ClosedRadialLinks<'d> {
         let x = prism.frame.x_axis.map(Interval::point);
         let y = prism.frame.y_axis.map(Interval::point);
         let z = prism.frame.z_axis.map(Interval::point);
-        let source_box = self.complete_source_position_box(source, remaining_bytes, work, cancel)?;
+        let source_box =
+            self.complete_source_position_box(source, remaining_bytes, work, cancel)?;
         let p = project(source_box, prism.frame);
         let rho_max = length([p[0], p[1], Interval::point(0.0)])?.hi;
         let cap_margin = down(
@@ -1404,8 +1432,10 @@ mod closed_support_tests {
 
     #[test]
     fn support_growth_is_refused_before_a_smaller_caller_budget_allocates() {
-        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
-        &AtomicBool::new(false),)
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
+            &AtomicBool::new(false),
+        )
         .unwrap();
         let mut links = ClosedRadialLinks {
             definition: &definition,
