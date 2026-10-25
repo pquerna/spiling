@@ -2691,26 +2691,25 @@ fn cone_boundary_scalar(
         work,
         cancel,
     )?;
-    {
-        let surface = &domain.surface_operand();
-        (|| {
-            // Fold the covector into native coefficients before evaluating the
-            // scalar carrier. The displacement is the literal boundary recipe,
-            // not a global physical OriginalF/G error or a padding allowance.
-            let scalar = super::transport::scalar_surface_jet(
-                surface,
-                uv_box(boundary.uv),
-                direction,
-                work,
-                cancel,
-            )?
-            .0
-            .add(dot(direction, boundary.displacement));
-            let height = intersection(dot(direction, boundary.position), scalar)
-                .ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
-            Ok((height, dot(direction, boundary.derivative)))
-        })()
-    }
+    let crate::kernel::PreparedTrimSurface::Original(surface) = domain.surface_operand() else {
+        return Err(refusal(
+            "source cone scalar lost its original coefficient carrier",
+        ));
+    };
+    // The scalar and vector bounds evaluate the same fixed boundary recipe;
+    // its literal displacement is not a global F/G error or padding allowance.
+    let scalar = super::transport::scalar_surface_jet(
+        surface,
+        uv_box(boundary.uv),
+        direction,
+        work,
+        cancel,
+    )?
+    .0
+    .add(dot(direction, boundary.displacement));
+    let height = intersection(dot(direction, boundary.position), scalar)
+        .ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
+    Ok((height, dot(direction, boundary.derivative)))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -9,8 +9,7 @@
 use super::*;
 use crate::analysis::material_source::MaterialSourceView;
 use crate::analysis::source_incidence::native_coedge;
-use crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES;
-use crate::parametric::SurfaceEvaluator;
+use crate::kernel::source_operand::{PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES};
 use solidcore::EdgeId;
 use vertex_transport::SourceVertexPlan;
 
@@ -111,32 +110,32 @@ pub(super) fn push(
     Ok(())
 }
 
-/// Fold the covector into original homogeneous coefficients before bounding
-/// the scalar ratio. Piecewise first jets also supply the mean-value theorem.
+/// Project the actual original coefficient sheet, not its selected trim box.
+/// C0 piecewise first bounds retain knot-side derivatives for the mean-value
+/// theorem; independent ribbon/corner receipts still own material admission.
 pub(super) fn scalar_surface_jet(
-    surface: &(impl SurfaceEvaluator + ?Sized),
+    surface: &PreparedOriginalSurface<'_>,
     uv: [[f64; 2]; 2],
     direction: [Interval; 3],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(Interval, [Interval; 2]), GeometryError> {
-    let [jet] = crate::parametric::surface_functional_enclosures(
-        surface,
-        uv,
-        &[crate::parametric::SurfaceFunctional {
-            direction,
-            origin: [Interval::point(0.0); 3],
-            offset: Interval::point(0.0),
-        }],
-        work,
-        cancel,
-    )?;
-    Ok((jet.position, [jet.du, jet.dv]))
+    work.charge(1, cancel)?;
+    for value in direction {
+        Interval::new(value.lo, value.hi)?;
+    }
+    let jet = surface.carrier_piecewise_first(uv, work, cancel)?;
+    let height = dot(direction, jet.position);
+    let gradient = [dot(direction, jet.du), dot(direction, jet.dv)];
+    for value in [height, gradient[0], gradient[1]] {
+        Interval::new(value.lo, value.hi)?;
+    }
+    Ok((height, gradient))
 }
 
 fn collar_scalar_support(
     collar: &OriginalCollar<'_, '_>,
-    surface: &(impl SurfaceEvaluator + ?Sized),
+    surface: &PreparedOriginalSurface<'_>,
     range: [f64; 2],
     direction: [Interval; 3],
     refinement: Option<([f64; 2], f64)>,
@@ -354,7 +353,12 @@ pub(crate) fn source_transport_supports(
                 ));
             }
             let before = work.consumed();
-            let surface = domain.surface_operand();
+            let crate::kernel::PreparedTrimSurface::Original(surface) = domain.surface_operand()
+            else {
+                return Err(unavailable(
+                    "source support lost its captured original coefficient carrier",
+                ));
+            };
             domain.with_original_spatial_curve(
                 use_.coedge, working, work, cancel,
                 |prepared, work, cancel| {
@@ -378,10 +382,10 @@ pub(crate) fn source_transport_supports(
                         let uv = chart_jet(domain, use_.coedge, range, work, cancel)?;
                         let before = work.consumed();
                         let outcome = (|| {
-                            let boundary = crate::parametric::surface_piecewise_enclosure(&surface,
+                            let boundary = surface.carrier_position_bounds(
                                 uv_box(add_margin(uv.position, collar.margin)), work, cancel)?;
                             let components: [Option<Interval>; 3] = std::array::from_fn(|axis| intersection(
-                                exact_difference(spatial.position[axis], boundary.position[axis]),
+                                exact_difference(spatial.position[axis], boundary[axis]),
                                 Interval { lo: -collar.position_error_mm, hi: collar.position_error_mm }));
                             let [Some(dx), Some(dy), Some(dz)] = components else {
                                 return Err(unavailable("source material support contradicts its complete forward correspondence"));
@@ -394,7 +398,7 @@ pub(crate) fn source_transport_supports(
                             let scalar_scratch = available.checked_sub(output_bytes(&output))
                                 .and_then(|bytes| bytes.checked_sub(EVALUATION_SCRATCH_BYTES))
                                 .ok_or_else(resource)?;
-                            let scalar_base = collar_scalar_support(&collar, &surface, range, direction,
+                            let scalar_base = collar_scalar_support(&collar, surface, range, direction,
                                 scalar_refinement, scalar_scratch, work, cancel)?;
                             let scalar_delta = mul(Interval { lo: 0.0, hi: 1.0 }, dot(direction, displacement));
                             let scalar_corrected = add(scalar_base, scalar_delta);
@@ -819,7 +823,7 @@ mod tests {
     use crate::kernel::source_operand::{PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES};
 
     #[test]
-    fn source_scalar_support_preserves_original_radian_surface_law() {
+    fn source_scalar_support_retains_radian_carrier_without_extending_trim() {
         let source = solidcraft_step::geom::Surface::Cylinder {
             position: solidcraft_step::geom::Placement {
                 origin: [3.0, -4.0, 5.0],
@@ -832,13 +836,18 @@ mod tests {
         let mut work = GeometryWorkBudget::new(1_000_000);
         let prepared = PreparedOriginalSurface::new(
             &source,
-            [[0.0, std::f64::consts::TAU], [-1.0, 1.0]],
+            [[0.0, 0.5], [-1.0, 1.0]],
             SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
             &mut work,
             &cancel,
         )
         .unwrap();
         let angle = 0.73_f64;
+        assert!(
+            prepared
+                .position_bounds([[angle; 2], [0.2; 2]], &mut work, &cancel)
+                .is_err()
+        );
         let (height, derivative) = scalar_surface_jet(
             &prepared,
             [[angle; 2], [0.2; 2]],

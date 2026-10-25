@@ -174,11 +174,13 @@ must never be converted into display unavailability.
   domain checks and original-material embedding remain independent obligations.
   Finite F/G homotopies use explicit original coefficient-sheet queries, not
   trim-box membership as an evaluation shortcut. These borrow the captured
-  inventory and retain literal rectangular/spline restrictions, denominators,
-  requested closed-box C0/C1 and charged work. Piecewise first queries retain
-  derivative jumps without forcing Hessians. They do not mutate selected trim domains or
-  establish native correspondence, branch ownership or realized-material
-  embedding; those remain separate receipts.
+  inventory and retain literal rectangular/spline restrictions, denominators
+  and charged work. Position-only images infer no continuity; piecewise first
+  queries require closed C0, retain derivative jumps and avoid Hessians, while
+  smooth second queries require closed C1. Source scalar support projects these
+  same original coefficients in their actual gauge, not a native degree chart.
+  None of these queries mutates selected trim domains or establishes native
+  correspondence, branch ownership or realized-material embedding.
 - **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
   and `analysis/placed.rs` distinguish geometric from realized-material bounds.
   Source realization error must survive actual affine conversion, placement
