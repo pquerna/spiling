@@ -3307,7 +3307,8 @@ impl SourceCurveCalibration {
         self.0.maximum_position_error_mm()
     }
     pub(crate) fn relative_derivative_error_bound(&self) -> f64 {
-        self.0.relative_derivative_error_bound
+        self.0
+            .relative_derivative_error_bound
             .expect("strong source constructor requires a relative-tangent receipt")
     }
     pub(crate) fn parameter_cuts(&self) -> &[f64] {
@@ -3528,7 +3529,9 @@ impl CurveCalibrationTheorem {
     ) -> Result<bool, GeometryError> {
         match self {
             Self::SourceRelativeTangent => segment.monotone(forward),
-            Self::NativeDirectedPosition => segment.directed_position_monotone(source_range, forward),
+            Self::NativeDirectedPosition => {
+                segment.directed_position_monotone(source_range, forward)
+            }
         }
     }
 }
@@ -3558,7 +3561,9 @@ pub(crate) fn calibrate_source_curves(
         cancel,
     )?;
     if map.relative_derivative_error_bound.is_none() {
-        return Err(unavailable("source calibration lacks its required relative-tangent receipt"));
+        return Err(unavailable(
+            "source calibration lacks its required relative-tangent receipt",
+        ));
     }
     Ok(SourceCurveCalibration(map))
 }
@@ -3703,7 +3708,8 @@ fn calibrate_curves(
         let range = [a.source, b.source];
         let middle = a.source * 0.5 + b.source * 0.5;
         let mut admitted = false;
-        let monotone = theorem.monotone(&segment, source_range, target_range[1] > target_range[0])?;
+        let monotone =
+            theorem.monotone(&segment, source_range, target_range[1] > target_range[0])?;
         if monotone {
             let map = segment.jet(range)?;
             let at_middle = segment.jet([middle; 2])?;
@@ -3797,7 +3803,9 @@ fn calibrate_curves(
             a.target * 0.5 + b.target * 0.5
         };
         let parameter = propose_parameter(reference, target, middle, seed, domain, work, cancel)?;
-        let shared = parameter_sample(reference, target, middle, parameter, secant, false, work, cancel)?;
+        let shared = parameter_sample(
+            reference, target, middle, parameter, secant, false, work, cancel,
+        )?;
         stack[live] = (
             ParameterSegment {
                 endpoints: [shared, b],

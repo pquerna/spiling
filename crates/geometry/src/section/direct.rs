@@ -1862,12 +1862,18 @@ mod correspondence_tests {
             };
             let cancel = AtomicBool::new(false);
             let mut work = GeometryWorkBudget::new(1_000_000);
-            let (position, derivative, _, _) =
-                boundary.evaluate([endpoint; 2], &mut work, &cancel).unwrap();
+            let (position, derivative, _, _) = boundary
+                .evaluate([endpoint; 2], &mut work, &cancel)
+                .unwrap();
             assert!(position[0].contains(endpoint));
             assert!(derivative.into_iter().all(|v| v.lo == 0.0 && v.hi == 0.0));
             assert!(
-                boundary.edge_jet([endpoint; 2], &mut work, &cancel).unwrap().derivative[0].lo > 0.0
+                boundary
+                    .edge_jet([endpoint; 2], &mut work, &cancel)
+                    .unwrap()
+                    .derivative[0]
+                    .lo
+                    > 0.0
             );
             boundary
                 .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)

@@ -95,6 +95,14 @@ chord/plane checks remain independent requirements; unresolved tangencies or
 branch ambiguities refuse rather than synthesize a closed loop. There is no
 SolidCore Boolean-clipping or old-kernel fallback.
 
+Spatial edges and chart lifts keep independent parameter gauges. Native
+correspondence proves a complete directed position map with strict interior
+monotonicity; stationary outer endpoints need coefficient proof, not a forced
+secant slope. This produces no source-relative tangent receipt. Chart/spatial
+roots still require independent complete inventories, ordered bijection and
+actual endpoint-gap checks. Original-source calibration retains its stronger
+relative-tangent contract and cannot consume the weaker native position proof.
+
 Raw section success does not establish source-material occupancy. Material slabs
 bind their actual reference to original-domain analysis, placed-world proof and
 planner conversion. Source chord, placement arithmetic, plane drift and complete
