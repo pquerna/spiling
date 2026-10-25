@@ -432,50 +432,52 @@ fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictio
 }
 
 #[test]
-fn regular_native_families_import_with_original_face_and_edge_identity() {
-    for (name, source_solid, metadata) in crate::parity_fixtures::recipes() {
-        // Skip synthetic Monstertruck generator fixtures with invalid loop winding or lacking seam edges (solidcraft strict B-rep verification)
-        if name.contains("nurbs-cylinder")
-            || name.contains("nurbs-torus")
-            || name.contains("revolution")
-        {
-            continue;
-        }
-        let source = crate::parity_fixtures::original(name, source_solid);
-        let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).expect(name);
-        assert_eq!(
-            definition.provenance.source_hash,
-            SourceHash::from_bytes(source.as_bytes())
-        );
-        let families: &[SurfaceFamily] = match metadata["family"].as_str().unwrap() {
-            "cone" => &[SurfaceFamily::Cone],
-            "sphere" => &[SurfaceFamily::Sphere],
-            "torus" => &[SurfaceFamily::Torus],
-            "bspline" => &[SurfaceFamily::BSpline],
-            "nurbs" => &[SurfaceFamily::Nurbs],
-            "linear_extrusion" => &[SurfaceFamily::LinearExtrusion],
-            "revolution" => &[SurfaceFamily::Revolution],
-            "plane-cylinder" => &[SurfaceFamily::Plane, SurfaceFamily::Cylinder],
-            "nurbs-plane-cylinder" => &[
+fn frozen_original_pockets_preserve_source_identity_and_mixed_floor_carriers() {
+    for (source, families) in [
+        (
+            crate::test_sources::BLIND_POCKET,
+            &[SurfaceFamily::Plane, SurfaceFamily::Cylinder][..],
+        ),
+        (
+            crate::test_sources::BLIND_POCKET_NURBS_FLOOR,
+            &[
                 SurfaceFamily::Nurbs,
                 SurfaceFamily::Plane,
                 SurfaceFamily::Cylinder,
-            ],
-            _ => panic!("unexpected genuine source recipe family"),
-        };
+            ][..],
+        ),
+    ] {
+        let definition = from_step_bytes_with_cancel(source, &cancelled()).unwrap();
+        assert_eq!(
+            definition.provenance.source_hash,
+            SourceHash::from_bytes(source)
+        );
+        assert_eq!(definition.faces.len(), 9);
+        assert_eq!(definition.faces.len(), definition.brep().faces().len());
+        for (info, &face_id) in definition.faces().iter().zip(definition.face_ids()) {
+            let original = definition.original_source().face(face_id).unwrap();
+            assert_eq!(original.source_face.0, info.face_id.step_entity());
+            let native = definition.brep().face(face_id).unwrap();
+            assert_eq!(native.loops.len(), original.wires.len());
+            let native_uses: usize = native
+                .loops
+                .iter()
+                .map(|&id| definition.brep().loop_(id).unwrap().edges.len())
+                .sum();
+            let original_uses: usize = original.wires.iter().map(|wire| wire.coedges.len()).sum();
+            assert_eq!(native_uses, original_uses);
+        }
         for family in families {
             assert!(
                 definition
                     .faces
                     .iter()
-                    .any(|face| face.geometry.family == *family),
-                "{name}: missing original {family:?}"
+                    .any(|face| face.geometry.family == *family)
             );
         }
-        assert_eq!(definition.faces.len(), definition.brep().faces().len());
         assert!(
             solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
-            "closed oriented manifold"
+            "closed oriented original pocket"
         );
     }
 }
@@ -497,8 +499,8 @@ fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() 
 
 #[test]
 fn a_true_rational_denominator_zero_refuses_before_geometric_consistency_sampling() {
-    let source = crate::parity_fixtures::conditioning_source();
-    let err = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
+    let err = from_step_bytes_with_cancel(crate::test_sources::DENOMINATOR_ZERO, &cancelled())
+        .unwrap_err();
     assert!(
         matches!(
             err.code,

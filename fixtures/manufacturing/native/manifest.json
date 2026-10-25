@@ -109,5 +109,8 @@
   ],
   "schema_version": 1,
   "software_only": true,
-  "source_recipe": "crates/geometry/examples/generate_operator_fixtures.rs"
+  "historical_source_recipe": "crates/geometry/examples/generate_operator_fixtures.rs",
+  "historical_producer": "Monstertruck",
+  "qualification": "Frozen original source bytes only; no current-runtime qualification",
+  "verification_command": "node tools/verify-fixtures.mjs"
 }

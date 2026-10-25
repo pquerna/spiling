@@ -147,17 +147,18 @@ large worker pool. Under tight Node task limits, `UV_THREADPOOL_SIZE=1` and
 `NODE_OPTIONS=--v8-pool-size=1` are available; trusted intent authoring also accepts
 an explicit `GOMAXPROCS` override.
 
-Tests consuming generated native parity/operator inputs require the real generators:
+Native tests consume committed immutable original STEP sources; no legacy kernel
+checkout or corpus writer is required:
 
 ```sh
-cargo run --locked -p spiling-geometry --example generate_corpus --
-cargo run --locked -p spiling-geometry --example generate_operator_fixtures --
+node tools/verify-fixtures.mjs
+cargo run --locked -p spiling-geometry --example inspect_corpus -- fixtures/geometry/box-mm.step
 ```
 
-Generators preserve frozen STEP bytes and refuse changed originals. Review new
-fixture/manifest output rather than editing expected geometry by hand. Fixture
-manifests own hashes; generated-contract and corpus drift checks are not runtime
-acceptance. Missing inputs are not expected geometry refusals.
+The verifier checks manifest hashes, recorded byte counts and OSL sidecars,
+not current import or manufacturing support. Manifests retain historical producer
+identity; inspection exercises the current facade and reports actual outcomes.
+Changed source requires a new name/version. Missing inputs are not expected refusals.
 
 ## Native CLI workflows
 

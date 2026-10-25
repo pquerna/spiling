@@ -6,7 +6,7 @@ Licensed under the Open Software License version 3.0
 
 # Private kernel ownership vision
 
-Keep Monstertruck ownership narrow and inspectable. Analytical carrier and boundary information supports independent mesh-deviation audits and safe native section queries without a second geometry authority. Periodic edge representation must preserve source face identity and carrier orientation through native extraction and modeling transforms; qualification includes independent exporter and malformed-topology evidence, not a filename-dependent admission lane.
+Keep SolidCore ownership narrow and inspectable. Analytical carrier and boundary information supports independent mesh-deviation audits and safe native section queries without a second geometry authority. Periodic edge representation must preserve source face identity and carrier orientation through native extraction and modeling transforms; qualification includes independent exporter and malformed-topology evidence, not a filename-dependent admission lane.
 
 Provide source-backed face-only rectangular wall certification through the public geometry facade, retaining positional native topology and oriented supporting-plane authority. A certificate gives downstream phase placement and exterior direction without kernel exports, source mutation or mesh/section inference. More general trims, holes, recess carriers, co-carrier ambiguity, sloped and partial-height walls stay outside this certificate's support envelope.
 

@@ -2726,13 +2726,7 @@ mod properties {
 
     #[test]
     fn actual_blindpocket_full_native_corner_comparison_preserves_fixed_exits() {
-        let name = "native-parity-blind-pocket.step";
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .expect("actual native blind-pocket recipe");
-        let step = crate::parity_fixtures::original(name, solid);
-        actual_corner_property(step.as_bytes());
+        actual_corner_property(crate::test_sources::BLIND_POCKET);
     }
 
     #[test]

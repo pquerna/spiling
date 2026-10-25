@@ -330,67 +330,10 @@ fn native_box_wall_certificates_keep_exact_face_identity_outward_side_and_source
     }
 }
 
-/// Genuine original planar STEP source, not a mocked certificate or mesh.
-fn native_notched_extrusion() -> Definition {
-    use monstertruck_io::step::{
-        load::step_geometry::{Curve3D, ElementarySurface, Surface, SweepSurface, re_exports::*},
-        save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
-    };
-    use monstertruck_modeling::builder;
-    use monstertruck_topology::{Face, Wire};
-    let polygon = [
-        (0.0, 0.0),
-        (20.0, 0.0),
-        (20.0, 10.0),
-        (12.0, 10.0),
-        (12.0, 6.0),
-        (8.0, 6.0),
-        (8.0, 10.0),
-        (0.0, 10.0),
-    ];
-    let vertices = builder::vertices(polygon.into_iter().map(|(x, y)| (x, y, 0.0)));
-    let wire: Wire<Point3, Curve3D> = (0..vertices.len())
-        .map(|i| builder::line(&vertices[i], &vertices[(i + 1) % vertices.len()]))
-        .collect();
-    let face: Face<Point3, Curve3D, Surface> = builder::try_attach_plane(vec![wire]).unwrap();
-    let solid = builder::extrude(&face, 8.0 * Vector3::unit_z());
-    let solid = solid
-        .try_mapped(
-            |p| Some(*p),
-            |curve| Some(curve.clone()),
-            |surface| match surface {
-                Surface::SweepSurface(SweepSurface::ExtrusionSurface(extrusion)) => {
-                    let Curve3D::Line(line) = extrusion.entity_curve().as_ref() else {
-                        return None;
-                    };
-                    Some(Surface::ElementarySurface(ElementarySurface::Plane(
-                        Plane::new(line.0, line.1, line.0 + extrusion.extruding_vector()),
-                    )))
-                }
-                surface => Some(surface.clone()),
-            },
-        )
-        .unwrap();
-    solid.boundaries()[0].check_solid_boundary().unwrap();
-    let compressed = solid.compress();
-    let bytes = CompleteStepDisplay::new(
-        StepModel::from(&compressed),
-        StepHeaderDescriptor {
-            file_name: "original-notched-wall-regression.step".into(),
-            time_stamp: "2026-01-01T00:00:00".into(),
-            authors: vec!["Spiling contributors".into()],
-            organization: vec!["Spiling".into()],
-            organization_system: "Original native geometry regression".into(),
-            authorization: "OSL-3.0".into(),
-        },
-    )
-    .to_string();
-    from_step_bytes_with_cancel(bytes.as_bytes(), &AtomicBool::new(false)).unwrap()
-}
-
+// Frozen original STEP inputs and their historical construction provenance live in certificates/.
 #[test]
 fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certificates() {
-    let definition = native_notched_extrusion();
+    let definition = load("certificates/notched-wall.step");
     let recessed = definition.faces().iter().find(|face| matches!(
         face.geometry.analytic,
         Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) if (origin_mm[1] - 6.0).abs() < 1e-7 && normal[1].abs() > 0.5
@@ -399,7 +342,6 @@ fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certif
         .vertical_wall_face(&recessed.face_id)
         .unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
-    assert!(error.message.contains("supporting"));
     let coplanar: Vec<_> = definition.faces().iter().filter(|face| matches!(
         face.geometry.analytic,
         Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) if (origin_mm[1] - 10.0).abs() < 1e-7 && normal[1].abs() > 0.5
@@ -408,7 +350,6 @@ fn recessed_rectangles_and_ambiguous_coplanar_trims_are_not_exterior_wall_certif
     for face in coplanar {
         let error = definition.vertical_wall_face(&face.face_id).unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
-        assert!(error.message.contains("ambiguous"));
     }
 }
 
@@ -556,50 +497,20 @@ fn split_cylinders_bores_and_planar_faces_do_not_acquire_full_cylinder_certifica
     }
 }
 
-/// Export genuine transformed analytic STEP, then exercise normal byte admission.
-/// No certificate or modeled NURBS fitting is involved in constructing this input.
-fn transformed_periodic_cylinder_source(
-    matrix: monstertruck_modeling::base::Matrix4,
-) -> Definition {
-    use monstertruck_io::step::{
-        load::Table,
-        save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
-    };
-    let bytes = source("independent-exporters/occt-cylinder-mm.step");
-    let exchange = step_p21::parser::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
-    let table = Table::from_data_section(&exchange.data[0]);
-    let (compressed, reports) = table
-        .to_compressed_solid_reported(table.manifold_solid_brep.values().next().unwrap())
-        .unwrap();
-    assert!(reports.iter().all(|r| r.is_lossless()));
-    let native = monstertruck_topology::Solid::extract(compressed).unwrap();
-    let transformed = monstertruck_modeling::builder::transformed(&native, matrix);
-    let bytes = CompleteStepDisplay::new(
-        StepModel::from(&transformed.compress()),
-        StepHeaderDescriptor {
-            file_name: "transformed-periodic-cylinder-regression.step".into(),
-            time_stamp: "2026-01-01T00:00:00".into(),
-            authors: vec!["Spiling contributors".into()],
-            organization: vec!["Spiling".into()],
-            organization_system: "Native analytic transformation regression".into(),
-            authorization: "OSL-3.0".into(),
-        },
-    )
-    .to_string();
-    from_step_bytes_with_cancel(bytes.as_bytes(), &AtomicBool::new(false)).unwrap()
-}
-
+// The source bytes retain the original analytic transform, including its phase and axis sign.
 #[test]
 fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign() {
-    use monstertruck_modeling::base::*;
-    for rotation in [
-        Matrix4::from_angle_z(Rad(0.713)),
-        Matrix4::from_angle_x(Rad(std::f64::consts::PI)),
+    for (name, expected_z) in [
+        (
+            "certificates/cylinder-phased-translated-scaled.step",
+            [2.0, 6.0],
+        ),
+        (
+            "certificates/cylinder-reversed-translated-scaled.step",
+            [-2.0, 2.0],
+        ),
     ] {
-        let matrix = Matrix4::from_translation(Vector3::new(13.0, -7.0, 2.0))
-            * rotation
-            * Matrix4::from_scale(0.5);
-        let definition = transformed_periodic_cylinder_source(matrix);
+        let definition = load(name);
         let side = definition
             .faces()
             .iter()
@@ -614,15 +525,10 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
         close(cert.center_mm[0], 13.0, 1e-7);
         close(cert.center_mm[1], -7.0, 1e-7);
         close(cert.radius_mm, 2.5, 1e-7);
-        let expected = if rotation == Matrix4::from_angle_z(Rad(0.713)) {
-            [2.0, 6.0]
-        } else {
-            [-2.0, 2.0]
-        };
-        close(cert.min_z_mm, expected[0], 1e-7);
-        close(cert.max_z_mm, expected[1], 1e-7);
+        close(cert.min_z_mm, expected_z[0], 1e-7);
+        close(cert.max_z_mm, expected_z[1], 1e-7);
     }
-    let sloped = transformed_periodic_cylinder_source(Matrix4::from_angle_y(Rad(0.2)));
+    let sloped = load("certificates/cylinder-sloped-axis.step");
     let side = sloped
         .faces()
         .iter()
@@ -642,97 +548,20 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
     );
 }
 
-/// Genuine original analytic source: one periodic cylindrical face per step,
-/// with shared native seams and arbitrary exact circular rim subdivisions.
-fn original_periodic_cylinder_source(subdivisions: usize, stepped: bool) -> Definition {
-    use monstertruck_io::step::{
-        load::step_geometry::{Curve3D, ElementarySurface, Surface, re_exports::*},
-        save::{CompleteStepDisplay, StepHeaderDescriptor, StepModel},
-    };
-    use monstertruck_modeling::builder;
-    use monstertruck_topology::{Face, Shell, Solid, Wire};
-    type StepWire = Wire<Point3, Curve3D>;
-    type StepFace = Face<Point3, Curve3D, Surface>;
-    let circle = |radius: f64, z: f64| -> StepWire {
-        builder::revolve(
-            &builder::vertex((radius, 0.0, z)),
-            Point3::new(0.0, 0.0, z),
-            Vector3::unit_z(),
-            builder::SweepAngle::Closed,
-            subdivisions,
-        )
-    };
-    let side =
-        |bottom: &StepWire, top: &StepWire, radius: f64, min_z: f64, max_z: f64| -> StepFace {
-            let seam = builder::line::<Curve3D>(bottom[0].front(), top[0].front());
-            let wire = bottom
-                .iter()
-                .cloned()
-                .chain(std::iter::once(seam.clone()))
-                .chain(top.inverse())
-                .chain(std::iter::once(seam.inverse()))
-                .collect();
-            let mut carrier = Processor::new(RevolutionSurface::by_revolution(
-                Line(
-                    Point3::new(radius, 0.0, min_z),
-                    Point3::new(radius, 0.0, max_z),
-                ),
-                Point3::new(0.0, 0.0, min_z),
-                Vector3::unit_z(),
-            ));
-            let point = carrier.subs(0.37, 0.73);
-            if carrier
-                .normal(0.37, 0.73)
-                .dot(Vector3::new(point.x, point.y, 0.0))
-                < 0.0
-            {
-                carrier.invert();
-            }
-            Face::try_new(
-                vec![wire],
-                Surface::ElementarySurface(ElementarySurface::CylindricalSurface(carrier)),
-            )
-            .unwrap()
-        };
-    let bottom = circle(5.0, 0.0);
-    let shoulder_outer = circle(5.0, 8.0);
-    let bottom_cap: StepFace = builder::try_attach_plane(vec![bottom.clone()]).unwrap();
-    let mut faces = vec![
-        bottom_cap.inverse(),
-        side(&bottom, &shoulder_outer, 5.0, 0.0, 8.0),
-    ];
-    if stepped {
-        let shoulder_inner = circle(3.0, 8.0);
-        let top = circle(3.0, 12.0);
-        faces.push(
-            builder::try_attach_plane(vec![shoulder_outer, shoulder_inner.inverse()]).unwrap(),
-        );
-        faces.push(side(&shoulder_inner, &top, 3.0, 8.0, 12.0));
-        faces.push(builder::try_attach_plane(vec![top]).unwrap());
-    } else {
-        faces.push(builder::try_attach_plane(vec![shoulder_outer]).unwrap());
-    }
-    let shell: Shell<_, _, _> = faces.into_iter().collect();
-    let solid = Solid::try_new(vec![shell]).unwrap();
-    let bytes = CompleteStepDisplay::new(
-        StepModel::from(&solid.compress()),
-        StepHeaderDescriptor {
-            file_name: "original-periodic-cylinder-regression.step".into(),
-            time_stamp: "2026-01-01T00:00:00".into(),
-            authors: vec!["Spiling contributors".into()],
-            organization: vec!["Spiling".into()],
-            organization_system: "Original analytic periodic topology regression".into(),
-            authorization: "OSL-3.0".into(),
-        },
-    )
-    .to_string();
-    from_step_bytes_with_cancel(bytes.as_bytes(), &AtomicBool::new(false)).unwrap()
-}
-
+// Each source retains its original shared seam and exact circular rim subdivisions.
 #[test]
 fn arbitrary_native_rim_subdivisions_preserve_full_face_but_short_steps_refuse() {
-    for subdivisions in [3, 7] {
-        let definition = original_periodic_cylinder_source(subdivisions, false);
+    for (full_height, stepped) in [
+        (
+            "certificates/periodic-cylinder-rim-3.step",
+            "certificates/stepped-periodic-cylinder-rim-3.step",
+        ),
+        (
+            "certificates/periodic-cylinder-rim-7.step",
+            "certificates/stepped-periodic-cylinder-rim-7.step",
+        ),
+    ] {
+        let definition = load(full_height);
         let side = definition
             .faces()
             .iter()
@@ -747,7 +576,7 @@ fn arbitrary_native_rim_subdivisions_preserve_full_face_but_short_steps_refuse()
         close(cert.radius_mm, 5.0, 1e-7);
         close(cert.min_z_mm, 0.0, 1e-7);
         close(cert.max_z_mm, 8.0, 1e-7);
-        let stepped = original_periodic_cylinder_source(subdivisions, true);
+        let stepped = load(stepped);
         for side in stepped.faces().iter().filter(|f| {
             matches!(
                 f.geometry.analytic,

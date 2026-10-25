@@ -31,10 +31,10 @@ try {
   assert.equal(diagnostic.status, 0, diagnostic.stderr);
   const report = JSON.parse(diagnostic.stdout);
   assert.match(report.hello.instance_id, /^[0-9a-f-]{36}$/);
-  assert.equal(report.hello.kernel, "monstertruck");
+  assert.equal(report.hello.kernel, "solidcore");
   assert.ok(report.hello.geometry_capabilities.length > 0);
   assert.match(report.hello.session_id, /^[0-9a-f-]{36}$/);
-  assert.equal(report.hello.kernel_identity.name, "monstertruck");
+  assert.equal(report.hello.kernel_identity.name, "solidcore");
   assert.ok(report.hello.pid > 0);
   const output = join(directory, "triangle.bin");
   const transfer = invoke(["triangle", "--engine", engine, "--output", output]);

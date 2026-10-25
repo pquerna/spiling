@@ -362,6 +362,16 @@ SolidCore parity. The unchanged original fixtures and operator workflows remain
 the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
 
+The workspace has no Monstertruck runtime, development, test or tooling dependency.
+Retained historical STEP provenance may name that producer; the data is not a
+linked backend or fallback. Immutable hashes/licenses are checked independently of
+current geometry acceptance.
+
+Rectangular-wall and full-cylinder finish-certificate positives remain unqualified
+where exact original line/carrier or closed-chart correspondence prerequisites
+refuse. Retained consumer tests preserve those obligations; raw face descriptors
+and historical positive results do not enable the operations.
+
 General STEP documents/assemblies, unproved charts, arbitrary freeform finishes,
 singular/nonmanifold material and unqualified critical interfaces remain outside
 support. Native descriptors and successful raw inspection do not broaden it.

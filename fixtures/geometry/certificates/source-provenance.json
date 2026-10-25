@@ -1,0 +1,132 @@
+{
+  "authority": "Frozen historical STEP inputs only; no current-runtime import, certificate or manufacturing qualification is asserted.",
+  "cases": [
+    {
+      "construction": "Original 20x10x8 planar extrusion with full-height notch x=8..12, y=6..10; recessed back and ambiguous coplanar exterior trims",
+      "file": "notched-wall.step"
+    },
+    {
+      "construction": "translation(13,-7,2) * rotation_z(0.713 radians) * uniform_scale(0.5)",
+      "expected_center_mm": [13, -7],
+      "expected_radius_mm": 2.5,
+      "expected_z_mm": [2, 6],
+      "file": "cylinder-phased-translated-scaled.step",
+      "source": "../independent-exporters/occt-cylinder-mm.step"
+    },
+    {
+      "construction": "translation(13,-7,2) * rotation_x(pi radians) * uniform_scale(0.5)",
+      "expected_center_mm": [13, -7],
+      "expected_radius_mm": 2.5,
+      "expected_z_mm": [-2, 2],
+      "file": "cylinder-reversed-translated-scaled.step",
+      "source": "../independent-exporters/occt-cylinder-mm.step"
+    },
+    {
+      "construction": "rotation_y(0.2 radians)",
+      "expected": "vertical cylinder certificate unsupported",
+      "file": "cylinder-sloped-axis.step",
+      "source": "../independent-exporters/occt-cylinder-mm.step"
+    },
+    {
+      "construction": "Original shared-seam periodic analytic cylinder, 3 exact circular rim edges",
+      "expected_radius_mm": 5,
+      "expected_z_mm": [0, 8],
+      "file": "periodic-cylinder-rim-3.step"
+    },
+    {
+      "construction": "Original shared-seam periodic analytic cylinder, 7 exact circular rim edges",
+      "expected_radius_mm": 5,
+      "expected_z_mm": [0, 8],
+      "file": "periodic-cylinder-rim-7.step"
+    },
+    {
+      "construction": "Original shared-seam stepped analytic cylinder, 3 exact edges per circular rim; radius 5 on z=0..8 and radius 3 on z=8..12",
+      "expected": "both partial-height cylinder faces unsupported",
+      "file": "stepped-periodic-cylinder-rim-3.step"
+    },
+    {
+      "construction": "Original shared-seam stepped analytic cylinder, 7 exact edges per circular rim; radius 5 on z=0..8 and radius 3 on z=8..12",
+      "expected": "both partial-height cylinder faces unsupported",
+      "file": "stepped-periodic-cylinder-rim-7.step"
+    }
+  ],
+  "fixtures": [
+    {
+      "byte_count": 13938,
+      "license": "OSL-3.0",
+      "license_path": "notched-wall.step.license",
+      "path": "notched-wall.step",
+      "sha256": "89bd6190fae688466bb9d831aef1ed43f5e10860e42879726ed8577e7713cc3d"
+    },
+    {
+      "byte_count": 12800,
+      "license": "OSL-3.0",
+      "license_path": "cylinder-phased-translated-scaled.step.license",
+      "path": "cylinder-phased-translated-scaled.step",
+      "sha256": "adc51b75c669b960080732f6b1109318f9b90ebc935617de69a56fd252e54640"
+    },
+    {
+      "byte_count": 12532,
+      "license": "OSL-3.0",
+      "license_path": "cylinder-reversed-translated-scaled.step.license",
+      "path": "cylinder-reversed-translated-scaled.step",
+      "sha256": "6553f919df11b2b1bdd8be18a75572b7146be7240a7f7ebe824822afc082eea4"
+    },
+    {
+      "byte_count": 13552,
+      "license": "OSL-3.0",
+      "license_path": "cylinder-sloped-axis.step.license",
+      "path": "cylinder-sloped-axis.step",
+      "sha256": "b8e3ba824e69dec0f890a265f203f85f2b0367eb9c3459b2ced827034691bf8e"
+    },
+    {
+      "byte_count": 5770,
+      "license": "OSL-3.0",
+      "license_path": "periodic-cylinder-rim-3.step.license",
+      "path": "periodic-cylinder-rim-3.step",
+      "sha256": "2cf28d1dd97acccd220ebb46218d125cc146d3f4d28bb796a8243db8d826b007"
+    },
+    {
+      "byte_count": 10205,
+      "license": "OSL-3.0",
+      "license_path": "periodic-cylinder-rim-7.step.license",
+      "path": "periodic-cylinder-rim-7.step",
+      "sha256": "1723d864f6dcdbccfc646e248c0cd4982e0efe0cd6333d75f9bef6338e336cec"
+    },
+    {
+      "byte_count": 10017,
+      "license": "OSL-3.0",
+      "license_path": "stepped-periodic-cylinder-rim-3.step.license",
+      "path": "stepped-periodic-cylinder-rim-3.step",
+      "sha256": "44c020c1abb84caa1bd1d3d52960f5680026b1e7cbb7fb40d268758ec81be61a"
+    },
+    {
+      "byte_count": 18842,
+      "license": "OSL-3.0",
+      "license_path": "stepped-periodic-cylinder-rim-7.step.license",
+      "path": "stepped-periodic-cylinder-rim-7.step",
+      "sha256": "b76139e6d06c8babb6202e28ddbdb7e0f7532647bdf10d147a02fcbc63b14501"
+    }
+  ],
+  "historical_exporter": {
+    "repository": "https://github.com/pquerna/monstertruck",
+    "revision": "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95",
+    "version": "0.4.1"
+  },
+  "input_sources": [
+    {
+      "byte_count": 5649,
+      "license_path": "../independent-exporters/occt-cylinder-mm.step.license",
+      "path": "../independent-exporters/occt-cylinder-mm.step",
+      "sha256": "21ea8ea395b4dd38d04dbe901d2538dd781f6567b404031148302164c85a8a9a",
+      "used_by": [
+        "cylinder-phased-translated-scaled.step",
+        "cylinder-reversed-translated-scaled.step",
+        "cylinder-sloped-axis.step"
+      ]
+    }
+  ],
+  "license": "OSL-3.0",
+  "schema": 1,
+  "source": "Original Spiling construction/export code from crates/geometry/src/tests.rs at c731a75"
+}

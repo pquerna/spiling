@@ -1,0 +1,34 @@
+{
+  "fixtures": [
+    {
+      "byte_count": 11734,
+      "license": "OSL-3.0",
+      "path": "native-parity-blind-pocket.step",
+      "purpose": "Original sewn blind pocket: source-bound floor, bore and corner ownership",
+      "sha256": "9225446daf70b3a4768f7e76e6ace63e8716001926120bffabd9edf8b5979146"
+    },
+    {
+      "byte_count": 12073,
+      "license": "OSL-3.0",
+      "path": "native-parity-blind-pocket-nurbs-floor.step",
+      "purpose": "Same original pocket with a bounded rational tensor floor and analytic walls",
+      "sha256": "fba78eebea7efd259db4a20c9531204a7c45044f537550b6b7adbc1d7b5f2b96"
+    },
+    {
+      "byte_count": 9868,
+      "license": "OSL-3.0",
+      "path": "native-parity-denominator-zero.step",
+      "purpose": "Actual rational denominator zero between opposite-sign homogeneous rows; refusal only",
+      "sha256": "4f4caaa91275e4f15ecc5c70005f7d06223af6bd57e5e9501f555b335c9357ca"
+    }
+  ],
+  "historical_recipe": {
+    "path": "crates/geometry/examples/parity/mod.rs",
+    "revision": "c731a75"
+  },
+  "producer": {
+    "name": "Monstertruck",
+    "revision": "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95"
+  },
+  "qualification": "Historical source bytes only; no current-runtime qualification"
+}

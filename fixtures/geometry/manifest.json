@@ -244,8 +244,10 @@
     }
   ],
   "generation": {
-    "command": "cargo run --locked -p spiling-geometry --example generate_corpus --",
-    "drift_command": "cargo run --locked -p spiling-geometry --example generate_corpus -- --check",
+    "historical_command": "cargo run --locked -p spiling-geometry --example generate_corpus --",
+    "verification_command": "node tools/verify-fixtures.mjs",
+    "producer": "Monstertruck",
+    "status": "Frozen original source bytes; retired builder; no current-runtime qualification",
     "plate_status": "32x16 source geometry frozen; measured packed workload evidence is separate from engine transfer acceptance",
     "timestamp": "2026-01-01T00:00:00"
   },

@@ -35,11 +35,6 @@ spiling-appearance = { path = "crates/appearance" }
 png = "=0.18.1"
 geo = "=0.32.0"
 boostvoronoi = { version = "=0.12.1", default-features = false }
-monstertruck-modeling = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
-monstertruck-meshing = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
-monstertruck-solid = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
-monstertruck-io = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95", default-features = false, features = ["step"] }
-monstertruck-topology = { version = "=0.4.1", git = "https://github.com/pquerna/monstertruck", rev = "69c551d6d92c5d0f1a98a82d1dafc0352d1d6f95" }
 # Integration source: pquerna/integration-spiling-tracking; keep an exact tested revision.
 solidcore = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "ee4d9c3feefb3c702ca53b190b7fe4516714c841" }
 solidcore-mesh = { version = "=0.0.1", git = "https://github.com/pquerna/solidcore", rev = "ee4d9c3feefb3c702ca53b190b7fe4516714c841", features = ["nurbs-grid-mesh"] }
@@ -55,9 +50,6 @@ debug = 0
 incremental = false
 
 # Keep geometry/manufacturing numerical work practical without optimizing the desktop stack.
-[profile.dev.package.monstertruck-modeling]
-opt-level = 2
-
 [profile.dev.package.solidcore]
 opt-level = 2
 

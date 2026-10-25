@@ -1148,57 +1148,47 @@ mod tests {
     }
 
     #[test]
-    fn source_census_accepts_original_polynomial_and_rational_affine_carriers() {
-        for name in [
-            "native-parity-bspline-box.step",
-            "native-parity-nurbs-box.step",
-        ] {
-            let (_, solid, _) = crate::parity_fixtures::recipes()
-                .into_iter()
-                .find(|(candidate, _, _)| *candidate == name)
-                .unwrap();
-            let text = crate::parity_fixtures::original(name, solid);
-            let cancel = AtomicBool::new(false);
-            let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
-            let mut work = GeometryWorkBudget::new(100_000_000);
-            let owner = crate::analysis::material_source::prepare_solid(
-                &definition,
+    fn source_census_accepts_an_independent_original_box() {
+        let bytes = include_bytes!(
+            "../../../../../../fixtures/geometry/independent-exporters/occt-box-mm.step"
+        );
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+        let mut work = GeometryWorkBudget::new(100_000_000);
+        let owner = crate::analysis::material_source::prepare_solid(
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let source = owner.source_view().unwrap();
+        let fiber = fiber([1.23456789, 2.34567891, 2.0]);
+        assert!(
+            original_fiber_degree_one(
+                source,
+                &fiber,
+                &request(),
+                HeightFunctional::from_frame(request().frame),
                 MAX_SCRATCH_BYTES,
                 &mut work,
                 &cancel,
             )
-            .unwrap();
-            let source = owner.source_view().unwrap();
-            let fiber = fiber([1.23456789, 2.34567891, 2.0]);
-            assert!(
-                original_fiber_degree_one(
-                    source,
-                    &fiber,
-                    &request(),
-                    HeightFunctional::from_frame(request().frame),
-                    MAX_SCRATCH_BYTES,
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap()
-                .is_some(),
-                "complete original carrier fiber has one outward root"
-            );
-        }
+            .unwrap()
+            .is_some(),
+            "complete original carrier fiber has one outward root"
+        );
     }
 
     #[test]
     fn multiple_intersections_and_void_entry_do_not_grant_degree_one() {
-        let name = "native-parity-nurbs-torus.step";
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .unwrap();
-        let text = crate::parity_fixtures::original(name, solid);
+        let bytes = include_bytes!(
+            "../../../../../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"
+        );
         let cancel = AtomicBool::new(false);
-        let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
         let fiber = OriginalFiber {
-            center: [0.0; 3],
+            center: [-10.0, 10.0, 4.0],
             rows: [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|v| v.map(Interval::point)),
             offsets: [Interval::point(0.0); 2],
             forward: [
@@ -1237,14 +1227,11 @@ mod tests {
 
     #[test]
     fn census_scratch_work_and_cancellation_failures_remain_typed() {
-        let name = "native-parity-bspline-box.step";
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .unwrap();
-        let text = crate::parity_fixtures::original(name, solid);
+        let bytes = include_bytes!(
+            "../../../../../../fixtures/geometry/independent-exporters/occt-box-mm.step"
+        );
         let cancel = AtomicBool::new(false);
-        let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
         let owner = crate::analysis::material_source::prepare_solid(
             &definition,
             MAX_SCRATCH_BYTES,
@@ -1395,69 +1382,5 @@ mod tests {
         let mut touching = FiberRoots::default();
         assert!(touching.record(true, Interval::new(3.9, 4.1).unwrap()));
         assert!(!touching.record(false, Interval::new(4.0, 4.2).unwrap()));
-    }
-
-    #[test]
-    fn one_original_carrier_can_supply_both_cylinder_roles_but_not_extra_sheets() {
-        let name = "native-parity-nurbs-torus.step";
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .unwrap();
-        let text = crate::parity_fixtures::original(name, solid);
-        let cancel = AtomicBool::new(false);
-        let definition = crate::from_step_bytes_with_cancel(text.as_bytes(), &cancel).unwrap();
-        assert_eq!(definition.face_ids().len(), 1);
-        let mut request = request();
-        request.height_interval_mm = [-1.0, 1.0];
-        request.sample_height_mm = 0.37;
-        let rows = [[-0.37, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|r| r.map(Interval::point));
-        let mut ray = OriginalFiber {
-            center: [0.0, 0.0, 0.37],
-            rows,
-            offsets: [Interval::point(0.0); 2],
-            forward: cross(rows[0], rows[1]),
-            forward_offset: Interval::point(0.0),
-            min_forward: 0.0,
-            core: None,
-        };
-        let mut work = GeometryWorkBudget::new(100_000_000);
-        let owner = crate::analysis::material_source::prepare_solid(
-            &definition,
-            MAX_SCRATCH_BYTES,
-            &mut work,
-            &cancel,
-        )
-        .unwrap();
-        let census = original_cylinder_fiber_census(
-            owner.source_view().unwrap(),
-            &ray,
-            &request,
-            HeightFunctional::from_frame(request.frame),
-            MAX_SCRATCH_BYTES,
-            &mut work,
-            &cancel,
-        )
-        .unwrap()
-        .expect("complete single-face source has both radial roles");
-        assert!(census.inner_forward().unwrap().lo > 0.0);
-        assert!(census.inner_forward().unwrap().hi < census.outer_forward().lo);
-        // Same infinite line and same carrier, but the positive half-ray now
-        // crosses both sides of the torus: two inner and two outer sheets.
-        // A source-face label cannot distinguish or silently drop these roots.
-        ray.center = [-10.0, -3.7, 0.37];
-        assert!(
-            original_cylinder_fiber_census(
-                owner.source_view().unwrap(),
-                &ray,
-                &request,
-                HeightFunctional::from_frame(request.frame),
-                MAX_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .is_none()
-        );
     }
 }

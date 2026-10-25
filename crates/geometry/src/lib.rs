@@ -16,8 +16,7 @@ mod tessellation;
 #[path = "../examples/corpus/ast.rs"]
 pub(crate) mod corpus_fixtures;
 #[cfg(test)]
-#[path = "../examples/parity/mod.rs"]
-pub(crate) mod parity_fixtures;
+pub(crate) mod test_sources;
 #[cfg(test)]
 mod tests;
 
