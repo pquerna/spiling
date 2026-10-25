@@ -55,6 +55,50 @@ this assessment or promoting the dependency.
   mesh-budget duplicate. This is a search-limited result, not proof of absence;
   check current issue/PR state immediately before filing.
 
+## Why the patches exist, and their SMLib relationship
+
+**STEP copying is needed by the current importer, not by an inherent geometry
+requirement.** [`from_schema4_brep`](../../crates/geometry/src/import/brep_data_bridge.rs)
+puts cylinders, cones, spheres and tori inside `StepSurface` and passes them to
+`make_topology_from_data`. The native builder's
+[`face_surface`](https://github.com/tangency-labs/solidcore/blob/2d37267fea023715d4e15e3baf59bef7b4e399f9/crates/solidcore/src/topology/brep/p10.rs#L783-L850)
+copies each input carrier into the BREP. Disabling analytic enrichment just
+switches from `copy_and_add_analytics` to `copy`; it does not avoid the copy.
+Spiling's later borrowed face getter does not bypass this construction step.
+
+The wrapper itself is **not a new Rust concept**.
+SMLib's [`SmSTEPSurface.h`](https://github.com/NVIDIA-Omniverse/usd-brep/blob/c9c5979/source/SMLib/inc/SmSTEPSurface.h)
+documents an evaluator that forwards to `EvaluateSTEP`, primarily for lifting
+STEP-parameterized UV curves into 3D. Its analytic angular parameters are degrees.
+The class does not override `Copy` or `CopyAndAddAnalytics`.
+The inherited [`SmSurface.cpp`](https://github.com/NVIDIA-Omniverse/usd-brep/blob/c9c5979/source/SMLib/src/SmSurface.cpp#L746-L819)
+returns `SM_ERR` from `Copy`, and `CopyAndAddAnalytics` delegates to that virtual
+copy. SolidCore's refusal therefore follows the C++ baseline. Our independently
+owned wrapper copy extends an inherited capability gap; it does not repair a
+demonstrated Rust-port regression. The source does not establish why SMLib omitted
+the override, so do not attribute a deliberate prohibition or historical motive.
+
+**Alternative:** import ordinary native carriers and reparameterize every
+affected UV curve/domain into their native charts, or introduce a consuming
+topology-construction API. Neither is a flag change. Existing
+[`convert_uv_from_step_to_nurbs`](https://github.com/tangency-labs/solidcore/blob/2d37267fea023715d4e15e3baf59bef7b4e399f9/crates/solidcore/src/surface/cone/p1.rs#L1300-L1355)
+uses a polar conversion, not merely degrees-to-radians scaling. Unwrapping a
+carrier while retaining its STEP UVs changes geometry evaluation and derivatives.
+No patch-free importer has been qualified here.
+
+**Decision:** retain the small owned-copy extension for the current importer and
+ask upstream about that capability explicitly. Reconsider it when a simpler,
+fully exercised native-chart import path exists; do not rewrite the importer
+merely to reduce the patch count.
+
+The meshing resource contract is different: `solidcore-mesh` in PR #636 is a new
+Rust mesher, not the C++-parity `SmTess` port. Spiling's cumulative work,
+cooperative cancellation and visible-storage admission are real engine
+requirements, but this particular `QueryBudget` API is an extension, not a
+restoration of an SMLib API. Keep those requirements while seeking the smallest
+upstream mesher control interface; do not claim SMLib has no cancellation
+mechanisms generally.
+
 ## Suggested STEP-copy issue
 
 **Title:** Support independently owned copies of STEP-wrapped surfaces while
@@ -65,8 +109,8 @@ preserving their chart semantics.
 ownership flag. This follows the documented base-default dispatch.
 
 **Requested capability:** recursively copy the wrapped carrier, keep the STEP
-wrapper and coordinate law, and give the result independent ownership. Native
-BREP surface extraction/duplication consumers call these copy entrypoints.
+wrapper and coordinate law, and give the result independent ownership. The
+current Spiling BREP construction path calls these copy entrypoints.
 
 Minimal native reproduction, using a checkout at the exact reviewed upstream:
 
