@@ -1614,6 +1614,38 @@ mod tests {
         }
     }
     #[test]
+    fn selected_finite_spline_master_keeps_its_coefficient_fence_endpoint() {
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ))
+        .unwrap();
+        let source = definition
+            .original_source()
+            .coedges
+            .iter()
+            .find(|source| source.edge_curve_id == spiling_contracts::geometry::StepEntityId(279))
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(2_000_000);
+        let operator =
+            SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+        for endpoint in 0..2 {
+            let position = operator
+                .tensor([endpoint as f64; 2], 0, &mut work, &cancel)
+                .unwrap()[0];
+            for axis in 0..3 {
+                let residual =
+                    position[axis].sub(Interval::point(source.vertex_points_mm[endpoint][axis]));
+                assert!(residual.lo.abs().max(residual.hi.abs()) < 1.0e-7);
+            }
+        }
+        let middle = operator.tensor([0.5; 2], 0, &mut work, &cancel).unwrap()[0];
+        for axis in [0, 2] {
+            assert!(middle[axis].lo > 0.58 && middle[axis].hi < 0.59);
+        }
+    }
+    #[test]
     fn preferred_opposite_pcurve_gauge_keeps_the_declared_3d_half_circle() {
         use solidcraft_step::geom as s;
         use std::sync::Arc;

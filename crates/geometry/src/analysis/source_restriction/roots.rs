@@ -286,33 +286,45 @@ pub(super) fn isolate_endpoint(
 
             // Exact stationarity is weaker than exact vertex coincidence:
             // a captured vertex may have a nonzero normal source residual.
-            // The whole tube already proves g' > 0. Test reference zero only
-            // as a candidate; a singleton outward g enclosure proves its root.
-            let (candidate, candidate_delta, candidate_g) =
-                if point_g != Interval::point(0.0) && range.contains(0.0) {
-                    let zero = curve.tensor([0.0; 2], 1, work, cancel)?;
-                    let delta = displacement(zero[0], vertex);
-                    (0.0, delta, finite(dot(delta, zero[1]))?)
-                } else {
-                    (midpoint, point_delta, point_g)
-                };
-            if candidate_g == Interval::point(0.0) {
-                let error_mm = distance(candidate_delta)?.hi;
-                if error_mm <= maximum_source_error_mm {
-                    retain(
-                        &mut roots,
-                        EndpointRoot {
-                            parameter: Interval::point(candidate),
-                            tube: range,
-                            exact: Some(candidate),
-                            error_mm,
-                        },
-                        retained_bytes,
-                        work,
-                        cancel,
-                    )?;
+            // The whole tube already proves g' > 0. Source fences, midpoint
+            // and reference zero are proposals only: singleton outward g must
+            // prove stationarity, including at a closed coefficient boundary.
+            let candidates = [midpoint, range.lo, range.hi, 0.0];
+            let mut stationary = None;
+            for (index, candidate) in candidates.into_iter().enumerate() {
+                work.charge(1, cancel)?;
+                if !range.contains(candidate) || candidates[..index].contains(&candidate) {
                     continue;
                 }
+                let (candidate_delta, candidate_g) = if candidate == midpoint {
+                    (point_delta, point_g)
+                } else {
+                    let jet = curve.tensor([candidate; 2], 1, work, cancel)?;
+                    let delta = displacement(jet[0], vertex);
+                    (delta, finite(dot(delta, jet[1]))?)
+                };
+                if candidate_g == Interval::point(0.0) {
+                    let error_mm = distance(candidate_delta)?.hi;
+                    if error_mm <= maximum_source_error_mm {
+                        stationary = Some((candidate, error_mm));
+                        break;
+                    }
+                }
+            }
+            if let Some((candidate, error_mm)) = stationary {
+                retain(
+                    &mut roots,
+                    EndpointRoot {
+                        parameter: Interval::point(candidate),
+                        tube: range,
+                        exact: Some(candidate),
+                        error_mm,
+                    },
+                    retained_bytes,
+                    work,
+                    cancel,
+                )?;
+                continue;
             }
 
             let newton = finite(Interval::point(midpoint).sub(point_g.div(derivative)?))?;

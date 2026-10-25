@@ -212,6 +212,10 @@ reference or generated native UV. Endpoint uniqueness, whole correspondence,
 relative derivatives and chart/joint qualification remain separate obligations.
 Finite authored trims and periodic selectors retain their own branch inventory.
 
+Endpoint proposals include finite coefficient fences, midpoints and reference
+zero. They still require exact stationarity or strict Newton existence; proximity
+to a search or natural-domain fence is not a root or branch certificate.
+
 An exactly isolated stationary parameter is not exact vertex coincidence.
 Its nonzero physical source residual remains charged to the source allowance.
 A joint collapses only with coefficient identity or equal singleton outward UV
