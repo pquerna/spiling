@@ -483,8 +483,13 @@ fn native_projected_bounds(
         // including its knots. They need no inferred native partition/gauge.
         let original_box = native_boxes.is_none().then_some(uv);
         let boxes = native_boxes.into_iter().flatten().chain(original_box);
+        // Prior faces supply independently feasible points of this same source
+        // under the same covector. The query needs global support, not tight
+        // extrema of every noncontact face. Each new face still has its complete
+        // coefficient/trim cover searched; the seed never clips its enclosures
+        // or supplies a feasible point on that particular face.
         let support = search_domains(
-            boxes, 2, tolerance, None, &mut scratch, work, cancel,
+            boxes, 2, tolerance, aggregate, &mut scratch, work, cancel,
             |cell, work, cancel| {
                 let class = trim.classify(cell, work, cancel)?;
                 if matches!(class, TrimClassification::Outside) {
@@ -560,7 +565,7 @@ fn native_projected_bounds(
         ).map_err(|failure| work.annotate_error(failure, before, format_args!(
             "native directional trimmed face; source_face={ordinal}; uv_domain={uv:?}; direction={direction:?}"
         )))?;
-        combine(&mut aggregate, support);
+        aggregate = Some(support);
     }
     let mut result = aggregate.ok_or_else(|| {
         error(
@@ -1108,16 +1113,6 @@ fn search_domains_with_query_scratch(
     Ok(result)
 }
 
-fn combine(aggregate: &mut Option<ProjectedBounds>, next: ProjectedBounds) {
-    if let Some(value) = aggregate {
-        for endpoint in 0..2 {
-            value.minimum[endpoint] = value.minimum[endpoint].min(next.minimum[endpoint]);
-            value.maximum[endpoint] = value.maximum[endpoint].max(next.maximum[endpoint]);
-        }
-    } else {
-        *aggregate = Some(next);
-    }
-}
 fn uncertainty(value: &ProjectedBounds) -> f64 {
     parametric::up(value.minimum[1] - value.minimum[0])
         .max(parametric::up(value.maximum[1] - value.maximum[0]))
@@ -1637,6 +1632,54 @@ mod tests {
         .unwrap();
         assert!(result.minimum[0] <= 0.0 && result.minimum[1] >= 0.0);
         assert!(result.maximum[0] <= 1.0 && result.maximum[1] >= 1.0);
+    }
+
+    #[test]
+    fn prior_source_faces_resolve_noncontact_faces_without_local_witnesses() {
+        let seed = exact_scalar_bounds();
+        let mut evaluated = 0;
+        let result = search_domains(
+            std::iter::once([[0.0, 1.0]; 2]),
+            2,
+            0.001,
+            Some(seed),
+            &mut Scratch::default(),
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+            |_, _, _| {
+                evaluated += 1;
+                // The complete new face is strictly between the independently
+                // feasible extrema on prior faces. It need not provide a local
+                // extremum or turn its enclosure into a contact witness.
+                Ok(Some(Evaluation {
+                    height: Interval::new(2.0, 8.0)?,
+                    witness: None,
+                    split_axis: 0,
+                }))
+            },
+        )
+        .unwrap();
+        assert_eq!(evaluated, 1);
+        assert_eq!(result.minimum, seed.minimum);
+        assert_eq!(result.maximum, seed.maximum);
+    }
+
+    #[test]
+    fn prior_source_witnesses_do_not_bypass_terminal_face_errors() {
+        for code in [GeometryErrorCode::ResourceLimit, GeometryErrorCode::Cancelled] {
+            let failure = search_domains(
+                std::iter::once([[0.0, 1.0]; 2]),
+                2,
+                0.001,
+                Some(exact_scalar_bounds()),
+                &mut Scratch::default(),
+                &mut GeometryWorkBudget::new(100),
+                &AtomicBool::new(false),
+                |_, _, _| Err(error(code, "new source face query failed")),
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, code);
+        }
     }
 
     #[test]
