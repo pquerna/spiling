@@ -197,7 +197,7 @@ fn compose(raw: [[Interval; 3]; 4], map: [Interval; 4], order: usize) -> [[Inter
 struct NormalizedLift<'a, 'd> {
     lifted: &'a LiftedPcurve<'d>,
     raw: RawRestriction,
-    cuts: Vec<f64>,
+    cuts: &'a [f64],
 }
 impl CurveEvaluator for NormalizedLift<'_, '_> {
     fn active_range(&self) -> [f64; 2] {
@@ -246,7 +246,7 @@ impl CurveEvaluator for NormalizedLift<'_, '_> {
         cancel: &AtomicBool,
     ) -> Result<AxisSpans<'_>, GeometryError> {
         normalized(range)?;
-        AxisSpans::from_cover_cuts(&self.cuts, range, work, cancel)
+        AxisSpans::from_cover_cuts(self.cuts, range, work, cancel)
     }
 }
 
@@ -329,6 +329,76 @@ fn directed(
         v.add(a[i].mul(b[i]).mul(slope))
     });
     Ok(product.lo > 0.0)
+}
+
+fn calibrate_raw_branch(
+    spatial: &SourceSpatialRestriction<'_>,
+    lifted: &LiftedPcurve<'_>,
+    raw: RawRestriction,
+    cuts: &mut Vec<f64>,
+    allowance: f64,
+    remaining: usize,
+    live: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SourceCurveCalibration, GeometryError> {
+    let live = live
+        .checked_add(std::mem::size_of::<NormalizedLift<'_, '_>>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<f64>>()))
+        .ok_or_else(capacity)?;
+    let derivative = raw.derivative()?;
+    let start = raw.endpoint(0)?;
+    let knot_count = lifted.chart().parameter_axis(work, cancel)?.0.len();
+    cuts.clear();
+    let metadata = cuts
+        .capacity()
+        .checked_mul(std::mem::size_of::<f64>())
+        .ok_or_else(capacity)?;
+    admit_vec(
+        cuts,
+        2,
+        live.checked_add(metadata).ok_or_else(capacity)?,
+        remaining,
+    )?;
+    cuts.extend([0.0, 1.0]);
+    for index in 0..knot_count {
+        work.charge(1, cancel)?;
+        let knot = lifted.chart().parameter_axis(work, cancel)?.0[index];
+        let band = Interval::point(knot).sub(start).div(derivative)?;
+        if let Some(band) = band.intersection(Interval::new(0.0, 1.0)?) {
+            let metadata = cuts
+                .capacity()
+                .checked_mul(std::mem::size_of::<f64>())
+                .ok_or_else(capacity)?;
+            admit_vec(
+                cuts,
+                2,
+                live.checked_add(metadata).ok_or_else(capacity)?,
+                remaining,
+            )?;
+            cuts.extend([band.lo, band.hi]);
+        }
+    }
+    work.charge(
+        (cuts.len() as u64).saturating_mul(usize::BITS as u64),
+        cancel,
+    )?;
+    cuts.sort_unstable_by(f64::total_cmp);
+    cuts.dedup();
+    let metadata = cuts
+        .capacity()
+        .checked_mul(std::mem::size_of::<f64>())
+        .ok_or_else(capacity)?;
+    let normalized = NormalizedLift { lifted, raw, cuts };
+    calibrate_source_curves(
+        spatial,
+        &normalized,
+        [0.0, 1.0],
+        allowance,
+        available(remaining, live.checked_add(metadata).ok_or_else(capacity)?)?,
+        work,
+        cancel,
+    )
 }
 
 fn angular_uv_period(
@@ -426,7 +496,57 @@ impl<'d> SourcePcurveRestriction<'d> {
             let live = fixed
                 .checked_add(lifted.retained_bytes())
                 .ok_or_else(capacity)?;
-            let mut raw = None;
+            let mut raw: Option<(RawRestriction, SourceCurveCalibration)> = None;
+            let mut first_rejection = None;
+            let mut candidate_cuts = Vec::new();
+            // Endpoint and midpoint-germ tests only propose branches. Count
+            // ambiguity after complete world/relative-derivative qualification.
+            let mut consider = |candidate: RawRestriction,
+                                root_bytes: usize,
+                                work: &mut GeometryWorkBudget|
+             -> Result<(), GeometryError> {
+                if !directed(candidate, &lifted, spatial, work, cancel)? {
+                    return Ok(());
+                }
+                let retained = raw.as_ref().map_or(0, |(_, proof)| proof.retained_bytes());
+                let branch_live = live
+                    .checked_add(root_bytes)
+                    .and_then(|bytes| bytes.checked_add(retained))
+                    .ok_or_else(capacity)?;
+                match calibrate_raw_branch(
+                    spatial,
+                    &lifted,
+                    candidate,
+                    &mut candidate_cuts,
+                    allowance,
+                    remaining,
+                    branch_live,
+                    work,
+                    cancel,
+                ) {
+                    Ok(calibration) => {
+                        if raw.is_some() {
+                            return Err(unavailable(
+                                "original PCurve admits multiple whole-correspondence-qualified parameter branches",
+                            ));
+                        }
+                        raw = Some((candidate, calibration));
+                        Ok(())
+                    }
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            GeometryErrorCode::Cancelled | GeometryErrorCode::ResourceLimit
+                        ) =>
+                    {
+                        Err(error)
+                    }
+                    Err(error) => {
+                        first_rejection.get_or_insert(error);
+                        Ok(())
+                    }
+                }
+            };
             if let Some(values) = selected.declared_endpoints {
                 let candidate = RawRestriction {
                     endpoints: std::array::from_fn(|i| RawEndpoint::Literal {
@@ -458,16 +578,8 @@ impl<'d> SourcePcurveRestriction<'d> {
                         cancel,
                     )?
                     .0;
-                    if a <= allowance
-                        && b <= allowance
-                        && directed(candidate, &lifted, spatial, work, cancel)?
-                    {
-                        if raw.is_some() {
-                            return Err(unavailable(
-                                "declared original PCurve endpoints admit more than one directed world branch",
-                            ));
-                        }
-                        raw = Some(candidate);
+                    if a <= allowance && b <= allowance {
+                        consider(candidate, 0, work)?;
                     }
                 }
             } else if coedge.vertex_ids[0] == coedge.vertex_ids[1]
@@ -504,14 +616,7 @@ impl<'d> SourcePcurveRestriction<'d> {
                     if image.lo < selected.raw[0] || image.hi > selected.raw[1] {
                         continue;
                     }
-                    if directed(candidate, &lifted, spatial, work, cancel)? {
-                        if raw.is_some() {
-                            return Err(unavailable(
-                                "closed original PCurve has ambiguous actual directed period ownership",
-                            ));
-                        }
-                        raw = Some(candidate);
-                    }
+                    consider(candidate, 0, work)?;
                 }
             } else {
                 let first = roots::isolate_endpoint(
@@ -539,6 +644,11 @@ impl<'d> SourcePcurveRestriction<'d> {
                     work,
                     cancel,
                 )?;
+                let root_bytes = second
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<EndpointRoot>())
+                    .and_then(|bytes| bytes.checked_add(first_bytes))
+                    .ok_or_else(capacity)?;
                 for &a in &first {
                     for &b in &second {
                         work.charge(1, cancel)?;
@@ -546,75 +656,15 @@ impl<'d> SourcePcurveRestriction<'d> {
                             endpoints: [RawEndpoint::Root(a), RawEndpoint::Root(b)],
                             period: None,
                         };
-                        if directed(candidate, &lifted, spatial, work, cancel)? {
-                            if raw.is_some() {
-                                return Err(unavailable(
-                                    "original PCurve world vertices admit multiple directed endpoint-root branches",
-                                ));
-                            }
-                            raw = Some(candidate);
-                        }
+                        consider(candidate, root_bytes, work)?;
                     }
                 }
             }
-            let raw = raw.ok_or_else(|| {
+            let (raw, calibration) = raw.ok_or_else(|| first_rejection.unwrap_or_else(|| {
                 unavailable(
-                    "bounded original PCurve has no unique directed world endpoint restriction",
+                    "bounded original PCurve has no whole-correspondence-qualified endpoint restriction",
                 )
-            })?;
-            let live = live
-                .checked_add(std::mem::size_of::<NormalizedLift<'_, 'd>>())
-                .ok_or_else(capacity)?;
-            let mut normalized = NormalizedLift {
-                lifted: &lifted,
-                raw,
-                cuts: Vec::new(),
-            };
-            let derivative = raw.derivative()?;
-            let a = raw.endpoint(0)?;
-            let (knots, _) = lifted.chart().parameter_axis(work, cancel)?;
-            let knot_count = knots.len();
-            admit_vec(&mut normalized.cuts, 2, live, remaining)?;
-            normalized.cuts.extend([0.0, 1.0]);
-            for index in 0..knot_count {
-                work.charge(1, cancel)?;
-                let knot = lifted.chart().parameter_axis(work, cancel)?.0[index];
-                let band = Interval::point(knot).sub(a).div(derivative)?;
-                if let Some(band) = band.intersection(Interval::new(0.0, 1.0)?) {
-                    let metadata = normalized
-                        .cuts
-                        .capacity()
-                        .checked_mul(std::mem::size_of::<f64>())
-                        .ok_or_else(capacity)?;
-                    admit_vec(
-                        &mut normalized.cuts,
-                        2,
-                        live.checked_add(metadata).ok_or_else(capacity)?,
-                        remaining,
-                    )?;
-                    normalized.cuts.extend([band.lo, band.hi]);
-                }
-            }
-            work.charge(
-                (normalized.cuts.len() as u64).saturating_mul(usize::BITS as u64),
-                cancel,
-            )?;
-            normalized.cuts.sort_unstable_by(f64::total_cmp);
-            normalized.cuts.dedup();
-            let metadata = normalized
-                .cuts
-                .capacity()
-                .checked_mul(std::mem::size_of::<f64>())
-                .ok_or_else(capacity)?;
-            let calibration = calibrate_source_curves(
-                spatial.as_ref(),
-                &normalized,
-                [0.0, 1.0],
-                allowance,
-                available(remaining, live.checked_add(metadata).ok_or_else(capacity)?)?,
-                work,
-                cancel,
-            )?;
+            }))?;
             let exact = endpoint_error(
                 &lifted,
                 raw.endpoint(0)?,
@@ -630,7 +680,6 @@ impl<'d> SourcePcurveRestriction<'d> {
                 cancel,
             )?
             .1;
-            drop(normalized);
             (
                 lifted.into_chart(),
                 ParameterRecipe::Calibrated { raw, calibration },

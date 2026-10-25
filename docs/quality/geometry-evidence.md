@@ -212,6 +212,12 @@ reference or generated native UV. Endpoint uniqueness, whole correspondence,
 relative derivatives and chart/joint qualification remain separate obligations.
 Finite authored trims and periodic selectors retain their own branch inventory.
 
+Independent PCurve endpoint-root pairs and midpoint tangent checks propose
+branches; they do not establish ambiguity or authorize the first match. Each
+candidate must pass complete world-position and relative-derivative calibration
+in its own gauge before it counts as qualified. Distinct qualified branches
+refuse; cumulative work and peak root/proof/workspace bytes stay bounded.
+
 Endpoint proposals include finite coefficient fences, midpoints and reference
 zero. They still require exact stationarity or strict Newton existence; proximity
 to a search or natural-domain fence is not a root or branch certificate.

@@ -1646,6 +1646,54 @@ mod tests {
         }
     }
     #[test]
+    fn independent_circular_pcurve_rejects_the_long_complementary_branch() {
+        use spiling_contracts::geometry::StepEntityId;
+        use std::sync::Arc;
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ))
+        .unwrap();
+        let face = definition
+            .original_source()
+            .faces
+            .iter()
+            .find(|face| face.source_face == StepEntityId(461))
+            .unwrap();
+        let source = definition
+            .original_source()
+            .coedges
+            .iter()
+            .find(|source| {
+                source.source_face == face.source_face && source.edge_curve_id == StepEntityId(142)
+            })
+            .unwrap();
+        let pcurve = source
+            .pcurves
+            .iter()
+            .find(|pcurve| pcurve.carrier_id == face.carrier_id)
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let spatial = Arc::new(
+            SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                .unwrap(),
+        );
+        let curve = pcurve::SourcePcurveRestriction::new(
+            face,
+            source,
+            pcurve,
+            &spatial,
+            1.0e-7,
+            2 * 1024 * 1024,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let middle = curve.tensor([0.5; 2], 0, &mut work, &cancel).unwrap()[0];
+        assert!(middle[0].lo > 0.78 && middle[0].hi < 0.79);
+        assert!(middle[1].lo.abs().max(middle[1].hi.abs()) < 1.0e-7);
+    }
+    #[test]
     fn preferred_opposite_pcurve_gauge_keeps_the_declared_3d_half_circle() {
         use solidcraft_step::geom as s;
         use std::sync::Arc;
