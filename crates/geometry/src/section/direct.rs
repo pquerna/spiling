@@ -867,14 +867,15 @@ impl<'a> Boundary<'a> {
                 chart,
             };
             // Both actual complete parameter branches are fixed before the
-            // solver proposes any gauge. Its retained monotone C1 map and
-            // whole-span position/tangent bounds, not its point inverses,
-            // discharge correspondence. No map or new geometry is retained
-            // after this proof; root inventories remain independently checked.
+            // solver proposes any gauge. A coefficient-proved monotone map
+            // with exact endpoint coverage and whole-span positional bounds,
+            // not its point inverses, discharges correspondence. Stationary
+            // chart endpoint germs need no source relative-tangent receipt.
+            // Root inventories and physical endpoint gaps remain independent.
             let physical_allowance = Interval::point(allowance)
                 .div(Interval::point(self.scale))?
                 .lo;
-            return crate::kernel::trim::calibrate_source_curves(
+            return crate::kernel::trim::prove_native_curve_position_correspondence(
                 &reference,
                 self.curve,
                 self.edge_range,
@@ -884,7 +885,6 @@ impl<'a> Boundary<'a> {
                 work,
                 cancel,
             )
-            .map(|_| ())
             .map_err(|mut error| {
                 if error.code == GeometryErrorCode::ParameterCorrespondenceUnavailable {
                     error.code = GeometryErrorCode::AnalysisIndeterminate;
@@ -1807,7 +1807,7 @@ mod correspondence_tests {
                 CPoint::new(1.0, 0.0, NOZ, NOW),
             ],
             1,
-            vec![0.0, 0.0, 1.0, 1.0],
+            vec![2.0, 2.0, 5.0, 5.0],
             2,
         );
         let boundary = Boundary {
@@ -1819,12 +1819,60 @@ mod correspondence_tests {
         };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
-        let (point, _, _, _) = boundary.evaluate([0.5; 2], &mut work, &cancel).unwrap();
+        let (point, derivative, _, _) = boundary.evaluate([0.5; 2], &mut work, &cancel).unwrap();
+        let reference = p::curve_prepared::NativeChartCurve {
+            surface: &surface,
+            chart: &chart,
+        };
+        let raw = p::CurveEvaluator::tensor(&reference, [3.5; 2], 1, &mut work, &cancel).unwrap();
+        assert!(point[0].contains(0.5));
+        assert!(derivative[0].contains(1.0));
+        assert!(raw[0][0].contains(0.5));
+        assert!(raw[1][0].mul(Interval::point(3.0)).contains(1.0));
         let native = boundary.edge_jet([0.5; 2], &mut work, &cancel).unwrap();
         assert!(norm(std::array::from_fn(|i| point[i].sub(native.position[i]))) > 0.1);
         boundary
             .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
             .unwrap();
+    }
+
+    #[test]
+    fn native_boundary_covers_stationary_germs_at_either_endpoint() {
+        let surface = carrier();
+        let spatial = spatial();
+        for (middle, endpoint) in [(0.0, 0.0), (1.0, 1.0)] {
+            // x(r)=r² or x(r)=1-(1-r)². The directed physical trace
+            // still covers [0,1], but one chart endpoint has zero speed.
+            let chart = curve(
+                vec![
+                    CPoint::new(0.0, 0.0, NOZ, NOW),
+                    CPoint::new(middle, 0.0, NOZ, NOW),
+                    CPoint::new(1.0, 0.0, NOZ, NOW),
+                ],
+                2,
+                vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                2,
+            );
+            let boundary = Boundary {
+                surface: &surface,
+                curve: &spatial,
+                uv_curve: Some(&chart),
+                edge_range: [0.0, 1.0],
+                scale: 1.0,
+            };
+            let cancel = AtomicBool::new(false);
+            let mut work = GeometryWorkBudget::new(1_000_000);
+            let (position, derivative, _, _) =
+                boundary.evaluate([endpoint; 2], &mut work, &cancel).unwrap();
+            assert!(position[0].contains(endpoint));
+            assert!(derivative.into_iter().all(|v| v.lo == 0.0 && v.hi == 0.0));
+            assert!(
+                boundary.edge_jet([endpoint; 2], &mut work, &cancel).unwrap().derivative[0].lo > 0.0
+            );
+            boundary
+                .prove_correspondence(1e-6, 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+        }
     }
 
     #[test]
