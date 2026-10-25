@@ -491,6 +491,34 @@ fn native_projected_bounds(
         let support = search_domains(
             boxes, 2, tolerance, aggregate, &mut scratch, work, cancel,
             |cell, work, cancel| {
+                // Enclose the complete coefficient sheet before asking whether
+                // its trimmed subset can furnish contact. Prior source points
+                // may already exclude the whole sheet from global extrema.
+                // Native first bounds retain their complete knot/denominator
+                // validation; original C0 positions need no new C1 authority.
+                let (height, native_enclosure) = match &surface {
+                    PreparedTrimSurface::Native(native) => {
+                        let enclosure = parametric::surface_piecewise_first_enclosure(
+                            *native, cell, work, cancel,
+                        )?;
+                        (project(enclosure.position, direction)?, Some(enclosure))
+                    }
+                    PreparedTrimSurface::Original(original) => (
+                        project(original.position_bounds(cell, work, cancel)?, direction)?,
+                        None,
+                    ),
+                };
+                if aggregate.is_some_and(|seed| {
+                    resolved_by_feasible_extrema(
+                        height, seed.minimum[1], seed.maximum[0], tolerance,
+                    )
+                }) {
+                    return Ok(Some(Evaluation {
+                        height,
+                        witness: None,
+                        split_axis: 0,
+                    }));
+                }
                 let class = trim.classify(cell, work, cancel)?;
                 if matches!(class, TrimClassification::Outside) {
                     return Ok(None);
@@ -499,11 +527,8 @@ fn native_projected_bounds(
                 let point_cell = middle.map(|value| [value, value]);
                 let (height, point_height, split_axis) = match &surface {
                     PreparedTrimSurface::Native(native) => {
-                        // Whole continuous first bounds suffice for a mean-value
-                        // enclosure without manufacturing C1 at native knots.
-                        let enclosure = parametric::surface_piecewise_first_enclosure(
-                            *native, cell, work, cancel,
-                        )?;
+                        let enclosure = native_enclosure
+                            .expect("native complete cover retains its first bounds");
                         let point = parametric::surface_position_enclosure(
                             *native, point_cell, work, cancel,
                         )?;
@@ -516,17 +541,13 @@ fn native_projected_bounds(
                         let dv = project(enclosure.dv, direction)?;
                         let centered = point_height.add(du.mul(delta[0])).add(dv.mul(delta[1]));
                         (
-                            intersect(project(enclosure.position, direction)?, centered)?,
+                            intersect(height, centered)?,
                             point_height,
                             usize::from(du.abs_upper() * width(cell[0])
                                 < dv.abs_upper() * width(cell[1])),
                         )
                     }
                     PreparedTrimSurface::Original(original) => {
-                        // Literal source position bounds remain valid across
-                        // source knot joins. Without separate continuity proof,
-                        // no derivative/mean-value enclosure is used here.
-                        let height = project(original.position_bounds(cell, work, cancel)?, direction)?;
                         let point_height = project(
                             original.position_bounds(point_cell, work, cancel)?, direction,
                         )?;
@@ -1013,11 +1034,9 @@ fn search_domains_with_query_scratch(
                 feasible_min = feasible_min.min(witness.hi);
                 feasible_max = feasible_max.max(witness.lo);
             }
-            if feasible_min.is_finite()
-                && feasible_max.is_finite()
-                && parametric::up(feasible_min - evaluation.height.lo) <= tolerance
-                && parametric::up(evaluation.height.hi - feasible_max) <= tolerance
-            {
+            if resolved_by_feasible_extrema(
+                evaluation.height, feasible_min, feasible_max, tolerance,
+            ) {
                 outer_min = outer_min.min(evaluation.height.lo);
                 outer_max = outer_max.max(evaluation.height.hi);
                 continue;
@@ -1111,6 +1130,20 @@ fn search_domains_with_query_scratch(
         ));
     }
     Ok(result)
+}
+
+/// Only independent feasible endpoints justify stopping a complete range proof.
+/// Outward subtraction is shared by early sheet exclusion and final cell search.
+fn resolved_by_feasible_extrema(
+    height: Interval,
+    feasible_min: f64,
+    feasible_max: f64,
+    tolerance: f64,
+) -> bool {
+    feasible_min.is_finite()
+        && feasible_max.is_finite()
+        && parametric::up(feasible_min - height.lo) <= tolerance
+        && parametric::up(height.hi - feasible_max) <= tolerance
 }
 
 fn uncertainty(value: &ProjectedBounds) -> f64 {
@@ -1662,6 +1695,38 @@ mod tests {
         assert_eq!(evaluated, 1);
         assert_eq!(result.minimum, seed.minimum);
         assert_eq!(result.maximum, seed.maximum);
+    }
+
+    #[test]
+    fn noncontact_exclusion_uses_outward_endpoint_uncertainty() {
+        let tolerance = 0.125;
+        assert!(resolved_by_feasible_extrema(
+            Interval { lo: -parametric::down(tolerance), hi: 10.0 },
+            0.0, 10.0, tolerance,
+        ));
+        assert!(!resolved_by_feasible_extrema(
+            Interval { lo: -tolerance, hi: 10.0 },
+            0.0, 10.0, tolerance,
+        ));
+        assert!(resolved_by_feasible_extrema(
+            Interval { lo: 0.0, hi: parametric::down(10.0 + tolerance) },
+            0.0, 10.0, tolerance,
+        ));
+        assert!(!resolved_by_feasible_extrema(
+            Interval { lo: 0.0, hi: 10.0 + tolerance },
+            0.0, 10.0, tolerance,
+        ));
+        for endpoints in [
+            [f64::INFINITY, 10.0],
+            [0.0, f64::NEG_INFINITY],
+            [f64::NAN, 10.0],
+            [0.0, f64::NAN],
+        ] {
+            assert!(!resolved_by_feasible_extrema(
+                Interval { lo: 2.0, hi: 8.0 },
+                endpoints[0], endpoints[1], tolerance,
+            ));
+        }
     }
 
     #[test]
