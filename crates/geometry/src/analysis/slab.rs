@@ -935,7 +935,25 @@ pub(super) fn constant_native_curve_height(
     let original = curve.original_curve().ok_or_else(|| {
         indeterminate("selected curve has no actual coefficient operand for height identity")
     })?;
-    constant_original_curve_height(original, functional, 0, work, cancel)
+    if let Some(height) = constant_original_curve_height(original, functional, 0, work, cancel)? {
+        return Ok(Some(height));
+    }
+    // A selected PCurve can be horizontal on a non-horizontal carrier without
+    // possessing a rational exact-affine receipt. Prove constancy on the
+    // COMPLETE actual operator: C0 plus an identically annihilated first hull,
+    // never a midpoint, small derivative or an unselected curve_3d.
+    let full = curve.active_range();
+    if !curve.continuous(full, work, cancel)? {
+        return Ok(None);
+    }
+    let first = curve.tensor(full, 1, work, cancel)?;
+    let derivative = functional.dot(first[1]);
+    if derivative.lo != 0.0 || derivative.hi != 0.0 {
+        return Ok(None);
+    }
+    // Only the completed constant-image proof licenses this tight anchor.
+    let position = curve.tensor([full[0]; 2], 0, work, cancel)?[0];
+    Ok(Some(functional.height(position)))
 }
 fn constant_native_curve_height_inner(
     curve: &solidcore::curve::curve::Curve,
@@ -7477,6 +7495,107 @@ mod tests {
             GeometryErrorCode::Cancelled
         );
     }
+    #[test]
+    fn selected_cylindrical_ruling_is_constant_but_a_small_angular_drift_is_not() {
+        use solidcraft_step::geom::{
+            Associated, Curve, Pcurve, Placement, PreferredRep, Surface, SurfaceCurveKind,
+        };
+        use std::sync::Arc;
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let angle = 0.37_f64;
+        let carrier = Arc::new(Surface::Cylinder {
+            position: Placement {
+                origin: [2.0, 0.0, 5.0],
+                axis: [0.0, 1.0, 0.0],
+                ref_direction: [1.0, 0.0, 0.0],
+            },
+            radius: 2.0,
+        });
+        let functional = HeightFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(0.0),
+        };
+        for angular_drift in [0.0, 1.0e-8] {
+            let source = Curve::SurfaceCurve {
+                kind: SurfaceCurveKind::Surface,
+                curve_3d: Arc::new(Curve::Line {
+                    origin: [0.0, 0.0, 123.0],
+                    direction: [0.0, 0.0, 1.0],
+                    magnitude: 1.0,
+                }),
+                associated: vec![Associated::Pcurve(Pcurve {
+                    surface: carrier.clone(),
+                    curve: Arc::new(Curve::Line {
+                        origin: [angle, 2.0, 0.0],
+                        direction: [angular_drift, 1.0, 0.0],
+                        magnitude: 14.0,
+                    }),
+                })],
+                master: PreferredRep::PcurveS1,
+            };
+            let prepared = crate::kernel::source_operand::PreparedOriginalCurve::new(
+                &source,
+                [0.0, 1.0],
+                MAX_SLAB_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let height =
+                constant_native_curve_height(&prepared, functional, &mut work, &cancel).unwrap();
+            if angular_drift == 0.0 {
+                let height = height.unwrap();
+                assert!(height.contains(5.0 - 2.0 * angle.sin()));
+                assert!(height.lo > 4.0 && height.hi < 5.0);
+            } else {
+                assert!(height.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn piecewise_horizontal_height_jump_is_not_a_constant_curve() {
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        let source = Curve::BSpline(Box::new(BSplineCurve {
+            degree: 1,
+            points: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [2.0, 0.0, 1.0],
+            ],
+            weights: None,
+            knots: vec![0.0, 0.5, 1.0],
+            multiplicities: vec![2, 2, 2],
+            form: CurveForm::PolylineForm,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        }));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let prepared = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &source,
+            [0.0, 1.0],
+            MAX_SLAB_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let height = constant_native_curve_height(
+            &prepared,
+            HeightFunctional {
+                direction: [0.0, 0.0, 1.0].map(Interval::point),
+                offset: Interval::point(0.0),
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        assert!(height.is_none());
+    }
+
     #[test]
     fn source_constancy_follows_selected_pcurve_not_unselected_spatial_line() {
         use solidcraft_step::geom::{

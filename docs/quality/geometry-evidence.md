@@ -120,6 +120,10 @@ authority; strict smoothness and second-order consumers retain their own queries
 Taylor qualification treats a spline's terminal coefficient extension as one
 piece, not an interior C0 join. Genuine internal and reflected uncertain knot
 bands still need original C1 proof.
+Constant-height admission follows the complete selected curve, not an unselected
+spatial line or its entire surface carrier. Whole-operator C0 and an identically
+zero projected first hull can prove constancy; only then may a tight anchor
+bound its height. Small drift and disconnected constant pieces are not constant.
 Native work is debited on refusal and cancellation as well as success.
 Optional surface-to-curve reductions must decline outside the reduced curve's
 regular domain, preserving the full tensor evaluator's extension semantics.
