@@ -200,8 +200,9 @@ struct EndKey {
 
 pub(super) struct ComparisonStarJet {
     pub(super) q: Box2,
-    pub(super) qt: Box2,
-    /// det(H_s,H_theta)/s, including its continuous value at s=0.
+    /// Angular derivative direction after cancelling its positive radial factor.
+    pub(super) angular_direction: Box2,
+    /// det(H_s,H_theta)/s for Middle, /s² for a quadratic collar.
     pub(super) factored_jacobian: Interval,
 }
 
@@ -638,7 +639,7 @@ impl OriginalCornerComparison {
             transport: None,
             allowance,
         };
-        if !candidate.is_identity() {
+        if !candidate.germs_are_identity() {
             let Some(transport) = comparison_transport::certify(
                 domain,
                 recipe,
@@ -677,8 +678,8 @@ impl OriginalCornerComparison {
         Ok(UvComparisonPreparation::Prepared(Self::NativeUv(candidate)))
     }
 
-    pub(super) fn is_identity(&self) -> bool {
-        matches!(self, Self::NativeUv(comparison) if comparison.is_identity())
+    pub(super) fn is_identity(&self, recipe: &CornerRecipe) -> bool {
+        matches!(self, Self::NativeUv(comparison) if comparison.star_is_identity(recipe))
     }
 
     pub(super) fn native_uv(&self) -> Option<&UvJointComparison> {
@@ -813,13 +814,20 @@ impl OriginalCornerComparison {
 }
 
 impl UvJointComparison {
-    pub(super) fn is_identity(&self) -> bool {
+    pub(super) fn germs_are_identity(&self) -> bool {
         self.exact_joint
             && matches!(self.completion, ComparisonCompletion::Linear)
             && self
                 .correction
                 .into_iter()
                 .all(|shift| equal_box(shift, ZERO2))
+    }
+
+    fn star_is_identity(&self, recipe: &CornerRecipe) -> bool {
+        self.germs_are_identity()
+            && equal_box(recipe.outgoing.offset, ZERO2)
+            && equal_box(recipe.incoming.offset, ZERO2)
+            && equal_box(recipe.bulge, ZERO2)
     }
 
     fn validate(
@@ -883,7 +891,7 @@ impl UvJointComparison {
                 "comparison endpoint authority or allowance changed",
             ));
         }
-        if !self.is_identity() {
+        if !self.germs_are_identity() {
             let Some(transport) = self.transport else {
                 return Err(refusal("comparison has no fresh whole-germ transport"));
             };
@@ -993,23 +1001,48 @@ impl UvJointComparison {
 
     fn star_correction(
         &self,
+        recipe: &CornerRecipe,
         piece: Piece,
         s: Interval,
         t: Interval,
     ) -> Result<CorrectionJet, GeometryError> {
-        match piece {
-            Piece::Outgoing => self.germ_correction(0, s),
-            Piece::Incoming => self.germ_correction(1, s),
+        let mut correction = match piece {
+            Piece::Outgoing => self.germ_correction(0, s)?,
+            Piece::Incoming => self.germ_correction(1, s)?,
             Piece::Middle => {
                 let a = self.germ_correction(0, s)?;
                 let b = self.germ_correction(1, s)?;
-                Ok(CorrectionJet {
+                CorrectionJet {
                     position: convex_mix(a.position, b.position, t)?,
                     derivative: mix(a.derivative, b.derivative, t),
                     second_derivative: mix(a.second_derivative, b.second_derivative, t),
-                })
+                }
             }
+        };
+        let offset = match piece {
+            Piece::Outgoing => recipe.outgoing.offset.map(|v| t.mul(v)),
+            Piece::Incoming => {
+                let weight = source_unit_complement(t)?;
+                recipe.incoming.offset.map(|v| weight.mul(v))
+            }
+            Piece::Middle => {
+                let blend = convex_mix(recipe.outgoing.offset, recipe.incoming.offset, t)?;
+                let bubble = t.mul(source_unit_complement(t)?);
+                std::array::from_fn(|i| blend[i].add(bubble.mul(recipe.bulge[i])))
+            }
+        };
+        // The source reference turns collars on as s². Its original germs and
+        // outer B are unchanged; the physical carrier star still uses s.
+        let position = s.mul(source_unit_complement(s)?).neg();
+        let derivative = Interval::point(2.0).mul(s).sub(Interval::point(1.0));
+        for i in 0..2 {
+            correction.position[i] = correction.position[i].add(position.mul(offset[i]));
+            correction.derivative[i] =
+                correction.derivative[i].add(derivative.mul(offset[i]));
+            correction.second_derivative[i] =
+                correction.second_derivative[i].add(Interval::point(2.0).mul(offset[i]));
         }
+        Ok(correction)
     }
 
     /// The completion coefficients name the original endpoint derivative
@@ -1060,7 +1093,7 @@ impl UvJointComparison {
         cancel: &AtomicBool,
     ) -> Result<Box2, GeometryError> {
         let completed = self.star_jet(domain, recipe, piece, s, t, work, cancel)?.uv;
-        if self.is_identity() {
+        if self.star_is_identity(recipe) {
             return Ok(completed);
         }
         let actual = super::star_jet(
@@ -1102,7 +1135,7 @@ impl UvJointComparison {
             work,
             cancel,
         )?;
-        let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
+        let correction = self.star_correction(recipe, piece, s, source_unit_parameter(t)?)?;
         jet.uv = std::array::from_fn(|i| jet.uv[i].add(correction.position[i]));
         jet.ds = std::array::from_fn(|i| jet.ds[i].add(correction.derivative[i]));
         jet.dss = std::array::from_fn(|i| jet.dss[i].add(correction.second_derivative[i]));
@@ -1163,7 +1196,7 @@ impl UvJointComparison {
         self.validate(domain, recipe)?;
         let s = source_unit_parameter(s)?;
         let t = source_unit_parameter(t)?;
-        let (q, qs, qt) = match piece {
+        let (q, qs, qt): (Box2, Box2, Box2) = match piece {
             Piece::Outgoing | Piece::Incoming => {
                 let incoming = matches!(piece, Piece::Incoming);
                 let index = usize::from(incoming);
@@ -1175,8 +1208,8 @@ impl UvJointComparison {
                 };
                 let offset = self.ends[index].offset;
                 (
-                    std::array::from_fn(|i| q[i].add(weight.mul(offset[i]))),
-                    qs,
+                    std::array::from_fn(|i| q[i].add(s.mul(weight).mul(offset[i]))),
+                    std::array::from_fn(|i| qs[i].add(weight.mul(offset[i]))),
                     if incoming {
                         offset.map(Interval::neg)
                     } else {
@@ -1187,15 +1220,23 @@ impl UvJointComparison {
             Piece::Middle => {
                 let (qa, qsa) = self.divided_end(domain, recipe, 0, s, work, cancel)?;
                 let (qb, qsb) = self.divided_end(domain, recipe, 1, s, work, cancel)?;
-                let qa: Box2 = std::array::from_fn(|i| qa[i].add(recipe.outgoing.offset[i]));
-                let qb: Box2 = std::array::from_fn(|i| qb[i].add(recipe.incoming.offset[i]));
                 let blend = convex_mix(qa, qb, t)?;
                 let bubble = t.mul(source_unit_complement(t)?);
                 let slope = Interval::point(1.0).sub(Interval::point(2.0).mul(t));
+                let offsets = convex_mix(recipe.outgoing.offset, recipe.incoming.offset, t)?;
+                let offset: Box2 =
+                    std::array::from_fn(|i| offsets[i].add(bubble.mul(recipe.bulge[i])));
+                let radial = mix(qsa, qsb, t);
                 (
-                    std::array::from_fn(|i| blend[i].add(bubble.mul(recipe.bulge[i]))),
-                    mix(qsa, qsb, t),
-                    std::array::from_fn(|i| qb[i].sub(qa[i]).add(slope.mul(recipe.bulge[i]))),
+                    std::array::from_fn(|i| blend[i].add(s.mul(offset[i]))),
+                    std::array::from_fn(|i| radial[i].add(offset[i])),
+                    std::array::from_fn(|i| {
+                        qb[i].sub(qa[i]).add(s.mul(
+                            recipe.incoming.offset[i]
+                                .sub(recipe.outgoing.offset[i])
+                                .add(slope.mul(recipe.bulge[i])),
+                        ))
+                    }),
                 )
             }
         };
@@ -1209,7 +1250,7 @@ impl UvJointComparison {
         let factored_jacobian = determinant(star.ds, qt);
         Ok(ComparisonStarJet {
             q,
-            qt,
+            angular_direction: qt,
             factored_jacobian,
         })
     }
@@ -1276,7 +1317,7 @@ impl UvJointComparison {
             work,
             cancel,
         )?;
-        let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
+        let correction = self.star_correction(recipe, piece, s, source_unit_parameter(t)?)?;
         {
             let surface = &domain.surface_operand();
             (|| {
@@ -1811,7 +1852,7 @@ impl UvJointComparison {
                 }
                 let h = self.factored_jet(domain, recipe, piece, s, theta, work, cancel)?;
                 if h.factored_jacobian.mul(Interval::point(sign)).lo > 0.0
-                    && determinant(h.q, h.qt).mul(Interval::point(sign)).lo > 0.0
+                    && determinant(h.q, h.angular_direction).mul(Interval::point(sign)).lo > 0.0
                     && !(h.q[0].contains_zero() && h.q[1].contains_zero())
                 {
                     continue;
@@ -1827,7 +1868,7 @@ impl UvJointComparison {
                                 Piece::Incoming => "incoming",
                             },
                             h.factored_jacobian,
-                            determinant(h.q, h.qt),
+                            determinant(h.q, h.angular_direction),
                             h.q,
                             [recipe.outgoing.offset, recipe.incoming.offset],
                             recipe.bulge,
@@ -2293,7 +2334,7 @@ mod properties {
                         "completion must not change OriginalMap margins",
                     );
                 }
-                if !comparison.is_identity() {
+                if !comparison.germs_are_identity() {
                     let mut missing_transport = comparison;
                     missing_transport.transport = None;
                     assert!(

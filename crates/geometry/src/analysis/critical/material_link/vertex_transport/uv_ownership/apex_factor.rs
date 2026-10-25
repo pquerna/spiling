@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! A second radial factor for the zero-offset Middle comparison only. This is
-//! local differential evidence, not boundary winding or relative-trim authority.
+//! A second radial factor for the Middle comparison with quadratic ribbons.
+//! Local differential evidence, not boundary winding or relative-trim authority.
 
 use super::*;
 
@@ -11,10 +11,6 @@ use super::*;
 // The owner reserves this in addition to the native evaluator's own scratch.
 pub(super) const STACK_BYTES: usize =
     32 * std::mem::size_of::<Box2>() + 16 * std::mem::size_of::<Interval>();
-
-fn exact_zero(value: Box2) -> bool {
-    value.iter().all(|v| v.lo == 0.0 && v.hi == 0.0)
-}
 
 fn finite(value: Interval) -> bool {
     value.lo.is_finite() && value.hi.is_finite() && value.lo <= value.hi
@@ -62,12 +58,7 @@ pub(super) fn proves(
     comparison.validate(domain, recipe)?;
     let s = source_unit_parameter(s)?;
     let theta = source_unit_parameter(theta)?;
-    if s.lo != 0.0
-        || (sign != 1.0 && sign != -1.0)
-        || !exact_zero(recipe.outgoing.offset)
-        || !exact_zero(recipe.incoming.offset)
-        || !exact_zero(recipe.bulge)
-    {
+    if s.lo != 0.0 || (sign != 1.0 && sign != -1.0) {
         return Ok(false);
     }
     let Some((tangent, kappa)) = qualified_line(comparison.apex_line()) else {
@@ -84,6 +75,8 @@ pub(super) fn proves(
         kappa,
         a.second_derivative,
         b.second_derivative,
+        [recipe.outgoing.offset, recipe.incoming.offset],
+        recipe.bulge,
         s,
         theta,
         sign,
@@ -96,33 +89,60 @@ fn coefficients_strict(
     kappa: Interval,
     dda: Box2,
     ddb: Box2,
+    offsets: [Box2; 2],
+    bulge: Box2,
     s: Interval,
     theta: Interval,
     sign: f64,
 ) -> bool {
     if (sign != 1.0 && sign != -1.0)
         || qualified_line(Some((tangent, kappa))).is_none()
-        || dda.into_iter().chain(ddb).any(|v| !finite(v))
+        || dda
+            .into_iter()
+            .chain(ddb)
+            .chain(offsets.into_iter().flatten())
+            .chain(bulge)
+            .any(|v| !finite(v))
     {
         return false;
     }
     // Integral Taylor identities use only C2 enclosures on [0,s.hi]:
-    // gamma_a = joint + s*T + s²*Ra,
-    // gamma_b = joint - s*kappa*T + s²*Rb,
-    // gamma_a' = T + s*Pa, gamma_b' = -kappa*T + s*Pb.
-    // Ra = integral (1-v) gamma_a''(sv)dv lies in dda/2;
-    // Pa = integral gamma_a''(sv)dv lies in dda (and likewise b).
-    // Ra and Pa are NOT asserted equal to one another or to endpoint samples.
-    let ra = dda.map(|v| v.mul(Interval::point(0.5)));
-    let rb = ddb.map(|v| v.mul(Interval::point(0.5)));
-    let delta: Box2 = std::array::from_fn(|i| rb[i].sub(ra[i]));
-    let rblend = mix(ra, rb, theta);
-    let pblend = mix(dda, ddb, theta);
+    // gamma_a = joint + s*T + s²*Ra, gamma_b = joint - s*kappa*T + s²*Rb.
+    // Quadratic ribbons add their offsets to Ra/Rb, and twice their offsets
+    // to the derivative remainder. These are NOT equal Taylor remainders.
+    let ra: Box2 = std::array::from_fn(|i| dda[i].mul(Interval::point(0.5)).add(offsets[0][i]));
+    let rb: Box2 = std::array::from_fn(|i| ddb[i].mul(Interval::point(0.5)).add(offsets[1][i]));
+    let complement = Interval::point(1.0).sub(theta);
+    let bubble = theta.mul(complement);
+    let slope = Interval::point(1.0).sub(Interval::point(2.0).mul(theta));
+    let delta: Box2 = std::array::from_fn(|i| rb[i].sub(ra[i]).add(slope.mul(bulge[i])));
+    let base_r = mix(ra, rb, theta);
+    let base_p = mix(dda, ddb, theta);
+    let offset = mix(offsets[0], offsets[1], theta);
+    let rblend: Box2 = std::array::from_fn(|i| base_r[i].add(bubble.mul(bulge[i])));
+    let pblend: Box2 = std::array::from_fn(|i| {
+        base_p[i].add(Interval::point(2.0).mul(offset[i].add(bubble.mul(bulge[i]))))
+    });
     let one_plus_kappa = Interval::point(1.0).add(kappa);
     let a = Interval::point(1.0).sub(one_plus_kappa.mul(theta));
+    // Expand the common theta factors before interval evaluation:
+    // a*beta' + (1+kappa)*beta = (1-theta)² + kappa*theta²,
+    // det(R,R_theta) = det(Ra,Rb) + (1-theta)²det(Ra,B) - theta²det(Rb,B).
     let angular = determinant(tangent, rb)
         .add(kappa.mul(determinant(tangent, ra)))
-        .add(s.mul(determinant(ra, rb)));
+        .add(
+            complement
+                .square()
+                .add(kappa.mul(theta.square()))
+                .mul(determinant(tangent, bulge)),
+        )
+        .add(
+            s.mul(
+                determinant(ra, rb)
+                    .add(complement.square().mul(determinant(ra, bulge)))
+                    .sub(theta.square().mul(determinant(rb, bulge))),
+            ),
+        );
     let jacobian = a
         .mul(determinant(tangent, delta))
         .add(one_plus_kappa.mul(determinant(tangent, pblend)))
@@ -192,6 +212,8 @@ mod properties {
                     Interval::point(kappa),
                     a,
                     b,
+                    [ZERO2; 2],
+                    ZERO2,
                     s,
                     UNIT,
                     1.0,
@@ -205,6 +227,8 @@ mod properties {
                     Interval::point(kappa),
                     a,
                     b,
+                    [ZERO2; 2],
+                    ZERO2,
                     s,
                     UNIT,
                     -1.0,
@@ -233,10 +257,46 @@ mod properties {
             Interval::point(1.0),
             second(&circle(1.0), s.hi),
             second(&circle(-1.0), s.hi),
+            [ZERO2; 2],
+            ZERO2,
             s,
             UNIT,
             1.0,
         ));
+    }
+
+    #[test]
+    fn quadratic_ribbon_avoids_linear_turn_on_fold_but_rejects_collapse() {
+        let s = Interval { lo: 0.0, hi: 0.125 };
+        let a = second(&quadratic(1.0, 1.0), s.hi);
+        let b = second(&quadratic(-1.0, 1.0), s.hi);
+        let ribbon = point(0.0, -0.75);
+        assert!(coefficients_strict(
+            point(1.0, 0.0),
+            Interval::point(1.0),
+            a,
+            b,
+            [ribbon; 2],
+            ZERO2,
+            s,
+            UNIT,
+            1.0,
+        ));
+        // A linear turn-on gives y=s²-0.75s, whose radial derivative
+        // changes sign. With s² turn-on, y=0.25s² on the whole ray.
+        for ribbon in [point(0.0, -1.0), point(0.0, -2.0)] {
+            assert!(!coefficients_strict(
+                point(1.0, 0.0),
+                Interval::point(1.0),
+                a,
+                b,
+                [ribbon; 2],
+                ZERO2,
+                s,
+                UNIT,
+                1.0,
+            ));
+        }
     }
 
     #[test]
@@ -253,6 +313,8 @@ mod properties {
                     Interval::point(1.0),
                     a,
                     b,
+                    [ZERO2; 2],
+                    ZERO2,
                     s,
                     UNIT,
                     sign,
@@ -266,12 +328,5 @@ mod properties {
         assert!(qualified_line(Some((point(0.0, 0.0), Interval::point(1.0)))).is_none());
         assert!(qualified_line(Some((point(1.0, 0.0), Interval::point(0.0)))).is_none());
         assert!(qualified_line(Some((point(1.0, 0.0), Interval { lo: 0.9, hi: 1.1 }))).is_none());
-        assert!(!exact_zero([
-            Interval {
-                lo: 0.0,
-                hi: f64::MIN_POSITIVE
-            },
-            Interval::point(0.0)
-        ]));
     }
 }

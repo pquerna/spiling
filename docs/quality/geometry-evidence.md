@@ -180,7 +180,9 @@ must never be converted into display unavailability.
 
 - **Source-only G:** `OriginalMaterialRealization` / `MaterialRealizationIdentity`
   in `kernel/mod.rs` bind the implemented source-relative transport recipe and
-  exact source-allowance bits. Query radial witnesses cannot change that recipe.
+  exact source-allowance bits. Complete original-source comparison costs enter
+  deterministic endpoint-fraction admission before the versioned plan freezes.
+  Query radial witnesses cannot change that recipe or select a finer fraction.
   [`critical/material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
   and its transport/vertex owners prove original-use material embedding; a
   retained chart or enclosure-only recipe cannot supply embedding authority.
@@ -198,6 +200,9 @@ must never be converted into display unavailability.
   same original coefficients in their actual gauge, not a native degree chart.
   None of these queries mutates selected trim domains or establishes native
   correspondence, branch ownership or realized-material embedding.
+  Original joint and pole-exclusion position overcovers use the coefficient-sheet
+  interface, not selected-trim membership. Literal/natural coefficient support
+  remains mandatory; position enclosures grant no material or continuity authority.
 - **Uncertainty:** [`analysis/bounds.rs`](../../crates/geometry/src/analysis/bounds.rs)
   and `analysis/placed.rs` distinguish geometric from realized-material bounds.
   Source realization error must survive actual affine conversion, placement

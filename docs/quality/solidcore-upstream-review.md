@@ -52,8 +52,8 @@ GitHub session and is not implied by their publication.
 | --- | --- | --- |
 | Independent copies of `StepSurface` wrappers | Upstream [`Surface::copy`](https://github.com/tangency-labs/solidcore/blob/2d37267fea023715d4e15e3baf59bef7b4e399f9/crates/solidcore/src/surface/surface/p2.rs#L1317-L1330) and `copy_and_add_analytics` intentionally route `Step` to the failing base implementation. The identical native consumer refuses on upstream and succeeds on the rebased patch. The original [owned-copy overlay](https://github.com/pquerna/solidcore/commit/18ad8bd1b9d6a1db5e51cf0439bb3db5df31dcd4) is small and independent of the unmerged mesher. | **Yes: a narrow capability issue/proposal.** Do not describe it as corruption in a successful copy or as a demonstrated C++-parity regression. Confirm maintainers want this Rust-owned-wrapper behavior before proposing a PR. |
 | Cumulative work, cooperative cancellation and visible-storage admission for meshing | The [resource-control overlay](https://github.com/pquerna/solidcore/commit/1fef444cbaad61c0f414fe126314c079175da046) extends inherited `solidcore-mesh`, which is absent from the reviewed upstream `main`. It also controls optional grid/deviation work. Its backend trait changes are not purely additive. | **Feature/API discussion, not a proven correctness bug.** Coordinate with [draft mesher PR #636](https://github.com/tangency-labs/solidcore/pull/636); keep the large implementation in the fork until the contract and dependency path are agreed. |
-| Current housing spherical quotient-cut refusal | A Spiling exclusion overcover is evaluated through Spiling's selected-trim provider instead of its coefficient-sheet interface. The selected-domain guard correctly refuses the query. | **Do not file upstream.** Fix the local caller while retaining literal/natural restrictions and independent material ownership. |
-| Current bore reference-star Jacobian refusal | Spiling constructs the comparison star and its interval determinant; the enclosure straddles zero. The receipt does not establish whether the actual recipe folds or the enclosure loses dependency. | **Do not file upstream yet.** Isolate a kernel primitive contract violation first; failure of a local strict-sign proof is insufficient. |
+| Housing spherical quotient-cut qualification | The coefficient-sheet position overcovers are Spiling-owned. The remaining central/shared-exit exclusion must prove actual original operand ownership; interval overlap is not an exact identity. | **Do not file upstream.** No independently established native primitive violation is demonstrated. |
+| Source corner reference-star construction | A linear radial ribbon can fold at opposed curved germs. Spiling owns the quadratic comparison, complete closed-apex proof, source-only cost admission and whole-original cap enclosure. | **Spiling change, not a kernel bug.** The source-backed bore now has real Compile/fresh-verification/export/replay evidence; this does not qualify spherical quotient cuts. |
 
 ### Existing related upstream work
 
@@ -171,28 +171,26 @@ the dependency returns. Cancellation is cooperative, not hard preemption or a
 wall-time guarantee. Process limits and independent geometry/display audits remain
 Spiling obligations. Do not advertise bounded total RAM from this interface.
 
-## Manufacturing failures that remain Spiling-owned
+## Source-material obligations remain Spiling-owned
 
-- **Housing:** `pole_comparison::misses_original_box` receives a both-inward-signs
-  foreign collar overcover, then calls strict `surface_enclosure` through the
-  selected original domain. The refused box crosses that domain. See
-  [`pole_comparison.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/pole_comparison.rs)
-  and [`material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs).
-- **Bore:** `regular_closed_star` fails on the middle reference piece near
-  `theta=0`; its factored determinant encloses both signs while its angular
-  determinant is positive. This is local reference construction/proof, not a
-  measured kernel surface-Jacobian error. See
-  [`uv_ownership.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership.rs).
-- The earlier needless local-extremum search, trim-versus-carrier queries,
-  missing original cylindrical inverse, affine-gauge assumption and horizontal
-  selected-PCurve constancy reduction were also Spiling-owned. Their owning
-  changes are [70a8cad](https://github.com/pquerna/spiling/commit/70a8cad),
-  [82cf916](https://github.com/pquerna/spiling/commit/82cf916),
-  [e638dbd](https://github.com/pquerna/spiling/commit/e638dbd),
-  [f20c139](https://github.com/pquerna/spiling/commit/f20c139) and
-  [0fd4ea9](https://github.com/pquerna/spiling/commit/0fd4ea9).
+The local source-star construction, original trim/curve correspondence,
+comparison homotopy, admitted error and material-degree proof belong to
+[`material_link.rs`](../../crates/geometry/src/analysis/critical/material_link.rs)
+and its owners, not the kernel mesher or STEP surface copy API.
+
+- [`uv_ownership.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership.rs)
+  owns the complete reference-star Jacobian and boundary proof. Quadratic radial
+  reference ribbons preserve the original apex tangent and outer trace; the
+  source-only selector must admit their complete physical cost before freezing G.
+- [`atlas.rs`](../../crates/geometry/src/analysis/critical/material_link/atlas.rs)
+  and [`pole_comparison.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/pole_comparison.rs)
+  distinguish auxiliary position overcovers from actual selected-material queries.
+  Neither can widen literal coefficient support or acquire ownership from a box.
+- Rounded-housing spherical central/shared-exit exclusion remains unqualified.
+  A complete bore or box program does not discharge those independent obligations.
 
 Only a standalone, valid-domain kernel call with an independently established
 wrong result or a specified resource-contract violation should be promoted to a
-new kernel issue. Full bore and rounded-housing manufacturing remain unqualified;
-working box output and bore source preparation do not close that gate.
+new kernel issue. Keep current support and reproduction procedures in the
+[manufacturing evidence](manufacturing-evidence.md) and
+[development guide](development.md), not inferred from upstream issue status.

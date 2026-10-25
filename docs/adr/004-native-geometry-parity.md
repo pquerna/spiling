@@ -243,6 +243,12 @@ without native Boolean seeds. Prepare it once per distinct definition; bounds
 and complete height discovery borrow those same owners. Consuming promotion to
 `PreparedMaterialSource` moves the domains/plans and adds native section seeds,
 with all other retained sources excluded from its replacement allowance.
+The source-only endpoint selector admits the complete original face, edge,
+vertex and comparison-homotopy cost before freezing a plan. A finite cost above
+the source allowance excludes that fraction in the existing deterministic
+selector; unsupported operands, nonfinite bounds, cancellation and exhausted
+work still refuse. The descriptor records this selector generation. This is
+immutable source preparation, never refinement in response to a posed query.
 Occurrences and adaptive retries do not select `G`, its frame, fraction, exits
 or physical correspondence again. Raw section APIs remain on
 `PreparedSectionSource`; they do not acquire material-admission prerequisites.
@@ -857,12 +863,16 @@ operators: `delta_d_a = T - gamma_a'(0)` and
 `delta_d_b = -kappa T - gamma_b'(0)`, for finite source-only `T` and
 `kappa > 0`. Retain that common-basis expression, not two independently
 rounded vectors or points selected from derivative enclosures.
-For a proved zero-offset, zero-bulge middle piece, original C2 integral
-remainders may expose an additional radial factor in the comparison Jacobian.
-Prove the remaining coefficient and nonzero radial vector for every `s > 0`,
-retaining the existing same-NativeV quotient at `s = 0`. Never discard a small
-apex neighborhood, clamp an uncertain sign, or infer an exact cancellation
-from interval overlap.
+Comparison ribbons and the middle bulge may use quadratic radial weights:
+their displacement is `s^2 O`, with derivative `2s O`, rather than introducing
+an offset into the apex tangent. Keep the original `s=1` outer trace and charge
+the entire `(s^2-s) O` comparison homotopy. For opposed completed germs, C2
+integral remainders together with those quadratic coefficients may expose an
+additional radial factor in the middle comparison Jacobian and angular
+determinant. Prove the remaining coefficients and nonzero radial vector for
+every `s > 0`, retaining the existing same-NativeV quotient at `s = 0`.
+Never discard a small apex neighborhood, clamp an uncertain sign, or infer an
+exact cancellation from interval overlap.
 
 Prove the comparison star's factored Jacobian, complete boundary winding,
 same-NativeV endpoint ownership and separation from every nonowning trim and
@@ -871,8 +881,9 @@ obligations. Joining cutovers use the same original outer-trace operands and
 range-scoped ribbon authority, including intended shared endpoints; an
 affine-rim shortcut cannot authorize a nonlinear rim.
 
-The comparison must not change actual G, its outer trace, selected widths,
-exits or vertex recipe. Bound G against the completed carrier comparison,
+After source-only selection, the comparison must not change actual G, its
+outer trace, selected widths, exits or vertex recipe. Bound G against the
+completed carrier comparison,
 include the bidirectional physical completion-homotopy cost, and independently
 bound the original 3D curve-to-chord and NativeV residual. Their complete face,
 edge and vertex maxima must fit the **same** source allowance and propagate to

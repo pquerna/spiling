@@ -95,10 +95,10 @@ pub(super) fn original_joint_position_enclosure(
     cancel: &AtomicBool,
 ) -> Result<Box3, GeometryError> {
     work.charge(1, cancel)?;
-    let surface = domain.surface_operand();
     let joint_uv = original_joint_uv_enclosure(joint, work, cancel)?;
-    let mut image = crate::parametric::surface_position_enclosure(
-        &surface,
+    // The connector rectangle is an auxiliary overcover, not a selected
+    // material-domain query. Literal coefficient support still applies.
+    let mut image = domain.original_carrier_position_bounds(
         joint_uv.map(|value| [value.lo, value.hi]),
         work,
         cancel,

@@ -120,8 +120,8 @@ impl ComparisonCompletion {
 
 /// Only a needed closed-apex, near-opposed candidate may be proposed. The
 /// interval determinant supplies the decision, not an angular tolerance.
-/// Actual offsets/bulge are inspected; an ordinary non-smooth corner is not
-/// silently replaced by a smooth comparison.
+/// Quadratic ribbons/bulge have no first-order apex contribution; the original
+/// germ jets and the actual manufactured cone still retain their own receipts.
 
 pub(super) fn propose(
     domain: &PreparedFaceTrimDomain<'_>,
@@ -132,12 +132,7 @@ pub(super) fn propose(
     cancel: &AtomicBool,
 ) -> Result<Option<ComparisonCompletion>, GeometryError> {
     work.charge(1, cancel)?;
-    if !allowance.is_finite()
-        || allowance <= 0.0
-        || !equal_box(recipe.outgoing.offset, ZERO2)
-        || !equal_box(recipe.incoming.offset, ZERO2)
-        || !equal_box(recipe.bulge, ZERO2)
-    {
+    if !allowance.is_finite() || allowance <= 0.0 {
         return Ok(None);
     }
     let ends = [recipe.outgoing, recipe.incoming];
@@ -157,12 +152,25 @@ pub(super) fn propose(
     let middle_position_b: Box2 = std::array::from_fn(|i| {
         middle_b.position[i].add(Interval::point(0.5).mul(joint_correction[1][i]))
     });
-    let middle_radial = mix(
+    let offsets = convex_mix(
+        recipe.outgoing.offset,
+        recipe.incoming.offset,
+        Interval::point(0.5),
+    )?;
+    let radial: Box2 = mix(
         std::array::from_fn(|i| middle_a.derivative[i].sub(joint_correction[0][i])),
         std::array::from_fn(|i| middle_b.derivative[i].sub(joint_correction[1][i])),
         Interval::point(0.5),
     );
-    let middle_angular = std::array::from_fn(|i| middle_position_b[i].sub(middle_position_a[i]));
+    let middle_radial: Box2 = std::array::from_fn(|i| {
+        radial[i].add(offsets[i]).add(Interval::point(0.25).mul(recipe.bulge[i]))
+    });
+    let middle_angular: Box2 = std::array::from_fn(|i| {
+        middle_position_b[i].sub(middle_position_a[i]).add(
+            Interval::point(0.25)
+                .mul(recipe.incoming.offset[i].sub(recipe.outgoing.offset[i])),
+        )
+    });
     let middle_sign = determinant(middle_radial, middle_angular);
     // A tiny but genuine opposite-sign corner needs a different proved
     // reference as well. Nonzero is not sufficient: it must agree with the

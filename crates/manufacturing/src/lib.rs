@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds automatic walls and actual adjacent native regular-pair authority.
-pub const PLANNER_VERSION: &str = "18";
+/// Binds complete immutable original-source realization and wall authority.
+pub const PLANNER_VERSION: &str = "19";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

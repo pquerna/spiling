@@ -13,13 +13,16 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-material contract](../adr/004-native-geometry-parity.md) define authority.
 
 The **SolidCore development cutover is not general manufacturing parity**.
-Native inspection/recovery and an original-plane software manufacturing path
-have real CLI evidence, including fresh saved-byte verification and replay.
-Missing declared PCurves may use a checked inverse of the actual original plane;
+Native inspection/recovery, original-plane software manufacturing and the
+source-backed through-hole journey have real CLI evidence through Compile,
+fresh saved-byte verification and replay. Missing declared PCurves may use a
+checked inverse of the actual original plane or admitted cylinder family;
 generated native UV curves and failed declared associations cannot substitute.
-Nonlinear inverse families and the broader mechanical-part journeys retain
-independent qualification. Historical Monstertruck operator journeys below keep
-their original producer provenance, not transferred SolidCore acceptance.
+Rounded-housing spherical quotient cuts, narrow-pocket endpoint correspondence
+and tapered-fitting closed-seam proofs remain unqualified. Broader mechanical-part
+journeys retain independent qualification. Historical Monstertruck operator
+journeys below keep their original producer provenance, not transferred
+SolidCore acceptance.
 
 ## Entry points and immutable capture
 
@@ -365,7 +368,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner18,
+Current identities are project10/manufacturing11/process3/surface3, planner19,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.

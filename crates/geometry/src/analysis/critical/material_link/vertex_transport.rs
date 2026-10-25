@@ -391,6 +391,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
         let mut face_coedges: Option<(usize, [usize; 2])> = None;
         let mut current_fraction = None;
         let mut current_candidate = None;
+        let mut last_source_cost = None;
         let result = (|| {
             work.charge(1, cancel)?;
             if !incidence.owns_definition(source.definition()) {
@@ -664,8 +665,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             "fixed source comparison exceeds coexistent geometry capacity",
                         )
                     })?;
-                    stage = "fixed realization source correspondence";
-                    qualify_fixed_source_costs(
+                    stage = "complete original source cost admission";
+                    match admit_candidate_source_costs(
                         source,
                         vertex,
                         point,
@@ -675,20 +676,28 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         &mut cells,
                         work,
                         cancel,
-                    )?;
-                    let source_error_mm =
-                        cells.iter().map(|cell| cell.error_mm).fold(0.0, f64::max);
-                    return Ok(Some(Self {
-                        definition: source.definition(),
-                        vertex,
-                        point,
-                        fraction,
-                        rows,
-                        recipes,
-                        cells,
-                        source_error_mm,
-                        source_geometry_qualified: AtomicBool::new(false),
-                    }));
+                    )? {
+                        SourceCostAdmission::Admitted => {
+                            let source_error_mm =
+                                cells.iter().map(|cell| cell.error_mm).fold(0.0, f64::max);
+                            return Ok(Some(Self {
+                                definition: source.definition(),
+                                vertex,
+                                point,
+                                fraction,
+                                rows,
+                                recipes,
+                                cells,
+                                source_error_mm,
+                                source_geometry_qualified: AtomicBool::new(false),
+                            }));
+                        }
+                        SourceCostAdmission::Exceeded {
+                            source_face,
+                            bound_mm,
+                            completion_mm,
+                        } => last_source_cost = Some((source_face, bound_mm, completion_mm)),
+                    }
                 }
                 let next = fraction * 0.5;
                 if next == fraction || next <= 0.0 {
@@ -697,7 +706,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 fraction = next;
             }
             Err(refusal(format!(
-                "source conical finite outer trace cannot prove projected star and admitted-error bound: definition={} vertex_mm={point:?} last_face_coedges_exits_fraction={last_exit:?} admitted_source_error_mm={allowance}",
+                "source conical finite outer trace cannot prove projected star and complete admitted-error bound: definition={} vertex_mm={point:?} last_face_coedges_exits_fraction={last_exit:?} last_source_cost={last_source_cost:?} admitted_source_error_mm={allowance}",
                 source.definition().id().as_str(),
             )))
         })();
@@ -2410,11 +2419,22 @@ fn endpoint_chord_error_bound(
     Ok(error.hi)
 }
 
-/// Strengthen the SOURCE comparison only AFTER geometry/radius selection.
-/// Failure here refuses that fixed M; it never selects a query-specific finer
-/// radius. Every support and downstream error consumer sees the charged cost.
+#[derive(Debug, Clone, Copy)]
+enum SourceCostAdmission {
+    Admitted,
+    Exceeded {
+        source_face: Option<usize>,
+        bound_mm: f64,
+        completion_mm: f64,
+    },
+}
+
+/// Admit every original-source cost BEFORE freezing the immutable realization.
+/// An excessive finite bound participates in the existing source-only fraction
+/// selector; errors, cancellation and exhausted work still propagate unchanged.
+/// No slab, pose, radial witness or query policy can select another realization.
 #[allow(clippy::too_many_arguments)]
-fn qualify_fixed_source_costs(
+fn admit_candidate_source_costs(
     source: MaterialSourceView<'_, '_>,
     vertex: VertexId,
     point: [f64; 3],
@@ -2424,7 +2444,7 @@ fn qualify_fixed_source_costs(
     cells: &mut [ConeCell],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
+) -> Result<SourceCostAdmission, GeometryError> {
     let available = remaining_bytes;
     let mut edge_error_mm = 0.0_f64;
     for recipe in recipes.iter() {
@@ -2443,9 +2463,11 @@ fn qualify_fixed_source_costs(
         )?);
     }
     if edge_error_mm > allowance {
-        return Err(refusal(format!(
-            "fixed source realization shared-edge chord exceeds admitted source error: vertex_mm={point:?} bound_mm={edge_error_mm} admitted_mm={allowance}"
-        )));
+        return Ok(SourceCostAdmission::Exceeded {
+            source_face: None,
+            bound_mm: edge_error_mm,
+            completion_mm: 0.0,
+        });
     }
     for (index, recipe) in recipes.iter_mut().enumerate() {
         let domain = source.face_domain(recipe.outgoing.use_.face, available, work, cancel)?;
@@ -2472,7 +2494,7 @@ fn qualify_fixed_source_costs(
             work.charge(1, cancel)?;
             cell.error_mm = cell.error_mm.max(edge_error_mm);
             if let Some(comparison) = &recipe.comparison {
-                if comparison.is_identity() {
+                if comparison.is_identity(recipe) {
                     // This is exact original-operand identity, not a small
                     // shift threshold: the already proved source cost is reused.
                     continue;
@@ -2492,12 +2514,17 @@ fn qualify_fixed_source_costs(
                 if !cost.homotopy_mm.is_finite()
                     || cost.homotopy_mm < 0.0
                     || !cost.error_mm.is_finite()
-                    || cost.error_mm > allowance
                 {
-                    return Err(refusal(format!(
-                        "fixed source realization completed UV comparison exceeds admitted source error: vertex_mm={point:?} source_face={} bound_mm={} completion_mm={} admitted_mm={allowance}",
-                        recipe.outgoing.use_.face, cost.error_mm, cost.homotopy_mm,
-                    )));
+                    return Err(refusal(
+                        "source realization comparison has no finite physical source cost",
+                    ));
+                }
+                if cost.error_mm > allowance {
+                    return Ok(SourceCostAdmission::Exceeded {
+                        source_face: Some(recipe.outgoing.use_.face),
+                        bound_mm: cost.error_mm,
+                        completion_mm: cost.homotopy_mm,
+                    });
                 }
                 cell.source = hull3(cell.source, cost.source);
                 cell.displacement = hull3(cell.displacement, cost.displacement);
@@ -2505,7 +2532,7 @@ fn qualify_fixed_source_costs(
             }
         }
     }
-    Ok(())
+    Ok(SourceCostAdmission::Admitted)
 }
 
 fn star_jet(

@@ -181,13 +181,18 @@ For manufacturing, author trusted TypeScript only outside the engine, or use the
 checked-in inert JSON. Desktop/engine load bounded JSON; they do not execute profiles:
 
 ```sh
-pnpm manufacturing:intent fixtures/manufacturing/complete-sparse.intent.ts NEW_INTENT.json
 "$CLI" project create NEW_PRINT_PROJECT --import fixtures/geometry/box-mm.step \
-  --intent NEW_INTENT.json --center-on-bed 1 --preflight --compile --verify \
+  --intent fixtures/manufacturing/solid-fill.intent.json --center-on-bed 1 --preflight --compile --verify \
   --manufacturing-out NEW_EXPORT --replay-out NEW_MOTION.splr --save --engine "$ENGINE"
 "$CLI" project inspect NEW_PRINT_PROJECT --preflight --verify \
   --manufacturing-out NEW_REOPENED_EXPORT --replay-out NEW_REOPENED_MOTION.splr --engine "$ENGINE"
 ```
+
+The checked software controls use the inert solid-fill intent above. For the
+source-backed bore, substitute `fixtures/geometry/through-hole.step` and new
+project/export/replay destinations. Its complete Compile and fresh saved-byte
+replay do not qualify rounded-housing spherical quotient cuts, general STEP or
+physical printing. Keep native refusals explicit rather than switching geometry.
 
 All output destinations must be new. Bed preparation precedes explicit pose Apply;
 Preflight is not manufacturing authority. Inspect/replay independently decode saved

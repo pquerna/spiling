@@ -151,9 +151,11 @@ impl SourceChartCertificate {
 /// adaptive proof cells and available work. This descriptor grants no collar
 /// or endpoint completion authority.
 ///
-/// Version 2 uses the selected ORIGINAL spatial-provider range for 1/1024
-/// collar and endpoint supports, with the normalized bubble on that range.
-/// Endpoint completion is anchored to authored original STEP vertex points.
+/// Version 3 uses the selected ORIGINAL spatial-provider range for 1/1024
+/// collar and initial endpoint supports, with the normalized bubble on that
+/// range. Complete original-source comparison costs participate in immutable
+/// endpoint fraction admission before any posed query. Endpoint completion
+/// remains anchored to authored original STEP vertex points.
 /// Native incidence/ranges remain separate; every consumer proves this recipe.
 #[derive(Clone, Copy)]
 pub(crate) struct OriginalMaterialRealization<'a> {
@@ -185,7 +187,7 @@ impl MaterialRealizationIdentity {
     }
     pub(crate) fn with_allowance(source_allowance_mm: Option<f64>) -> Self {
         Self {
-            version: 2,
+            version: 3,
             variant: MaterialRealizationVariant::OriginalSpatialGTransport,
             source_allowance_bits: source_allowance_mm.map(f64::to_bits),
             collar_parameter_fraction_bits: (1.0_f64 / 1024.0).to_bits(),

@@ -374,7 +374,7 @@ mod properties {
                     .expect("actual corner comparison")
                     .native_uv()
                     .expect("the actual fitting has native UV corner charts");
-                if comparison.is_identity() {
+                if comparison.germs_are_identity() {
                     continue;
                 }
                 let domain = source
