@@ -1592,6 +1592,18 @@ pub(crate) fn certified_curve2d_is_straight_regular(
         }
         return Ok(affine.derivative[0].sign() != 0 || affine.derivative[1].sign() != 0);
     }
+    if curve.native_curve().is_none() && curve.original_curve().is_none() {
+        // A derived analytic chart need not have rational exact-affine
+        // coefficients (its constant angle can be an isolated root). An
+        // identically zero whole-range second jet still proves straightness;
+        // smoothness above and a strict first jet prove regularity.
+        let jet = parametric::curve2d_piecewise_jet(curve, range, work, cancel)?;
+        if jet.second_derivative == [Interval::point(0.0); 2]
+            && jet.derivative.iter().any(|d| d.lo > 0.0 || d.hi < 0.0)
+        {
+            return Ok(true);
+        }
+    }
     if let Some(native) = curve.native_curve() {
         match native.kind() {
             CurveKind::Line(_) => {}
@@ -2572,6 +2584,308 @@ impl parametric::CurveEvaluator for SourcePlanePullback<'_> {
     }
 }
 
+/// A narrowly qualified inverse of an original cylinder on axial LINEs and
+/// coaxial CIRCLEs. The law is affine in the actual selected source parameter,
+/// not in a native convenience interval. Angular roots remain intervals; this
+/// operator deliberately supplies no exact-affine coefficient receipt.
+struct SourceCylinderPullback<'d> {
+    spatial: Arc<crate::analysis::source_restriction::SourceSpatialRestriction<'d>>,
+    origin: [Interval; 2],
+    velocity: [Interval; 2],
+    exact_lift: bool,
+}
+fn original_cylinder<'a>(
+    mut surface: &'a solidcraft_step::geom::Surface,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<(&'a solidcraft_step::geom::Placement, f64)>, GeometryError> {
+    for _ in 0..MAX_DEPTH {
+        work.charge(1, cancel)?;
+        match surface {
+            solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => surface = basis,
+            solidcraft_step::geom::Surface::Cylinder { position, radius } => {
+                Interval::new(*radius, *radius)?;
+                if *radius <= 0.0 {
+                    return Err(unavailable("original cylindrical pullback needs positive radius"));
+                }
+                return Ok(Some((position, *radius)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Err(unavailable("original cylinder wrapper depth exceeds source policy"))
+}
+fn original_cylinder_curve<'a>(
+    mut curve: &'a solidcraft_step::geom::Curve,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<&'a solidcraft_step::geom::Curve, GeometryError> {
+    for _ in 0..MAX_DEPTH {
+        work.charge(1, cancel)?;
+        match curve {
+            solidcraft_step::geom::Curve::Trimmed { basis, .. } => curve = basis,
+            solidcraft_step::geom::Curve::SurfaceCurve { curve_3d, .. } => {
+                if super::source_operand::preferred_source_pcurve(curve)?.is_some() {
+                    return Err(unavailable(
+                        "cylindrical pullback cannot replace a declared PCurve master",
+                    ));
+                }
+                curve = curve_3d;
+            }
+            _ => return Ok(curve),
+        }
+    }
+    Err(unavailable("original cylindrical curve wrapper depth exceeds source policy"))
+}
+fn exact_cross(
+    a: &[ExactCoefficient; 3],
+    b: &[ExactCoefficient; 3],
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[ExactCoefficient; 3], GeometryError> {
+    let mut result = std::array::from_fn(|_| ExactCoefficient::point(0.0));
+    for axis in 0..3 {
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        result[axis] = exact_product(&a[j], &b[k], work, cancel)?;
+        result[axis]
+            .subtract(&exact_product(&a[k], &b[j], work, cancel)?)
+            .ok_or_else(|| unavailable("original cylinder cofactor exceeds exact capacity"))?;
+    }
+    Ok(result)
+}
+struct OriginalCylinderFrame {
+    rows: [[ExactCoefficient; 3]; 3],
+    denominator: ExactCoefficient,
+}
+impl OriginalCylinderFrame {
+    fn new(
+        position: &solidcraft_step::geom::Placement,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Self, GeometryError> {
+        let [x, y] = original_plane_basis(position, work, cancel)?;
+        let z = position.axis.map(ExactCoefficient::point);
+        let rows = [
+            exact_cross(&y, &z, work, cancel)?,
+            exact_cross(&z, &x, work, cancel)?,
+            exact_cross(&x, &y, work, cancel)?,
+        ];
+        let denominator = exact_dot(&x, &rows[0], work, cancel)?;
+        if denominator.sign() == 0 || exact_enclosure(&denominator).contains_zero() {
+            return Err(unavailable("original cylinder has no nonsingular coefficient frame"));
+        }
+        Ok(Self { rows, denominator })
+    }
+    fn local(
+        &self,
+        vector: &[ExactCoefficient; 3],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[ExactCoefficient; 3], GeometryError> {
+        Ok([
+            exact_dot(&self.rows[0], vector, work, cancel)?,
+            exact_dot(&self.rows[1], vector, work, cancel)?,
+            exact_dot(&self.rows[2], vector, work, cancel)?,
+        ])
+    }
+    fn displacement(
+        &self,
+        point: [f64; 3],
+        origin: [f64; 3],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[ExactCoefficient; 3], GeometryError> {
+        let mut delta = point.map(ExactCoefficient::point);
+        for axis in 0..3 {
+            Interval::new(point[axis], point[axis])?;
+            delta[axis].subtract(&ExactCoefficient::point(origin[axis]))
+                .ok_or_else(|| unavailable("original cylinder displacement exceeds exact capacity"))?;
+        }
+        self.local(&delta, work, cancel)
+    }
+    fn circle_height(
+        &self,
+        position: &solidcraft_step::geom::Placement,
+        radius: f64,
+        curve: &solidcraft_step::geom::Curve,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Interval>, GeometryError> {
+        let solidcraft_step::geom::Curve::Circle { position: circle, radius: r } =
+            original_cylinder_curve(curve, work, cancel)?
+        else {
+            return Ok(None);
+        };
+        // Literal frame identity, never an epsilon comparison of converted
+        // normalized axes. The exact cofactors prove the center displacement.
+        if circle.axis != position.axis || circle.ref_direction != position.ref_direction || *r != radius {
+            return Ok(None);
+        }
+        let local = self.displacement(circle.origin, position.origin, work, cancel)?;
+        if local[0].sign() != 0 || local[1].sign() != 0 {
+            return Ok(None);
+        }
+        Ok(Some(exact_ratio(&local[2], &self.denominator, work, cancel)?))
+    }
+}
+impl<'d> SourceCylinderPullback<'d> {
+    fn new(
+        definition: &'d Definition,
+        surface: &'d solidcraft_step::geom::Surface,
+        selected: &SelectedSourceUse<'d>,
+        wire: &SelectedSourceWire<'d>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Self>, GeometryError> {
+        let Some((position, radius)) = original_cylinder(surface, work, cancel)? else {
+            return Ok(None);
+        };
+        let frame = OriginalCylinderFrame::new(position, work, cancel)?;
+        let source = definition.original_source().coedge(selected.source_index)?;
+        let zero = Interval::point(0.0);
+        if let Some(height) = frame.circle_height(position, radius, &source.spatial_curve, work, cancel)? {
+            return Ok(Some(Self {
+                spatial: Arc::clone(&selected.spatial.operator),
+                origin: [zero, height],
+                velocity: [Interval::point(1.0), zero],
+                // Same literal radial coefficients and exact axial center
+                // displacement give C(t)=F(t,height) on the COMPLETE selected
+                // source restriction. Vertex/edge endpoint gaps are separate.
+                exact_lift: true,
+            }));
+        }
+        let solidcraft_step::geom::Curve::Line { origin, direction, magnitude } =
+            original_cylinder_curve(&source.spatial_curve, work, cancel)?
+        else {
+            return Err(unavailable(
+                "undeclared original cylindrical UV supports only same-frame coaxial circles and axial lines",
+            ));
+        };
+        Interval::new(*magnitude, *magnitude)?;
+        for value in direction {
+            Interval::new(*value, *value)?;
+        }
+        let velocity = frame.local(&direction.map(ExactCoefficient::point), work, cancel)?;
+        if velocity[0].sign() != 0 || velocity[1].sign() != 0 || velocity[2].sign() == 0 || *magnitude == 0.0 {
+            return Err(unavailable("original cylindrical LINE is not coefficient-proved axial"));
+        }
+        let local = frame.displacement(*origin, position.origin, work, cancel)?;
+        let x = exact_ratio(&local[0], &frame.denominator, work, cancel)?;
+        let y = exact_ratio(&local[1], &frame.denominator, work, cancel)?;
+        let principal = super::source_operand::original_angular_parameter(y, x, 1.0e-12, work, cancel)?;
+        let tau = Interval {
+            lo: parametric::down(std::f64::consts::TAU),
+            hi: parametric::up(std::f64::consts::TAU),
+        };
+        let mut angle = None;
+        // A circle endpoint at the SAME original topology vertex owns the
+        // covering branch. Proximity chooses no equality: the independently
+        // isolated LINE angle is lifted, then the whole forward proof below
+        // measures its actual physical residual.
+        for other in &wire.uses {
+            work.charge(1, cancel)?;
+            let rim = definition.original_source().coedge(other.source_index)?;
+            if frame.circle_height(position, radius, &rim.spatial_curve, work, cancel)?.is_none() {
+                continue;
+            }
+            for end in 0..2 {
+                if !source.vertex_ids.contains(&rim.vertex_ids[end]) {
+                    continue;
+                }
+                let anchor = other.spatial.operator.source_parameter_image([end as f64; 2], work, cancel)?
+                    .ok_or_else(|| unavailable("original cylinder rim has no actual source parameter image"))?;
+                let turns = ((anchor.mid() - principal.mid()) / std::f64::consts::TAU).round();
+                if !turns.is_finite() || turns.abs() > i32::MAX as f64 {
+                    return Err(unavailable("original cylindrical branch lift exceeds bounded integer policy"));
+                }
+                let lifted = principal.add(tau.mul(Interval::point(turns)));
+                let difference = lifted.sub(anchor);
+                if difference.lo <= -std::f64::consts::PI || difference.hi >= std::f64::consts::PI {
+                    return Err(unavailable("original cylindrical endpoint does not isolate one owned angular branch"));
+                }
+                if angle.is_some_and(|old: Interval| old != lifted) {
+                    return Err(unavailable("original cylinder rims demand incompatible angular lifts"));
+                }
+                angle = Some(lifted);
+            }
+        }
+        let angle = angle.ok_or_else(|| unavailable(
+            "original axial LINE has no same-face coaxial rim endpoint owning its angular branch",
+        ))?;
+        Ok(Some(Self {
+            spatial: Arc::clone(&selected.spatial.operator),
+            origin: [angle, exact_ratio(&local[2], &frame.denominator, work, cancel)?],
+            velocity: [zero, exact_ratio(
+                &exact_product(&velocity[2], &ExactCoefficient::point(*magnitude), work, cancel)?,
+                &frame.denominator, work, cancel,
+            )?],
+            // Isolated angular roots enclose an inverse, not an algebraic
+            // identity. The complete forward/relative-tangent proof retains
+            // the finite physical residual of this LINE law.
+            exact_lift: false,
+        }))
+    }
+}
+impl parametric::CurveEvaluator for SourceCylinderPullback<'_> {
+    fn active_range(&self) -> [f64; 2] {
+        self.spatial.active_range()
+    }
+    fn tensor(
+        &self,
+        range: [f64; 2],
+        order: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[[Interval; 3]; 4], GeometryError> {
+        work.charge(1, cancel)?;
+        if order > 3 {
+            return Err(unavailable("original cylindrical pullback curve order exceeds three"));
+        }
+        // Evaluation also enforces every literal wrapper/domain restriction.
+        self.spatial.tensor(range, 0, work, cancel)?;
+        let parameter = self.spatial.source_parameter_image(range, work, cancel)?
+            .ok_or_else(|| unavailable("original cylindrical curve lost its source parameter image"))?;
+        let derivative = if order > 0 {
+            self.spatial.parameter_derivative(work, cancel)?
+        } else {
+            Interval::point(0.0)
+        };
+        let mut result = [[Interval::point(0.0); 3]; 4];
+        for axis in 0..2 {
+            result[0][axis] = self.origin[axis].add(self.velocity[axis].mul(parameter));
+            if order > 0 {
+                result[1][axis] = self.velocity[axis].mul(derivative);
+            }
+        }
+        Ok(result)
+    }
+    fn continuous(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.spatial.continuous(range, work, cancel)
+    }
+    fn smooth(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        self.spatial.smooth(range, work, cancel)
+    }
+    fn parameter_spans(
+        &self,
+        range: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<parametric::AxisSpans<'_>, GeometryError> {
+        self.spatial.parameter_spans(range, work, cancel)
+    }
+}
+
 fn exact_accumulate(
     target: &mut ExactCoefficient,
     value: &ExactCoefficient,
@@ -3315,6 +3629,7 @@ impl PreparedSharedSpatialCurve<'_> {
 enum OriginalUvCurve<'d> {
     PlaneLine(SourcePlaneLineProjection<'d>),
     DerivedPlane(SourcePlanePullback<'d>),
+    DerivedCylinder(SourceCylinderPullback<'d>),
     Pcurve(crate::analysis::source_restriction::pcurve::SourcePcurveRestriction<'d>),
 }
 pub(crate) struct PreparedOriginalUvCurve<'d> {
@@ -3337,12 +3652,15 @@ impl PreparedOriginalUvCurve<'_> {
         match &self.curve {
             OriginalUvCurve::PlaneLine(curve) => curve,
             OriginalUvCurve::DerivedPlane(curve) => curve,
+            OriginalUvCurve::DerivedCylinder(curve) => curve,
             OriginalUvCurve::Pcurve(curve) => curve,
         }
     }
     fn owned_bytes(&self) -> usize {
         match &self.curve {
-            OriginalUvCurve::PlaneLine(_) | OriginalUvCurve::DerivedPlane(_) => 0,
+            OriginalUvCurve::PlaneLine(_)
+            | OriginalUvCurve::DerivedPlane(_)
+            | OriginalUvCurve::DerivedCylinder(_) => 0,
             OriginalUvCurve::Pcurve(curve) => curve.retained_bytes() - size_of_val(curve),
         }
     }
@@ -4672,16 +4990,19 @@ impl PreparedFaceTrimDomain<'_> {
             .map(|coedge| coedge.source_pcurve.is_some())
             .ok_or_else(|| unavailable("selected original coedge declaration scope is unavailable"))
     }
-    /// True only for the retained selected expression composed with a proved
-    /// nondegenerate original-plane global Gram inverse. Declaration, a plane
-    /// label, or a native UV proposal cannot establish this property.
+    /// True only for a retained selected expression with a proved
+    /// nondegenerate original-plane inverse or an owned analytic cylindrical
+    /// branch. Declaration or a native UV proposal cannot establish this.
     pub(crate) fn original_coedge_has_regular_inverse(
         &self,
         index: usize,
     ) -> Result<bool, GeometryError> {
         self.original_coedges
             .get(index)
-            .map(|coedge| matches!(&coedge.curve.curve, OriginalUvCurve::DerivedPlane(_)))
+            .map(|coedge| matches!(
+                &coedge.curve.curve,
+                OriginalUvCurve::DerivedPlane(_) | OriginalUvCurve::DerivedCylinder(_)
+            ))
             .ok_or_else(|| unavailable("selected original inverse scope is unavailable"))
     }
 }
@@ -5057,15 +5378,18 @@ impl<'d> PreparedNativeTrimSource<'d> {
                 let mut choices = Vec::new();
                 let mut failure = None;
                 work.charge(source.pcurves.len() as u64 + 1, cancel)?;
-                let derive_plane = !source
+                let undeclared = !source
                     .pcurves
                     .iter()
-                    .any(|pcurve| pcurve.carrier_id == original.carrier_id)
+                    .any(|pcurve| pcurve.carrier_id == original.carrier_id);
+                let derive_plane = undeclared
                     && original_plane_placement(&original.carrier, work, cancel)?.is_some();
+                let derive_cylinder = undeclared
+                    && original_cylinder(&original.carrier, work, cancel)?.is_some();
                 let choice_capacity = source
                     .pcurves
                     .len()
-                    .checked_add(usize::from(derive_plane))
+                    .checked_add(usize::from(derive_plane || derive_cylinder))
                     .ok_or_else(|| resource("original PCurve choice count overflow"))?;
                 memory(
                     self.retained_bytes()
@@ -5173,18 +5497,26 @@ impl<'d> PreparedNativeTrimSource<'d> {
                         pcurve: Some(pcurve),
                     });
                 }
-                if derive_plane {
-                    let inverse = SourcePlanePullback::new(
-                        &original.carrier,
-                        &selected.spatial.operator,
-                        work,
-                        cancel,
-                    )?
-                    .ok_or_else(|| {
-                        unavailable("original plane inverse changed carrier during preparation")
-                    })?;
+                if derive_plane || derive_cylinder {
+                    let operator = if derive_plane {
+                        OriginalUvCurve::DerivedPlane(SourcePlanePullback::new(
+                            &original.carrier,
+                            &selected.spatial.operator,
+                            work,
+                            cancel,
+                        )?.ok_or_else(|| unavailable("original plane inverse changed carrier during preparation"))?)
+                    } else {
+                        OriginalUvCurve::DerivedCylinder(SourceCylinderPullback::new(
+                            self.definition,
+                            &original.carrier,
+                            selected,
+                            wire,
+                            work,
+                            cancel,
+                        )?.ok_or_else(|| unavailable("original cylinder inverse changed carrier during preparation"))?)
+                    };
                     let curve = PreparedOriginalUvCurve {
-                        curve: OriginalUvCurve::DerivedPlane(inverse),
+                        curve: operator,
                         spatial: Arc::clone(&selected.spatial),
                     };
                     let image =
@@ -5290,6 +5622,18 @@ impl<'d> PreparedNativeTrimSource<'d> {
                             margin_uv: [0.0; 2],
                         })
                     }
+                    OriginalUvCurve::DerivedCylinder(curve) if curve.exact_lift => {
+                        Some(OriginalCoedgeCorrespondence {
+                            binding: proposal.binding,
+                            spatial_range: [0.0, 1.0],
+                            uv_ends: [0.0, 1.0],
+                            position_error_mm: 0.0,
+                            relative_derivative_error_bound: 0.0,
+                            inventory,
+                            provenance: OriginalCorrespondenceProvenance::ExactCoefficients,
+                            margin_uv: [0.0; 2],
+                        })
+                    }
                     OriginalUvCurve::PlaneLine(line)
                         if line.exact_endpoints
                             && proposal.curve.spatial.operator.exact_source_endpoints()
@@ -5311,7 +5655,9 @@ impl<'d> PreparedNativeTrimSource<'d> {
                             margin_uv: [0.0; 2],
                         })
                     }
-                    OriginalUvCurve::PlaneLine(_) | OriginalUvCurve::DerivedPlane(_) => {
+                    OriginalUvCurve::PlaneLine(_)
+                    | OriginalUvCurve::DerivedPlane(_)
+                    | OriginalUvCurve::DerivedCylinder(_) => {
                         qualify_original_correspondence(
                             proposal.binding,
                             proposal.curve.spatial.operator.as_ref(),
@@ -6107,5 +6453,21 @@ mod tests {
                 ([[13.0; 2], [10.0; 2]], Boundary),
             ],
         );
+    }
+
+    #[test]
+    fn original_split_bore_cylinders_keep_their_owned_half_turn_and_height() {
+        for face in [57, 64] {
+            assert_original_face_regions(
+                include_bytes!("../../../../fixtures/geometry/through-hole.step"),
+                spiling_contracts::geometry::StepEntityId(face),
+                &[
+                    ([[0.5, 0.6], [3.0, 4.0]], Inside),
+                    ([[0.5, 0.6], [8.1, 8.2]], Outside),
+                    ([[-0.2, -0.1], [3.0, 4.0]], Outside),
+                    ([[3.4, 3.5], [3.0, 4.0]], Outside),
+                ],
+            );
+        }
     }
 }
