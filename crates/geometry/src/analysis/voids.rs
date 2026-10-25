@@ -18,8 +18,19 @@
 //! open lower rim from a solid pocket floor. Active material correction requires
 //! a complete isolated wall degree proof and its actual floor closure; missing
 //! branch incidence remains typed unresolved, never an extension to global -inf.
+//!
+//! Projection borrows the same qualified native source owner as the captured
+//! slab. Pairing uses native edge IDs and actual shell-oriented uses, never
+//! proximity welding or a generated UV curve promoted to original genealogy.
+//! Flow, rim degree and floor exclusion evaluate the selected original spatial
+//! operators. Their sealed material traversal direction, not a native parameter
+//! sign guess, orients the full closed source integration.
+//! Native coefficient geometry is already in millimetres; the only subsequent
+//! spatial transform is the captured pose polynomial and its outward error.
 
 use super::{GeometryWorkBudget, SlabAnalysis, SlabRequest};
+use super::material_source::{MaterialSourceView, PreparedSolid, prepare_solid};
+use super::source_incidence::{boundary_loop, face_orientation, native_coedge, native_face};
 use crate::parametric::{Interval, up};
 use crate::{Definition, GeometryError, SectionLoopMm};
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode, RigidPoseMm};
@@ -838,29 +849,24 @@ fn normal(jet: &crate::parametric::SurfaceEnclosure) -> [Interval; 3] {
     ]
 }
 fn classify_column_face(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     index: usize,
     remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ColumnFace, GeometryError> {
     use crate::{
-        kernel::{TrimClassification, prepare_face_trim_domain_with_byte_limit},
+        kernel::TrimClassification,
         parametric::{surface_enclosure, surface_parameter_boxes},
     };
-    let face = definition
-        .solid
-        .face_iter()
-        .nth(index)
-        .ok_or_else(|| unresolved("native void face index is absent"))?;
+    let definition = source.definition();
     let cap =
         super::slab::constant_source_face_height(definition, index, source_z(), work, cancel)?;
-    let domain =
-        prepare_face_trim_domain_with_byte_limit(definition, index, remaining, work, cancel)?;
-    let uv = domain
-        .certified_uv_domain()
-        .unwrap_or_else(|| domain.uv_bounds());
-    face.with_surface(|surface| {
+    let domain = source.face_domain(index, remaining, work, cancel)?;
+    let uv = domain.uv_domain();
+    let surface = domain.surface_evaluator();
+    let outward = domain.orientation();
+    (|| {
         let mut cap_sign = None;
         let mut seen = false;
         let mut pending = [([[0.0; 2]; 2], 0u8); 66];
@@ -884,7 +890,7 @@ fn classify_column_face(
             if cap.is_none() && (n[2].lo != 0.0 || n[2].hi != 0.0) {
                 return Ok(ColumnFace::Other);
             }
-            let signed = if face.orientation() { n[2] } else { n[2].neg() };
+            let signed = if outward { n[2] } else { n[2].neg() };
             let sign = if signed.lo > 0.0 {
                 Some(1)
             } else if signed.hi < 0.0 {
@@ -950,49 +956,38 @@ fn classify_column_face(
         } else {
             ColumnFace::Wall
         })
-    })
+    })()
 }
 
 /// Pair by original native shared edge ID and oriented use, never positional
 /// welding. The admitted source lineage must retain both actual occurrences.
 fn neighbor_use(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     own: (usize, usize, usize),
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(usize, usize, usize), GeometryError> {
-    let face = definition
-        .solid
-        .face_iter()
-        .nth(own.0)
-        .ok_or_else(|| unresolved("void coedge face is absent"))?;
-    let edge = &face.absolute_boundaries()[own.1][own.2];
-    let orientation = edge.orientation() == face.orientation();
+    // This private view qualifies every original use; a raw Definition cannot
+    // bypass source correspondence with a combinatorial pairing alone.
+    let definition = source.definition();
+    let (edge, _) = native_coedge(definition, own.0, own.1, own.2)?;
+    let orientation = edge.forward == face_orientation(definition, own.0, work, cancel)?;
     let mut neighbor = None;
-    for (fi, other) in definition.solid.face_iter().enumerate() {
-        for (wi, wire) in other.absolute_boundaries().iter().enumerate() {
-            for (ei, use_) in wire.iter().enumerate() {
+    for fi in 0..definition.face_ids().len() {
+        let (_, other) = native_face(definition, fi)?;
+        let outward = face_orientation(definition, fi, work, cancel)?;
+        for wi in 0..other.loops.len() {
+            let wire = boundary_loop(definition, fi, wi)?;
+            for (ei, use_) in wire.edges.iter().enumerate() {
                 work.charge(1, cancel)?;
-                if use_.id() != edge.id() || (fi, wi, ei) == own {
+                if use_.edge != edge.edge || (fi, wi, ei) == own {
                     continue;
                 }
-                if neighbor.is_some() || (use_.orientation() == other.orientation()) == orientation
+                if neighbor.is_some() || (use_.forward == outward) == orientation
                 {
                     return Err(error(
                         GeometryErrorCode::SingularGeometry,
                         "protected void native coedge is not paired with opposite material orientation",
-                    ));
-                }
-                if definition
-                    .source_topology
-                    .faces
-                    .get(fi)
-                    .and_then(|face| face.wires.get(wi))
-                    .and_then(|wire| wire.coedges.get(ei))
-                    .is_none()
-                {
-                    return Err(unresolved(
-                        "protected void original coedge lineage is absent",
                     ));
                 }
                 neighbor = Some((fi, wi, ei));
@@ -1002,33 +997,41 @@ fn neighbor_use(
     neighbor.ok_or_else(|| unresolved("protected void native coedge has no original neighbor"))
 }
 
+fn source_coedge_index(
+    domain: &crate::kernel::PreparedFaceTrimDomain<'_>, wire: usize, coedge: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<usize, GeometryError> {
+    for (index, use_) in domain.coedges().iter().enumerate() {
+        work.charge(1, cancel)?;
+        let identity = use_.identity();
+        if identity.wire_index == wire && identity.coedge_index == coedge {
+            return Ok(index);
+        }
+    }
+    Err(unresolved("protected void lost its selected original coedge occurrence"))
+}
+
 fn wire_area(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     face_index: usize,
     wire_index: usize,
     remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Interval, GeometryError> {
-    use monstertruck_modeling::BoundedCurve;
-    let face = definition
-        .solid
-        .face_iter()
-        .nth(face_index)
-        .ok_or_else(|| unresolved("void rim face is absent"))?;
+    let domain = source.face_domain(face_index, remaining, work, cancel)?;
     let mut area = Interval::point(0.0);
-    for edge in &face.absolute_boundaries()[wire_index] {
-        let contribution = edge.with_curve(|curve| {
-            let prepared = definition.prepare_boundary_curve(
-                edge.id(),
-                curve,
-                curve.range_tuple(),
-                remaining,
-                work,
-                cancel,
-            )?;
+    for (index, coedge) in domain.coedges().iter().enumerate() {
+        work.charge(1, cancel)?;
+        if coedge.identity().wire_index != wire_index { continue; }
+        let correspondence = domain.original_coedge_correspondence(index)?;
+        let binding = correspondence.binding()
+            .ok_or_else(|| unresolved("void rim lacks a sealed original parameter binding"))?;
+        let range = correspondence.spatial_range();
+        let contribution = domain.with_original_spatial_curve(
+            index, remaining, work, cancel, |curve, work, cancel| {
             let mut sum = Interval::point(0.0);
-            for (lo, hi) in prepared.parameter_intervals() {
+            for [lo, hi] in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
                 // A quadrature ENCLOSURE: each integrand interval covers its
                 // whole parameter cell. No point evaluations certify an arc.
                 for i in 0..128 {
@@ -1048,7 +1051,7 @@ fn wire_area(
                             "native void rim integral cannot subdivide",
                         ));
                     }
-                    let jet = prepared.jet((a, b), work, cancel)?;
+                    let jet = crate::parametric::curve_enclosure(curve, (a, b), work, cancel)?;
                     let integrand = jet.position[0]
                         .mul(jet.derivative[1])
                         .sub(jet.position[1].mul(jet.derivative[0]));
@@ -1057,7 +1060,7 @@ fn wire_area(
             }
             Ok::<_, GeometryError>(sum)
         })?;
-        area = area.add(if edge.orientation() == face.orientation() {
+        area = area.add(if binding.material_forward {
             contribution
         } else {
             contribution.neg()
@@ -1067,30 +1070,18 @@ fn wire_area(
 }
 
 fn edge_vertical(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     a: (usize, usize, usize),
     remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    use monstertruck_modeling::BoundedCurve;
-    let first = definition
-        .solid
-        .face_iter()
-        .nth(a.0)
-        .ok_or_else(|| unresolved("void wall face is absent"))?;
-    let edge = &first.absolute_boundaries()[a.1][a.2];
-    edge.with_curve(|curve| {
-        let prepared = definition.prepare_boundary_curve(
-            edge.id(),
-            curve,
-            curve.range_tuple(),
-            remaining,
-            work,
-            cancel,
-        )?;
-        for span in prepared.parameter_intervals() {
-            let jet = prepared.jet(span, work, cancel)?;
+    let domain = source.face_domain(a.0, remaining, work, cancel)?;
+    let index = source_coedge_index(domain, a.1, a.2, work, cancel)?;
+    let range = domain.original_coedge_correspondence(index)?.spatial_range();
+    domain.with_original_spatial_curve(index, remaining, work, cancel, |curve, work, cancel| {
+        for span in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
+            let jet = crate::parametric::curve_enclosure(curve, (span[0], span[1]), work, cancel)?;
             if jet.derivative[..2]
                 .iter()
                 .any(|d| d.lo != 0.0 || d.hi != 0.0)
@@ -1136,20 +1127,21 @@ fn revalidate_raw_scope(
 /// branch authority: complete incidence, corrections and full-scope geometry
 /// are still qualified by `native_height_scopes` below.
 fn original_column_faces(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     holes: &[NativeCapturedHole],
     storage: &mut Storage,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Vec<ColumnFace>, GeometryError> {
+    let definition = source.definition();
     if holes.is_empty() {
         return Ok(Vec::new());
     }
     let mut faces = Vec::new();
-    storage.reserve(&mut faces, definition.faces.len(), work, cancel)?;
-    for index in 0..definition.faces.len() {
+    storage.reserve(&mut faces, definition.face_ids().len(), work, cancel)?;
+    for index in 0..definition.face_ids().len() {
         faces.push(classify_column_face(
-            definition,
+            source,
             index,
             storage.limit.saturating_sub(storage.used),
             work,
@@ -1173,7 +1165,7 @@ fn original_column_faces(
 }
 
 fn native_height_scopes(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     capture: &NativeVoidProjectionCapture,
     faces: &[ColumnFace],
     transport_supports: &[super::critical::material_link::SourceTransportSupport],
@@ -1225,24 +1217,21 @@ fn native_height_scopes(
         while cursor < component.len() {
             let fi = component[cursor];
             cursor += 1;
-            let face = definition
-                .solid
-                .face_iter()
-                .nth(fi)
-                .ok_or_else(|| unresolved("void wall component is absent"))?;
-            for (wi, wire) in face.absolute_boundaries().iter().enumerate() {
-                for (ei, edge) in wire.iter().enumerate() {
-                    let neighbor = neighbor_use(definition, (fi, wi, ei), work, cancel)?;
+            let (_, face) = native_face(definition, fi)?;
+            let domain = source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
+            for wi in 0..face.loops.len() {
+                let wire = boundary_loop(definition, fi, wi)?;
+                for (ei, _) in wire.edges.iter().enumerate() {
+                    let neighbor = neighbor_use(source, (fi, wi, ei), work, cancel)?;
                     match faces[neighbor.0] {
                         ColumnFace::Cap { height, .. } => {
-                            let h = edge.with_curve(|curve| {
-                                super::slab::constant_native_curve_height(
-                                    curve,
-                                    source_z(),
-                                    work,
-                                    cancel,
-                                )
-                            })?;
+                            let index = source_coedge_index(domain, wi, ei, work, cancel)?;
+                            let h = domain.with_original_spatial_curve(
+                                index, storage.limit.saturating_sub(storage.used), work, cancel,
+                                |curve, work, cancel| super::slab::constant_native_curve_height(
+                                    curve, source_z(), work, cancel,
+                                ),
+                            )?;
                             if h.is_none_or(|h| h.lo > height.hi || h.hi < height.lo) {
                                 valid = false;
                             }
@@ -1251,7 +1240,7 @@ fn native_height_scopes(
                         }
                         ColumnFace::Wall => {
                             if !edge_vertical(
-                                definition,
+                                source,
                                 (fi, wi, ei),
                                 storage.limit.saturating_sub(storage.used),
                                 work,
@@ -1279,14 +1268,11 @@ fn native_height_scopes(
         let mut lower_safe = f64::NEG_INFINITY;
         let mut upper_safe = f64::INFINITY;
         for &fi in &component {
-            let face = definition
-                .solid
-                .face_iter()
-                .nth(fi)
-                .ok_or_else(|| unresolved("void cap-band component is absent"))?;
-            for (wi, wire) in face.absolute_boundaries().iter().enumerate() {
-                for (ei, _) in wire.iter().enumerate() {
-                    let neighbor = neighbor_use(definition, (fi, wi, ei), work, cancel)?;
+            let (_, face) = native_face(definition, fi)?;
+            for wi in 0..face.loops.len() {
+                let wire = boundary_loop(definition, fi, wi)?;
+                for (ei, _) in wire.edges.iter().enumerate() {
+                    let neighbor = neighbor_use(source, (fi, wi, ei), work, cancel)?;
                     if let ColumnFace::Cap { height, .. } = faces[neighbor.0] {
                         if height.hi < midpoint {
                             lower_safe = lower_safe.max(height.hi);
@@ -1304,16 +1290,64 @@ fn native_height_scopes(
             continue;
         }
         for &fi in &component {
-            let face = definition
-                .solid
-                .face_iter()
-                .nth(fi)
-                .ok_or_else(|| unresolved("void source vertex component is absent"))?;
-            for vertex in face.vertex_iter() {
-                work.charge(1, cancel)?;
-                let z = vertex.point().z;
-                if z > lower_safe && z < upper_safe {
-                    valid = false;
+            let (_, face) = native_face(definition, fi)?;
+            for wi in 0..face.loops.len() {
+                for edge in &boundary_loop(definition, fi, wi)?.edges {
+                    let record = definition.brep().edge(edge.edge)
+                        .map_err(|e| GeometryError::new(
+                            GeometryErrorCode::AnalysisIndeterminate,
+                            format!("void source edge: {e}"),
+                        ))?;
+                    for vertex in record.vertices {
+                        work.charge(1, cancel)?;
+                        let z = definition.brep().vertex(vertex)
+                            .map_err(|e| GeometryError::new(
+                                GeometryErrorCode::AnalysisIndeterminate,
+                                format!("void source vertex: {e}"),
+                            ))?.point.z;
+                        if z > lower_safe && z < upper_safe {
+                            valid = false;
+                        }
+                    }
+                }
+            }
+        }
+        if !valid {
+            continue;
+        }
+        // Native endpoint data is not a substitute for a distinct original
+        // vertex declaration. The sealed selected-use binding retains both
+        // original points in canonical native endpoint order, without rounding.
+        for &fi in &component {
+            let domain = source.face_domain(fi, storage.limit.saturating_sub(storage.used), work, cancel)?;
+            for index in 0..domain.coedges().len() {
+                let correspondence = domain.original_coedge_correspondence(index)?;
+                let binding = correspondence.binding()
+                    .ok_or_else(|| unresolved("void column lost its selected original endpoint binding"))?;
+                for (native_back, point) in binding.source_vertex_points_mm.into_iter().enumerate() {
+                    work.charge(1, cancel)?;
+                    if point[2] > lower_safe && point[2] < upper_safe {
+                        valid = false;
+                        continue;
+                    }
+                    let parameter = correspondence.spatial_endpoint(native_back != 0);
+                    let interior = domain.with_original_spatial_curve(
+                        index, storage.limit.saturating_sub(storage.used), work, cancel,
+                        |curve, work, cancel| {
+                            let z = super::slab::original_endpoint_height(
+                                curve, parameter, point, source_z(), work, cancel,
+                            )?;
+                            if z.hi <= lower_safe || z.lo >= upper_safe { return Ok(false); }
+                            // Only a literal source coefficient identity owns a
+                            // boundary whose outward endpoint jet straddles it.
+                            Ok(!crate::parametric::curve_endpoint_coordinate_equal(
+                                curve, parameter, 2, lower_safe, work, cancel,
+                            )? && !crate::parametric::curve_endpoint_coordinate_equal(
+                                curve, parameter, 2, upper_safe, work, cancel,
+                            )?)
+                        },
+                    )?;
+                    if interior { valid = false; }
                 }
             }
         }
@@ -1348,14 +1382,11 @@ fn native_height_scopes(
             continue;
         }
         for &fi in &component {
-            let face = definition
-                .solid
-                .face_iter()
-                .nth(fi)
-                .ok_or_else(|| unresolved("void wall component face is absent"))?;
-            for (wi, wire) in face.absolute_boundaries().iter().enumerate() {
-                for (ei, _) in wire.iter().enumerate() {
-                    let neighbor = neighbor_use(definition, (fi, wi, ei), work, cancel)?;
+            let (_, face) = native_face(definition, fi)?;
+            for wi in 0..face.loops.len() {
+                let wire = boundary_loop(definition, fi, wi)?;
+                for (ei, _) in wire.edges.iter().enumerate() {
+                    let neighbor = neighbor_use(source, (fi, wi, ei), work, cancel)?;
                     let ColumnFace::Cap { height, sign } = faces[neighbor.0] else {
                         continue;
                     };
@@ -1368,17 +1399,10 @@ fn native_height_scopes(
                     if neighbor.2 != 0 {
                         continue;
                     }
-                    let cap_face = definition
-                        .solid
-                        .face_iter()
-                        .nth(neighbor.0)
-                        .ok_or_else(|| unresolved("void material-facing cap face is absent"))?;
-                    for (ci, _) in cap_face.absolute_boundaries()[neighbor.1]
-                        .iter()
-                        .enumerate()
-                    {
+                    let cap_wire = boundary_loop(definition, neighbor.0, neighbor.1)?;
+                    for (ci, _) in cap_wire.edges.iter().enumerate() {
                         let wall =
-                            neighbor_use(definition, (neighbor.0, neighbor.1, ci), work, cancel)?;
+                            neighbor_use(source, (neighbor.0, neighbor.1, ci), work, cancel)?;
                         work.charge(component.len() as u64, cancel)?;
                         if !component.contains(&wall.0) {
                             valid = false;
@@ -1387,14 +1411,11 @@ fn native_height_scopes(
                     if !valid {
                         continue;
                     }
-                    let area = wire_area(
-                        definition,
-                        neighbor.0,
-                        neighbor.1,
-                        storage.limit.saturating_sub(storage.used),
-                        work,
-                        cancel,
-                    )?;
+                    let area = wire_area(source, neighbor.0,
+                    neighbor.1,
+                    storage.limit.saturating_sub(storage.used),
+                    work,
+                    cancel,)?;
                     // Original inward rim degree is positive at the source
                     // lower end and negative at the upper end. An exterior
                     // column cannot impersonate an original native Hole.
@@ -1414,33 +1435,30 @@ fn native_height_scopes(
                     }
                     opening = Some(is_open);
                     if let Some(height) =
-                        super::critical::material_link::constant_material_face_height(
-                            definition,
-                            neighbor.0,
-                            super::slab::HeightFunctional {
-                                direction: matrix[2],
-                                offset: Interval::point(translation[2]),
-                            },
-                            work,
-                            cancel,
-                        )?
+                        super::critical::material_link::constant_material_face_height(source, neighbor.0,
+                        super::slab::HeightFunctional {
+                            direction: matrix[2],
+                            offset: Interval::point(translation[2]),
+                        },
+                        work,
+                        cancel,)?
                     {
                         lower_world = lower_world.min(height);
                         continue;
                     }
-                    use monstertruck_modeling::BoundedCurve;
-                    for rim in &cap_face.absolute_boundaries()[neighbor.1] {
-                        rim.with_curve(|curve| {
-                            let prepared = definition.prepare_boundary_curve(
-                                rim.id(),
-                                curve,
-                                curve.range_tuple(),
-                                storage.limit.saturating_sub(storage.used),
-                                work,
-                                cancel,
-                            )?;
-                            for span in prepared.parameter_intervals() {
-                                let position = prepared.jet(span, work, cancel)?.position;
+                    let cap_domain = source.face_domain(
+                        neighbor.0, storage.limit.saturating_sub(storage.used), work, cancel,
+                    )?;
+                    for (rim_index, _) in cap_wire.edges.iter().enumerate() {
+                        let index = source_coedge_index(cap_domain, neighbor.1, rim_index, work, cancel)?;
+                        let range = cap_domain.original_coedge_correspondence(index)?.spatial_range();
+                        cap_domain.with_original_spatial_curve(
+                            index, storage.limit.saturating_sub(storage.used), work, cancel,
+                            |curve, work, cancel| {
+                            for span in crate::parametric::curve_parameter_spans(curve, range, work, cancel)? {
+                                let position = crate::parametric::curve_enclosure(
+                                    curve, (span[0], span[1]), work, cancel,
+                                )?.position;
                                 lower_world = lower_world.min(
                                     finite(
                                         dot(matrix[2], position)
@@ -1507,57 +1525,13 @@ fn native_height_scopes(
     Ok(result)
 }
 
-/// Project lazily after actual support demand, under the caller's cumulative
-/// work/cancellation and remaining owned-capacity allowance. All returned loops
-/// are positive WORLD-XY outer masks at z=0, never deposited/source material.
-pub fn projected_protected_void_envelopes(
+fn validate_projection_binding(
     definition: &Definition,
     capture: &NativeVoidProjectionCapture,
     policy: ProtectedVoidPolicy,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<NativeProjectedVoids, GeometryError> {
-    projected_protected_void_envelopes_using(
-        crate::section::OriginalTrimSource::standalone(definition),
-        definition.retained_query_proof_bytes(),
-        capture,
-        policy,
-        work,
-        cancel,
-    )
-}
-
-impl crate::PreparedMaterialSource<'_> {
-    /// Project a bound capture while borrowing immutable original domains and
-    /// selected source recipes. The byte limit excludes this retained owner;
-    /// all pose, height, branch, floor and clearance proofs remain query-local.
-    pub fn projected_protected_void_envelopes(
-        &self,
-        capture: &NativeVoidProjectionCapture,
-        policy: ProtectedVoidPolicy,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<NativeProjectedVoids, GeometryError> {
-        projected_protected_void_envelopes_using(
-            self.trim_source(),
-            0,
-            capture,
-            policy,
-            work,
-            cancel,
-        )
-    }
-}
-
-fn projected_protected_void_envelopes_using(
-    source: crate::section::OriginalTrimSource<'_, '_>,
-    source_proof_bytes: usize,
-    capture: &NativeVoidProjectionCapture,
-    policy: ProtectedVoidPolicy,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<NativeProjectedVoids, GeometryError> {
-    let definition = source.definition();
+) -> Result<(), GeometryError> {
     work.charge(1, cancel)?;
     if !policy.maximum_xy_error_mm.is_finite() || policy.maximum_xy_error_mm <= 0.0 {
         return Err(error(
@@ -1574,6 +1548,64 @@ fn projected_protected_void_envelopes_using(
             "protected void source/slab/native sample capture mismatch",
         ));
     }
+    Ok(())
+}
+
+/// Project lazily after actual support demand, under the caller's cumulative
+/// work/cancellation and remaining owned-capacity allowance. All returned loops
+/// are positive WORLD-XY outer masks at z=0, never deposited/source material.
+pub fn projected_protected_void_envelopes(
+    definition: &Definition,
+    capture: &NativeVoidProjectionCapture,
+    policy: ProtectedVoidPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeProjectedVoids, GeometryError> {
+    validate_projection_binding(definition, capture, policy, work, cancel)?;
+    let limit = (policy.byte_limit as usize).min(MAX_BYTES);
+    let prepared = prepare_solid(definition, limit, work, cancel)?;
+    projected_protected_void_envelopes_using(
+        prepared.source_view()?,
+        prepared.retained_bytes(),
+        capture,
+        policy,
+        work,
+        cancel,
+    )
+}
+
+impl PreparedSolid<'_> {
+    /// Project a bound capture while borrowing immutable original domains and
+    /// selected source recipes. The byte limit excludes this retained owner;
+    /// all pose, height, branch, floor and clearance proofs remain query-local.
+    pub fn projected_protected_void_envelopes(
+        &self,
+        capture: &NativeVoidProjectionCapture,
+        policy: ProtectedVoidPolicy,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<NativeProjectedVoids, GeometryError> {
+        validate_projection_binding(self.definition(), capture, policy, work, cancel)?;
+        projected_protected_void_envelopes_using(
+            self.source_view()?,
+            0,
+            capture,
+            policy,
+            work,
+            cancel,
+        )
+    }
+}
+
+fn projected_protected_void_envelopes_using(
+    source: MaterialSourceView<'_, '_>,
+    source_proof_bytes: usize,
+    capture: &NativeVoidProjectionCapture,
+    policy: ProtectedVoidPolicy,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<NativeProjectedVoids, GeometryError> {
+    let definition = source.definition();
     let request = capture.request;
     let pose = capture.pose;
     let matrix = super::placed::rotation(pose.unwrap_or(RigidPoseMm::IDENTITY))?;
@@ -1641,7 +1673,7 @@ fn projected_protected_void_envelopes_using(
     // Reject a structurally noncolumn branch before evaluating the entire
     // source realization. Reuse this SAME classification in the full proof;
     // passing this necessary precondition never grants material authority.
-    let faces = original_column_faces(definition, &capture.holes, &mut storage, work, cancel)?;
+    let faces = original_column_faces(source, &capture.holes, &mut storage, work, cancel)?;
     // This provider visits EVERY original central collar and corner plan, not
     // merely the strata active in the captured slab. Its error is physical 3D;
     // querying world Z does not turn it into a scalar-only displacement bound.
@@ -2016,17 +2048,8 @@ mod tests {
         );
     }
 
-    fn original_definition(name: &str, solid: crate::parity_fixtures::StepSolid) -> Definition {
-        let source = crate::parity_fixtures::original(name, solid);
-        crate::import_step(source.as_bytes(), &AtomicBool::new(false))
-            .expect("original immutable native STEP")
-    }
     fn recipe(name: &str) -> Definition {
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .expect("actual native recipe");
-        original_definition(name, solid)
+        super::super::test_source::recipe(name)
     }
     #[test]
     fn noncolumn_original_faces_refuse_before_transport_preparation() {
@@ -2037,15 +2060,16 @@ mod tests {
             // issues authority for it. Only the actual coefficient owners below
             // determine whether the current column lane is even applicable.
             boundary: square(),
-            source_faces: (0..definition.faces.len()).collect(),
+            source_faces: (0..definition.face_ids().len()).collect(),
         }];
         let mut storage = Storage {
             used: 0,
             limit: MAX_BYTES,
         };
         let mut work = GeometryWorkBudget::new(20_000_000);
+        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
         let error = original_column_faces(
-            &definition,
+            prepared.source_view().unwrap(),
             &holes,
             &mut storage,
             &mut work,
@@ -2058,82 +2082,15 @@ mod tests {
     }
 
     fn analytic_bore() -> Definition {
-        let mut hole = crate::parity_fixtures::circle(10.0, 10.0, 3.0);
-        hole.invert();
-        original_definition(
-            "original-protected-through-bore.step",
-            crate::parity_fixtures::extruded(
-                vec![crate::parity_fixtures::rectangle(20.0, 20.0), hole],
-                8.0,
-            ),
+        super::super::test_source::original_definition(
+            super::super::test_source::protected_bore(false),
         )
     }
-    /// Sew the actual rational-cylinder source wall, with its original rational
-    /// rims/seam/pcurves, into independent rectangular outer cap cycles. This is
-    /// not an analytic family rename or a trusted sampled circular certificate.
+    /// The fixture owns a genuine rational cylindrical wall and sewn original
+    /// rational rims/seam/pcurves, not an analytic family rename or sampled circle.
     fn rational_bore() -> Definition {
-        use monstertruck_io::step::load::step_geometry::re_exports::*;
-        use monstertruck_topology::{Face, Solid};
-        let (_, plug, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(name, _, _)| *name == "native-parity-nurbs-cylinder.step")
-            .unwrap();
-        let translation = Matrix4::from_translation(Vector3::new(-10.0, -10.0, 0.0));
-        let outer = crate::parity_fixtures::extruded(
-            vec![crate::parity_fixtures::rectangle(20.0, 20.0)],
-            8.0,
-        )
-        .try_mapped(
-            |point| Some(translation.transform_point(*point)),
-            |curve| Some(curve.transformed(translation)),
-            |surface| Some(surface.transformed(translation)),
-        )
-        .unwrap();
-        let cap_height = |face: &monstertruck_topology::Face<
-            Point3,
-            monstertruck_io::step::load::step_geometry::Curve3D,
-            monstertruck_io::step::load::step_geometry::Surface,
-        >| {
-            let mut vertices = face.vertex_iter();
-            let z = vertices.next().unwrap().point().z;
-            vertices.all(|vertex| vertex.point().z == z).then_some(z)
-        };
-        let mut faces = Vec::new();
-        for face in outer.face_iter() {
-            if let Some(z) = cap_height(face) {
-                let cap = plug
-                    .face_iter()
-                    .find(|candidate| cap_height(candidate) == Some(z))
-                    .unwrap();
-                let mut boundaries = face.boundaries();
-                boundaries.extend(cap.boundaries().into_iter().map(|wire| wire.inverse()));
-                if !cap.orientation() {
-                    boundaries = boundaries.into_iter().map(|wire| wire.inverse()).collect();
-                }
-                let ring = Face::new(boundaries, cap.surface());
-                faces.push(if cap.orientation() {
-                    ring
-                } else {
-                    ring.inverse()
-                });
-            } else {
-                faces.push(face.clone());
-            }
-        }
-        faces.extend(
-            plug.face_iter()
-                .filter(|face| cap_height(face).is_none())
-                .map(|face| face.inverse()),
-        );
-        let shell = faces
-            .into_iter()
-            .collect::<monstertruck_topology::Shell<_, _, _>>();
-        shell
-            .check_solid_boundary()
-            .expect("original rational bore shares exact rim edge identities");
-        original_definition(
-            "original-rational-protected-bore.step",
-            Solid::new(vec![shell]),
+        super::super::test_source::original_definition(
+            super::super::test_source::protected_bore(true),
         )
     }
     fn captured(
@@ -2144,12 +2101,7 @@ mod tests {
         work: &mut GeometryWorkBudget,
     ) -> NativeVoidProjectionCapture {
         let cancel = AtomicBool::new(false);
-        let source = crate::prepare_material_source(
-            definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            work,
-        )
+        let source = prepare_solid(definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, work, &cancel)
         .unwrap();
         let analysis = source
             .analyze_placed_slab(
@@ -2232,20 +2184,13 @@ mod tests {
     #[test]
     fn independent_housing_upper_hole_preserves_frozen_projection_accuracy() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-            ),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &cancel,)
         .unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
         .unwrap();
         // This actual upper housing section needs bounded reference-cycle
         // correspondence as well as native curve, Boolean and physical G error.
@@ -2314,8 +2259,9 @@ mod tests {
         );
         // A captured regular slab is NOT the endpoint inventory of the whole
         // original wall: its upper edge cuts live material, not a source cap.
+        let prepared = prepare_solid(&definition, MAX_BYTES, &mut work, &AtomicBool::new(false)).unwrap();
         let error = super::super::critical::material_link::prove_source_wall_component(
-            crate::section::OriginalTrimSource::standalone(&definition),
+            prepared.source_view().unwrap(),
             &capture.holes[0].source_faces,
             [4.0, 6.1],
             MAX_BYTES,
@@ -2325,13 +2271,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
         assert!(error.message.contains("boundary exit"));
+        drop(prepared);
         let allowance = if definition.provenance().uncertainty_mm.is_some() {
             None
         } else {
             Some(0.0)
         };
-        capture.material_realization =
-            crate::kernel::MaterialRealizationIdentity::with_allowance(allowance);
+        let original_allowance = definition.provenance.uncertainty_mm;
+        definition.provenance.uncertainty_mm = allowance;
+        capture.material_realization = crate::kernel::MaterialRealizationIdentity::new(&definition);
+        definition.provenance.uncertainty_mm = original_allowance;
         assert_eq!(
             projected_protected_void_envelopes(
                 &definition,
@@ -2358,12 +2307,10 @@ mod tests {
 
     #[test]
     fn actual_analytic_rational_and_independent_through_bores_preserve_diagonal_corridors() {
-        let independent = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"
-            ),
-            &AtomicBool::new(false),
-        )
+        let independent = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-through-hole-mm.step"
+        ),
+        &AtomicBool::new(false),)
         .unwrap();
         for (definition, center, radius) in [
             (analytic_bore(), [10.0, 10.0], 3.0),
@@ -2447,12 +2394,10 @@ mod tests {
 
     #[test]
     fn independent_rounded_floor_is_not_the_global_source_minimum() {
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-            ),
-            &AtomicBool::new(false),
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &AtomicBool::new(false),)
         .unwrap();
         let mut work = GeometryWorkBudget::new(300_000_000);
         let capture = captured(
@@ -2568,12 +2513,7 @@ mod tests {
         let definition = recipe("native-parity-nurbs-cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
         .unwrap();
         let analysis = source
             .analyze_slab(
@@ -2614,10 +2554,8 @@ mod tests {
     fn closed_birth_without_sample_holes_requires_complete_original_disk_product() {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
         let capture = captured(
             &definition,
@@ -2667,12 +2605,7 @@ mod tests {
         let definition = recipe("native-parity-ring-torus.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(200_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel)
         .unwrap();
         let analysis = source
             .analyze_slab(
@@ -2718,12 +2651,10 @@ mod tests {
 
     #[test]
     fn independent_submillimeter_pocket_does_not_alias_away_its_native_floor() {
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
-            ),
-            &AtomicBool::new(false),
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
+        ),
+        &AtomicBool::new(false),)
         .unwrap();
         let mut work = GeometryWorkBudget::new(200_000_000);
         let capture = captured(

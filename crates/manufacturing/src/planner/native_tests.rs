@@ -20,7 +20,7 @@ struct NativeScene {
 impl NativeScene {
     fn new(bytes: &[u8], poses: &[RigidPoseMm]) -> Self {
         let native =
-            Arc::new(spiling_geometry::import_step(bytes, &AtomicBool::new(false)).unwrap());
+            Arc::new(spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap());
         let id = native.id().clone();
         Self {
             project: ProjectId::default(),
@@ -45,7 +45,7 @@ impl NativeScene {
     }
     fn add(&mut self, bytes: &[u8], poses: &[RigidPoseMm]) {
         let native =
-            Arc::new(spiling_geometry::import_step(bytes, &AtomicBool::new(false)).unwrap());
+            Arc::new(spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap());
         let id = native.id().clone();
         if !self.definitions.contains_key(&id) {
             self.stored.push(StoredDefinition {
@@ -565,7 +565,7 @@ fn genuine_inward_sloped_planar_ramp_passes_native_compile_and_replay() {
 #[test]
 fn tilted_native_cylinder_uses_analytic_extrema_and_native_sections() {
     let bytes = include_bytes!("../../../../fixtures/geometry/cylinder.step");
-    let native = spiling_geometry::import_step(bytes, &AtomicBool::new(false)).unwrap();
+    let native = spiling_geometry::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap();
     let angle = 1.0f64.to_radians();
     let component = (angle * 0.5).sin() / 2.0f64.sqrt();
     let mut pose = RigidPoseMm {
@@ -3548,13 +3548,14 @@ fn housing_terminal_native_source_refinement_preserves_closed_material_authority
             .unwrap(),
         );
     }
-    let sources = prepare_sources(
-        geometry,
+    admit_source_captures(
+        &geometry,
         admission.native_capture_proposal_bytes(),
         &mut admission.geometry_work,
         &cancel,
     )
     .unwrap();
+    let sources = geometry;
     // Prepare genuine accepted lower material in the ordinary producer before
     // making the captured terminal request. A state starting only at that
     // terminal height lacks the production lower-leaf precondition.

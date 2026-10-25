@@ -34,6 +34,7 @@ use solidcore::surface::cone::Cone;
 use solidcore::surface::plane::Plane;
 use solidcore::surface::sphere::Sphere;
 use solidcore::surface::surface::Surface;
+use solidcore::surface::surface::p1::StepSurface;
 use solidcore::surface::torus::{Torus, TorusOptions};
 use solidcore::topology::brep::p10::{
     HEALER_VERSION, MakeTopologyOptions, TopologyEnv, make_topology_from_data,
@@ -126,7 +127,7 @@ fn unique_knots_and_multiplicities(flat: &[f64]) -> (Vec<f64>, Vec<usize>) {
     let mut mults: Vec<usize> = Vec::new();
     for &k in flat {
         if let Some(&last) = knots.last() {
-            if (k - last).abs() <= 1e-14 {
+            if k == last {
                 if let Some(m) = mults.last_mut() {
                     *m += 1;
                 }
@@ -139,109 +140,9 @@ fn unique_knots_and_multiplicities(flat: &[f64]) -> (Vec<f64>, Vec<usize>) {
     (knots, mults)
 }
 
-/// Parses STEP text into a [`solidcraft_step::p21::Exchange`] and normalizes OCCT's
-/// `(1, p, ..., p, 1)` quasi-periodic clamped B-spline knot vectors into standard
-/// `(p + 1, ..., p + 1)` clamped knot vectors on the identical active interval `[t_p, t_n]`.
+/// Parse the original STEP exchange without changing knots, multiplicities or domains.
 pub fn parse_step_exchange(step_text: &str) -> Result<solidcraft_step::p21::Exchange, String> {
-    use solidcraft_step::p21::Param;
-
-    fn clamp_quasi_periodic_knots(degree: i64, mults: &mut Vec<Param>, knots: &mut Vec<Param>) {
-        if degree < 1 || mults.len() < 4 || mults.len() != knots.len() {
-            return;
-        }
-        let m0 = mults.first().and_then(Param::as_i64);
-        let m1 = mults.get(1).and_then(Param::as_i64);
-        let m_pen = mults.get(mults.len() - 2).and_then(Param::as_i64);
-        let m_last = mults.last().and_then(Param::as_i64);
-        if m0 == Some(1) && m1 == Some(degree) && m_pen == Some(degree) && m_last == Some(1) {
-            mults.pop();
-            mults.remove(0);
-            knots.pop();
-            knots.remove(0);
-            if let Some(first) = mults.first_mut() {
-                *first = Param::Int(degree + 1);
-            }
-            if let Some(last) = mults.last_mut() {
-                *last = Param::Int(degree + 1);
-            }
-        }
-    }
-
-    let mut ex = solidcraft_step::p21::parse(step_text)?;
-    for entity in ex.entities.values_mut() {
-        if entity.is_complex() {
-            let curve_deg = entity
-                .record("B_SPLINE_CURVE")
-                .and_then(|p| p.first())
-                .and_then(Param::as_i64);
-            if let Some(deg) = curve_deg {
-                if let Some(rec) = entity
-                    .records
-                    .iter_mut()
-                    .find(|r| r.name == "B_SPLINE_CURVE_WITH_KNOTS")
-                {
-                    if let [Param::List(mults), Param::List(knots), ..] = rec.params.as_mut_slice()
-                    {
-                        clamp_quasi_periodic_knots(deg, mults, knots);
-                    }
-                }
-            }
-            let surf_degs = entity.record("B_SPLINE_SURFACE").and_then(|p| {
-                Some((p.first()?.as_i64()?, p.get(1)?.as_i64()?))
-            });
-            if let Some((u_deg, v_deg)) = surf_degs {
-                if let Some(rec) = entity
-                    .records
-                    .iter_mut()
-                    .find(|r| r.name == "B_SPLINE_SURFACE_WITH_KNOTS")
-                {
-                    if let [
-                        Param::List(u_mults),
-                        Param::List(v_mults),
-                        Param::List(u_knots),
-                        Param::List(v_knots),
-                        ..,
-                    ] = rec.params.as_mut_slice()
-                    {
-                        clamp_quasi_periodic_knots(u_deg, u_mults, u_knots);
-                        clamp_quasi_periodic_knots(v_deg, v_mults, v_knots);
-                    }
-                }
-            }
-        } else if let Some(rec) = entity.records.first_mut() {
-            if rec.name == "B_SPLINE_CURVE_WITH_KNOTS" {
-                let deg = rec.params.get(1).and_then(Param::as_i64);
-                if let Some(deg) = deg {
-                    if let Some([Param::List(mults), Param::List(knots)]) =
-                        rec.params.get_mut(6..=7)
-                    {
-                        clamp_quasi_periodic_knots(deg, mults, knots);
-                    }
-                }
-            } else if rec.name == "B_SPLINE_SURFACE_WITH_KNOTS" {
-                let degs = rec
-                    .params
-                    .get(1)
-                    .and_then(Param::as_i64)
-                    .zip(rec.params.get(2).and_then(Param::as_i64));
-                if let Some((u_deg, v_deg)) = degs {
-                    if let Some(
-                        [
-                            Param::List(u_mults),
-                            Param::List(v_mults),
-                            Param::List(u_knots),
-                            Param::List(v_knots),
-                        ],
-                    ) = rec.params.get_mut(8..=11)
-                    {
-                        clamp_quasi_periodic_knots(u_deg, u_mults, u_knots);
-                        clamp_quasi_periodic_knots(v_deg, v_mults, v_knots);
-                    }
-                }
-            }
-        }
-    }
-    Ok(ex)
+    solidcraft_step::p21::parse(step_text)
 }
 
 /// Converts a validated Schema 4 [`solidcraft_geom::brep::Brep`] into a [`solidcore::topology::Brep`].
@@ -301,9 +202,6 @@ pub fn from_schema4_brep(k: &mut Kernel, brep: &b::Brep, heal: bool) -> R<Brep> 
 /// Builds a [`solidcore::topology::brep_data::BrepData`] from a Schema 4 `Brep`.
 pub fn to_brep_data(k: &mut Kernel, brep: &b::Brep, analytic_planes: bool) -> R<BrepData> {
     brep.validate().map_err(|e| BridgeError::Invalid(e.0))?;
-    let stripped = strip_lamina_spurs(brep)?;
-    let brep = analytic::analytic(stripped.as_ref())?;
-    let brep = brep.as_ref();
 
     // Manifold flag 0 tells `make_topology_from_data` to use the explicit regions,
     // shells, and `relink_radial_lists` (`next_eu` / `mate_next_eu`) we construct below.
@@ -904,15 +802,8 @@ fn build_surface(
             let cyl = Cone::create_canonical_cylinder(k, &ax, *radius)?;
             let u0_deg = u_range[0].to_degrees();
             let u1_deg = u_range[1].to_degrees();
-            let min_nurb = cyl.convert_uv_from_step_to_nurbs(k, Point2::new(u0_deg, v0))?;
-            let max_nurb = cyl.convert_uv_from_step_to_nurbs(k, Point2::new(u1_deg, v1))?;
-            let dom = Extent2d::from_bounds(
-                min_nurb.x.min(max_nurb.x),
-                min_nurb.y.min(max_nurb.y),
-                min_nurb.x.max(max_nurb.x),
-                min_nurb.y.max(max_nurb.y),
-            );
-            Ok((Surface::from(cyl), dom, false))
+            let dom = Extent2d::from_bounds(u0_deg, v0, u1_deg, v1);
+            Ok((Surface::from(StepSurface::new(Surface::from(cyl), true)?), dom, false))
         }
         b::Surface::Cone {
             frame,
@@ -937,15 +828,8 @@ fn build_surface(
             )?;
             let u0_deg = u_range[0].to_degrees();
             let u1_deg = u_range[1].to_degrees();
-            let min_nurb = cone.convert_uv_from_step_to_nurbs(k, Point2::new(u0_deg, v0))?;
-            let max_nurb = cone.convert_uv_from_step_to_nurbs(k, Point2::new(u1_deg, v1))?;
-            let dom = Extent2d::from_bounds(
-                min_nurb.x.min(max_nurb.x),
-                min_nurb.y.min(max_nurb.y),
-                min_nurb.x.max(max_nurb.x),
-                min_nurb.y.max(max_nurb.y),
-            );
-            Ok((Surface::from(cone), dom, false))
+            let dom = Extent2d::from_bounds(u0_deg, v0, u1_deg, v1);
+            Ok((Surface::from(StepSurface::new(Surface::from(cone), true)?), dom, false))
         }
         b::Surface::Sphere { frame, radius } => {
             let mut f = frame.clone();
@@ -960,15 +844,8 @@ fn build_surface(
             let u1_deg = u_range[1].to_degrees();
             let v0_deg = v0.to_degrees();
             let v1_deg = v1.to_degrees();
-            let min_nurb = sph.convert_uv_from_step_to_nurbs(k, Point2::new(u0_deg, v0_deg))?;
-            let max_nurb = sph.convert_uv_from_step_to_nurbs(k, Point2::new(u1_deg, v1_deg))?;
-            let dom = Extent2d::from_bounds(
-                min_nurb.x.min(max_nurb.x),
-                min_nurb.y.min(max_nurb.y),
-                min_nurb.x.max(max_nurb.x),
-                min_nurb.y.max(max_nurb.y),
-            );
-            Ok((Surface::from(sph), dom, false))
+            let dom = Extent2d::from_bounds(u0_deg, v0_deg, u1_deg, v1_deg);
+            Ok((Surface::from(StepSurface::new(Surface::from(sph), true)?), dom, false))
         }
         b::Surface::Torus {
             frame,
@@ -997,15 +874,8 @@ fn build_surface(
             let u1_deg = u_range[1].to_degrees();
             let v0_deg = v_range[0].to_degrees();
             let v1_deg = v_range[1].to_degrees();
-            let min_nurb = tor.convert_uv_from_step_to_nurbs(k, Point2::new(u0_deg, v0_deg))?;
-            let max_nurb = tor.convert_uv_from_step_to_nurbs(k, Point2::new(u1_deg, v1_deg))?;
-            let dom = Extent2d::from_bounds(
-                min_nurb.x.min(max_nurb.x),
-                min_nurb.y.min(max_nurb.y),
-                min_nurb.x.max(max_nurb.x),
-                min_nurb.y.max(max_nurb.y),
-            );
-            Ok((Surface::from(tor), dom, false))
+            let dom = Extent2d::from_bounds(u0_deg, v0_deg, u1_deg, v1_deg);
+            Ok((Surface::from(StepSurface::new(Surface::from(tor), true)?), dom, false))
         }
         b::Surface::Spline {
             u_knots,

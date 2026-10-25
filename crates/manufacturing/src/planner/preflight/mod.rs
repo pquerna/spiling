@@ -41,7 +41,7 @@ pub fn preflight(
 pub(super) fn admit<'a>(
     input: &'a CompilerInput<'_>,
     cancel: &AtomicBool,
-) -> Result<(Admission, super::PreparedGeometrySources<'a>), ManufacturingError> {
+) -> Result<(Admission, super::PreparedSources<'a>), ManufacturingError> {
     check_cancel(cancel)?;
     let mut result = Admission {
         bounds: None,
@@ -187,11 +187,11 @@ pub(super) fn admit<'a>(
             continue;
         };
         if !geometry_sources.contains_key(&occurrence.definition_id) {
-            let source = match spiling_geometry::prepare_geometry_source(
+            let source = match spiling_geometry::prepare_solid(
                 definition,
                 remaining_prepared,
-                cancel,
                 &mut result.geometry_work,
+                cancel,
             ) {
                 Ok(source) => source,
                 Err(e)
@@ -479,7 +479,7 @@ pub(super) fn admit<'a>(
 pub(super) fn resolve_native_events(
     input: &CompilerInput<'_>,
     admission: &mut Admission,
-    geometry_sources: &super::PreparedGeometrySources<'_>,
+    geometry_sources: &super::PreparedSources<'_>,
     proposal_work: &mut usize,
     cancel: &AtomicBool,
 ) -> Result<(), ManufacturingError> {

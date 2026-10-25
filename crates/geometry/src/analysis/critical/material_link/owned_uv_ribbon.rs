@@ -8,6 +8,23 @@
 
 use super::*;
 
+/// The entire selected-original PCurve domain, not a native UV convenience
+/// interval or only the used spatial collar range. Knots retain that same law.
+fn boundary_parameter_intervals<'c>(
+    chart: &'c (impl crate::parametric::CurveEvaluator + ?Sized),
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<crate::parametric::AxisSpans<'c>, GeometryError> {
+    let range = chart.active_range();
+    Interval::new(range[0], range[1])?;
+    if range[0] >= range[1] {
+        return Err(GeometryError::new(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "original UV owning boundary has no nondegenerate complete domain"));
+    }
+    crate::parametric::curve2d_parameter_spans(chart, range, work, cancel)
+}
+
 // These proof phases run sequentially, after the pure embedding has returned.
 // Their largest explicit stack fits the existing caller-reserved UV allowance.
 const _: () = assert!(
@@ -15,6 +32,9 @@ const _: () = assert!(
 );
 const _: () = assert!(
     std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>() <= UV_EMBEDDING_STACK_BYTES
+);
+const _: () = assert!(
+    super::atlas::ORIGINAL_JOINT_UV_SCRATCH_BYTES <= UV_EMBEDDING_STACK_BYTES
 );
 
 /// Sealed whole-used-scope ownership. The contained pure receipt binds the
@@ -47,12 +67,12 @@ fn resource_at(
     mut error: GeometryError,
     owner: CoedgeUse,
     stage: &'static str,
-    native: [f64; 2],
+    spatial: [f64; 2],
     boundary: Option<(usize, [f64; 2])>,
 ) -> GeometryError {
     if error.code == GeometryErrorCode::ResourceLimit {
         error.message = format!(
-            "{}; complete owned UV ribbon stage={stage} owner={:?} native={native:?} boundary_uv={boundary:?}",
+            "{}; complete owned UV ribbon stage={stage} owner={:?} spatial={spatial:?} boundary_uv={boundary:?}",
             error.message,
             [owner.face, owner.wire, owner.index],
         );
@@ -145,33 +165,6 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         ))
     }
 
-    fn raw_boundary_image(
-        &self,
-        coedge: usize,
-        range: [f64; 2],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[Interval; 2], GeometryError> {
-        let original = &self.domain.native().coedges()[coedge];
-        let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = monstertruck_modeling::validated_curve2d_jet(
-            original.curve,
-            range,
-            &mut native,
-            cancel,
-        );
-        crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
-        Ok(result
-            .map_err(crate::parametric::native_error)?
-            .position
-            .map(|value| Interval {
-                lo: value.lower,
-                hi: value.upper,
-            }))
-    }
-
     fn inner_misses_joints_and_domain(
         &self,
         range: [f64; 2],
@@ -190,17 +183,15 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             let image = self
                 .inner_image(range, error, work, cancel)
                 .map_err(&context)?;
-            let mut separated = inside_box(image, self.domain.native().closed_parameter_box());
-            if let Some(bounds) = self.domain.certified_uv_domain() {
-                separated &= inside_box(image, bounds);
-            }
-            for joint in self.domain.native().joints() {
+            let mut separated = inside_box(image, self.domain.uv_domain());
+            // Exclude the complete selected-original joint inventory, including
+            // every affine endpoint connector and any admitted pole completion.
+            // These are UV support enclosures, not physical collapse proofs.
+            for joint in self.domain.original_joints().map_err(&context)? {
                 work.charge(1, cancel).map_err(&context)?;
-                let enclosure = joint.enclosure.map(|value| Interval {
-                    lo: value.lower,
-                    hi: value.upper,
-                });
-                separated &= apart(image, enclosure);
+                let joint_uv = super::atlas::original_joint_uv_enclosure(joint, work, cancel)
+                    .map_err(&context)?;
+                separated &= apart(image, joint_uv);
             }
             if separated {
                 continue;
@@ -229,10 +220,15 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let own = self
             .domain
             .original_coedge_correspondence(self.use_.coedge)?;
-        for coedge in 0..self.domain.native().coedges().len() {
+        for coedge in 0..self.domain.coedges().len() {
             // Retain the association of EVERY original boundary occurrence.
             self.domain.original_coedge_correspondence(coedge)?;
-            for span in self.domain.boundary_parameter_intervals(coedge)? {
+            // Restrict the COMPLETE owning original PCurve, including unused
+            // end pieces. Native UV trim cuts have a different parameter law.
+            let chart = self.domain.coedge_operand(coedge)?;
+            let mut complete = false;
+            for span in boundary_parameter_intervals(&chart, work, cancel)? {
+                complete = true;
                 let mut stack: [UvPairCell; MAX_DEPTH as usize + 1] =
                     [([0.0; 2], [0.0; 2], 0); MAX_DEPTH as usize + 1];
                 stack[0] = (range, span, 0);
@@ -251,17 +247,17 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     };
                     work.charge(1, cancel).map_err(&context)?;
                     let image = self.inner_image(a, error, work, cancel).map_err(&context)?;
-                    let boundary = self
-                        .raw_boundary_image(coedge, b, work, cancel)
-                        .map_err(&context)?;
+                    let boundary = crate::parametric::curve2d_piecewise_jet(
+                        &chart, b, work, cancel,
+                    ).map_err(&context)?.position;
                     if apart(image, boundary) {
                         continue;
                     }
                     if coedge == self.use_.coedge {
-                        let Some(native) = own.affine_native_parameter_preimage(b)? else {
+                        let Some(spatial) = own.affine_spatial_parameter_preimage(b)? else {
                             return Ok(false);
                         };
-                        let hull = [a[0].min(native.lo), a[1].max(native.hi)];
+                        let hull = [a[0].min(spatial.lo), a[1].max(spatial.hi)];
                         // The SAME original strict C2 operator supplies this
                         // convex proof hull; genuine knots cannot be crossed.
                         let jet =
@@ -304,6 +300,11 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     pending += 2;
                 }
             }
+            if !complete {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "owned original UV boundary has no complete parameter-cut inventory"));
+            }
         }
         Ok(true)
     }
@@ -324,10 +325,9 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             // an inner ribbon or an Inside calibration.
             return Ok(Some(OwnedUvRibbon { embedding }));
         }
-        // Native expands a classifier query by its whole-domain uncertainty.
-        // Keep that error AND the original anchor margin in complete exclusion;
-        // never mutate either retained source margin or its parameter map.
-        let uncertainty = self.domain.native().uncertainty_uv();
+        // Keep the selected-original domain margin AND the anchor margin in
+        // complete exclusion; neither margin nor its parameter map is mutated.
+        let uncertainty = self.domain.original_uv_margin()?;
         let error = std::array::from_fn(|axis| {
             add(
                 Interval::point(self.margin[axis]),
@@ -354,20 +354,12 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let offset = rotate(jet.derivative, inward)
             .map(|value| mul(mul(Interval::point(width), normal), value));
         let point = std::array::from_fn(|axis| add(jet.position[axis], offset[axis]));
-        let inclusive = remaining_scratch_bytes
-            .checked_add(self.domain.retained_bytes())
-            .ok_or_else(|| {
-                GeometryError::new(
-                    GeometryErrorCode::ResourceLimit,
-                    "UV ribbon classifier byte count overflow",
-                )
-            })?
-            .min(MAX_SCRATCH_BYTES);
+        let classifier_bytes = remaining_scratch_bytes.min(MAX_SCRATCH_BYTES);
         if self
             .domain
             .classify_with_byte_limit(
                 uv_box(add_margin(point, self.margin)),
-                inclusive,
+                classifier_bytes,
                 work,
                 cancel,
             )
@@ -385,6 +377,36 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owning_boundary_cuts_keep_complete_original_pcurve_gauge() {
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, Logical, KnotSpec};
+        let source = Curve::BSpline(Box::new(BSplineCurve {
+            degree: 2,
+            points: [-2.0, -1.0, 2.0, 4.0].into_iter().map(|t| [t, 0.0, 0.0]).collect(),
+            weights: None, knots: vec![-2.0, 0.0, 4.0], multiplicities: vec![3, 1, 3],
+            form: CurveForm::Unspecified, closed: Logical::False,
+            self_intersect: Logical::False, knot_spec: KnotSpec::Unspecified,
+        }));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let chart = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &source, [-2.0, 4.0], MAX_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let cuts: Vec<_> = boundary_parameter_intervals(&chart, &mut work, &cancel)
+            .unwrap().collect();
+        assert_eq!(cuts, [[-2.0, 0.0], [0.0, 4.0]]);
+        // A used spatial collar can occupy [0,1]; that does not erase the
+        // selected PCurve's unused complement on either side of that gauge.
+        let boundary = crate::parametric::curve2d_piecewise_jet(
+            &chart, cuts[0], &mut work, &cancel,
+        ).unwrap().position;
+        assert!(boundary[0].lo <= -2.0 && boundary[0].hi >= 0.0);
+        assert_eq!(boundary_parameter_intervals(&chart, &mut GeometryWorkBudget::new(0), &cancel)
+            .err().unwrap().code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(boundary_parameter_intervals(&chart, &mut work, &AtomicBool::new(true))
+            .err().unwrap().code, GeometryErrorCode::Cancelled);
+    }
 
     #[test]
     fn owning_complement_secant_bound_retains_both_uv_errors() {

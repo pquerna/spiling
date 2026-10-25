@@ -7,7 +7,8 @@
 //! collar and conical source recipes; failure of this witness refuses the lane.
 
 use super::*;
-use monstertruck_modeling::BoundedCurve;
+use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::source_incidence::{native_coedge, native_face};
 
 type Box3 = [Interval; 3];
 const STACK_BYTES: usize = std::mem::size_of::<[([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1]>();
@@ -82,7 +83,7 @@ fn record_box(output: &mut Vec<Box3>, p: Box3) -> Result<(), GeometryError> {
 /// construct this receipt: error is consumed only after this function returns.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prove_source_wall_component(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     faces: &[usize],
     endpoints: [f64; 2],
     remaining_bytes: usize,
@@ -97,7 +98,7 @@ pub(crate) fn prove_source_wall_component(
         || faces
             .iter()
             .enumerate()
-            .any(|(i, &f)| f >= definition.faces.len() || faces[..i].contains(&f))
+            .any(|(i, &f)| f >= definition.face_ids().len() || faces[..i].contains(&f))
     {
         return Err(refusal(
             "source wall proof has no complete finite original component",
@@ -105,18 +106,14 @@ pub(crate) fn prove_source_wall_component(
     }
     let mut available = remaining_bytes
         .checked_sub(STACK_BYTES)
+        .and_then(|bytes| bytes.checked_sub(transport::EVALUATION_SCRATCH_BYTES))
         .ok_or_else(resource)?;
-    let originals = source.prepare_domains_if_missing(available, work, cancel)?;
-    available = available
-        .checked_sub(originals.as_ref().map_or(0, |x| x.retained_bytes()))
-        .ok_or_else(resource)?;
-    let source = source.borrowing_domains(originals.as_ref());
     let mut incidence = SourceEdgeIncidence::new(definition, available, work, cancel)?;
     incidence.prepare_vertices(available, work, cancel)?;
     available = available
         .checked_sub(incidence.owned_bytes())
         .ok_or_else(resource)?;
-    let mut constants = allocate(definition.faces.len(), None, &mut available)?;
+    let mut constants = allocate(definition.face_ids().len(), None, &mut available)?;
     let mut others = Vec::new();
     // Reserve the existing complete correction cap before native corner
     // plans are live. Nonwall cells use the same bounded storage allowance;
@@ -126,14 +123,14 @@ pub(crate) fn prove_source_wall_component(
         .checked_sub(other_capacity.saturating_mul(std::mem::size_of::<Box3>()))
         .and_then(|n| n.checked_sub(MAX_CORRECTION_BYTES))
         .ok_or_else(resource)?;
-    let mut cap_signs = allocate(definition.faces.len(), 0_i8, &mut available)?;
+    let mut cap_signs = allocate(definition.face_ids().len(), 0_i8, &mut available)?;
     let height = HeightFunctional {
         direction: [0.0, 0.0, 1.0].map(Interval::point),
         offset: Interval::point(0.0),
     };
     for (fi, slot) in constants.iter_mut().enumerate() {
         if !faces.contains(&fi) {
-            *slot = constant_material_face_height(definition, fi, height, work, cancel)?
+            *slot = constant_material_face_height(source, fi, height, work, cancel)?
                 .filter(|h| endpoints.contains(h));
         }
     }
@@ -188,7 +185,7 @@ pub(crate) fn prove_source_wall_component(
     // Complete raw carrier/trim covers remain a conservative over-cover where
     // G replaces them. No raw coefficient root is used until ALL replacements
     // have been separately excluded from the identical calibration fiber.
-    for (fi, _) in definition.solid.face_iter().enumerate() {
+    for fi in 0..definition.face_ids().len() {
         if !faces.contains(&fi) && constants[fi].is_none() {
             continue;
         }
@@ -248,40 +245,45 @@ pub(crate) fn prove_source_wall_component(
         for use_ in [uses.first, second] {
             let domain = source.face_domain(use_.face, available, work, cancel)?;
             let scratch = available
-                .checked_sub(domain.owned_bytes())
-                .and_then(|bytes| bytes.checked_sub(UV_EMBEDDING_STACK_BYTES))
+                .checked_sub(UV_EMBEDDING_STACK_BYTES)
                 .and_then(|bytes| bytes.checked_sub(std::mem::size_of::<OwnedUvRibbon<'_, '_>>()))
                 .ok_or_else(resource)?;
-            let classifier_bytes = scratch
-                .checked_add(domain.retained_bytes())
-                .ok_or_else(resource)?;
             let collar = OriginalCollar::for_enclosure_with_byte_limit(
-                &domain,
+                domain,
                 use_,
-                classifier_bytes,
+                scratch,
                 work,
                 cancel,
             )?
             .ok_or_else(|| refusal("source wall constructor has no original collar geometry"))?;
-            let face = domain.native().face();
-            let edge = &face.absolute_boundaries()[use_.wire][use_.index];
+            let (edge_use, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
+            let coedge = domain.coedges().get(use_.coedge)
+                .ok_or_else(|| refusal("source wall lost its original coedge binding"))?;
+            if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
+                return Err(refusal("source wall belongs to another original native use"));
+            }
             let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
             let binding = correspondence
                 .binding()
                 .ok_or_else(|| refusal("actual source collar lost its original native binding"))?;
-            if binding.edge != edge.id() || binding.owner != [use_.face, use_.wire, use_.index] {
+            if binding.edge != edge_use.edge
+                || binding.owner != [use_.face, use_.wire, use_.index]
+                || binding.endpoints != edge.vertices
+                || binding.native_interval != [edge.interval.min(), edge.interval.max()]
+                || correspondence.spatial_range() != collar.range
+            {
                 return Err(refusal(
                     "actual source collar belongs to a different original native use",
                 ));
             }
             let cuts =
-                original_coedge_parameter_cuts([(&domain, use_.coedge); 2], scratch, work, cancel)?;
+                original_coedge_parameter_cuts([(domain, use_.coedge); 2], scratch, work, cancel)?;
             let scratch = scratch
                 .checked_sub(cuts.capacity().saturating_mul(std::mem::size_of::<f64>()))
                 .ok_or_else(resource)?;
-            let central = links.central_native_range(
-                edge.id(),
-                correspondence.native_range(),
+            let central = links.central_spatial_range(
+                edge_use.edge,
+                correspondence.spatial_range(),
                 [use_.face, use_.wire, use_.index],
             )?;
             let embedding = collar
@@ -289,57 +291,71 @@ pub(crate) fn prove_source_wall_component(
                 .ok_or_else(|| {
                     refusal("source wall constructor has no complete boundary-owned UV ribbon")
                 })?;
-            edge.with_curve(|curve| -> Result<(), GeometryError> {
-                let native = curve.range_tuple();
-                if correspondence.native_range() != [native.0, native.1] {
-                    return Err(refusal("opposed source collar has a different original native parameter range"));
-                }
-                let prepared = definition.prepare_boundary_curve(edge.id(), curve, native, scratch, work, cancel)?;
-                for span in prepared.parameter_intervals() {
-                    let lo = span.0.max(central[0]);
-                    let hi = span.1.min(central[1]);
-                    if lo >= hi { continue; }
-                    let first = cuts.partition_point(|cut| *cut <= lo);
-                    let last = cuts.partition_point(|cut| *cut < hi).max(first);
-                    let mut start = lo;
-                    for end in cuts[first..last].iter().copied().chain(std::iter::once(hi)) {
-                    let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-                    stack[0] = ([start, end], 0);
-                    start = end;
-                    let mut pending = 1;
-                    while pending != 0 {
-                        pending -= 1;
-                        let (range, depth) = stack[pending];
-                        work.charge(1, cancel)?;
-                        let jet = prepared.jet((range[0], range[1]), work, cancel)?;
-                        let cell = collar.geometry_cell(&embedding, range, &jet, allowance, work, cancel)?;
-                        let acceptable = cell.as_ref().is_some_and(|c| {
-                            if faces.contains(&use_.face) { inward(c.position, c.outward, center) }
-                            else if constants[use_.face].is_some() {
-                                if cap_signs[use_.face] > 0 { c.outward[2].lo > 0.0 } else { c.outward[2].hi < 0.0 }
-                            } else { wall.is_some_and(|w| disjoint(c.position, w)) }
-                        });
-                        if acceptable {
-                            let cell = cell.expect("acceptable actual collar retains its geometry");
-                            links.record(&cell, work, cancel)?;
-                            if faces.contains(&use_.face) { hull(&mut wall, cell.position); }
-                            else if constants[use_.face].is_none() {
-                                record_box(&mut others, cell.position)?;
+            let provider_query_bytes = scratch.checked_add(transport::EVALUATION_SCRATCH_BYTES).ok_or_else(resource)?;
+            domain.with_original_spatial_curve(
+                use_.coedge, provider_query_bytes, work, cancel,
+                |prepared, work, cancel| {
+                    let spatial_range = correspondence.spatial_range();
+                    // The complete selected source law must be C0 before its
+                    // one-sided closed jets can support a wall topology proof.
+                    if !crate::parametric::curve_parameter_span_continuous(
+                        prepared, spatial_range, work, cancel,
+                    )? {
+                        return Err(refusal("source wall spatial provider has no whole-branch continuity proof"));
+                    }
+                    crate::parametric::curve_enclosure(
+                        prepared, (spatial_range[0], spatial_range[1]), work, cancel,
+                    )?;
+                    for span in crate::parametric::curve_parameter_spans(
+                        prepared, spatial_range, work, cancel,
+                    )? {
+                        let lo = span[0].max(central[0]);
+                        let hi = span[1].min(central[1]);
+                        if lo >= hi { continue; }
+                        let first = cuts.partition_point(|cut| *cut <= lo);
+                        let last = cuts.partition_point(|cut| *cut < hi).max(first);
+                        let mut start = lo;
+                        for end in cuts[first..last].iter().copied().chain(std::iter::once(hi)) {
+                            let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
+                            stack[0] = ([start, end], 0);
+                            start = end;
+                            let mut pending = 1;
+                            while pending != 0 {
+                                pending -= 1;
+                                let (range, depth) = stack[pending];
+                                work.charge(1, cancel)?;
+                                let jet = crate::parametric::curve_enclosure(
+                                    prepared, (range[0], range[1]), work, cancel,
+                                )?;
+                                let cell = collar.geometry_cell(&embedding, range, &jet, allowance, work, cancel)?;
+                                let acceptable = cell.as_ref().is_some_and(|c| {
+                                    if faces.contains(&use_.face) { inward(c.position, c.outward, center) }
+                                    else if constants[use_.face].is_some() {
+                                        if cap_signs[use_.face] > 0 { c.outward[2].lo > 0.0 } else { c.outward[2].hi < 0.0 }
+                                    } else { wall.is_some_and(|w| disjoint(c.position, w)) }
+                                });
+                                if acceptable {
+                                    let cell = cell.expect("acceptable actual collar retains its geometry");
+                                    links.record(&cell, work, cancel)?;
+                                    if faces.contains(&use_.face) { hull(&mut wall, cell.position); }
+                                    else if constants[use_.face].is_none() {
+                                        record_box(&mut others, cell.position)?;
+                                    }
+                                    continue;
+                                }
+                                let mid = range[0] * 0.5 + range[1] * 0.5;
+                                if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
+                                    return Err(refusal("actual source collar lacks complete wall/endpoint local geometry"));
+                                }
+                                stack[pending] = ([range[0], mid], depth + 1);
+                                stack[pending + 1] = ([mid, range[1]], depth + 1);
+                                pending += 2;
                             }
-                            continue;
                         }
-                        let mid = range[0] * 0.5 + range[1] * 0.5;
-                        if depth >= MAX_DEPTH || mid <= range[0] || mid >= range[1] {
-                            return Err(refusal("actual source collar lacks complete wall/endpoint local geometry"));
-                        }
-                        stack[pending] = ([range[0], mid], depth + 1);
-                        stack[pending + 1] = ([mid, range[1]], depth + 1);
-                        pending += 2;
                     }
-                    }
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                },
+            )?;
         }
     }
     let wall = wall.ok_or_else(|| refusal("source wall has no actual complete geometry cover"))?;
@@ -355,7 +371,7 @@ pub(crate) fn prove_source_wall_component(
             ));
         }
     }
-    for (fi, _) in definition.solid.face_iter().enumerate() {
+    for fi in 0..definition.face_ids().len() {
         if faces.contains(&fi) || constants[fi].is_some() {
             continue;
         }
@@ -375,11 +391,7 @@ pub(crate) fn prove_source_wall_component(
         if !floor {
             continue;
         }
-        let face = definition
-            .solid
-            .face_iter()
-            .nth(fi)
-            .ok_or_else(|| refusal("source floor face is absent"))?;
+        let (_, face) = native_face(definition, fi)?;
         let incident = incidence.values().any(|u| {
             let Some(b) = u.second else {
                 return false;
@@ -390,14 +402,18 @@ pub(crate) fn prove_source_wall_component(
         if !incident {
             continue;
         }
-        if face.absolute_boundaries().len() != 1 {
+        if face.loops.len() != 1 {
             return Err(refusal(
                 "actual material floor has extra original boundary exits",
             ));
         }
-        for edge in &face.absolute_boundaries()[0] {
+        let loop_ = definition.brep().loop_(face.loops[0]).map_err(|error| {
+            GeometryError::new(GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                format!("source floor original loop is unavailable: {error}"))
+        })?;
+        for edge in &loop_.edges {
             let uses = incidence
-                .get(edge.id())
+                .get(edge.edge)
                 .ok_or_else(|| refusal("actual floor boundary lost its original use"))?;
             let second = uses
                 .second
@@ -463,7 +479,7 @@ pub(crate) fn prove_source_wall_component(
 }
 
 fn visit_raw(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     fi: usize,
     remaining: usize,
     work: &mut GeometryWorkBudget,
@@ -471,10 +487,11 @@ fn visit_raw(
     visitor: &mut impl FnMut(Box3, Box3) -> Result<bool, GeometryError>,
 ) -> Result<(), GeometryError> {
     let domain = source.face_domain(fi, remaining, work, cancel)?;
-    let face = domain.native().face();
-    face.with_surface(|surface| {
-        for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
-            let smooth = surface_parameter_span_smooth(surface, span, work, cancel)?;
+    let surface = domain.surface_operand();
+    let orientation = domain.orientation();
+    {
+        for span in surface_parameter_boxes(&surface, domain.uv_domain(), work, cancel)? {
+            let smooth = surface_parameter_span_smooth(&surface, span, work, cancel)?;
             let mut stack = [([[0.0; 2]; 2], 0_u8); MAX_DEPTH as usize + 1];
             stack[0] = (span, 0);
             let mut pending = 1;
@@ -486,11 +503,11 @@ fn visit_raw(
                     continue;
                 }
                 let jet = if smooth {
-                    surface_enclosure(surface, uv, work, cancel)?
+                    surface_enclosure(&surface, uv, work, cancel)?
                 } else {
-                    crate::parametric::surface_piecewise_enclosure(surface, uv, work, cancel)?
+                    crate::parametric::surface_piecewise_enclosure(&surface, uv, work, cancel)?
                 };
-                if visitor(jet.position, normal(&jet, face.orientation()))? {
+                if visitor(jet.position, normal(&jet, orientation))? {
                     continue;
                 }
                 if depth >= MAX_DEPTH {
@@ -506,7 +523,7 @@ fn visit_raw(
             }
         }
         Ok(())
-    })
+    }
 }
 
 #[cfg(test)]

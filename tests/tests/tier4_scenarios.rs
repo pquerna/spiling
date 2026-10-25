@@ -11,7 +11,6 @@ use spiling_contracts::geometry::*;
 use spiling_geometry::*;
 use spiling_e2e_tests::fixtures::*;
 use spiling_e2e_tests::helpers::*;
-use spiling_e2e_tests::parametric::*;
 
 // =========================================================================
 // Scenario 1: Stock Selection & Facing Setup

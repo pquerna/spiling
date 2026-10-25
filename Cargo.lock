@@ -3166,7 +3166,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+source = "git+https://github.com/pquerna/solidcore?rev=1fef444cbaad61c0f414fe126314c079175da046#1fef444cbaad61c0f414fe126314c079175da046"
 
 [[package]]
 name = "objc2"
@@ -4815,7 +4815,7 @@ dependencies = [
 [[package]]
 name = "solidcore"
 version = "0.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+source = "git+https://github.com/pquerna/solidcore?rev=1fef444cbaad61c0f414fe126314c079175da046#1fef444cbaad61c0f414fe126314c079175da046"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -4823,7 +4823,7 @@ dependencies = [
 [[package]]
 name = "solidcore-mesh"
 version = "0.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?rev=ec0dd723fb394acbdd3dfe05a4cc8182910dc403#ec0dd723fb394acbdd3dfe05a4cc8182910dc403"
+source = "git+https://github.com/pquerna/solidcore?rev=1fef444cbaad61c0f414fe126314c079175da046#1fef444cbaad61c0f414fe126314c079175da046"
 dependencies = [
  "nurbs-grid-mesh",
  "solidcore",

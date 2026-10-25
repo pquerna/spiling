@@ -43,11 +43,11 @@ pub(super) fn prepare(
         ));
     }
     let mut work = GeometryWorkBudget::new(MAX_CONTACT_WORK);
-    let source = spiling_geometry::prepare_geometry_source(
+    let source = spiling_geometry::prepare_solid(
         definition,
         spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
-        cancel,
         &mut work,
+        cancel,
     )?;
     // Immutable domains and vertex plans are shared; each query's scratch must
     // fit alongside their retained capacities within the same geometry pool.

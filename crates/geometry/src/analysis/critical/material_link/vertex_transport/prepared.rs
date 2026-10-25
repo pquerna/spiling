@@ -23,7 +23,7 @@ fn resource(message: &'static str) -> GeometryError {
     GeometryError::new(GeometryErrorCode::ResourceLimit, message)
 }
 
-fn slot(vertex: VertexId<Point3>, count: usize) -> usize {
+fn slot(vertex: VertexId, count: usize) -> usize {
     let mut hash = DefaultHasher::new();
     vertex.hash(&mut hash);
     (hash.finish() % count as u64) as usize
@@ -31,7 +31,7 @@ fn slot(vertex: VertexId<Point3>, count: usize) -> usize {
 
 impl<'d> PreparedSourceVertexPlans<'d> {
     pub(crate) fn prepare(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -48,10 +48,7 @@ impl<'d> PreparedSourceVertexPlans<'d> {
             .ok_or_else(|| {
                 resource("prepared source vertex owner exceeds retained-byte allowance")
             })?;
-        if source
-            .definition()
-            .material_transport_is_proved_zero(work, cancel)?
-        {
+        if source.material_transport_is_proved_zero(work, cancel)? {
             return Ok(result);
         }
         let mut incidence = SourceEdgeIncidence::new(source.definition(), available, work, cancel)?;
@@ -177,6 +174,26 @@ impl<'d> PreparedSourceVertexPlans<'d> {
         self.retained_bytes
     }
 
+    /// Stream actual selected G position bounds, not the source/G comparison
+    /// hull. The retained source owner is checked before invoking the visitor;
+    /// this grants position coverage only, not a new material qualification.
+    pub(crate) fn visit_position_supports(
+        &self,
+        definition: &Definition,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+        visitor: &mut dyn FnMut([Interval; 3]) -> Result<(), GeometryError>,
+    ) -> Result<(), GeometryError> {
+        self.validate_source(definition, work, cancel)?;
+        for plan in &self.plans {
+            work.charge(1, cancel)?;
+            plan.visit_position_supports(work, cancel, &mut |realized, _comparison| {
+                visitor(realized)
+            })?;
+        }
+        Ok(())
+    }
+
     pub(in crate::analysis::critical::material_link) fn validate_source(
         &self,
         definition: &Definition,
@@ -195,7 +212,7 @@ impl<'d> PreparedSourceVertexPlans<'d> {
     pub(in crate::analysis::critical::material_link) fn plan(
         &self,
         definition: &Definition,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<&SourceVertexTransportPlan<'d>, GeometryError> {
@@ -220,7 +237,7 @@ impl<'d> PreparedSourceVertexPlans<'d> {
     }
 }
 
-/// A retained plan has already been charged at its source owner; a standalone
+/// A retained plan has already been charged at its source owner; a query-local
 /// selection must instead reserve its own complete storage in query scratch.
 pub(in crate::analysis::critical::material_link) enum SourceVertexPlan<'s, 'd> {
     Retained(&'s SourceVertexTransportPlan<'d>),
@@ -229,9 +246,9 @@ pub(in crate::analysis::critical::material_link) enum SourceVertexPlan<'s, 'd> {
 
 impl<'s, 'd> SourceVertexPlan<'s, 'd> {
     pub(in crate::analysis::critical::material_link) fn prepare(
-        source: OriginalTrimSource<'s, 'd>,
+        source: MaterialSourceView<'s, 'd>,
         incidence: &SourceEdgeIncidence,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,

@@ -13,9 +13,9 @@ use crate::analysis::critical::material_link::{BoundaryCell, BoundaryVisit};
 use crate::analysis::critical::ray_index::RayEdgeIndex;
 use crate::analysis::critical::{ClosedRadialMaterialProduct, RadialRegionKind};
 use crate::analysis::placed::ActualMaterialCoordinates;
-use crate::section::OriginalTrimSource;
+use crate::analysis::material_source::MaterialSourceView;
 use crate::parametric::{
-    SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_scratch_bytes,
+    SurfaceEvaluator, SurfaceFunctional, SurfaceFunctionalEnclosure, surface_functional_scratch_bytes,
     surface_functional_enclosures,
 };
 
@@ -282,7 +282,7 @@ impl RadialCandidate<'_> {
 /// A centered mean-value enclosure is valid across admitted continuous C0
 /// spans; it grants neither smoothness nor a substitute topology certificate.
 fn original_face_support(
-    surface: &monstertruck_modeling::Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     coordinates: &ActualMaterialCoordinates<'_>,
     direction: [Interval; 2],
@@ -320,8 +320,12 @@ fn original_face_support(
     Ok(Interval { lo, hi })
 }
 
+/// Complete filled-solid AND boundary distance in both directions. The closed
+/// source atlas supplies coverage, role and degree-one authority; the visitor
+/// independently pays for every role's same-azimuth displacement using native
+/// coefficient images. Neither topology nor polygon bounds supply this metric.
 pub(in crate::analysis) fn certify_closed_radial_slab(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     request: &super::super::SlabRequest,
     coordinates: &ActualMaterialCoordinates<'_>,
     actual_native_loops: &[SectionLoopMm],
@@ -457,7 +461,7 @@ pub(in crate::analysis) fn certify_closed_radial_slab(
                     [point[0], point[1]], inward, target, work, cancel,
                     &mut |direction, coarse, work, cancel| {
                         original_face_support(
-                            surface, uv, coordinates, direction, coarse, work, cancel,
+                            &surface, uv, coordinates, direction, coarse, work, cancel,
                         )
                     },
                 )?
@@ -506,14 +510,12 @@ mod tests {
 
     #[test]
     fn original_facet_support_preserves_correlated_native_images_between_sample_points() {
-        use monstertruck_modeling::base::*;
+        use solidcore::nurbs::knots::Side;
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
-            ),
-            &cancel,
-        ).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+        ),
+        &cancel,).unwrap();
         let frame = crate::PlaneFrameMm {
             origin_mm: [0.0; 3],
             x_axis: [1.0, 0.0, 0.0],
@@ -525,14 +527,38 @@ mod tests {
         let coordinates = ActualMaterialCoordinates::source(
             &definition, &frame, &rows, [0.6, 1.2], 0.9, &mut work, &cancel,
         ).unwrap();
-        let face = definition.solid.face_iter().next().unwrap();
-        face.with_surface(|surface| {
-            let uv = [[-0.8, -0.6], [-1.2, -0.6]];
+        let kernel = solidcore::Kernel::default();
+        assert!(!definition.face_ids().is_empty());
+        for &face_id in definition.face_ids() {
+            let face = definition.brep().face(face_id).unwrap();
+            let surface = definition.face_surface(face_id).unwrap();
+            // Query the imported face's actual chart, not the legacy exporter's
+            // first-face ordering or an unrelated hand-picked parameter box.
+            let min = face.uv_domain.min();
+            let max = face.uv_domain.max();
+            let uv = [[min.x, max.x], [min.y, max.y]].map(|range| {
+                let width = range[1] - range[0];
+                [range[0] + 0.2 * width, range[0] + 0.8 * width]
+            });
+            assert!(uv.iter().all(|range| range[0].is_finite()
+                && range[1].is_finite() && range[0] < range[1]));
+            // Sample the native scalar coefficient evaluator independently of
+            // the interval functional. A STEP analytic chart has no NURBS
+            // substitution; a stored NURBS chart uses its literal coefficients.
+            let nurbs = crate::parametric::native_surface_nurbs(surface).unwrap();
+            let sample = |u, v| {
+                if let Some(nurbs) = nurbs {
+                    nurbs.eval(u, v, Side::Left, Side::Left).unwrap()
+                } else {
+                    surface.evaluate_point(&kernel, solidcore::Vec2::new(u, v)).unwrap()
+                }
+            };
             let jet = crate::parametric::surface_piecewise_enclosure(
                 surface, uv, &mut work, &cancel,
             ).unwrap();
             let point = coordinates.position_relative_to_center_family(jet.position).unwrap();
-            let center = surface.subs(-0.7, -0.9);
+            let center_uv = uv.map(|range| range[0] * 0.5 + range[1] * 0.5);
+            let center = sample(center_uv[0], center_uv[1]);
             let center = coordinates.position_relative_to_center_family(
                 [center.x, center.y, center.z].map(Interval::point),
             ).unwrap();
@@ -545,7 +571,7 @@ mod tests {
                 for j in 0..=6 {
                     let u = uv[0][0] + (uv[0][1] - uv[0][0]) * f64::from(i) / 8.0;
                     let v = uv[1][0] + (uv[1][1] - uv[1][0]) * f64::from(j) / 6.0;
-                    let native = surface.subs(u, v);
+                    let native = sample(u, v);
                     let native = coordinates.position_relative_to_center_family(
                         [native.x, native.y, native.z].map(Interval::point),
                     ).unwrap();
@@ -554,7 +580,7 @@ mod tests {
                         "original native facet image escaped its whole-cell enclosure");
                 }
             }
-        });
+        }
     }
 
     #[test]

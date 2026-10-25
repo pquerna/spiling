@@ -2,2475 +2,415 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Error-enclosed arithmetic and native bounded parameter adapters. Every basic
-//! IEEE-754 operation is padded by one adjacent representable number. Inputs are
-//! exact binary64 coefficients; parameter/extraction/transform errors must be
-//! represented in their intervals rather than hidden in a sampled epsilon.
+//! Shared immutable native coefficient bounds. Parameters are the original
+//! natural/NURBS chart, never implicit STEP angles, normalized edge fractions,
+//! face-use orientation or a guessed UV correspondence. Spatial unit conversion
+//! belongs to an explicit prepared curve view, not its parameter derivatives.
+
+pub mod interval;
+pub mod nurbs_eval;
+pub mod analytic_eval;
+pub mod curve_prepared;
+pub mod plane_roots;
+pub mod coplane;
+mod green;
+mod continuity;
+mod source_eval;
+pub(crate) use source_eval::*;
+#[cfg(test)]
+mod tests;
+
+pub use interval::*;
+pub use nurbs_eval::{SurfaceEnclosure, evaluate_nurbs_surface_jet, evaluate_bspline_surface_jet};
+pub use analytic_eval::{evaluate_analytic_surface_jet, evaluate_analytic_normal_enclosure};
+pub use curve_prepared::{PreparedValidatedCurve, CurveEnclosure, CurveThirdEnclosure,
+    ValidatedCurvePoint, ValidatedScalarCurveJet, ChartCurveEnclosure,
+    curve_on_surface_enclosure, curve_on_surface_span_smooth};
+pub use plane_roots::{PreparedFacePlaneRoots, FacePlaneRelation, FacePlaneTrimRoot,
+    BoundaryCoedgeRoots, FacePlaneCell, PreparedBoundaryBinding};
+pub use coplane::{CoplaneClassification, classify_face_coplane,
+    COPLANE_ANGULAR_TOLERANCE};
 
 use crate::{GeometryError, GeometryWorkBudget, PlaneFrameMm, check_cancel};
-use monstertruck_modeling::{Curve, ParametricCurve, Surface};
-use spiling_contracts::geometry::{
-    GeometryErrorCode, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
-};
+use solidcore::{surface::surface::Surface, curve::curve::Curve};
+use spiling_contracts::geometry::GeometryErrorCode;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) fn down(value: f64) -> f64 {
-    if value.is_nan() || value == f64::NEG_INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return -f64::from_bits(1);
-    }
-    f64::from_bits(if value > 0.0 {
-        value.to_bits() - 1
-    } else {
-        value.to_bits() + 1
-    })
-}
-pub(crate) fn up(value: f64) -> f64 {
-    if value.is_nan() || value == f64::INFINITY {
-        return value;
-    }
-    if value == 0.0 {
-        return f64::from_bits(1);
-    }
-    f64::from_bits(if value > 0.0 {
-        value.to_bits() + 1
-    } else {
-        value.to_bits() - 1
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Interval {
-    pub lo: f64,
-    pub hi: f64,
-}
-impl Interval {
-    pub(crate) fn new(lo: f64, hi: f64) -> Result<Self, GeometryError> {
-        if !lo.is_finite() || !hi.is_finite() || lo > hi {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "invalid finite parameter interval",
-            ));
-        }
-        Ok(Self { lo, hi })
-    }
-    pub(crate) fn point(value: f64) -> Self {
-        Self {
-            lo: value,
-            hi: value,
-        }
-    }
-    pub(crate) fn hull(self, other: Self) -> Self {
-        Self {
-            lo: self.lo.min(other.lo),
-            hi: self.hi.max(other.hi),
-        }
-    }
-    pub(crate) fn add(self, other: Self) -> Self {
-        if self.lo == 0.0 && self.hi == 0.0 {
-            return other;
-        }
-        if other.lo == 0.0 && other.hi == 0.0 {
-            return self;
-        }
-        if self.lo == self.hi && other.lo == other.hi && self.lo == -other.lo {
-            return Self::point(0.0);
-        }
-        if self.lo == self.hi && other.lo == other.hi {
-            let sum = self.lo + other.lo;
-            if sum.is_finite() {
-                // Error-free TwoSum uses only addition/subtraction. Gradual
-                // underflow cannot hide a residual below the binary64 input
-                // lattice, unlike an unguarded TwoProduct/FMA-zero test.
-                let virtual_other = sum - self.lo;
-                let residual = (self.lo - (sum - virtual_other)) + (other.lo - virtual_other);
-                if residual == 0.0 {
-                    return Self::point(sum);
-                }
-            }
-        }
-        Self {
-            lo: down(self.lo + other.lo),
-            hi: up(self.hi + other.hi),
-        }
-    }
-    pub(crate) fn neg(self) -> Self {
-        Self {
-            lo: -self.hi,
-            hi: -self.lo,
-        }
-    }
-    pub(crate) fn sub(self, other: Self) -> Self {
-        self.add(other.neg())
-    }
-    pub(crate) fn mul(self, other: Self) -> Self {
-        if (self.lo == 0.0 && self.hi == 0.0) || (other.lo == 0.0 && other.hi == 0.0) {
-            return Self::point(0.0);
-        }
-        if self.lo == 1.0 && self.hi == 1.0 {
-            return other;
-        }
-        if other.lo == 1.0 && other.hi == 1.0 {
-            return self;
-        }
-        if self.lo == -1.0 && self.hi == -1.0 {
-            return other.neg();
-        }
-        if other.lo == -1.0 && other.hi == -1.0 {
-            return self.neg();
-        }
-        let products = [
-            self.lo * other.lo,
-            self.lo * other.hi,
-            self.hi * other.lo,
-            self.hi * other.hi,
-        ];
-        if products.iter().any(|v| v.is_nan()) {
-            return Self {
-                lo: f64::NEG_INFINITY,
-                hi: f64::INFINITY,
-            };
-        }
-        Self {
-            lo: down(products.iter().copied().fold(f64::INFINITY, f64::min)),
-            hi: up(products.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
-        }
-    }
-    pub(crate) fn div(self, other: Self) -> Result<Self, GeometryError> {
-        if other.lo <= 0.0 && other.hi >= 0.0 {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "whole-interval rational denominator cannot be separated from zero",
-            ));
-        }
-        if other.lo == 1.0 && other.hi == 1.0 {
-            return Ok(self);
-        }
-        if other.lo == -1.0 && other.hi == -1.0 {
-            return Ok(self.neg());
-        }
-        if self.lo == 0.0 && self.hi == 0.0 {
-            return Ok(Self::point(0.0));
-        }
-        if self.lo == self.hi && other.lo == other.hi && self.lo == other.lo {
-            return Ok(Self::point(1.0));
-        }
-        Ok(self.mul(Self {
-            lo: down(1.0 / other.hi),
-            hi: up(1.0 / other.lo),
-        }))
-    }
-    pub(crate) fn sqrt(self) -> Result<Self, GeometryError> {
-        if self.lo < 0.0 || !self.hi.is_finite() {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "invalid square-root enclosure",
-            ));
-        }
-        if self.lo == self.hi && (self.lo == 0.0 || self.lo == 1.0) {
-            return Ok(self);
-        }
-        Ok(Self {
-            lo: down(self.lo.sqrt()).max(0.0),
-            hi: up(self.hi.sqrt()),
-        })
-    }
-    pub(crate) fn square(self) -> Self {
-        if self.lo == self.hi {
-            if self.lo == 0.0 {
-                return Self::point(0.0);
-            }
-            if self.lo == 1.0 || self.lo == -1.0 {
-                return Self::point(1.0);
-            }
-        }
-        if self.lo <= 0.0 && self.hi >= 0.0 {
-            Self {
-                lo: 0.0,
-                hi: up(self.abs_upper() * self.abs_upper()),
-            }
-        } else {
-            Self {
-                lo: down((self.lo * self.lo).min(self.hi * self.hi)).max(0.0),
-                hi: up((self.lo * self.lo).max(self.hi * self.hi)),
-            }
-        }
-    }
-    pub(crate) fn width(self) -> f64 {
-        up(self.hi - self.lo)
-    }
-    pub(crate) fn mid(self) -> f64 {
-        self.lo * 0.5 + self.hi * 0.5
-    }
-    pub(crate) fn abs_upper(self) -> f64 {
-        self.lo.abs().max(self.hi.abs())
-    }
-    pub(crate) fn contains_zero(self) -> bool {
-        self.lo <= 0.0 && self.hi >= 0.0
-    }
-}
-
 pub(crate) fn dot_point(point: [f64; 3], direction: [f64; 3]) -> Interval {
-    (0..3).fold(Interval::point(0.0), |sum, axis| {
-        sum.add(Interval::point(point[axis]).mul(Interval::point(direction[axis])))
-    })
+    (0..3).fold(Interval::point(0.0), |sum, axis| sum.add(Interval::point(point[axis]).mul(Interval::point(direction[axis]))))
 }
-
-/// Original continuous-source image and one-sided first derivatives.
-/// This carries neither Hessians nor a C1/regularity certificate.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SurfaceFirstEnclosure {
-    pub position: [Interval; 3],
-    pub du: [Interval; 3],
-    pub dv: [Interval; 3],
-}
-
+pub(crate) struct SurfaceFirstEnclosure { pub position: [Interval; 3], pub du: [Interval; 3], pub dv: [Interval; 3] }
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SurfaceEnclosure {
-    pub position: [Interval; 3],
-    pub du: [Interval; 3],
-    pub dv: [Interval; 3],
-    pub duu: [Interval; 3],
-    pub duv: [Interval; 3],
-    pub dvv: [Interval; 3],
-}
-
+pub(crate) struct SurfaceFunctional { pub direction: [Interval; 3], pub origin: [Interval; 3], pub offset: Interval }
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SurfaceFunctional {
-    pub direction: [Interval; 3],
-    pub origin: [Interval; 3],
-    pub offset: Interval,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SurfaceFunctionalEnclosure {
-    pub position: Interval,
-    pub du: Interval,
-    pub dv: Interval,
-}
-
+pub(crate) struct SurfaceFunctionalEnclosure { pub position: Interval, pub du: Interval, pub dv: Interval }
 pub(crate) const fn surface_functional_scratch_bytes<const N: usize>() -> usize {
-    std::mem::size_of::<[SurfaceFunctional; N]>()
-        + std::mem::size_of::<[monstertruck_modeling::ValidatedSurfaceFunctional; N]>()
-        + std::mem::size_of::<[monstertruck_modeling::ValidatedSurfaceFunctionalJet; N]>()
-        + std::mem::size_of::<[SurfaceFunctionalEnclosure; N]>()
+    nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES + continuity::SCRATCH_BYTES + std::mem::size_of::<[SurfaceFunctional; N]>()
+        + 3 * std::mem::size_of::<[SurfaceFunctionalEnclosure; N]>()
 }
+pub(crate) const SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES: usize = surface_functional_scratch_bytes::<3>()
+    + std::mem::size_of::<SurfaceFirstEnclosure>();
 
-pub(crate) const SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES: usize =
-    surface_functional_scratch_bytes::<3>()
-        + std::mem::size_of::<SurfaceFirstEnclosure>();
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CurveEnclosure {
-    pub position: [Interval; 3],
-    pub derivative: [Interval; 3],
-    pub second_derivative: [Interval; 3],
+/// Full piecewise second-jet bounds; this grants no global differentiability.
+fn native_surface_piecewise_enclosure(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<SurfaceEnclosure, GeometryError> {
+    analytic_eval::surface_order(surface, uv, 2, work, cancel)
 }
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ChartCurveEnclosure {
-    pub position: [Interval; 2],
-    pub derivative: [Interval; 2],
-    pub second_derivative: [Interval; 2],
+/// A Hessian consumer requires C1 over the closed box, not a selected knot side.
+fn native_surface_enclosure(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<SurfaceEnclosure, GeometryError> {
+    if !surface_parameter_span_smooth(surface, uv, work, cancel)? {
+        return Err(GeometryError::new(GeometryErrorCode::AnalysisIndeterminate,
+            "native surface closed query lacks C1 smoothness authority"));
+    }
+    surface_piecewise_enclosure(surface, uv, work, cancel)
 }
-
-pub(crate) struct CurveIntervalEnclosure {
-    pub start_mm: [f64; 3],
-    pub end_mm: [f64; 3],
-    pub chord_error_mm: f64,
-    pub plane_error_mm: f64,
+fn native_surface_piecewise_first_enclosure(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<SurfaceFirstEnclosure, GeometryError> {
+    let jet = analytic_eval::surface_order(surface, uv, 1, work, cancel)?;
+    if !surface_coefficients_continuous(surface, uv, work, cancel)? {
+        return Err(GeometryError::new(GeometryErrorCode::AnalysisIndeterminate,
+            "native surface query crosses an unproved discontinuous knot"));
+    }
+    Ok(SurfaceFirstEnclosure { position: jet.position, du: jet.du, dv: jet.dv })
 }
-
-pub(crate) fn native_error(error: monstertruck_modeling::ValidatedGeometryError) -> GeometryError {
-    use monstertruck_modeling::ValidatedGeometryError as E;
-    let code = match error {
-        E::Cancelled => GeometryErrorCode::Cancelled,
-        E::ResourceLimit => GeometryErrorCode::ResourceLimit,
-        E::InvalidInput | E::ParameterOutOfRange => GeometryErrorCode::InvalidGeometry,
-        E::Unsupported => GeometryErrorCode::UnsupportedOperation,
-        E::DenominatorContainsZero | E::ConditioningFailure => {
-            GeometryErrorCode::ConditioningFailure
+fn native_surface_functional_enclosures<const N: usize>(surface: &Surface, uv: [[f64; 2]; 2],
+    functionals: &[SurfaceFunctional; N], work: &mut GeometryWorkBudget, cancel: &AtomicBool)
+    -> Result<[SurfaceFunctionalEnclosure; N], GeometryError> {
+    work.charge(N as u64, cancel)?;
+    for f in functionals { for v in f.direction.into_iter().chain(f.origin).chain([f.offset]) { Interval::new(v.lo, v.hi)?; } }
+    validate_surface_partition(surface, uv, work, cancel)?;
+    if !surface_coefficients_continuous(surface, uv, work, cancel)? {
+        return Err(GeometryError::new(GeometryErrorCode::AnalysisIndeterminate, "surface functional crosses an unproved source discontinuity"));
+    }
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
+        return nurbs_eval::evaluate_nurbs_surface_functionals(n, uv, functionals, work, cancel);
+    }
+    let mut source = surface;
+    for _ in 0..32 {
+        match source.kind() {
+            solidcore::surface::surface::p2::SurfaceKind::CurveBounded(s) => source = s.basis(),
+            solidcore::surface::surface::p2::SurfaceKind::Step(s) => source = s.surface()
+                .ok_or_else(|| nurbs_eval::conditioning("empty native STEP functional surface"))?,
+            solidcore::surface::surface::p2::SurfaceKind::Plane(p) => {
+                let jet = surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
+                let origin = p.position().origin();
+                let origin = [origin.x, origin.y, origin.z].map(Interval::point);
+                let result = functionals.map(|f| {
+                    let project = |row: [Interval; 3]| (0..3).fold(Interval::point(0.0), |s, i| s.add(f.direction[i].mul(row[i])));
+                    let du = project(jet.du); let dv = project(jet.dv);
+                    let constant = project(std::array::from_fn(|i| origin[i].sub(f.origin[i]))).add(f.offset);
+                    SurfaceFunctionalEnclosure { position: constant.add(Interval { lo: uv[0][0], hi: uv[0][1] }.mul(du))
+                        .add(Interval { lo: uv[1][0], hi: uv[1][1] }.mul(dv)), du, dv }
+                });
+                for r in result { for v in [r.position, r.du, r.dv] { Interval::new(v.lo, v.hi)?; } }
+                return Ok(result);
+            }
+            _ => break,
         }
-        E::NonSmooth | E::Singular => GeometryErrorCode::SingularGeometry,
-        E::Unresolved
-        | E::PlaneCoverageUnresolved { .. }
-        | E::AmbiguousBranch
-        | E::NonTransverse => GeometryErrorCode::AnalysisIndeterminate,
-    };
-    GeometryError::new(
-        code,
-        format!("native bounded parameter analysis: {error:?}"),
-    )
-}
-
-pub(crate) fn debit_native_work(
-    work: &mut GeometryWorkBudget,
-    consumed: usize,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    // Cancellation must not erase computation already charged by the native
-    // operation, including a failed operation. Preserve cancellation priority
-    // after retaining that cumulative debit.
-    work.charge(consumed as u64, &AtomicBool::new(false))?;
-    check_cancel(cancel)
-}
-
-fn adapt(value: monstertruck_modeling::ValidatedInterval) -> Interval {
-    Interval {
-        lo: value.lower,
-        hi: value.upper,
     }
-}
-
-/// The native concrete evaluator partitions at knots and encloses extraction,
-/// affine transforms and rational division. Its work is debited even on error.
-pub(crate) fn surface_enclosure(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SurfaceEnclosure, GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result =
-        monstertruck_modeling::validated_surface_jet(surface, uv, &mut native_work, cancel);
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    let jet = result.map_err(native_error)?;
-    let mut enclosure = adapt_surface_jet(jet);
-    tighten_revolution(surface, uv, &mut enclosure, work, cancel)?;
-    Ok(enclosure)
-}
-
-/// Source-geometric orientation, including a proved regular geometric carrier
-/// at a singular UV chart. This does not use the kernel's sampled/nearby-normal
-/// fallbacks and does not apply the owning topology face's orientation.
-pub(crate) fn surface_geometric_normal_enclosure(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<[Interval; 3], GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_surface_geometric_normal(
-        surface,
-        uv,
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    Ok(result.map_err(native_error)?.map(adapt))
-}
-
-/// Continuous-source images and one-sided derivative ranges, not a C1 or
-/// normal certificate. Hessian consumers must separately qualify the span.
-/// Do not apply strict profile-based tightening to an unqualified C0 range.
-pub(crate) fn surface_piecewise_enclosure(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SurfaceEnclosure, GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_surface_piecewise_jet(
-        surface,
-        uv,
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    let mut enclosure = adapt_surface_jet(result.map_err(native_error)?);
-    if matches!(surface, Surface::RevolutionSurface(_))
-        && surface_parameter_span_smooth(surface, uv, work, cancel)?
-    {
-        tighten_revolution(surface, uv, &mut enclosure, work, cancel)?;
-    }
-    Ok(enclosure)
-}
-
-/// Fold interval covectors, origins and offsets into original coefficients.
-/// The batch shares native source basis/denominator evaluation. Continuous
-/// piecewise first jets support mean-value bounds, not C1 authority.
-pub(crate) fn surface_functional_enclosures<const N: usize>(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    functionals: &[SurfaceFunctional; N],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<[SurfaceFunctionalEnclosure; N], GeometryError> {
-    check_cancel(cancel)?;
-    let native_interval = |value: Interval| monstertruck_modeling::ValidatedInterval {
-        lower: value.lo,
-        upper: value.hi,
-    };
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_surface_functional_jets::<N>(
-        surface,
-        uv,
-        std::array::from_fn(|i| monstertruck_modeling::ValidatedSurfaceFunctional {
-            direction: functionals[i].direction.map(native_interval),
-            origin: functionals[i].origin.map(native_interval),
-            offset: native_interval(functionals[i].offset),
-        }),
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    Ok(result.map_err(native_error)?.map(|jet| SurfaceFunctionalEnclosure {
-        position: adapt(jet.position),
-        du: adapt(jet.du),
-        dv: adapt(jet.dv),
-    }))
-}
-
-/// Enclose the genuine original first jet with three unit-coordinate rows.
-/// Native basis/denominator work is shared and all continuous C0 sides remain
-/// enclosed. No second derivatives or smoothness are invented for consumers.
-pub(crate) fn surface_piecewise_first_enclosure(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SurfaceFirstEnclosure, GeometryError> {
-    let functionals: [SurfaceFunctional; 3] = std::array::from_fn(|axis| SurfaceFunctional {
-        direction: std::array::from_fn(|i| Interval::point(if i == axis { 1.0 } else { 0.0 })),
-        origin: [Interval::point(0.0); 3],
-        offset: Interval::point(0.0),
+    let jet = surface_piecewise_first_enclosure(surface, uv, work, cancel)?;
+    let result = functionals.map(|f| {
+        let project = |row: [Interval; 3]| (0..3).fold(Interval::point(0.0), |s, i| s.add(f.direction[i].mul(row[i])));
+        SurfaceFunctionalEnclosure { position: project(std::array::from_fn(|i| jet.position[i].sub(f.origin[i]))).add(f.offset),
+            du: project(jet.du), dv: project(jet.dv) }
     });
-    let jets = surface_functional_enclosures(surface, uv, &functionals, work, cancel)?;
-    Ok(SurfaceFirstEnclosure {
-        position: std::array::from_fn(|i| jets[i].position),
-        du: std::array::from_fn(|i| jets[i].du),
-        dv: std::array::from_fn(|i| jets[i].dv),
-    })
+    for r in result { for v in [r.position, r.du, r.dv] { Interval::new(v.lo, v.hi)?; } }
+    Ok(result)
 }
-
-fn adapt_surface_jet(jet: monstertruck_modeling::ValidatedSurfaceJet) -> SurfaceEnclosure {
-    SurfaceEnclosure {
-        position: jet.position.map(adapt),
-        du: jet.du.map(adapt),
-        dv: jet.dv.map(adapt),
-        duu: jet.duu.map(adapt),
-        duv: jet.duv.map(adapt),
-        dvv: jet.dvv.map(adapt),
+fn native_surface_geometric_normal_enclosure(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<[Interval; 3], GeometryError> {
+    if !surface_parameter_span_smooth(surface, uv, work, cancel)? {
+        return Err(GeometryError::new(GeometryErrorCode::AnalysisIndeterminate, "normal query lacks whole-span C1 authority"));
     }
-}
-
-/// Collect the stored Rodrigues coefficients BEFORE interval evaluation. The
-/// native expression `d*cos + (a dot d)*a*(1-cos)` loses the correlation in its
-/// axial component over a full turn. Expanding its linear coefficient instead
-/// gives `aa^T + (I-aa^T)*cos + C*sin`, without assuming the stored axis is
-/// mathematically unit length. This is valid for every admitted profile, not
-/// just a line, and retains exact axial cancellations through affine poses.
-fn tighten_revolution(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    enclosure: &mut SurfaceEnclosure,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    let Surface::RevolutionSurface(processor) = surface else {
-        return Ok(());
-    };
-    let matrix = processor.transform();
-    // Projective poses still use the complete native denominator-enclosed jet.
-    if (0..3).any(|i| matrix[i][3] != 0.0) || matrix[3][3] != 1.0 {
-        return Ok(());
-    }
-    work.charge(256, cancel)?;
-    let revolution = processor.entity();
-    let profile_axis = usize::from(!processor.orientation());
-    let profile_range = uv[profile_axis];
-    let angle = uv[1 - profile_axis];
-    let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let trig = monstertruck_modeling::validated_sin_cos(
-        monstertruck_modeling::ValidatedInterval {
-            lower: angle[0],
-            upper: angle[1],
-        },
-        &mut native,
-        cancel,
-    );
-    debit_native_work(work, native.consumed(), cancel)?;
-    let (sine, cosine) = trig.map_err(native_error)?;
-    let (sine, cosine) = (adapt(sine), adapt(cosine));
-    let axis = revolution.axis();
-    let axis = [axis.x, axis.y, axis.z].map(Interval::point);
-    let origin = revolution.origin();
-    let origin_point = [origin.x, origin.y, origin.z];
-    let origin = origin_point.map(Interval::point);
-    let zero = Interval::point(0.0);
-    // C*d is exactly the cross term used by the native revolution evaluator.
-    let cross = [
-        [zero, axis[2].neg(), axis[1]],
-        [axis[2], zero, axis[0].neg()],
-        [axis[1].neg(), axis[0], zero],
-    ];
-    let mut profile_jets: Option<CurveEnclosure> = None;
-    for row in 0..3 {
-        let axial = (0..3).fold(zero, |sum, i| {
-            sum.add(Interval::point(matrix[i][row]).mul(axis[i]))
-        });
-        let constant: [Interval; 3] = std::array::from_fn(|column| axial.mul(axis[column]));
-        let cos = std::array::from_fn(|column| {
-            Interval::point(matrix[column][row]).sub(constant[column])
-        });
-        let sin = std::array::from_fn(|column| {
-            (0..3).fold(zero, |sum, i| {
-                sum.add(Interval::point(matrix[i][row]).mul(cross[i][column]))
-            })
-        });
-        let mut projected = |coefficients: [Interval; 3]| -> Result<[Interval; 3], GeometryError> {
-            if coefficients.iter().all(|v| v.lo == 0.0 && v.hi == 0.0) {
-                return Ok([zero; 3]);
-            }
-            // The public scalar native API accepts exact binary64 coefficients.
-            // Project their representatives before separating coordinates, then
-            // retain every coefficient-rounding remainder in an interval dot.
-            let direction = coefficients.map(Interval::mid);
-            let remainder: [Interval; 3] =
-                std::array::from_fn(|i| coefficients[i].sub(Interval::point(direction[i])));
-            let residual = if remainder.iter().all(|v| v.lo == 0.0 && v.hi == 0.0) {
-                [zero; 3]
-            } else {
-                let profile = match profile_jets {
-                    Some(profile) => profile,
-                    None => {
-                        let profile = curve_enclosure(
-                            revolution.entity_curve(),
-                            (profile_range[0], profile_range[1]),
-                            work,
-                            cancel,
-                        )?;
-                        profile_jets = Some(profile);
-                        profile
-                    }
-                };
-                [
-                    std::array::from_fn(|i| profile.position[i].sub(origin[i])),
-                    profile.derivative,
-                    profile.second_derivative,
-                ]
-                .map(|values| (0..3).fold(zero, |sum, i| sum.add(remainder[i].mul(values[i]))))
-            };
-            let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-                usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-            );
-            let result = monstertruck_modeling::validated_curve_projected_jet(
-                revolution.entity_curve(),
-                profile_range,
-                origin_point,
-                direction,
-                &mut native,
-                cancel,
-            );
-            debit_native_work(work, native.consumed(), cancel)?;
-            let jet = result.map_err(native_error)?;
-            let derivatives = [jet.position, jet.first, jet.second].map(adapt);
-            Ok(std::array::from_fn(|order| {
-                derivatives[order].add(residual[order])
-            }))
-        };
-        let constant = projected(constant)?;
-        let cosine_coefficient = projected(cos)?;
-        let sine_coefficient = projected(sin)?;
-        let profile_derivatives: [Interval; 3] = std::array::from_fn(|order| {
-            constant[order]
-                .add(cosine_coefficient[order].mul(cosine))
-                .add(sine_coefficient[order].mul(sine))
-        });
-        let angular = cosine_coefficient[0]
-            .mul(sine)
-            .neg()
-            .add(sine_coefficient[0].mul(cosine));
-        let mixed = cosine_coefficient[1]
-            .mul(sine)
-            .neg()
-            .add(sine_coefficient[1].mul(cosine));
-        let angular_second = cosine_coefficient[0]
-            .mul(cosine)
-            .add(sine_coefficient[0].mul(sine))
-            .neg();
-        let translated_origin = (0..3).fold(Interval::point(matrix[3][row]), |sum, i| {
-            sum.add(Interval::point(matrix[i][row]).mul(origin[i]))
-        });
-        let position = translated_origin.add(profile_derivatives[0]);
-        let intersect = |target: &mut Interval, bound: Interval| -> Result<(), GeometryError> {
-            *target = Interval::new(target.lo.max(bound.lo), target.hi.min(bound.hi))?;
-            Ok(())
-        };
-        intersect(&mut enclosure.position[row], position)?;
-        let (profile_first, angle_first, profile_second, angle_second) = if profile_axis == 0 {
-            (
-                &mut enclosure.du[row],
-                &mut enclosure.dv[row],
-                &mut enclosure.duu[row],
-                &mut enclosure.dvv[row],
-            )
-        } else {
-            (
-                &mut enclosure.dv[row],
-                &mut enclosure.du[row],
-                &mut enclosure.dvv[row],
-                &mut enclosure.duu[row],
-            )
-        };
-        intersect(profile_first, profile_derivatives[1])?;
-        intersect(angle_first, angular)?;
-        intersect(profile_second, profile_derivatives[2])?;
-        intersect(&mut enclosure.duv[row], mixed)?;
-        intersect(angle_second, angular_second)?;
-    }
-    Ok(())
+    evaluate_analytic_normal_enclosure(surface, uv, work, cancel)
 }
 
 #[derive(Clone, Copy)]
-enum KnotSource<'a> {
-    Borrowed(&'a [f64]),
-    Integer(usize),
-}
-#[derive(Clone, Copy)]
-struct KnotAxis<'a> {
-    source: KnotSource<'a>,
-    degree: usize,
-    sign: f64,
-    offset: Interval,
-}
-impl<'a> KnotAxis<'a> {
-    fn new(knots: &'a [f64], degree: usize) -> Self {
-        Self {
-            source: KnotSource::Borrowed(knots),
-            degree,
-            sign: 1.0,
-            offset: Interval::point(0.0),
-        }
-    }
-    fn len(self) -> usize {
-        match self.source {
-            KnotSource::Borrowed(knots) => knots.len(),
-            KnotSource::Integer(count) => count,
-        }
-    }
-    fn raw(self, index: usize) -> f64 {
-        let index = if self.sign > 0.0 {
-            index
-        } else {
-            self.len() - 1 - index
-        };
-        match self.source {
-            KnotSource::Borrowed(knots) => knots[index],
-            KnotSource::Integer(_) => index as f64,
-        }
-    }
-    fn value(self, index: usize) -> Interval {
-        let value = Interval::point(self.raw(index));
-        self.offset
-            .add(if self.sign > 0.0 { value } else { value.neg() })
-    }
-    fn reflect(&mut self, range: (f64, f64)) -> Result<(), GeometryError> {
-        Interval::new(range.0, range.1)?;
-        let center = Interval::point(range.0).add(Interval::point(range.1));
-        self.offset = self.offset.add(if self.sign > 0.0 {
-            center
-        } else {
-            center.neg()
-        });
-        Interval::new(self.offset.lo, self.offset.hi)?;
-        self.sign = -self.sign;
-        Ok(())
-    }
-}
+struct KnotAxis<'a> { values: &'a [f64], degree: usize }
 #[derive(Clone)]
-pub(crate) struct AxisSpans<'a> {
-    knots: KnotAxis<'a>,
-    low: f64,
-    high: f64,
-    index: usize,
-    pending: Option<f64>,
-    done: bool,
-}
+pub(crate) struct AxisSpans<'a> { knots: &'a [f64], range: [f64; 2], front: usize, back: usize, single: bool }
 impl<'a> AxisSpans<'a> {
-    fn new(knots: KnotAxis<'a>, domain: [f64; 2]) -> Self {
-        let (mut low, mut high) = (0, knots.len());
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if knots.value(middle).hi <= domain[0] {
-                low = middle + 1;
-            } else {
-                high = middle;
+    pub(crate) fn single(range: [f64; 2]) -> Result<Self, GeometryError> {
+        Interval::new(range[0], range[1])?;
+        Ok(Self::new(KnotAxis { values: &[], degree: 0 }, range))
+    }
+    /// A borrowed evaluation cover, not an inventory of exact source knots.
+    /// Knot-band fences preserve uncertainty; continuity is proved by the provider.
+    pub(crate) fn from_cover_cuts(cuts: &'a [f64], range: [f64; 2],
+        work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<Self, GeometryError> {
+        work.charge(1, cancel)?;
+        Interval::new(range[0], range[1])?;
+        if cuts.len() < 2 { return Err(nurbs_eval::conditioning("curve cover needs both domain fences")); }
+        for (i, value) in cuts.iter().copied().enumerate() {
+            work.charge(1, cancel)?;
+            if !value.is_finite() || (i > 0 && value < cuts[i - 1]) {
+                return Err(nurbs_eval::conditioning("curve cover fences are not finite and sorted"));
             }
         }
-        Self {
-            knots,
-            low: domain[0],
-            high: domain[1],
-            index: low,
-            pending: None,
-            done: false,
+        if range[0] < cuts[0] || range[1] > cuts[cuts.len() - 1] {
+            return Err(nurbs_eval::conditioning("curve cover does not contain the requested domain"));
         }
+        if cuts[0] == cuts[cuts.len() - 1] { return Self::single(range); }
+        Ok(Self::new(KnotAxis { values: cuts, degree: 0 }, range))
+    }
+    fn new(axis: KnotAxis<'a>, range: [f64; 2]) -> Self {
+        Self { knots: axis.values, range, front: axis.degree,
+            back: axis.values.len().saturating_sub(axis.degree + 1), single: axis.values.is_empty() }
+    }
+    pub(super) fn from_validated_curve(curve: &'a Curve, range: [f64; 2]) -> Self {
+        let mut source = curve;
+        while let solidcore::curve::curve::p2::CurveKind::CrvOnSurf(c) = source.kind() { source = c.uv_curve(); }
+        let axis = curve_prepared::native_curve_nurbs(source).ok().flatten().map_or(
+            KnotAxis { values: &[], degree: 0 }, |n| KnotAxis { values: n.knots(), degree: n.degree() });
+        Self::new(axis, [range[0].min(range[1]), range[0].max(range[1])])
+    }
+    fn clip(&self, i: usize) -> Option<[f64; 2]> {
+        let lo = self.knots[i]; let hi = self.knots[i + 1];
+        (lo < hi && lo <= self.range[1] && hi >= self.range[0])
+            .then_some([lo.max(self.range[0]), hi.min(self.range[1])])
     }
 }
 impl Iterator for AxisSpans<'_> {
     type Item = [f64; 2];
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+        if self.single { self.single = false; return Some(self.range); }
+        while self.front < self.back { let i = self.front; self.front += 1; if let Some(v) = self.clip(i) { return Some(v); } }
+        None
+    }
+}
+impl DoubleEndedIterator for AxisSpans<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.single { self.single = false; return Some(self.range); }
+        while self.front < self.back { self.back -= 1; if let Some(v) = self.clip(self.back) { return Some(v); } }
+        None
+    }
+}
+fn surface_knots<'a>(surface: &'a Surface, work: &mut GeometryWorkBudget, cancel: &AtomicBool)
+    -> Result<[KnotAxis<'a>; 2], GeometryError> {
+    work.charge(1, cancel)?;
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
+        let (p, q) = n.degrees();
+        Ok([KnotAxis { values: n.u_knots(), degree: p }, KnotAxis { values: n.v_knots(), degree: q }])
+    } else { Ok([KnotAxis { values: &[], degree: 0 }; 2]) }
+}
+fn axis_continuity(axis: KnotAxis<'_>, range: [f64; 2], continuity: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    Interval::new(range[0], range[1])?;
+    let knots = axis.values;
+    let mut i = 0;
+    while i < knots.len() {
+        work.charge(1, cancel)?;
+        let start = i; let value = knots[i];
+        while i < knots.len() && knots[i] == value { i += 1; }
+        if start == 0 || i == knots.len() { continue; }
+        if value >= range[0] && value <= range[1] && i - start + continuity > axis.degree { return Ok(false); }
+    }
+    Ok(true)
+}
+fn native_surface_parameter_span_smooth(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    analytic_eval::surface_order(surface, uv, 0, work, cancel)?;
+    let axes = surface_knots(surface, work, cancel)?;
+    if axis_continuity(axes[0], uv[0], 1, work, cancel)? && axis_continuity(axes[1], uv[1], 1, work, cancel)? { return Ok(true); }
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? { continuity::surface_is_c1(n, uv, work, cancel) }
+    else { Ok(true) }
+}
+fn native_surface_parameter_span_continuous(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    analytic_eval::surface_order(surface, uv, 0, work, cancel)?;
+    surface_coefficients_continuous(surface, uv, work, cancel)
+}
+fn surface_coefficients_continuous(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    let axes = surface_knots(surface, work, cancel)?;
+    if axis_continuity(axes[0], uv[0], 0, work, cancel)? && axis_continuity(axes[1], uv[1], 0, work, cancel)? { return Ok(true); }
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? { continuity::surface_is_c0(n, uv, work, cancel) }
+    else { Ok(true) }
+}
+fn native_curve_parameter_span_continuous(curve: &Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    curve_span_continuous_at(curve, range, 0, work, cancel)
+}
+fn curve_span_continuous_at(curve: &Curve, range: [f64; 2], depth: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if depth >= 16 { return Err(GeometryError::new(GeometryErrorCode::ResourceLimit, "nested curve continuity depth exceeded")); }
+    curve_prepared::curve_jet_order(curve, range, 0, depth, work, cancel)?;
+    if let solidcore::curve::curve::p2::CurveKind::CrvOnSurf(c) = curve.kind() {
+        if !curve_span_continuous_at(c.uv_curve(), range, depth + 1, work, cancel)? { return Ok(false); }
+        let uv = curve_prepared::curve_jet_order(c.uv_curve(), range, 0, depth + 1, work, cancel)?;
+        let domain = [[uv[0][0].lo, uv[0][0].hi], [uv[0][1].lo, uv[0][1].hi]];
+        return surface_parameter_span_continuous(c.surface(), domain, work, cancel);
+    }
+    if let Some(n) = curve_prepared::native_curve_nurbs(curve)? {
+        if axis_continuity(KnotAxis { values: n.knots(), degree: n.degree() }, range, 0, work, cancel)? { Ok(true) }
+        else { continuity::curve_is_c0(n, curve.dim(), range, work, cancel) }
+    } else { Ok(true) }
+}
+fn native_curve_parameter_span_smooth(curve: &Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    curve_span_smooth_at(curve, range, 0, work, cancel)
+}
+fn curve_span_smooth_at(curve: &Curve, range: [f64; 2], depth: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    if depth >= 16 { return Err(GeometryError::new(GeometryErrorCode::ResourceLimit, "nested curve smoothness depth exceeded")); }
+    if let solidcore::curve::curve::p2::CurveKind::CrvOnSurf(c) = curve.kind() {
+        if !curve_span_smooth_at(c.uv_curve(), range, depth + 1, work, cancel)? { return Ok(false); }
+        let uv = curve_prepared::curve_jet_order(c.uv_curve(), range, 0, depth + 1, work, cancel)?;
+        return surface_parameter_span_smooth(c.surface(), [[uv[0][0].lo, uv[0][0].hi], [uv[0][1].lo, uv[0][1].hi]], work, cancel);
+    }
+    curve_prepared::curve_jet_order(curve, range, 0, depth, work, cancel)?;
+    if let Some(n) = curve_prepared::native_curve_nurbs(curve)? {
+        continuity::curve_is_c1(n, curve.dim(), range, work, cancel)
+    } else { Ok(true) }
+}
+fn native_curve_parameter_spans<'a>(curve: &'a Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<AxisSpans<'a>, GeometryError> {
+    Interval::new(range[0], range[1])?;
+    let mut source = curve;
+    for depth in 0..=16 {
+        work.charge(1, cancel)?;
+        let active = source.natural_interval();
+        if range[0] < active.min() || range[1] > active.max() {
+            return Err(nurbs_eval::conditioning("curve partition exceeds native active domain"));
         }
-        let mut high = self.high;
-        if let Some(value) = self.pending.take()
-            && value > self.low
-        {
-            high = value.min(self.high);
+        if let solidcore::curve::curve::p2::CurveKind::CrvOnSurf(c) = source.kind() {
+            if depth == 16 { return Err(GeometryError::new(GeometryErrorCode::ResourceLimit, "curve partition nesting limit exceeded")); }
+            source = c.uv_curve(); continue;
         }
-        if high == self.high {
-            while self.index < self.knots.len() {
-                let knot = self.knots.value(self.index);
-                self.index += 1;
-                if knot.lo > self.low {
-                    high = knot.lo.min(self.high);
-                    if knot.hi > knot.lo {
-                        self.pending = Some(knot.hi);
-                    }
-                    break;
-                }
-                if knot.hi > self.low {
-                    high = knot.hi.min(self.high);
-                    break;
+        if let Some(n) = curve_prepared::native_curve_nurbs(source)? {
+            nurbs_eval::validate_knots(n.knots(), n.degree(), n.cpts().len(), range, work, cancel)?;
+        }
+        break;
+    }
+    let spans = AxisSpans::from_validated_curve(curve, range);
+    work.charge(spans.clone().count() as u64, cancel)?;
+    Ok(spans)
+}
+fn native_curve2d_parameter_spans<'a>(curve: &'a Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<AxisSpans<'a>, GeometryError> {
+    curve_parameter_spans(curve, range, work, cancel)
+}
+/// Positive/negative homogeneous convex-hull containment, independent of an
+/// overwide evaluated UV interval. A true result permits intersection with this
+/// domain; false supplies no chart authority and is never a tolerance waiver.
+fn native_curve2d_image_within_box(curve: &Curve, range: [f64; 2], domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool, GeometryError> {
+    for d in domain { Interval::new(d[0], d[1])?; }
+    let image = curve_prepared::curve_jet_order(curve, range, 0, 0, work, cancel)?[0];
+    if (0..2).all(|i| image[i].lo >= domain[i][0] && image[i].hi <= domain[i][1]) { return Ok(true); }
+    let Some(n) = curve_prepared::native_curve_nurbs(curve)? else { return Ok(false); };
+    let knots = n.knots(); let degree = n.degree(); let count = n.cpts().len();
+    let mut sign = 0i8;
+    for span in degree..count {
+        work.charge(1, cancel)?;
+        if knots[span] == knots[span + 1] || knots[span] > range[1] || knots[span + 1] < range[0] { continue; }
+        for p in &n.cpts()[span - degree..=span] {
+            work.charge(1, cancel)?;
+            let w = if n.is_rational() { p.w } else { 1.0 };
+            let this_sign = if w > 0.0 { 1 } else if w < 0.0 { -1 } else { return Ok(false); };
+            if sign != 0 && sign != this_sign { return Ok(false); } sign = this_sign;
+            let coordinates = [p.x, p.y];
+            for axis in 0..2 {
+                for side in 0..2 {
+                    let Some(mut difference) = crate::exact_coefficient::ExactCoefficient::point(domain[axis][side])
+                        .product(&crate::exact_coefficient::ExactCoefficient::point(w), work, cancel)? else { return Ok(false); };
+                    if difference.subtract(&crate::exact_coefficient::ExactCoefficient::point(coordinates[axis])).is_none() { return Ok(false); }
+                    let comparison = difference.sign() * sign;
+                    if (side == 0 && comparison > 0) || (side == 1 && comparison < 0) { return Ok(false); }
                 }
             }
         }
-        let result = [self.low, high];
-        self.done = high >= self.high;
-        self.low = high;
-        Some(result)
     }
+    Ok(sign != 0)
 }
-/// Borrowed span product: no per-query knot/control-net copies or patch vector.
-pub(crate) struct SurfaceParameterBoxes<'a> {
-    u: AxisSpans<'a>,
-    v_template: AxisSpans<'a>,
-    v: AxisSpans<'a>,
-    current_u: Option<[f64; 2]>,
+fn native_curve2d_piecewise_jet(curve: &Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<ChartCurveEnclosure, GeometryError> {
+    let j = curve_prepared::curve_jet_order(curve, range, 2, 0, work, cancel)?;
+    Ok(ChartCurveEnclosure { position: [j[0][0], j[0][1]], derivative: [j[1][0], j[1][1]], second_derivative: [j[2][0], j[2][1]] })
 }
+fn native_curve2d_c1_jet(curve: &Curve, range: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<Option<ChartCurveEnclosure>, GeometryError> {
+    if !curve_parameter_span_smooth(curve, range, work, cancel)? { return Ok(None); }
+    Ok(Some(curve2d_piecewise_jet(curve, range, work, cancel)?))
+}
+pub(crate) struct SurfaceParameterBoxes<'a> { u: AxisSpans<'a>, v: AxisSpans<'a>, active_u: Option<[f64; 2]>, active_v: AxisSpans<'a> }
 impl Iterator for SurfaceParameterBoxes<'_> {
     type Item = [[f64; 2]; 2];
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.current_u.is_none() {
-                self.current_u = self.u.next();
-            }
-            let u = self.current_u?;
-            if let Some(v) = self.v.next() {
-                return Some([u, v]);
-            }
-            self.current_u = self.u.next();
-            self.v = self.v_template.clone();
+            if let Some(u) = self.active_u { if let Some(v) = self.active_v.next() { return Some([u, v]); } }
+            self.active_u = Some(self.u.next()?); self.active_v = self.v.clone();
         }
     }
 }
-fn profile_knots<'a>(
-    mut curve: &'a Curve,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<KnotAxis<'a>, GeometryError> {
-    let mut axis = KnotAxis::new(&[], 0);
-    for depth in 0..=32 {
-        work.charge(1, cancel)?;
-        match curve {
-            Curve::TrimmedCurve(c) => {
-                if depth == 32 {
-                    break;
-                }
-                if !c.orientation() {
-                    axis.reflect(c.try_range_tuple().ok_or_else(|| {
-                        GeometryError::new(
-                            GeometryErrorCode::ConditioningFailure,
-                            "unbounded retained profile trim",
-                        )
-                    })?)?;
-                }
-                curve = c.entity().curve().as_ref();
-            }
-            Curve::BsplineCurve(c) => {
-                axis.source = KnotSource::Borrowed(c.knot_vector().as_ref());
-                axis.degree = c.degree();
-                return Ok(axis);
-            }
-            Curve::NurbsCurve(c) => {
-                axis.source = KnotSource::Borrowed(c.knot_vector().as_ref());
-                axis.degree = c.degree();
-                return Ok(axis);
-            }
-            Curve::ParameterCurve(c) => return chart_knots(c.curve(), axis, depth, work, cancel),
-            _ => return Ok(axis),
-        }
-    }
-    Err(GeometryError::new(
-        GeometryErrorCode::ResourceLimit,
-        "retained profile basis-wrapper nesting exceeds cap",
-    ))
-}
-/// Borrowed native curve/chart knot partition for zeroth-order bounds. Nested
-/// profile-carrier C0 preimages still require actual interval subdivision;
-/// these computational cuts are not a global smoothness certificate.
-pub(crate) fn curve_parameter_spans<'a>(
-    curve: &'a Curve,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<AxisSpans<'a>, GeometryError> {
-    Interval::new(range[0], range[1])?;
-    let knots = profile_knots(curve, work, cancel)?;
-    work.charge(knots.len() as u64, cancel)?;
-    Ok(AxisSpans::new(knots, range))
-}
-fn chart_knots<'a>(
-    mut chart: &'a monstertruck_modeling::Curve2D,
-    mut axis: KnotAxis<'a>,
-    depth: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<KnotAxis<'a>, GeometryError> {
-    for level in depth..=32 {
-        work.charge(1, cancel)?;
-        match chart {
-            monstertruck_modeling::Curve2D::TrimmedCurve(c) => {
-                if level == 32 {
-                    break;
-                }
-                if !c.orientation() {
-                    axis.reflect(c.try_range_tuple().ok_or_else(|| {
-                        GeometryError::new(
-                            GeometryErrorCode::ConditioningFailure,
-                            "unbounded retained native chart trim",
-                        )
-                    })?)?;
-                }
-                chart = c.entity().curve().as_ref();
-            }
-            monstertruck_modeling::Curve2D::BsplineCurve(c) => {
-                axis.source = KnotSource::Borrowed(c.knot_vector().as_ref());
-                axis.degree = c.degree();
-                return Ok(axis);
-            }
-            monstertruck_modeling::Curve2D::NurbsCurve(c) => {
-                axis.source = KnotSource::Borrowed(c.knot_vector().as_ref());
-                axis.degree = c.degree();
-                return Ok(axis);
-            }
-            monstertruck_modeling::Curve2D::Polyline(c) => {
-                axis.source = KnotSource::Integer(c.as_slice().len());
-                axis.degree = 1;
-                return Ok(axis);
-            }
-            _ => return Ok(axis),
-        }
-    }
-    Err(GeometryError::new(
-        GeometryErrorCode::ResourceLimit,
-        "retained native chart nesting exceeds cap",
-    ))
-}
-pub(crate) fn curve2d_parameter_spans<'a>(
-    curve: &'a monstertruck_modeling::Curve2D,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<AxisSpans<'a>, GeometryError> {
-    Interval::new(range[0], range[1])?;
-    let knots = chart_knots(curve, KnotAxis::new(&[], 0), 0, work, cancel)?;
-    work.charge(knots.len() as u64, cancel)?;
-    Ok(AxisSpans::new(knots, range))
-}
-
-/// C1 qualification of the literal UV source, followed by the native
-/// continuous-piecewise evaluator. A knot at a CLOSED endpoint is included:
-/// the evaluator retains both incident sides there, not a chosen smooth side.
-/// None means C1 was not proved; it never grants a normal-coordinate ribbon.
-pub(crate) fn curve2d_c1_jet(
-    curve: &monstertruck_modeling::Curve2D,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<Option<ChartCurveEnclosure>, GeometryError> {
-    if !curve2d_source_is_c1(curve, range, work, cancel)? {
-        return Ok(None);
-    }
-    curve2d_piecewise_jet(curve, range, work, cancel).map(Some)
-}
-
-/// Continuous C0 positions and bounded one-sided derivatives, not C1 authority.
-pub(crate) fn curve2d_piecewise_jet(
-    curve: &monstertruck_modeling::Curve2D,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<ChartCurveEnclosure, GeometryError> {
-    let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_curve2d_piecewise_jet(
-        curve, range, &mut native, cancel,
-    );
-    debit_native_work(work, native.consumed(), cancel)?;
-    let jet = result.map_err(native_error)?;
-    let adapt = |v: monstertruck_modeling::ValidatedInterval| Interval {
-        lo: v.lower,
-        hi: v.upper,
-    };
-    Ok(ChartCurveEnclosure {
-        position: jet.position.map(adapt),
-        derivative: jet.first.map(adapt),
-        second_derivative: jet.second.map(adapt),
-    })
-}
-
-fn curve2d_source_is_c1(
-    mut curve: &monstertruck_modeling::Curve2D,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    use monstertruck_modeling::Curve2D;
-    let mut parameter = Interval::new(range[0], range[1])?;
-    for depth in 0..=32 {
-        work.charge(1, cancel)?;
-        match curve {
-            Curve2D::TrimmedCurve(wrapper) => {
-                if depth == 32 {
-                    break;
-                }
-                if !wrapper.orientation() {
-                    let (a, b) = wrapper.try_range_tuple().ok_or_else(|| {
-                        GeometryError::new(
-                            GeometryErrorCode::ConditioningFailure,
-                            "unbounded original UV trim",
-                        )
-                    })?;
-                    parameter = Interval::point(a).add(Interval::point(b)).sub(parameter);
-                }
-                // Native evaluation below checks the unchanged matrix and its
-                // denominator. A smooth admitted projective image preserves C1.
-                curve = wrapper.entity().curve().as_ref();
-            }
-            Curve2D::BsplineCurve(c) => {
-                return spline_curve2d_is_c1(
-                    c.knot_vector().as_ref(), c.degree(), c.control_points().len(),
-                    |i| {
-                        let p = c.control_points()[i];
-                        [p.x, p.y, 1.0]
-                    },
-                    parameter, work, cancel,
-                );
-            }
-            Curve2D::NurbsCurve(c) => {
-                return spline_curve2d_is_c1(
-                    c.knot_vector().as_ref(), c.degree(), c.control_points().len(),
-                    |i| {
-                        let p = c.control_points()[i];
-                        [p.x, p.y, p.z]
-                    },
-                    parameter, work, cancel,
-                );
-            }
-            Curve2D::Polyline(c) => {
-                let points = c.as_slice();
-                for i in 1..points.len().saturating_sub(1) {
-                    work.charge(1, cancel)?;
-                    if parameter.lo <= i as f64 && i as f64 <= parameter.hi {
-                        let control = |j: usize| [points[j].x, points[j].y, 1.0];
-                        if !exact_curve2d_c1_join(
-                            control(i - 1), control(i), control(i + 1),
-                            [i as f64 - 1.0, i as f64, i as f64 + 1.0],
-                            work, cancel,
-                        )? {
-                            return Ok(false);
-                        }
-                    }
-                }
-                return Ok(true);
-            }
-            Curve2D::Line(_) | Curve2D::Conic(_) => return Ok(true),
-        }
-    }
-    Err(GeometryError::new(
-        GeometryErrorCode::ResourceLimit,
-        "original UV C1 wrapper nesting exceeds cap",
-    ))
-}
-
-fn spline_curve2d_is_c1(
-    knots: &[f64],
-    degree: usize,
-    count: usize,
-    control: impl Fn(usize) -> [f64; 3],
-    range: Interval,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    if degree == 0 || count <= degree || knots.len() != count + degree + 1 {
-        return Ok(false);
-    }
-    let mut start = knots.partition_point(|k| *k < range.lo);
-    while start < knots.len() && knots[start] <= range.hi {
-        work.charge(1, cancel)?;
-        let value = knots[start];
-        let mut end = start + 1;
-        while end < knots.len() && knots[end] == value {
-            work.charge(1, cancel)?;
-            end += 1;
-        }
-        if knots[degree] < value && value < knots[count] && end - start >= degree {
-            // At multiplicity p the two homogeneous endpoint values are the
-            // SAME control coefficient. p+1 is a jump, not C0 authority.
-            if end - start != degree || start == 0 || end >= knots.len() {
-                return Ok(false);
-            }
-            let Some(shared) = end.checked_sub(degree + 1) else {
-                return Ok(false);
-            };
-            if shared == 0 || shared + 1 >= count
-                || !exact_curve2d_c1_join(
-                    control(shared - 1), control(shared), control(shared + 1),
-                    [knots[start - 1], value, knots[end]], work, cancel,
-                )?
-            {
-                return Ok(false);
-            }
-        }
-        start = end;
-    }
-    Ok(true)
-}
-
-/// For H=(X,Y,W), d(X/W)=(dX W-X dW)/W². At a multiplicity-p
-/// join the degree and shared W² cancel. Cross-multiply the DISTINCT exact
-/// source knot lengths; neither normalized tangents nor a positive G1 scale
-/// proves this identity. No derivative division or rounded knot subtraction.
-fn exact_curve2d_c1_join(
-    left: [f64; 3],
-    center: [f64; 3],
-    right: [f64; 3],
-    knots: [f64; 3],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    use crate::exact_coefficient::ExactCoefficient;
-    if left.into_iter().chain(center).chain(right).chain(knots)
-        .any(|v| !v.is_finite())
-    {
-        return Ok(false);
-    }
-    let Some(left_span) = ExactCoefficient::difference(knots[1], knots[0]) else {
-        return Ok(false);
-    };
-    let Some(right_span) = ExactCoefficient::difference(knots[2], knots[1]) else {
-        return Ok(false);
-    };
-    if left_span.sign() <= 0 || right_span.sign() <= 0 || center[2] == 0.0 {
-        return Ok(false);
-    }
-    for axis in 0..2 {
-        let determinant = |a: f64, b: f64, c: f64, d: f64,
-                           work: &mut GeometryWorkBudget|
-         -> Result<Option<ExactCoefficient>, GeometryError> {
-            let Some(mut first) = ExactCoefficient::point(a)
-                .product(&ExactCoefficient::point(b), work, cancel)? else {
-                return Ok(None);
-            };
-            let Some(second) = ExactCoefficient::point(c)
-                .product(&ExactCoefficient::point(d), work, cancel)? else {
-                return Ok(None);
-            };
-            if first.subtract(&second).is_none() {
-                return Ok(None);
-            }
-            Ok(Some(first))
-        };
-        let Some(l) = determinant(center[axis], left[2], left[axis], center[2], work)? else {
-            return Ok(false);
-        };
-        let Some(r) = determinant(right[axis], center[2], center[axis], right[2], work)? else {
-            return Ok(false);
-        };
-        let Some(mut l) = l.product(&right_span, work, cancel)? else {
-            return Ok(false);
-        };
-        let Some(r) = r.product(&left_span, work, cancel)? else {
-            return Ok(false);
-        };
-        if l.subtract(&r).is_none() || l.sign() != 0 {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn surface_knots<'a>(
-    surface: &'a Surface,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<[KnotAxis<'a>; 2], GeometryError> {
-    let empty = KnotAxis::new(&[], 0);
-    Ok(match surface {
-        Surface::BsplineSurface(s) => [
-            KnotAxis::new(s.knot_vector_u().as_ref(), s.udegree()),
-            KnotAxis::new(s.knot_vector_v().as_ref(), s.vdegree()),
-        ],
-        Surface::NurbsSurface(s) => [
-            KnotAxis::new(s.knot_vector_u().as_ref(), s.udegree()),
-            KnotAxis::new(s.knot_vector_v().as_ref(), s.vdegree()),
-        ],
-        Surface::RevolutionSurface(s) => {
-            let profile = profile_knots(s.entity().entity_curve(), work, cancel)?;
-            if s.orientation() {
-                [profile, empty]
-            } else {
-                [empty, profile]
-            }
-        }
-        Surface::ExtrusionSurface(s) => [profile_knots(s.entity_curve(), work, cancel)?, empty],
-        _ => [empty, empty],
-    })
-}
-/// Qualify a Taylor interval, including uncertain reflected knot bands and
-/// nested native profile-on-surface expressions. A single extracted patch box
-/// is not sufficient: it may itself be an unresolved knot band.
-pub(crate) fn surface_parameter_span_smooth(
-    surface: &Surface,
-    domain: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    surface_span_smooth_at(surface, domain, 0, work, cancel)
-}
-fn axis_span_smooth(
-    knots: KnotAxis<'_>,
-    range: [f64; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    Interval::new(range[0], range[1])?;
-    if range[0] == range[1] {
-        return Ok(true);
-    }
-    let (mut low, mut high) = (0, knots.len());
-    while low < high {
-        work.charge(1, cancel)?;
-        let middle = low + (high - low) / 2;
-        if knots.value(middle).hi <= range[0] {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    while low < knots.len() {
-        work.charge(1, cancel)?;
-        let knot = knots.value(low);
-        if knot.lo >= range[1] {
-            break;
-        }
-        let value = knots.raw(low);
-        let mut end = low + 1;
-        while end < knots.len() && knots.raw(end) == value {
-            work.charge(1, cancel)?;
-            end += 1;
-        }
-        // C1 with bounded piecewise second derivatives suffices for Taylor.
-        // Structural C0 knots require an independent continuity proof; merely
-        // small one-sided differences or a single extracted band cannot do it.
-        // Native spline extrapolation continues the terminal piece across an
-        // outer knot. Only a knot with source pieces on both sides is a join.
-        let terminal = matches!(knots.source, KnotSource::Borrowed(_))
-            && (value == knots.raw(0) || value == knots.raw(knots.len() - 1));
-        if !terminal && knot.lo < range[1] && range[0] < knot.hi && end - low >= knots.degree {
-            return Ok(false);
-        }
-        low = end;
-    }
-    Ok(true)
-}
-fn surface_span_smooth_at(
-    surface: &Surface,
-    domain: [[f64; 2]; 2],
-    depth: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
+fn validate_surface_partition(surface: &Surface, uv: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<(), GeometryError> {
     work.charge(1, cancel)?;
-    if depth > 32 {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ResourceLimit,
-            "native Taylor expression nesting exceeds bound",
-        ));
+    for range in uv { Interval::new(range[0], range[1])?; }
+    let active = surface.natural_uv_domain(); let lo = active.min(); let hi = active.max();
+    if uv[0][0] < lo.x || uv[0][1] > hi.x || uv[1][0] < lo.y || uv[1][1] > hi.y {
+        return Err(nurbs_eval::conditioning("surface partition exceeds native active domain"));
     }
-    for (axis, knots) in surface_knots(surface, work, cancel)?
-        .into_iter()
-        .enumerate()
-    {
-        if !axis_span_smooth(knots, domain[axis], work, cancel)? {
-            return Ok(false);
-        }
+    if let Some(n) = analytic_eval::native_surface_nurbs(surface)? {
+        nurbs_eval::validate_knots(n.u_knots(), n.p(), n.n() + 1, uv[0], work, cancel)?;
+        nurbs_eval::validate_knots(n.v_knots(), n.q(), n.m() + 1, uv[1], work, cancel)?;
     }
-    let profile = match surface {
-        Surface::RevolutionSurface(s) => {
-            Some((s.entity().entity_curve(), usize::from(!s.orientation())))
-        }
-        Surface::ExtrusionSurface(s) => Some((s.entity_curve(), 0)),
-        _ => None,
-    };
-    if let Some((curve, axis)) = profile
-        && domain[axis][0] != domain[axis][1]
-    {
-        return curve_span_smooth_at(curve, domain[axis], depth + 1, work, cancel);
-    }
-    Ok(true)
+    Ok(())
 }
-fn curve_span_smooth_at(
-    mut curve: &Curve,
-    range: [f64; 2],
-    mut depth: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    if !axis_span_smooth(profile_knots(curve, work, cancel)?, range, work, cancel)? {
-        return Ok(false);
-    }
-    let mut parameter = Interval::new(range[0], range[1])?;
-    loop {
-        work.charge(1, cancel)?;
-        if depth > 32 {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "native Taylor profile nesting exceeds bound",
-            ));
-        }
-        match curve {
-            Curve::TrimmedCurve(wrapped) => {
-                if !wrapped.orientation() {
-                    let (a, b) = wrapped.try_range_tuple().ok_or_else(|| {
-                        GeometryError::new(
-                            GeometryErrorCode::ConditioningFailure,
-                            "unbounded native Taylor profile",
-                        )
-                    })?;
-                    parameter = Interval::point(a).add(Interval::point(b)).sub(parameter);
-                }
-                curve = wrapped.entity().curve().as_ref();
-                depth += 1;
-            }
-            Curve::ParameterCurve(composed) => {
-                let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-                    usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-                );
-                let result = monstertruck_modeling::validated_curve2d_jet(
-                    composed.curve(),
-                    [parameter.lo, parameter.hi],
-                    &mut native,
-                    cancel,
-                );
-                debit_native_work(work, native.consumed(), cancel)?;
-                let jet = result.map_err(native_error)?;
-                let domain = std::array::from_fn(|axis| {
-                    let p = jet.position[axis];
-                    if jet.first[axis].lower == 0.0
-                        && jet.first[axis].upper == 0.0
-                        && jet.second[axis].lower == 0.0
-                        && jet.second[axis].upper == 0.0
-                    {
-                        [Interval {
-                            lo: p.lower,
-                            hi: p.upper,
-                        }
-                        .mid(); 2]
-                    } else {
-                        [p.lower, p.upper]
-                    }
-                });
-                return surface_span_smooth_at(
-                    composed.surface().as_ref(),
-                    domain,
-                    depth + 1,
-                    work,
-                    cancel,
-                );
-            }
-            Curve::IntersectionCurve(_) => return Ok(false),
-            _ => return Ok(true),
-        }
-    }
-}
-
-pub(crate) fn surface_parameter_boxes<'a>(
-    surface: &'a Surface,
-    domain: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SurfaceParameterBoxes<'a>, GeometryError> {
-    for span in domain {
-        Interval::new(span[0], span[1])?;
-    }
-    let knots = surface_knots(surface, work, cancel)?;
-    let u = AxisSpans::new(knots[0], domain[0]);
-    let v = AxisSpans::new(knots[1], domain[1]);
-    let count = u
-        .clone()
-        .count()
-        .checked_mul(v.clone().count())
-        .ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "surface knot-span product overflow",
-            )
-        })?;
-    if count > 1_000_000 {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ResourceLimit,
-            "surface knot-span product exceeds limit",
-        ));
-    }
+fn native_surface_parameter_boxes<'a>(surface: &'a Surface, domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<SurfaceParameterBoxes<'a>, GeometryError> {
+    validate_surface_partition(surface, domain, work, cancel)?;
+    let axes = surface_knots(surface, work, cancel)?;
+    let u = AxisSpans::new(axes[0], domain[0]); let v = AxisSpans::new(axes[1], domain[1]);
+    let count = u.clone().count().checked_mul(v.clone().count()).ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit, "surface knot product overflow"))?;
     work.charge(count as u64, cancel)?;
-    Ok(SurfaceParameterBoxes {
-        u,
-        v_template: v.clone(),
-        v,
-        current_u: None,
-    })
+    Ok(SurfaceParameterBoxes { u, active_v: v.clone(), v, active_u: None })
 }
-
-#[derive(Clone)]
-pub(crate) struct SurfaceCreaseInterfaces<'a> {
-    axes: [KnotAxis<'a>; 2],
-    domain: [[f64; 2]; 2],
-    axis: usize,
-    index: usize,
-    active: Option<(usize, Interval, AxisSpans<'a>)>,
-}
+pub(crate) struct SurfaceCreaseInterfaces<'a> { axes: [KnotAxis<'a>; 2], domain: [[f64; 2]; 2], axis: usize, index: usize, active: Option<(usize, f64, AxisSpans<'a>)> }
 impl Iterator for SurfaceCreaseInterfaces<'_> {
     type Item = [[f64; 2]; 2];
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some((axis, value, spans)) = &mut self.active {
-                if let Some(span) = spans.next() {
-                    let mut result = self.domain;
-                    result[*axis] = [value.lo, value.hi];
-                    result[1 - *axis] = span;
-                    return Some(result);
-                }
-                self.active = None;
-            }
-            if self.axis >= 2 {
-                return None;
-            }
-            let knots = self.axes[self.axis];
-            if self.index == knots.len() {
-                self.axis += 1;
-                self.index = 0;
-                continue;
-            }
-            let start = self.index;
-            let raw = knots.raw(start);
-            let value = knots.value(start);
-            while self.index < knots.len() && knots.raw(self.index) == raw {
-                self.index += 1;
-            }
-            if value.hi > self.domain[self.axis][0]
-                && value.lo < self.domain[self.axis][1]
-                && self.index - start >= knots.degree
-            {
-                let other = 1 - self.axis;
-                self.active = Some((
-                    self.axis,
-                    value,
-                    AxisSpans::new(self.axes[other], self.domain[other]),
-                ));
+            if let Some((axis, value, spans)) = &mut self.active { if let Some(span) = spans.next() {
+                let mut result = self.domain; result[*axis] = [*value; 2]; result[1 - *axis] = span; return Some(result);
+            } self.active = None; }
+            if self.axis >= 2 { return None; }
+            let a = self.axes[self.axis];
+            if self.index >= a.values.len() { self.axis += 1; self.index = 0; continue; }
+            let start = self.index; let value = a.values[start];
+            while self.index < a.values.len() && a.values[self.index] == value { self.index += 1; }
+            if value > self.domain[self.axis][0] && value < self.domain[self.axis][1] && self.index - start >= a.degree {
+                self.active = Some((self.axis, value, AxisSpans::new(self.axes[1 - self.axis], self.domain[1 - self.axis])));
             }
         }
     }
 }
-/// Potential C0-or-worse source interfaces need lower-dimensional analysis.
-/// Knot multiplicity alone never proves an actual geometric crease or event.
-pub(crate) fn surface_crease_interfaces<'a>(
-    surface: &'a Surface,
-    domain: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SurfaceCreaseInterfaces<'a>, GeometryError> {
-    for span in domain {
-        Interval::new(span[0], span[1])?;
-    }
-    let interfaces = SurfaceCreaseInterfaces {
-        axes: surface_knots(surface, work, cancel)?,
-        domain,
-        axis: 0,
-        index: 0,
-        active: None,
-    };
-    let count = interfaces.clone().take(1_000_001).count();
-    if count > 1_000_000 {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ResourceLimit,
-            "surface crease-interface product exceeds limit",
-        ));
-    }
+fn native_surface_crease_interfaces<'a>(surface: &'a Surface, domain: [[f64; 2]; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<SurfaceCreaseInterfaces<'a>, GeometryError> {
+    validate_surface_partition(surface, domain, work, cancel)?;
+    let axes = surface_knots(surface, work, cancel)?;
+    let count = axes[0].values.len().checked_mul(axes[1].values.len().max(1)).ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit, "crease knot product overflow"))?;
     work.charge(count as u64, cancel)?;
-    Ok(interfaces)
+    Ok(SurfaceCreaseInterfaces { axes, domain, axis: 0, index: 0, active: None })
 }
-
-pub(crate) fn curve_enclosure(
-    curve: &Curve,
-    range: (f64, f64),
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<CurveEnclosure, GeometryError> {
-    check_cancel(cancel)?;
-    // Implicit curves require an original-range capture, including under native
-    // trim/pose operators. Static jets must never choose fresh projected roots.
-    let mut basis = curve;
-    let mut depth = 0;
-    while let Curve::TrimmedCurve(wrapper) = basis {
-        work.charge(1, cancel)?;
-        if depth == 32 {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "native curve basis nesting exceeds retained source limit",
-            ));
-        }
-        depth += 1;
-        basis = wrapper.entity().curve().as_ref();
-    }
-    if matches!(basis, Curve::IntersectionCurve(_)) {
-        return Err(GeometryError::new(
-            GeometryErrorCode::UnsupportedOperation,
-            "implicit curves require a retained prepared branch",
-        ));
-    }
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_curve_jet(
-        curve,
-        [range.0, range.1],
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    let jet = result.map_err(native_error)?;
-    Ok(CurveEnclosure {
-        position: jet.position.map(adapt),
-        derivative: jet.first.map(adapt),
-        second_derivative: jet.second.map(adapt),
-    })
+fn native_curve_enclosure(curve: &Curve, range: (f64, f64), work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<CurveEnclosure, GeometryError> {
+    for value in [range.0, range.1] { Interval::new(value, value)?; }
+    let j = curve_prepared::curve_jet_order(curve, [range.0.min(range.1), range.0.max(range.1)], 2, 0, work, cancel)?;
+    Ok(CurveEnclosure { position: j[0], derivative: j[1], second_derivative: j[2] })
 }
-
+pub(crate) fn prepare_curve_enclosure<'a>(curve: &'a dyn CurveEvaluator, range: (f64, f64), remaining_bytes: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<PreparedValidatedCurve<'a>, GeometryError> {
+    PreparedValidatedCurve::new(curve, [range.0, range.1], 1.0, remaining_bytes, work, cancel)
+}
 fn norm_upper(vector: [Interval; 3]) -> Result<f64, GeometryError> {
-    let squared = vector
-        .into_iter()
-        .fold(Interval::point(0.0), |sum, x| sum.add(x.square()));
-    // Sums of squares are nonnegative analytically; outward addition at exact
-    // zero can introduce a negative subnormal lower endpoint.
-    Ok(Interval {
-        lo: squared.lo.max(0.0),
-        hi: squared.hi,
-    }
-    .sqrt()?
-    .hi)
+    Ok(vector.into_iter().fold(Interval::point(0.0), |sum, v| sum.add(v.square())).sqrt()?.hi)
 }
 
-/// One original-range curve capture. Implicit branch selection is performed
-/// once, and all adaptive children contract the same native continuation tube.
-pub(crate) struct PreparedCurveEnclosure<'a> {
-    native: PreparedNative<'a>,
-    scale: f64,
-    active: Option<(f64, f64)>,
-}
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Own a temporary native proof inline without a per-curve allocation; retained proofs remain borrowed."
-)]
-enum PreparedNative<'a> {
-    Owned(monstertruck_modeling::PreparedValidatedCurve<'a>),
-    Borrowed(&'a monstertruck_modeling::PreparedValidatedCurve<'static>),
-}
-
-pub(crate) struct GnomonicFrame {
-    pub(crate) center_mm: [f64; 3],
-    pub(crate) x_axis: [f64; 3],
-    pub(crate) y_axis: [f64; 3],
-    pub(crate) normal: [f64; 3],
-}
-
-/// One exact native parameter on one immutable prepared binding and unit view.
-#[derive(Clone, Copy)]
-pub(crate) struct CurveSamplingEndpoint<'a, 'source> {
-    binding: &'a PreparedCurveEnclosure<'source>,
-    parameter: f64,
-    point: monstertruck_modeling::ValidatedCurvePoint,
-}
-impl CurveSamplingEndpoint<'_, '_> {
-    pub(crate) fn parameter(&self) -> f64 {
-        self.parameter
-    }
-}
-
-/// Positive native C1 qualification and whole-image bounds on one closed range.
-/// A subset can inherit the bounds, never extend their range or binding.
-#[derive(Clone, Copy)]
-pub(crate) struct CurveSamplingSmoothRange<'binding, 'source> {
-    binding: &'binding PreparedCurveEnclosure<'source>,
-    range: (f64, f64),
-    jet: CurveEnclosure,
-}
-
-/// Chord and Green queries share one certified whole-query curvature bound.
-pub(crate) struct CurveSamplingInterval<'a, 'source> {
-    binding: &'a PreparedCurveEnclosure<'source>,
-    range: (f64, f64),
-    enclosure: CurveIntervalEnclosure,
-    smooth_range: Option<CurveSamplingSmoothRange<'a, 'source>>,
-}
-impl<'binding, 'source> CurveSamplingInterval<'binding, 'source> {
-    pub(crate) fn enclosure(&self) -> &CurveIntervalEnclosure {
-        &self.enclosure
-    }
-
-    pub(crate) fn smooth_range(&self) -> Option<CurveSamplingSmoothRange<'binding, 'source>> {
-        self.smooth_range
-    }
-
-    /// Integrates this exact interval from its original native endpoint receipts.
-    pub(crate) fn signed_area(
-        &self,
-        endpoints: &[CurveSamplingEndpoint<'_, '_>; 2],
-        frame: &PlaneFrameMm,
-        reference_mm: [f64; 3],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[f64; 2], GeometryError> {
-        work.charge(1, cancel)?;
-        frame.validate()?;
-        if !std::ptr::eq(endpoints[0].binding, self.binding)
-            || !std::ptr::eq(endpoints[1].binding, self.binding)
-            || (endpoints[0].parameter, endpoints[1].parameter) != self.range
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::InvalidGeometry,
-                "native Green endpoints do not own this prepared interval",
-            ));
-        }
-        if self.range.0 == self.range.1 {
-            return Ok([0.0; 2]);
-        }
-        if let Some(receipt) = &self.smooth_range {
-            let endpoint_bounds = endpoints.each_ref().map(|endpoint| {
-                endpoint
-                    .point
-                    .error
-                    .map(|value| adapt(value).mul(Interval::point(self.binding.scale)))
-            });
-            return green::signed_area_from_curvature(
-                frame,
-                reference_mm,
-                &endpoint_bounds,
-                &receipt.jet.second_derivative,
-                self.range,
-                work,
-                cancel,
-            );
-        }
-        let enclosure = self.binding.jet(self.range, work, cancel)?;
-        let projection = |axis: [f64; 3], derivative: bool| {
-            (0..3).fold(Interval::point(0.0), |sum, index| {
-                let value = if derivative {
-                    enclosure.derivative[index]
-                } else {
-                    enclosure.position[index].sub(Interval::point(reference_mm[index]))
-                };
-                sum.add(value.mul(Interval::point(axis[index])))
-            })
-        };
-        let area = projection(frame.x_axis, false)
-            .mul(projection(frame.y_axis, true))
-            .sub(projection(frame.y_axis, false).mul(projection(frame.x_axis, true)))
-            .mul(Interval::point(self.range.1).sub(Interval::point(self.range.0)))
-            .mul(Interval::point(0.5));
-        if !area.lo.is_finite() || !area.hi.is_finite() {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "native section signed-area enclosure is nonfinite",
-            ));
-        }
-        Ok([area.lo, area.hi])
-    }
-}
-impl<'a> std::ops::Deref for PreparedNative<'a> {
-    type Target = monstertruck_modeling::PreparedValidatedCurve<'a>;
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned(value) => value,
-            Self::Borrowed(value) => value,
-        }
-    }
-}
-pub(crate) fn prepare_curve_enclosure<'a>(
-    curve: &'a Curve,
-    range: (f64, f64),
-    remaining_bytes: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<PreparedCurveEnclosure<'a>, GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let options = monstertruck_modeling::ValidatedCurveOptions {
-        max_retained_bytes: remaining_bytes,
-        ..monstertruck_modeling::ValidatedCurveOptions::default()
-    };
-    let result = monstertruck_modeling::prepared_validated_curve(
-        curve,
-        [range.0, range.1],
-        &options,
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    Ok(PreparedCurveEnclosure {
-        native: PreparedNative::Owned(result.map_err(native_error)?),
-        scale: 1.0,
-        active: Some(range),
-    })
-}
-impl crate::Definition {
-    /// Borrow the retained original branch with the definition's lifetime,
-    /// independently of any temporary native boundary-curve mutex guard.
-    pub(crate) fn original_boundary_curve(
-        &self,
-        edge: monstertruck_topology::EdgeId<Curve>,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<PreparedCurveEnclosure<'_>>, GeometryError> {
-        check_cancel(cancel)?;
-        if self.original_continuations.is_empty() {
-            return Ok(None);
-        }
-        work.charge(1, cancel)?;
-        let index = self
-            .boundary_curve_indices
-            .get(&edge)
-            .copied()
-            .ok_or_else(|| {
-                GeometryError::new(
-                    GeometryErrorCode::KernelFailure,
-                    "native boundary query lost original edge identity",
-                )
-            })?;
-        let continuation = self.boundary_continuations.get(index).ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::KernelFailure,
-                "native boundary query lost its continuation slot",
-            )
-        })?;
-        if let Some(continuation) = continuation {
-            if continuation.edge != Some(edge)
-                || range.0 < continuation.source_range.0
-                || range.1 > continuation.source_range.1
-                || range.0 > range.1
-            {
-                return Err(GeometryError::new(
-                    GeometryErrorCode::InvalidGeometry,
-                    "original implicit query exceeds its retained restricted interval",
-                ));
-            }
-            let prepared = self
-                .original_continuations
-                .get(continuation.prepared)
-                .ok_or_else(|| {
-                    GeometryError::new(
-                        GeometryErrorCode::KernelFailure,
-                        "original implicit continuation owner is missing",
-                    )
-                })?;
-            return Ok(Some(PreparedCurveEnclosure::borrowed_restricted(
-                prepared,
-                continuation.scale_to_mm,
-                continuation.source_range,
-            )));
-        }
-        if self
-            .boundary_parameters
-            .get(index)
-            .and_then(Option::as_ref)
-            .is_none()
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::KernelFailure,
-                "original implicit source cannot be recaptured as an explicit native curve",
-            ));
-        }
-        Ok(None)
-    }
-}
-
-impl<'a> PreparedCurveEnclosure<'a> {
-    /// Borrow the already selected native continuation without preparing a branch.
-    pub(crate) fn native_receipt(&self) -> &monstertruck_modeling::PreparedValidatedCurve<'a> {
-        &self.native
-    }
-
-    /// Preserve the immutable definition's original proof lifetime across a
-    /// temporary boundary-carrier borrow. Query-owned explicit curves return none.
-    pub(crate) fn original_receipt(
-        &self,
-    ) -> Option<&'a monstertruck_modeling::PreparedValidatedCurve<'static>> {
-        match &self.native {
-            PreparedNative::Borrowed(receipt) => Some(*receipt),
-            PreparedNative::Owned(_) => None,
-        }
-    }
-
-    pub(crate) fn scale_to_mm(&self) -> f64 {
-        self.scale
-    }
-}
-
-impl<'source> PreparedCurveEnclosure<'source> {
-    /// Query-owned bytes only: the immutable definition's shared source was
-    /// charged once at admission, not again for each use or occurrence.
-    pub(crate) fn retained_bytes(&self) -> usize {
-        match &self.native {
-            PreparedNative::Owned(value) => value.retained_bytes(),
-            PreparedNative::Borrowed(_) => 0,
-        }
-    }
-    #[cfg(test)]
-    pub(crate) fn borrowed<'a>(
-        native: &'a monstertruck_modeling::PreparedValidatedCurve<'static>,
-        scale: f64,
-    ) -> PreparedCurveEnclosure<'a> {
-        PreparedCurveEnclosure {
-            native: PreparedNative::Borrowed(native),
-            scale,
-            active: None,
-        }
-    }
-    pub(crate) fn borrowed_restricted<'a>(
-        native: &'a monstertruck_modeling::PreparedValidatedCurve<'static>,
-        scale: f64,
-        range: (f64, f64),
-    ) -> PreparedCurveEnclosure<'a> {
-        PreparedCurveEnclosure {
-            native: PreparedNative::Borrowed(native),
-            scale,
-            active: Some(range),
-        }
-    }
-    fn check_range(&self, range: (f64, f64)) -> Result<(), GeometryError> {
-        if !range.0.is_finite()
-            || !range.1.is_finite()
-            || range.0 > range.1
-            || self
-                .active
-                .is_some_and(|active| range.0 < active.0 || range.1 > active.1)
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::InvalidGeometry,
-                "retained original curve query leaves its active source restriction",
-            ));
-        }
-        Ok(())
-    }
-    /// Retained native query pieces. An explicit binding may be ONE piece
-    /// across several original knots. These seed adaptive queries, not a C0
-    /// incidence inventory or Taylor qualification: use the separate knot
-    /// visitor and `is_smooth_on` for those obligations.
-    pub(crate) fn parameter_intervals(&self) -> impl DoubleEndedIterator<Item = (f64, f64)> + '_ {
-        self.native.pieces().iter().filter_map(move |piece| {
-            let (a, b) = self
-                .active
-                .map_or((piece.parameter[0], piece.parameter[1]), |active| {
-                    (
-                        piece.parameter[0].max(active.0),
-                        piece.parameter[1].min(active.1),
-                    )
-                });
-            (a < b).then_some((a, b))
-        })
-    }
-    /// Stream every internal literal knot of an original explicit spline in
-    /// root-parameter order. A complete result qualifies each BETWEEN-knot span
-    /// analytically C1 with bounded one-sided second derivatives: the retained
-    /// Native whole-source piecewise jet already admitted all coefficients,
-    /// affine operators, finite support and denominators, and no knot is omitted.
-    /// This NEVER claims C1 across a joint. Unknown implicit/carrier-induced
-    /// knots and nonrepresentable mapped bands return false. No copied buffers.
-    pub(crate) fn visit_explicit_knots(
-        &self,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-        visit: &mut impl FnMut(f64, &mut GeometryWorkBudget, &AtomicBool) -> Result<(), GeometryError>,
-    ) -> Result<bool, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        let Some(original) = self.native.native_curve() else {
-            return Ok(false);
-        };
-        let mut basis = original;
-        for depth in 0..=32 {
-            work.charge(1, cancel)?;
-            match basis {
-                Curve::TrimmedCurve(wrapper) if depth < 32 => {
-                    basis = wrapper.entity().curve().as_ref();
-                }
-                Curve::TrimmedCurve(_) => {
-                    return Err(GeometryError::new(
-                        GeometryErrorCode::ResourceLimit,
-                        "original coedge knot-wrapper nesting exceeds cap",
-                    ));
-                }
-                _ => break,
-            }
-        }
-        if !matches!(basis, Curve::BsplineCurve(_) | Curve::NurbsCurve(_)) {
-            return Ok(false);
-        }
-        // Reuse the original knot-axis walker, including every independent
-        // retained reflection anchor and its outward/exact TwoSum arithmetic.
-        let knots = profile_knots(original, work, cancel)?;
-        let mut previous = range.0;
-        for index in 0..knots.len() {
-            work.charge(1, cancel)?;
-            let knot = knots.value(index);
-            Interval::new(knot.lo, knot.hi)?;
-            if knot.hi <= range.0 || knot.lo >= range.1 {
-                continue;
-            }
-            if knot.lo != knot.hi || knot.lo < previous {
-                return Ok(false);
-            }
-            if knot.lo > previous {
-                visit(knot.lo, work, cancel)?;
-                previous = knot.lo;
-            }
-        }
-        Ok(true)
-    }
-    pub(crate) fn is_smooth_on(
-        &self,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<bool, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = self
-            .native
-            .is_smooth_on([range.0, range.1], &mut native, cancel);
-        debit_native_work(work, native.consumed(), cancel)?;
-        result.map_err(native_error)
-    }
-    /// Independent whole native image enclosure. No differentiability/Taylor
-    /// premise is attached to this bound across retained coordinate joints.
-    pub(crate) fn position_bounds(
-        &self,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[Interval; 3], GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = self
-            .native
-            .position_bounds([range.0, range.1], &mut native, cancel);
-        debit_native_work(work, native.consumed(), cancel)?;
-        Ok(result
-            .map_err(native_error)?
-            .map(|value| adapt(value).mul(Interval::point(self.scale))))
-    }
-    pub(crate) fn endpoint_position(
-        &self,
-        parameter: f64,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<[Interval; 3], GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range((parameter, parameter))?;
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = self.native.evaluate(parameter, &mut native_work, cancel);
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        Ok(result
-            .map_err(native_error)?
-            .error
-            .map(|value| adapt(value).mul(Interval::point(self.scale))))
-    }
-
-    /// Actual (unnormalized) scalar functional, folded into explicit native
-    /// coefficients before interval evaluation so geometric correlations survive.
-    pub(crate) fn projected_position_enclosure(
-        &self,
-        range: (f64, f64),
-        origin: [f64; 3],
-        direction: [f64; 3],
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Interval, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result =
-            self.projected_with_native_budget(range, origin, direction, &mut native_work, cancel);
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        result
-    }
-
-    fn projected_with_native_budget(
-        &self,
-        range: (f64, f64),
-        origin: [f64; 3],
-        direction: [f64; 3],
-        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Interval, GeometryError> {
-        // Evaluate in the original source frame before the actual unit map.
-        let native_origin = if self.scale == 1.0 { origin } else { [0.0; 3] };
-        let jet = self
-            .native
-            .projected_jet(
-                [range.0, range.1],
-                native_origin,
-                direction,
-                native_work,
-                cancel,
-            )
-            .map_err(native_error)?;
-        if self.scale == 1.0 {
-            Ok(adapt(jet.position))
-        } else {
-            Ok(adapt(jet.position)
-                .mul(Interval::point(self.scale))
-                .sub(dot_point(origin, direction)))
-        }
-    }
-
-    pub(crate) fn jet(
-        &self,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<CurveEnclosure, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = self.refined_with_native_budget(range, &mut native_work, cancel);
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        result
-    }
-
-    fn refined_with_native_budget(
-        &self,
-        range: (f64, f64),
-        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
-        cancel: &AtomicBool,
-    ) -> Result<CurveEnclosure, GeometryError> {
-        let jet = self
-            .native
-            .jet([range.0, range.1], native_work, cancel)
-            .map_err(native_error)?;
-        let scaled = |value| adapt(value).mul(Interval::point(self.scale));
-        Ok(CurveEnclosure {
-            position: jet.position.map(scaled),
-            derivative: jet.first.map(scaled),
-            second_derivative: jet.second.map(scaled),
-        })
-    }
-
-    /// Piecewise first derivatives of this exact retained owner, not position,
-    /// Hessian or C1 authority. Crossing a prepared projection joint declines.
-    /// Mapped owners retain the ordinary fresh query's reflected-range checks.
-    pub(crate) fn retained_first_enclosure(
-        &self,
-        range: (f64, f64),
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<Option<[Interval; 3]>, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range(range)?;
-        work.charge(1, cancel)?;
-        if self.native.mapped_basis().is_some() {
-            return Ok(None);
-        }
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = self.retained_with_native_budget(range, &mut native_work, cancel, true);
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        result.map(|jet| jet.map(|jet| jet.derivative))
-    }
-
-    /// Borrow a finite whole-piece certificate on a contained smooth query.
-    /// The caller separately qualifies C1; a retained Hessian is not that proof.
-    fn retained_with_native_budget(
-        &self,
-        range: (f64, f64),
-        native_work: &mut monstertruck_modeling::ValidatedGeometryBudget,
-        cancel: &AtomicBool,
-        single_piece: bool,
-    ) -> Result<Option<CurveEnclosure>, GeometryError> {
-        if range.0 == range.1 {
-            native_work.charge(1, cancel).map_err(native_error)?;
-            return Ok(None);
-        }
-        let pieces = self.native.pieces();
-        let (mut low, mut high) = (0, pieces.len());
-        while low < high {
-            native_work.charge(1, cancel).map_err(native_error)?;
-            let middle = low + (high - low) / 2;
-            if pieces[middle].parameter[1] <= range.0 {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        let mut covered = range.0;
-        let mut result: Option<CurveEnclosure> = None;
-        let scaled = |value| adapt(value).mul(Interval::point(self.scale));
-        for piece in &pieces[low..] {
-            native_work.charge(1, cancel).map_err(native_error)?;
-            if piece.parameter[0] >= range.1 {
-                break;
-            }
-            let lower = piece.parameter[0].max(range.0);
-            let upper = piece.parameter[1].min(range.1);
-            if lower >= upper {
-                continue;
-            }
-            if lower > covered {
-                return Err(GeometryError::new(
-                    GeometryErrorCode::InvalidGeometry,
-                    "retained native curve partition has an uncovered query interval",
-                ));
-            }
-            if single_piece && result.is_some() {
-                return Ok(None);
-            }
-            let jet = CurveEnclosure {
-                position: piece.jet.position.map(scaled),
-                derivative: piece.jet.first.map(scaled),
-                second_derivative: piece.jet.second.map(scaled),
-            };
-            if jet
-                .position
-                .into_iter()
-                .chain(jet.derivative)
-                .chain(jet.second_derivative)
-                .any(|bound| !bound.lo.is_finite() || !bound.hi.is_finite())
-            {
-                return Ok(None);
-            }
-            result = Some(match result {
-                None => jet,
-                Some(previous) => CurveEnclosure {
-                    position: std::array::from_fn(|axis| {
-                        previous.position[axis].hull(jet.position[axis])
-                    }),
-                    derivative: std::array::from_fn(|axis| {
-                        previous.derivative[axis].hull(jet.derivative[axis])
-                    }),
-                    second_derivative: std::array::from_fn(|axis| {
-                        previous.second_derivative[axis].hull(jet.second_derivative[axis])
-                    }),
-                },
-            });
-            covered = upper;
-            if covered == range.1 {
-                return Ok(result);
-            }
-        }
-        Err(GeometryError::new(
-            GeometryErrorCode::InvalidGeometry,
-            "retained native curve partition does not cover the requested range",
-        ))
-    }
-
-    /// Compose the actual retained native branch with a pole-free projective
-    /// chart. Frame vectors need not be perfectly orthonormal: independence and
-    /// a strictly positive hemisphere denominator are proved outwardly.
-    pub(crate) fn gnomonic_jet(
-        &self,
-        range: (f64, f64),
-        frame: &GnomonicFrame,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<ChartCurveEnclosure, GeometryError> {
-        let &GnomonicFrame {
-            center_mm,
-            x_axis,
-            y_axis,
-            normal,
-        } = frame;
-        work.charge(1, cancel)?;
-        if center_mm
-            .into_iter()
-            .chain(x_axis)
-            .chain(y_axis)
-            .chain(normal)
-            .any(|v| !v.is_finite())
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "nonfinite projective pole chart frame",
-            ));
-        }
-        let dot = |a: [Interval; 3], b: [f64; 3]| {
-            (0..3).fold(Interval::point(0.0), |sum, i| {
-                sum.add(a[i].mul(Interval::point(b[i])))
-            })
-        };
-        let determinant = dot(
-            cross(x_axis.map(Interval::point), y_axis.map(Interval::point)),
-            normal,
-        );
-        if determinant.contains_zero() || !determinant.lo.is_finite() || !determinant.hi.is_finite()
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "projective pole chart frame independence is unresolved",
-            ));
-        }
-        let native = self.jet(range, work, cancel)?;
-        let p = std::array::from_fn(|i| native.position[i].sub(Interval::point(center_mm[i])));
-        let s = dot(p, normal);
-        if s.lo <= 0.0 || !s.lo.is_finite() || !s.hi.is_finite() {
-            return Err(GeometryError::new(
-                GeometryErrorCode::AnalysisIndeterminate,
-                "native branch cannot be enclosed in a positive projective hemisphere",
-            ));
-        }
-        let ds = dot(native.derivative, normal);
-        let dds = dot(native.second_derivative, normal);
-        let s2 = s.square();
-        let s3 = s2.mul(s);
-        let chart_axis = |axis: [f64; 3]| -> Result<[Interval; 3], GeometryError> {
-            let n = dot(p, axis);
-            let dn = dot(native.derivative, axis);
-            let ddn = dot(native.second_derivative, axis);
-            let value = n.div(s)?;
-            let first = dn.mul(s).sub(n.mul(ds)).div(s2)?;
-            let second = ddn
-                .div(s)?
-                .sub(n.mul(dds).div(s2)?)
-                .sub(Interval::point(2.0).mul(dn).mul(ds).div(s2)?)
-                .add(Interval::point(2.0).mul(n).mul(ds.square()).div(s3)?);
-            for value in [value, first, second] {
-                Interval::new(value.lo, value.hi)?;
-            }
-            Ok([value, first, second])
-        };
-        let x = chart_axis(x_axis)?;
-        let y = chart_axis(y_axis)?;
-        Ok(ChartCurveEnclosure {
-            position: [x[0], y[0]],
-            derivative: [x[1], y[1]],
-            second_derivative: [x[2], y[2]],
-        })
-    }
-
-    /// Retains an original endpoint enclosure for exact-parameter reuse by this sampler.
-    pub(crate) fn sampling_endpoint(
-        &self,
-        parameter: f64,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<CurveSamplingEndpoint<'_, 'source>, GeometryError> {
-        check_cancel(cancel)?;
-        self.check_range((parameter, parameter))?;
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let point = self.native.evaluate(parameter, &mut native_work, cancel);
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        Ok(CurveSamplingEndpoint {
-            binding: self,
-            parameter,
-            point: point.map_err(native_error)?,
-        })
-    }
-
-    /// Whole-curve Hausdorff bound to the actual returned endpoint chord.
-    /// Taylor requires a native C1 receipt; otherwise use a complete image and
-    /// an actual native endpoint anchor, never a piecewise Hessian union.
-    pub(crate) fn sampling_interval(
-        &self,
-        endpoints: &[CurveSamplingEndpoint<'_, 'source>; 2],
-        inherited_smooth_range: Option<CurveSamplingSmoothRange<'_, 'source>>,
-        frame: &PlaneFrameMm,
-        maximum_plane_error_mm: f64,
-        work: &mut GeometryWorkBudget,
-        cancel: &AtomicBool,
-    ) -> Result<CurveSamplingInterval<'_, 'source>, GeometryError> {
-        frame.validate()?;
-        if !maximum_plane_error_mm.is_finite()
-            || maximum_plane_error_mm <= 0.0
-            || maximum_plane_error_mm > SECTION_PLANE_TOLERANCE_MM
-        {
-            return Err(GeometryError::new(
-                GeometryErrorCode::InvalidGeometry,
-                "native sampling plane error must narrow the frozen section allowance",
-            ));
-        }
-        work.charge(1, cancel)?;
-        let [start, end] = endpoints;
-        if !std::ptr::eq(start.binding, self) || !std::ptr::eq(end.binding, self) {
-            return Err(GeometryError::new(
-                GeometryErrorCode::InvalidGeometry,
-                "native sampler endpoint belongs to another prepared source binding",
-            ));
-        }
-        let range = (start.parameter, end.parameter);
-        self.check_range(range)?;
-        if let Some(receipt) = inherited_smooth_range {
-            work.charge(1, cancel)?;
-            // Identity also fixes the active restriction, native parameter gauge
-            // and unit view: all are immutable for this binding's borrowed life.
-            if !std::ptr::eq(receipt.binding, self) {
-                return Err(GeometryError::new(
-                    GeometryErrorCode::InvalidGeometry,
-                    "native sampler smooth range belongs to another prepared source binding",
-                ));
-            }
-            self.check_range(receipt.range)?;
-            if range.0 < receipt.range.0 || range.1 > receipt.range.1 {
-                return Err(GeometryError::new(
-                    GeometryErrorCode::InvalidGeometry,
-                    "native sampler interval leaves its qualified closed smooth range",
-                ));
-            }
-        }
-        let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = (|| -> Result<CurveSamplingInterval<'_, 'source>, GeometryError> {
-            let smooth = match inherited_smooth_range {
-                Some(_) => true,
-                None => self
-                    .native
-                    .is_smooth_on([range.0, range.1], &mut native_work, cancel)
-                    .map_err(native_error)?,
-            };
-            let start = &start.point;
-            let end = &end.point;
-            let start_mm = [start.position.x, start.position.y, start.position.z]
-                .map(|value| value * self.scale);
-            let end_mm =
-                [end.position.x, end.position.y, end.position.z].map(|value| value * self.scale);
-            let scaled = |value| adapt(value).mul(Interval::point(self.scale));
-            let endpoint_error =
-                |point: [f64; 3], enclosure: [monstertruck_modeling::ValidatedInterval; 3]| {
-                    norm_upper(std::array::from_fn(|axis| {
-                        scaled(enclosure[axis]).sub(Interval::point(point[axis]))
-                    }))
-                };
-            let reserve =
-                endpoint_error(start_mm, start.error)?.max(endpoint_error(end_mm, end.error)?);
-            let mut retained_jet = None;
-            let (position, chord_error_mm) = if smooth {
-                let width = Interval::point(range.1).sub(Interval::point(range.0));
-                let chord_error = |jet: &CurveEnclosure| -> Result<f64, GeometryError> {
-                    let remainder = Interval::point(norm_upper(jet.second_derivative)?)
-                        .mul(width.square())
-                        .mul(Interval::point(0.125))
-                        .hi;
-                    Ok(up(remainder + reserve))
-                };
-                let inherited = match inherited_smooth_range {
-                    Some(receipt)
-                        if chord_error(&receipt.jet)? <= SECTION_SAMPLING_TOLERANCE_MM =>
-                    {
-                        Some(receipt.jet)
-                    }
-                    _ => None,
-                };
-                let jet = match inherited {
-                    Some(jet) => jet,
-                    None => {
-                        // Only query a tighter native bound when the parent's
-                        // qualified enclosure cannot meet this child's policy.
-                        let coarse =
-                            self.retained_with_native_budget(range, &mut native_work, cancel, false)?;
-                        match coarse {
-                            Some(jet)
-                                if chord_error(&jet)? <= SECTION_SAMPLING_TOLERANCE_MM => jet,
-                            _ => self.refined_with_native_budget(range, &mut native_work, cancel)?,
-                        }
-                    }
-                };
-                let error = chord_error(&jet)?;
-                retained_jet = Some(jet);
-                (jet.position, error)
-            } else {
-                // Curve -> chord uses its first actual chord endpoint. Chord
-                // -> curve uses the true native start point enclosed by E0;
-                // convexity of norm bounds every chord point by its endpoints.
-                let position = self
-                    .native
-                    .position_bounds([range.0, range.1], &mut native_work, cancel)
-                    .map_err(native_error)?
-                    .map(scaled);
-                let image_to_chord = norm_upper(std::array::from_fn(|axis| {
-                    position[axis].sub(Interval::point(start_mm[axis]))
-                }))?;
-                let chord_to_anchor = reserve.max(norm_upper(std::array::from_fn(|axis| {
-                    scaled(start.error[axis]).sub(Interval::point(end_mm[axis]))
-                }))?);
-                (position, image_to_chord.max(chord_to_anchor))
-            };
-            let projection = (0..3).fold(Interval::point(0.0), |sum, axis| {
-                sum.add(
-                    position[axis]
-                        .sub(Interval::point(frame.origin_mm[axis]))
-                        .mul(Interval::point(frame.z_axis[axis])),
-                )
-            });
-            let mut plane_error_mm = projection.abs_upper();
-            if smooth && plane_error_mm > maximum_plane_error_mm {
-                plane_error_mm = self
-                    .projected_with_native_budget(
-                        range,
-                        frame.origin_mm,
-                        frame.z_axis,
-                        &mut native_work,
-                        cancel,
-                    )?
-                    .abs_upper();
-            }
-            Ok(CurveSamplingInterval {
-                binding: self,
-                range,
-                enclosure: CurveIntervalEnclosure {
-                    start_mm,
-                    end_mm,
-                    chord_error_mm,
-                    plane_error_mm,
-                },
-                smooth_range: retained_jet.map(|jet| CurveSamplingSmoothRange {
-                    binding: self,
-                    range,
-                    jet,
-                }),
-            })
-        })();
-        debit_native_work(work, native_work.consumed(), cancel)?;
-        result
-    }
-}
-pub(crate) fn clone_oriented_curve_with_byte_limit(
-    edge: &monstertruck_modeling::Edge,
-    remaining_bytes: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(Curve, usize), GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let size = edge.with_curve(|curve| {
-        monstertruck_modeling::curve_owned_bytes(curve, remaining_bytes, &mut native_work, cancel)
-    });
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    let size = size.map_err(native_error)?;
-    work.charge(1, cancel)?;
-    Ok((edge.oriented_curve(), size))
-}
-
-pub(crate) fn same_surface_coefficients(
-    lhs: &Surface,
-    rhs: &Surface,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<bool, GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_same_surface_coefficients(
-        lhs,
-        rhs,
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    result.map_err(native_error)
-}
-
-pub(crate) fn prepare_section_curve_enclosure(
-    guide: &Curve,
-    source: monstertruck_modeling::ValidatedFacePlaneSource<'_>,
-    plane: &monstertruck_modeling::Plane,
-    range: (f64, f64),
-    remaining_bytes: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<PreparedCurveEnclosure<'static>, GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let options = monstertruck_modeling::ValidatedCurveOptions {
-        max_retained_bytes: remaining_bytes,
-        ..monstertruck_modeling::ValidatedCurveOptions::default()
-    };
-    let result = monstertruck_modeling::prepared_face_plane_curve(
-        guide,
-        source,
-        plane,
-        [range.0, range.1],
-        &options,
-        &mut native_work,
-        cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    Ok(PreparedCurveEnclosure {
-        native: PreparedNative::Owned(result.map_err(native_error)?),
-        scale: 1.0,
-        active: Some(range),
-    })
-}
-
-mod green;
-mod section_coverage;
-pub(crate) use section_coverage::{
-    EndpointChartProposals, PreparedSectionOriginals, PreparedSectionPlaneRoots,
-    SectionPlaneCoverage, SectionPlaneEndpointReceipt, certify_section_plane_coverage,
-    prepare_section_originals, prepare_section_plane_roots,
-};
-
-fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
+pub(crate) fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
     std::array::from_fn(|axis| {
         let i = (axis + 1) % 3;
         let j = (axis + 2) % 3;
@@ -2607,7 +547,7 @@ pub(crate) struct DisplayTriangleProof<'a> {
     surface: &'a Surface,
     boxes: [Option<DisplayAuxBox>; 64],
     vertices: [Option<DisplayVertexProof>; 256],
-    mesh_uvs: &'a [monstertruck_modeling::Vector2],
+    mesh_uvs: &'a [solidcore::Vec2],
     mesh_vertices: Vec<Option<[Interval; 3]>>,
     triangle_boxes: Vec<u32>,
     mesh_boxes: Vec<DisplayMeshBox>,
@@ -2668,12 +608,16 @@ struct DisplaySubdivisionScratch {
     remainder: [Interval; 3],
     residual: [Interval; 3],
 }
+const DISPLAY_EVALUATION_SCRATCH_BYTES: usize = nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
+    + continuity::SCRATCH_BYTES + std::mem::size_of::<[([[f64; 2]; 2], u8); 50]>()
+    + 4 * std::mem::size_of::<SurfaceEnclosure>();
 impl<'a> DisplayTriangleProof<'a> {
     pub(crate) fn base_retained_bytes_for_vertices(count: usize) -> Result<usize, GeometryError> {
         count.checked_mul(std::mem::size_of::<Option<[Interval; 3]>>())
             .and_then(|bytes| bytes.checked_add(
                 std::mem::size_of::<Self>() + std::mem::size_of::<DisplayHessianScratch>()
-                    + std::mem::size_of::<DisplaySubdivisionScratch>(),
+                    + std::mem::size_of::<DisplaySubdivisionScratch>()
+                    + DISPLAY_EVALUATION_SCRATCH_BYTES,
             ))
             .ok_or_else(|| GeometryError::new(
                 GeometryErrorCode::ResourceLimit, "display UV-point proof storage overflow",
@@ -2681,7 +625,7 @@ impl<'a> DisplayTriangleProof<'a> {
     }
     pub(crate) fn retained_bytes(&self) -> usize {
         (std::mem::size_of::<Self>() + std::mem::size_of::<DisplayHessianScratch>()
-            + std::mem::size_of::<DisplaySubdivisionScratch>()).saturating_add(
+            + std::mem::size_of::<DisplaySubdivisionScratch>() + DISPLAY_EVALUATION_SCRATCH_BYTES).saturating_add(
                 self.mesh_vertices.capacity().saturating_mul(std::mem::size_of::<Option<[Interval; 3]>>()),
             )
             .saturating_add(self.triangle_boxes.capacity().saturating_mul(std::mem::size_of::<u32>()))
@@ -2693,22 +637,36 @@ impl<'a> DisplayTriangleProof<'a> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
-        Self::with_mesh_inventory(surface, &[], Vec::new(), Vec::new(), work, cancel)
+        Self::with_mesh_inventory(surface, &[], Vec::new(), Vec::new(), usize::MAX, work, cancel)
     }
     pub(crate) fn with_mesh_inventory(
         surface: &'a Surface,
-        mesh_uvs: &'a [monstertruck_modeling::Vector2],
+        mesh_uvs: &'a [solidcore::Vec2],
         triangle_boxes: Vec<u32>,
         mesh_boxes: Vec<DisplayMeshBox>,
+        maximum_live_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Self, GeometryError> {
         let uv_count = mesh_uvs.len();
         work.charge((64 + 256 + 1_u64).saturating_add(uv_count as u64), cancel)?;
+        let inventory_bytes = triangle_boxes.capacity().checked_mul(std::mem::size_of::<u32>())
+            .and_then(|n| mesh_boxes.capacity().checked_mul(std::mem::size_of::<DisplayMeshBox>()).and_then(|b| n.checked_add(b)))
+            .ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit, "display inventory byte size overflow"))?;
+        let anticipated = Self::base_retained_bytes_for_vertices(uv_count)?.checked_add(inventory_bytes)
+            .ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit, "display proof live bytes overflow"))?;
+        if anticipated > maximum_live_bytes {
+            return Err(GeometryError::new(GeometryErrorCode::ResourceLimit, "display proof owner and scratch exceed byte allowance"));
+        }
         let mut mesh_vertices = Vec::new();
         mesh_vertices.try_reserve_exact(uv_count).map_err(|_| GeometryError::new(
             GeometryErrorCode::ResourceLimit, "display UV-point proof allocation failed",
         ))?;
+        let actual = Self::base_retained_bytes_for_vertices(mesh_vertices.capacity())?.checked_add(inventory_bytes)
+            .ok_or_else(|| GeometryError::new(GeometryErrorCode::ResourceLimit, "display proof allocated bytes overflow"))?;
+        if actual > maximum_live_bytes {
+            return Err(GeometryError::new(GeometryErrorCode::ResourceLimit, "display allocator capacity exceeds proof allowance"));
+        }
         for index in 0..uv_count {
             if index % 1024 == 0 {
                 check_cancel(cancel)?;
@@ -3184,21 +1142,10 @@ fn first_jet_triangle_error(
 
 /// Evaluate only the native source position; derivatives and regularity remain
 /// separate obligations. Debit completed work even if evaluation fails.
-pub(crate) fn surface_position_enclosure(
-    surface: &Surface,
-    uv: [[f64; 2]; 2],
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
+fn native_surface_position_enclosure(
+    surface: &Surface, uv: [[f64; 2]; 2], work: &mut GeometryWorkBudget, cancel: &AtomicBool,
 ) -> Result<[Interval; 3], GeometryError> {
-    check_cancel(cancel)?;
-    let mut native_work = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_surface_position_bounds(
-        surface, uv, &mut native_work, cancel,
-    );
-    debit_native_work(work, native_work.consumed(), cancel)?;
-    Ok(result.map_err(native_error)?.map(adapt))
+    Ok(analytic_eval::surface_order(surface, uv, 0, work, cancel)?.position)
 }
 fn surface_coordinate_first(
     surface: &Surface,
@@ -3231,7 +1178,7 @@ fn auxiliary_smooth_triangle(
     let axes = surface_knots(surface, work, cancel)?;
     let mut interior = [[0.0; 2]; 2];
     for axis in 0..2 {
-        work.charge(axes[axis].len() as u64 + 1, cancel)?;
+        work.charge(axes[axis].values.len() as u64 + 1, cancel)?;
         let mut selected: Option<[f64; 2]> = None;
         for span in AxisSpans::new(axes[axis], domain[axis]) {
             work.charge(1, cancel)?;
@@ -3574,1497 +1521,4 @@ fn triangle_metric_remainder(
         remainder[axis] = Interval::point(radius).mul(Interval::point(0.5));
     }
     Ok(Some(remainder))
-}
-
-/// The native source boundary joint supplies quotient topology. This proof
-/// supplies only complete-image display error and actual one-sided native
-/// normals; it never asserts a unique limiting normal at a chart singularity.
-pub(crate) enum BoundaryTriangleProof {
-    NativeTriangle {
-        error_mm: f64,
-        normals: [[f64; 3]; 3],
-        boundary_normal: [bool; 3],
-    },
-    VertexTube {
-        error_mm: f64,
-    },
-}
-
-fn native_unit_normal(jet: &SurfaceEnclosure) -> Result<[f64; 3], GeometryError> {
-    let normal = cross(jet.du, jet.dv);
-    if !regular_jet(jet) {
-        return Err(GeometryError::new(
-            GeometryErrorCode::SingularGeometry,
-            "native display normal has no proved regular representative",
-        ));
-    }
-    let center = normal.map(Interval::mid);
-    let scale = center.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
-    if !scale.is_finite() || scale == 0.0 {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ConditioningFailure,
-            "native display normal representative is ill-conditioned",
-        ));
-    }
-    let scaled = center.map(|x| x / scale);
-    let length = scaled[0].hypot(scaled[1]).hypot(scaled[2]);
-    let unit = scaled.map(|x| x / length);
-    let orientation = (0..3).fold(Interval::point(0.0), |sum, axis| {
-        sum.add(normal[axis].mul(Interval::point(unit[axis])))
-    });
-    if unit.into_iter().any(|x| !x.is_finite()) || orientation.lo <= 0.0 {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ConditioningFailure,
-            "native one-sided normal orientation is unresolved",
-        ));
-    }
-    Ok(unit)
-}
-
-struct BoundaryPatchRequest {
-    domain: [[f64; 2]; 2],
-    fixed_axis: usize,
-    fixed: f64,
-    supported: [[f64; 2]; 2],
-    vertex: [f64; 3],
-}
-
-fn certify_boundary_patch(
-    surface: &Surface,
-    request: &BoundaryPatchRequest,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    let &BoundaryPatchRequest {
-        domain,
-        fixed_axis,
-        fixed,
-        supported,
-        vertex,
-    } = request;
-    let mut stack = [([[0.0; 2]; 2], 0_u8); 50];
-    stack[0] = (domain, 0);
-    let mut live = 1;
-    while live != 0 {
-        live -= 1;
-        let (cell, depth) = stack[live];
-        work.charge(1, cancel)?;
-        let jet = surface_enclosure(surface, cell, work, cancel)?;
-        if regular_jet(&jet) {
-            continue;
-        }
-        let variable = 1 - fixed_axis;
-        // Only a connected collar of this ORIGINAL natural-boundary connector
-        // may belong to the explicit source-vertex stratum. The WHOLE strip to
-        // the native boundary must fit its display tube. An unrelated interior
-        // rank failure, a merely small row, or endpoint nearness is insufficient.
-        if cell[variable][0] >= supported[variable][0]
-            && cell[variable][1] <= supported[variable][1]
-        {
-            let mut strip = cell;
-            strip[fixed_axis][0] = strip[fixed_axis][0].min(fixed);
-            strip[fixed_axis][1] = strip[fixed_axis][1].max(fixed);
-            let collar = surface_enclosure(surface, strip, work, cancel)?;
-            let distance = norm_upper(std::array::from_fn(|axis| {
-                collar.position[axis].sub(Interval::point(vertex[axis]))
-            }))?;
-            if distance <= 0.00625 {
-                continue;
-            }
-        }
-        if depth == 24 {
-            return Err(GeometryError::new(
-                GeometryErrorCode::AnalysisIndeterminate,
-                "native display rank outside the original boundary vertex tube is unresolved",
-            ));
-        }
-        let axis = if cell[0][1] - cell[0][0] >= cell[1][1] - cell[1][0] {
-            0
-        } else {
-            1
-        };
-        let middle = cell[axis][0] * 0.5 + cell[axis][1] * 0.5;
-        if middle <= cell[axis][0] || middle >= cell[axis][1] {
-            return Err(GeometryError::new(
-                GeometryErrorCode::ConditioningFailure,
-                "native boundary display chart exhausted representable subdivision",
-            ));
-        }
-        let mut left = cell;
-        let mut right = cell;
-        left[axis][1] = middle;
-        right[axis][0] = middle;
-        stack[live] = (right, depth + 1);
-        stack[live + 1] = (left, depth + 1);
-        live += 2;
-    }
-    Ok(())
-}
-
-pub(crate) fn triangle_boundary_error_bound(
-    surface: &Surface,
-    uv: &[[f64; 2]; 3],
-    points: &[[f64; 3]; 3],
-    original_vertex_mm: [f64; 3],
-    joint: &monstertruck_modeling::TrimJointKind,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<BoundaryTriangleProof, GeometryError> {
-    work.charge(1, cancel)?;
-    let monstertruck_modeling::TrimJointKind::NaturalBoundary {
-        fixed_axis,
-        fixed_parameter,
-        supported_parameter_box,
-        ..
-    } = joint
-    else {
-        return Err(GeometryError::new(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "native boundary triangle lacks original natural-boundary joint authority",
-        ));
-    };
-    if *fixed_axis >= 2
-        || uv
-            .iter()
-            .flatten()
-            .chain(points.iter().flatten())
-            .chain(original_vertex_mm.iter())
-            .any(|x| !x.is_finite())
-    {
-        return Err(GeometryError::new(
-            GeometryErrorCode::InvalidGeometry,
-            "invalid native boundary triangle parameters",
-        ));
-    }
-    let domain = std::array::from_fn(|axis| {
-        [
-            uv.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min),
-            uv.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max),
-        ]
-    });
-    let bound = surface_piecewise_enclosure(surface, domain, work, cancel)?;
-    if points[0] == points[1] || points[1] == points[2] || points[2] == points[0] {
-        // A collapsed ROW does not bound its incident UV wedge. Enclose the
-        // ENTIRE wedge image (its rectangle is a conservative superset).
-        let error_mm = norm_upper(std::array::from_fn(|axis| {
-            bound.position[axis].sub(Interval::point(original_vertex_mm[axis]))
-        }))?;
-        return Ok(BoundaryTriangleProof::VertexTube { error_mm });
-    }
-    certify_boundary_patch(
-        surface,
-        &BoundaryPatchRequest {
-            domain,
-            fixed_axis: *fixed_axis,
-            fixed: *fixed_parameter,
-            supported: *supported_parameter_box,
-            vertex: original_vertex_mm,
-        },
-        work,
-        cancel,
-    )?;
-    let error_mm = triangle_interpolation_error(surface, uv, points, domain, &bound, work, cancel)?;
-    let boundary_normal = uv.map(|point| {
-        (0..2).all(|axis| {
-            supported_parameter_box[axis][0] <= point[axis]
-                && point[axis] <= supported_parameter_box[axis][1]
-        })
-    });
-    let representative = std::array::from_fn::<_, 2, _>(|axis| {
-        uv[0][axis] + ((uv[1][axis] - uv[0][axis]) + (uv[2][axis] - uv[0][axis])) / 3.0
-    });
-    let mut normals = [[0.0; 3]; 3];
-    let mut interior_normal = None;
-    for slot in 0..3 {
-        if boundary_normal[slot] {
-            if interior_normal.is_none() {
-                let jet = surface_enclosure(
-                    surface,
-                    [[representative[0]; 2], [representative[1]; 2]],
-                    work,
-                    cancel,
-                )?;
-                interior_normal = Some(native_unit_normal(&jet)?);
-            }
-            normals[slot] = interior_normal.ok_or_else(|| {
-                GeometryError::new(
-                    GeometryErrorCode::SingularGeometry,
-                    "native one-sided display normal is unavailable",
-                )
-            })?;
-        } else {
-            let jet =
-                surface_enclosure(surface, [[uv[slot][0]; 2], [uv[slot][1]; 2]], work, cancel)?;
-            normals[slot] = native_unit_normal(&jet)?;
-        }
-    }
-    Ok(BoundaryTriangleProof::NativeTriangle {
-        error_mm,
-        normals,
-        boundary_normal,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rodrigues_derivatives_preserve_axial_cancellation_and_surface_sense() {
-        use monstertruck_modeling::{Line, Point3, Processor, RevolutionSurface, Vector3, base::*};
-        for inverted in [false, true] {
-            let mut processor = Processor::new(RevolutionSurface::by_revolution(
-                Curve::Line(Line(
-                    Point3::new(6.0, 0.0, 0.0),
-                    Point3::new(4.0, 0.0, 12.0),
-                )),
-                Point3::origin(),
-                Vector3::unit_z(),
-            ));
-            if inverted {
-                processor.invert();
-            }
-            let surface = Surface::RevolutionSurface(processor);
-            let domain = if inverted {
-                [[0.0, std::f64::consts::TAU], [0.0, 1.0]]
-            } else {
-                [[0.0, 1.0], [0.0, std::f64::consts::TAU]]
-            };
-            let enclosure = surface_enclosure(
-                &surface,
-                domain,
-                &mut GeometryWorkBudget::new(1_000_000),
-                &AtomicBool::new(false),
-            )
-            .unwrap();
-            let (profile, angle) = if inverted {
-                (enclosure.dv[2], enclosure.du[2])
-            } else {
-                (enclosure.du[2], enclosure.dv[2])
-            };
-            assert!(profile.lo <= 12.0 && profile.hi >= 12.0);
-            assert!(profile.width() <= 1e-10);
-            assert!(angle.abs_upper() <= 1e-10);
-            assert!(enclosure.duv[2].abs_upper() <= 1e-10);
-            assert!(enclosure.duu[2].abs_upper() <= 1e-10);
-            assert!(enclosure.dvv[2].abs_upper() <= 1e-10);
-        }
-    }
-
-    #[test]
-    fn whole_triangle_interpolation_encloses_bilinear_saddle_material() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        let surface = Surface::BsplineSurface(BsplineSurface::new(
-            (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
-            vec![
-                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
-                vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)],
-            ],
-        ));
-        let uv = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-        let triangle = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let bound = triangle_error_bound(
-            &surface,
-            &uv,
-            &triangle,
-            &mut GeometryWorkBudget::new(1_000_000),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        // The exact saddle z=u*v reaches 1/4 on this triangle's sloped edge,
-        // although every mesh vertex lies on z=0.
-        assert!((0.25..=0.25000001).contains(&bound));
-        for i in 0..=20 {
-            for j in 0..=20 - i {
-                let u = f64::from(i) / 20.0;
-                let v = f64::from(j) / 20.0;
-                assert!(u * v <= bound);
-            }
-        }
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let mut memo = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
-        for _ in 0..2 {
-            let cached = memo.triangle_error_bound(&uv, &triangle, &mut work, &cancel).unwrap();
-            assert!((0.25..=0.25000001).contains(&cached));
-        }
-        // Cached native point enclosures must not cache a previous mesh
-        // triangle's residual or authorize a different interpolation.
-        let mut displaced = triangle;
-        displaced[0][2] = 1.0;
-        let displaced_bound = memo.triangle_error_bound(&uv, &displaced, &mut work, &cancel).unwrap();
-        // The unit physical vertex residual remains mandatory even when the
-        // filled-triangle proof tightens the former 1.25 Taylor estimate.
-        assert!((1.0..=1.25000001).contains(&displaced_bound));
-        let narrowed_uv = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
-        let narrowed_triangle = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]];
-        let narrowed_bound = memo.triangle_error_bound(
-            &narrowed_uv, &narrowed_triangle, &mut work, &cancel,
-        ).unwrap();
-        assert!((0.0625..=0.06250001).contains(&narrowed_bound));
-        assert!(memo.triangle_error_bound(
-            &uv, &triangle, &mut work, &AtomicBool::new(true),
-        ).is_err());
-        let mesh_uvs = uv.map(|point| monstertruck_modeling::Vector2::new(point[0], point[1]));
-        let mesh_boxes = vec![DisplayMeshBox::new([
-            0.0_f64.to_bits(), 1.0_f64.to_bits(), 0.0_f64.to_bits(), 1.0_f64.to_bits(),
-        ])];
-        let mut indexed = DisplayTriangleProof::with_mesh_inventory(
-            &surface, &mesh_uvs, vec![0], mesh_boxes, &mut work, &cancel,
-        ).unwrap();
-        let indexed_bound = indexed.indexed_triangle_error_bound(
-            &uv, &triangle, 0, &[0, 1, 2], &mut work, &cancel,
-        ).unwrap();
-        assert!((0.25..=0.25000001).contains(&indexed_bound));
-        let displaced_indexed = indexed.indexed_triangle_error_bound(
-            &uv, &displaced, 0, &[0, 1, 2], &mut work, &cancel,
-        ).unwrap();
-        // A retained conditioned Hessian is a source proof, not the former
-        // triangle's error: this actual displaced vertex has unit residual.
-        assert!((1.0..=1.25000001).contains(&displaced_indexed));
-        // A captured mesh index cannot lend its native point proof to changed
-        // parameter bits, even on the same carrier and within the same box.
-        let changed_uv = [[0.0, 0.0], [1.0, 0.25], [0.0, 1.0]];
-        let changed_triangle = [[0.0, 0.0, 0.0], [1.0, 0.25, 0.25], [0.0, 1.0, 0.0]];
-        assert_eq!(indexed.indexed_triangle_error_bound(
-            &changed_uv, &changed_triangle, 0, &[0, 1, 2], &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry);
-        assert_eq!(indexed.indexed_triangle_error_bound(
-            &narrowed_uv, &narrowed_triangle, 0, &[0, 1, 2], &mut work, &cancel,
-        ).unwrap_err().code, GeometryErrorCode::InvalidGeometry);
-    }
-
-    #[test]
-    fn display_triangle_variance_encloses_actual_quadratic_boundary_fan() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        let u = [0.0, 0.5, 1.0];
-        let v = [-1.0, 0.0, 1.0];
-        let u_square = [0.0, 0.0, 1.0];
-        let v_square = [1.0, -1.0, 1.0];
-        let surface = Surface::BsplineSurface(BsplineSurface::new(
-            (
-                KnotVector::bezier_knot(2),
-                KnotVector::from(vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]),
-            ),
-            (0..3).map(|i| {
-                (0..3).map(|j| Point3::new(u[i], v[j], u_square[i] + v_square[j])).collect()
-            }).collect(),
-        ));
-        // This original polynomial is F(u,v)=(u,v,u²+v²). The actual affine
-        // triangle has z=2u, with error 2u-u²-v² attaining one at (1,0).
-        let uv = [[0.0, 0.0], [1.0, -1.0], [1.0, 1.0]];
-        let triangle = [[0.0, 0.0, 0.0], [1.0, -1.0, 2.0], [1.0, 1.0, 2.0]];
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let mut proof = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
-        let bound = proof.triangle_error_bound(&uv, &triangle, &mut work, &cancel).unwrap();
-        // The rectangle variance estimate is 1.25; this actual fan permits
-        // one, without discarding its boundary midpoint or any interior point.
-        // A proof subdivision must retain that actual midpoint residual:
-        // replacing its physical midpoint by F(midpoint) would underbound one.
-        assert!((1.0..=1.00000001).contains(&bound));
-        for i in 0..=20 {
-            for j in 0..=20 {
-                let u = f64::from(i) / 20.0;
-                let v = u * (f64::from(j) / 10.0 - 1.0);
-                assert!((2.0 * u - u * u - v * v).abs() <= bound);
-            }
-        }
-    }
-
-    #[test]
-    fn display_triangle_memo_preserves_nonsmooth_whole_image_proof() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        let surface = Surface::BsplineSurface(BsplineSurface::new(
-            (
-                KnotVector::from(vec![0.0, 0.0, 1.0, 2.0, 2.0]),
-                KnotVector::bezier_knot(1),
-            ),
-            vec![
-                vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)],
-                vec![Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
-                vec![Point3::new(2.0, 0.0, 1.0), Point3::new(2.0, 1.0, 1.0)],
-            ],
-        ));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let domain = [[0.0, 2.0], [0.0, 1.0]];
-        assert!(!surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap());
-        let uv = [[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]];
-        let points = [[0.0, 0.0, 0.0], [2.0, 0.0, 1.0], [0.0, 1.0, 0.0]];
-        let mut memo = DisplayTriangleProof::new(&surface, &mut work, &cancel).unwrap();
-        // Warm a smooth planar span of the same immutable face first.
-        let smooth_uv = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]];
-        let smooth_points = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]];
-        assert!(memo.triangle_error_bound(
-            &smooth_uv, &smooth_points, &mut work, &cancel,
-        ).unwrap() < 1.0e-9);
-        for _ in 0..2 {
-            let bound = memo.triangle_error_bound(&uv, &points, &mut work, &cancel).unwrap();
-            // At u=1 the actual kink and affine triangle differ by 1/2.
-            assert!((0.5..=3.0).contains(&bound));
-        }
-        // A roundoff-sized straddle is still NOT a smooth source span. The
-        // independently planar right-side comparison plus charged transport
-        // can nevertheless prove the original unchanged triangle accurately.
-        let sliver_uv = [
-            [1.0_f64.next_down(), 0.0],
-            [1.03125, 0.0],
-            [1.0, 0.03125],
-        ];
-        let sliver_points = sliver_uv.map(|point| [
-            point[0], point[1], (point[0] - 1.0).max(0.0),
-        ]);
-        assert!(!surface_parameter_span_smooth(
-            &surface, [[sliver_uv[0][0], sliver_uv[1][0]], [0.0, 0.03125]],
-            &mut work, &cancel,
-        ).unwrap());
-        assert!(memo.triangle_error_bound(
-            &sliver_uv, &sliver_points, &mut work, &cancel,
-        ).unwrap() <= spiling_contracts::geometry::MESH_CARRIER_TOLERANCE_MM);
-    }
-
-    #[test]
-    fn display_hessian_partition_encloses_complete_cubic_patch() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        // z=u^3: its exact u-Hessian ranges over the COMPLETE [0,6].
-        let surface = Surface::BsplineSurface(BsplineSurface::new(
-            (KnotVector::bezier_knot(3), KnotVector::bezier_knot(1)),
-            [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].into_iter().enumerate().map(|(i, x)| {
-                let z = if i == 3 { 1.0 } else { 0.0 };
-                vec![Point3::new(x, 0.0, z), Point3::new(x, 1.0, z)]
-            }).collect(),
-        ));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let domain = [[0.0, 1.0]; 2];
-        let smooth = surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap();
-        assert!(smooth);
-        let parent = DisplayFullBoxProof {
-            bound: surface_piecewise_enclosure(&surface, domain, &mut work, &cancel).unwrap(),
-            smooth,
-            partitioned: false,
-        };
-        let hessian = partition_display_hessian(&surface, domain, &parent, &mut work, &cancel).unwrap();
-        assert!(hessian[0][2].lo <= 0.0 && hessian[0][2].hi >= 6.0);
-    }
-
-    fn collapsed_row_surface() -> Surface {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        Surface::BsplineSurface(BsplineSurface::new(
-            (
-                KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
-                KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-            ),
-            vec![
-                vec![Point3::new(0.0, 0.0, 0.0); 3],
-                vec![
-                    Point3::new(1.0, 0.0, 0.0),
-                    Point3::new(1.0, 1.0, 0.0),
-                    Point3::new(0.0, 1.0, 0.0),
-                ],
-            ],
-        ))
-    }
-    fn exact_collapsed_row_joint() -> monstertruck_modeling::TrimJointKind {
-        use monstertruck_modeling::{
-            Line, NativeSurfaceBoundary, Point2, TrimJointKind, ValidatedInterval,
-        };
-        TrimJointKind::NaturalBoundary {
-            boundary: NativeSurfaceBoundary::UFront,
-            fixed_axis: 0,
-            fixed_parameter: 0.0,
-            variable_range: [0.0, 1.0],
-            connector: Line(Point2::new(0.0, 1.0), Point2::new(0.0, 0.0)),
-            supported_parameter_box: [[0.0, 0.0], [0.0, 1.0]],
-            vertex_residual: [ValidatedInterval {
-                lower: 0.0,
-                upper: 0.0,
-            }; 3],
-            world_enclosure: [ValidatedInterval {
-                lower: 0.0,
-                upper: 0.0,
-            }; 3],
-            max_vertex_deviation: [0.0; 3],
-        }
-    }
-    #[test]
-    fn collapsed_row_does_not_authorize_omitting_a_large_uv_wedge() {
-        let surface = collapsed_row_surface();
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let proof = triangle_boundary_error_bound(
-            &surface,
-            &[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
-            &[[0.0; 3], [0.0; 3], [0.0, 1.0, 0.0]],
-            [0.0; 3],
-            &exact_collapsed_row_joint(),
-            &mut work,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let BoundaryTriangleProof::VertexTube { error_mm } = proof else {
-            panic!("physically collapsed triangle needs whole-image vertex tube");
-        };
-        // S(1/2,1/2)=(3/8,3/8,0), despite the exactly collapsed u=0 row.
-        assert!(error_mm >= 0.375_f64.hypot(0.375));
-        assert!(error_mm > 0.025);
-    }
-    #[test]
-    fn boundary_triangle_uses_real_interior_native_normal_not_zero_pole_cross() {
-        let surface = collapsed_row_surface();
-        let uv = [[0.0, 0.0], [0.001, 0.0], [0.001, 0.001]];
-        let points = [[0.0; 3], [0.001, 0.0, 0.0], [0.000999999, 0.000001999, 0.0]];
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let proof = triangle_boundary_error_bound(
-            &surface,
-            &uv,
-            &points,
-            [0.0; 3],
-            &exact_collapsed_row_joint(),
-            &mut work,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let BoundaryTriangleProof::NativeTriangle {
-            error_mm,
-            normals,
-            boundary_normal,
-        } = proof
-        else {
-            panic!("nondegenerate native triangle must not become an omitted tube");
-        };
-        assert!(error_mm < 0.025);
-        assert_eq!(boundary_normal, [true, false, false]);
-        assert!(
-            normals
-                .into_iter()
-                .all(|n| n[2] > 0.999999 && n[0].abs() < 1e-12 && n[1].abs() < 1e-12)
-        );
-    }
-    #[test]
-    fn arithmetic_encloses_cancellation_and_signed_denominators() {
-        let sum = Interval::point(1e16)
-            .add(Interval::point(1.0))
-            .sub(Interval::point(1e16));
-        assert!(sum.lo <= 1.0 && sum.hi >= 1.0);
-        let negative = Interval::new(-4.0, -2.0).unwrap();
-        let quotient = Interval::point(2.0).div(negative).unwrap();
-        assert!(quotient.lo <= -1.0 && quotient.hi >= -0.5);
-        assert!(
-            Interval::point(1.0)
-                .div(Interval::new(-1.0, 1.0).unwrap())
-                .is_err()
-        );
-    }
-    #[test]
-    fn adjacent_padding_includes_subnormal_zero_cases() {
-        assert!(down(0.0) < 0.0 && up(-0.0) > 0.0);
-        let square = Interval::new(-2.0, 1.0).unwrap().square();
-        assert_eq!(square.lo, 0.0);
-        assert!(square.hi >= 4.0);
-    }
-    #[test]
-    fn cubic_aliasing_is_enclosed_between_zero_samples() {
-        use monstertruck_modeling::{BsplineCurve, KnotVector, Point3};
-        let curve = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(1.0 / 3.0, 1.0, 0.0),
-                Point3::new(2.0 / 3.0, -1.0, 0.0),
-                Point3::new(1.0, 0.0, 0.0),
-            ],
-        ));
-        let mut work = GeometryWorkBudget::new(100_000);
-        let enclosure =
-            curve_enclosure(&curve, (0.0, 1.0), &mut work, &AtomicBool::new(false)).unwrap();
-        // Endpoints and midpoint all have y=0; the complete curve does not.
-        assert!(enclosure.position[1].lo < -0.28);
-        assert!(enclosure.position[1].hi > 0.28);
-        assert!(work.consumed() > 0);
-    }
-
-    #[test]
-    fn rational_surface_extension_does_not_inherit_strict_curve_domain() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, NurbsSurface, Vector4};
-        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
-            (
-                KnotVector::from(vec![0.0, 1.0, 2.0, 3.0]),
-                KnotVector::bezier_knot(1),
-            ),
-            vec![
-                vec![
-                    Vector4::new(0.0, 0.0, 7.0, 1.0),
-                    Vector4::new(0.0, 1.0, 7.0, 1.0),
-                ],
-                vec![
-                    Vector4::new(1.0, 0.0, 7.0, 1.0),
-                    Vector4::new(1.0, 1.0, 7.0, 1.0),
-                ],
-            ],
-        )));
-        // Outside the regular U interval, only the first tensor row contributes.
-        // Its nonzero basis mass cancels in the quotient: (0, v, 7).
-        // This is a coefficient-extension enclosure, not source-domain admission.
-        let jet = surface_enclosure(
-            &surface,
-            [[0.5; 2]; 2],
-            &mut GeometryWorkBudget::new(1_000_000),
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        for (actual, expected) in [
-            (jet.position, [0.0, 0.5, 7.0]),
-            (jet.du, [0.0; 3]),
-            (jet.dv, [0.0, 1.0, 0.0]),
-        ] {
-            for (actual, expected) in actual.into_iter().zip(expected) {
-                assert!(
-                    actual.lo <= expected && expected <= actual.hi && actual.hi - actual.lo < 1e-9,
-                    "{actual:?} does not tightly enclose {expected}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn rational_sign_normalization_and_mixed_denominator_exclusion() {
-        use monstertruck_modeling::{BsplineCurve, KnotVector, NurbsCurve, Vector4};
-        let rational = |weights: [f64; 3]| {
-            Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
-                KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-                weights
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, w)| Vector4::new(i as f64 * w, 0.0, 0.0, w))
-                    .collect(),
-            )))
-        };
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let negative =
-            curve_enclosure(&rational([-1.0; 3]), (0.25, 0.75), &mut work, &cancel).unwrap();
-        assert!(negative.position[0].lo <= 0.5 && negative.position[0].hi >= 1.5);
-        let mixed = curve_enclosure(
-            &rational([1.0, -0.1, 1.0]),
-            (0.45, 0.55),
-            &mut work,
-            &cancel,
-        )
-        .unwrap();
-        assert!(mixed.position[0].lo.is_finite() && mixed.position[0].hi.is_finite());
-        assert_eq!(
-            curve_enclosure(&rational([1.0, -1.0, 1.0]), (0.5, 0.5), &mut work, &cancel)
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ConditioningFailure
-        );
-    }
-    #[test]
-    fn cancellation_and_cumulative_work_are_terminal() {
-        use monstertruck_modeling::{Line, Point3};
-        let curve = Curve::Line(Line(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)));
-        let mut work = GeometryWorkBudget::new(0);
-        assert_eq!(
-            curve_enclosure(&curve, (0.0, 1.0), &mut work, &AtomicBool::new(false))
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ResourceLimit
-        );
-        let mut work = GeometryWorkBudget::new(100);
-        assert_eq!(
-            curve_enclosure(&curve, (0.0, 1.0), &mut work, &AtomicBool::new(true))
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::Cancelled
-        );
-    }
-    #[test]
-    fn nonbinary_knot_partition_preserves_closed_interfaces_without_patch_copies() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, Point3};
-        let surface = Surface::BsplineSurface(BsplineSurface::new(
-            (
-                KnotVector::from(vec![0.0, 0.0, 0.37, 1.0, 1.0]),
-                KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
-            ),
-            [0.0, 0.37, 1.0]
-                .into_iter()
-                .map(|u| vec![Point3::new(u, 0.0, 0.0), Point3::new(u, 1.0, 0.0)])
-                .collect(),
-        ));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100);
-        let spans: Vec<_> =
-            surface_parameter_boxes(&surface, [[0.0, 1.0], [0.0, 1.0]], &mut work, &cancel)
-                .unwrap()
-                .collect();
-        assert_eq!(
-            spans,
-            vec![[[0.0, 0.37], [0.0, 1.0]], [[0.37, 1.0], [0.0, 1.0]]]
-        );
-        let interfaces: Vec<_> =
-            surface_crease_interfaces(&surface, [[0.0, 1.0], [0.0, 1.0]], &mut work, &cancel)
-                .unwrap()
-                .collect();
-        assert_eq!(interfaces, vec![[[0.37, 0.37], [0.0, 1.0]]]);
-        // The chart interface is merely a candidate: this particular surface
-        // remains geometrically planar and regular across the inserted knot.
-        assert_eq!(work.consumed(), 3);
-    }
-    #[test]
-    fn projective_pole_chart_encloses_native_curve_and_rejects_horizon() {
-        use monstertruck_modeling::{Line, Point3};
-        let curve = Curve::Line(Line(Point3::new(0.0, 0.0, 1.0), Point3::new(1.0, 0.0, 2.0)));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let prepared =
-            prepare_curve_enclosure(&curve, (0.0, 1.0), 1024 * 1024, &mut work, &cancel).unwrap();
-        let x = [1.0, 0.0, 0.0];
-        let y = [0.0, 1.0, 0.0];
-        let normal = [0.0, 0.0, 1.0];
-        let chart = prepared
-            .gnomonic_jet(
-                (0.0, 1.0),
-                &crate::parametric::GnomonicFrame {
-                    center_mm: [0.0; 3],
-                    x_axis: x,
-                    y_axis: y,
-                    normal,
-                },
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-        for t in [0.0_f64, 0.3, 1.0] {
-            let values = [
-                t / (1.0 + t),
-                1.0 / (1.0 + t).powi(2),
-                -2.0 / (1.0 + t).powi(3),
-            ];
-            for (bound, value) in [
-                chart.position[0],
-                chart.derivative[0],
-                chart.second_derivative[0],
-            ]
-            .into_iter()
-            .zip(values)
-            {
-                assert!(bound.lo <= value && value <= bound.hi);
-            }
-        }
-        assert_eq!(
-            prepared
-                .gnomonic_jet(
-                    (0.0, 1.0),
-                    &GnomonicFrame {
-                        center_mm: [0.0, 0.0, 1.5],
-                        x_axis: x,
-                        y_axis: y,
-                        normal,
-                    },
-                    &mut work,
-                    &cancel
-                )
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::AnalysisIndeterminate
-        );
-        assert_eq!(
-            prepared
-                .gnomonic_jet(
-                    (0.0, 1.0),
-                    &GnomonicFrame {
-                        center_mm: [0.0; 3],
-                        x_axis: x,
-                        y_axis: x,
-                        normal
-                    },
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ConditioningFailure
-        );
-    }
-    #[test]
-    fn exact_extrusion_partitions_borrowed_profile_knots_without_v_clipping() {
-        use monstertruck_modeling::{BsplineCurve, ExtrusionSurface, KnotVector, Point3, Vector3};
-        let profile = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.37, 1.0, 1.0]),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.37, 1.0, 0.0),
-                Point3::new(1.0, 0.0, 0.0),
-            ],
-        ));
-        let surface =
-            Surface::ExtrusionSurface(ExtrusionSurface::by_extrusion(profile, Vector3::unit_z()));
-        let mut work = GeometryWorkBudget::new(100);
-        let spans: Vec<_> = surface_parameter_boxes(
-            &surface,
-            [[0.0, 1.0], [-2.0, 3.0]],
-            &mut work,
-            &AtomicBool::new(false),
-        )
-        .unwrap()
-        .collect();
-        assert_eq!(
-            spans,
-            vec![[[0.0, 0.37], [-2.0, 3.0]], [[0.37, 1.0], [-2.0, 3.0]]]
-        );
-    }
-
-    #[test]
-    fn cancelled_native_return_keeps_completed_work_debit() {
-        let mut work = GeometryWorkBudget::new(10);
-        let cancel = AtomicBool::new(true);
-        assert_eq!(
-            debit_native_work(&mut work, 4, &cancel).unwrap_err().code,
-            GeometryErrorCode::Cancelled
-        );
-        assert_eq!(work.remaining(), 6);
-    }
-
-    #[test]
-    fn c0_curve_chord_uses_native_image_not_zero_piecewise_curvature() {
-        use monstertruck_modeling::{BsplineCurve, KnotVector, Point3};
-        let curve = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.5, 1.0, 1.0]),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.5, 0.0, 1.0),
-                Point3::new(1.0, 0.0, 0.0),
-            ],
-        ));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        let prepared =
-            prepare_curve_enclosure(&curve, (0.0, 1.0), 1_000_000, &mut work, &cancel).unwrap();
-        assert!(
-            !prepared
-                .is_smooth_on((0.0, 1.0), &mut work, &cancel)
-                .unwrap()
-        );
-        // Piecewise first derivatives can enclose both one-sided slopes
-        // without granting the rejected whole-span C1/Taylor qualification.
-        let both = prepared.retained_first_enclosure((0.0, 1.0), &mut work, &cancel)
-            .unwrap().unwrap();
-        assert!(both[2].lo <= -2.0 && both[2].hi >= 2.0);
-        let first = prepared.retained_first_enclosure((0.0, 0.25), &mut work, &cancel)
-            .unwrap().unwrap();
-        assert!(first[0].lo <= 1.0 && first[0].hi >= 1.0);
-        assert!(first[2].lo <= 2.0 && first[2].hi >= 2.0);
-        let frame = PlaneFrameMm {
-            origin_mm: [0.0; 3],
-            x_axis: [1.0, 0.0, 0.0],
-            y_axis: [0.0, 1.0, 0.0],
-            z_axis: [0.0, 0.0, 1.0],
-        };
-        let endpoints = [0.0, 1.0].map(|parameter| {
-            prepared
-                .sampling_endpoint(parameter, &mut work, &cancel)
-                .unwrap()
-        });
-        let interval = prepared
-            .sampling_interval(
-                &endpoints,
-                None,
-                &frame,
-                SECTION_PLANE_TOLERANCE_MM,
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-        let bound = interval.enclosure();
-        // Both endpoint tangents are finite and both pieces have C''=0, but
-        // the actual native midpoint is 1 mm from the returned straight chord.
-        assert!(bound.chord_error_mm >= 1.0);
-        assert!(bound.plane_error_mm >= 1.0);
-        let smooth_endpoints = [0.0, 0.25].map(|parameter| {
-            prepared
-                .sampling_endpoint(parameter, &mut work, &cancel)
-                .unwrap()
-        });
-        let smooth = prepared
-            .sampling_interval(
-                &smooth_endpoints,
-                None,
-                &frame,
-                SECTION_PLANE_TOLERANCE_MM,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .smooth_range()
-            .expect("a strict interior of the first linear piece is smooth");
-        // Adjacency and overlap do not extend a closed proof, especially across
-        // the real C0 corner whose complete-image error was established above.
-        for range in [[0.25, 0.5], [0.125, 0.375], [0.25, 0.75], [0.0, 1.0]] {
-            let endpoints = range.map(|parameter| {
-                prepared
-                    .sampling_endpoint(parameter, &mut work, &cancel)
-                    .unwrap()
-            });
-            let error = prepared
-                .sampling_interval(
-                    &endpoints,
-                    Some(smooth),
-                    &frame,
-                    SECTION_PLANE_TOLERANCE_MM,
-                    &mut work,
-                    &cancel,
-                )
-                .err()
-                .expect("an inherited smooth range must not authorize another range");
-            assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
-        }
-    }
-
-    #[test]
-    fn a_single_uncertain_knot_band_is_not_a_smooth_taylor_span() {
-        let values = [0.0, 0.5, 1.0];
-        let knots = KnotAxis {
-            source: KnotSource::Borrowed(&values),
-            degree: 1,
-            sign: 1.0,
-            offset: Interval {
-                lo: -0.125,
-                hi: 0.125,
-            },
-        };
-        let range = [0.49, 0.51];
-        assert_eq!(AxisSpans::new(knots, range).count(), 1);
-        assert!(
-            !axis_span_smooth(
-                knots,
-                range,
-                &mut GeometryWorkBudget::new(100),
-                &AtomicBool::new(false)
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn structural_c1_knots_admit_bounded_piecewise_second_derivatives() {
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100);
-        for (degree, multiplicity, expected) in
-            [(2, 1, true), (2, 2, false), (3, 2, true), (3, 3, false)]
-        {
-            let mut values = vec![0.0; degree + 1];
-            values.extend(std::iter::repeat_n(0.5, multiplicity));
-            values.extend(std::iter::repeat_n(1.0, degree + 1));
-            assert_eq!(
-                axis_span_smooth(
-                    KnotAxis::new(&values, degree),
-                    [0.0, 1.0],
-                    &mut work,
-                    &cancel
-                )
-                .unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn literal_rational_uv_c1_uses_exact_weights_and_distinct_span_lengths() {
-        use monstertruck_modeling::{BsplineCurve, Curve2D, KnotVector, NurbsCurve, Vector3};
-        let curve = |right_x| Curve2D::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 3.0, 3.0, 3.0]),
-            vec![
-                Vector3::new(-1.0, 1.0, 1.0),
-                Vector3::new(0.0, 0.0, 1.0),
-                Vector3::new(2.0, 0.0, 2.0),
-                Vector3::new(right_x, 0.0, 3.0),
-                Vector3::new(8.0, 2.0, 2.0),
-            ],
-        )));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(10_000_000);
-        let exact = curve(5.0);
-        // The native STRICT structural policy alone cannot admit this C1 join.
-        assert!(monstertruck_modeling::validated_curve2d_jet(
-            &exact, [0.0, 3.0],
-            &mut monstertruck_modeling::ValidatedGeometryBudget::new(1_000_000),
-            &cancel,
-        ).is_err());
-        assert!(curve2d_c1_jet(&exact, [0.0, 3.0], &mut work, &cancel)
-            .unwrap().is_some());
-        let knot = curve2d_c1_jet(&exact, [1.0; 2], &mut work, &cancel)
-            .unwrap().unwrap();
-        assert!(knot.derivative[0].lo <= 1.0 && 1.0 <= knot.derivative[0].hi);
-        assert!(knot.derivative[1].lo <= 0.0 && 0.0 <= knot.derivative[1].hi);
-
-        // Same positive tangent direction, different native t speed: G1 only.
-        let g1 = curve(6.0);
-        for range in [[0.0, 3.0], [1.0; 2], [0.0, 1.0], [1.0, 3.0]] {
-            assert!(curve2d_c1_jet(&g1, range, &mut work, &cancel)
-                .unwrap().is_none());
-        }
-        let sides = curve2d_piecewise_jet(&g1, [1.0; 2], &mut work, &cancel).unwrap();
-        assert!(sides.derivative[0].lo <= 1.0 && 1.5 <= sides.derivative[0].hi);
-        assert!(curve2d_c1_jet(&g1, [0.0, 0.5], &mut work, &cancel)
-            .unwrap().is_some());
-
-        // A one-ULP coefficient residual is not an exact identity.
-        let near = curve(f64::from_bits(5.0_f64.to_bits() + 1));
-        assert!(curve2d_c1_jet(&near, [0.0, 3.0], &mut work, &cancel)
-            .unwrap().is_none());
-    }
-
-    #[test]
-    fn literal_uv_c1_preserves_reversed_posed_wrapper_and_structural_joins() {
-        use monstertruck_modeling::{
-            BsplineCurve, Curve2D, Invertible, KnotVector, Matrix3, Point2,
-            Processor, TrimmedCurve, Vector2,
-        };
-        let basis = Curve2D::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 3.0, 3.0, 3.0]),
-            vec![
-                Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
-                Point2::new(1.0, 2.0), Point2::new(3.0, 2.0),
-            ],
-        ));
-        let mut wrapped = Processor::with_transform(
-            TrimmedCurve::new(Box::new(basis.clone()), (0.0, 3.0)),
-            Matrix3::from_translation(Vector2::new(4.0, -2.0)),
-        );
-        wrapped.invert();
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(10_000_000);
-        let original = curve2d_c1_jet(&basis, [1.0; 2], &mut work, &cancel)
-            .unwrap().unwrap();
-        let reflected = curve2d_c1_jet(
-            &Curve2D::TrimmedCurve(wrapped), [2.0; 2], &mut work, &cancel,
-        ).unwrap().unwrap();
-        for axis in 0..2 {
-            let shift = [4.0, -2.0][axis];
-            let expected = original.position[axis].mid() + shift;
-            assert!(reflected.position[axis].lo <= expected
-                && expected <= reflected.position[axis].hi);
-            let derivative = -original.derivative[axis].mid();
-            assert!(reflected.derivative[axis].lo <= derivative
-                && derivative <= reflected.derivative[axis].hi);
-        }
-    }
-
-    #[test]
-    fn literal_uv_jump_refuses_piecewise_even_at_closed_knot() {
-        use monstertruck_modeling::{BsplineCurve, Curve2D, KnotVector, Point2};
-        let jump = Curve2D::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]),
-            vec![
-                Point2::new(0.0, 0.0), Point2::new(1.0, 0.0),
-                Point2::new(2.0, 0.0), Point2::new(3.0, 0.0),
-            ],
-        ));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(10_000_000);
-        for range in [[0.0, 2.0], [1.0; 2]] {
-            assert!(curve2d_c1_jet(&jump, range, &mut work, &cancel)
-                .unwrap().is_none());
-            assert_eq!(
-                curve2d_piecewise_jet(&jump, range, &mut work, &cancel)
-                    .unwrap_err().code,
-                GeometryErrorCode::SingularGeometry,
-            );
-        }
-    }
-
-    #[test]
-    fn sweep_smoothness_checks_the_actual_nested_profile_carrier() {
-        use monstertruck_modeling::{
-            BsplineSurface, Curve2D, ExtrusionSurface, KnotVector, Line, ParameterCurve, Point2,
-            Point3, Vector3,
-        };
-        let carrier = Surface::BsplineSurface(BsplineSurface::new(
-            (
-                KnotVector::from(vec![0.0, 0.0, 0.5, 1.0, 1.0]),
-                KnotVector::from(vec![0.0, 0.0, 1.0, 1.0]),
-            ),
-            [0.0, 0.5, 1.0]
-                .into_iter()
-                .enumerate()
-                .map(|(i, u)| {
-                    let y = if i == 1 { 0.25 } else { 0.0 };
-                    vec![Point3::new(u, y, 0.0), Point3::new(u, y + 1.0, 0.0)]
-                })
-                .collect(),
-        ));
-        let profile = Curve::ParameterCurve(ParameterCurve::new(
-            Curve2D::Line(Line(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
-            Box::new(carrier),
-        ));
-        let surface =
-            Surface::ExtrusionSurface(ExtrusionSurface::by_extrusion(profile, Vector3::unit_z()));
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let domain = [[0.0, 1.0], [0.0, 1.0]];
-        // The exposed profile chart is one LINE, so its own knots alone miss
-        // the genuine interior C0 carrier stratum.
-        assert_eq!(
-            surface_parameter_boxes(&surface, domain, &mut work, &cancel)
-                .unwrap()
-                .count(),
-            1
-        );
-        assert!(!surface_parameter_span_smooth(&surface, domain, &mut work, &cancel).unwrap());
-        assert!(
-            surface_parameter_span_smooth(&surface, [[0.1, 0.2], [0.0, 1.0]], &mut work, &cancel)
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn borrowed_original_continuation_keeps_one_branch_across_unit_views() {
-        use monstertruck_modeling::{
-            Line, Plane, Point3, SurfaceCurve, ValidatedCurveOptions, ValidatedGeometryBudget,
-        };
-        let xy = Surface::Plane(Plane::new(
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-        ));
-        let yz = Surface::Plane(Plane::new(
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ));
-        let guide = Curve::Line(Line(
-            Point3::new(0.05, 0.0, 0.02),
-            Point3::new(0.05, 1.0, 0.02),
-        ));
-        let curve = Curve::IntersectionCurve(SurfaceCurve::with_boundaries(
-            Box::new(xy),
-            Box::new(yz),
-            Box::new(guide),
-            None,
-            None,
-        ));
-        let cancel = AtomicBool::new(false);
-        let prepared = monstertruck_modeling::prepared_validated_curve_owned(
-            curve,
-            [0.0, 1.0],
-            &ValidatedCurveOptions::default(),
-            &mut ValidatedGeometryBudget::new(1_000_000),
-            &cancel,
-        )
-        .unwrap();
-        let original = PreparedCurveEnclosure::borrowed(&prepared, 1.0);
-        let mm = PreparedCurveEnclosure::borrowed(&prepared, 25.4);
-        let mut work = GeometryWorkBudget::new(1_000_000);
-        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let source = original.endpoint_position(t, &mut work, &cancel).unwrap();
-            let normalized = mm.endpoint_position(t, &mut work, &cancel).unwrap();
-            for axis in [0, 2] {
-                assert!(source[axis].contains_zero());
-                assert!(normalized[axis].contains_zero());
-                assert!(normalized[axis].abs_upper() < 1.0e-7);
-            }
-            assert!(source[1].lo <= t && source[1].hi >= t);
-            assert!(normalized[1].lo <= 25.4 * t && normalized[1].hi >= 25.4 * t);
-        }
-        let child = mm.jet((0.25, 0.75), &mut work, &cancel).unwrap();
-        assert!(child.derivative[1].lo <= 25.4 && child.derivative[1].hi >= 25.4);
-        assert!(child.position[0].abs_upper() < 1.0e-7);
-        let piece = prepared.pieces().iter()
-            .find(|piece| piece.parameter[0] < piece.parameter[1]).unwrap();
-        let [a, b] = piece.parameter;
-        let range = (a * 0.75 + b * 0.25, a * 0.25 + b * 0.75);
-        let tangent = mm.retained_first_enclosure(range, &mut work, &cancel).unwrap().unwrap();
-        assert!(tangent[0].contains_zero() && tangent[2].contains_zero());
-        assert!(tangent[1].lo <= 25.4 && tangent[1].hi >= 25.4);
-        assert_eq!(
-            mm.retained_first_enclosure(range, &mut GeometryWorkBudget::new(0), &cancel)
-                .unwrap_err().code,
-            GeometryErrorCode::ResourceLimit,
-        );
-        assert_eq!(
-            mm.retained_first_enclosure(
-                range, &mut GeometryWorkBudget::new(1_000_000), &AtomicBool::new(true),
-            ).unwrap_err().code,
-            GeometryErrorCode::Cancelled,
-        );
-        let first = PreparedCurveEnclosure::borrowed_restricted(&prepared, 25.4, (0.0, 0.5));
-        let second = PreparedCurveEnclosure::borrowed_restricted(&prepared, 25.4, (0.5, 1.0));
-        assert!(
-            first
-                .parameter_intervals()
-                .all(|(a, b)| a >= 0.0 && b <= 0.5)
-        );
-        assert!(
-            second
-                .parameter_intervals()
-                .all(|(a, b)| a >= 0.5 && b <= 1.0)
-        );
-        let left = first.endpoint_position(0.5, &mut work, &cancel).unwrap();
-        let right = second.endpoint_position(0.5, &mut work, &cancel).unwrap();
-        for axis in 0..3 {
-            assert_eq!(
-                (left[axis].lo, left[axis].hi),
-                (right[axis].lo, right[axis].hi)
-            );
-        }
-        assert_eq!(
-            first
-                .jet((0.25, 0.75), &mut work, &cancel)
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::InvalidGeometry
-        );
-        assert_eq!(
-            first.retained_first_enclosure((0.25, 0.75), &mut work, &cancel)
-                .unwrap_err().code,
-            GeometryErrorCode::InvalidGeometry,
-        );
-    }
-
-    fn quadratic_sampling_native() -> monstertruck_modeling::PreparedValidatedCurve<'static> {
-        use monstertruck_modeling::{
-            BsplineCurve, KnotVector, Point3, ValidatedCurveOptions, ValidatedGeometryBudget,
-        };
-        // x=s, y=s^2, s=(t-10)/4. The native gauge is deliberately not [0,1].
-        let curve = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![10.0, 10.0, 10.0, 14.0, 14.0, 14.0]),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.5, 0.0, 0.0),
-                Point3::new(1.0, 1.0, 0.0),
-            ],
-        ));
-        monstertruck_modeling::prepared_validated_curve_owned(
-            curve,
-            [10.0, 14.0],
-            &ValidatedCurveOptions::default(),
-            &mut ValidatedGeometryBudget::new(100_000),
-            &AtomicBool::new(false),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn sampling_receipts_preserve_native_gauge_chord_and_analytic_green_area() {
-        use spiling_contracts::geometry::{
-            SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
-        };
-        let native = quadratic_sampling_native();
-        let prepared = PreparedCurveEnclosure::borrowed(&native, 1.0);
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let frame = PlaneFrameMm::from_plane(crate::PlaneMm {
-            origin_mm: [0.0; 3],
-            normal: [0.0, 0.0, 1.0],
-        })
-        .unwrap();
-        let mut start = prepared
-            .sampling_endpoint(10.0, &mut work, &cancel)
-            .unwrap();
-        let end = prepared
-            .sampling_endpoint(14.0, &mut work, &cancel)
-            .unwrap();
-        let smooth = prepared
-            .sampling_interval(
-                &[start, end],
-                None,
-                &frame,
-                SECTION_PLANE_TOLERANCE_MM,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .smooth_range()
-            .unwrap();
-        let mut area = Interval::point(0.0);
-        for index in 0..16 {
-            let end = prepared
-                .sampling_endpoint(10.0 + f64::from(index + 1) / 4.0, &mut work, &cancel)
-                .unwrap();
-            let interval = prepared
-                .sampling_interval(
-                    &[start, end],
-                    Some(smooth),
-                    &frame,
-                    SECTION_PLANE_TOLERANCE_MM,
-                    &mut work,
-                    &cancel,
-                )
-                .unwrap();
-            let enclosure = interval.enclosure();
-            let x0 = f64::from(index) / 16.0;
-            let x1 = f64::from(index + 1) / 16.0;
-            assert!((enclosure.start_mm[0] - x0).abs() < 1e-10);
-            assert!((enclosure.end_mm[1] - x1 * x1).abs() < 1e-10);
-            let true_sagitta = (x1 - x0).powi(2) / (4.0 * (1.0 + (x0 + x1).powi(2)).sqrt());
-            assert!(enclosure.chord_error_mm >= true_sagitta);
-            assert!(enclosure.chord_error_mm <= SECTION_SAMPLING_TOLERANCE_MM);
-            assert!(enclosure.plane_error_mm <= SECTION_PLANE_TOLERANCE_MM);
-            let part = interval
-                .signed_area(&[start, end], &frame, [0.0; 3], &mut work, &cancel)
-                .unwrap();
-            area = area.add(Interval {
-                lo: part[0],
-                hi: part[1],
-            });
-            start = end;
-        }
-        // The closing diagonal has zero Green integral. This is an independent
-        // exact parabola area, not an equality between two implementation paths.
-        assert!(area.lo > 0.0);
-        assert!(area.lo <= 1.0 / 6.0 && 1.0 / 6.0 <= area.hi);
-    }
-
-    #[test]
-    fn sampling_smooth_ranges_refuse_foreign_sources_units_and_restrictions() {
-        let native = quadratic_sampling_native();
-        let other_native = quadratic_sampling_native();
-        let prepared = PreparedCurveEnclosure::borrowed(&native, 1.0);
-        let same_source = PreparedCurveEnclosure::borrowed(&native, 1.0);
-        let other_units = PreparedCurveEnclosure::borrowed(&native, 25.4);
-        let restricted = PreparedCurveEnclosure::borrowed_restricted(&native, 1.0, (10.0, 11.0));
-        let other_source = PreparedCurveEnclosure::borrowed(&other_native, 1.0);
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let frame = PlaneFrameMm::from_plane(crate::PlaneMm {
-            origin_mm: [0.0; 3],
-            normal: [0.0, 0.0, 1.0],
-        })
-        .unwrap();
-        let endpoints = [10.0, 10.5].map(|parameter| {
-            prepared
-                .sampling_endpoint(parameter, &mut work, &cancel)
-                .unwrap()
-        });
-        let smooth = prepared
-            .sampling_interval(
-                &endpoints,
-                None,
-                &frame,
-                SECTION_PLANE_TOLERANCE_MM,
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .smooth_range()
-            .unwrap();
-        for binding in [&same_source, &other_units, &restricted, &other_source] {
-            // These endpoints belong to the target and lie strictly inside the
-            // qualified range. Only the foreign smooth authority must refuse.
-            let endpoints = [10.125, 10.25].map(|parameter| {
-                binding
-                    .sampling_endpoint(parameter, &mut work, &cancel)
-                    .unwrap()
-            });
-            let error = binding
-                .sampling_interval(
-                    &endpoints,
-                    Some(smooth),
-                    &frame,
-                    SECTION_PLANE_TOLERANCE_MM,
-                    &mut work,
-                    &cancel,
-                )
-                .err()
-                .expect("a positive smooth proof cannot transfer prepared bindings");
-            assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
-        }
-    }
-
-    #[test]
-    fn sampling_receipts_reject_other_bindings_gauges_and_cancelled_reuse() {
-        let native = quadratic_sampling_native();
-        let prepared = PreparedCurveEnclosure::borrowed(&native, 1.0);
-        let other_units = PreparedCurveEnclosure::borrowed(&native, 25.4);
-        let cancel = AtomicBool::new(false);
-        let mut work = GeometryWorkBudget::new(100_000);
-        let frame = PlaneFrameMm::from_plane(crate::PlaneMm {
-            origin_mm: [0.0; 3],
-            normal: [0.0, 0.0, 1.0],
-        })
-        .unwrap();
-        let start = prepared
-            .sampling_endpoint(10.0, &mut work, &cancel)
-            .unwrap();
-        let end = prepared
-            .sampling_endpoint(10.25, &mut work, &cancel)
-            .unwrap();
-        let foreign = other_units
-            .sampling_endpoint(10.25, &mut work, &cancel)
-            .unwrap();
-        for endpoints in [[start, foreign], [end, start]] {
-            let error = prepared
-                .sampling_interval(
-                    &endpoints,
-                    None,
-                    &frame,
-                    SECTION_PLANE_TOLERANCE_MM,
-                    &mut work,
-                    &cancel,
-                )
-                .err()
-                .expect("foreign binding or reversed native gauge must refuse");
-            assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
-        }
-        assert_eq!(
-            prepared
-                .sampling_endpoint(0.0, &mut work, &cancel)
-                .err()
-                .unwrap()
-                .code,
-            GeometryErrorCode::InvalidGeometry
-        );
-        let interval = prepared
-            .sampling_interval(
-                &[start, end],
-                None,
-                &frame,
-                SECTION_PLANE_TOLERANCE_MM,
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-        for endpoints in [[start, foreign], [end, start]] {
-            let failure = interval
-                .signed_area(&endpoints, &frame, [0.0; 3], &mut work, &cancel)
-                .unwrap_err();
-            assert_eq!(failure.code, GeometryErrorCode::InvalidGeometry);
-        }
-        assert_eq!(
-            interval
-                .signed_area(
-                    &[start, end],
-                    &frame,
-                    [0.0; 3],
-                    &mut GeometryWorkBudget::new(0),
-                    &cancel
-                )
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ResourceLimit
-        );
-        let cancelled = AtomicBool::new(true);
-        assert_eq!(
-            interval
-                .signed_area(&[start, end], &frame, [0.0; 3], &mut work, &cancelled)
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::Cancelled
-        );
-        assert_eq!(
-            prepared
-                .sampling_interval(
-                    &[start, end],
-                    interval.smooth_range(),
-                    &frame,
-                    SECTION_PLANE_TOLERANCE_MM,
-                    &mut work,
-                    &cancelled
-                )
-                .err()
-                .unwrap()
-                .code,
-            GeometryErrorCode::Cancelled
-        );
-    }
 }

@@ -195,7 +195,7 @@ impl UvJointComparison {
         // strictly on the endpoint side of BOTH exact exit supports.
         for end in [recipe.outgoing, recipe.incoming] {
             let at = chart_jet(domain, end.use_.coedge, [end.exit; 2], work, cancel)?;
-            let direction = if end.absolute_back { -1.0 } else { 1.0 };
+            let direction = if end.spatial_high { -1.0 } else { 1.0 };
             let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
             if dot2(
                 row,
@@ -217,7 +217,7 @@ impl UvJointComparison {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
-        for index in 0..domain.native().coedges().len() {
+        for index in 0..domain.coedges().len() {
             let own = [recipe.outgoing, recipe.incoming]
                 .into_iter()
                 .find(|end| end.use_.coedge == index);
@@ -228,20 +228,20 @@ impl UvJointComparison {
                 let mut range = span;
                 if let Some(map) = central_map {
                     // The boundary inventory is in original PCurve parameters;
-                    // the collar and literal exits use native C3D parameters.
-                    let Some(native) = map.affine_native_parameter_preimage(span)? else {
+                    // the collar and literal exits use original spatial-provider parameters.
+                    let Some(spatial) = map.affine_spatial_parameter_preimage(span)? else {
                         return Ok(false);
                     };
-                    let native_range = map.native_range();
+                    let spatial_range = map.spatial_range();
                     range = [
-                        native.lo.max(native_range[0]),
-                        native.hi.min(native_range[1]),
+                        spatial.lo.max(spatial_range[0]),
+                        spatial.hi.min(spatial_range[1]),
                     ];
-                    // Restrict that proved native preimage to the SAME central
+                    // Restrict that proved spatial preimage to the SAME central
                     // scope, preserving both germs of a closed original edge.
                     for end in [recipe.outgoing, recipe.incoming] {
                         if own.is_some_and(|owner| end.edge == owner.edge) {
-                            if end.absolute_back {
+                            if end.spatial_high {
                                 range[1] = range[1].min(end.exit);
                             } else {
                                 range[0] = range[0].max(end.exit);
@@ -260,7 +260,7 @@ impl UvJointComparison {
                     let (range, depth) = stack[pending];
                     work.charge(1, cancel)?;
                     let image = if own.is_some() {
-                        OriginalCollar::native_collar_overcover(domain, index, range, work, cancel)?
+                        OriginalCollar::spatial_collar_overcover(domain, index, range, work, cancel)?
                     } else {
                         OriginalCollar::other_collar_overcover(domain, index, range, work, cancel)?
                     };
@@ -277,7 +277,7 @@ impl UvJointComparison {
                 }
             }
         }
-        for (index, joint) in domain.native().joints().iter().enumerate() {
+        for (index, joint) in domain.original_joints()?.iter().enumerate() {
             work.charge(1, cancel)?;
             if matches!(self.authority,
                 EndpointAuthority::EndpointUncertaintyJoint { index: own, .. } if own == index)
@@ -286,10 +286,7 @@ impl UvJointComparison {
             }
             if !disjoint(
                 envelope,
-                joint.enclosure.map(|v| Interval {
-                    lo: v.lower,
-                    hi: v.upper,
-                }),
+                joint.enclosure,
             ) {
                 return Ok(false);
             }
@@ -412,16 +409,8 @@ impl UvJointComparison {
                 cancel,
             )?
             .position;
-        let inclusive = query_bytes
-            .checked_add(domain.retained_bytes())
-            .ok_or_else(|| {
-                GeometryError::new(
-                    GeometryErrorCode::ResourceLimit,
-                    "source-face relative-cut classifier byte count overflow",
-                )
-            })?
-            .min(MAX_SCRATCH_BYTES);
-        if domain.classify_with_byte_limit(uv_box(anchor), inclusive, work, cancel)?
+        let classifier_bytes = query_bytes.min(MAX_SCRATCH_BYTES);
+        if domain.classify_with_byte_limit(uv_box(anchor), classifier_bytes, work, cancel)?
             != TrimClassification::Inside
         {
             return Err(ownership_failure(

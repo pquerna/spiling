@@ -8,7 +8,7 @@ use spiling_contracts::{
     display::{SECTION_HEADER_BYTES, SectionChunkBuilder},
     geometry::*,
 };
-use spiling_geometry::{import_step, section, tessellate};
+use spiling_geometry::{from_step_bytes_with_cancel, section, tessellate};
 use std::{error::Error, path::Path, sync::atomic::AtomicBool};
 
 fn hex(bytes: &[u8]) -> String {
@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let protocol = root.join("protocol");
     let cancel = AtomicBool::new(false);
     let session = SessionId::parse("550e8400-e29b-41d4-a716-446655440000")?;
-    let box_definition = import_step(&std::fs::read(root.join("geometry/box-mm.step"))?, &cancel)?;
+    let box_definition = from_step_bytes_with_cancel(&std::fs::read(root.join("geometry/box-mm.step"))?, &cancel)?;
     let mesh = tessellate(&box_definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
     store(
         &protocol,
@@ -59,10 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }),
         check,
     )?;
-    let definition = import_step(
-        &std::fs::read(root.join("geometry/through-hole.step"))?,
-        &cancel,
-    )?;
+    let definition = from_step_bytes_with_cancel(&std::fs::read(root.join("geometry/through-hole.step"))?, &cancel)?;
     let plane = PlaneMm {
         origin_mm: [0.0, 0.0, 4.0],
         normal: [0.0, 0.0, 1.0],

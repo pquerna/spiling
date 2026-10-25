@@ -140,39 +140,36 @@ fn coefficients_strict(
 #[cfg(test)]
 mod properties {
     use super::*;
-    use monstertruck_modeling::{
-        BsplineCurve, Conic2D, Curve2D, KnotVector, Matrix3, Point2, Processor, TrimmedCurve,
-        UnitCircle, ValidatedGeometryBudget, validated_curve2d_jet,
+    use solidcore::{
+        curve::curve::Curve,
+        nurbs::{b_spline_curve::BSplineCurve, crv_basic, math::{CPoint, NOW, NOZ}},
     };
 
     fn point(x: f64, y: f64) -> Box2 {
         [Interval::point(x), Interval::point(y)]
     }
 
-    fn quadratic(speed: f64, curvature: f64) -> Curve2D {
-        // The actual Bernstein coefficients give gamma=(speed*s,curvature*s²).
-        Curve2D::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-            vec![
-                Point2::new(0.0, 0.0),
-                Point2::new(speed * 0.5, 0.0),
-                Point2::new(speed, curvature),
-            ],
-        ))
+    fn native_quadratic(points: [CPoint; 3]) -> Curve {
+        let raw = crv_basic::Curve::new(
+            points.to_vec(), 2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ).unwrap();
+        BSplineCurve::from_nurb(raw, 2, true).into()
     }
 
-    fn second(curve: &Curve2D, hi: f64) -> Box2 {
-        let jet = validated_curve2d_jet(
-            curve,
-            [0.0, hi],
-            &mut ValidatedGeometryBudget::new(1_000_000),
+    fn quadratic(speed: f64, curvature: f64) -> Curve {
+        // Literal native Bernstein coefficients: gamma=(speed*s,curvature*s²).
+        native_quadratic([
+            CPoint::new(0.0, 0.0, NOZ, NOW),
+            CPoint::new(speed * 0.5, 0.0, NOZ, NOW),
+            CPoint::new(speed, curvature, NOZ, NOW),
+        ])
+    }
+
+    fn second(curve: &Curve, hi: f64) -> Box2 {
+        crate::parametric::curve2d_c1_jet(
+            curve, [0.0, hi], &mut GeometryWorkBudget::new(1_000_000),
             &AtomicBool::new(false),
-        )
-        .unwrap();
-        jet.second.map(|v| Interval {
-            lo: v.lower,
-            hi: v.upper,
-        })
+        ).unwrap().expect("one smooth native Bernstein restriction").second_derivative
     }
 
     #[test]
@@ -211,19 +208,20 @@ mod properties {
     #[test]
     fn actual_circular_split_has_nonzero_normal_remainder() {
         let circle = |direction: f64| {
-            // gamma=(direction*sin(s),1-cos(s)); both literal endpoints
-            // are s=0, not rounded PI/TAU endpoint substitutions.
-            Curve2D::Conic(Conic2D::Ellipse(Processor::with_transform(
-                TrimmedCurve::new(UnitCircle::<Point2>::new(), (0.0, 1.0)),
-                Matrix3::new(0.0, -1.0, 0.0, direction, 0.0, 0.0, 0.0, 1.0, 1.0),
-            )))
+            // Exact rational circle: gamma=(2*direction*s,2*s²)/(1+s²).
+            // Its native parameter is rational, not an angular re-labeling.
+            native_quadratic([
+                CPoint::new(0.0, 0.0, NOZ, 1.0),
+                CPoint::new(direction, 0.0, NOZ, 1.0),
+                CPoint::new(2.0 * direction, 2.0, NOZ, 2.0),
+            ])
         };
         let s = Interval {
             lo: 0.0,
             hi: 0.03125,
         };
         assert!(coefficients_strict(
-            point(1.0, 0.0),
+            point(2.0, 0.0),
             Interval::point(1.0),
             second(&circle(1.0), s.hi),
             second(&circle(-1.0), s.hi),

@@ -248,12 +248,12 @@ mod tests {
     fn original_housing_upper_fillet_reference_proves_closed_material_and_protected_hole() {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(128_000_000);
-        let definition = crate::import_step(include_bytes!(
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"), &cancel).unwrap();
         let occurrence: spiling_contracts::geometry::OccurrenceRecord = serde_json::from_slice(include_bytes!(
             "../../../../../fixtures/manufacturing/rounded-housing-bed-occurrence.json")).unwrap();
-        let prepared = crate::prepare_material_source(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel, &mut work).unwrap();
+        let prepared = crate::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &mut work, &cancel).unwrap();
         let interval = [8.014650488771121, 8.311510884034451];
         let sample = 8.163080686402786;
         let analysis = prepared.analyze_placed_slab(&crate::PlacedSlabRequest {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(analysis.section.loops.iter().filter(|boundary| boundary.is_hole).count(), 1);
         let actual = &analysis.section.loops;
         let leaf = certify_native_source_leaf(&SourceLeafRequest {
-            definition: &definition, occurrence_id: &occurrence.occurrence_id, pose: occurrence.pose,
+            source: &prepared, occurrence_id: &occurrence.occurrence_id, pose: occurrence.pose,
             analysis: &analysis, actual_used_source_loops: actual,
             policy: NativeUnionPolicy { candidate_coordinate_error_mm: 0.0 },
         }, &mut work, &cancel).unwrap();
@@ -288,14 +288,14 @@ mod tests {
     fn original_housing_inner_prism_preserves_holes_scope_and_binding() {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(128_000_000);
-        let definition = crate::import_step(include_bytes!(
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
         ), &cancel).unwrap();
-        let prepared = crate::prepare_material_source(
+        let prepared = crate::prepare_solid(
             &definition,
             crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
             &mut work,
+            &cancel,
         )
         .unwrap();
         let analysis = prepared
@@ -326,7 +326,7 @@ mod tests {
             .collect();
         let leaf = certify_native_source_leaf(
             &SourceLeafRequest {
-                definition: &definition,
+                source: &prepared,
                 occurrence_id: &OccurrenceId::new(1).unwrap(),
                 pose: RigidPoseMm::IDENTITY,
                 analysis: &analysis,

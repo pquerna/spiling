@@ -6,12 +6,12 @@
 //! Neither the original UV boundary nor the selected finite B/G is changed.
 
 use super::*;
-use monstertruck_modeling::{SphericalPole, TrimJointKind};
+use crate::kernel::trim::{SphericalPole, TrimJointKind};
 use source_chart::PoleChart;
 
 #[derive(Clone, Copy)]
 pub(in crate::analysis::critical::material_link::vertex_transport) struct PoleComparison {
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
     ends: [EndKey; 2],
     joint_index: usize,
     pole: SphericalPole,
@@ -53,30 +53,6 @@ struct ExitSupport<'a, 'd> {
 
 type ExitEvidence<'a, 'd> = Result<ExitSupport<'a, 'd>, (Interval, Interval)>;
 
-fn polar_sin_cos(
-    polar: Interval,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(Interval, Interval), GeometryError> {
-    let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-        usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-    );
-    let result = monstertruck_modeling::validated_sin_cos(
-        monstertruck_modeling::ValidatedInterval {
-            lower: polar.lo,
-            upper: polar.hi,
-        },
-        &mut native,
-        cancel,
-    );
-    crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
-    let (sine, cosine) = result.map_err(crate::parametric::native_error)?;
-    let adapt = |value: monstertruck_modeling::ValidatedInterval| Interval {
-        lo: value.lower,
-        hi: value.upper,
-    };
-    Ok((adapt(sine), adapt(cosine)))
-}
 
 impl SharedPolarGerm<'_, '_> {
     /// No two-dimensional inverse is needed for this scalar support. The
@@ -97,27 +73,23 @@ impl SharedPolarGerm<'_, '_> {
             return Ok(false);
         }
         let germ = end_curve(self.domain, self.recipe.outgoing, s, work, cancel)?;
-        let phi = germ.position[polar];
-        // This is the SAME principal covering branch as the ordinary inverse.
-        // A native pole endpoint outside it is not snapped or discarded: that
-        // case retains the general geometric/inverse proof.
-        if phi.lo <= 0.0 || phi.hi >= down(std::f64::consts::PI) {
-            return Ok(false);
-        }
-        let (sine, cosine) = polar_sin_cos(phi, work, cancel)?;
-        let hemisphere = match self.comparison.pole {
-            SphericalPole::North => 1.0,
-            SphericalPole::South => -1.0,
-        };
-        if cosine.mul(Interval::point(hemisphere)).lo <= 0.0
+        let chart = self.comparison.chart(self.domain)?;
+        if !chart.principal_polar(germ.position[polar])
             || row[polar].mul(germ.derivative[polar]).lo <= 0.0
         {
             return Ok(false);
         }
-        let radius_squared_s = Interval::point(2.0)
-            .mul(sine)
-            .mul(cosine)
-            .mul(germ.derivative[polar]);
+        // The normalized native covering coordinates are evaluated with their
+        // actual parameter law. No radians, pole swap, or angular re-labeling
+        // is imposed on a rational native coefficient chart.
+        let (q, qs, _) = chart.covering_jet(
+            germ.position, germ.derivative, germ.second_derivative, work, cancel,
+        )?;
+        let (position, _, _) = chart.graph_jet(q, ZERO2)?;
+        if !chart.same_hemisphere(position) {
+            return Ok(false);
+        }
+        let radius_squared_s = Interval::point(2.0).mul(dot2(q, qs));
         if radius_squared_s.lo <= 0.0 {
             return Ok(false);
         }
@@ -128,8 +100,8 @@ impl SharedPolarGerm<'_, '_> {
             work,
             cancel,
         )?;
-        let (exit_sine, _) = polar_sin_cos(exit.position[polar], work, cancel)?;
-        let radius_squared = exit_sine.square();
+        let (exit_q, _, _) = chart.covering_jet(exit.position, ZERO2, ZERO2, work, cancel)?;
+        let radius_squared = dot2(exit_q, exit_q);
         if radius_squared.lo <= 0.0 || radius_squared.hi >= 1.0 {
             return Ok(false);
         }
@@ -214,7 +186,7 @@ fn raw_boundary(
             .margin_uv(),
         Piece::Middle => [0.0; 2],
     };
-    domain.native().face().with_surface(|surface| {
+    { let surface = &domain.surface_operand(); (|| {
         let jet = surface_enclosure(surface, uv_box(boundary.uv), work, cancel)?;
         let margin_box = margin.map(|radius| Interval {
             lo: -radius,
@@ -235,7 +207,7 @@ fn raw_boundary(
             // than S(U). Retain that SAME actual B minus raw carrier trace.
             displacement: std::array::from_fn(|i| boundary.displacement[i].add(margin_shift[i])),
         })
-    })
+    })() }
 }
 
 impl PoleComparison {
@@ -243,7 +215,7 @@ impl PoleComparison {
     pub(super) fn prepare(
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         joint_index: usize,
         allowance: f64,
         remaining_bytes: usize,
@@ -260,7 +232,7 @@ impl PoleComparison {
         if !allowance.is_finite() || allowance <= 0.0 {
             return Ok(None);
         }
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(None);
         };
         let TrimJointKind::SphericalPole {
@@ -278,46 +250,35 @@ impl PoleComparison {
         if joint.vertex_id != vertex
             || !same_native_use(joint.outgoing, outgoing)
             || !same_native_use(joint.incoming, incoming)
-            || length(vertex_residual.map(|v| Interval {
-                lo: v.lower,
-                hi: v.upper,
-            }))?
+            || length(vertex_residual)?
             .hi > allowance
         {
             return Ok(None);
         }
         let mut keys = [None; 2];
         for (i, end) in [recipe.outgoing, recipe.incoming].into_iter().enumerate() {
-            let original = domain.original_coedge(end.use_.coedge)?;
             let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
             let Some(binding) = proof.binding() else {
                 return Ok(None);
             };
-            let face = domain.native().face();
-            let Some(edge) = face
-                .absolute_boundaries()
-                .get(end.use_.wire)
-                .and_then(|wire| wire.get(end.use_.index))
-            else {
-                return Ok(None);
-            };
-            let range = proof.native_range();
+            let (entry, edge) = crate::analysis::source_incidence::native_coedge(
+                domain.definition(), end.use_.face, end.use_.wire, end.use_.index,
+            )?;
+            let range = proof.spatial_range();
             let delta = Interval::point(end.exit).sub(Interval::point(end.endpoint));
             if proof.provenance()
-                == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+                == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
                 || binding.owner != [end.use_.face, end.use_.wire, end.use_.index]
-                || binding.face != face.id()
-                || binding.edge != edge.id()
+                || binding.face != domain.face()
+                || binding.edge != entry.edge
                 || binding.edge != end.edge
-                || binding.source.native_orientation != edge.orientation()
-                || binding.endpoints != [edge.front().id(), edge.back().id()]
-                || binding.endpoints
-                    [usize::from(end.absolute_back == binding.source.native_orientation)]
-                    != vertex
-                || original.source_chart_parameter_range
-                    != Some((proof.uv_range()[0], proof.uv_range()[1]))
-                || end.endpoint != range[usize::from(end.absolute_back)]
-                || end.absolute_back != (end.use_.orientation == (i == 1))
+                || binding.source.native_orientation != entry.forward
+                || binding.endpoints != edge.vertices
+                || binding.native_interval != [edge.interval.min(), edge.interval.max()]
+                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] != vertex
+                || !joint_owns_source_endpoint(joint, binding, end.spatial_high, vertex)
+                || end.endpoint != range[usize::from(end.spatial_high)]
+                || (end.spatial_high ^ !binding.spatial_forward) != (end.use_.orientation == (i == 1))
                 || end.delta_t.lo != delta.lo
                 || end.delta_t.hi != delta.hi
                 || !end.exit.is_finite()
@@ -337,28 +298,27 @@ impl PoleComparison {
             keys[i] = Some(EndKey {
                 binding: *binding,
                 coedge: end.use_.coedge,
+                edgeuse: end.use_.edgeuse,
                 orientation: end.use_.orientation,
-                absolute_back: end.absolute_back,
+                spatial_high: end.spatial_high,
                 endpoint: end.endpoint,
                 exit: end.exit,
                 joint_uv: end.joint_uv,
                 offset: end.offset,
                 collar: end.collar,
-                native_range: range,
-                uv_range: proof.uv_range(),
+                spatial_range: range,
+                uv_ends: [proof.uv_endpoint(false), proof.uv_endpoint(true)],
                 margin: proof.margin_uv(),
                 position_error: proof.position_error_mm(),
                 provenance: proof.provenance(),
             });
         }
-        let chart_ok = domain.native().face().with_surface(|surface| {
-            let monstertruck_modeling::Surface::SphericalSurface(processor) = surface else {
-                return Ok(false);
-            };
-            Ok(polar_axis == usize::from(!processor.orientation())
-                && source_chart::SphereChart::new(surface, domain, work, cancel)?.is_some()
-                && PoleChart::coefficients(surface, pole)?.is_some())
-        })?;
+        let chart_ok = if let Some(chart) = PoleChart::coefficients(&domain.surface_operand(), pole)? {
+            polar_axis == chart.polar_axis()
+                && source_chart::SphereChart::new(&domain.surface_operand(), domain, work, cancel)?.is_some()
+        } else {
+            false
+        };
         if !chart_ok {
             return Ok(None);
         }
@@ -393,7 +353,7 @@ impl PoleComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
     ) -> Result<(), GeometryError> {
         if !self.allowance.is_finite()
             || self.allowance <= 0.0
@@ -411,7 +371,7 @@ impl PoleComparison {
                 "pole fresh germ receipt exceeds frozen allowance/strict derivative",
             ));
         }
-        let Some(joint) = domain.native().joints().get(self.joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(self.joint_index) else {
             return Err(ownership_failure(recipe, "pole missing original joint"));
         };
         let Ok([outgoing, incoming]) = native_endpoint_operands(domain, recipe, vertex) else {
@@ -421,6 +381,9 @@ impl PoleComparison {
             if pole == self.pole && polar_axis == self.polar_axis);
         if vertex != self.vertex
             || joint.vertex_id != vertex
+            || !self.ends.iter().all(|end| joint_owns_source_endpoint(
+                joint, &end.binding, end.spatial_high, vertex,
+            ))
             || !kind_matches
             || !same_native_use(joint.outgoing, outgoing)
             || !same_native_use(joint.incoming, incoming)
@@ -455,7 +418,7 @@ impl PoleComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<SourcePositionOvercover, GeometryError> {
@@ -465,11 +428,8 @@ impl PoleComparison {
             work.charge(1, cancel)?;
             self.validate(domain, recipe, vertex)?;
             let chart = self.chart(domain)?;
-            let joint = &domain.native().joints()[self.joint_index];
-            let mut boundary_uv = joint.enclosure.map(|v| Interval {
-                lo: v.lower,
-                hi: v.upper,
-            });
+            let joint = &domain.original_joints()?[self.joint_index];
+            let mut boundary_uv = joint.enclosure;
             let mut raw_uv = boundary_uv;
             // ZERO2 is the validated analytic pole in this original chart,
             // never a snapped rounded-PI native parameter.
@@ -515,7 +475,7 @@ impl PoleComparison {
             }
             raw_uv = hull2(raw_uv, boundary_uv);
             phase = "whole raw boundary/reference box source hemisphere";
-            let raw_position = domain.native().face().with_surface(|surface| {
+            let raw_position = { let surface = &domain.surface_operand(); (|| {
                 crate::parametric::surface_piecewise_enclosure(
                     surface,
                     uv_box(raw_uv),
@@ -523,7 +483,7 @@ impl PoleComparison {
                     cancel,
                 )
                 .map(|jet| jet.position)
-            })?;
+            })() }?;
             if !chart.same_hemisphere(raw_position) {
                 return Ok(SourcePositionOvercover::Unavailable(
                     "SphericalPole full raw source box hemisphere unresolved",
@@ -552,7 +512,7 @@ impl PoleComparison {
                 let source = if same_raw_box {
                     raw_position
                 } else {
-                    domain.native().face().with_surface(|surface| {
+                    { let surface = &domain.surface_operand(); (|| {
                         crate::parametric::surface_piecewise_enclosure(
                             surface,
                             uv_box(clipped),
@@ -560,7 +520,7 @@ impl PoleComparison {
                             cancel,
                         )
                         .map(|jet| jet.position)
-                    })?
+                    })() }?
                 };
                 position = hull3(position, source);
             }
@@ -576,11 +536,11 @@ impl PoleComparison {
     }
 
     fn chart(&self, domain: &PreparedFaceTrimDomain<'_>) -> Result<PoleChart, GeometryError> {
-        domain.native().face().with_surface(|surface| {
+        { let surface = &domain.surface_operand(); (|| {
             PoleChart::coefficients(surface, self.pole)?.ok_or_else(|| {
                 refusal("pole comparison lost its literal analytic source coefficients")
             })
-        })
+        })() }
     }
 
     fn star_jet(
@@ -668,18 +628,15 @@ impl PoleComparison {
         };
         let chart = self.chart(domain)?;
         let exit = end_curve(domain, end, Interval::point(1.0), work, cancel)?;
-        let position = domain
-            .native()
-            .face()
-            .with_surface(|surface| {
-                surface_enclosure(surface, uv_box(exit.position), work, cancel)
-            })?
+        let position = { let surface = &domain.surface_operand(); (|| {
+            surface_enclosure(surface, uv_box(exit.position), work, cancel)
+        })() }?
             .position;
         if !chart.same_hemisphere(position) {
             return Ok(None);
         }
         let (p, _, _) = chart.covering_jet(exit.position, ZERO2, ZERO2, work, cancel)?;
-        // Stream original exact cuts BEFORE the canonical original edge lock.
+        // Inventory original exact cuts before borrowing the prepared spatial source.
         let cuts = comparison_transport::exact_interior_cuts(domain, end, bytes, work, cancel)?;
         let bytes = bytes
             .checked_sub(cuts.capacity().saturating_mul(std::mem::size_of::<f64>()))
@@ -707,7 +664,9 @@ impl PoleComparison {
                         pending -= 1;
                         let (range, depth) = stack[pending];
                         work.charge(1, cancel)?;
-                        let source = spatial.jet((range[0], range[1]), work, cancel)?;
+                        let source = crate::parametric::curve_enclosure(
+                            spatial, (range[0], range[1]), work, cancel,
+                        )?;
                         let s = Interval::new(range[0], range[1])?
                             .sub(Interval::point(end.endpoint))
                             .div(end.delta_t)?;
@@ -718,7 +677,9 @@ impl PoleComparison {
                         let relative =
                             comparison_transport::relative_error(source_derivative, derivative)?;
                         let midpoint = range[0] * 0.5 + range[1] * 0.5;
-                        let source_midpoint = spatial.jet((midpoint, midpoint), work, cancel)?;
+                        let source_midpoint = crate::parametric::curve_enclosure(
+                            spatial, (midpoint, midpoint), work, cancel,
+                        )?;
                         let sm = Interval::point(midpoint)
                             .sub(Interval::point(end.endpoint))
                             .div(end.delta_t)?;
@@ -852,10 +813,7 @@ impl PoleComparison {
                 "pole physical comparison exceeds frozen allowance",
             ));
         }
-        let source = domain
-            .native()
-            .face()
-            .with_surface(|surface| surface_enclosure(surface, uv_box(raw.uv), work, cancel))?;
+        let source = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))() }?;
         Ok(ComparisonSourceCost {
             source: hull3(homotopy_image.position, source.position),
             displacement,
@@ -898,10 +856,7 @@ impl PoleComparison {
             work,
             cancel,
         )?;
-        let raw_surface = domain
-            .native()
-            .face()
-            .with_surface(|surface| surface_enclosure(surface, uv_box(raw.uv), work, cancel))?;
+        let raw_surface = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(raw.uv), work, cancel))() }?;
         if !chart.same_hemisphere(boundary.position) || !chart.same_hemisphere(raw_surface.position)
         {
             return Err(ownership_failure(
@@ -948,7 +903,7 @@ impl PoleComparison {
             min_forward,
             core: None,
         };
-        let bounds = domain.uv_bounds();
+        let bounds = domain.uv_domain();
         for scale in [1.0, 2.0, 4.0] {
             let uv: [[f64; 2]; 2] = std::array::from_fn(|i| {
                 let padding = up(proposal[i].width() * scale);
@@ -962,7 +917,7 @@ impl PoleComparison {
             {
                 continue;
             }
-            let result = domain.native().face().with_surface(|surface| {
+            let result = { let surface = &domain.surface_operand(); (|| {
                 let jet = surface_enclosure(surface, uv, work, cancel)?;
                 let FiberNewton::Enclosure { uv, unique: true } =
                     fiber_krawczyk(surface, uv, &jet, &fiber, work, cancel)?
@@ -974,13 +929,12 @@ impl PoleComparison {
                     std::array::from_fn(|i| jet.position[i].sub(Interval::point(center[i])));
                 if !chart.same_hemisphere(jet.position)
                     || dot(forward, relative).lo <= min_forward
-                    || uv[self.polar_axis][0] <= 0.0
-                    || uv[self.polar_axis][1] >= down(std::f64::consts::PI)
+                    || !chart.principal_polar(Interval { lo: uv[self.polar_axis][0], hi: uv[self.polar_axis][1] })
                 {
                     return Ok(None);
                 }
                 Ok(Some((uv.map(|v| Interval { lo: v[0], hi: v[1] }), jet)))
-            })?;
+            })() }?;
             if result.is_some() {
                 return Ok(result);
             }
@@ -997,10 +951,7 @@ impl PoleComparison {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         let chart = self.chart(domain)?;
-        let other_world = domain
-            .native()
-            .face()
-            .with_surface(|surface| surface_enclosure(surface, uv_box(other), work, cancel))?
+        let other_world = { let surface = &domain.surface_operand(); (|| surface_enclosure(surface, uv_box(other), work, cancel))() }?
             .position;
         // Projection is two-to-one globally. Never confuse the opposite pole
         // with a collision, or use the projection to identify source sheets.
@@ -1239,7 +1190,7 @@ impl PoleComparison {
         ownership_failure(
             recipe,
             format_args!(
-                "pole central {stage} owner={:?} coedge={} exit={} offsets={:?} bulge={:?} sealed_native_uv_ranges={:?}",
+                "pole central {stage} owner={:?} coedge={} exit={} offsets={:?} bulge={:?} sealed_spatial_uv_ranges={:?}",
                 [end.use_.face, end.use_.wire, end.use_.index],
                 end.use_.coedge,
                 end.exit,
@@ -1247,7 +1198,7 @@ impl PoleComparison {
                 recipe.bulge,
                 self.ends
                     .each_ref()
-                    .map(|key| (key.native_range, key.uv_range)),
+                    .map(|key| (key.spatial_range, key.uv_ends)),
             ),
         )
     }
@@ -1326,17 +1277,16 @@ impl PoleComparison {
         }
         let first = domain.original_coedge_correspondence(recipe.outgoing.use_.coedge)?;
         let second = domain.original_coedge_correspondence(recipe.incoming.use_.coedge)?;
-        if !first.same_affine_native_uv_map(second) {
+        if !first.same_affine_spatial_uv_map(second) {
             return Ok(false);
         }
         // This is the complete original affine map, including orientation and
-        // normalization. A native endpoint/exit is never snapped to this range.
+        // normalization. A source endpoint/exit is never snapped to this range.
         first.uv_parameter_image([recipe.outgoing.exit; 2])?;
         second.uv_parameter_image([recipe.incoming.exit; 2])?;
-        let coedges = domain.native().coedges();
         super::super::super::vertex_fan::original_uv_affine_coordinate_functions_equal(
-            coedges[recipe.outgoing.use_.coedge].curve,
-            coedges[recipe.incoming.use_.coedge].curve,
+            &domain.coedge_operand(recipe.outgoing.use_.coedge)?,
+            &domain.coedge_operand(recipe.incoming.use_.coedge)?,
             first.uv_range(),
             polar,
             work,
@@ -1362,7 +1312,7 @@ impl PoleComparison {
         let shared = (exact_exit
             && a.endpoint == b.endpoint
             && a.exit == b.exit
-            && a.absolute_back == b.absolute_back)
+            && a.spatial_high == b.spatial_high)
             .then_some(SharedPolarGerm {
                 comparison: self,
                 domain,
@@ -1507,7 +1457,7 @@ impl PoleComparison {
         let mut central = collar.range;
         for owned in [recipe.outgoing, recipe.incoming] {
             if owned.edge == end.edge {
-                central[usize::from(owned.absolute_back)] = owned.exit;
+                central[usize::from(owned.spatial_high)] = owned.exit;
             }
         }
         if central[0] > central[1] {
@@ -1535,7 +1485,7 @@ impl PoleComparison {
                 if owned.edge != end.edge {
                     continue;
                 }
-                let direction = if owned.absolute_back { -1.0 } else { 1.0 };
+                let direction = if owned.spatial_high { -1.0 } else { 1.0 };
                 let evidence = match exit_supports[index] {
                     Some(evidence) => evidence,
                     None => {
@@ -1589,7 +1539,7 @@ impl PoleComparison {
                     }
                 };
                 let row = support.row;
-                if if owned.absolute_back {
+                if if owned.spatial_high {
                     range[1] > owned.exit
                 } else {
                     range[0] < owned.exit
@@ -1636,12 +1586,9 @@ impl PoleComparison {
                     ));
                     continue;
                 }
-                let other_world = domain
-                    .native()
-                    .face()
-                    .with_surface(|surface| {
-                        surface_enclosure(surface, uv_box(other), work, cancel)
-                    })?
+                let other_world = { let surface = &domain.surface_operand(); (|| {
+                    surface_enclosure(surface, uv_box(other), work, cancel)
+                })() }?
                     .position;
                 let other_local = chart.project(other_world);
                 let other_q = [other_local[0], other_local[1]];
@@ -1769,7 +1716,7 @@ impl PoleComparison {
                     "pole original nonowning inventory",
                 ));
             };
-            for (index, _) in domain.native().coedges().iter().enumerate() {
+            for (index, _) in domain.coedges().iter().enumerate() {
                 if index == recipe.outgoing.use_.coedge || index == recipe.incoming.use_.coedge {
                     continue;
                 }
@@ -1804,17 +1751,14 @@ impl PoleComparison {
                 }
             }
             active_boundary = None;
-            for (index, joint) in domain.native().joints().iter().enumerate() {
+            for (index, joint) in domain.original_joints()?.iter().enumerate() {
                 active_joint = Some(index);
                 phase = "foreign original joint exclusion";
                 work.charge(1, cancel)?;
                 if index == self.joint_index {
                     continue;
                 }
-                let other = joint.enclosure.map(|v| Interval {
-                    lo: v.lower,
-                    hi: v.upper,
-                });
+                let other = joint.enclosure;
                 if !self.misses_original_box(domain, recipe, other, work, cancel)? {
                     return Err(ownership_failure(
                         recipe,
@@ -1862,26 +1806,22 @@ mod properties {
                 .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
         )
         .unwrap();
-        let definition = crate::import_step(&bytes, &cancel).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
         let geometry_before =
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+            format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let standalone = OriginalTrimSource::standalone(&definition);
-        let originals = standalone
-            .prepare_domains_if_missing(MAX_SCRATCH_BYTES, &mut work, &cancel)
-            .unwrap()
-            .expect("one complete original-domain owner");
-        let source = standalone.borrowing_domains(Some(&originals));
-        let available = MAX_SCRATCH_BYTES
-            .checked_sub(originals.retained_bytes())
-            .unwrap();
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
+        let available = MAX_SCRATCH_BYTES;
         let mut poles = Vec::new();
         let mut vertices = Vec::new();
-        for (face, _) in definition.solid.face_iter().enumerate() {
+        for face in 0..definition.face_ids().len() {
             let domain = source
                 .face_domain(face, available, &mut work, &cancel)
                 .unwrap();
-            for (joint, original) in domain.native().joints().iter().enumerate() {
+            for (joint, original) in domain.original_joints().unwrap().iter().enumerate() {
                 if matches!(original.kind, TrimJointKind::SphericalPole { .. }) {
                     poles.push((face, joint, original.vertex_id));
                     if !vertices.contains(&original.vertex_id) {
@@ -1929,9 +1869,31 @@ mod properties {
                     .face_domain(face, available, &mut work, &cancel)
                     .unwrap();
                 let scratch = available
-                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
+                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES)
                     .unwrap();
                 comparison.validate(&domain, recipe, vertex).unwrap();
+                let joint = &domain.original_joints().unwrap()[comparison.joint_index];
+                let incoming_endpoint = if joint.connector_endpoint_is_bound(
+                    &domain, 0, recipe.incoming.use_.coedge, recipe.incoming.spatial_high,
+                    &mut work, &cancel,
+                ).unwrap() { 0 } else { 1 };
+                assert!(joint.connector_endpoint_is_bound(
+                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
+                    recipe.incoming.spatial_high, &mut work, &cancel,
+                ).unwrap());
+                assert!(joint.connector_endpoint_is_bound(
+                    &domain, 1 - incoming_endpoint, recipe.outgoing.use_.coedge,
+                    recipe.outgoing.spatial_high, &mut work, &cancel,
+                ).unwrap());
+                assert!(!joint.connector_endpoint_is_bound(
+                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
+                    !recipe.incoming.spatial_high, &mut work, &cancel,
+                ).unwrap(), "closed-edge source germs require their exact directed endpoint key");
+                let copied_joint = *joint;
+                assert!(!copied_joint.connector_endpoint_is_bound(
+                    &domain, incoming_endpoint, recipe.incoming.use_.coedge,
+                    recipe.incoming.spatial_high, &mut work, &cancel,
+                ).unwrap(), "equal copied endpoint tubes cannot forge immutable domain membership");
                 let original = OriginalCornerComparison::SphericalPole(comparison);
                 assert!(
                     original
@@ -1944,13 +1906,13 @@ mod properties {
                             &domain,
                             recipe,
                             vertex,
-                            domain.native().joints().len(),
+                            domain.original_joints().unwrap().len(),
                         )
                         .unwrap()
                 );
                 let exact_exit = |edge, back, parameter| {
                     [recipe.incoming, recipe.outgoing].into_iter().any(|end| {
-                        end.edge == edge && end.absolute_back == back && end.exit == parameter
+                        end.edge == edge && end.spatial_high == back && end.exit == parameter
                     })
                 };
                 assert!(
@@ -1978,7 +1940,7 @@ mod properties {
                             &|edge, back, parameter| {
                                 exact_exit(edge, back, parameter)
                                     && !(edge == recipe.incoming.edge
-                                        && back == recipe.incoming.absolute_back
+                                        && back == recipe.incoming.spatial_high
                                         && parameter == recipe.incoming.exit)
                             },
                         )
@@ -2011,7 +1973,7 @@ mod properties {
                     cells += 1;
                 }
                 assert!(cells > 0);
-                let direction = if recipe.outgoing.absolute_back {
+                let direction = if recipe.outgoing.spatial_high {
                     -1.0
                 } else {
                     1.0
@@ -2090,7 +2052,7 @@ mod properties {
         );
         assert_eq!(
             geometry_before,
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+            format!("{:?}", definition.brep()),
         );
     }
 
@@ -2102,38 +2064,34 @@ mod properties {
                 .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
         )
         .unwrap();
-        let definition = crate::import_step(&bytes, &cancel).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
         let geometry_before =
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+            format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let standalone = OriginalTrimSource::standalone(&definition);
-        let originals = standalone
-            .prepare_domains_if_missing(MAX_SCRATCH_BYTES, &mut work, &cancel)
-            .unwrap()
-            .expect("one canonical owner for all original Housing trim domains");
-        let source = standalone.borrowing_domains(Some(&originals));
-        let available = MAX_SCRATCH_BYTES
-            .checked_sub(originals.retained_bytes())
-            .unwrap();
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
+        let available = MAX_SCRATCH_BYTES;
 
         // Select the first-layer consumer by ORIGINAL Native pole incidence
         // and shared vertex height, never a fixture face or coordinate match.
-        let mut lowest: Option<(f64, usize, usize, VertexId<Point3>)> = None;
-        for (face_index, _) in definition.solid.face_iter().enumerate() {
+        let mut lowest: Option<(f64, usize, usize, VertexId)> = None;
+        for face_index in 0..definition.face_ids().len() {
             let domain = source
                 .face_domain(face_index, available, &mut work, &cancel)
                 .unwrap();
-            for (joint_index, joint) in domain.native().joints().iter().enumerate() {
+            for (joint_index, joint) in domain.original_joints().unwrap().iter().enumerate() {
                 if !matches!(joint.kind, TrimJointKind::SphericalPole { .. }) {
                     continue;
                 }
-                assert!(joint.vertex_point.z.is_finite());
+                assert!(joint.vertex_point[2].is_finite());
                 if lowest
                     .as_ref()
-                    .is_none_or(|selected| joint.vertex_point.z < selected.0)
+                    .is_none_or(|selected| joint.vertex_point[2] < selected.0)
                 {
                     lowest = Some((
-                        joint.vertex_point.z,
+                        joint.vertex_point[2],
                         face_index,
                         joint_index,
                         joint.vertex_id,
@@ -2184,7 +2142,7 @@ mod properties {
             .face_domain(face_index, available, &mut work, &cancel)
             .unwrap();
         let scratch = available
-            .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
+            .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES)
             .unwrap();
         comparison.validate(&domain, &recipe, vertex).unwrap();
         assert!(
@@ -2221,19 +2179,7 @@ mod properties {
             "the pole comparison must cover actual fixed G cells"
         );
 
-        let mut foreign = None;
-        'faces: for face in definition.solid.face_iter() {
-            for wire in face.absolute_boundaries().iter() {
-                for edge in wire.iter() {
-                    for endpoint in [edge.front(), edge.back()] {
-                        if endpoint.id() != vertex {
-                            foreign = Some(endpoint.id());
-                            break 'faces;
-                        }
-                    }
-                }
-            }
-        }
+        let foreign = incidence.vertices().unwrap().find(|&endpoint| endpoint != vertex);
         let error = comparison
             .validate(
                 &domain,
@@ -2264,7 +2210,7 @@ mod properties {
             GeometryErrorCode::AnalysisIndeterminate,
         );
         let mut missing_joint = comparison;
-        missing_joint.joint_index = domain.native().joints().len();
+        missing_joint.joint_index = domain.original_joints().unwrap().len();
         assert_eq!(
             missing_joint
                 .validate(&domain, &recipe, vertex)
@@ -2308,23 +2254,41 @@ mod properties {
         );
         assert_eq!(
             geometry_before,
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+            format!("{:?}", definition.brep()),
         );
     }
 
     #[test]
     fn original_affine_sphere_graph_keeps_opposite_hemispheres_and_closed_cap_distinct() {
-        use monstertruck_modeling::{Matrix4, Processor, Sphere, Surface};
-        let transform = Matrix4::from_cols(
-            [2.0, 0.5, 0.0, 0.0].into(),
-            [0.0, 3.0, 0.25, 0.0].into(),
-            [0.0, 0.0, 4.0, 0.0].into(),
-            [10.0, 11.0, 12.0, 1.0].into(),
-        );
-        let surface = Surface::SphericalSurface(Processor::with_transform(
-            Sphere::new(Point3::new(1.0, -2.0, 3.0), 2.0),
-            transform,
-        ));
+        use solidcore::{geom::{Extent2d, Point3, Vec3},
+            surface::{sphere::{Sphere, SphereOptions}, surface::{Surface, StepSurface}}};
+        let kernel = crate::kernel::make_kernel_context();
+        let natural: Surface = Sphere::new(
+            &kernel, Point3::new(10.0, 11.0, 12.0),
+            Vec3::new(1.0, 1.0, 0.0), Vec3::new(-1.0, 1.0, 1.0),
+            Extent2d::from_bounds(-180.0, -90.0, 180.0, 90.0), 2.0,
+            SphereOptions::default(),
+        ).unwrap().into();
+        assert!(PoleChart::coefficients(&natural, SphericalPole::North).unwrap().is_none(),
+            "a natural rational chart cannot borrow the explicit angular law");
+        let native_step: Surface = StepSurface::new(natural, true).unwrap().into();
+        assert!(PoleChart::coefficients(&native_step, SphericalPole::North).unwrap().is_some());
+
+        // Retain the original nonorthogonal affine-coefficient boundary case,
+        // not merely a native rigid-placement sphere with a different label.
+        let original = solidcraft_step::geom::Surface::Sphere {
+            position: solidcraft_step::geom::Placement {
+                origin: [10.0, 11.0, 12.0],
+                axis: [0.0, 0.25, 2.0],
+                ref_direction: [2.0, 0.5, 0.0],
+            },
+            radius: 2.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let surface = crate::kernel::source_operand::PreparedOriginalSurface::new(
+            &original, [[-1.0, 1.0], [-0.5, 0.5]], MAX_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
         let xy = [0.125, -0.25].map(Interval::point);
         let north = PoleChart::coefficients(&surface, SphericalPole::North)
             .unwrap()

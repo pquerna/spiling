@@ -3,8 +3,8 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
-use crate::corpus_fixtures as corpus;
-use crate::import_step;
+use crate::{GeometryWorkBudget, corpus_fixtures as corpus};
+use crate::from_step_bytes_with_cancel;
 use std::path::PathBuf;
 use step_p21::ast::{EntityInstance, Name, Parameter};
 fn fixture(name: &str) -> Vec<u8> {
@@ -46,7 +46,7 @@ fn lexical_caps_ignore_strings_comments_and_binary_strings() {
 fn source_cap_is_checked_before_parser() {
     let bytes = vec![b' '; MAX_SOURCE_BYTES as usize + 1];
     assert_eq!(
-        import_step(&bytes, &cancelled()).unwrap_err().code,
+        from_step_bytes_with_cancel(&bytes, &cancelled()).unwrap_err().code,
         GeometryErrorCode::ResourceLimit
     );
 }
@@ -69,7 +69,7 @@ fn canonical_oriented_face_use_survives_conversion_and_large_entity_ids() {
         &format!("ORIENTED_FACE('',*,#{surface_face},.T.)"),
     );
     let bytes = corpus::serialize(&ex);
-    let definition = import_step(bytes.as_bytes(), &cancelled()).unwrap();
+    let definition = from_step_bytes_with_cancel(bytes.as_bytes(), &cancelled()).unwrap();
     assert_eq!(
         definition.faces[0].face_id.as_str(),
         "step:9007199254740993"
@@ -83,7 +83,7 @@ fn canonical_oriented_face_use_survives_conversion_and_large_entity_ids() {
         definition.faces[0].face_id,
         FaceId::from_step_entity(surface_face).unwrap()
     );
-    let same = import_step(bytes.as_bytes(), &cancelled()).unwrap();
+    let same = from_step_bytes_with_cancel(bytes.as_bytes(), &cancelled()).unwrap();
     assert_eq!(definition.id, same.id);
     assert_eq!(definition.faces, same.faces);
 }
@@ -95,7 +95,7 @@ fn each_original_adversary_returns_its_exact_manifest_error() {
     for entry in manifest["fixtures"].as_array().unwrap() {
         if let Some(expected) = entry["expected_error"].as_str() {
             let source = std::fs::read(root.join(entry["path"].as_str().unwrap())).unwrap();
-            let err = import_step(&source, &cancelled())
+            let err = from_step_bytes_with_cancel(&source, &cancelled())
                 .expect_err("adversary must not admit partial geometry");
             assert_eq!(
                 serde_json::to_value(err.code).unwrap(),
@@ -108,8 +108,8 @@ fn each_original_adversary_returns_its_exact_manifest_error() {
 }
 #[test]
 fn conversion_inch_source_is_dimensional_and_keeps_uncertainty() {
-    let mm = import_step(&fixture("box-mm.step"), &cancelled()).unwrap();
-    let inch = import_step(&fixture("box-inch.step"), &cancelled()).unwrap();
+    let mm = from_step_bytes_with_cancel(&fixture("box-mm.step"), &cancelled()).unwrap();
+    let inch = from_step_bytes_with_cancel(&fixture("box-inch.step"), &cancelled()).unwrap();
     assert_eq!(
         inch.provenance.source_unit,
         spiling_contracts::geometry::SourceUnit::Inch
@@ -144,14 +144,14 @@ fn missing_reference_duplicate_ids_and_multiple_data_never_partially_import() {
     ex.data[0].entities.push(duplicate);
     let bytes = corpus::serialize(&ex);
     assert_eq!(
-        import_step(bytes.as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(bytes.as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::InvalidGeometry
     );
     let two_data = source.replace("END-ISO-10303-21;", "DATA; ENDSEC; END-ISO-10303-21;");
     assert_eq!(
-        import_step(two_data.as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(two_data.as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::UnsupportedGeometry
@@ -162,7 +162,7 @@ fn missing_reference_duplicate_ids_and_multiple_data_never_partially_import() {
         Parameter::Ref(Name::Entity(id));
     let bytes = corpus::serialize(&ex);
     assert_eq!(
-        import_step(bytes.as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(bytes.as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::InvalidGeometry
@@ -173,7 +173,7 @@ fn missing_reference_duplicate_ids_and_multiple_data_never_partially_import() {
 }
 #[test]
 fn exact_circle_witnesses_bound_the_native_curved_extrema() {
-    let def = import_step(&fixture("cylinder.step"), &cancelled()).unwrap();
+    let def = from_step_bytes_with_cancel(&fixture("cylinder.step"), &cancelled()).unwrap();
     let mut circular = 0;
     for (_id, edge) in def.brep().edges().iter() {
         if let Some(curve) = &edge.curve {
@@ -186,53 +186,6 @@ fn exact_circle_witnesses_bound_the_native_curved_extrema() {
         }
     }
     assert!(circular >= 4, "two analytic half arcs on each cap");
-}
-
-#[test]
-fn analytic_intersection_leaders_must_lie_on_the_entire_native_carrier() {
-    let plane = AnalyticSurfaceDescription::Plane {
-        origin_mm: [0.0; 3],
-        normal: [0.0, 0.0, 1.0],
-    };
-    let offset_circle = BoundaryCurveMm::CircleArc {
-        center_mm: [0.0, 0.0, 1.0],
-        u_mm: [5.0, 0.0, 0.0],
-        v_mm: [0.0, 5.0, 0.0],
-        start_angle: 0.0,
-        end_angle: std::f64::consts::PI,
-    };
-    assert_eq!(
-        certify_boundary(&offset_circle, &plane).unwrap_err().code,
-        GeometryErrorCode::InvalidGeometry
-    );
-    let cylinder = AnalyticSurfaceDescription::Cylinder {
-        axis_origin_mm: [0.0; 3],
-        axis_direction: [0.0, 0.0, 1.0],
-        radius_mm: 5.0,
-    };
-    // Both endpoints lie on the cylinder, but its interior passes through the axis.
-    let chord = BoundaryCurveMm::Line {
-        start_mm: [5.0, 0.0, 0.0],
-        end_mm: [-5.0, 0.0, 0.0],
-    };
-    assert_eq!(
-        certify_boundary(&chord, &cylinder).unwrap_err().code,
-        GeometryErrorCode::InvalidGeometry
-    );
-    let axial = BoundaryCurveMm::Line {
-        start_mm: [5.0, 0.0, 0.0],
-        end_mm: [5.0, 0.0, 8.0],
-    };
-    certify_boundary(&axial, &cylinder).unwrap();
-    let circle = BoundaryCurveMm::CircleArc {
-        center_mm: [0.0; 3],
-        u_mm: [5.0, 0.0, 0.0],
-        v_mm: [0.0, 5.0, 0.0],
-        start_angle: 0.0,
-        end_angle: std::f64::consts::PI,
-    };
-    certify_boundary(&circle, &plane).unwrap();
-    certify_boundary(&circle, &cylinder).unwrap();
 }
 
 #[test]
@@ -273,7 +226,7 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
             ),
         );
         let definition =
-            import_step(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap();
+            from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap();
         for axis in 0..3 {
             assert!((definition.bounds.max[axis] - [20.0, 10.0, 8.0][axis]).abs() < 1e-6);
         }
@@ -288,7 +241,7 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
         "AUTOMOTIVE_DESIGN { 1 0 10303 203 3 1 1 }".into(),
     )])]);
     assert_eq!(
-        import_step(corpus::serialize(&exchange).as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::UnsupportedGeometry
@@ -337,7 +290,7 @@ fn deep_acyclic_conversion_units_resolve_without_consuming_the_call_stack() {
         .find(|parameter| reference(parameter).ok() == Some(original_unit))
         .unwrap();
     *length = Parameter::Ref(Name::Entity(base));
-    let definition = import_step(corpus::serialize(&exchange).as_bytes(), &cancel).unwrap();
+    let definition = from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancel).unwrap();
     assert_eq!(
         definition.provenance.source_unit,
         spiling_contracts::geometry::SourceUnit::Inch
@@ -380,7 +333,7 @@ fn frozen_occt_periodic_edges_admit_closed_solids_without_changing_source_face_s
         let shell_id = entities.named("CLOSED_SHELL", &cancel).unwrap()[0];
         let canonical =
             list(at(entities.record(shell_id, "CLOSED_SHELL").unwrap(), 1).unwrap()).unwrap();
-        let definition = import_step(&source, &cancel).expect("unchanged independent OCCT solid");
+        let definition = from_step_bytes_with_cancel(&source, &cancel).expect("unchanged independent OCCT solid");
         assert_eq!(definition.source_bytes as usize, source.len());
         assert_eq!(definition.provenance.source_hash.as_str(), hash);
         assert_eq!(definition.faces.len(), count);
@@ -418,7 +371,7 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
     };
     edges.pop().unwrap();
     assert_eq!(
-        import_step(corpus::serialize(&open).as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(corpus::serialize(&open).as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::InvalidGeometry
@@ -431,7 +384,7 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
     corpus::parameters(corpus::first(&mut nonperiodic, "EDGE_CURVE"))[3] =
         Parameter::Ref(Name::Entity(line));
     assert_eq!(
-        import_step(corpus::serialize(&nonperiodic).as_bytes(), &cancelled())
+        from_step_bytes_with_cancel(corpus::serialize(&nonperiodic).as_bytes(), &cancelled())
             .unwrap_err()
             .code,
         GeometryErrorCode::InvalidGeometry
@@ -439,7 +392,7 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
     let mut inconsistent = original;
     corpus::parameters(corpus::first(&mut inconsistent, "CIRCLE"))[2] = Parameter::Real(4.0);
     assert!(
-        import_step(corpus::serialize(&inconsistent).as_bytes(), &cancelled()).is_err(),
+        from_step_bytes_with_cancel(corpus::serialize(&inconsistent).as_bytes(), &cancelled()).is_err(),
         "an inconsistent original radius must refuse, regardless of rejection stage",
     );
 }
@@ -447,7 +400,7 @@ fn periodic_representation_does_not_admit_open_or_nonperiodic_self_loop_topology
 #[test]
 fn unclamped_rational_closed_edge_preserves_shared_original_parameter_restrictions() {
     let source = fixture("independent-exporters/occt-spline-housing-mm.step");
-    let definition = import_step(&source, &cancelled()).expect("unchanged rational closed edge");
+    let definition = from_step_bytes_with_cancel(&source, &cancelled()).expect("unchanged rational closed edge");
     assert_eq!(definition.faces.len(), definition.brep().faces().len());
     assert!(
         solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
@@ -463,7 +416,7 @@ fn regular_native_families_import_with_original_face_and_edge_identity() {
             continue;
         }
         let source = crate::parity_fixtures::original(name, source_solid);
-        let definition = import_step(source.as_bytes(), &cancelled()).expect(name);
+        let definition = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).expect(name);
         assert_eq!(
             definition.provenance.source_hash,
             SourceHash::from_bytes(source.as_bytes())
@@ -515,38 +468,12 @@ fn original_spatial_line_cannot_be_replaced_by_an_unrelated_brep_vertex_chord() 
         std::str::from_utf8(&original).unwrap(),
         "wrong-spatial-line.step",
     );
-    let failure = import_step(source.as_bytes(), &cancelled()).unwrap_err();
+    let failure = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
     assert_eq!(
         failure.code,
         GeometryErrorCode::InvalidGeometry,
         "{failure:?}"
     );
-}
-#[test]
-fn source_sphere_chart_is_not_assumed_equal_to_native_uv() {
-    let source_solid = crate::parity_fixtures::recipes()
-        .into_iter()
-        .find(|(name, _, _)| *name == "native-parity-sphere-belt.step")
-        .unwrap()
-        .1;
-    let source = crate::parity_fixtures::original("sphere-chart.step", source_solid);
-    let definition = import_step(source.as_bytes(), &cancelled()).unwrap();
-    for (info, retained) in definition.faces.iter().zip(&definition.face_boundaries) {
-        if info.geometry.family == SurfaceFamily::Sphere {
-            let source_uv = (0.25, 0.5);
-            let native_uv = retained
-                .parameter
-                .conversion
-                .source_to_native(source_uv)
-                .unwrap();
-            assert_ne!(
-                source_uv, native_uv,
-                "sphere longitude/latitude is not native polar/azimuth"
-            );
-            assert_eq!(definition.provenance.source_unit.scale_to_mm(), 1.0);
-            assert!(!info.source_surface_entity_kind.is_empty());
-        }
-    }
 }
 
 
@@ -560,7 +487,7 @@ fn source_sphere_chart_is_not_assumed_equal_to_native_uv() {
 #[test]
 fn a_true_rational_denominator_zero_refuses_before_geometric_consistency_sampling() {
     let source = crate::parity_fixtures::conditioning_source();
-    let err = import_step(source.as_bytes(), &cancelled()).unwrap_err();
+    let err = from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).unwrap_err();
     assert!(
         matches!(
             err.code,
@@ -586,7 +513,7 @@ fn newly_supported_geometry_does_not_admit_unimplemented_surface_wrappers() {
     );
     corpus::parameters(corpus::first(&mut exchange, "ADVANCED_FACE"))[2] =
         Parameter::Ref(Name::Entity(wrapper));
-    let error = import_step(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap_err();
+    let error = from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled()).unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
     assert!(error.message.contains("OFFSET_SURFACE"));
 }
@@ -653,6 +580,94 @@ fn sign_equivalent_and_nonzero_mixed_denominators_import_genuine_closed_sources(
         let source = crate::parity_fixtures::original("signed-denominator.step", source);
         // ISO 10303-42 Section 5.3 strictly mandates positive rational B-spline weights (w_i > 0).
         // Negative Bernstein weights are rejected during AST normalization in solidcraft.
-        assert!(import_step(source.as_bytes(), &cancelled()).is_err());
+        assert!(from_step_bytes_with_cancel(source.as_bytes(), &cancelled()).is_err());
     }
 }
+    #[test]
+    fn frozen_perforated_plate_admission_preserves_every_hole_with_frozen_work_caps() {
+        let bytes = include_bytes!("../../../../fixtures/geometry/perforated-plate.step");
+        let definition = crate::from_step_bytes_with_cancel(bytes, &AtomicBool::new(false)).unwrap();
+        assert_eq!(definition.faces.len(), 1030);
+        assert_eq!(
+            definition
+                .faces
+                .iter()
+                .filter(|face| { face.source_surface_entity_kind == "CYLINDRICAL_SURFACE" })
+                .count(),
+            1024,
+        );
+        let mut caps = 0;
+        for (native_id, face) in definition.face_ids().iter().zip(definition.faces()) {
+            if face.geometry.domain.inner_loop_count == 0 {
+                continue;
+            }
+            caps += 1;
+            assert_eq!(face.geometry.domain.inner_loop_count, 512);
+            assert_eq!(face.geometry.domain.trim_loop_count, 513);
+            let native_face = definition.brep().face(*native_id).unwrap();
+            assert_eq!(native_face.loops.len(), 513);
+            let original_face = definition.original_source().face(*native_id).unwrap();
+            assert_eq!(original_face.wires.len(), 513);
+        }
+        assert_eq!(caps, 2);
+        for (axis, expected) in [[0.0, 1640.0], [0.0, 840.0], [0.0, 20.0]]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(definition.bounds.min[axis] <= expected[0]);
+            assert!(definition.bounds.max[axis] >= expected[1]);
+        }
+    }
+    #[test]
+    fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
+        // This unchanged OCCT export has a six-to-four outer taper, a radius
+        // two bore and physical end planes at zero and twelve millimetres.
+        // Its cone apex is outside the admitted face, not a height witness.
+        let bytes = include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+        );
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+        let tolerance = 0.00001;
+        for (axis, expected) in [[-6.0, 6.0], [-6.0, 6.0], [0.0, 12.0]]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(definition.bounds.min[axis] <= expected[0]);
+            assert!(definition.bounds.max[axis] >= expected[1]);
+            assert!(definition.bounds.min[axis] >= expected[0] - tolerance);
+            assert!(definition.bounds.max[axis] <= expected[1] + tolerance);
+        }
+        let mesh = crate::tessellate(
+            &definition,
+            spiling_contracts::geometry::DisplayProfile::MeshTrimmedMm005V2,
+            &cancel,
+        )
+        .unwrap();
+        assert!(mesh.triangle_count > 0 && mesh.vertex_count > 0);
+        assert!(!mesh.chunks.is_empty());
+        for chunk in &mesh.chunks {
+            let receipt = &chunk.descriptor;
+            assert_eq!(receipt.definition_id, definition.id);
+            assert_eq!(receipt.face_count as usize, definition.faces.len());
+            assert!(
+                receipt.carrier_deviation_mm
+                    + receipt.trim_deviation_mm
+                    + receipt.quantization_error_mm
+                    <= spiling_contracts::geometry::MESH_SURFACE_TOLERANCE_MM
+            );
+        }
+        let projected = crate::analysis::projected_bounds(
+            &definition,
+            [0.0, 0.0, 1.0],
+            crate::analysis::BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: tolerance,
+            },
+            &mut GeometryWorkBudget::new(20_000_000),
+            &cancel,
+        )
+        .unwrap();
+        assert!(projected.minimum[0] <= 0.0 && 0.0 <= projected.minimum[1]);
+        assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
+        assert!(projected.achieved_uncertainty_mm <= tolerance);
+    }

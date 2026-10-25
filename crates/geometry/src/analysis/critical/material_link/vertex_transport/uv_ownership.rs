@@ -30,7 +30,7 @@ pub(super) enum SourcePositionOvercover {
 }
 
 fn original_domain_intersection(domain: &PreparedFaceTrimDomain<'_>, cover: Box2) -> Option<Box2> {
-    let original = domain.uv_bounds();
+    let original = domain.uv_domain();
     let clipped = std::array::from_fn::<_, 2, _>(|i| {
         intersection(
             cover[i],
@@ -46,10 +46,7 @@ fn original_domain_intersection(domain: &PreparedFaceTrimDomain<'_>, cover: Box2
     Some([u, v])
 }
 
-type NativeUse = monstertruck_topology::trimmed::ChartCoedgeIdentity<
-    monstertruck_modeling::Curve,
-    monstertruck_modeling::Surface,
->;
+type NativeUse = NativeCoedgeIdentity;
 
 #[derive(Clone, Copy)]
 enum EndpointAuthority {
@@ -62,7 +59,7 @@ enum EndpointAuthority {
 /// Retain typed NativeUse/whole-forward identities, not duplicate spatial jets.
 #[derive(Clone, Copy)]
 pub(super) struct UvJointComparison {
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
     ends: [EndKey; 2],
     joint: Box2,
     correction: [Box2; 2],
@@ -88,14 +85,11 @@ pub(super) enum UvPrepareStage {
     Provenance,
     BindingOwner,
     NativeVertex,
-    NativeWire,
     NativeEdge,
     NativeOrientation,
     NativeEndpoints,
     NativeFace,
-    WholeForwardOwnership,
-    Gauge,
-    NativeEndpoint,
+    SpatialEndpoint,
     EndpointOrientation,
     EndpointDelta,
     InteriorExit,
@@ -113,29 +107,24 @@ pub(super) enum UvPrepareStage {
 pub(super) struct UvPrepareEndContext {
     pub(super) owner: [usize; 3],
     pub(super) coedge: usize,
-    pub(super) absolute_back: bool,
+    pub(super) spatial_high: bool,
     pub(super) orientation: bool,
     pub(super) endpoint: f64,
     pub(super) exit: f64,
     pub(super) joint_uv: Box2,
-    pub(super) native_range: Option<[f64; 2]>,
+    pub(super) spatial_range: Option<[f64; 2]>,
     pub(super) uv_range: Option<[f64; 2]>,
     pub(super) margin_uv: Option<[f64; 2]>,
     pub(super) position_error_mm: Option<f64>,
     pub(super) relative_derivative_error: Option<f64>,
-    pub(super) span_inventory: Option<[usize; 3]>,
-    pub(super) provenance: Option<crate::kernel::OriginalCorrespondenceProvenance>,
+    pub(super) span_inventory: Option<[usize; 4]>,
+    pub(super) provenance: Option<crate::kernel::trim::OriginalCorrespondenceProvenance>,
     pub(super) source_face: Option<u64>,
     pub(super) source_face_use: Option<u64>,
     pub(super) source_edge: Option<u64>,
     pub(super) source_coedge: Option<u64>,
     pub(super) binding_owner: Option<[usize; 3]>,
     pub(super) native_orientation: Option<bool>,
-    pub(super) source_chart_margin_uv: Option<[f64; 2]>,
-    pub(super) source_chart_error_mm: Option<f64>,
-    pub(super) source_chart_parameter_range: Option<(f64, f64)>,
-    pub(super) source_chart_certificate: Option<crate::kernel::SourceChartCertificate>,
-    pub(super) source_chart_declared: bool,
     pub(super) binding_present: bool,
     pub(super) native_vertex_matches: bool,
 }
@@ -154,14 +143,14 @@ impl std::fmt::Display for UvPrepareEndContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "owner={:?} coedge={} absolute_back={} orientation={} endpoint_exit={:?} joint_uv={:?} native_range={:?} uv_range={:?} margin_uv={:?} position_error_mm={:?} relative_derivative_error={:?} span_inventory={:?} provenance={:?} binding_present={} native_vertex_matches={} source_face={:?} source_face_use={:?} source_edge={:?} source_coedge={:?} binding_owner={:?} native_orientation={:?} source_chart_margin_uv={:?} source_chart_error_mm={:?} source_chart_parameter_range={:?} source_chart_certificate={:?} source_chart_declared={}",
+            "owner={:?} coedge={} spatial_high={} orientation={} endpoint_exit={:?} joint_uv={:?} spatial_range={:?} uv_range={:?} margin_uv={:?} position_error_mm={:?} relative_derivative_error={:?} span_inventory={:?} provenance={:?} binding_present={} native_vertex_matches={} source_face={:?} source_face_use={:?} source_edge={:?} source_coedge={:?} binding_owner={:?} native_orientation={:?}",
             self.owner,
             self.coedge,
-            self.absolute_back,
+            self.spatial_high,
             self.orientation,
             [self.endpoint, self.exit],
             self.joint_uv,
-            self.native_range,
+            self.spatial_range,
             self.uv_range,
             self.margin_uv,
             self.position_error_mm,
@@ -176,11 +165,6 @@ impl std::fmt::Display for UvPrepareEndContext {
             self.source_coedge,
             self.binding_owner,
             self.native_orientation,
-            self.source_chart_margin_uv,
-            self.source_chart_error_mm,
-            self.source_chart_parameter_range,
-            self.source_chart_certificate,
-            self.source_chart_declared,
         )
     }
 }
@@ -197,20 +181,21 @@ impl std::fmt::Display for UvPrepareRefusal {
 
 #[derive(Clone, Copy)]
 struct EndKey {
-    binding: crate::kernel::OriginalCoedgeBinding,
+    binding: crate::kernel::trim::OriginalCoedgeBinding,
     coedge: usize,
+    edgeuse: solidcore::topology::EdgeuseId,
     orientation: bool,
-    absolute_back: bool,
+    spatial_high: bool,
     endpoint: f64,
     exit: f64,
     joint_uv: Box2,
     offset: Box2,
     collar: bool,
-    native_range: [f64; 2],
-    uv_range: [f64; 2],
+    spatial_range: [f64; 2],
+    uv_ends: [f64; 2],
     margin: [f64; 2],
     position_error: f64,
-    provenance: crate::kernel::OriginalCorrespondenceProvenance,
+    provenance: crate::kernel::trim::OriginalCorrespondenceProvenance,
 }
 
 pub(super) struct ComparisonStarJet {
@@ -234,23 +219,31 @@ fn equal_box(a: Box2, b: Box2) -> bool {
     (0..2).all(|i| a[i].lo == b[i].lo && a[i].hi == b[i].hi)
 }
 
-fn same_end(a: EndKey, b: End, proof: &crate::kernel::OriginalCoedgeCorrespondence) -> bool {
+fn same_end(a: EndKey, b: End, proof: &crate::kernel::trim::OriginalCoedgeCorrespondence) -> bool {
     let Some(binding) = proof.binding() else {
         return false;
     };
     let delta = Interval::point(a.exit).sub(Interval::point(a.endpoint));
     a.binding.face == binding.face
         && a.binding.edge == binding.edge
+        && a.binding.edgeuse == binding.edgeuse
+        && a.binding.native_interval == binding.native_interval
+        && a.binding.spatial_forward == binding.spatial_forward
+        && a.binding.material_forward == binding.material_forward
+        && a.binding.source_vertex_points_mm == binding.source_vertex_points_mm
+        && a.binding.source_vertex_ids == binding.source_vertex_ids
         && a.binding.endpoints == binding.endpoints
         && a.binding.owner == binding.owner
         && a.binding.source_face == binding.source_face
         && a.binding.source_face_use == binding.source_face_use
-        && a.binding.source.native_orientation == binding.source.native_orientation
+        && a.binding.source == binding.source
         && binding.owner == [b.use_.face, b.use_.wire, b.use_.index]
         && a.coedge == b.use_.coedge
+        && a.edgeuse == b.use_.edgeuse
+        && binding.edgeuse == b.use_.edgeuse
         && a.orientation == b.use_.orientation
         && a.binding.edge == b.edge
-        && a.absolute_back == b.absolute_back
+        && a.spatial_high == b.spatial_high
         && a.endpoint == b.endpoint
         && a.exit == b.exit
         && b.delta_t.lo == delta.lo
@@ -258,8 +251,8 @@ fn same_end(a: EndKey, b: End, proof: &crate::kernel::OriginalCoedgeCorresponden
         && equal_box(a.joint_uv, b.joint_uv)
         && equal_box(a.offset, b.offset)
         && a.collar == b.collar
-        && a.native_range == proof.native_range()
-        && a.uv_range == proof.uv_range()
+        && a.spatial_range == proof.spatial_range()
+        && a.uv_ends == [proof.uv_endpoint(false), proof.uv_endpoint(true)]
         && a.margin == proof.margin_uv()
         && a.position_error == proof.position_error_mm()
         && a.provenance == proof.provenance()
@@ -271,6 +264,20 @@ fn same_native_use(a: NativeUse, b: NativeUse) -> bool {
         && a.coedge_index == b.coedge_index
         && a.edge_id == b.edge_id
         && a.orientation == b.orientation
+        && a.edgeuse == b.edgeuse
+}
+
+fn joint_owns_source_endpoint(
+    joint: &crate::kernel::trim::PreparedTrimJoint,
+    binding: &crate::kernel::trim::OriginalCoedgeBinding,
+    spatial_high: bool,
+    vertex: VertexId,
+) -> bool {
+    let index = binding.native_endpoint_index(spatial_high);
+    joint.vertex_id == vertex
+        && binding.endpoints[index] == vertex
+        && binding.source_vertex_ids[index] == joint.source_vertex_id
+        && binding.source_vertex_points_mm[index] == joint.vertex_point
 }
 
 /// Both APIs resolve the stored curve through this same immutable
@@ -279,9 +286,9 @@ fn same_native_use(a: NativeUse, b: NativeUse) -> bool {
 fn native_endpoint_operands(
     domain: &PreparedFaceTrimDomain<'_>,
     recipe: &CornerRecipe,
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
 ) -> Result<[NativeUse; 2], UvPrepareStage> {
-    let face = domain.native().face();
+    let definition = domain.definition();
     let ends = [recipe.outgoing, recipe.incoming];
     let mut uses = [None; 2];
     for (i, end) in ends.into_iter().enumerate() {
@@ -291,9 +298,7 @@ fn native_endpoint_operands(
         let binding = proof
             .binding()
             .ok_or(UvPrepareStage::NativeOperandAssociation)?;
-        let prepared = domain
-            .native()
-            .coedges()
+        let prepared = domain.coedges()
             .get(end.use_.coedge)
             .ok_or(UvPrepareStage::NativeOperandAssociation)?;
         let expected = NativeUse {
@@ -301,41 +306,42 @@ fn native_endpoint_operands(
             wire_index: end.use_.wire,
             coedge_index: end.use_.index,
             edge_id: end.edge,
-            orientation: end.use_.orientation,
+            orientation: end.use_.orientation == domain.native_orientation(),
+            edgeuse: end.use_.edgeuse,
         };
-        let endpoint_index = usize::from(i == 1);
-        if !same_native_use(prepared.identity, expected)
+        if !same_native_use(prepared.identity(), expected)
             || binding.owner != [end.use_.face, end.use_.wire, end.use_.index]
-            || binding.face != face.id()
-            || end.endpoint != proof.native_range()[usize::from(end.absolute_back)]
-            || proof.uv_range()[usize::from(end.absolute_back)]
-                != prepared.oriented_range[endpoint_index]
-            || binding.endpoints
-                [usize::from(end.absolute_back == binding.source.native_orientation)]
-                != vertex
+            || binding.face != domain.face()
+            || end.endpoint != proof.spatial_range()[usize::from(end.spatial_high)]
+            || binding.native_interval != prepared.native_range
+            || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] != vertex
         {
             return Err(UvPrepareStage::NativeOperandAssociation);
         }
-        uses[i] = Some(prepared.identity);
+        uses[i] = Some(prepared.identity());
     }
     let [outgoing, incoming] = uses.map(|use_| use_.expect("both operands associated"));
-    let wire = face
-        .absolute_boundaries()
-        .get(outgoing.wire_index)
+    let ordinal = definition.face_ordinal(domain.face())
         .ok_or(UvPrepareStage::NativeAdjacency)?;
-    if incoming.wire_index != outgoing.wire_index || wire.is_empty() {
+    let wire = crate::analysis::source_incidence::boundary_loop(definition, ordinal, outgoing.wire_index)
+        .map_err(|_| UvPrepareStage::NativeAdjacency)?;
+    if incoming.wire_index != outgoing.wire_index || wire.edges.is_empty() {
         return Err(UvPrepareStage::NativeAdjacency);
     }
-    // Native admission closes consecutive ABSOLUTE uses; inversion reverses
-    // material incoming/outgoing, not the absolute wire indexing.
-    let (absolute_in, absolute_out) = if face.orientation() {
+    let (absolute_in, absolute_out) = if domain.native_orientation() {
         (incoming, outgoing)
     } else {
         (outgoing, incoming)
     };
-    if (absolute_in.coedge_index + 1) % wire.len() != absolute_out.coedge_index
-        || wire[absolute_in.coedge_index].back().id() != vertex
-        || wire[absolute_out.coedge_index].front().id() != vertex
+    let incoming_entry = wire.edges[absolute_in.coedge_index];
+    let outgoing_entry = wire.edges[absolute_out.coedge_index];
+    let incoming_edge = definition.brep().edge(incoming_entry.edge)
+        .map_err(|_| UvPrepareStage::NativeAdjacency)?;
+    let outgoing_edge = definition.brep().edge(outgoing_entry.edge)
+        .map_err(|_| UvPrepareStage::NativeAdjacency)?;
+    if (absolute_in.coedge_index + 1) % wire.edges.len() != absolute_out.coedge_index
+        || incoming_edge.vertices[usize::from(incoming_entry.forward)] != vertex
+        || outgoing_edge.vertices[usize::from(!outgoing_entry.forward)] != vertex
     {
         return Err(UvPrepareStage::NativeAdjacency);
     }
@@ -345,7 +351,7 @@ fn native_endpoint_operands(
 fn native_endpoint_authority(
     domain: &PreparedFaceTrimDomain<'_>,
     recipe: &CornerRecipe,
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Result<EndpointAuthority, UvPrepareStage>, GeometryError> {
@@ -354,29 +360,35 @@ fn native_endpoint_authority(
         Err(stage) => return Ok(Err(stage)),
     };
     let mut authority = None;
-    for (index, joint) in domain.native().joints().iter().enumerate() {
+    for (index, joint) in domain.original_joints()?.iter().enumerate() {
         work.charge(1, cancel)?;
         if !same_native_use(joint.incoming, incoming) || !same_native_use(joint.outgoing, outgoing)
         {
             continue;
         }
-        if authority.is_some() || joint.vertex_id != vertex {
+        let mut owns_original_vertex = true;
+        for end in [recipe.outgoing, recipe.incoming] {
+            let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
+            let Some(binding) = proof.binding() else {
+                return Ok(Err(UvPrepareStage::NativeBinding));
+            };
+            owns_original_vertex &= joint_owns_source_endpoint(
+                joint, binding, end.spatial_high, vertex,
+            );
+        }
+        if authority.is_some() || !owns_original_vertex {
             return Ok(Err(UvPrepareStage::UnsupportedNativeJoint));
         }
         authority = Some(match joint.kind {
-            monstertruck_modeling::TrimJointKind::EndpointUncertainty => {
+            TrimJointKind::EndpointUncertainty => {
                 EndpointAuthority::EndpointUncertaintyJoint {
                     index,
-                    enclosure: joint.enclosure.map(|v| Interval {
-                        lo: v.lower,
-                        hi: v.upper,
-                    }),
+                    enclosure: joint.enclosure,
                 }
             }
-            monstertruck_modeling::TrimJointKind::SphericalPole { .. } => {
+            TrimJointKind::SphericalPole { .. } => {
                 EndpointAuthority::SphericalPoleJoint { index }
             }
-            _ => return Ok(Err(UvPrepareStage::UnsupportedNativeJoint)),
         });
     }
     // This is the COMPLETE prepared chart's closed-adjacency theorem, only
@@ -401,7 +413,7 @@ impl OriginalCornerComparison {
     pub(super) fn prepare(
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         allowance: f64,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -409,20 +421,20 @@ impl OriginalCornerComparison {
     ) -> Result<UvComparisonPreparation, GeometryError> {
         work.charge(1, cancel)?;
         let ends = [recipe.outgoing, recipe.incoming];
-        let originals = ends.map(|end| domain.original_coedge(end.use_.coedge).ok());
+        let proofs = ends.map(|end| domain.original_coedge_correspondence(end.use_.coedge).ok());
         let contexts = std::array::from_fn(|i| {
             let end = ends[i];
-            let proof = originals[i].and_then(|original| original.correspondence.as_ref());
+            let proof = proofs[i];
             let inventory = proof.map(|proof| proof.span_inventory());
             UvPrepareEndContext {
                 owner: [end.use_.face, end.use_.wire, end.use_.index],
                 coedge: end.use_.coedge,
-                absolute_back: end.absolute_back,
+                spatial_high: end.spatial_high,
                 orientation: end.use_.orientation,
                 endpoint: end.endpoint,
                 exit: end.exit,
                 joint_uv: end.joint_uv,
-                native_range: proof.map(|proof| proof.native_range()),
+                spatial_range: proof.map(|proof| proof.spatial_range()),
                 uv_range: proof.map(|proof| proof.uv_range()),
                 margin_uv: proof.map(|proof| proof.margin_uv()),
                 position_error_mm: proof.map(|proof| proof.position_error_mm()),
@@ -431,8 +443,9 @@ impl OriginalCornerComparison {
                 span_inventory: inventory.map(|inventory| {
                     [
                         inventory.source_knot_boundaries,
+                        inventory.source_knot_bands,
                         inventory.uv_knot_boundaries,
-                        inventory.continuation_spans,
+                        inventory.uv_knot_bands,
                     ]
                 }),
                 provenance: proof.map(|proof| proof.provenance()),
@@ -454,21 +467,10 @@ impl OriginalCornerComparison {
                 native_orientation: proof
                     .and_then(|proof| proof.binding())
                     .map(|binding| binding.source.native_orientation),
-                source_chart_margin_uv: originals[i]
-                    .map(|original| original.source_chart_margin_uv),
-                source_chart_error_mm: originals[i].map(|original| original.source_chart_error_mm),
-                source_chart_parameter_range: originals[i]
-                    .and_then(|original| original.source_chart_parameter_range),
-                source_chart_certificate: originals[i]
-                    .map(|original| original.source_chart_certificate),
-                source_chart_declared: originals[i]
-                    .is_some_and(|original| original.source_chart_declared),
                 binding_present: proof.is_some_and(|proof| proof.binding().is_some()),
                 native_vertex_matches: proof.and_then(|proof| proof.binding()).is_some_and(
                     |binding| {
-                        binding.endpoints
-                            [usize::from(end.absolute_back == binding.source.native_orientation)]
-                            == vertex
+                        binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] == vertex
                     },
                 ),
             }
@@ -476,20 +478,12 @@ impl OriginalCornerComparison {
         let shift: Box2 = std::array::from_fn(|i| {
             exact_difference(ends[1].joint_uv[i], ends[0].joint_uv[i]).mul(Interval::point(0.5))
         });
-        let vertex_point = domain
-            .native()
-            .face()
-            .absolute_boundaries()
-            .get(ends[0].use_.wire)
-            .and_then(|wire| wire.get(ends[0].use_.index))
-            .and_then(|edge| {
-                if edge.front().id() == vertex {
-                    Some(edge.front().point().into())
-                } else if edge.back().id() == vertex {
-                    Some(edge.back().point().into())
-                } else {
-                    None
-                }
+        let vertex_point = proofs[0]
+            .and_then(|proof| proof.binding())
+            .and_then(|binding| {
+                let index = binding.native_endpoint_index(ends[0].spatial_high);
+                (binding.endpoints[index] == vertex)
+                    .then_some(binding.source_vertex_points_mm[index])
             });
         let reject = |stage, end| {
             UvComparisonPreparation::Refused(UvPrepareRefusal {
@@ -505,17 +499,17 @@ impl OriginalCornerComparison {
         }
         let mut keys = [None; 2];
         for (i, end) in ends.iter().enumerate() {
-            let Some(original) = originals[i] else {
+            if domain.coedges().get(end.use_.coedge).is_none() {
                 return Ok(reject(UvPrepareStage::CoedgeInventory, Some(i)));
-            };
-            let Some(proof) = original.correspondence.as_ref() else {
+            }
+            let Some(proof) = proofs[i] else {
                 return Ok(reject(UvPrepareStage::WholeForwardReceipt, Some(i)));
             };
             let Some(binding) = proof.binding() else {
                 return Ok(reject(UvPrepareStage::NativeBinding, Some(i)));
             };
             if proof.provenance()
-                == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+                == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
             {
                 return Ok(reject(UvPrepareStage::Provenance, Some(i)));
             }
@@ -525,44 +519,29 @@ impl OriginalCornerComparison {
             if !contexts[i].native_vertex_matches {
                 return Ok(reject(UvPrepareStage::NativeVertex, Some(i)));
             }
-            let face = domain.native().face();
-            let Some(wire) = face.absolute_boundaries().get(end.use_.wire) else {
-                return Ok(reject(UvPrepareStage::NativeWire, Some(i)));
-            };
-            let Some(edge) = wire.get(end.use_.index) else {
+            let Ok((entry, edge)) = crate::analysis::source_incidence::native_coedge(
+                domain.definition(), end.use_.face, end.use_.wire, end.use_.index,
+            ) else {
                 return Ok(reject(UvPrepareStage::NativeEdge, Some(i)));
             };
-            if edge.id() != binding.edge || binding.edge != end.edge {
+            if entry.edge != binding.edge || binding.edge != end.edge {
                 return Ok(reject(UvPrepareStage::NativeEdge, Some(i)));
             }
-            if binding.source.native_orientation != edge.orientation() {
+            if binding.source.native_orientation != entry.forward {
                 return Ok(reject(UvPrepareStage::NativeOrientation, Some(i)));
             }
-            if [edge.front().id(), edge.back().id()] != binding.endpoints {
+            if edge.vertices != binding.endpoints {
                 return Ok(reject(UvPrepareStage::NativeEndpoints, Some(i)));
             }
-            if binding.face != face.id() {
+            if binding.face != domain.face() {
                 return Ok(reject(UvPrepareStage::NativeFace, Some(i)));
             }
-            if original.source_chart_parameter_range
-                != Some((proof.uv_range()[0], proof.uv_range()[1]))
-            {
-                return Ok(reject(UvPrepareStage::Gauge, Some(i)));
-            }
-            // Reuse the complete retained-receipt guard, including source-chart
-            // certification and metadata orientation; no alternate authority.
-            if domain
-                .original_coedge_correspondence(end.use_.coedge)
-                .is_err()
-            {
-                return Ok(reject(UvPrepareStage::WholeForwardOwnership, Some(i)));
-            }
-            let range = proof.native_range();
+            let range = proof.spatial_range();
             let delta = Interval::point(end.exit).sub(Interval::point(end.endpoint));
-            if end.endpoint != range[usize::from(end.absolute_back)] {
-                return Ok(reject(UvPrepareStage::NativeEndpoint, Some(i)));
+            if end.endpoint != range[usize::from(end.spatial_high)] {
+                return Ok(reject(UvPrepareStage::SpatialEndpoint, Some(i)));
             }
-            if end.absolute_back != (end.use_.orientation == (i == 1)) {
+            if (end.spatial_high ^ !binding.spatial_forward) != (end.use_.orientation == (i == 1)) {
                 return Ok(reject(UvPrepareStage::EndpointOrientation, Some(i)));
             }
             if end.delta_t.lo != delta.lo || end.delta_t.hi != delta.hi {
@@ -580,15 +559,16 @@ impl OriginalCornerComparison {
             keys[i] = Some(EndKey {
                 binding: *binding,
                 coedge: end.use_.coedge,
+                edgeuse: end.use_.edgeuse,
                 orientation: end.use_.orientation,
-                absolute_back: end.absolute_back,
+                spatial_high: end.spatial_high,
                 endpoint: end.endpoint,
                 exit: end.exit,
                 joint_uv: end.joint_uv,
                 offset: end.offset,
                 collar: end.collar,
-                native_range: range,
-                uv_range: proof.uv_range(),
+                spatial_range: range,
+                uv_ends: [proof.uv_endpoint(false), proof.uv_endpoint(true)],
                 margin: proof.margin_uv(),
                 position_error: proof.position_error_mm(),
                 provenance: proof.provenance(),
@@ -709,7 +689,7 @@ impl OriginalCornerComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<SourcePositionOvercover, GeometryError> {
@@ -725,7 +705,7 @@ impl OriginalCornerComparison {
                 let Some(clipped) = original_domain_intersection(domain, cover) else {
                     return Ok(SourcePositionOvercover::EmptyOriginalDomain);
                 };
-                domain.native().face().with_surface(|surface| {
+                { let surface = &domain.surface_operand(); (|| {
                     crate::parametric::surface_piecewise_enclosure(
                         surface,
                         uv_box(clipped),
@@ -733,7 +713,7 @@ impl OriginalCornerComparison {
                         cancel,
                     )
                     .map(|jet| SourcePositionOvercover::Bounded(jet.position))
-                })
+                })() }
             }
             Self::SphericalPole(comparison) => {
                 comparison.source_position_overcover(domain, recipe, vertex, work, cancel)
@@ -745,7 +725,7 @@ impl OriginalCornerComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
     ) -> Result<(), GeometryError> {
         match self {
             Self::NativeUv(comparison) => comparison.validates(domain, recipe, vertex),
@@ -760,23 +740,23 @@ impl OriginalCornerComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         joint_index: usize,
     ) -> Result<bool, GeometryError> {
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(false);
         };
         let matches = match (self, joint.kind) {
             (
                 Self::NativeUv(comparison),
-                monstertruck_modeling::TrimJointKind::EndpointUncertainty,
+                TrimJointKind::EndpointUncertainty,
             ) => {
                 matches!(comparison.authority,
                     EndpointAuthority::EndpointUncertaintyJoint { index, .. } if index == joint_index)
             }
             (
                 Self::SphericalPole(comparison),
-                monstertruck_modeling::TrimJointKind::SphericalPole { .. },
+                TrimJointKind::SphericalPole { .. },
             ) => comparison.joint_index_matches(joint_index),
             _ => false,
         };
@@ -848,9 +828,7 @@ impl UvJointComparison {
                 .binding()
                 .ok_or_else(|| refusal("comparison lost NativeUse binding"))?;
             if !same_end(self.ends[i], end, proof)
-                || binding.endpoints
-                    [usize::from(end.absolute_back == binding.source.native_orientation)]
-                    != self.vertex
+                || binding.endpoints[usize::from(end.spatial_high ^ !binding.spatial_forward)] != self.vertex
             {
                 return Err(refusal(
                     "UV comparison belongs to different original endpoint germs",
@@ -876,22 +854,17 @@ impl UvJointComparison {
                         .all(|shift| equal_box(shift, ZERO2))
             }
             EndpointAuthority::EndpointUncertaintyJoint { index, enclosure } => {
-                domain.native().joints().get(index).is_some_and(|joint| {
-                    joint.vertex_id == self.vertex
+                if let Some(joint) = domain.original_joints()?.get(index) {
+                    self.ends.iter().all(|end| joint_owns_source_endpoint(
+                        joint, &end.binding, end.spatial_high, self.vertex,
+                    ))
                         && same_native_use(joint.incoming, incoming)
                         && same_native_use(joint.outgoing, outgoing)
-                        && matches!(
-                            joint.kind,
-                            monstertruck_modeling::TrimJointKind::EndpointUncertainty
-                        )
-                        && equal_box(
-                            enclosure,
-                            joint.enclosure.map(|v| Interval {
-                                lo: v.lower,
-                                hi: v.upper,
-                            }),
-                        )
-                })
+                        && matches!(joint.kind, TrimJointKind::EndpointUncertainty)
+                        && equal_box(enclosure, joint.enclosure)
+                } else {
+                    false
+                }
             }
             EndpointAuthority::SphericalPoleJoint { .. } => false,
         };
@@ -924,7 +897,7 @@ impl UvJointComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
     ) -> Result<(), GeometryError> {
         if vertex != self.vertex {
             return Err(refusal("comparison cannot borrow a foreign actual NativeV"));
@@ -941,7 +914,7 @@ impl UvJointComparison {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         recipe: &CornerRecipe,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<Box2>, GeometryError> {
@@ -953,13 +926,10 @@ impl UvJointComparison {
             EndpointAuthority::EndpointUncertaintyJoint { index, .. } => {
                 // validates checked this exact joint's two original NativeUse
                 // operands, vertex, kind and complete retained enclosure.
-                let joint = &domain.native().joints()[index];
+                let joint = &domain.original_joints()?[index];
                 cover = hull2(
                     cover,
-                    joint.enclosure.map(|v| Interval {
-                        lo: v.lower,
-                        hi: v.upper,
-                    }),
+                    joint.enclosure,
                 );
             }
             EndpointAuthority::SphericalPoleJoint { .. } => return Ok(None),
@@ -1300,7 +1270,7 @@ impl UvJointComparison {
             cancel,
         )?;
         let correction = self.star_correction(piece, s, source_unit_parameter(t)?)?;
-        domain.native().face().with_surface(|surface| {
+        { let surface = &domain.surface_operand(); (|| {
             let comparison = surface_enclosure(surface, uv_box(completed.uv), work, cancel)?;
             let whole_jet = if whole_ray {
                 comparison
@@ -1362,7 +1332,7 @@ impl UvJointComparison {
                 error_mm,
                 homotopy_mm,
             })
-        })
+        })() }
     }
 }
 
@@ -1393,7 +1363,7 @@ struct UvBoundaryJet {
 
 fn ownership_failure(recipe: &CornerRecipe, gate: impl std::fmt::Display) -> GeometryError {
     refusal(format!(
-        "original UV comparison ownership gate={gate} source_face={} coedges={:?} native_endpoint_exits={:?}",
+        "original UV comparison ownership gate={gate} source_face={} coedges={:?} spatial_endpoint_exits={:?}",
         recipe.outgoing.use_.face,
         [recipe.outgoing.use_.coedge, recipe.incoming.use_.coedge],
         [
@@ -1753,7 +1723,7 @@ impl UvJointComparison {
             recipe.incoming
         };
         let at = chart_jet(domain, end.use_.coedge, [end.exit; 2], work, cancel)?;
-        let direction = if end.absolute_back { -1.0 } else { 1.0 };
+        let direction = if end.spatial_high { -1.0 } else { 1.0 };
         let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
         let own = end_curve(domain, end, UNIT, work, cancel)?;
         let correction = self.germ_correction(index, UNIT)?;
@@ -1901,7 +1871,7 @@ impl UvJointComparison {
             if owned.edge != end.edge {
                 continue;
             }
-            if owned.absolute_back {
+            if owned.spatial_high {
                 central[1] = owned.exit
             } else {
                 central[0] = owned.exit
@@ -1951,7 +1921,7 @@ impl UvJointComparison {
                 let jet = chart_jet(domain, owned.use_.coedge, prefix, work, cancel)?;
                 let (beta, beta_t) = collar.bubble(prefix)?;
                 let at = chart_jet(domain, owned.use_.coedge, [owned.exit; 2], work, cancel)?;
-                let direction = if owned.absolute_back { -1.0 } else { 1.0 };
+                let direction = if owned.spatial_high { -1.0 } else { 1.0 };
                 let row = at.derivative.map(|v| v.mul(Interval::point(direction)));
                 let derivative = match collar.transport {
                     CarrierTransport::Exact => jet.derivative,
@@ -2036,7 +2006,7 @@ impl UvJointComparison {
                     "constructorOwned nonowning_inventory",
                 ));
             };
-            for (index, _) in domain.native().coedges().iter().enumerate() {
+            for (index, _) in domain.coedges().iter().enumerate() {
                 work.charge(1, cancel)?;
                 if index == recipe.outgoing.use_.coedge || index == recipe.incoming.use_.coedge {
                     continue;
@@ -2072,28 +2042,27 @@ impl UvJointComparison {
                 }
             }
             active_boundary = None;
-            for joint in domain.native().joints() {
+            for joint in domain.original_joints()? {
                 active_joint = Some((joint.incoming.coedge_index, joint.outgoing.coedge_index));
                 phase = "foreign original joint exclusion";
                 work.charge(1, cancel)?;
                 let owned = joint.vertex_id == self.vertex
-                    && joint.incoming.face_id == domain.native().face().id()
-                    && joint.outgoing.face_id == domain.native().face().id()
+                    && joint.incoming.face_id == domain.face()
+                    && joint.outgoing.face_id == domain.face()
                     && joint.incoming.wire_index == recipe.incoming.use_.wire
                     && joint.outgoing.wire_index == recipe.outgoing.use_.wire
                     && joint.incoming.coedge_index == recipe.incoming.use_.index
                     && joint.outgoing.coedge_index == recipe.outgoing.use_.index
                     && joint.incoming.edge_id == recipe.incoming.edge
                     && joint.outgoing.edge_id == recipe.outgoing.edge
-                    && joint.incoming.orientation == recipe.incoming.use_.orientation
-                    && joint.outgoing.orientation == recipe.outgoing.use_.orientation;
+                    && joint.incoming.orientation == (recipe.incoming.use_.orientation == domain.native_orientation())
+                    && joint.outgoing.orientation == (recipe.outgoing.use_.orientation == domain.native_orientation())
+                    && joint.incoming.edgeuse == recipe.incoming.use_.edgeuse
+                    && joint.outgoing.edgeuse == recipe.outgoing.use_.edgeuse;
                 if owned {
                     continue;
                 }
-                let image = joint.enclosure.map(|v| Interval {
-                    lo: v.lower,
-                    hi: v.upper,
-                });
+                let image = joint.enclosure;
                 if !self.image_misses_box(domain, recipe, image, work, cancel)? {
                     return Err(ownership_failure(
                         recipe,
@@ -2168,23 +2137,25 @@ mod properties {
     use super::*;
     fn actual_corner_property(bytes: &[u8]) {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(bytes, &cancel).unwrap();
-        let original = serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
+        let original = format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
         let mut vertices = Vec::new();
         let mut expected_corners = Vec::new();
         // NativeUse occurrences, not approximate coordinates, supply every
         // actual endpoint identity. Closed edges keep both parameter germs in
         // the corner recipes even when their two endpoint IDs are identical.
-        for (face_index, face) in definition.solid.face_iter().enumerate() {
+        for (face_index, &face_id) in definition.face_ids().iter().enumerate() {
+            let face = definition.brep().face(face_id).unwrap();
             let mut flat = 0;
-            for (wire_index, wire) in face.absolute_boundaries().iter().enumerate() {
-                for (index, edge) in wire.iter().enumerate() {
+            for (wire_index, &loop_id) in face.loops.iter().enumerate() {
+                let wire = definition.brep().loop_(loop_id).unwrap();
+                for (index, entry) in wire.edges.iter().enumerate() {
                     expected_corners.push((face_index, wire_index, index, flat));
                     flat += 1;
-                    for endpoint in [edge.front(), edge.back()] {
-                        if !vertices.contains(&endpoint.id()) {
-                            vertices.push(endpoint.id());
+                    for endpoint in definition.brep().edge(entry.edge).unwrap().vertices {
+                        if !vertices.contains(&endpoint) {
+                            vertices.push(endpoint);
                         }
                     }
                 }
@@ -2198,7 +2169,10 @@ mod properties {
         incidence
             .prepare_vertices(MAX_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
-        let source = OriginalTrimSource::standalone(&definition);
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
         for &vertex in &vertices {
             let foreign = *vertices
                 .iter()
@@ -2224,6 +2198,8 @@ mod properties {
                 }
             };
             let point = plan.point;
+            assert_eq!(point, source.trim_source().source_vertex_point(vertex, &mut work, &cancel).unwrap(),
+                "native vertex IDs key incidence, not healed realization positions");
             for &recipe in &plan.recipes {
                 let outgoing = recipe.outgoing;
                 let incoming = recipe.incoming;
@@ -2239,7 +2215,7 @@ mod properties {
                     .unwrap();
                 let allowance = source_allowance(&definition).unwrap();
                 let comparison_scratch = MAX_SCRATCH_BYTES
-                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
+                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES)
                     .unwrap();
                 let original_margins = [outgoing, incoming].map(|end| {
                     domain
@@ -2276,7 +2252,7 @@ mod properties {
                     );
                     let mut foreign_joint = comparison;
                     foreign_joint.authority = EndpointAuthority::EndpointUncertaintyJoint {
-                        index: domain.native().joints().len(),
+                        index: domain.original_joints().unwrap().len(),
                         enclosure: comparison.joint,
                     };
                     assert!(
@@ -2312,13 +2288,16 @@ mod properties {
                     nonregular.transport.as_mut().unwrap()[0].relative_derivative_error = 0.25;
                     assert!(nonregular.validates(&domain, &recipe, vertex).is_err());
                 }
-                for end in [outgoing, incoming] {
-                    let range = domain
-                        .original_coedge_correspondence(end.use_.coedge)
-                        .unwrap()
-                        .native_range();
+                for (index, end) in [outgoing, incoming].into_iter().enumerate() {
+                    let proof = domain.original_coedge_correspondence(end.use_.coedge).unwrap();
+                    let binding = proof.binding().unwrap();
+                    let native_back = end.spatial_high ^ !binding.spatial_forward;
+                    assert_eq!(native_back, end.use_.orientation == (index == 1),
+                        "sealed source direction must preserve the actual native endpoint germ");
+                    assert_eq!(binding.endpoints[usize::from(native_back)], vertex);
+                    let range = proof.spatial_range();
                     let expected_exit = end.endpoint
-                        + if end.absolute_back {
+                        + if end.spatial_high {
                             -(range[1] - range[0]) * plan.fraction
                         } else {
                             (range[1] - range[0]) * plan.fraction
@@ -2400,13 +2379,32 @@ mod properties {
                     )
                     .unwrap(),
                     UvComparisonPreparation::Refused(UvPrepareRefusal {
-                        stage: UvPrepareStage::NativeEndpoint,
+                        stage: UvPrepareStage::SpatialEndpoint,
                         end: Some(0),
                         ..
                     })
                 ));
                 comparison.validates(&domain, &recipe, vertex).unwrap();
                 assert!(comparison.validates(&domain, &recipe, foreign).is_err());
+                let mut wrong_spatial_direction = comparison;
+                wrong_spatial_direction.ends[0].binding.spatial_forward =
+                    !wrong_spatial_direction.ends[0].binding.spatial_forward;
+                assert!(wrong_spatial_direction.validates(&domain, &recipe, vertex).is_err(),
+                    "closed-edge vertex equality cannot replace the sealed source germ mapping");
+                let mut wrong_native_interval = comparison;
+                wrong_native_interval.ends[0].binding.native_interval[0] =
+                    up(wrong_native_interval.ends[0].binding.native_interval[0]);
+                assert!(wrong_native_interval.validates(&domain, &recipe, vertex).is_err(),
+                    "the original spatial gauge cannot replace native interval identity");
+                let mut wrong_uv_direction = comparison;
+                wrong_uv_direction.ends[0].uv_ends.swap(0, 1);
+                assert!(wrong_uv_direction.validates(&domain, &recipe, vertex).is_err(),
+                    "equal sorted UV ranges cannot replace a directed original parameter map");
+                let mut wrong_source_vertex = comparison;
+                wrong_source_vertex.ends[0].binding.source_vertex_points_mm[0][0] =
+                    up(wrong_source_vertex.ends[0].binding.source_vertex_points_mm[0][0]);
+                assert!(wrong_source_vertex.validates(&domain, &recipe, vertex).is_err(),
+                    "native incidence cannot substitute different original vertex coefficients");
                 let anchor = comparison
                     .star_jet(
                         &domain,
@@ -2435,7 +2433,7 @@ mod properties {
                 )
                 .unwrap()
                 .derivative;
-                let direction = if outgoing.absolute_back { -1.0 } else { 1.0 };
+                let direction = if outgoing.spatial_high { -1.0 } else { 1.0 };
                 crossing.bulge = exit_tangent.map(|v| v.mul(Interval::point(1024.0 * direction)));
                 assert!(
                     !comparison
@@ -2522,7 +2520,7 @@ mod properties {
         }
         assert_eq!(
             original,
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap()
+            format!("{:?}", definition.brep())
         );
         assert!(
             failures.is_empty(),

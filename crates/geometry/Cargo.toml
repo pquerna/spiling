@@ -12,11 +12,6 @@ publish = false
 
 [dependencies]
 spiling-contracts.workspace = true
-monstertruck-modeling.workspace = true
-monstertruck-meshing.workspace = true
-monstertruck-solid.workspace = true
-monstertruck-io.workspace = true
-monstertruck-topology.workspace = true
 solidcore.workspace = true
 solidcore-mesh.workspace = true
 solidcraft-geom.workspace = true
@@ -26,4 +21,9 @@ sha2.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+monstertruck-modeling.workspace = true
+monstertruck-meshing.workspace = true
+monstertruck-solid.workspace = true
+monstertruck-io.workspace = true
+monstertruck-topology.workspace = true
 serde_json.workspace = true

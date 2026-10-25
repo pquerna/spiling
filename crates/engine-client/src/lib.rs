@@ -331,12 +331,14 @@ fn validate_engine_cutover(hello: &Hello) -> Result<(), ClientError> {
         ),
     ];
     if hello.engine_build != spiling_contracts::ENGINE_BUILD_ID
+        || hello.kernel != spiling_contracts::geometry::KERNEL_NAME
+        || hello.kernel_identity.name != spiling_contracts::geometry::KERNEL_NAME
         || required.iter().any(|(capabilities, expected)| {
             !capabilities.iter().any(|value| value.as_str() == *expected)
         })
     {
         return Err(ClientError::Protocol(
-            "engine build or source-bound authoring format/API capabilities mismatch".into(),
+            "engine build, native kernel or source-bound authoring format/API capabilities mismatch".into(),
         ));
     }
     Ok(())

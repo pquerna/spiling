@@ -46,7 +46,18 @@ fn code(error: ClientError) -> Code {
 async fn actual_child_diagnostics_and_clean_shutdown() {
     let mut client = EngineClient::spawn(ENGINE).await.unwrap();
     assert!(client.status().await.unwrap());
-    assert_eq!(client.hello().kernel, "monstertruck");
+    assert_eq!(
+        client.hello().kernel,
+        spiling_contracts::geometry::KERNEL_NAME
+    );
+    assert_eq!(
+        client.hello().kernel_identity,
+        spiling_contracts::geometry::KernelIdentity {
+            name: spiling_contracts::geometry::KERNEL_NAME.into(),
+            version: spiling_geometry::KERNEL_VERSION.into(),
+            revision: spiling_geometry::KERNEL_REVISION.into(),
+        }
+    );
     assert_eq!(
         client.hello().engine_build,
         spiling_contracts::ENGINE_BUILD_ID

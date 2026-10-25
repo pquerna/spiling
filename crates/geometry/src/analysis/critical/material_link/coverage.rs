@@ -3,47 +3,40 @@
 // Licensed under the Open Software License version 3.0
 
 use super::*;
+use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::source_incidence::{boundary_loop, native_face};
 
 pub(in crate::analysis::critical) const MAX_CORRECTION_BYTES: usize = MAX_EDGE_BYTES;
 
-/// Error-only, source-local witness. Native allocation IDs remain private
-/// proof keys and must never become an IPC diagnostic identifier.
+/// Error-only original use ordinals. Native allocation IDs remain private proof
+/// keys, and healed native coordinates are not the original material apex.
 fn vertex_diagnostic(
     definition: &Definition,
     incidence: &SourceEdgeIncidence,
-    vertex: monstertruck_topology::VertexId<monstertruck_modeling::Point3>,
-) -> Option<([usize; 3], [f64; 3])> {
-    let id = incidence.vertex_edges(vertex).next()?;
-    let owner = incidence.get(id)?.first;
-    let face = definition.solid.face_iter().nth(owner.face)?;
-    let edge = face
-        .absolute_boundaries()
-        .get(owner.wire)?
-        .get(owner.index)?;
-    if edge.id() != id {
+    vertex: solidcore::VertexId,
+) -> Option<[usize; 3]> {
+    if !incidence.owns_definition(definition) {
         return None;
     }
-    let point = if edge.absolute_front().id() == vertex {
-        edge.absolute_front().point()
-    } else if edge.absolute_back().id() == vertex {
-        edge.absolute_back().point()
-    } else {
+    let id = incidence.vertex_edges(vertex).next()?;
+    let owner = incidence.get(id)?.first;
+    let (_, edge) = crate::analysis::source_incidence::native_coedge(
+        definition, owner.face, owner.wire, owner.index,
+    ).ok()?;
+    if !edge.vertices.contains(&vertex) {
         return None;
-    };
-    Some((
-        [owner.face, owner.wire, owner.index],
-        [point.x, point.y, point.z],
-    ))
+    }
+    Some([owner.face, owner.wire, owner.index])
 }
 
 /// A negative-witness prerequisite only: the caller supplies the original
 /// carrier evaluation of this SAME UV box. Strict original trim ownership and
 /// exclusion of every removed R/K_F support prove that evaluation is still F
 /// in the fixed realization. This grants no positive material/topology proof.
-/// `remaining_bytes` excludes caller-owned domain/incidence/input storage.
+/// `remaining_bytes` excludes the borrowed prepared domain and caller incidence/input storage.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::analysis::critical) fn source_f_point_is_retained(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     domain: &PreparedFaceTrimDomain<'_>,
     face_index: usize,
     uv: [[f64; 2]; 2],
@@ -56,6 +49,7 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
     const FIXED_BYTES: usize = std::mem::size_of::<ChartCurveEnclosure>()
         + std::mem::size_of::<[[f64; 2]; 2]>()
         + 2 * std::mem::size_of::<[Interval; 3]>()
+        + crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
         + std::mem::size_of::<Option<vertex_transport::CompletePositionCoverFailure>>();
     let before = work.consumed();
     let mut phase = "original source/domain binding";
@@ -84,41 +78,18 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
             return Ok(false);
         }
         let definition = source.definition();
-        let Some(face) = definition.solid.face_iter().nth(face_index) else {
-            return Ok(false);
-        };
-        let Some(original) = definition.face_boundaries.get(face_index) else {
-            return Ok(false);
-        };
-        let boundaries = face.absolute_boundaries();
-        if domain.native().face().id() != face.id()
-            || original.face != face.id()
-            || original.wires.is_empty()
-            || original.wires.len() != boundaries.len()
+        let (face_id, face) = native_face(definition, face_index)?;
+        if !incidence.owns_definition(definition)
+            || !std::ptr::eq(domain.definition(), definition)
+            || domain.face() != face_id
+            || !std::ptr::eq(domain, source.face_domain(face_index, available, work, cancel)?)
+            || face.loops.is_empty()
         {
             return Ok(false);
         }
-        let Some(first) = original.wires.iter().flatten().next() else {
-            return Ok(false);
-        };
-        // Bind the literal immutable metadata owner, not a matching source ID.
-        // This is an input guard; actual trim/curve bounds below grant proof.
-        if !std::ptr::eq(domain.original_coedge(0)?, first) {
-            return Ok(false);
-        }
+        let orientation = domain.orientation();
         phase = "strict whole original trim Inside";
-        let inclusive = available
-            .checked_add(domain.retained_bytes())
-            .ok_or_else(|| {
-                failure(
-                    GeometryErrorCode::ResourceLimit,
-                    "retained original-F classifier storage overflow",
-                    face_index,
-                    (),
-                )
-            })?
-            .min(MAX_SCRATCH_BYTES);
-        if domain.classify_with_byte_limit(uv, inclusive, work, cancel)?
+        if domain.classify_with_byte_limit(uv, available, work, cancel)?
             != TrimClassification::Inside
         {
             return Ok(false);
@@ -126,17 +97,18 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
         phase = "all complete original reference-R overcovers";
         let point_uv = uv.map(|v| Interval { lo: v[0], hi: v[1] });
         let mut flat = 0;
-        for (wire_index, (wire, references)) in boundaries.iter().zip(&original.wires).enumerate() {
-            if wire.is_empty() || wire.len() != references.len() {
+        for wire_index in 0..face.loops.len() {
+            let wire = boundary_loop(definition, face_index, wire_index)?;
+            if wire.edges.is_empty() {
                 return Ok(false);
             }
-            for (index, (edge, reference)) in wire.iter().zip(references).enumerate() {
+            for (index, edge) in wire.edges.iter().enumerate() {
                 work.charge(1, cancel)?;
                 active_coedge = Some((wire_index, index, flat));
-                if !std::ptr::eq(domain.original_coedge(flat)?, reference)
-                    || reference.edge != edge.id()
-                    || reference.orientation != edge.orientation()
-                {
+                let Some(coedge) = domain.coedges().get(flat) else {
+                    return Ok(false);
+                };
+                if coedge.edge != edge.edge || coedge.forward != edge.forward {
                     return Ok(false);
                 }
                 let use_ = CoedgeUse {
@@ -144,13 +116,14 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
                     coedge: flat,
                     wire: wire_index,
                     index,
-                    orientation: edge.orientation() == face.orientation(),
+                    orientation: edge.forward == orientation,
+                    edgeuse: coedge.edgeuse,
                 };
-                let Some(uses) = incidence.get(edge.id()) else {
+                let Some(uses) = incidence.get(edge.edge) else {
                     return Ok(false);
                 };
                 if (uses.first != use_ && uses.second != Some(use_))
-                    || uses.vertices != [edge.absolute_front().id(), edge.absolute_back().id()]
+                    || uses.vertices != coedge.vertices
                 {
                     return Ok(false);
                 }
@@ -158,26 +131,27 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
                 let Some(binding) = proof.binding() else {
                     return Ok(false);
                 };
-                if binding.face != face.id()
-                    || binding.edge != edge.id()
+                if binding.face != face_id
+                    || binding.edge != edge.edge
                     || binding.owner != [face_index, wire_index, index]
-                    || binding.endpoints != [edge.front().id(), edge.back().id()]
+                    || binding.edgeuse != coedge.edgeuse
+                    || binding.endpoints != coedge.vertices
+                    || binding.native_interval != coedge.native_range
                     || proof.provenance()
-                        == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+                        == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
                 {
                     return Ok(false);
                 }
                 let mapped = proof.uv_range();
-                if proof
-                    .affine_native_parameter_preimage([
-                        mapped[0].min(mapped[1]),
-                        mapped[0].max(mapped[1]),
-                    ])?
+                if proof.affine_spatial_parameter_preimage([
+                    mapped[0].min(mapped[1]),
+                    mapped[0].max(mapped[1]),
+                ])?
                     .is_none()
                 {
                     return Ok(false);
                 }
-                let range = proof.native_range();
+                let range = proof.spatial_range();
                 let width = (range[1] - range[0])
                     * domain.material_realization().collar_parameter_fraction();
                 if !width.is_finite() || width <= 0.0 {
@@ -210,11 +184,11 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
                 flat += 1;
             }
         }
-        if flat != domain.native().coedges().len() {
+        if flat != domain.coedges().len() {
             return Ok(false);
         }
         // Only a source-coefficient identity may eliminate all K_F recipes.
-        if definition.material_transport_is_proved_zero(work, cancel)? {
+        if source.material_transport_is_proved_zero(work, cancel)? {
             return Ok(true);
         }
         let Some(vertices) = incidence.vertices() else {
@@ -284,13 +258,13 @@ pub(in crate::analysis::critical) fn source_f_point_is_retained(
 }
 
 #[derive(Clone, Copy)]
-struct NativeEndpointExit {
-    edge: monstertruck_topology::EdgeId<Curve>,
-    absolute_back: bool,
+struct SpatialEndpointExit {
+    edge: solidcore::EdgeId,
+    spatial_high: bool,
     parameter: f64,
     // Present only after exact source-star qualification AND complete closed
-    // actual-coordinate G rank/metric coverage for this literal NativeV.
-    closed_atlas_vertex: Option<monstertruck_topology::VertexId<monstertruck_modeling::Point3>>,
+    // actual-coordinate G rank/metric coverage for this original STEP apex.
+    closed_atlas_vertex: Option<solidcore::VertexId>,
 }
 
 /// Query-local proof storage, never an alternative source representation.
@@ -300,13 +274,13 @@ pub(in crate::analysis::critical) struct ClosedRadialLinks<'d> {
     definition: &'d Definition,
     supports: Vec<[Interval; 3]>,
     pub source_error_mm: f64,
-    exits: Vec<NativeEndpointExit>,
+    exits: Vec<SpatialEndpointExit>,
     unchanged_source: bool,
     all_vertex_supports_outside: bool,
 }
 impl<'d> ClosedRadialLinks<'d> {
     pub fn new(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         prism: &SamplePrism,
         request: &SlabRequest,
@@ -325,10 +299,10 @@ impl<'d> ClosedRadialLinks<'d> {
         )
     }
 
-    /// The SAME complete source vertex inventory and literal native exits as
+    /// The SAME complete source vertex inventory and literal spatial exits as
     /// radial coverage, qualified independently of a physical witness field.
     pub(super) fn geometry(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -352,7 +326,7 @@ impl<'d> ClosedRadialLinks<'d> {
     /// G visitor and retention of the full source/reference/G homotopy support.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn for_closed_atlas(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         coordinates: &crate::analysis::placed::ActualMaterialCoordinates<'_>,
         remaining_bytes: usize,
@@ -372,10 +346,16 @@ impl<'d> ClosedRadialLinks<'d> {
         let mut active_vertex = None;
         let outcome = (|| {
             let definition = source.definition();
+            if !incidence.owns_definition(definition) {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "closed radial links borrow incidence from another native definition",
+                ));
+            }
             if let Some(plans) = source.vertex_plans() {
                 plans.validate_source(definition, work, cancel)?;
             }
-            let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
+            let unchanged_source = source.material_transport_is_proved_zero(work, cancel)?;
             let allowance = source_allowance(definition)?;
             let interval = coordinates.world_interval();
             let expand = |position: [Interval; 3]| {
@@ -419,7 +399,7 @@ impl<'d> ClosedRadialLinks<'d> {
                     )
                 })?;
                 let bytes = count
-                    .checked_mul(std::mem::size_of::<NativeEndpointExit>())
+                    .checked_mul(std::mem::size_of::<SpatialEndpointExit>())
                     .ok_or_else(|| {
                         failure(
                             GeometryErrorCode::ResourceLimit,
@@ -462,14 +442,15 @@ impl<'d> ClosedRadialLinks<'d> {
                 if !incidence.vertex_link_is_cycle(definition, vertex, work, cancel)? {
                     return Ok(None);
                 }
-                let Some((owner, point)) = vertex_diagnostic(definition, incidence, vertex) else {
+                let Some(owner) = vertex_diagnostic(definition, incidence, vertex) else {
                     return Err(failure(
                         GeometryErrorCode::KernelFailure,
-                        "original vertex inventory lost its literal point",
+                        "original vertex inventory lost its original coedge owner",
                         0,
                         (),
                     ));
                 };
+                let point = source.trim_source().source_vertex_point(vertex, work, cancel)?;
                 active_vertex = Some((owner, point));
                 if unchanged_source {
                     // A native cycle alone is not a complete projected-star
@@ -575,7 +556,7 @@ impl<'d> ClosedRadialLinks<'d> {
                     Some(vertex)
                 };
                 phase = "literal original vertex/native-edge/germ central exits";
-                plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter, _work| {
+                plan.visit_spatial_exits(work, cancel, &mut |edge, spatial_high, parameter, work| {
                     let Some(uses) = incidence.get(edge) else {
                         return Err(failure(
                             GeometryErrorCode::ParameterCorrespondenceUnavailable,
@@ -584,17 +565,35 @@ impl<'d> ClosedRadialLinks<'d> {
                             (owner[1], owner[2]),
                         ));
                     };
-                    if uses.vertices[usize::from(absolute_back)] != vertex {
+                    let use_ = uses.first;
+                    let domain = source.face_domain(use_.face, support_limit, work, cancel)?;
+                    let proof = domain.original_coedge_correspondence(use_.coedge)?;
+                    let binding = proof.binding().ok_or_else(|| GeometryError::new(
+                        GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                        "source spatial exit lacks its selected original/native binding",
+                    ))?;
+                    let (_, native_edge) = crate::analysis::source_incidence::native_coedge(
+                        definition, use_.face, use_.wire, use_.index,
+                    )?;
+                    if binding.edge != edge
+                        || binding.native_interval != [native_edge.interval.min(), native_edge.interval.max()]
+                    {
+                        return Err(GeometryError::new(
+                            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                            "source spatial exit belongs to another actual native interval",
+                        ));
+                    }
+                    if uses.vertices[binding.native_endpoint_index(spatial_high)] != vertex {
                         return Err(failure(
                             GeometryErrorCode::ParameterCorrespondenceUnavailable,
                             "source vertex exit belongs to another original endpoint germ",
                             owner[0],
-                            (owner[1], owner[2], absolute_back, parameter),
+                            (owner[1], owner[2], spatial_high, parameter),
                         ));
                     }
                     if result.exits.len() == result.exits.capacity()
                         && !result.exits.iter().any(|previous| {
-                            previous.edge == edge && previous.absolute_back == absolute_back
+                            previous.edge == edge && previous.spatial_high == spatial_high
                         })
                     {
                         return Err(failure(
@@ -604,9 +603,9 @@ impl<'d> ClosedRadialLinks<'d> {
                             (),
                         ));
                     }
-                    result.record_exit_with_byte_limit(NativeEndpointExit {
+                    result.record_exit_with_byte_limit(SpatialEndpointExit {
                         edge,
-                        absolute_back,
+                        spatial_high,
                         parameter,
                         closed_atlas_vertex,
                     }, support_limit)
@@ -628,7 +627,7 @@ impl<'d> ClosedRadialLinks<'d> {
 
     #[allow(clippy::too_many_arguments)]
     fn prepare(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence,
         field: Option<(&SamplePrism, &SlabRequest)>,
         remaining_bytes: usize,
@@ -637,6 +636,12 @@ impl<'d> ClosedRadialLinks<'d> {
         visitor: &mut impl FnMut(usize, [Interval; 3], [Interval; 3]) -> Result<(), GeometryError>,
     ) -> Result<Self, GeometryError> {
         let definition = source.definition();
+        if !incidence.owns_definition(definition) {
+            return Err(GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "material links borrow incidence from another native definition",
+            ));
+        }
         if let Some(plans) = source.vertex_plans() {
             plans.validate_source(definition, work, cancel)?;
         }
@@ -649,7 +654,7 @@ impl<'d> ClosedRadialLinks<'d> {
                 (),
             )
         })?;
-        let unchanged_source = definition.material_transport_is_proved_zero(work, cancel)?;
+        let unchanged_source = source.material_transport_is_proved_zero(work, cancel)?;
         let mut result = Self {
             definition,
             supports: Vec::new(),
@@ -765,14 +770,14 @@ impl<'d> ClosedRadialLinks<'d> {
             plan.visit_position_supports(work, cancel, &mut |_realized, homotopy| {
                 result.record_support_with_byte_limit(homotopy, support_limit)
             })?;
-            plan.visit_native_exits(
+            plan.visit_spatial_exits(
                 work,
                 cancel,
-                &mut |edge, absolute_back, parameter, _work| {
+                &mut |edge, spatial_high, parameter, _work| {
                     result.record_exit_with_byte_limit(
-                        NativeEndpointExit {
+                        SpatialEndpointExit {
                             edge,
-                            absolute_back,
+                            spatial_high,
                             parameter,
                             closed_atlas_vertex: None,
                         },
@@ -801,13 +806,13 @@ impl<'d> ClosedRadialLinks<'d> {
             .saturating_add(
                 self.exits
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<NativeEndpointExit>()),
+                    .saturating_mul(std::mem::size_of::<SpatialEndpointExit>()),
             )
     }
 
     fn record_exit_with_byte_limit(
         &mut self,
-        exit: NativeEndpointExit,
+        exit: SpatialEndpointExit,
         remaining_bytes: usize,
     ) -> Result<(), GeometryError> {
         let limit = remaining_bytes.min(MAX_CORRECTION_BYTES);
@@ -828,14 +833,14 @@ impl<'d> ClosedRadialLinks<'d> {
             ));
         }
         if let Some(previous) = self.exits.iter().find(|previous| {
-            previous.edge == exit.edge && previous.absolute_back == exit.absolute_back
+            previous.edge == exit.edge && previous.spatial_high == exit.spatial_high
         }) {
             if previous.parameter != exit.parameter
                 || previous.closed_atlas_vertex != exit.closed_atlas_vertex
             {
                 return Err(failure(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                    "opposed original uses disagree on immutable native endpoint exit",
+                    "opposed original uses disagree on immutable source-spatial endpoint exit",
                     0,
                     (previous.parameter, exit.parameter),
                 ));
@@ -848,7 +853,7 @@ impl<'d> ClosedRadialLinks<'d> {
                 .supports
                 .capacity()
                 .saturating_mul(std::mem::size_of::<[Interval; 3]>())
-                .saturating_add(next.saturating_mul(std::mem::size_of::<NativeEndpointExit>()));
+                .saturating_add(next.saturating_mul(std::mem::size_of::<SpatialEndpointExit>()));
             if bytes > limit {
                 return Err(failure(
                     GeometryErrorCode::ResourceLimit,
@@ -886,27 +891,27 @@ impl<'d> ClosedRadialLinks<'d> {
     /// ribbon must still complete its closed reference/G and seam proofs.
     pub(super) fn qualified_closed_cutover(
         &self,
-        vertex: monstertruck_topology::VertexId<monstertruck_modeling::Point3>,
-        edge: monstertruck_topology::EdgeId<Curve>,
-        absolute_back: bool,
+        vertex: solidcore::VertexId,
+        edge: solidcore::EdgeId,
+        spatial_high: bool,
         parameter: f64,
     ) -> bool {
         self.exits.iter().any(|exit| {
             exit.edge == edge
-                && exit.absolute_back == absolute_back
+                && exit.spatial_high == spatial_high
                 && exit.parameter == parameter
                 && exit.closed_atlas_vertex == Some(vertex)
         })
     }
 
     /// Active original closure admission borrows completed source/reference/G
-    /// authority only through both exact native endpoint cutovers. It also
+    /// authority only through both exact source/native endpoint cutovers. It also
     /// requires the independent WHOLE original joint image proof; an exit by
     /// itself never discharges this obligation.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn qualified_original_joint(
         &self,
-        source: OriginalTrimSource<'_, '_>,
+        source: MaterialSourceView<'_, '_>,
         incidence: &SourceEdgeIncidence,
         domain: &PreparedFaceTrimDomain<'_>,
         joint_index: usize,
@@ -915,15 +920,26 @@ impl<'d> ClosedRadialLinks<'d> {
         cancel: &AtomicBool,
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let remaining_bytes = remaining_bytes
+            .checked_sub(super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES
+                + 2 * std::mem::size_of::<[Interval; 3]>())
+            .ok_or_else(|| failure(
+                GeometryErrorCode::ResourceLimit,
+                "original joint physical-image gate exceeds scratch allowance",
+                0,
+                joint_index,
+            ))?;
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(false);
         };
-        if !std::ptr::eq(self.definition, source.definition())
+        if !incidence.owns_definition(source.definition())
+            || !std::ptr::eq(domain.definition(), source.definition())
+            || !std::ptr::eq(self.definition, source.definition())
             || self.unchanged_source
             || !matches!(
                 joint.kind,
-                monstertruck_modeling::TrimJointKind::EndpointUncertainty
-                    | monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+                crate::kernel::trim::TrimJointKind::EndpointUncertainty
+                    | crate::kernel::trim::TrimJointKind::SphericalPole { .. }
             )
             || !self
                 .exits
@@ -932,19 +948,15 @@ impl<'d> ClosedRadialLinks<'d> {
         {
             return Ok(false);
         }
-        // The closed G apex is the literal NativeV in every selected cone
-        // cell. Its expanded retained homotopy support must cover the entire
-        // allowance cube. The independent joint proof below puts S(joint UV)
-        // inside this cube, so no admitted closure can escape the original
+        // The closed G apex is the captured ORIGINAL STEP VertexPoint in every
+        // selected cone cell. Its retained homotopy support must cover the entire
+        // allowance cube. The independent joint proof below qualifies its UV
+        // and physical projection; the actual connector/world image must also
+        // lie in this cube, so no admitted closure can escape the original
         // fiber census's retained-support exclusion. This is not Jordan
         // ownership for arbitrary completions.
         let allowance = source_allowance(self.definition)?;
-        let vertex_cube = [
-            joint.vertex_point.x,
-            joint.vertex_point.y,
-            joint.vertex_point.z,
-        ]
-        .map(|value| {
+        let vertex_cube = joint.vertex_point.map(|value| {
             add(
                 Interval::point(value),
                 Interval {
@@ -953,6 +965,15 @@ impl<'d> ClosedRadialLinks<'d> {
                 },
             )
         });
+        let position = super::atlas::original_joint_position_enclosure(
+            domain, joint, work, cancel,
+        )?;
+        if !(0..3).all(|axis| {
+            vertex_cube[axis].lo <= position[axis].lo
+                && position[axis].hi <= vertex_cube[axis].hi
+        }) {
+            return Ok(false);
+        }
         if !self.supports.iter().any(|support| {
             (0..3).all(|i| support[i].lo <= vertex_cube[i].lo && vertex_cube[i].hi <= support[i].hi)
         }) {
@@ -986,33 +1007,34 @@ impl<'d> ClosedRadialLinks<'d> {
             scratch,
             work,
             cancel,
-            &|edge, absolute_back, parameter| {
-                self.qualified_closed_cutover(joint.vertex_id, edge, absolute_back, parameter)
+            &|edge, spatial_high, parameter| {
+                self.qualified_closed_cutover(joint.vertex_id, edge, spatial_high, parameter)
             },
         )
     }
 
     /// Both literal limits come from the same source-only corner recipes used
-    /// by the active-star proof. A closed edge retains its two distinct germs.
-    pub fn central_native_range(
+    /// by the active-star proof in original SOURCE spatial gauge. A closed edge
+    /// retains its two distinct source endpoint germs even when vertex IDs agree.
+    pub fn central_spatial_range(
         &self,
-        edge: monstertruck_topology::EdgeId<Curve>,
+        edge: solidcore::EdgeId,
         original: [f64; 2],
         source_owner: [usize; 3],
     ) -> Result<[f64; 2], GeometryError> {
         if self.unchanged_source {
             return Ok(original);
         }
-        let find = |back| {
+        let find = |spatial_high| {
             self.exits
                 .iter()
-                .find(|exit| exit.edge == edge && exit.absolute_back == back)
+                .find(|exit| exit.edge == edge && exit.spatial_high == spatial_high)
                 .map(|exit| exit.parameter)
         };
         let (Some(front), Some(back)) = (find(false), find(true)) else {
             return Err(failure(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "source central collar lacks complete native endpoint ownership",
+                "source central collar lacks complete spatial endpoint ownership",
                 source_owner[0],
                 (source_owner[1], source_owner[2], original),
             ));
@@ -1020,7 +1042,7 @@ impl<'d> ClosedRadialLinks<'d> {
         if front <= original[0] || back >= original[1] || front >= back {
             return Err(failure(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
-                "source endpoint exits do not partition the original native edge",
+                "source endpoint exits do not partition the original spatial curve",
                 source_owner[0],
                 (source_owner[1], source_owner[2], original, [front, back]),
             ));
@@ -1073,7 +1095,7 @@ impl<'d> ClosedRadialLinks<'d> {
                             bytes.checked_add(
                                 self.exits
                                     .capacity()
-                                    .saturating_mul(std::mem::size_of::<NativeEndpointExit>()),
+                                    .saturating_mul(std::mem::size_of::<SpatialEndpointExit>()),
                             )
                         })
                         .is_some_and(|bytes| bytes <= limit)
@@ -1109,9 +1131,94 @@ impl<'d> ClosedRadialLinks<'d> {
         Ok(())
     }
 
+    /// Complete original F (including declared joint/lift images), central G
+    /// displaced by its sealed whole-source forward bound, and all retained
+    /// source-corner/G supports. A lowered native import AABB supplies none of
+    /// this authority.
+    fn complete_source_position_box(
+        &self,
+        source: MaterialSourceView<'_, '_>,
+        remaining_bytes: usize,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<[Interval; 3], GeometryError> {
+        const STACK_BYTES: usize =
+            crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+                + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+                + 3 * std::mem::size_of::<[Interval; 3]>()
+                + std::mem::size_of::<crate::kernel::trim::PreparedTrimSurface<'_, '_>>()
+                + super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES;
+        let before = work.consumed();
+        let mut active_face = None;
+        let outcome = (|| {
+            work.charge(1, cancel)?;
+            if !std::ptr::eq(self.definition, source.definition()) {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::InvalidGeometry,
+                    "whole-source cap bound borrows another source definition",
+                ));
+            }
+            let available = remaining_bytes.checked_sub(STACK_BYTES).ok_or_else(|| {
+                GeometryError::new(GeometryErrorCode::ResourceLimit,
+                    "whole-original/source-G cap bound exceeds remaining scratch")
+            })?;
+            let mut cover: Option<[Interval; 3]> = None;
+            let mut include = |position: [Interval; 3]| -> Result<(), GeometryError> {
+                for value in position { Interval::new(value.lo, value.hi)?; }
+                cover = Some(match cover {
+                    Some(previous) => std::array::from_fn(|axis| previous[axis].hull(position[axis])),
+                    None => position,
+                });
+                Ok(())
+            };
+            let mut forward_padding_mm = 0.0_f64;
+            for face in 0..source.definition().face_ids().len() {
+                active_face = Some(face);
+                let domain = source.face_domain(face, available, work, cancel)?;
+                let surface = domain.surface_operand();
+                include(crate::parametric::surface_position_enclosure(
+                    &surface, domain.uv_domain(), work, cancel,
+                )?)?;
+                for joint in domain.original_joints()? {
+                    include(super::atlas::original_joint_position_enclosure(
+                        domain, joint, work, cancel,
+                    )?)?;
+                }
+                for coedge in 0..domain.coedges().len() {
+                    work.charge(1, cancel)?;
+                    let error = domain.original_coedge_correspondence(coedge)?.position_error_mm();
+                    if !error.is_finite() || error < 0.0 {
+                        return Err(GeometryError::new(GeometryErrorCode::ConditioningFailure,
+                            "whole-source cap bound has an invalid original forward receipt"));
+                    }
+                    forward_padding_mm = forward_padding_mm.max(error);
+                }
+            }
+            let original = cover.ok_or_else(|| GeometryError::new(
+                GeometryErrorCode::InvalidGeometry,
+                "whole-source cap bound has no original face inventory",
+            ))?;
+            // R is owned in the original carrier domains above, and every
+            // central G point is F(U)+lambda*(1-w)*delta with |delta| bounded
+            // by the selected whole-source forward receipt. This is an
+            // overcover, not equality or source-error acceptance.
+            let padding = Interval::new(-forward_padding_mm, forward_padding_mm)?;
+            let mut result = original.map(|value| value.add(padding));
+            for support in &self.supports {
+                work.charge(1, cancel)?;
+                for value in *support { Interval::new(value.lo, value.hi)?; }
+                result = std::array::from_fn(|axis| result[axis].hull(support[axis]));
+            }
+            Ok(result)
+        })();
+        outcome.map_err(|error| work.annotate_error(error, before, format_args!(
+            "degree-one whole-original/source-G cap bound face={active_face:?}",
+        )))
+    }
+
     pub fn degree_one(
         &self,
-        source: OriginalTrimSource<'_, '_>,
+        source: MaterialSourceView<'_, '_>,
         prism: &SamplePrism,
         request: &SlabRequest,
         remaining_bytes: usize,
@@ -1147,11 +1254,7 @@ impl<'d> ClosedRadialLinks<'d> {
         let x = prism.frame.x_axis.map(Interval::point);
         let y = prism.frame.y_axis.map(Interval::point);
         let z = prism.frame.z_axis.map(Interval::point);
-        let allowance = source_allowance(source.definition())?;
-        let source_box = std::array::from_fn(|axis| Interval {
-            lo: down(source.definition().bounds.min[axis] - allowance),
-            hi: up(source.definition().bounds.max[axis] + allowance),
-        });
+        let source_box = self.complete_source_position_box(source, remaining_bytes, work, cancel)?;
         let p = project(source_box, prism.frame);
         let rho_max = length([p[0], p[1], Interval::point(0.0)])?.hi;
         let cap_margin = down(
@@ -1301,10 +1404,8 @@ mod closed_support_tests {
 
     #[test]
     fn support_growth_is_refused_before_a_smaller_caller_budget_allocates() {
-        let definition = crate::import_step(
-            include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
-            &AtomicBool::new(false),
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../../../fixtures/geometry/box-mm.step"),
+        &AtomicBool::new(false),)
         .unwrap();
         let mut links = ClosedRadialLinks {
             definition: &definition,

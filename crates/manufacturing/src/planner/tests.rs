@@ -578,7 +578,7 @@ fn cancellation_and_retained_segment_budget_precede_path_growth() {
 fn native_section_consumer_preserves_hole_ownership_in_sparse_and_skin_paths() {
     let bytes = include_bytes!("../../../../fixtures/geometry/through-hole.step");
     let cancel = AtomicBool::new(false);
-    let definition = spiling_geometry::import_step(bytes, &cancel).unwrap();
+    let definition = spiling_geometry::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
     let native = spiling_geometry::section_with_byte_limit(
         &definition,
         PlaneMm {

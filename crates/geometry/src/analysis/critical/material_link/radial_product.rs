@@ -6,7 +6,9 @@
 //! identical physical all-face cylinder census may construct this receipt.
 
 use super::*;
+use crate::analysis::material_source::MaterialSourceView;
 use crate::analysis::placed::{ActualMaterialCoordinates, MaterialCoordinatesCapture};
+use crate::kernel::trim::PreparedTrimSurface;
 use sha2::{Digest, Sha256};
 use spiling_contracts::geometry::RigidPoseMm;
 
@@ -29,7 +31,7 @@ pub(in crate::analysis) enum BoundaryVisit {
 #[derive(Clone, Copy)]
 pub(in crate::analysis) struct BoundaryCell<'a> {
     pub position: [Interval; 3],
-    pub original_face: Option<(&'a Surface, [[f64; 2]; 2])>,
+    pub original_face: Option<(PreparedTrimSurface<'a, 'a>, [[f64; 2]; 2])>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,7 +105,7 @@ impl ClosedRadialMaterialProduct {
 }
 
 pub(in crate::analysis) fn certify_closed_radial_material_product(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     request: &SlabRequest,
     coordinates: &ActualMaterialCoordinates<'_>,
     remaining_bytes: usize,
@@ -131,7 +133,7 @@ pub(in crate::analysis) fn certify_closed_radial_material_product(
 /// an unrelated atlas refusal into a metric diagnosis.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::analysis) fn certify_closed_radial_material_product_with_boundary_visitor(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     request: &SlabRequest,
     coordinates: &ActualMaterialCoordinates<'_>,
     remaining_bytes: usize,
@@ -220,7 +222,7 @@ mod tests {
                 .join("../../fixtures/geometry/box-mm.step"),
         )
         .unwrap();
-        crate::import_step(&bytes, &AtomicBool::new(false)).unwrap()
+        crate::from_step_bytes_with_cancel(&bytes, &AtomicBool::new(false)).unwrap()
     }
 
     fn request(definition: &Definition) -> SlabRequest {
@@ -246,6 +248,9 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
+        let owner = crate::analysis::material_source::prepare_solid(
+            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
         let coordinates = ActualMaterialCoordinates::source(
             &definition,
             &request.frame,
@@ -257,7 +262,7 @@ mod tests {
         )
         .unwrap();
         let product = certify_closed_radial_material_product(
-            OriginalTrimSource::standalone(&definition),
+            owner.source_view().unwrap(),
             &request,
             &coordinates,
             MAX_SCRATCH_BYTES,
@@ -295,6 +300,9 @@ mod tests {
         let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
+        let owner = crate::analysis::material_source::prepare_solid(
+            &definition, MAX_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
         let coordinates = ActualMaterialCoordinates::source(
             &definition,
             &request.frame,
@@ -305,7 +313,7 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let source = OriginalTrimSource::standalone(&definition);
+        let source = owner.source_view().unwrap();
         assert!(
             certify_closed_radial_material_product(
                 source,

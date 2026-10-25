@@ -208,7 +208,7 @@ fn checked_readiness_rejects_missing_native_identity_in_otherwise_current_info()
     let info = rpc::EngineInfo {
         instance_id: Uuid::new_v4().to_string(),
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
-        kernel: "monstertruck".into(),
+        kernel: spiling_contracts::geometry::KERNEL_NAME.into(),
         geometry_capabilities: vec!["source_backed_geometry".into()],
         project_capabilities: vec![spiling_contracts::PROJECT_FORMAT_CAPABILITY.into()],
         manufacturing_capabilities: vec!["planar_software_compile_v1".into()],
@@ -299,7 +299,7 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
     let mut hello = Hello {
         instance_id: Uuid::new_v4().to_string(),
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
-        kernel: "monstertruck".into(),
+        kernel: spiling_contracts::geometry::KERNEL_NAME.into(),
         geometry_capabilities: vec![
             "step_native_trimmed_v2".into(),
             "native_geometry_queries_v2".into(),
@@ -326,13 +326,19 @@ fn supervised_readiness_rejects_mixed_surface_builds_and_missing_cutover_capabil
         pid: 123,
         session_id: SessionId::new(),
         kernel_identity: KernelIdentity {
-            name: "monstertruck".into(),
-            version: "0.4.1".into(),
-            revision: "5a4ddb7582c3d7f75a39e800a9fef345cdfe435e".into(),
+            name: spiling_contracts::geometry::KERNEL_NAME.into(),
+            version: "test-kernel-version".into(),
+            revision: "test-kernel-revision".into(),
         },
         geometry_limits: GeometryLimits::FROZEN,
     };
     super::validate_engine_cutover(&hello).unwrap();
+    hello.kernel = "unsupported-kernel".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.kernel = spiling_contracts::geometry::KERNEL_NAME.into();
+    hello.kernel_identity.name = "unsupported-kernel".into();
+    assert!(super::validate_engine_cutover(&hello).is_err());
+    hello.kernel_identity.name = spiling_contracts::geometry::KERNEL_NAME.into();
     hello.engine_build = env!("CARGO_PKG_VERSION").into();
     assert!(super::validate_engine_cutover(&hello).is_err());
     hello.engine_build = spiling_contracts::ENGINE_BUILD_ID.into();

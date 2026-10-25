@@ -208,13 +208,13 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         ),
     ] {
         // Prevent committing source bytes that the actual public adapter does not admit.
-        spiling_geometry::import_step(bytes.as_bytes(), &cancel)
+        spiling_geometry::from_step_bytes_with_cancel(bytes.as_bytes(), &cancel)
             .map_err(|e| format!("original {name} fails admission: {e:?}"))?;
         entries.push(json!({"path":name,"sha256":hash(bytes.as_bytes()),"byte_count":bytes.len(),"expected":"accepted","source_origin":"same-kernel-original-roundtrip","recipe":"public analytic planar-wire extrusion","expectation":expectation}));
         files.insert(name.into(), bytes.into_bytes());
     }
     for (name, bytes, expectation) in implicit_sources {
-        let definition = spiling_geometry::import_step(bytes.as_bytes(), &cancel)
+        let definition = spiling_geometry::from_step_bytes_with_cancel(bytes.as_bytes(), &cancel)
             .map_err(|error| format!("original implicit {name} admission: {error:?}"))?;
         let mesh =
             spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;
@@ -253,11 +253,11 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         let sample = expectation["section_z_mm"]
             .as_f64()
             .ok_or("implicit section height oracle")?;
-        let source = spiling_geometry::prepare_material_source(
+        let source = spiling_geometry::prepare_solid(
             &definition,
             spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
             &mut work,
+            &cancel,
         )?;
         let bounds_bytes = directional_bounds
             .capacity()
@@ -315,7 +315,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
                 .map_err(|e| format!("original {name} native topology: {e:?}"))?;
         }
         let bytes = original(name, solid);
-        let definition = spiling_geometry::import_step(bytes.as_bytes(), &cancel)
+        let definition = spiling_geometry::from_step_bytes_with_cancel(bytes.as_bytes(), &cancel)
             .map_err(|e| format!("original {name} admission: {e:?}"))?;
         let mesh =
             spiling_geometry::tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)
@@ -387,7 +387,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         {
             return Err(format!("frozen independent source identity changed: {name}").into());
         }
-        let definition = spiling_geometry::import_step(&bytes, &cancel)?;
+        let definition = spiling_geometry::from_step_bytes_with_cancel(&bytes, &cancel)?;
         if expectation["face_count"]
             .as_u64()
             .is_some_and(|count| definition.faces().len() as u64 != count)
@@ -465,7 +465,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         &std::fs::read_to_string(independent_root.join("occt-tapered-fitting-mm.step"))?,
         "native-source-wrong-selected-master.step",
     );
-    let failure = spiling_geometry::import_step(wrong_master.as_bytes(), &cancel)
+    let failure = spiling_geometry::from_step_bytes_with_cancel(wrong_master.as_bytes(), &cancel)
         .err()
         .ok_or("wrong selected master borrowed an alternate carrier receipt")?;
     if failure.code
@@ -488,7 +488,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         wrong_master.into_bytes(),
     );
     for adversary in corpus::adversaries(&mm, &inch) {
-        let result = spiling_geometry::import_step(adversary.bytes.as_bytes(), &cancel);
+        let result = spiling_geometry::from_step_bytes_with_cancel(adversary.bytes.as_bytes(), &cancel);
         if adversary.expected == "accepted" {
             let definition = result
                 .map_err(|e| format!("equivalent {} source import: {e:?}", adversary.name))?;
@@ -539,7 +539,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         files.insert(adversary.name.into(), adversary.bytes.into_bytes());
     }
     let wrong_line = corpus::wrong_spatial_line(&mm, "native-source-wrong-spatial-line.step");
-    let failure = spiling_geometry::import_step(wrong_line.as_bytes(), &cancel)
+    let failure = spiling_geometry::from_step_bytes_with_cancel(wrong_line.as_bytes(), &cancel)
         .err()
         .ok_or("original spatial LINE was silently replaced by its BREP vertex chord")?;
     if failure.code != spiling_contracts::geometry::GeometryErrorCode::InvalidGeometry {
@@ -561,7 +561,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         wrong_line.into_bytes(),
     );
     let conditioning = parity::conditioning_source();
-    let error = spiling_geometry::import_step(conditioning.as_bytes(), &cancel)
+    let error = spiling_geometry::from_step_bytes_with_cancel(conditioning.as_bytes(), &cancel)
         .err()
         .ok_or("denominator-zero source was admitted")?;
     if error.code != spiling_contracts::geometry::GeometryErrorCode::ConditioningFailure {
@@ -577,7 +577,7 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         conditioning.into_bytes(),
     );
     let aliasing = parity::aliasing_source();
-    let definition = spiling_geometry::import_step(aliasing.as_bytes(), &cancel)?;
+    let definition = spiling_geometry::from_step_bytes_with_cancel(aliasing.as_bytes(), &cancel)?;
     let mesh_outcome = match spiling_geometry::tessellate(
         &definition,
         DisplayProfile::MeshTrimmedMm005V2,

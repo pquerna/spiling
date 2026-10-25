@@ -7,4 +7,3 @@
 pub mod contracts;
 pub mod fixtures;
 pub mod helpers;
-pub mod parametric;

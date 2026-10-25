@@ -202,7 +202,7 @@ impl MaterialLinkCell {
     }
 }
 
-/// Actual cross-ribbon position and first jet at ONE original native parameter.
+/// Actual cross-ribbon position and first jet at ONE selected original spatial parameter.
 /// All fields use the unchanged original coefficient/map operands.
 #[derive(Debug, Clone, Copy)]
 struct CollarBoundaryJet {
@@ -241,10 +241,10 @@ fn chart_jet(
     domain.original_coedge_uv_jet(coedge, range, work, cancel)
 }
 
-/// The recipe's SAME native-parameter beta=x(1-x), restricted to a proved
+/// The recipe's SAME spatial-parameter beta=x(1-x), restricted to a proved
 /// subinterval. In particular an endpoint subdivision must not keep the
 /// unrelated whole-edge upper bound 1/4.
-fn native_endpoint_bubble(whole: [f64; 2], parameter: Interval) -> Result<Interval, GeometryError> {
+fn spatial_endpoint_bubble(whole: [f64; 2], parameter: Interval) -> Result<Interval, GeometryError> {
     if !whole[0].is_finite()
         || !whole[1].is_finite()
         || whole[0] >= whole[1]
@@ -253,7 +253,7 @@ fn native_endpoint_bubble(whole: [f64; 2], parameter: Interval) -> Result<Interv
     {
         return Err(GeometryError::new(
             GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "foreign collar bubble leaves its original native parameter range",
+            "foreign collar bubble leaves its original spatial parameter range",
         ));
     }
     let span = Interval::point(whole[1]).sub(Interval::point(whole[0]));
@@ -310,14 +310,15 @@ fn source_allowance(definition: &Definition) -> Result<f64, GeometryError> {
 /// conical completion preserve that scalar identically. An interval merely
 /// containing the candidate height is insufficient, even at roundoff scale.
 pub(crate) fn constant_material_face_height(
-    definition: &Definition,
+    source: MaterialSourceView<'_, '_>,
     face_index: usize,
     functional: HeightFunctional,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<f64>, GeometryError> {
-    let Some(height) = super::super::slab::constant_source_face_height(
-        definition, face_index, functional, work, cancel,
+    let domain = source.face_domain(face_index, MAX_SCRATCH_BYTES, work, cancel)?;
+    let Some(height) = super::super::slab::constant_spline_height(
+        &domain.surface_operand(), functional, work, cancel,
     )?
     else {
         return Ok(None);
@@ -325,32 +326,23 @@ pub(crate) fn constant_material_face_height(
     if !height.lo.is_finite() || height.lo != height.hi {
         return Ok(None);
     }
-    let face = definition
-        .solid
-        .face_iter()
-        .nth(face_index)
-        .ok_or_else(|| {
-            failure(
-                GeometryErrorCode::InvalidGeometry,
-                "material scalar law lost its original face",
-                face_index,
-                (),
-            )
-        })?;
-    for wire in face.absolute_boundaries() {
-        for edge in wire {
-            work.charge(1, cancel)?;
-            let curve_height = edge.with_curve(|curve| {
-                super::super::slab::constant_native_curve_height(curve, functional, work, cancel)
-            })?;
-            if curve_height.is_none_or(|value| value.lo != height.lo || value.hi != height.hi) {
-                return Ok(None);
-            }
-        }
-    }
-    for vertex in face.vertex_iter() {
+    for (index, coedge) in domain.coedges().iter().enumerate() {
         work.charge(1, cancel)?;
-        let point: [f64; 3] = vertex.point().into();
+        let curve_height = domain.with_original_spatial_curve(
+            index, MAX_SCRATCH_BYTES, work, cancel, |curve, work, cancel| {
+                super::super::slab::constant_native_curve_height(
+                    curve, functional, work, cancel,
+                )
+            },
+        )?;
+        if curve_height.is_none_or(|value| value.lo != height.lo || value.hi != height.hi) {
+            return Ok(None);
+        }
+        // The admitted native use circuits are closed, so their start vertices
+        // cover every incident apex without checking each twice. The coordinate
+        // is the exact original VertexPoint from the complete admitted star.
+        let vertex = coedge.vertices[usize::from(!coedge.forward)];
+        let point = source.trim_source().source_vertex_point(vertex, work, cancel)?;
         let value = functional.vertex(point);
         if value.lo != height.lo || value.hi != height.hi {
             return Ok(None);
@@ -370,6 +362,8 @@ enum CarrierTransport {
 struct OriginalCollar<'a, 'd> {
     domain: &'a PreparedFaceTrimDomain<'d>,
     use_: CoedgeUse,
+    /// Increasing selected spatial t follows the material boundary traversal.
+    spatial_orientation: bool,
     range: [f64; 2],
     transport: CarrierTransport,
     margin: [f64; 2],
@@ -421,7 +415,12 @@ fn contained_parameter_range(inner: [f64; 2], outer: [f64; 2]) -> bool {
 type UvPairCell = ([f64; 2], [f64; 2], u8);
 pub(super) const UV_EMBEDDING_STACK_BYTES: usize = std::mem::size_of::<
     [UvPairCell; 2 * MAX_DEPTH as usize + 1],
->() + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+>() + if SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    > crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES {
+        SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    } else {
+        crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+    }
     + 2 * std::mem::size_of::<SurfaceFirstEnclosure>();
 
 fn normal_uv_jet(
@@ -460,7 +459,7 @@ fn normal_uv_pmatrix(
 }
 impl<'a, 'd> OriginalCollar<'a, 'd> {
     /// Evaluate the immutable recipe without granting material-chart authority.
-    /// In particular the endpoint bubble always uses the WHOLE native range.
+    /// In particular the endpoint bubble always uses the WHOLE spatial query range.
     fn for_enclosure(
         domain: &'a PreparedFaceTrimDomain<'d>,
         use_: CoedgeUse,
@@ -470,13 +469,13 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         Self::for_enclosure_with_byte_limit(domain, use_, usize::MAX, work, cancel)
     }
 
-    /// The native winding limit includes this domain's retained metadata.
-    /// Query-local consumers must supply their CURRENT coexistent allowance,
-    /// not the larger allowance captured when a borrowed domain was prepared.
+    /// The native classifier consumes scratch only. The PreparedSolid owner
+    /// already accounts for every retained domain; callers provide the current
+    /// coexistent scratch allowance without adding that metadata again.
     fn for_enclosure_with_byte_limit(
         domain: &'a PreparedFaceTrimDomain<'d>,
         use_: CoedgeUse,
-        metadata_inclusive_bytes: usize,
+        remaining_scratch_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
@@ -485,28 +484,31 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let Some(binding) = proof.binding() else {
             return Ok(None);
         };
-        let face = domain.native().face();
-        let boundaries = face.absolute_boundaries();
-        let Some(edge) = boundaries
-            .get(use_.wire)
-            .and_then(|wire| wire.get(use_.index))
-        else {
+        let Some(coedge) = domain.coedges().get(use_.coedge) else {
             return Ok(None);
         };
         if binding.owner != [use_.face, use_.wire, use_.index]
-            || binding.edge != edge.id()
-            || use_.orientation != (edge.orientation() == face.orientation())
+            || binding.edge != coedge.edge
+            || binding.face != domain.face()
+            || binding.edgeuse != use_.edgeuse
+            || binding.endpoints != coedge.vertices
+            || binding.native_interval != coedge.native_range
+            || use_.edgeuse != coedge.edgeuse
+            || use_.orientation != (coedge.forward == domain.native_orientation())
+            || binding.material_forward != (use_.orientation == binding.spatial_forward)
         {
             return Ok(None);
         }
-        let range = proof.native_range();
+        let spatial_orientation = binding.material_forward;
+        let range = proof.spatial_range();
         let margin = proof.margin_uv();
-        if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(Some(Self {
                 domain,
                 use_,
+                spatial_orientation,
                 range,
                 transport: CarrierTransport::Exact,
                 margin,
@@ -532,7 +534,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             });
             if domain.classify_with_byte_limit(
                 uv_box(add_margin(probe, margin)),
-                metadata_inclusive_bytes,
+                remaining_scratch_bytes,
                 work,
                 cancel,
             )? == TrimClassification::Inside
@@ -549,6 +551,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         Ok(Some(Self {
             domain,
             use_,
+            spatial_orientation,
             range,
             transport: CarrierTransport::Collar { width, inward },
             margin,
@@ -578,7 +581,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         ))
     }
 
-    /// `range` uses the original C3D curve's native parameters, not the
+    /// `range` uses the selected ORIGINAL C3D query gauge, not the
     /// original PCurve parameter inventory returned by the trim domain.
     fn normal_image(
         &self,
@@ -622,7 +625,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let proof = self
             .domain
             .original_coedge_correspondence(self.use_.coedge)?;
-        if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
         {
             return Ok(None);
         }
@@ -766,7 +769,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 mul(Interval { lo: 0.0, hi: width }, mul(beta, v[axis])),
             )
         });
-        self.domain.native().face().with_surface(|surface| {
+        {
+            let surface = &self.domain.surface_operand();
             Ok(surface_piecewise_first_enclosure(
                 surface,
                 uv_box(add_margin(tube, self.margin)),
@@ -783,7 +787,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     },
                 )
             }))
-        })
+        }
     }
 
     fn other_collar_enclosure(
@@ -812,38 +816,23 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 hi: value[1],
             });
         let proof = domain.original_coedge_correspondence(coedge)?;
-        if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(position);
         }
-        let original = &domain.native().coedges()[coedge];
-        let mut native = monstertruck_modeling::ValidatedGeometryBudget::new(
-            usize::try_from(work.remaining()).unwrap_or(usize::MAX),
-        );
-        let result = monstertruck_modeling::validated_curve2d_jet(
-            original.curve,
-            range,
-            &mut native,
-            cancel,
-        );
-        crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
-        let jet = result.map_err(crate::parametric::native_error)?;
-        let derivative = jet.first.map(|value| {
-            mul(
-                Interval {
-                    lo: value.lower,
-                    hi: value.upper,
-                },
-                proof.uv_parameter_derivative(),
-            )
+        let jet = crate::parametric::curve2d_piecewise_jet(
+            &domain.coedge_operand(coedge)?, range, work, cancel,
+        )?;
+        let derivative = jet.derivative.map(|value| {
+            mul(value, proof.uv_parameter_derivative())
         });
         let v = rotate(derivative, 1.0);
-        let native_range = proof.native_range();
-        let width = (native_range[1] - native_range[0])
+        let spatial_range = proof.spatial_range();
+        let width = (spatial_range[1] - spatial_range[0])
             * domain.material_realization().collar_parameter_fraction();
-        let beta = match proof.affine_native_parameter_preimage(range)? {
-            Some(parameter) => native_endpoint_bubble(native_range, parameter)?,
+        let beta = match proof.affine_spatial_parameter_preimage(range)? {
+            Some(parameter) => spatial_endpoint_bubble(spatial_range, parameter)?,
             // This correspondence kind does not grant affine preimage
             // authority. Keep the complete old enclosure, never infer a map.
             None => Interval { lo: 0.0, hi: 0.25 },
@@ -863,9 +852,9 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         }))
     }
 
-    /// The same two-sign exclusion overcover in the sealed native parameter.
+    /// The same two-sign exclusion overcover in the sealed spatial query gauge.
     /// Exact correspondences retain their literal zero-offset realization.
-    fn native_collar_overcover(
+    fn spatial_collar_overcover(
         domain: &PreparedFaceTrimDomain<'_>,
         coedge: usize,
         range: [f64; 2],
@@ -874,15 +863,15 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
     ) -> Result<[Interval; 2], GeometryError> {
         let jet = chart_jet(domain, coedge, range, work, cancel)?;
         let proof = domain.original_coedge_correspondence(coedge)?;
-        if proof.provenance() == crate::kernel::OriginalCorrespondenceProvenance::ExactCoefficients
+        if proof.provenance() == crate::kernel::trim::OriginalCorrespondenceProvenance::ExactCoefficients
             && proof.position_error_mm() == 0.0
         {
             return Ok(jet.position);
         }
-        let native_range = proof.native_range();
-        let width = (native_range[1] - native_range[0])
+        let spatial_range = proof.spatial_range();
+        let width = (spatial_range[1] - spatial_range[0])
             * domain.material_realization().collar_parameter_fraction();
-        let beta = native_endpoint_bubble(native_range, Interval::new(range[0], range[1])?)?;
+        let beta = spatial_endpoint_bubble(spatial_range, Interval::new(range[0], range[1])?)?;
         let offset = mul(
             Interval::point(width),
             Interval {
@@ -946,7 +935,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 "actual-G central across weight has no unit image",
             )
         })?;
-        self.domain.native().face().with_surface(|surface| {
+        {
+            let surface = &self.domain.surface_operand();
             let boundary = surface_piecewise_first_enclosure(
                 surface,
                 uv_box(add_margin(uv.position, self.margin)),
@@ -987,7 +977,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 }),
                 std::array::from_fn(|axis| exact_difference(base_w[axis], displacement[axis])),
             ))
-        })
+        }
     }
 
     fn boundary_jet(
@@ -1028,7 +1018,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         let offset = rotate(uv.derivative, inward)
             .map(|value| mul(mul(Interval::point(width), beta), value));
         let at = std::array::from_fn(|axis| add(uv.position[axis], mul(across, offset[axis])));
-        self.domain.native().face().with_surface(|surface| {
+        {
+            let surface = &self.domain.surface_operand();
             let boundary = surface_enclosure(
                 surface,
                 uv_box(add_margin(uv.position, self.margin)),
@@ -1083,7 +1074,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 boundary_displacement: displacement,
                 constant: false,
             })
-        })
+        }
     }
 
     fn cell(
@@ -1232,7 +1223,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
         // The owned receipt calibrates the complete inner image against ALL
         // original boundaries and joints, including this edge's unused pieces.
         // Separately retain full nonowning COLLAR separation for actual G.
-        for (index, _) in self.domain.native().coedges().iter().enumerate() {
+        for (index, _) in self.domain.coedges().iter().enumerate() {
             if index == self.use_.coedge {
                 continue;
             }
@@ -1249,7 +1240,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     let resource_context = |mut error: GeometryError| {
                         if error.code == GeometryErrorCode::ResourceLimit {
                             error.message = format!(
-                                "{}; source collar ForeignCollar owner={:?} native={range:?} foreign_coedge={index} foreign_uv_parameter={span:?} owned_uv={owned_tube:?} last_evaluated_foreign={last_other:?}",
+                                "{}; source collar ForeignCollar owner={:?} spatial={range:?} foreign_coedge={index} foreign_uv_parameter={span:?} owned_uv={owned_tube:?} last_evaluated_foreign={last_other:?}",
                                 error.message,
                                 [self.use_.face, self.use_.wire, self.use_.index],
                             );
@@ -1281,9 +1272,10 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 }
             }
         }
-        self.domain.native().face().with_surface(|surface| {
+        {
+            let surface = &self.domain.surface_operand();
             let enclosure =
-                |surface: &Surface, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
+                |surface: &PreparedTrimSurface<'_, '_>, uv, work: &mut GeometryWorkBudget, cancel: &AtomicBool| {
                     if piecewise {
                         surface_piecewise_first_enclosure(surface, uv, work, cancel)
                     } else {
@@ -1349,7 +1341,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 fw[axis].sub(mul(Interval { lo: 0.0, hi: 1.0 }, displacement[axis]))
             });
             let mut normal = cross(gt, gw);
-            if !self.use_.orientation {
+            if !self.spatial_orientation {
                 normal = normal.map(Interval::neg);
             }
             let position = std::array::from_fn(|axis| {
@@ -1378,7 +1370,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 outward: normal,
                 second_outward: normal,
             }))
-        })
+        }
     }
 }
 
@@ -1406,7 +1398,10 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
         cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
         work.charge(1, cancel)?;
-        if first.orientation == second.orientation {
+        if !std::ptr::eq(first_domain.definition(), definition)
+            || !std::ptr::eq(second_domain.definition(), definition)
+            || first.orientation == second.orientation
+        {
             return Ok(None);
         }
         let a = first_domain.original_coedge_correspondence(first.coedge)?;
@@ -1415,9 +1410,14 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
             return Ok(None);
         };
         if a_binding.edge != b_binding.edge
-            || a.native_range() != b.native_range()
+            || a_binding.native_interval != b_binding.native_interval
+            || a_binding.spatial_forward != b_binding.spatial_forward
+            || a.spatial_range() != b.spatial_range()
             || a_binding.owner != [first.face, first.wire, first.index]
             || b_binding.owner != [second.face, second.wire, second.index]
+            || !first_domain.same_original_spatial_trace(
+                first.coedge, second_domain, second.coedge, work, cancel,
+            )?
         {
             return Ok(None);
         }
@@ -1494,7 +1494,7 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
             Ok(cell) => cell,
             Err(reason) => return Ok(Err(reason)),
         };
-        let tangent = if self.first.use_.orientation {
+        let tangent = if self.first.spatial_orientation {
             curve.derivative
         } else {
             curve.derivative.map(Interval::neg)
@@ -1513,607 +1513,4 @@ impl<'a, 'd> PairedMaterialLink<'a, 'd> {
 }
 
 #[cfg(test)]
-mod scalar_law_tests {
-    use super::*;
-
-    #[test]
-    fn nonowner_collar_bubble_contracts_at_original_native_endpoints() {
-        let whole = [10.0, 12.0];
-        let first =
-            native_endpoint_bubble(whole, Interval::new(10.0, 10.0 + 1.0 / 1024.0).unwrap())
-                .unwrap();
-        let last = native_endpoint_bubble(whole, Interval::new(12.0 - 1.0 / 1024.0, 12.0).unwrap())
-            .unwrap();
-        assert!(first.lo >= 0.0 && first.hi < 1.0 / 1024.0);
-        assert!(last.lo >= 0.0 && last.hi < 1.0 / 1024.0);
-        let center = native_endpoint_bubble(whole, Interval::point(11.0)).unwrap();
-        assert!(center.lo <= 0.25 && center.hi == 0.25);
-        let complete = native_endpoint_bubble(whole, Interval::new(10.0, 12.0).unwrap()).unwrap();
-        assert_eq!((complete.lo, complete.hi), (0.0, 0.25));
-        assert_eq!(
-            native_endpoint_bubble(whole, Interval::point(9.0))
-                .unwrap_err()
-                .code,
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-        );
-    }
-
-    #[test]
-    fn actual_fitting_complete_paired_source_collars_have_local_geometry() {
-        let cancel = AtomicBool::new(false);
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step");
-        let definition = crate::import_step(&std::fs::read(path).unwrap(), &cancel).unwrap();
-        let mut work = GeometryWorkBudget::new(20_000_000);
-        let standalone = OriginalTrimSource::standalone(&definition);
-        let originals = standalone
-            .prepare_domains_if_missing(MAX_SCRATCH_BYTES, &mut work, &cancel)
-            .unwrap()
-            .expect("one immutable original-domain owner");
-        let source = standalone.borrowing_domains(Some(&originals));
-        let available = MAX_SCRATCH_BYTES - originals.retained_bytes();
-        let mut incidence =
-            SourceEdgeIncidence::new(&definition, available, &mut work, &cancel).unwrap();
-        incidence
-            .prepare_vertices(available, &mut work, &cancel)
-            .unwrap();
-        let available = available - incidence.owned_bytes();
-
-        // Visit ALL paired incidences in source-occurrence order, not hash or
-        // allocation-ID order. No observed failing parameter/face selects scope.
-        let mut pairs = incidence.values().collect::<Vec<_>>();
-        pairs.sort_unstable_by_key(|pair| (pair.first.face, pair.first.wire, pair.first.index));
-        let mut vertices = Vec::new();
-        for pair in &pairs {
-            assert!(
-                pair.second.is_some(),
-                "complete original opposed-use inventory"
-            );
-            for vertex in pair.vertices {
-                if !vertices.contains(&vertex) {
-                    vertices.push(vertex);
-                }
-            }
-        }
-        let mut exits = Vec::new();
-        for vertex in vertices {
-            let plan = vertex_transport::SourceVertexTransportPlan::prepare(
-                source, &incidence, vertex, available, &mut work, &cancel,
-            )
-            .unwrap()
-            .expect("the unchanged canonical source-only NativeV plan");
-            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter, _work| {
-                if let Some(&(_, _, previous)) = exits
-                    .iter()
-                    .find(|&&(candidate, end, _)| candidate == edge && end == back)
-                {
-                    assert_eq!(previous, parameter, "same actual NativeEdge endpoint germ");
-                } else {
-                    exits.push((edge, back, parameter));
-                }
-                Ok(())
-            })
-            .unwrap();
-        }
-
-        let mut complete_pairs = 0;
-        for pair in pairs {
-            let first = pair.first;
-            let second = pair.second.unwrap();
-            let first_owner = [first.face, first.wire, first.index];
-            let second_owner = [second.face, second.wire, second.index];
-            let a = source
-                .face_domain(first.face, available, &mut work, &cancel)
-                .unwrap();
-            let b = source
-                .face_domain(second.face, available, &mut work, &cancel)
-                .unwrap();
-            let edge = &a.native().face().absolute_boundaries()[first.wire][first.index];
-            let proof = a.original_coedge_correspondence(first.coedge).unwrap();
-            let endpoint = |back| {
-                exits
-                    .iter()
-                    .find(|&&(candidate, end, _)| candidate == edge.id() && end == back)
-                    .map(|&(_, _, parameter)| parameter)
-                    .expect("actual original NativeV exit")
-            };
-            let central = [endpoint(false), endpoint(true)];
-            let whole = proof.native_range();
-            assert!(
-                whole[0] < central[0] && central[0] < central[1] && central[1] < whole[1],
-                "fixed source cutouts: {first_owner:?} {second_owner:?} {whole:?} {central:?}",
-            );
-            let link = PairedMaterialLink::new(
-                &definition,
-                &a,
-                first,
-                &b,
-                second,
-                central,
-                available
-                    .checked_sub(a.owned_bytes())
-                    .and_then(|bytes| bytes.checked_sub(b.owned_bytes()))
-                    .expect("live paired-domain byte reservation"),
-                &mut work,
-                &cancel,
-            )
-            .unwrap()
-            .unwrap_or_else(|| {
-                panic!(
-                    "whole used paired UV embedding: {first_owner:?} {second_owner:?} {central:?}"
-                )
-            });
-            // Prepare original knots before borrowing the same physical edge.
-            let cuts = original_coedge_parameter_cuts(
-                [(&a, first.coedge), (&b, second.coedge)],
-                available,
-                &mut work,
-                &cancel,
-            )
-            .unwrap();
-            let mut covered = 0;
-            let mut current_range = central;
-            let mut current_owner = first_owner;
-            let mut current_phase = "original spatial preparation";
-            let mut last_refusal = None;
-            a.with_original_spatial_curve(first.coedge, available, &mut work, &cancel, |curve, work, cancel| {
-                for span in curve.parameter_intervals() {
-                    let start = span.0.max(central[0]);
-                    let finish = span.1.min(central[1]);
-                    if start > finish {
-                        continue;
-                    }
-                    let first_cut = cuts.partition_point(|cut| *cut <= start);
-                    let last_cut = cuts.partition_point(|cut| *cut < finish).max(first_cut);
-                    let mut start = start;
-                    for finish in cuts[first_cut..last_cut].iter().copied()
-                        .chain(std::iter::once(finish))
-                    {
-                        let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
-                        stack[0] = ([start, finish], 0);
-                        let mut pending = 1;
-                        while pending != 0 {
-                            pending -= 1;
-                            let (range, depth) = stack[pending];
-                            current_range = range;
-                            current_phase = "original spatial enclosure";
-                            work.charge(1, cancel)?;
-                            let jet = curve.jet((range[0], range[1]), work, cancel)?;
-                            let mut refused = None;
-                            for (collar, embedding) in [
-                                (&link.first, &link.first_embedding),
-                                (&link.second, &link.second_embedding),
-                            ] {
-                                current_owner = [
-                                    collar.use_.face, collar.use_.wire, collar.use_.index,
-                                ];
-                                current_phase = "source collar local geometry";
-                                if let Err(proof) = collar.geometry_cell_proof(
-                                    embedding, range, &jet, link.allowance, work, cancel,
-                                )? {
-                                    refused = Some((collar.use_, proof));
-                                    break;
-                                }
-                            }
-                            if let Some((owner, proof)) = refused {
-                                let owner = [owner.face, owner.wire, owner.index];
-                                let mid = range[0] * 0.5 + range[1] * 0.5;
-                                assert!(
-                                    depth < MAX_DEPTH && mid > range[0] && mid < range[1],
-                                    "complete paired original-source local geometry: owner={owner:?} pair={first_owner:?}/{second_owner:?} central={central:?} native={range:?} proof={proof:?} work={}",
-                                    work.consumed(),
-                                );
-                                last_refusal = Some((owner, range, proof));
-                                stack[pending] = ([mid, range[1]], depth + 1);
-                                stack[pending + 1] = ([range[0], mid], depth + 1);
-                                pending += 2;
-                            } else {
-                                covered += 1;
-                            }
-                        }
-                        start = finish;
-                    }
-                }
-                Ok(())
-            })
-            .map_err(|mut error| {
-                if error.code == GeometryErrorCode::ResourceLimit {
-                    error.message = format!(
-                        "{}; direct paired source cover phase={current_phase} owner={current_owner:?} current_native={current_range:?} last_local_refusal={last_refusal:?}",
-                        error.message,
-                    );
-                }
-                error
-            })
-            .unwrap_or_else(|error| panic!(
-                "whole original paired collar: {first_owner:?}/{second_owner:?} central={central:?} work={}: {error:?}",
-                work.consumed(),
-            ));
-            assert!(
-                covered > 0,
-                "every whole original paired central range is covered"
-            );
-            complete_pairs += 1;
-        }
-        assert!(complete_pairs > 0);
-    }
-
-    #[test]
-    fn actual_fitting_circular_rim_normal_embedding_covers_unchanged_used_ribbon() {
-        let cancel = AtomicBool::new(false);
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step");
-        let definition = crate::import_step(&std::fs::read(path).unwrap(), &cancel).unwrap();
-        let mut work = GeometryWorkBudget::new(20_000_000);
-        let standalone = OriginalTrimSource::standalone(&definition);
-        let originals = standalone
-            .prepare_domains_if_missing(MAX_SCRATCH_BYTES, &mut work, &cancel)
-            .unwrap()
-            .expect("one owner for the unchanged original trim domains");
-        let source = standalone.borrowing_domains(Some(&originals));
-        let available = MAX_SCRATCH_BYTES - originals.retained_bytes();
-        let mut incidence =
-            SourceEdgeIncidence::new(&definition, available, &mut work, &cancel).unwrap();
-        incidence
-            .prepare_vertices(available, &mut work, &cancel)
-            .unwrap();
-        let available = available - incidence.owned_bytes();
-
-        // Both annular wires, including every occurrence produced by periodic
-        // splitting. The flat slot counts ALL preceding wires, just as the
-        // original incidence inventory does; wire-local index is not that slot.
-        let face_index = 2;
-        let face = definition.solid.face_iter().nth(face_index).unwrap();
-        let source_face = &definition.source_topology.faces[face_index];
-        assert_eq!(source_face.wires.len(), 2);
-        assert_eq!(source_face.wires.len(), face.absolute_boundaries().len());
-        let mut uses = Vec::new();
-        let mut vertices = Vec::new();
-        let mut flat = 0;
-        for (wire_index, source_wire) in source_face.wires.iter().enumerate() {
-            let wire = &face.absolute_boundaries()[wire_index];
-            assert_eq!(source_wire.coedges.len(), wire.len());
-            assert!(
-                !wire.is_empty(),
-                "each actual annular rim must be exercised"
-            );
-            for (index, source_use) in source_wire.coedges.iter().enumerate() {
-                let edge = &wire[index];
-                assert_eq!(source_use.native_orientation, edge.orientation());
-                let expected = CoedgeUse {
-                    face: face_index,
-                    coedge: flat,
-                    wire: wire_index,
-                    index,
-                    orientation: edge.orientation() == face.orientation(),
-                };
-                flat += 1;
-                let pair = incidence.get(edge.id()).expect("actual original rim edge");
-                let second = pair.second.expect("opposed actual original rim use");
-                assert!(pair.first == expected || second == expected);
-                // Exercise the paired original occurrence as well: its chart,
-                // gauge and orientation need not match the annular plane's.
-                uses.extend([pair.first, second]);
-                for vertex in pair.vertices {
-                    if !vertices.contains(&vertex) {
-                        vertices.push(vertex);
-                    }
-                }
-            }
-        }
-        assert_eq!(uses.len(), 2 * flat);
-
-        // Literal exits from the SAME complete source-only NativeV geometry
-        // plans as production: no coordinate lookup, uniform fraction, UV
-        // qualification or query-dependent shortening.
-        let mut exits = Vec::new();
-        for vertex in vertices {
-            let plan = vertex_transport::SourceVertexTransportPlan::prepare(
-                source, &incidence, vertex, available, &mut work, &cancel,
-            )
-            .unwrap()
-            .expect("actual rim NativeV has its unchanged source-only geometry plan");
-            plan.visit_native_exits(&mut work, &cancel, &mut |edge, back, parameter, _work| {
-                if let Some(&(_, _, previous)) = exits
-                    .iter()
-                    .find(|&&(candidate, end, _)| candidate == edge && end == back)
-                {
-                    assert_eq!(
-                        previous, parameter,
-                        "one literal exit per original endpoint germ"
-                    );
-                } else {
-                    exits.push((edge, back, parameter));
-                }
-                Ok(())
-            })
-            .unwrap();
-        }
-        let mut nonzero_collars = 0;
-        for use_ in uses {
-            let domain = source
-                .face_domain(use_.face, available, &mut work, &cancel)
-                .unwrap();
-            let face = domain.native().face();
-            let edge = &face.absolute_boundaries()[use_.wire][use_.index];
-            let source_use =
-                &definition.source_topology.faces[use_.face].wires[use_.wire].coedges[use_.index];
-            let proof = domain.original_coedge_correspondence(use_.coedge).unwrap();
-            let binding = proof.binding().expect("final actual original-use binding");
-            assert_eq!(binding.face, face.id());
-            assert_eq!(binding.edge, edge.id());
-            assert_eq!(binding.owner, [use_.face, use_.wire, use_.index]);
-            assert_eq!(binding.source, *source_use);
-            assert_eq!(binding.endpoints, [edge.front().id(), edge.back().id()]);
-            let native = edge.with_curve(|curve| curve.range_tuple());
-            assert_eq!(proof.native_range(), [native.0, native.1]);
-            let slope = proof.uv_parameter_derivative();
-            let context = format!(
-                "face={} coedge={} wire={} index={} source={source_use:?} native={:?} uv={:?} map_derivative={:?} margin={:?} physical_error_mm={}",
-                use_.face,
-                use_.coedge,
-                use_.wire,
-                use_.index,
-                proof.native_range(),
-                proof.uv_range(),
-                [slope.lo, slope.hi],
-                proof.margin_uv(),
-                proof.position_error_mm(),
-            );
-            assert!(
-                proof.position_error_mm() <= source_allowance(&definition).unwrap(),
-                "{context}"
-            );
-            let uv_range = proof.uv_range();
-            assert!(
-                (uv_range[0] < uv_range[1] && slope.lo > 0.0)
-                    || (uv_range[1] < uv_range[0] && slope.hi < 0.0),
-                "retained original parameter map must be strictly oriented: {context}"
-            );
-            let range = proof.native_range();
-            let width =
-                (range[1] - range[0]) * domain.material_realization().collar_parameter_fraction();
-            assert!(
-                width.is_finite() && width > 0.0,
-                "source-only collar width: {context}"
-            );
-            let collar = OriginalCollar::for_enclosure(&domain, use_, &mut work, &cancel)
-                .unwrap_or_else(|error| panic!("original collar evaluation: {context}: {error:?}"))
-                .unwrap_or_else(|| panic!("source-only inward classification refused after actual owner/map/width audit: {context}"));
-            let has_collar = matches!(collar.transport, CarrierTransport::Collar { .. });
-            nonzero_collars += usize::from(has_collar);
-            let find_exit = |back| {
-                exits
-                    .iter()
-                    .find(|&&(candidate, end, _)| candidate == edge.id() && end == back)
-                    .map(|&(_, _, parameter)| parameter)
-                    .unwrap_or_else(|| {
-                        panic!("missing original endpoint germ back={back}: {context}")
-                    })
-            };
-            let central = [find_exit(false), find_exit(true)];
-            assert!(
-                range[0] < central[0] && central[0] < central[1] && central[1] < range[1],
-                "actual NativeV exits partition the whole original rim: {context} central={central:?}"
-            );
-            let midpoint = range[0] * 0.5 + range[1] * 0.5;
-            let (curve, _) = domain
-                .original_coedge_jets(use_.coedge, [midpoint; 2], available, &mut work, &cancel)
-                .unwrap();
-            let before = collar
-                .boundary_jet(midpoint, [0.0, 1.0], &curve, &mut work, &cancel)
-                .unwrap();
-            let embedding = collar
-                .embedding(central, [0.0, 1.0], &mut work, &cancel)
-                .unwrap_or_else(|error| panic!("scoped original UV proof: {context} central={central:?}: {error:?}"))
-                .unwrap_or_else(|| panic!("whole USED original normal ribbon is not proved injective: {context} central={central:?}"));
-            assert!(embedding.covers(&collar, central, [0.0, 1.0]), "{context}");
-            assert!(
-                !embedding.covers(&collar, range, [0.0, 1.0]),
-                "a central receipt must never claim the collapsed NativeV quotient: {context}"
-            );
-            assert!(
-                !embedding.covers(&collar, central, [0.0, 1.0001]),
-                "{context}"
-            );
-            let after = collar
-                .boundary_jet(midpoint, [0.0, 1.0], &curve, &mut work, &cancel)
-                .unwrap();
-            assert_eq!(
-                before.position.map(|v| [v.lo, v.hi]),
-                after.position.map(|v| [v.lo, v.hi]),
-                "{context}"
-            );
-            assert_eq!(
-                before.derivative.map(|v| [v.lo, v.hi]),
-                after.derivative.map(|v| [v.lo, v.hi]),
-                "{context}"
-            );
-            if has_collar {
-                assert!(
-                    collar
-                        .embedding(range, [0.0, 1.0], &mut work, &cancel)
-                        .unwrap()
-                        .is_none(),
-                    "collapsed original endpoints are not a strict UV chart: {context}"
-                );
-            }
-
-            // Right geometry, wrong original occurrence: neither constructor
-            // ownership nor a borrowed receipt may accept it.
-            let pair = incidence.get(edge.id()).unwrap();
-            let other = if pair.first == use_ {
-                pair.second.unwrap()
-            } else {
-                pair.first
-            };
-            let wrong_use = CoedgeUse {
-                coedge: use_.coedge,
-                ..other
-            };
-            assert!(
-                OriginalCollar::for_enclosure(&domain, wrong_use, &mut work, &cancel)
-                    .unwrap()
-                    .is_none(),
-                "actual geometry cannot grant foreign owner authority: {context}"
-            );
-            let owned = collar
-                .owned_embedding(central, available, &mut work, &cancel)
-                .unwrap()
-                .expect("whole boundary-owned original ribbon");
-            let wrong_owner = OriginalCollar {
-                use_: wrong_use,
-                ..collar
-            };
-            assert!(
-                !embedding.covers(&wrong_owner, central, [0.0, 1.0]),
-                "{context}"
-            );
-            assert!(
-                wrong_owner
-                    .geometry_cell(
-                        &owned,
-                        central,
-                        &curve,
-                        source_allowance(&definition).unwrap(),
-                        &mut work,
-                        &cancel,
-                    )
-                    .is_err(),
-                "geometry consumer must reject another owner's receipt: {context}"
-            );
-            let narrow = collar
-                .owned_embedding([midpoint; 2], available, &mut work, &cancel)
-                .unwrap()
-                .unwrap();
-            assert!(!narrow.covers(&collar, central, [0.0, 1.0]), "{context}");
-            assert!(
-                collar
-                    .geometry_cell(
-                        &narrow,
-                        central,
-                        &curve,
-                        source_allowance(&definition).unwrap(),
-                        &mut work,
-                        &cancel,
-                    )
-                    .is_err(),
-                "every cell must consume its full native scope: {context}"
-            );
-            let narrow_across = collar
-                .embedding([midpoint; 2], [0.0, 0.5], &mut work, &cancel)
-                .unwrap()
-                .unwrap();
-            assert!(
-                !narrow_across.covers(&collar, [midpoint; 2], [0.0, 1.0]),
-                "a partial PURE across proof cannot grant whole owned-G authority: {context}"
-            );
-        }
-        assert!(
-            nonzero_collars > 0,
-            "actual rims must exercise nonzero original transport"
-        );
-    }
-
-    #[test]
-    fn normal_coordinate_pmatrix_refuses_a_genuine_curvature_fold() {
-        // At t=0 of a unit circle, U=(1-k*r)*gamma. k=2 and
-        // r in [0,1] includes an actual collapsed circle and orientation fold.
-        let jet = ChartCurveEnclosure {
-            position: [1.0, 0.0].map(Interval::point),
-            derivative: [0.0, 1.0].map(Interval::point),
-            second_derivative: [-1.0, 0.0].map(Interval::point),
-        };
-        assert!(normal_uv_pmatrix(
-            &jet,
-            jet.derivative,
-            0.25,
-            1.0,
-            Interval { lo: 0.0, hi: 1.0 }
-        ));
-        assert!(!normal_uv_pmatrix(
-            &jet,
-            jet.derivative,
-            2.0,
-            1.0,
-            Interval { lo: 0.0, hi: 1.0 }
-        ));
-    }
-
-    fn pocket_floor() -> (Definition, usize) {
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(name, _, _)| *name == "native-parity-blind-pocket.step")
-            .expect("original native pocket recipe");
-        let source = crate::parity_fixtures::original("material-floor-scalar-law.step", solid);
-        let definition = crate::import_step(source.as_bytes(), &AtomicBool::new(false))
-            .expect("unchanged original coefficients");
-        let mut work = GeometryWorkBudget::new(20_000_000);
-        let functional = HeightFunctional {
-            direction: [0.0, 0.0, 1.0].map(Interval::point),
-            offset: Interval::point(0.0),
-        };
-        let floor = (0..definition.solid.face_iter().count())
-            .find(|&face| {
-                super::super::super::slab::constant_source_face_height(
-                    &definition,
-                    face,
-                    functional,
-                    &mut work,
-                    &AtomicBool::new(false),
-                )
-                .unwrap()
-                .is_some_and(|height| height.lo == 4.0 && height.hi == 4.0)
-            })
-            .expect("coefficient-backed interior floor");
-        (definition, floor)
-    }
-
-    #[test]
-    fn actual_generic_transport_floor_preserves_complete_exact_scalar_law() {
-        let (definition, floor) = pocket_floor();
-        let functional = HeightFunctional {
-            direction: [0.0, 0.0, 1.0].map(Interval::point),
-            offset: Interval::point(0.0),
-        };
-        let mut work = GeometryWorkBudget::new(20_000_000);
-        assert!(
-            !definition
-                .material_transport_is_proved_zero(&mut work, &AtomicBool::new(false),)
-                .unwrap()
-        );
-        assert_eq!(
-            constant_material_face_height(
-                &definition,
-                floor,
-                functional,
-                &mut work,
-                &AtomicBool::new(false),
-            )
-            .unwrap(),
-            Some(4.0)
-        );
-    }
-
-    #[test]
-    fn complete_material_scalar_law_rejects_sub_roundoff_functional_tilt() {
-        let (definition, floor) = pocket_floor();
-        let functional = HeightFunctional {
-            direction: [1.0e-18, 0.0, 1.0].map(Interval::point),
-            offset: Interval::point(0.0),
-        };
-        let mut work = GeometryWorkBudget::new(20_000_000);
-        assert_eq!(
-            constant_material_face_height(
-                &definition,
-                floor,
-                functional,
-                &mut work,
-                &AtomicBool::new(false),
-            )
-            .unwrap(),
-            None,
-            "rounded point heights cannot establish a scalar identity"
-        );
-    }
-}
+mod scalar_law_tests;

@@ -38,7 +38,14 @@ fn reaped(pid: u64) {
 fn diagnostic_readiness_and_triangle_finish_after_child_reap() {
     let diagnostic = report(cli().arg("diagnose").output().unwrap());
     assert_eq!(diagnostic["ping"], "pong");
-    assert_eq!(diagnostic["hello"]["kernel"], "monstertruck");
+    assert_eq!(
+        diagnostic["hello"]["kernel"],
+        spiling_contracts::geometry::KERNEL_NAME
+    );
+    assert_eq!(
+        diagnostic["hello"]["kernel_identity"]["name"],
+        spiling_contracts::geometry::KERNEL_NAME
+    );
     assert!(diagnostic["hello"]["session_id"].as_str().is_some());
     let root =
         std::env::temp_dir().join(format!("spiling-diagnostic-cli-{}", uuid::Uuid::new_v4()));

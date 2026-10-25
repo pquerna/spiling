@@ -11,6 +11,9 @@ use ts_rs::TS;
 mod runtime;
 pub use runtime::*;
 
+/// Geometry provider shipped with the engine and its protocol clients.
+pub const KERNEL_NAME: &str = "solidcore";
+
 pub const IMPORT_PROFILE: &str = "step-native-trimmed-v2";
 pub const MESH_PROFILE: &str = "mesh-trimmed-mm-0.05-v2";
 pub const MAX_SOURCE_BYTES: u32 = 16 * 1024 * 1024;

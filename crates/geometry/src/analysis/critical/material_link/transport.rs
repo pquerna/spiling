@@ -7,7 +7,21 @@
 //! additionally requires the closed radial link and complete degree proof.
 
 use super::*;
+use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::source_incidence::native_coedge;
+use crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES;
+use crate::parametric::SurfaceEvaluator;
+use solidcore::EdgeId;
 use vertex_transport::SourceVertexPlan;
+
+// Original operators may recursively evaluate their selected source carriers.
+// Keep evaluator scratch disjoint from live scalar heaps and output capacity.
+pub(super) const EVALUATION_SCRATCH_BYTES: usize =
+    if SOURCE_OPERAND_SCRATCH_BYTES > SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES {
+        SOURCE_OPERAND_SCRATCH_BYTES
+    } else {
+        SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    };
 
 #[derive(Clone, Copy)]
 pub(crate) enum SourceTransportOwner {
@@ -100,7 +114,7 @@ pub(super) fn push(
 /// Fold the covector into original homogeneous coefficients before bounding
 /// the scalar ratio. Piecewise first jets also supply the mean-value theorem.
 pub(super) fn scalar_surface_jet(
-    surface: &monstertruck_modeling::Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     direction: [Interval; 3],
     work: &mut GeometryWorkBudget,
@@ -122,7 +136,7 @@ pub(super) fn scalar_surface_jet(
 
 fn collar_scalar_support(
     collar: &OriginalCollar<'_, '_>,
-    surface: &monstertruck_modeling::Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     range: [f64; 2],
     direction: [Interval; 3],
     refinement: Option<([f64; 2], f64)>,
@@ -213,7 +227,7 @@ fn collar_scalar_support(
 /// a local endpoint tolerance. It changes enclosures only, never the selected
 /// source recipe, original domain, displacement grid or physical error proof.
 pub(crate) fn source_transport_supports(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     direction: [Interval; 3],
     scalar_refinement: Option<([f64; 2], f64)>,
     remaining_bytes: usize,
@@ -245,26 +259,10 @@ pub(crate) fn source_transport_supports(
     if let Some(plans) = source.vertex_plans() {
         plans.validate_source(definition, work, cancel)?;
     }
-    if definition.material_transport_is_proved_zero(work, cancel)? {
+    if source.material_transport_is_proved_zero(work, cancel)? {
         return Ok(Vec::new());
     }
     let allowance = source_allowance(definition)?;
-    // Bounds and other standalone consumers share the same original domain
-    // owner as height queries. Prepared sources already lend and charge it.
-    let before = work.consumed();
-    let originals = source
-        .prepare_domains_if_missing(remaining_bytes, work, cancel)
-        .map_err(|error| {
-            work.annotate_error(
-                error,
-                before,
-                "source support original-domain owner preparation",
-            )
-        })?;
-    let source = source.borrowing_domains(originals.as_ref());
-    let remaining_bytes = remaining_bytes
-        .checked_sub(originals.as_ref().map_or(0, |owner| owner.retained_bytes()))
-        .ok_or_else(resource)?;
     let before = work.consumed();
     let mut incidence = SourceEdgeIncidence::new(definition, remaining_bytes, work, cancel)
         .map_err(|error| {
@@ -313,19 +311,14 @@ pub(crate) fn source_transport_supports(
                         ),
                     )
                 })?;
-            let working = face_limit
-                .checked_sub(domain.owned_bytes())
-                .ok_or_else(resource)?;
-            let classifier_bytes = working
-                .checked_add(domain.retained_bytes())
-                .ok_or_else(resource)?;
+            let working = face_limit;
             let before = work.consumed();
             let Some(collar) = OriginalCollar::for_enclosure_with_byte_limit(
-                &domain, use_, classifier_bytes, work, cancel,
+                domain, use_, working, work, cancel,
             )
                 .map_err(|error| work.annotate_error(error, before,
-                    format_args!("source support central-coedge owner preparation; face={}, coedge={}, native_range={:?}",
-                        use_.face, use_.coedge, domain.original_coedge_correspondence(use_.coedge).ok().map(|proof| proof.native_range()))))? else {
+                    format_args!("source support central-coedge owner preparation; face={}, coedge={}, spatial_range={:?}",
+                        use_.face, use_.coedge, domain.original_coedge_correspondence(use_.coedge).ok().map(|proof| proof.spatial_range()))))? else {
                 return Err(failure(
                     GeometryErrorCode::ParameterCorrespondenceUnavailable,
                     "source material collar has no complete original coefficient recipe",
@@ -336,64 +329,93 @@ pub(crate) fn source_transport_supports(
             if matches!(collar.transport, CarrierTransport::Exact) {
                 continue;
             }
-            let face = domain.native().face();
-            let edge = &face.absolute_boundaries()[use_.wire][use_.index];
+            let (edge_use, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
+            let coedge = domain.coedges().get(use_.coedge).ok_or_else(|| {
+                unavailable("source support lost its original coedge binding")
+            })?;
+            if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
+                return Err(unavailable("source support belongs to another original native use"));
+            }
+            let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
+            let binding = correspondence.binding().ok_or_else(|| {
+                unavailable("source support lost its original native binding")
+            })?;
+            if binding.edge != edge_use.edge
+                || binding.owner != [use_.face, use_.wire, use_.index]
+                || binding.endpoints != edge.vertices
+                || binding.native_interval != [edge.interval.min(), edge.interval.max()]
+                || correspondence.spatial_range() != collar.range
+            {
+                return Err(unavailable("source support collar has a different original spatial/native binding"));
+            }
             let before = work.consumed();
-            edge.with_curve(|curve| -> Result<(), GeometryError> {
-                let before = work.consumed();
-                let prepared = definition.prepare_boundary_curve(edge.id(), curve,
-                    (collar.range[0], collar.range[1]), working, work, cancel)
-                    .map_err(|error| work.annotate_error(error, before,
-                        format_args!("source support central-coedge curve preparation; face={}, coedge={}, native_range={:?}",
-                            use_.face, use_.coedge, collar.range)))?;
-                for span in prepared.parameter_intervals() {
-                    work.charge(1, cancel)?;
-                    let range = [span.0, span.1];
-                    let spatial = prepared.jet(span, work, cancel)?;
-                    let uv = chart_jet(&domain, use_.coedge, range, work, cancel)?;
-                    let before = work.consumed();
-                    face.with_surface(|surface| -> Result<(), GeometryError> {
-                        let boundary = crate::parametric::surface_piecewise_enclosure(surface,
-                            uv_box(add_margin(uv.position, collar.margin)), work, cancel)?;
-                        let components: [Option<Interval>; 3] = std::array::from_fn(|axis| intersection(
-                            exact_difference(spatial.position[axis], boundary.position[axis]),
-                            Interval { lo: -collar.position_error_mm, hi: collar.position_error_mm }));
-                        let [Some(dx), Some(dy), Some(dz)] = components else {
-                            return Err(unavailable("source material support contradicts its complete forward correspondence"));
-                        };
-                        let displacement = [dx, dy, dz];
-                        let error = length(displacement)?.hi.min(collar.position_error_mm);
-                        if !error.is_finite() || error > allowance {
-                            return Err(unavailable("source material ribbon exceeds the frozen source allowance"));
-                        }
-                        let scalar_scratch = available.checked_sub(domain.owned_bytes())
-                            .and_then(|bytes| bytes.checked_sub(prepared.retained_bytes()))
-                            .and_then(|bytes| bytes.checked_sub(output_bytes(&output))).ok_or_else(resource)?;
-                        let scalar_base = collar_scalar_support(&collar, surface, range, direction,
-                            scalar_refinement, scalar_scratch, work, cancel)?;
-                        let scalar_delta = mul(Interval { lo: 0.0, hi: 1.0 }, dot(direction, displacement));
-                        let scalar_corrected = add(scalar_base, scalar_delta);
-                        // The whole lambda homotopy is retained, including raw
-                        // and corrected images at both CLOSED height cuts.
-                        let support = SourceTransportSupport {
-                            owner: SourceTransportOwner::OriginalCoedge { face: use_.face, coedge: use_.coedge },
-                            base_interval: [scalar_base.lo, scalar_base.hi],
-                            corrected_interval: [scalar_corrected.lo, scalar_corrected.hi],
-                            displacement_interval: [scalar_delta.lo, scalar_delta.hi],
-                            realized_witness_interval: None,
-                            realized_endpoint_witnesses: None,
-                            source_error_mm: error,
-                        };
-                        let output_limit = available.checked_sub(domain.owned_bytes())
-                            .and_then(|v| v.checked_sub(prepared.retained_bytes())).ok_or_else(resource)?;
-                        push(&mut output, support, output_limit)
-                    }).map_err(|error| work.annotate_error(error, before,
-                        format_args!("source support central-coedge scalar enclosure; face={}, coedge={}, native_range={range:?}",
-                            use_.face, use_.coedge)))?;
-                }
-                Ok(())
-            }).map_err(|error| work.annotate_error(error, before,
-                format_args!("source support central-coedge preparation; face={}, coedge={}, native_range={:?}",
+            let surface = domain.surface_operand();
+            domain.with_original_spatial_curve(
+                use_.coedge, working, work, cancel,
+                |prepared, work, cancel| {
+                    // The selected source provider owns this gauge and its literal
+                    // coefficients. Native edge intervals above bind identity only.
+                    if !crate::parametric::curve_parameter_span_continuous(
+                        prepared, collar.range, work, cancel,
+                    )? {
+                        return Err(unavailable("source support spatial provider has no whole-branch continuity proof"));
+                    }
+                    crate::parametric::curve_enclosure(
+                        prepared, (collar.range[0], collar.range[1]), work, cancel,
+                    )?;
+                    for range in crate::parametric::curve_parameter_spans(
+                        prepared, collar.range, work, cancel,
+                    )? {
+                        work.charge(1, cancel)?;
+                        let spatial = crate::parametric::curve_enclosure(
+                            prepared, (range[0], range[1]), work, cancel,
+                        )?;
+                        let uv = chart_jet(domain, use_.coedge, range, work, cancel)?;
+                        let before = work.consumed();
+                        let outcome = (|| {
+                            let boundary = crate::parametric::surface_piecewise_enclosure(&surface,
+                                uv_box(add_margin(uv.position, collar.margin)), work, cancel)?;
+                            let components: [Option<Interval>; 3] = std::array::from_fn(|axis| intersection(
+                                exact_difference(spatial.position[axis], boundary.position[axis]),
+                                Interval { lo: -collar.position_error_mm, hi: collar.position_error_mm }));
+                            let [Some(dx), Some(dy), Some(dz)] = components else {
+                                return Err(unavailable("source material support contradicts its complete forward correspondence"));
+                            };
+                            let displacement = [dx, dy, dz];
+                            let error = length(displacement)?.hi.min(collar.position_error_mm);
+                            if !error.is_finite() || error > allowance {
+                                return Err(unavailable("source material ribbon exceeds the frozen source allowance"));
+                            }
+                            let scalar_scratch = available.checked_sub(output_bytes(&output))
+                                .and_then(|bytes| bytes.checked_sub(EVALUATION_SCRATCH_BYTES))
+                                .ok_or_else(resource)?;
+                            let scalar_base = collar_scalar_support(&collar, &surface, range, direction,
+                                scalar_refinement, scalar_scratch, work, cancel)?;
+                            let scalar_delta = mul(Interval { lo: 0.0, hi: 1.0 }, dot(direction, displacement));
+                            let scalar_corrected = add(scalar_base, scalar_delta);
+                            // Retain the complete lambda homotopy, including raw and
+                            // corrected images at both CLOSED height cuts.
+                            let support = SourceTransportSupport {
+                                owner: SourceTransportOwner::OriginalCoedge { face: use_.face, coedge: use_.coedge },
+                                base_interval: [scalar_base.lo, scalar_base.hi],
+                                corrected_interval: [scalar_corrected.lo, scalar_corrected.hi],
+                                displacement_interval: [scalar_delta.lo, scalar_delta.hi],
+                                realized_witness_interval: None,
+                                realized_endpoint_witnesses: None,
+                                source_error_mm: error,
+                            };
+                            let output_limit = available.checked_sub(EVALUATION_SCRATCH_BYTES)
+                                .ok_or_else(resource)?;
+                            push(&mut output, support, output_limit)
+                        })();
+                        outcome.map_err(|error| work.annotate_error(error, before,
+                            format_args!("source support central-coedge scalar enclosure; face={}, coedge={}, spatial_range={range:?}",
+                                use_.face, use_.coedge)))?;
+                    }
+                    Ok(())
+                },
+            ).map_err(|error| work.annotate_error(error, before,
+                format_args!("source support central-coedge curve preparation; face={}, coedge={}, spatial_range={:?}",
                     use_.face, use_.coedge, collar.range)))?;
         }
     }
@@ -510,14 +532,15 @@ impl SourceProjectionCover<'_> {
         let first: [Interval; 3] = std::array::from_fn(|axis| dot(self.rows[axis], first));
         let second: [Interval; 3] = std::array::from_fn(|axis| dot(self.rows[axis], second));
         // Include world height in the motion metric: an excluded cut-crosser
-        // must refine in its actual native direction, not a source-F proxy.
+        // must refine in its actual G recipe direction, not a source-F proxy.
         crate::analysis::critical::split_metric_derivatives(parameter, depth, face, &first, &second)
     }
 }
 
 struct ClosedSourceExit {
-    edge: monstertruck_topology::EdgeId<Curve>,
-    absolute_back: bool,
+    edge: EdgeId,
+    /// High endpoint in the original spatial provider gauge, not native back.
+    spatial_high: bool,
     parameter: f64,
 }
 
@@ -525,7 +548,7 @@ struct ClosedSourceExit {
 /// No physical Original-F/G error, material membership or void is asserted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn source_transport_projection_cover(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     matrix: [[Interval; 3]; 3],
     pose: spiling_contracts::geometry::RigidPoseMm,
     interval: [f64; 2],
@@ -536,7 +559,7 @@ pub(crate) fn source_transport_projection_cover(
     cancel: &AtomicBool,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
     type Pending = [([[f64; 2]; 2], u8); MAX_DEPTH as usize + 1];
-    const FIXED_BYTES: usize = SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+    const FIXED_BYTES: usize = EVALUATION_SCRATCH_BYTES
         + std::mem::size_of::<Pending>()
         + std::mem::size_of::<SourceProjectionCover<'static>>()
         + std::mem::size_of::<OriginalCollar<'static, 'static>>()
@@ -549,7 +572,7 @@ pub(crate) fn source_transport_projection_cover(
     if let Some(plans) = source.vertex_plans() {
         plans.validate_source(definition, work, cancel)?;
     }
-    if definition.material_transport_is_proved_zero(work, cancel)? {
+    if source.material_transport_is_proved_zero(work, cancel)? {
         return Ok(original_xy);
     }
     let mut cover = SourceProjectionCover {
@@ -561,11 +584,6 @@ pub(crate) fn source_transport_projection_cover(
     };
     let available = remaining_bytes
         .checked_sub(FIXED_BYTES)
-        .ok_or_else(resource)?;
-    let originals = source.prepare_domains_if_missing(available, work, cancel)?;
-    let source = source.borrowing_domains(originals.as_ref());
-    let available = available
-        .checked_sub(originals.as_ref().map_or(0, |owner| owner.retained_bytes()))
         .ok_or_else(resource)?;
     let mut incidence = SourceEdgeIncidence::new(definition, available, work, cancel)?;
     incidence.prepare_vertices(available, work, cancel)?;
@@ -609,20 +627,20 @@ pub(crate) fn source_transport_projection_cover(
                 .ok_or_else(resource)?;
             let plan = selection.plan();
             plan.visit_projected_position_supports(source, &mut cover, scratch, work, cancel)?;
-            plan.visit_native_exits(work, cancel, &mut |edge, absolute_back, parameter, work| {
+            plan.visit_spatial_exits(work, cancel, &mut |edge, spatial_high, parameter, work| {
                 if !parameter.is_finite() || incidence.get(edge).is_none() {
                     return Err(unavailable(
-                        "actual-G corner has a foreign or nonfinite native exit",
+                        "actual-G corner has a foreign or nonfinite original spatial exit",
                     ));
                 }
                 for previous in &exits {
                     work.charge(1, cancel)?;
-                    if previous.edge == edge && previous.absolute_back == absolute_back {
+                    if previous.edge == edge && previous.spatial_high == spatial_high {
                         return if previous.parameter == parameter {
                             Ok(())
                         } else {
                             Err(unavailable(
-                                "actual-G corners disagree on their literal native exit",
+                                "actual-G corners disagree on their literal original spatial exit",
                             ))
                         };
                     }
@@ -634,7 +652,7 @@ pub(crate) fn source_transport_projection_cover(
                 }
                 exits.push(ClosedSourceExit {
                     edge,
-                    absolute_back,
+                    spatial_high,
                     parameter,
                 });
                 Ok(())
@@ -650,7 +668,7 @@ pub(crate) fn source_transport_projection_cover(
     }
     if exits.len() != exit_count {
         return Err(unavailable(
-            "actual-G cover lacks complete literal native endpoint exits",
+            "actual-G cover lacks complete literal original spatial endpoint exits",
         ));
     }
     let mut stack: Pending = [([[0.0; 2]; 2], 0); MAX_DEPTH as usize + 1];
@@ -663,16 +681,11 @@ pub(crate) fn source_transport_projection_cover(
             let before = work.consumed();
             let outcome = (|| {
                 let domain = source.face_domain(use_.face, available, work, cancel)?;
-                let scratch = available
-                    .checked_sub(domain.owned_bytes())
-                    .ok_or_else(resource)?;
-                let classifier_bytes = scratch
-                    .checked_add(domain.retained_bytes())
-                    .ok_or_else(resource)?;
+                let scratch = available;
                 let collar = OriginalCollar::for_enclosure_with_byte_limit(
-                    &domain,
+                    domain,
                     use_,
-                    classifier_bytes,
+                    scratch,
                     work,
                     cancel,
                 )?
@@ -681,81 +694,102 @@ pub(crate) fn source_transport_projection_cover(
                     // No added ribbon: its original F is already in the seed.
                     return Ok(());
                 }
-                let face = domain.native().face();
-                let edge = &face.absolute_boundaries()[use_.wire][use_.index];
+                let (edge_use, edge) = native_coedge(definition, use_.face, use_.wire, use_.index)?;
+                let coedge = domain.coedges().get(use_.coedge).ok_or_else(|| {
+                    unavailable("actual-G ribbon lost its original coedge binding")
+                })?;
+                if coedge.edge != edge_use.edge || coedge.edgeuse != use_.edgeuse {
+                    return Err(unavailable("actual-G ribbon belongs to another original native use"));
+                }
                 let mut central = [None; 2];
                 for exit in &exits {
                     work.charge(1, cancel)?;
-                    if exit.edge == edge.id() {
-                        central[usize::from(exit.absolute_back)] = Some(exit.parameter);
+                    if exit.edge == edge_use.edge {
+                        central[usize::from(exit.spatial_high)] = Some(exit.parameter);
                     }
                 }
                 let [Some(front), Some(back)] = central else {
                     return Err(unavailable(
-                        "actual-G ribbon lacks both literal native endpoint exits",
+                        "actual-G ribbon lacks both literal original spatial endpoint exits",
                     ));
                 };
                 if collar.range[0] >= front || front >= back || back >= collar.range[1] {
                     return Err(unavailable(
-                        "actual-G exits do not partition the original native ribbon",
+                        "actual-G exits do not partition the original spatial ribbon",
                     ));
                 }
-                edge.with_curve(|curve| -> Result<(), GeometryError> {
-                    let prepared = definition.prepare_boundary_curve(
-                        edge.id(),
-                        curve,
-                        (front, back),
-                        scratch,
-                        work,
-                        cancel,
-                    )?;
-                    scratch
-                        .checked_sub(prepared.retained_bytes())
-                        .ok_or_else(resource)?;
-                    let mut covered = front;
-                    for span in prepared.parameter_intervals() {
-                        work.charge(1, cancel)?;
-                        let range = [span.0.max(front), span.1.min(back)];
-                        if range[0] > range[1] {
-                            continue;
+                let correspondence = domain.original_coedge_correspondence(use_.coedge)?;
+                let binding = correspondence.binding().ok_or_else(|| {
+                    unavailable("actual-G ribbon lost its original native binding")
+                })?;
+                if binding.edge != edge_use.edge
+                    || binding.owner != [use_.face, use_.wire, use_.index]
+                    || binding.endpoints != edge.vertices
+                    || binding.native_interval != [edge.interval.min(), edge.interval.max()]
+                    || correspondence.spatial_range() != collar.range
+                {
+                    return Err(unavailable("actual-G ribbon has a different original spatial/native binding"));
+                }
+                let provider_query_bytes = scratch.checked_add(EVALUATION_SCRATCH_BYTES).ok_or_else(resource)?;
+                domain.with_original_spatial_curve(
+                    use_.coedge, provider_query_bytes, work, cancel,
+                    |prepared, work, cancel| {
+                        if !crate::parametric::curve_parameter_span_continuous(
+                            prepared, collar.range, work, cancel,
+                        )? {
+                            return Err(unavailable("actual-G spatial provider has no whole-branch continuity proof"));
                         }
-                        if range[0] > covered {
-                            return Err(unavailable(
-                                "actual-G coefficient spans leave an uncovered native interval",
-                            ));
-                        }
-                        covered = covered.max(range[1]);
-                        stack[0] = ([range, [0.0, 1.0]], 0);
-                        let mut pending = 1;
-                        while pending != 0 {
-                            pending -= 1;
-                            let (parameter, depth) = stack[pending];
+                        crate::parametric::curve_enclosure(
+                            prepared, (front, back), work, cancel,
+                        )?;
+                        let mut covered = front;
+                        for span in crate::parametric::curve_parameter_spans(
+                            prepared, [front, back], work, cancel,
+                        )? {
                             work.charge(1, cancel)?;
-                            let spatial =
-                                prepared.jet((parameter[0][0], parameter[0][1]), work, cancel)?;
-                            let jet =
-                                collar.position_first_jet(parameter, &spatial, work, cancel)?;
-                            if cover.include(jet.0)? {
+                            let range = [span[0].max(front), span[1].min(back)];
+                            if range[0] > range[1] {
                                 continue;
                             }
-                            let children =
-                                cover.split(parameter, depth, use_.face, jet.1, jet.2)?;
-                            if pending + children.len() > stack.len() {
-                                return Err(resource());
+                            if range[0] > covered {
+                                return Err(unavailable(
+                                    "actual-G coefficient spans leave an uncovered original spatial interval",
+                                ));
                             }
-                            for child in children.into_iter().rev() {
-                                stack[pending] = (child, depth + 1);
-                                pending += 1;
+                            covered = covered.max(range[1]);
+                            stack[0] = ([range, [0.0, 1.0]], 0);
+                            let mut pending = 1;
+                            while pending != 0 {
+                                pending -= 1;
+                                let (parameter, depth) = stack[pending];
+                                work.charge(1, cancel)?;
+                                let spatial = crate::parametric::curve_enclosure(
+                                    prepared, (parameter[0][0], parameter[0][1]), work, cancel,
+                                )?;
+                                let jet =
+                                    collar.position_first_jet(parameter, &spatial, work, cancel)?;
+                                if cover.include(jet.0)? {
+                                    continue;
+                                }
+                                let children =
+                                    cover.split(parameter, depth, use_.face, jet.1, jet.2)?;
+                                if pending + children.len() > stack.len() {
+                                    return Err(resource());
+                                }
+                                for child in children.into_iter().rev() {
+                                    stack[pending] = (child, depth + 1);
+                                    pending += 1;
+                                }
                             }
                         }
-                    }
-                    if covered < back {
-                        return Err(unavailable(
-                            "actual-G coefficient spans omit its closed native endpoint",
-                        ));
-                    }
-                    Ok(())
-                })
+                        if covered < back {
+                            return Err(unavailable(
+                                "actual-G coefficient spans omit its closed original spatial endpoint",
+                            ));
+                        }
+                        Ok(())
+                    },
+                )
             })();
             outcome.map_err(|error| {
                 work.annotate_error(
@@ -770,4 +804,50 @@ pub(crate) fn source_transport_projection_cover(
         }
     }
     Ok(cover.xy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::source_operand::{
+        PreparedOriginalSurface, SOURCE_OPERAND_SCRATCH_BYTES,
+    };
+
+    #[test]
+    fn source_scalar_support_preserves_original_radian_surface_law() {
+        let source = solidcraft_step::geom::Surface::Cylinder {
+            position: solidcraft_step::geom::Placement {
+                origin: [3.0, -4.0, 5.0],
+                axis: [0.0, 0.0, 1.0],
+                ref_direction: [1.0, 0.0, 0.0],
+            },
+            radius: 2.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let prepared = PreparedOriginalSurface::new(
+            &source,
+            [[0.0, std::f64::consts::TAU], [-1.0, 1.0]],
+            SOURCE_OPERAND_SCRATCH_BYTES + 64 * 1024,
+            &mut work,
+            &cancel,
+        ).unwrap();
+        let angle = 0.73_f64;
+        let (height, derivative) = scalar_surface_jet(
+            &prepared,
+            [[angle; 2], [0.2; 2]],
+            [1.0, 0.0, 0.0].map(Interval::point),
+            &mut work,
+            &cancel,
+        ).unwrap();
+        let expected = 3.0 + 2.0 * angle.cos();
+        let expected_du = -2.0 * angle.sin();
+        assert!(height.lo <= expected && expected <= height.hi);
+        assert!(derivative[0].lo <= expected_du && expected_du <= derivative[0].hi);
+        assert!(derivative[1].contains_zero());
+        // The native analytic degree chart at the same number has x near 5
+        // and a much smaller derivative; neither is this original operand.
+        assert!(height.hi < 4.6);
+        assert!(derivative[0].hi < -1.0);
+    }
 }

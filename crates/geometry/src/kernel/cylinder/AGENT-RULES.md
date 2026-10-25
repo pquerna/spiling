@@ -3,7 +3,7 @@
 
 # Full-cylinder face certificate rules
 
-Own only immutable source-local full exterior cylinder certification through the existing geometry facade. Resolve exact admitted positional face/native identities and generic face/wire/oriented-coedge references into the single analytic witness store; never fit modeled NURBS or infer face ownership from a mesh/global circle list.
+Own only immutable source-local full exterior cylinder certification through the existing geometry facade. Resolve the retained original STEP carrier and admitted face ordinal into SolidCore's actual analytic STEP surface and bounded Loopuse/Edgeuse cycles; `Loop.edges` is not an incidence inventory. Check exact native ellipse/line operands and shared vertex incidence, never fit modeled NURBS or infer face ownership from a mesh/global circle list.
 
 Require transformed analytic cylindrical carrier agreement, canonical material-outward orientation, full-source analytic Z extrema, two continuous monotone one-turn physical rims and opposite identical full-height axial seam incidences, with no extra trims/co-carrier ambiguity. Subdivision count, seam placement, exporter name, source dimensions and native chart wire count are not recognition keys. Keep 1e-7 mm residual and 1e-10 angular limits; query incidence storage is bounded by admitted coedges and cancellation is checked while building/traversing it.
 

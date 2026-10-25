@@ -18,7 +18,7 @@ use spiling_core::{
 };
 use spiling_geometry::{
     Definition, GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
-    MeshArtifact, PreparedSectionSource,
+    MeshArtifact, PreparedSolid,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +33,8 @@ use std::{
 
 pub use spiling_contracts::display::MeshBudget;
 struct Resident {
+    // Created and retained only inside run(). The compiler borrows cheap shared
+    // handles on this same worker; Definition's native caches are not Sync.
     definition: Arc<Definition>,
     record: StoredDefinition,
     vertices: u32,
@@ -511,15 +513,12 @@ impl Capacity {
                 "live/staged native source budget exceeded",
             ));
         }
-        let definition = spiling_geometry::import_step_with_limits(
+        let definition = spiling_geometry::from_step_bytes_with_limits(
             bytes,
             cancel,
-            spiling_geometry::ImportLimits {
-                max_faces: self.faces,
-                max_query_proof_bytes: self
-                    .query_proof_bytes
-                    .min(self.source_bytes as usize - bytes.len()),
-            },
+            self.faces,
+            self.query_proof_bytes
+                .min(self.source_bytes as usize - bytes.len()),
         )?;
         let query_proof_bytes = definition.retained_query_proof_bytes();
         let accounted_bytes = bytes
@@ -868,7 +867,7 @@ fn section(
     let mut builder = SectionChunkBuilder::new(session, artifact, revision, plane)?;
     let mut work = GeometryWorkBudget::new(50_000_000);
     let source_limit = MAX_PREPARED_SECTION_SOURCE_BYTES;
-    let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSectionSource<'_>>)>::new();
+    let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSolid<'_>>)>::new();
     for occurrence in &occurrences {
         sources
             .entry(occurrence.definition_id.clone())
@@ -888,7 +887,7 @@ fn section(
             .get_mut(&occurrence.definition_id)
             .expect("section occurrence was counted");
         if source.is_none() {
-            let prepared = spiling_geometry::prepare_section_source(
+            let prepared = spiling_geometry::prepare_solid(
                 &definition.definition,
                 (source_limit - prepared_bytes).min(
                     remaining_section_capacity(prepared_bytes, builder.retained_bytes())?
@@ -896,12 +895,12 @@ fn section(
                         .ok_or_else(|| {
                             error(
                                 GeometryErrorCode::ResourceLimit,
-                                "native section has no query seed headroom",
+                                "native section has no query headroom",
                             )
                         })?,
                 ),
-                cancel,
                 &mut work,
+                cancel,
             )?;
             prepared_bytes = prepared_bytes
                 .checked_add(prepared.retained_bytes())

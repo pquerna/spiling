@@ -5,11 +5,19 @@
 //! Source-only finite-boundary conical vertex realization. The boundary is
 //! evaluated on the existing paired collar realization and unchanged carrier;
 //! neither a query radial direction nor a fitted tangent plane chooses it.
+//!
+//! Carrier and trim evaluations borrow the domain-selected coefficient
+//! operands. Original spatial/UV provider gauges remain separate from native
+//! edge intervals, linked only by the retained source correspondence. Vertex
+//! and edge IDs belong to the same borrowed definition as the incidence
+//! inventory; arena-ID equality alone is not ownership. Native loop traversal,
+//! material shell sense, and source-provider direction remain distinct.
 
 use super::*;
 use crate::analysis::source_incidence::CoedgeUse;
-use monstertruck_modeling::{Curve, Point3};
-use monstertruck_topology::{EdgeId, VertexId};
+use solidcore::topology::{EdgeId, VertexId};
+use crate::analysis::material_source::MaterialSourceView;
+use crate::kernel::trim::{NativeCoedgeIdentity, TrimJointKind};
 use std::sync::atomic::Ordering;
 
 mod prepared;
@@ -60,7 +68,7 @@ pub(super) struct CompletePositionCoverFailure {
 /// All retained cells belong to one original definition and NativeV.
 pub(super) struct SourceVertexTransportPlan<'d> {
     definition: &'d Definition,
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
     point: [f64; 3],
     fraction: f64,
     rows: [Box3; 2],
@@ -100,7 +108,7 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
         uv_ownership::OWNERSHIP_STACK_BYTES;
 
     pub(in crate::analysis) fn prepare(
-        source: OriginalTrimSource<'a, 'd>,
+        source: MaterialSourceView<'a, 'd>,
         domain: &'a PreparedFaceTrimDomain<'d>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -111,20 +119,17 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
             return Ok(None);
         };
         plans.validate_source(source.definition(), work, cancel)?;
-        if source
-            .definition()
-            .material_transport_is_proved_zero(work, cancel)?
-        {
+        if source.material_transport_is_proved_zero(work, cancel)? {
             return Ok(None);
         }
         let scratch = remaining_bytes
             .checked_sub(std::mem::size_of::<Self>())
             .ok_or_else(super::transport::resource)?;
-        for (joint_index, joint) in domain.native().joints().iter().enumerate() {
+        for (joint_index, joint) in domain.original_joints()?.iter().enumerate() {
             work.charge(1, cancel)?;
             if !matches!(
                 joint.kind,
-                monstertruck_modeling::TrimJointKind::EndpointUncertainty
+                TrimJointKind::EndpointUncertainty
             ) {
                 continue;
             }
@@ -148,7 +153,7 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
         &self,
         domain: &PreparedFaceTrimDomain<'_>,
         joint_index: usize,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         connection: [[f64; 2]; 2],
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -157,13 +162,13 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
         if !std::ptr::eq(self.domain, domain) {
             return Ok(false);
         }
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(false);
         };
         if joint.vertex_id != vertex
             || !matches!(
                 joint.kind,
-                monstertruck_modeling::TrimJointKind::EndpointUncertainty
+                TrimJointKind::EndpointUncertainty
             )
         {
             return Ok(false);
@@ -175,8 +180,8 @@ impl<'a, 'd> OriginalFaceCornerAttachments<'a, 'd> {
         let Some(recipe) = plan.original_joint_recipe(domain, joint_index)? else {
             return Ok(false);
         };
-        // The successful all-recipe cache is immutable and source-only. Do
-        // not call qualify_geometry here: the caller holds a carrier lock.
+        // The successful all-recipe cache is immutable and source-only. This
+        // original attachment query reuses it without rerunning qualification.
         if !(QualifiedSourceGeometry { plan }).owns_source_cut(recipe) {
             return Ok(false);
         }
@@ -293,8 +298,8 @@ fn projected(a: Box3, rows: [Box3; 2]) -> Box2 {
 #[derive(Clone, Copy)]
 struct End {
     use_: CoedgeUse,
-    edge: EdgeId<Curve>,
-    absolute_back: bool,
+    edge: EdgeId,
+    spatial_high: bool,
     endpoint: f64,
     exit: f64,
     delta_t: Interval,
@@ -373,9 +378,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// Select one source-only endpoint fraction for the COMPLETE original
     /// corner cycle. A failed gate never falls back to sampled tangent rays.
     pub(super) fn prepare(
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         incidence: &SourceEdgeIncidence,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -388,6 +393,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
         let mut current_candidate = None;
         let result = (|| {
             work.charge(1, cancel)?;
+            if !incidence.owns_definition(source.definition()) {
+                return Ok(None);
+            }
             let remaining_bytes = remaining_bytes
                 .checked_sub(
                     CONICAL_STACK_BYTES
@@ -483,39 +491,14 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     })?;
                     let domain =
                         source.face_domain(corner.outgoing.face, available, work, cancel)?;
-                    let curve_scratch =
-                        available.checked_sub(domain.owned_bytes()).ok_or_else(|| {
-                            GeometryError::new(
-                                GeometryErrorCode::ResourceLimit,
-                                "source conical corner domain exhausts scratch allowance",
-                            )
-                        })?;
                     stage = "outgoing end evaluation";
-                    let Some(outgoing) = prepare_end(
-                        &domain,
-                        corner.outgoing,
-                        false,
-                        fraction,
-                        recipes.last().map(|recipe| recipe.incoming),
-                        curve_scratch,
-                        work,
-                        cancel,
-                    )?
+                    let Some(outgoing) = prepare_end(&domain, corner.outgoing, false, fraction, recipes.last().map(|recipe| recipe.incoming), work, cancel)?
                     else {
                         accepted = false;
                         break;
                     };
                     stage = "incoming end evaluation";
-                    let Some(incoming) = prepare_end(
-                        &domain,
-                        corner.incoming,
-                        true,
-                        fraction,
-                        recipes.first().map(|recipe| recipe.outgoing),
-                        curve_scratch,
-                        work,
-                        cancel,
-                    )?
+                    let Some(incoming) = prepare_end(&domain, corner.incoming, true, fraction, recipes.first().map(|recipe| recipe.outgoing), work, cancel)?
                     else {
                         accepted = false;
                         break;
@@ -594,11 +577,11 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             let cell_start = cells.len();
                             let ray_start = rays.len();
                             let cell_limit = scratch
-                                .checked_sub(domain.owned_bytes().saturating_add(recipe_bytes))
+                                .checked_sub(recipe_bytes)
                                 .ok_or_else(|| {
                                     GeometryError::new(
                                         GeometryErrorCode::ResourceLimit,
-                                        "source conical domain and cells exceed scratch allowance",
+                                        "source conical recipes and cells exceed scratch allowance",
                                     )
                                 })?;
                             let mut candidate_accepted = true;
@@ -643,8 +626,8 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     }
                 }
                 if accepted {
-                    stage = "opposed native exits";
-                    validate_native_exits(&recipes, work, cancel)?;
+                    stage = "opposed spatial exits";
+                    validate_spatial_exits(&recipes, work, cancel)?;
                 }
                 stage = "projected vertex fan";
                 if accepted
@@ -717,7 +700,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// Material admission remains the separate source-cut/embedding theorem.
     pub(super) fn visit_projected_position_supports(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         cover: &mut super::transport::SourceProjectionCover<'_>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -734,7 +717,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         + std::mem::size_of::<CollarBoundaryJet>()
                         + 3 * std::mem::size_of::<ChartCurveEnclosure>()
                         + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-                        + std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>()
+                        + crate::parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
                         + 3 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>(),
                 )
             })
@@ -748,10 +731,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
             let recipe = &self.recipes[cell.recipe];
             let face = recipe.outgoing.use_.face;
             let domain = source.face_domain(face, scratch, work, cancel)?;
-            let classifier_bytes = scratch
-                .checked_sub(domain.owned_bytes())
-                .and_then(|bytes| bytes.checked_add(domain.retained_bytes()))
-                .ok_or_else(super::transport::resource)?;
+            let classifier_bytes = scratch;
             stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
             let mut pending = 1;
             while pending != 0 {
@@ -799,27 +779,28 @@ impl<'d> SourceVertexTransportPlan<'d> {
         domain: &PreparedFaceTrimDomain<'_>,
         joint_index: usize,
     ) -> Result<Option<&CornerRecipe>, GeometryError> {
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(None);
         };
         if joint.vertex_id != self.vertex
             || [
-                joint.vertex_point.x,
-                joint.vertex_point.y,
-                joint.vertex_point.z,
+                joint.vertex_point[0],
+                joint.vertex_point[1],
+                joint.vertex_point[2],
             ] != self.point
         {
             return Ok(None);
         }
-        let face = domain.native().face();
+        let face = domain.face();
         let matches_use =
-            |native: monstertruck_topology::trimmed::ChartCoedgeIdentity<Curve, Surface>,
+            |native: NativeCoedgeIdentity,
              end: End| {
-                native.face_id == face.id()
+                native.face_id == face
                     && native.wire_index == end.use_.wire
                     && native.coedge_index == end.use_.index
                     && native.edge_id == end.edge
-                    && native.orientation == end.use_.orientation
+                    && native.orientation == (end.use_.orientation == domain.native_orientation())
+                    && native.edgeuse == end.use_.edgeuse
             };
         let mut recipes = self.recipes.iter().filter(|recipe| {
             matches_use(joint.incoming, recipe.incoming)
@@ -852,15 +833,15 @@ impl<'d> SourceVertexTransportPlan<'d> {
             )
     }
 
-    /// One literal exit for each original endpoint germ. Closed edges retain
-    /// both their front and back germs. Adjacent opposed uses were checked
-    /// against these SAME binary64 parameters when the plan was prepared.
-    pub(super) fn visit_native_exits(
+    /// One literal source-provider exit for each original endpoint germ.
+    /// Closed edges retain both source parameter germs. Adjacent opposed uses
+    /// share these SAME parameters, separately from the native edge interval.
+    pub(super) fn visit_spatial_exits(
         &self,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
         visitor: &mut dyn FnMut(
-            EdgeId<Curve>,
+            EdgeId,
             bool,
             f64,
             &mut GeometryWorkBudget,
@@ -870,7 +851,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
             work.charge(1, cancel)?;
             visitor(
                 recipe.outgoing.edge,
-                recipe.outgoing.absolute_back,
+                recipe.outgoing.spatial_high,
                 recipe.outgoing.exit,
                 work,
             )?;
@@ -886,19 +867,19 @@ impl<'d> SourceVertexTransportPlan<'d> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn qualified_original_joint_image(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         domain: &PreparedFaceTrimDomain<'_>,
         joint_index: usize,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-        has_cutover: &dyn Fn(EdgeId<Curve>, bool, f64) -> bool,
+        has_cutover: &dyn Fn(EdgeId, bool, f64) -> bool,
     ) -> Result<bool, GeometryError> {
         work.charge(1, cancel)?;
         if !std::ptr::eq(source.definition(), self.definition) {
             return Ok(false);
         }
-        let Some(joint) = domain.native().joints().get(joint_index) else {
+        let Some(joint) = domain.original_joints()?.get(joint_index) else {
             return Ok(false);
         };
         let Some(recipe) = self.original_joint_recipe(domain, joint_index)? else {
@@ -906,11 +887,11 @@ impl<'d> SourceVertexTransportPlan<'d> {
         };
         if !has_cutover(
             recipe.incoming.edge,
-            recipe.incoming.absolute_back,
+            recipe.incoming.spatial_high,
             recipe.incoming.exit,
         ) || !has_cutover(
             recipe.outgoing.edge,
-            recipe.outgoing.absolute_back,
+            recipe.outgoing.spatial_high,
             recipe.outgoing.exit,
         ) {
             return Ok(false);
@@ -929,47 +910,55 @@ impl<'d> SourceVertexTransportPlan<'d> {
             .saturating_add(4 * std::mem::size_of::<Box3>());
         let pole_scratch = if matches!(
             joint.kind,
-            monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+            TrimJointKind::SphericalPole { .. }
         ) {
             // SphereChart admission calls the native whole-pole strip proof.
             // Its chart, native jets/operands and returned receipt coexist
             // with the outer image/functional evaluation storage.
             (2 * std::mem::size_of::<source_chart::SphereChart>())
                 .saturating_add(std::mem::size_of::<Option<source_chart::SphereChart>>())
-                .saturating_add(std::mem::size_of::<monstertruck_modeling::Curve2D>())
-                .saturating_add(std::mem::size_of::<
-                    monstertruck_modeling::ValidatedCurveJet2D,
-                >())
-                .saturating_add(std::mem::size_of::<
-                    monstertruck_modeling::ValidatedSurfaceJet,
-                >())
-                .saturating_add(2 * std::mem::size_of::<monstertruck_modeling::TrimJointKind>())
-                .saturating_add(std::mem::size_of::<
-                    monstertruck_modeling::ValidatedGeometryBudget,
-                >())
+                .saturating_add(crate::parametric::curve_prepared::CURVE_EVALUATION_SCRATCH_BYTES)
+                .saturating_add(std::mem::size_of::<crate::parametric::ChartCurveEnclosure>())
+                .saturating_add(crate::parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES)
+                .saturating_add(2 * std::mem::size_of::<TrimJointKind>())
                 .saturating_add(8 * std::mem::size_of::<Box3>())
         } else {
             0
         };
-        if scratch.saturating_add(pole_scratch) > remaining_bytes {
+        let required = scratch.saturating_add(pole_scratch)
+            .max(super::atlas::ORIGINAL_JOINT_POSITION_SCRATCH_BYTES)
+            .saturating_add(std::mem::size_of::<Box3>() + 3 * std::mem::size_of::<Box2>());
+        if required > remaining_bytes {
             return Err(super::transport::resource());
         }
         let allowance = source_allowance(self.definition)?.min(domain.source_chart_error_mm());
         if !allowance.is_finite() || allowance <= 0.0 {
             return Ok(false);
         }
-        let uv = joint.enclosure.map(|v| Interval {
-            lo: v.lower,
-            hi: v.upper,
-        });
-        let face = domain.native().face();
-        face.with_surface(|surface| {
-            // Qualification above must stay outside this native carrier lock.
+        let physical = super::atlas::original_joint_position_enclosure(domain, joint, work, cancel)?;
+        if length(relative(physical, self.point))?.hi > allowance {
+            return Ok(false);
+        }
+        let connector = crate::parametric::CurveEvaluator::tensor(
+            &joint.connector, [0.0, 1.0], 0, work, cancel,
+        )?;
+        let mut uv = hull2(joint.enclosure, [connector[0][0], connector[0][1]]);
+        for endpoint in joint.endpoint_uv {
+            uv = hull2(uv, endpoint.map(|range| Interval { lo: range[0], hi: range[1] }));
+        }
+        if let TrimJointKind::SphericalPole { connector, .. } = &joint.kind {
+            let connector = crate::parametric::CurveEvaluator::tensor(
+                connector, [0.0, 1.0], 0, work, cancel,
+            )?;
+            uv = hull2(uv, [connector[0][0], connector[0][1]]);
+        }
+        let surface = &domain.surface_operand();
+        (|| {
             // This independent chart uses the SAME borrowed carrier/domain,
             // never a family label or the rank-zero covering-chart normal.
             let sphere_chart = if matches!(
                 joint.kind,
-                monstertruck_modeling::TrimJointKind::SphericalPole { .. }
+                TrimJointKind::SphericalPole { .. }
             ) {
                 let Some(chart) = source_chart::SphereChart::new(surface, domain, work, cancel)?
                 else {
@@ -979,18 +968,24 @@ impl<'d> SourceVertexTransportPlan<'d> {
             } else {
                 None
             };
+            if let Some(chart) = &sphere_chart {
+                let normal = chart.normal(physical)?;
+                if dot(normal, cross(self.rows[0], self.rows[1])).lo <= 0.0 {
+                    return Ok(false);
+                }
+            }
             whole_original_joint_image_fits(
                 surface,
                 uv,
                 self.point,
                 cross(self.rows[0], self.rows[1]),
-                face.orientation(),
+                domain.orientation(),
                 sphere_chart.as_ref(),
                 allowance,
                 work,
                 cancel,
             )
-        })
+        })()
     }
 
     /// Conservative complete-set exclusion, not corner ownership. Removed F
@@ -1002,7 +997,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// or promotes a `cell.source` image to domain authority.
     pub(super) fn complete_incident_positions_miss(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -1034,15 +1029,15 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 active_face = Some(face);
                 work.charge(1, cancel)?;
                 let domain = source.face_domain(face, scratch, work, cancel)?;
-                let position = domain.native().face().with_surface(|surface| {
+                let position = { let surface = &domain.surface_operand(); (|| {
                     crate::parametric::surface_piecewise_enclosure(
                         surface,
-                        domain.uv_bounds(),
+                        domain.uv_domain(),
                         work,
                         cancel,
                     )
                     .map(|jet| jet.position)
-                })?;
+                })() }?;
                 if misses(position)? {
                     continue;
                 }
@@ -1175,7 +1170,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn visit_endpoint_supports(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         direction: [Interval; 3],
         reference: [f64; 2],
         tolerance: f64,
@@ -1190,7 +1185,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
             + std::mem::size_of::<CollarBoundaryJet>()
             + 3 * std::mem::size_of::<ChartCurveEnclosure>()
             + crate::parametric::SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
-            + std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>();
+            + crate::parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES;
         let available = remaining_bytes
             .checked_sub(fixed_bytes)
             .ok_or_else(super::transport::resource)?;
@@ -1233,9 +1228,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 .ok_or_else(super::transport::resource)?;
             let domain =
                 source.face_domain(recipe.outgoing.use_.face, domain_limit, work, cancel)?;
-            let output_limit = available
-                .checked_sub(domain.owned_bytes())
-                .ok_or_else(super::transport::resource)?;
+            let output_limit = available;
             let query_bytes = output_limit
                 .checked_sub(output_bytes(output))
                 .ok_or_else(super::transport::resource)?;
@@ -1307,7 +1300,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// retained source plans are charged only by their immutable source owner.
     pub(super) fn visit_qualified_geometry(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -1334,7 +1327,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn visit_closed_atlas_geometry(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         coordinates: &crate::analysis::placed::ActualMaterialCoordinates<'_>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
@@ -1371,7 +1364,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
             })
             .and_then(|bytes| {
                 bytes.checked_sub(
-                    std::mem::size_of::<monstertruck_modeling::ValidatedSurfaceJet>()
+                    crate::parametric::nurbs_eval::SURFACE_EVALUATION_SCRATCH_BYTES
                         + 3 * std::mem::size_of::<crate::parametric::SurfaceEnclosure>(),
                 )
             })
@@ -1402,11 +1395,6 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     continue;
                 }
                 let domain = source.face_domain(face, scratch, work, cancel)?;
-                // face_domain's allowance includes its owned storage. No
-                // native carrier lock is retained by this domain handle.
-                if domain.owned_bytes() > scratch {
-                    return Err(super::transport::resource());
-                }
                 stack[0] = ([[0.0, 1.0], cell.parameter], 0, None);
                 let mut pending = 1;
                 while pending != 0 {
@@ -1440,7 +1428,6 @@ impl<'d> SourceVertexTransportPlan<'d> {
                             let mid = range[0] * 0.5 + range[1] * 0.5;
                             range[0] < mid && mid < range[1]
                         });
-                    // boundary_jet has released all native carrier locks.
                     let included =
                         visitor(face, jet.position, jet.normal, can_refine, work, cancel)?;
                     if included == BoundaryVisit::Accepted {
@@ -1499,12 +1486,12 @@ impl<'d> SourceVertexTransportPlan<'d> {
 
     /// Retain only a successful qualification of this immutable source star.
     /// No slab, pose, radial field or metric participates in that theorem.
-    /// Fixed inline storage avoids retained growth. Do not hold a cache lock
-    /// across native geometry traversal; concurrent first use may recompute,
-    /// with all actual work still charged to its caller.
+    /// Fixed inline storage avoids retained growth. The cache records only a
+    /// successful source theorem; all uncached coefficient work remains charged
+    /// to its caller.
     fn qualify_geometry(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -1526,7 +1513,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
 
     fn qualify_geometry_fresh(
         &self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         remaining_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -1561,12 +1548,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
                 work.charge(1, cancel)?;
                 let face = recipe.outgoing.use_.face;
                 let domain = source.face_domain(face, scratch, work, cancel)?;
-                let owned_scratch = scratch.checked_sub(domain.owned_bytes()).ok_or_else(|| {
-                    GeometryError::new(
-                        GeometryErrorCode::ResourceLimit,
-                        "relative source UV ownership exceeds coexistent domain storage",
-                    )
-                })?;
+                let owned_scratch = scratch;
                 phase = "active collar source-P graph transversality";
                 if !collar_graph_transverse(&domain, recipe.outgoing, self.rows, work, cancel)?
                     || !collar_graph_transverse(&domain, recipe.incoming, self.rows, work, cancel)?
@@ -1648,9 +1630,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
                     ));
                 }
                 phase = "source sphere-chart qualification";
-                let sphere_chart = domain.native().face().with_surface(|surface| {
+                let sphere_chart = { let surface = &domain.surface_operand(); (|| {
                     source_chart::SphereChart::new(surface, &domain, work, cancel)
-                })?;
+                })() }?;
                 for cell in self.cells.iter().filter(|cell| cell.recipe == index) {
                     active_cell = Some((cell.parameter, cell.recipe));
                     phase = "source corner cell";
@@ -1733,16 +1715,16 @@ impl<'d> SourceVertexTransportPlan<'d> {
                         } else {
                             h.uv
                         };
-                        domain.native().face().with_surface(|surface| {
+                        { let surface = &domain.surface_operand(); (|| {
                             let jet = surface_enclosure(
                                 surface,
                                 uv_box(hull2(h.uv, comparison_uv)),
                                 work,
                                 cancel,
                             )?;
-                            let n = normal(&jet, domain.native().face().orientation());
+                            let n = normal(&jet, domain.orientation());
                             Ok(dot(n, cross(self.rows[0], self.rows[1])).lo > 0.0)
-                        })?
+                        })() }?
                     };
                     if !transverse {
                         return Err(self.gate_failure(
@@ -1781,7 +1763,7 @@ impl<'d> SourceVertexTransportPlan<'d> {
     /// Activity is still tested before any source geometry qualification.
     pub(super) fn prove_radial<'a>(
         &'a self,
-        source: OriginalTrimSource<'_, 'd>,
+        source: MaterialSourceView<'_, 'd>,
         prism: &SamplePrism,
         request: &SlabRequest,
         remaining_bytes: usize,
@@ -1854,9 +1836,9 @@ impl<'d> SourceVertexTransportPlan<'d> {
 }
 
 fn corners(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     incidence: &SourceEdgeIncidence,
-    vertex: VertexId<Point3>,
+    vertex: VertexId,
     remaining_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -1865,6 +1847,11 @@ fn corners(
     let mut point = None;
     let mut face_coedge = None;
     let outcome = (|| {
+        // The prepared source owner validates one captured STEP VertexPoint
+        // identity and its exact mm coefficients across the complete star.
+        // Native IDs select incidence only; healed native positions do not
+        // choose the realization apex.
+        point = Some(source.trim_source().source_vertex_point(vertex, work, cancel)?);
         let mut result = Vec::new();
         for edge_id in incidence.vertex_edges(vertex) {
             work.charge(1, cancel)?;
@@ -1889,54 +1876,50 @@ fn corners(
                         )
                     })?;
                 let domain = source.face_domain(use_.face, domain_bytes, work, cancel)?;
-                let face = domain.native().face();
-                let Some(wire) = face.absolute_boundaries().get(use_.wire) else {
-                    return Ok(None);
-                };
-                let Some(edge) = wire.get(use_.index) else {
-                    return Ok(None);
-                };
-                let origin = if face.orientation() {
-                    edge.front()
-                } else {
-                    edge.back()
-                };
-                if origin.id() != vertex {
+                let definition = source.definition();
+                let wire = crate::analysis::source_incidence::boundary_loop(
+                    definition, use_.face, use_.wire,
+                )?;
+                let (entry, edge) = crate::analysis::source_incidence::native_coedge(
+                    definition, use_.face, use_.wire, use_.index,
+                )?;
+                let orientation = crate::analysis::source_incidence::face_orientation(
+                    definition, use_.face, work, cancel,
+                )?;
+                let ends = edge.vertices;
+                let origin = ends[usize::from(!use_.orientation)];
+                if origin != vertex {
                     continue;
                 }
-                if edge.id() != edge_id
-                    || (edge.orientation() == face.orientation()) != use_.orientation
+                if entry.edge != edge_id || (entry.forward == orientation) != use_.orientation
+                    || domain.coedges()[use_.coedge].edgeuse != use_.edgeuse
                 {
                     return Ok(None);
                 }
-                let adjacent = if face.orientation() {
-                    if use_.index == 0 {
-                        wire.len() - 1
-                    } else {
-                        use_.index - 1
-                    }
+                let adjacent = if orientation {
+                    if use_.index == 0 { wire.edges.len() - 1 } else { use_.index - 1 }
                 } else {
-                    (use_.index + 1) % wire.len()
+                    (use_.index + 1) % wire.edges.len()
                 };
-                let neighbor = &wire[adjacent];
-                let end = if face.orientation() {
-                    neighbor.back()
-                } else {
-                    neighbor.front()
-                };
-                if end.id() != vertex {
+                let (neighbor_entry, neighbor) = crate::analysis::source_incidence::native_coedge(
+                    definition, use_.face, use_.wire, adjacent,
+                )?;
+                let neighbor_orientation = neighbor_entry.forward == orientation;
+                let neighbor_ends = neighbor.vertices;
+                if neighbor_ends[usize::from(neighbor_orientation)] != vertex {
                     return Ok(None);
                 }
-                let target: [f64; 3] = origin.point().into();
+                let binding = domain.original_coedge_correspondence(use_.coedge)?.binding()
+                    .ok_or_else(|| refusal("source vertex corner lost its original endpoint binding"))?;
+                let target = binding.source_vertex_points_mm[usize::from(!use_.orientation)];
                 if point.is_some_and(|prior| prior != target) {
-                    return Ok(None);
+                    return Err(refusal("incident original source vertex coefficients disagree"));
                 }
                 point = Some(target);
                 if result
                     .len()
                     .saturating_add(1)
                     .saturating_mul(std::mem::size_of::<Corner>())
-                    .saturating_add(domain.owned_bytes())
                     > remaining_bytes
                 {
                     return Err(GeometryError::new(
@@ -1957,7 +1940,8 @@ fn corners(
                         wire: use_.wire,
                         index: adjacent,
                         coedge: use_.coedge - use_.index + adjacent,
-                        orientation: neighbor.orientation() == face.orientation(),
+                        orientation: neighbor_orientation,
+                        edgeuse: domain.coedges()[use_.coedge - use_.index + adjacent].edgeuse,
                     },
                 });
             }
@@ -1981,10 +1965,8 @@ fn corners(
                         ),
                         work,
                         cancel,
-                    )?
-                    .native()
-                    .coedges()[result[index].incoming.coedge]
-                    .identity
+                    )?.coedges()[result[index].incoming.coedge]
+                    .identity()
                     .edge_id,
             ) else {
                 return Ok(None);
@@ -2019,7 +2001,7 @@ fn corners(
 }
 
 fn source_frame(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     corners: &[Corner],
     scratch: usize,
     work: &mut GeometryWorkBudget,
@@ -2027,28 +2009,31 @@ fn source_frame(
 ) -> Result<Option<[Box3; 2]>, GeometryError> {
     let mut candidate = [0.0; 3];
     for corner in corners {
-        let mut native_window = None;
+        let mut spatial_window = None;
         let before = work.consumed();
         let evaluated = (|| {
             work.charge(1, cancel)?;
             let domain = source.face_domain(corner.outgoing.face, scratch, work, cancel)?;
-            let n = domain.native().face().with_surface(|surface| {
+            let n = { let surface = &domain.surface_operand(); (|| {
                 let proof = domain.original_coedge_correspondence(corner.outgoing.coedge)?;
-                let t = proof.native_range()[usize::from(!corner.outgoing.orientation)];
-                native_window = Some(proof.native_range());
+                let binding = proof.binding()
+                    .ok_or_else(|| refusal("source frame lost its selected spatial endpoint mapping"))?;
+                let high = !corner.outgoing.orientation ^ !binding.spatial_forward;
+                let t = proof.spatial_range()[usize::from(high)];
+                spatial_window = Some(proof.spatial_range());
                 let uv = chart_jet(&domain, corner.outgoing.coedge, [t; 2], work, cancel)?;
                 let jet = surface_enclosure(surface, uv_box(uv.position), work, cancel)?;
                 if let Some(chart) = source_chart::SphereChart::new(surface, &domain, work, cancel)?
                 {
                     chart.normal(jet.position)
                 } else {
-                    Ok(normal(&jet, domain.native().face().orientation()))
+                    Ok(normal(&jet, domain.orientation()))
                 }
-            })?;
+            })() }?;
             Ok(n)
         })();
         let n = evaluated.map_err(|error| work.annotate_error(error, before, format_args!(
-            "source_frame incident normal source_face={} coedge={} native_parameter_bounds={native_window:?}",
+            "source_frame incident normal source_face={} coedge={} spatial_parameter_bounds={spatial_window:?}",
             corner.outgoing.face, corner.outgoing.coedge,
         )))?;
         let representative = n.map(Interval::mid);
@@ -2088,13 +2073,12 @@ fn prepare_end(
     incoming: bool,
     fraction: f64,
     reuse: Option<End>,
-    scratch: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<End>, GeometryError> {
     let before = work.consumed();
-    let mut native_window = None;
-    let mut native_endpoint_exit = None;
+    let mut spatial_window = None;
+    let mut spatial_endpoint_exit = None;
     let mut stage = "coedge correspondence";
     let result = (|| {
         let proof = domain.original_coedge_correspondence(use_.coedge)?;
@@ -2104,9 +2088,9 @@ fn prepare_end(
         if binding.owner != [use_.face, use_.wire, use_.index] {
             return Ok(None);
         }
-        let range = proof.native_range();
-        native_window = Some(range);
-        let high = use_.orientation == incoming;
+        let range = proof.spatial_range();
+        spatial_window = Some(range);
+        let high = (use_.orientation == incoming) ^ !binding.spatial_forward;
         let endpoint = range[usize::from(high)];
         let exit = endpoint
             + if high {
@@ -2118,7 +2102,7 @@ fn prepare_end(
             return Ok(None);
         }
         let delta_t = Interval::point(exit).sub(Interval::point(endpoint));
-        native_endpoint_exit = Some((endpoint, exit));
+        spatial_endpoint_exit = Some((endpoint, exit));
         stage = "end chart evaluation";
         let joint_uv = chart_jet(domain, use_.coedge, [endpoint; 2], work, cancel)?.position;
         stage = "end collar evaluation";
@@ -2127,12 +2111,12 @@ fn prepare_end(
         };
         stage = "end native spatial evaluation";
         let spatial = match reuse.filter(|prior| {
-            prior.edge == binding.edge && prior.absolute_back == high && prior.exit == exit
+            prior.edge == binding.edge && prior.spatial_high == high && prior.exit == exit
         }) {
             Some(prior) => prior.spatial,
             None => {
                 domain
-                    .original_coedge_jets(use_.coedge, [exit; 2], scratch, work, cancel)?
+                    .original_coedge_jets(use_.coedge, [exit; 2], work, cancel)?
                     .0
             }
         };
@@ -2141,7 +2125,7 @@ fn prepare_end(
         Ok(Some(End {
             use_,
             edge: binding.edge,
-            absolute_back: high,
+            spatial_high: high,
             endpoint,
             exit,
             delta_t,
@@ -2152,7 +2136,7 @@ fn prepare_end(
         }))
     })();
     result.map_err(|error| work.annotate_error(error, before, format_args!(
-        "SourceVertexTransportPlan {stage} source_face={} coedge={} incoming={incoming} fraction={fraction} native_parameter_bounds={native_window:?} endpoint_exit={native_endpoint_exit:?}",
+        "SourceVertexTransportPlan {stage} source_face={} coedge={} incoming={incoming} fraction={fraction} spatial_parameter_bounds={spatial_window:?} endpoint_exit={spatial_endpoint_exit:?}",
         use_.face, use_.coedge,
     )))
 }
@@ -2167,7 +2151,7 @@ fn end_curve(
     let s = source_unit_parameter(s)?;
     let t = Interval::point(end.endpoint).add(end.delta_t.mul(s));
     let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
-    let range = proof.native_range();
+    let range = proof.spatial_range();
     // The actual affine image of a proved unit coordinate lies between these
     // SAME literal source endpoints, independently of arithmetic roundoff.
     let image = Interval {
@@ -2176,7 +2160,7 @@ fn end_curve(
     };
     if image.lo < range[0] || image.hi > range[1] {
         return Err(refusal(
-            "source conical endpoint recipe leaves its original native range",
+            "source conical endpoint recipe leaves its original spatial provider range",
         ));
     }
     let t = intersection(t, image)
@@ -2190,47 +2174,21 @@ fn end_curve(
 /// Bound S(uv) - V with V folded into the original carrier coefficients.
 /// This is an actual source evaluation, not a Taylor surrogate at the joint.
 fn centered_source_point(
-    surface: &Surface,
+    surface: &(impl crate::parametric::SurfaceEvaluator + ?Sized),
     uv: Box2,
     point: [f64; 3],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Box3, GeometryError> {
-    use monstertruck_modeling::{
-        ValidatedGeometryBudget, ValidatedInterval, ValidatedSurfaceFunctional,
-    };
-    const ZERO: ValidatedInterval = ValidatedInterval {
-        lower: 0.0,
-        upper: 0.0,
-    };
-    const ONE: ValidatedInterval = ValidatedInterval {
-        lower: 1.0,
-        upper: 1.0,
-    };
-    let mut native =
-        ValidatedGeometryBudget::new(usize::try_from(work.remaining()).unwrap_or(usize::MAX));
-    let origin = point.map(|value| ValidatedInterval {
-        lower: value,
-        upper: value,
-    });
-    let functionals = std::array::from_fn(|axis| ValidatedSurfaceFunctional {
-        direction: std::array::from_fn(|i| if i == axis { ONE } else { ZERO }),
+    use crate::parametric::{SurfaceFunctional, surface_functional_enclosures};
+    let origin = point.map(Interval::point);
+    let functionals = std::array::from_fn(|axis| SurfaceFunctional {
+        direction: std::array::from_fn(|i| Interval::point(if i == axis { 1.0 } else { 0.0 })),
         origin,
-        offset: ZERO,
+        offset: Interval::point(0.0),
     });
-    let result = monstertruck_modeling::validated_surface_functional_jets::<3>(
-        surface,
-        uv_box(uv),
-        functionals,
-        &mut native,
-        cancel,
-    );
-    crate::parametric::debit_native_work(work, native.consumed(), cancel)?;
-    let jets = result.map_err(crate::parametric::native_error)?;
-    Ok(jets.map(|jet| Interval {
-        lo: jet.position.lower,
-        hi: jet.position.upper,
-    }))
+    Ok(surface_functional_enclosures::<3>(surface, uv_box(uv), &functionals, work, cancel)?
+        .map(|jet| jet.position))
 }
 
 /// This is an image proof, not an endpoint/center test or reference-domain
@@ -2238,7 +2196,7 @@ fn centered_source_point(
 /// chart error and retains the already selected source projection direction.
 #[allow(clippy::too_many_arguments)]
 fn whole_original_joint_image_fits(
-    surface: &Surface,
+    surface: &(impl crate::parametric::SurfaceEvaluator + ?Sized),
     uv: Box2,
     point: [f64; 3],
     projection_normal: Box3,
@@ -2274,7 +2232,7 @@ fn whole_original_joint_image_fits(
 /// enclosure can only refute an allowance: it proves nothing about the rest
 /// of the cone, its source domain, determinant, or winding.
 fn source_generator_displacement(
-    surface: &Surface,
+    surface: &(impl crate::parametric::SurfaceEvaluator + ?Sized),
     boundary_uv: Box2,
     halfway_uv: Box2,
     point: [f64; 3],
@@ -2309,7 +2267,7 @@ fn source_radius_refuted(
         let boundary_uv = std::array::from_fn(|i| boundary[i].add(end.offset[i]));
         let halfway_uv =
             std::array::from_fn(|i| halfway[i].add(Interval::point(0.5).mul(end.offset[i])));
-        domain.native().face().with_surface(|surface| {
+        { let surface = &domain.surface_operand(); (|| {
             let displacement = source_generator_displacement(
                 surface,
                 boundary_uv,
@@ -2319,10 +2277,10 @@ fn source_radius_refuted(
                 cancel,
             )?;
             Ok(length(displacement)?.lo > allowance)
-        })
+        })() }
     })();
     result.map_err(|error| work.annotate_error(error, before, format_args!(
-        "SourceVertexTransportPlan actual source generator radius refutation vertex_mm={point:?} source_face={} coedge={} native_endpoint_exit={:?} admitted_source_error_mm={allowance}",
+        "SourceVertexTransportPlan actual source generator radius refutation vertex_mm={point:?} source_face={} coedge={} spatial_endpoint_exit={:?} admitted_source_error_mm={allowance}",
         end.use_.face, end.use_.coedge, (end.endpoint, end.exit),
     )))
 }
@@ -2345,36 +2303,34 @@ fn original_endpoint_chord_error(
     let binding = proof
         .binding()
         .ok_or_else(|| refusal("original shared-edge chord lost its source binding"))?;
-    let edge = &domain.native().face().absolute_boundaries()[end.use_.wire][end.use_.index];
-    if edge.id() != end.edge
-        || edge.id() != binding.edge
-        || [edge.front().id(), edge.back().id()] != binding.endpoints
+    let (entry, edge) = crate::analysis::source_incidence::native_coedge(
+        definition, end.use_.face, end.use_.wire, end.use_.index,
+    )?;
+    if entry.edge != end.edge
+        || entry.edge != binding.edge
+        || edge.vertices != binding.endpoints
+        || [edge.interval.min(), edge.interval.max()] != binding.native_interval
     {
         return Err(refusal("original shared-edge chord operands changed"));
     }
     let span = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
     proof.uv_parameter_image(span)?;
-    let native_range = proof.native_range();
-    edge.with_curve(|curve| {
-        // Prepare the bound original spatial source ONCE, then reuse its
-        // immutable query index for the endpoint and whole C2 restriction.
-        let prepared = definition.prepare_boundary_curve(
-            edge.id(),
-            curve,
-            (native_range[0], native_range[1]),
-            remaining_bytes,
-            work,
-            cancel,
-        )?;
-        let endpoint = prepared.jet((end.endpoint, end.endpoint), work, cancel)?;
-        let whole = prepared.jet((span[0], span[1]), work, cancel)?;
-        endpoint_chord_error_bound(
-            point,
-            endpoint.position,
-            whole.second_derivative,
-            end.delta_t,
-        )
-    })
+    domain.with_original_spatial_curve(
+        end.use_.coedge, remaining_bytes, work, cancel,
+        |source, work, cancel| {
+            // Both queries use the verified original spatial provider gauge,
+            // never a native rational parameter at an original radian value.
+            let endpoint = crate::parametric::curve_enclosure(
+                source, (end.endpoint, end.endpoint), work, cancel,
+            )?;
+            let whole = crate::parametric::curve_enclosure(
+                source, (span[0], span[1]), work, cancel,
+            )?;
+            endpoint_chord_error_bound(
+                point, endpoint.position, whole.second_derivative, end.delta_t,
+            )
+        },
+    )
 }
 
 fn endpoint_chord_error_bound(
@@ -2399,8 +2355,8 @@ fn endpoint_chord_error_bound(
 /// radius. Every support and downstream error consumer sees the charged cost.
 #[allow(clippy::too_many_arguments)]
 fn qualify_fixed_source_costs(
-    source: OriginalTrimSource<'_, '_>,
-    vertex: VertexId<Point3>,
+    source: MaterialSourceView<'_, '_>,
+    vertex: VertexId,
     point: [f64; 3],
     allowance: f64,
     remaining_bytes: usize,
@@ -2413,12 +2369,7 @@ fn qualify_fixed_source_costs(
     let mut edge_error_mm = 0.0_f64;
     for recipe in recipes.iter() {
         let domain = source.face_domain(recipe.outgoing.use_.face, available, work, cancel)?;
-        let scratch = available.checked_sub(domain.owned_bytes()).ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "original shared-edge comparison exceeds remaining source storage",
-            )
-        })?;
+        let scratch = available;
         // Each outgoing germ occurs once in the complete native corner cycle;
         // its opposed incoming use was checked against the SAME literal exit.
         edge_error_mm = edge_error_mm.max(original_endpoint_chord_error(
@@ -2438,12 +2389,7 @@ fn qualify_fixed_source_costs(
     }
     for (index, recipe) in recipes.iter_mut().enumerate() {
         let domain = source.face_domain(recipe.outgoing.use_.face, available, work, cancel)?;
-        let owned_scratch = available.checked_sub(domain.owned_bytes()).ok_or_else(|| {
-            GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "fixed source UV correspondence exceeds coexistent domain storage",
-            )
-        })?;
+        let owned_scratch = available;
         match OriginalCornerComparison::prepare(
             &domain,
             recipe,
@@ -2587,7 +2533,7 @@ fn boundary_jet_with_byte_limit(
                     .mul(bulge[i]),
             )
         });
-        return domain.native().face().with_surface(|surface| {
+        return { let surface = &domain.surface_operand(); (|| {
             let jet = surface_enclosure(surface, uv_box(uv), work, cancel)?;
             Ok(BoundaryJet {
                 position: jet.position,
@@ -2595,7 +2541,7 @@ fn boundary_jet_with_byte_limit(
                 displacement: [Interval::point(0.0); 3],
                 uv,
             })
-        });
+        })() };
     }
     let end = if matches!(piece, Piece::Outgoing) {
         a
@@ -2671,9 +2617,7 @@ fn cone_boundary_scalar(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(Interval, Interval), GeometryError> {
-    let classifier_bytes = remaining_bytes
-        .checked_add(domain.retained_bytes())
-        .ok_or_else(super::transport::resource)?;
+    let classifier_bytes = remaining_bytes;
     let boundary = boundary_jet_with_byte_limit(
         domain,
         recipe.outgoing,
@@ -2685,7 +2629,7 @@ fn cone_boundary_scalar(
         work,
         cancel,
     )?;
-    domain.native().face().with_surface(|surface| {
+    { let surface = &domain.surface_operand(); (|| {
         // Fold the covector into native coefficients before evaluating the
         // scalar carrier. The displacement is the literal boundary recipe,
         // not a global physical OriginalF/G error or a padding allowance.
@@ -2701,7 +2645,7 @@ fn cone_boundary_scalar(
         let height = intersection(dot(direction, boundary.position), scalar)
             .ok_or_else(|| refusal("source cone boundary scalar enclosures disagree"))?;
         Ok((height, dot(direction, boundary.derivative)))
-    })
+    })() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2771,7 +2715,7 @@ fn cover_piece(
                     cancel,
                 )?;
                 stage = "finite B carrier and radius evaluation";
-                candidate = domain.native().face().with_surface(|surface| {
+                candidate = { let surface = &domain.surface_operand(); (|| {
                 let jet = surface_enclosure(surface, uv_box(h.uv), work, cancel)?;
                 let at_joint = surface_enclosure(surface, uv_box(j.uv), work, cancel)?.position;
                 let d0 = relative(at_joint, point).map(Interval::neg);
@@ -2812,7 +2756,7 @@ fn cover_piece(
                     piece,
                     parameter: range,
                 }))
-            })?;
+                            })() }?;
             }
             if let Some(cell) = candidate {
                 stage = "finite B endpoint evaluation";
@@ -2868,21 +2812,21 @@ fn cover_piece(
         Ok(true)
     })();
     result.map_err(|error| work.annotate_error(error, before, format_args!(
-        "SourceVertexTransportPlan {stage} vertex_mm={point:?} source_face={} coedges={:?} native_endpoint_exit={:?} parameter_window={parameter_window:?} piece={}",
+        "SourceVertexTransportPlan {stage} vertex_mm={point:?} source_face={} coedges={:?} spatial_endpoint_exit={:?} parameter_window={parameter_window:?} piece={}",
         a.use_.face, [a.use_.coedge, b.use_.coedge], [(a.endpoint, a.exit), (b.endpoint, b.exit)],
         match piece { Piece::Outgoing => "outgoing", Piece::Middle => "middle", Piece::Incoming => "incoming" },
     )))
 }
 
 fn separate_nonincident(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     corners: &[CornerRecipe],
     support: Box3,
     scratch: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    for (index, _) in source.definition().solid.face_iter().enumerate() {
+    for index in 0..source.definition().face_ids().len() {
         work.charge(1, cancel)?;
         if corners
             .iter()
@@ -2891,8 +2835,8 @@ fn separate_nonincident(
             continue;
         }
         let domain = source.face_domain(index, scratch, work, cancel)?;
-        let separated = domain.native().face().with_surface(|surface| {
-            for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
+        let separated = { let surface = &domain.surface_operand(); (|| {
+            for span in surface_parameter_boxes(surface, domain.uv_domain(), work, cancel)? {
                 let mut stack = [(span, 0_u8); MAX_DEPTH as usize + 1];
                 let mut pending = 1;
                 while pending != 0 {
@@ -2931,7 +2875,7 @@ fn separate_nonincident(
                 }
             }
             Ok(true)
-        })?;
+        })() }?;
         if !separated {
             return Ok(false);
         }
@@ -2962,8 +2906,7 @@ fn uv_point(
     cancel: &AtomicBool,
 ) -> Result<Box2, GeometryError> {
     let t = domain
-        .original_coedge_correspondence(point.coedge)?
-        .native_range()[usize::from(point.high)];
+        .original_coedge_correspondence(point.coedge)?.spatial_range()[usize::from(point.high)];
     Ok(chart_jet(domain, point.coedge, [t; 2], work, cancel)?.position)
 }
 
@@ -2980,10 +2923,10 @@ fn same_uv_point(
     let pa = domain.original_coedge_correspondence(a.coedge)?;
     let pb = domain.original_coedge_correspondence(b.coedge)?;
     super::vertex_fan::original_uv_endpoints_equal(
-        domain.native().coedges()[a.coedge].curve,
-        pa.uv_range()[usize::from(a.high)],
-        domain.native().coedges()[b.coedge].curve,
-        pb.uv_range()[usize::from(b.high)],
+        &domain.coedge_operand(a.coedge)?,
+        pa.uv_endpoint(a.high),
+        &domain.coedge_operand(b.coedge)?,
+        pb.uv_endpoint(b.high),
         work,
         cancel,
     )
@@ -3018,8 +2961,7 @@ fn end_line_values(
     cancel: &AtomicBool,
 ) -> Result<(Interval, Interval, Interval), GeometryError> {
     let range = domain
-        .original_coedge_correspondence(end.use_.coedge)?
-        .native_range();
+        .original_coedge_correspondence(end.use_.coedge)?.spatial_range();
     let j = line_value(
         domain,
         line,
@@ -3086,16 +3028,16 @@ fn convex_affine_star_inside(
     if b.use_.wire != wire_index {
         return Ok(false);
     }
-    let coedges = domain.native().coedges();
+    let coedges = domain.coedges();
     for (index, coedge) in coedges.iter().enumerate() {
-        if coedge.identity.wire_index != wire_index {
+        if coedge.identity().wire_index != wire_index {
             continue;
         }
         work.charge(1, cancel)?;
-        if !super::vertex_fan::original_uv_affine(coedge.curve, work, cancel)? {
+        if !super::vertex_fan::original_uv_affine(&domain.coedge_operand(index)?, work, cancel)? {
             return Ok(false);
         }
-        let range = domain.original_coedge_correspondence(index)?.native_range();
+        let range = domain.original_coedge_correspondence(index)?.spatial_range();
         let jet = chart_jet(domain, index, range, work, cancel)?;
         let origin = uv_point(
             domain,
@@ -3137,31 +3079,34 @@ fn convex_affine_star_inside(
     }
     // Complete the original UV boundary with the retained ORIGINAL connector
     // at every native corner, including the actual polar quotient connector.
-    let face = domain.native().face();
-    let Some(wire) = face.absolute_boundaries().get(wire_index) else {
-        return Ok(false);
-    };
-    for index in 0..wire.len() {
+    let wire = crate::analysis::source_incidence::boundary_loop(
+        domain.definition(), domain.face_index(), wire_index,
+    )?;
+    for index in 0..wire.edges.len() {
         work.charge(1, cancel)?;
-        let next = (index + 1) % wire.len();
+        let next = (index + 1) % wire.edges.len();
         let flat = a.use_.coedge - a.use_.index;
-        let incoming = if face.orientation() {
+        let incoming = if domain.native_orientation() {
             flat + index
         } else {
             flat + next
         };
-        let outgoing = if face.orientation() {
+        let outgoing = if domain.native_orientation() {
             flat + next
         } else {
             flat + index
         };
+        let incoming_binding = domain.original_coedge_correspondence(incoming)?.binding()
+            .ok_or_else(|| refusal("original connector lost its incoming source endpoint map"))?;
+        let outgoing_binding = domain.original_coedge_correspondence(outgoing)?.binding()
+            .ok_or_else(|| refusal("original connector lost its outgoing source endpoint map"))?;
         let p0 = UvPoint {
             coedge: incoming,
-            high: coedges[incoming].identity.orientation,
+            high: (coedges[incoming].forward == domain.native_orientation()) ^ !incoming_binding.spatial_forward,
         };
         let p1 = UvPoint {
             coedge: outgoing,
-            high: !coedges[outgoing].identity.orientation,
+            high: (coedges[outgoing].forward != domain.native_orientation()) ^ !outgoing_binding.spatial_forward,
         };
         if same_uv_point(domain, p0, p1, work, cancel)? {
             continue;
@@ -3169,78 +3114,41 @@ fn convex_affine_star_inside(
         let origin = uv_point(domain, p0, work, cancel)?;
         let end = uv_point(domain, p1, work, cancel)?;
         let mut retained = false;
-        for joint in domain.native().joints() {
+        for joint in domain.original_joints()? {
             work.charge(1, cancel)?;
-            if joint.incoming.face_id == face.id()
-                && joint.incoming.wire_index == wire_index
-                && joint.incoming.coedge_index == coedges[incoming].identity.coedge_index
-                && joint.incoming.edge_id == coedges[incoming].identity.edge_id
-                && joint.incoming.orientation == coedges[incoming].identity.orientation
-                && joint.outgoing.face_id == face.id()
-                && joint.outgoing.wire_index == wire_index
-                && joint.outgoing.coedge_index == coedges[outgoing].identity.coedge_index
-                && joint.outgoing.edge_id == coedges[outgoing].identity.edge_id
-                && joint.outgoing.orientation == coedges[outgoing].identity.orientation
-                && joint.vertex_id == wire[index].back().id()
+            if joint.incoming == coedges[incoming].identity()
+                && joint.outgoing == coedges[outgoing].identity()
+                && joint.vertex_id == domain.definition().brep().edge(wire.edges[index].edge)
+                    .map_err(|error| refusal(format!("native connector edge: {error}")))?
+                    .vertices[usize::from(wire.edges[index].forward)]
                 && contains(
-                    joint.enclosure.map(|v| Interval {
-                        lo: v.lower,
-                        hi: v.upper,
-                    }),
+                    joint.enclosure,
                     hull2(origin, end),
                 )
             {
-                let monstertruck_modeling::TrimJointKind::SphericalPole { connector, .. } =
-                    &joint.kind
-                else {
+                if !matches!(joint.kind, TrimJointKind::SphericalPole { .. }) {
                     // Ordinary source corners require the coefficient endpoint
                     // identity above. A rectangle does not invent a connector.
                     continue;
-                };
-                if face
-                    .with_surface(|surface| {
-                        source_chart::SphereChart::new(surface, domain, work, cancel)
-                    })?
-                    .is_none()
+                }
+                if source_chart::SphereChart::new(&domain.surface_operand(), domain, work, cancel)?.is_none()
                 {
                     return Ok(false);
                 }
-                let connector = monstertruck_modeling::Curve2D::Line(*connector);
-                let p0_parameter = domain.original_coedge_correspondence(incoming)?.uv_range()
-                    [usize::from(p0.high)];
-                let p1_parameter = domain.original_coedge_correspondence(outgoing)?.uv_range()
-                    [usize::from(p1.high)];
-                let forward = super::vertex_fan::original_uv_endpoints_equal(
-                    coedges[incoming].curve,
-                    p0_parameter,
-                    &connector,
-                    0.0,
-                    work,
-                    cancel,
-                )? && super::vertex_fan::original_uv_endpoints_equal(
-                    coedges[outgoing].curve,
-                    p1_parameter,
-                    &connector,
-                    1.0,
-                    work,
-                    cancel,
+                // The opaque joint binds these SAME original endpoint
+                // expressions and directed source maps by construction.
+                // Its interval endpoint tubes are not literal PCurve controls.
+                let forward = joint.connector_endpoint_is_bound(
+                    domain, 0, incoming, p0.high, work, cancel,
+                )? && joint.connector_endpoint_is_bound(
+                    domain, 1, outgoing, p1.high, work, cancel,
                 )?;
                 let reverse = !forward
-                    && super::vertex_fan::original_uv_endpoints_equal(
-                        coedges[incoming].curve,
-                        p0_parameter,
-                        &connector,
-                        1.0,
-                        work,
-                        cancel,
+                    && joint.connector_endpoint_is_bound(
+                        domain, 1, incoming, p0.high, work, cancel,
                     )?
-                    && super::vertex_fan::original_uv_endpoints_equal(
-                        coedges[outgoing].curve,
-                        p1_parameter,
-                        &connector,
-                        0.0,
-                        work,
-                        cancel,
+                    && joint.connector_endpoint_is_bound(
+                        domain, 0, outgoing, p1.high, work, cancel,
                     )?;
                 if !forward && !reverse {
                     // Canonical pole endpoint legs need an actual source-domain
@@ -3295,24 +3203,21 @@ fn convex_affine_star_inside(
         .uv,
     );
     for (index, coedge) in coedges.iter().enumerate() {
-        if coedge.identity.wire_index == wire_index {
+        if coedge.identity().wire_index == wire_index {
             continue;
         }
         if !trim_span_misses(domain, index, uv, work, cancel)? {
             return Ok(false);
         }
     }
-    for joint in domain.native().joints() {
+    for joint in domain.original_joints()? {
         work.charge(1, cancel)?;
         if joint.incoming.wire_index == wire_index {
             continue;
         }
         if !disjoint(
             uv,
-            joint.enclosure.map(|v| Interval {
-                lo: v.lower,
-                hi: v.upper,
-            }),
+            joint.enclosure,
         ) {
             return Ok(false);
         }
@@ -3331,8 +3236,8 @@ fn validate_trim_line(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    for (index, coedge) in domain.native().coedges().iter().enumerate() {
-        if coedge.identity.wire_index != wire {
+    for (index, coedge) in domain.coedges().iter().enumerate() {
+        if coedge.identity().wire_index != wire {
             continue;
         }
         for high in [false, true] {
@@ -3415,7 +3320,7 @@ fn affine_bridge_exits_collar(
         return Ok(true);
     }
     if !super::vertex_fan::original_uv_affine(
-        domain.native().coedges()[end.use_.coedge].curve,
+        &domain.coedge_operand(end.use_.coedge)?,
         work,
         cancel,
     )? {
@@ -3481,12 +3386,12 @@ fn collar_graph_transverse(
     let step = (end.exit - end.endpoint).abs() * 0.5;
     let nominal_cut = (collar.range[1] - collar.range[0])
         * domain.material_realization().endpoint_support_fraction();
-    let germ = if end.absolute_back {
+    let germ = if end.spatial_high {
         [end.exit - step, end.exit]
     } else {
         [end.exit, end.exit + step]
     };
-    let remains_central = if end.absolute_back {
+    let remains_central = if end.spatial_high {
         germ[0] > collar.range[0] + nominal_cut
     } else {
         germ[1] < collar.range[1] - nominal_cut
@@ -3531,7 +3436,7 @@ fn collar_graph_transverse(
     });
     // boundary_jet acquires this same carrier mutex.
     let cross_section = collar.boundary_jet(end.exit, [0.0, 1.0], &end.spatial, work, cancel)?;
-    domain.native().face().with_surface(|surface| {
+    { let surface = &domain.surface_operand(); (|| {
         let boundary = surface_enclosure(
             surface,
             uv_box(add_margin(uv.position, collar.margin)),
@@ -3566,7 +3471,7 @@ fn collar_graph_transverse(
             ));
         }
         Ok(true)
-    })
+    })() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3594,7 +3499,7 @@ fn outer_cutover_owned(
     let Some(collar) = OriginalCollar::for_enclosure(domain, end.use_, work, cancel)? else {
         return Ok(false);
     };
-    for (index, _) in domain.native().coedges().iter().enumerate() {
+    for (index, _) in domain.coedges().iter().enumerate() {
         let joining = if matches!(piece, Piece::Middle) {
             index == a.use_.coedge || index == b.use_.coedge
         } else {
@@ -3632,6 +3537,24 @@ fn outer_cutover_owned(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solidcore::curve::curve::Curve;
+    use solidcore::nurbs::{b_spline_curve::BSplineCurve, b_spline_surface::BSplineSurface,
+        crv_basic, srf_basic, math::{CPoint, NOW}};
+
+    fn native_surface(points: Vec<Vec<CPoint>>, degree: [usize; 2], knots: [Vec<f64>; 2]) -> Surface {
+        let [u, v] = knots;
+        BSplineSurface::from_nurb(
+            srf_basic::Surface::new(points, degree[0], degree[1], u, v).unwrap(), true,
+        ).into()
+    }
+
+    fn native_plane() -> Surface {
+        native_surface(
+            [-1.0, 1.0].map(|u| [-1.0, 1.0]
+                .map(|v| CPoint::new(u, v, 0.0, NOW)).to_vec()).to_vec(),
+            [1, 1], [vec![-1.0, -1.0, 1.0, 1.0], vec![-1.0, -1.0, 1.0, 1.0]],
+        )
+    }
 
     #[test]
     fn retained_cone_apex_avoids_only_inward_endpoint_refinement() {
@@ -3744,10 +3667,8 @@ mod tests {
     #[test]
     fn nonincident_carrier_exclusion_preserves_trimmed_holes_and_actual_caps() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!("../../../../../../fixtures/geometry/through-hole.step"),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../../../fixtures/geometry/through-hole.step"),
+        &cancel,)
         .unwrap();
         // The bottom carrier covers both points, but the original cap has a
         // radius-three hole centered at (10,10). Empty trim is not material;
@@ -3758,9 +3679,12 @@ mod tests {
                 hi: coordinate + 0.05,
             });
             let mut work = GeometryWorkBudget::new(20_000_000);
+            let prepared = crate::analysis::prepare_solid(
+                &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+            ).unwrap();
             assert_eq!(
                 separate_nonincident(
-                    OriginalTrimSource::standalone(&definition),
+                    prepared.source_view().unwrap(),
                     &[],
                     support,
                     MAX_SCRATCH_BYTES,
@@ -3798,7 +3722,7 @@ mod tests {
 
     #[test]
     fn direct_original_curve_chord_bound_retains_native_vertex_residual() {
-        use monstertruck_modeling::{BsplineCurve, KnotVector};
+        // The source is the actual borrowed native spatial coefficient curve.
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let linear = [1.0, 2.0, 0.5];
@@ -3810,13 +3734,12 @@ mod tests {
                         let p: [f64; 3] = std::array::from_fn(|i| {
                             origin[i] + linear_weight * linear[i] + quadratic_weight * quadratic[i]
                         });
-                        Point3::new(p[0], p[1], p[2])
+                        CPoint::new(p[0], p[1], p[2], NOW)
                     },
                 );
-                let curve = Curve::BsplineCurve(BsplineCurve::new(
-                    KnotVector::from(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-                    points.to_vec(),
-                ));
+                let curve: Curve = BSplineCurve::from_nurb(crv_basic::Curve::new(
+                    points.to_vec(), 2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                ).unwrap(), 3, true).into();
                 let endpoint =
                     crate::parametric::curve_enclosure(&curve, (0.0, 0.0), &mut work, &cancel)
                         .unwrap();
@@ -3853,8 +3776,42 @@ mod tests {
     }
 
     #[test]
+    fn original_circle_chord_cost_retains_its_radian_provider_gauge() {
+        let original = solidcraft_step::geom::Curve::Circle {
+            position: solidcraft_step::geom::Placement {
+                origin: [10.0, -2.0, 3.0],
+                axis: [0.0, 0.0, 1.0],
+                ref_direction: [1.0, 0.0, 0.0],
+            },
+            radius: 4.0,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let provider = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &original, [0.0, 0.5], MAX_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let endpoint = crate::parametric::curve_enclosure(
+            &provider, (0.0, 0.0), &mut work, &cancel,
+        ).unwrap();
+        assert!(endpoint.derivative[1].contains(4.0),
+            "an original radian derivative is not a native degree or rational derivative");
+        for span in [0.125_f64, 0.5] {
+            let whole = crate::parametric::curve_enclosure(
+                &provider, (0.0, span), &mut work, &cancel,
+            ).unwrap();
+            let bound = endpoint_chord_error_bound(
+                [14.0, -2.0, 3.0], endpoint.position, whole.second_derivative,
+                Interval::point(span),
+            ).unwrap();
+            let actual_midpoint_error = 4.0 * (1.0 - (span * 0.5).cos());
+            assert!(bound >= actual_midpoint_error && bound < 1.0,
+                "the complete source-provider C2 remainder must cover its actual circular chord");
+        }
+    }
+
+    #[test]
     fn actual_source_generator_refutation_covers_quadratic_coefficient_families() {
-        use monstertruck_modeling::{BsplineSurface, KnotVector, NurbsSurface, base::Vector4};
+        // Both polynomial and homogeneous native source coefficient families.
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let linear = [1.0, 2.0, 3.0];
@@ -3869,44 +3826,29 @@ mod tests {
             ] {
                 // S(u,v) = V + A*u + D*v + C*u^2, represented by its
                 // complete original Bernstein coefficients, not sampled jets.
-                let points: Vec<Vec<Point3>> = [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)]
+                let points: Vec<Vec<[f64; 3]>> = [(0.0, 0.0), (0.5, 0.0), (1.0, 1.0)]
                     .into_iter()
                     .map(|(u, q)| {
                         [0.0, 1.0]
                             .into_iter()
                             .map(|v| {
-                                Point3::from(std::array::from_fn::<_, 3, _>(|i| {
+                                std::array::from_fn::<_, 3, _>(|i| {
                                     origin[i] + linear[i] * u + across[i] * v + quadratic[i] * q
-                                }))
+                                })
                             })
                             .collect()
                     })
                     .collect();
-                let knots = (KnotVector::bezier_knot(2), KnotVector::bezier_knot(1));
+                let knots = [vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]];
                 for weight in [1.0, 2.0] {
-                    let surface = if weight == 1.0 {
-                        Surface::BsplineSurface(BsplineSurface::new(knots.clone(), points.clone()))
-                    } else {
-                        let homogeneous = points
-                            .iter()
-                            .map(|row| {
-                                row.iter()
-                                    .map(|p| {
-                                        Vector4::new(
-                                            weight * p.x,
-                                            weight * p.y,
-                                            weight * p.z,
-                                            weight,
-                                        )
-                                    })
-                                    .collect()
-                            })
-                            .collect();
-                        Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
-                            knots.clone(),
-                            homogeneous,
-                        )))
-                    };
+                    let controls = points.iter().map(|row| row.iter().map(|p| {
+                        if weight == 1.0 {
+                            CPoint::new(p[0], p[1], p[2], NOW)
+                        } else {
+                            CPoint::new(weight * p[0], weight * p[1], weight * p[2], weight)
+                        }
+                    }).collect()).collect();
+                    let surface = native_surface(controls, [2, 1], knots.clone());
                     for h in [0.125, 0.5, 1.0] {
                         for offset in [0.0, 0.125] {
                             let boundary_uv = [h, 0.5 * h + offset].map(Interval::point);
@@ -3951,14 +3893,7 @@ mod tests {
 
     #[test]
     fn actual_source_generator_refutation_preserves_work_cancel_and_conditioning_errors() {
-        use monstertruck_modeling::{
-            BsplineSurface, KnotVector, NurbsSurface, Plane, base::Vector4,
-        };
-        let surface = Surface::Plane(Plane::new(
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-        ));
+        let surface = native_plane();
         let boundary_uv = [1.0, 0.5].map(Interval::point);
         let halfway_uv = [0.5, 0.25].map(Interval::point);
         for (limit, cancelled, code) in [
@@ -3980,19 +3915,12 @@ mod tests {
                 code
             );
         }
-        let pole = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
-            (KnotVector::bezier_knot(1), KnotVector::bezier_knot(1)),
+        let pole = native_surface(
             vec![
-                vec![
-                    Vector4::new(0.0, 0.0, 0.0, 1.0),
-                    Vector4::new(0.0, 1.0, 0.0, 1.0),
-                ],
-                vec![
-                    Vector4::new(-1.0, 0.0, 0.0, -1.0),
-                    Vector4::new(-1.0, -1.0, 0.0, -1.0),
-                ],
-            ],
-        )));
+                vec![CPoint::new(0.0, 0.0, 0.0, 1.0), CPoint::new(0.0, 1.0, 0.0, 1.0)],
+                vec![CPoint::new(-1.0, 0.0, 0.0, -1.0), CPoint::new(-1.0, -1.0, 0.0, -1.0)],
+            ], [1, 1], [vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 0.0, 1.0, 1.0]],
+        );
         let mut work = GeometryWorkBudget::new(1_000_000);
         assert_eq!(
             source_generator_displacement(
@@ -4012,11 +3940,7 @@ mod tests {
 
     #[test]
     fn original_joint_image_needs_whole_envelope_and_same_oriented_projection() {
-        let surface = Surface::Plane(monstertruck_modeling::Plane::new(
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-        ));
+        let surface = native_plane();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
         let projection = [0.0, 0.0, 1.0].map(Interval::point);
@@ -4072,25 +3996,45 @@ mod tests {
     }
 
     fn housing() -> Definition {
-        crate::import_step(include_bytes!(
+        crate::from_step_bytes_with_cancel(include_bytes!(
             "../../../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
         ), &AtomicBool::new(false)).unwrap()
     }
 
-    fn spherical_corner(definition: &Definition) -> VertexId<Point3> {
-        for face in definition.solid.face_iter() {
-            if face.with_surface(|surface| matches!(surface, Surface::SphericalSurface(_))) {
-                return face.absolute_boundaries()[0][0].front().id();
+    fn spherical_corner(definition: &Definition) -> VertexId {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        for (ordinal, &id) in definition.face_ids().iter().enumerate() {
+            let surface = definition.face_surface(id).unwrap();
+            for axis in 0..2 {
+                for upper in [false, true] {
+                    let Some(pole) = source_chart::native_collapsed_boundary(
+                        surface, axis, upper, &mut work, &cancel,
+                    ).unwrap() else { continue; };
+                    let (_, face) = crate::analysis::source_incidence::native_face(definition, ordinal).unwrap();
+                    for &loop_id in &face.loops {
+                        for entry in &definition.brep().loop_(loop_id).unwrap().edges {
+                            for vertex in definition.brep().edge(entry.edge).unwrap().vertices {
+                                let p = definition.brep().vertex(vertex).unwrap().point;
+                                if pole.world.into_iter().zip([p.x, p.y, p.z])
+                                    .all(|(bound, value)| bound.contains(value))
+                                {
+                                    return vertex;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        panic!("original housing must retain its actual spherical corner carrier");
+        panic!("original housing must retain its coefficient-qualified collapsed corner");
     }
 
-    fn incidence(
-        definition: &Definition,
+    fn incidence<'d>(
+        definition: &'d Definition,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
-    ) -> SourceEdgeIncidence {
+    ) -> SourceEdgeIncidence<'d> {
         let mut incidence =
             SourceEdgeIncidence::new(definition, MAX_SCRATCH_BYTES, work, cancel).unwrap();
         incidence
@@ -4102,18 +4046,19 @@ mod tests {
     #[test]
     fn original_housing_overbudget_generator_refutes_radius_before_finite_boundary_cover() {
         let definition = housing();
-        let before = serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        let before = format!("{:?}", definition.brep());
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(20_000_000);
         let incidence = incidence(&definition, &mut work, &cancel);
-        let source = OriginalTrimSource::standalone(&definition);
-        let face = definition.solid.face_iter().nth(2).unwrap();
-        let edge = &face.absolute_boundaries()[0][0];
-        let vertex = if face.orientation() {
-            edge.front().id()
-        } else {
-            edge.back().id()
-        };
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
+        let (_, edge) = crate::analysis::source_incidence::native_coedge(&definition, 2, 0, 0).unwrap();
+        let domain = source.face_domain(2, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
+        let vertex = edge.vertices[usize::from(!(
+            domain.coedges()[0].forward == domain.native_orientation()
+        ))];
         let (corners, point) = corners(
             source,
             &incidence,
@@ -4138,28 +4083,10 @@ mod tests {
         let allowance = source_allowance(&definition).unwrap();
         assert_eq!(allowance, 1e-7);
         for (fraction, expected_refutation) in [(1.0 / 2048.0, true), (1.0 / 4096.0, false)] {
-            let outgoing = prepare_end(
-                &domain,
-                corner.outgoing,
-                false,
-                fraction,
-                None,
-                MAX_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
+            let outgoing = prepare_end(&domain, corner.outgoing, false, fraction, None, &mut work, &cancel)
             .unwrap()
             .unwrap();
-            let incoming = prepare_end(
-                &domain,
-                corner.incoming,
-                true,
-                fraction,
-                None,
-                MAX_SCRATCH_BYTES,
-                &mut work,
-                &cancel,
-            )
+            let incoming = prepare_end(&domain, corner.incoming, true, fraction, None, &mut work, &cancel)
             .unwrap()
             .unwrap();
             let outgoing_refutes =
@@ -4186,22 +4113,27 @@ mod tests {
         assert!(plan.source_error_mm() <= allowance);
         assert_eq!(
             before,
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap()
+            format!("{:?}", definition.brep())
         );
     }
 
     #[test]
     fn original_housing_cone_has_actual_source_correspondence_and_no_source_mutation() {
         let definition = housing();
-        let before = serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        let before = format!("{:?}", definition.brep());
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
         let incidence = incidence(&definition, &mut work, &cancel);
         let vertex = spherical_corner(&definition);
-        let source = OriginalTrimSource::standalone(&definition);
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
         let plan = SourceVertexTransportPlan::prepare(source, &incidence, vertex,
             MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap()
             .expect("actual original rounded corner must produce a finite source-only conical geometry plan");
+        assert_eq!(plan.point, source.trim_source().source_vertex_point(vertex, &mut work, &cancel).unwrap(),
+            "only the captured original source vertex chooses the canonical apex");
         let allowance = definition.provenance.uncertainty_mm.unwrap();
         assert!(plan.source_error_mm() <= allowance);
         assert!(!plan.cells.is_empty());
@@ -4242,12 +4174,9 @@ mod tests {
                     &cancel,
                 )
                 .unwrap();
-                let original = domain
-                    .native()
-                    .face()
-                    .with_surface(|surface| {
-                        surface_enclosure(surface, uv_box(h.uv), &mut work, &cancel)
-                    })
+                let original = { let surface = &domain.surface_operand(); (|| {
+                    surface_enclosure(surface, uv_box(h.uv), &mut work, &cancel)
+                })() }
                     .unwrap()
                     .position;
                 let realized: Box3 = std::array::from_fn(|i| {
@@ -4289,7 +4218,7 @@ mod tests {
         );
         assert_eq!(
             before,
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap()
+            format!("{:?}", definition.brep())
         );
     }
 
@@ -4300,16 +4229,59 @@ mod tests {
         let foreign = housing();
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
-        let section =
-            crate::prepare_section_source(&definition, MAX_SCRATCH_BYTES, &cancel, &mut work)
-                .unwrap();
-        let source = section.trim_source();
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let foreign_prepared = crate::analysis::prepare_solid(
+            &foreign, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
+        let foreign_view = foreign_prepared.source_view().unwrap().with_vertex_plans(None);
         let plans =
             PreparedSourceVertexPlans::prepare(source, MAX_SCRATCH_BYTES, &mut work, &cancel)
                 .unwrap();
-        let retained_source = source.borrowing_vertex_plans(&plans);
+        let retained_source = source.with_vertex_plans(Some(&plans));
         let vertex = spherical_corner(&definition);
         let source_incidence = incidence(&definition, &mut work, &cancel);
+        let mut expected_positions = Vec::new();
+        for vertex in source_incidence.vertices().unwrap() {
+            plans.plan(&definition, vertex, &mut work, &cancel).unwrap()
+                .visit_position_supports(&mut work, &cancel, &mut |realized, _comparison| {
+                    expected_positions.push(realized);
+                    Ok(())
+                }).unwrap();
+        }
+        let mut actual_positions = Vec::new();
+        plans.visit_position_supports(&definition, &mut work, &cancel, &mut |realized| {
+            actual_positions.push(realized);
+            Ok(())
+        }).unwrap();
+        let order = |left: &Box3, right: &Box3| {
+            for axis in 0..3 {
+                let order = left[axis].lo.total_cmp(&right[axis].lo)
+                    .then_with(|| left[axis].hi.total_cmp(&right[axis].hi));
+                if order != std::cmp::Ordering::Equal { return order; }
+            }
+            std::cmp::Ordering::Equal
+        };
+        actual_positions.sort_unstable_by(order);
+        expected_positions.sort_unstable_by(order);
+        assert!(!actual_positions.is_empty());
+        assert_eq!(actual_positions, expected_positions,
+            "retained bounds must stream actual G positions, not comparison hulls");
+        let cancelled_positions = AtomicBool::new(true);
+        for (owner, cancellation, expected) in [
+            (&foreign, &cancel, GeometryErrorCode::AnalysisIndeterminate),
+            (&definition, &cancelled_positions, GeometryErrorCode::Cancelled),
+        ] {
+            let mut visited = false;
+            let error = plans.visit_position_supports(owner, &mut work, cancellation, &mut |_| {
+                visited = true;
+                Ok(())
+            }).unwrap_err();
+            assert_eq!(error.code, expected);
+            assert!(!visited, "unqualified retained bounds must not invoke the visitor");
+        }
         let selected = SourceVertexPlan::prepare(
             retained_source,
             &source_incidence,
@@ -4324,13 +4296,13 @@ mod tests {
         assert_eq!(
             SourceVertexPlan::prepare(source, &source_incidence, vertex, 0, &mut work, &cancel,)
                 .err()
-                .expect("standalone selection must reserve its local plan storage")
+                .expect("query-local selection must reserve its local plan storage")
                 .code,
             GeometryErrorCode::ResourceLimit,
         );
         assert_eq!(
             plans
-                .plan(&definition, spherical_corner(&foreign), &mut work, &cancel)
+                .plan(&foreign, spherical_corner(&foreign), &mut work, &cancel)
                 .err()
                 .expect("a foreign NativeV must not borrow a retained plan")
                 .code,
@@ -4358,7 +4330,7 @@ mod tests {
         let mut atlas_visited = false;
         for (owner, bytes, cancellation, expected) in [
             (
-                OriginalTrimSource::standalone(&foreign),
+                foreign_view,
                 MAX_SCRATCH_BYTES,
                 &cancel,
                 GeometryErrorCode::AnalysisIndeterminate,
@@ -4428,8 +4400,7 @@ mod tests {
             (bounds, error)
         };
         assert_eq!(summary(&local), summary(&retained));
-        let foreign_source =
-            OriginalTrimSource::standalone(&foreign).borrowing_vertex_plans(&plans);
+        let foreign_source = foreign_view.with_vertex_plans(Some(&plans));
         assert_eq!(
             source_transport_supports(
                 foreign_source,
@@ -4510,8 +4481,11 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
         let incidence = incidence(&definition, &mut work, &cancel);
+        let prepared = crate::analysis::prepare_solid(
+            &foreign, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
         let result = SourceVertexTransportPlan::prepare(
-            OriginalTrimSource::standalone(&foreign),
+            prepared.source_view().unwrap().with_vertex_plans(None),
             &incidence,
             spherical_corner(&definition),
             MAX_SCRATCH_BYTES,
@@ -4529,8 +4503,19 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000_000);
         let incidence = incidence(&definition, &mut work, &cancel);
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = match prepared.source_view() {
+            Ok(source) => source.with_vertex_plans(None),
+            Err(error) => {
+                assert!(matches!(error.code, GeometryErrorCode::AnalysisIndeterminate
+                    | GeometryErrorCode::ShapeErrorExceeded));
+                return;
+            }
+        };
         match SourceVertexTransportPlan::prepare(
-            OriginalTrimSource::standalone(&definition),
+            source,
             &incidence,
             spherical_corner(&definition),
             MAX_SCRATCH_BYTES,
@@ -4554,33 +4539,33 @@ mod tests {
     }
 }
 
-fn validate_native_exits(
+fn validate_spatial_exits(
     recipes: &[CornerRecipe],
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<(), GeometryError> {
     if recipes.is_empty() {
-        return Err(refusal("source vertex has no actual native endpoint exits"));
+        return Err(refusal("source vertex has no actual spatial-provider endpoint exits"));
     }
     for (index, recipe) in recipes.iter().enumerate() {
         work.charge(1, cancel)?;
         let incoming = recipe.incoming;
         let outgoing = recipes[(index + 1) % recipes.len()].outgoing;
         if incoming.edge != outgoing.edge
-            || incoming.absolute_back != outgoing.absolute_back
+            || incoming.spatial_high != outgoing.spatial_high
             || incoming.exit != outgoing.exit
             || incoming.use_.orientation == outgoing.use_.orientation
         {
             return Err(GeometryError::new(
                 GeometryErrorCode::ParameterCorrespondenceUnavailable,
                 format!(
-                    "opposed original vertex uses do not share one literal native endpoint exit: incoming_face_coedge={:?} outgoing_face_coedge={:?} incoming_native_exit={} outgoing_native_exit={} incoming_absolute_back={} outgoing_absolute_back={}",
+                    "opposed original vertex uses do not share one literal spatial endpoint exit: incoming_face_coedge={:?} outgoing_face_coedge={:?} incoming_spatial_exit={} outgoing_spatial_exit={} incoming_spatial_high={} outgoing_spatial_high={}",
                     [incoming.use_.face, incoming.use_.coedge],
                     [outgoing.use_.face, outgoing.use_.coedge],
                     incoming.exit,
                     outgoing.exit,
-                    incoming.absolute_back,
-                    outgoing.absolute_back,
+                    incoming.spatial_high,
+                    outgoing.spatial_high,
                 ),
             ));
         }

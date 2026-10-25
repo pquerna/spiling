@@ -13,8 +13,8 @@ use super::{
     projected_bounds,
 };
 use crate::{
-    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, PreparedSectionSource,
-    parametric::Interval,
+    Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm,
+    parametric::{Interval, SurfaceEvaluator},
 };
 use spiling_contracts::geometry::{
     GeometryErrorCode, RigidPoseMm, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
@@ -226,6 +226,103 @@ fn source_extent(definition: &Definition) -> [f64; 3] {
     let bounds = definition.bounds_mm();
     std::array::from_fn(|i| bounds.min[i].abs().max(bounds.max[i].abs()))
 }
+fn include_position_bounds(
+    bounds: &mut [Interval; 3], position: [Interval; 3],
+) -> Result<(), GeometryError> {
+    for axis in 0..3 {
+        bounds[axis] = bounds[axis].hull(finite(position[axis])?);
+    }
+    Ok(())
+}
+pub(super) fn material_position_bounds(
+    source: super::material_source::MaterialSourceView<'_, '_>,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 3], GeometryError> {
+    work.charge(1, cancel)?;
+    if let Some(bounds) = source.cached_position_bounds() {
+        return Ok(bounds);
+    }
+    let fixed = crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+        + std::mem::size_of::<[[Interval; 3]; 4]>()
+        + 2 * std::mem::size_of::<[Interval; 3]>();
+    if remaining_bytes < fixed {
+        return Err(error(GeometryErrorCode::ResourceLimit,
+            "material coefficient position bound exhausts evaluator scratch"));
+    }
+    let definition = source.definition();
+    // Retain the native candidate's real bound too; it is not a proxy for F.
+    let native = definition.bounds_mm();
+    let mut bounds = std::array::from_fn(|axis| Interval {
+        lo: native.min[axis], hi: native.max[axis],
+    });
+    for coordinate in bounds { finite(coordinate)?; }
+    let mut original_bounds = [Interval { lo: f64::INFINITY, hi: f64::NEG_INFINITY }; 3];
+    let mut ribbon_displacement = 0.0_f64;
+    for ordinal in 0..definition.face_ids().len() {
+        let domain = source.face_domain(ordinal, remaining_bytes, work, cancel)?;
+        let surface = domain.surface_operand();
+        let active = surface.active_domain();
+        for range in active { Interval::new(range[0], range[1])?; }
+        // Enclose F on its complete selected source parameter domain, never a
+        // native UV box evaluated as original radians. Cone G positions are
+        // enclosed independently from their retained literal realization below.
+        let position = crate::parametric::surface_position_enclosure(
+            &surface, active, work, cancel,
+        )?;
+        include_position_bounds(&mut original_bounds, position)?;
+        for flat in 0..domain.coedges().len() {
+            work.charge(1, cancel)?;
+            let proof = domain.original_coedge_correspondence(flat)?;
+            let displacement = proof.position_error_mm();
+            if !displacement.is_finite() || displacement < 0.0 {
+                return Err(error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "selected source trace has no finite physical deviation bound"));
+            }
+            ribbon_displacement = ribbon_displacement.max(displacement);
+            let binding = proof.binding().ok_or_else(|| error(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "material position bound has no bound original vertices",
+            ))?;
+            for point in binding.source_vertex_points_mm {
+                include_position_bounds(&mut bounds, point.map(Interval::point))?;
+            }
+            domain.with_original_spatial_curve(flat, remaining_bytes, work, cancel,
+                |curve, work, cancel| {
+                    include_position_bounds(&mut bounds,
+                        curve.tensor(proof.spatial_range(), 0, work, cancel)?[0])
+                })?;
+        }
+    }
+    for axis in 0..3 {
+        // The actual ribbon law is F + lambda*(C-F(trace)), 0 <= lambda <= 1.
+        // Its displacement is the sealed whole-trace coefficient bound above,
+        // not the declared tolerance or an assumed F/native correspondence.
+        let ribbon = finite(add(original_bounds[axis], Interval {
+            lo: -ribbon_displacement, hi: ribbon_displacement,
+        }))?;
+        bounds[axis] = bounds[axis].hull(ribbon);
+    }
+    if let Some(plans) = source.vertex_plans() {
+        plans.visit_position_supports(definition, work, cancel, &mut |position| {
+            include_position_bounds(&mut bounds, position)
+        })?;
+    } else if !source.material_transport_is_proved_zero(work, cancel)? {
+        return Err(error(GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "material position bound lacks the complete selected G vertex positions"));
+    }
+    Ok(bounds)
+}
+fn material_extent(
+    source: super::material_source::MaterialSourceView<'_, '_>,
+    remaining_bytes: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[f64; 3], GeometryError> {
+    Ok(material_position_bounds(source, remaining_bytes, work, cancel)?
+        .map(Interval::abs_upper))
+}
 fn coefficient_error(
     coefficients: [Interval; 3],
     nominal: [f64; 3],
@@ -260,12 +357,15 @@ pub fn placed_bounds(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<ProjectedBounds, GeometryError> {
+    let prepared = super::material_source::prepare_solid(
+        definition, crate::MAX_PREPARED_SECTION_BYTES, work, cancel,
+    )?;
     placed_bounds_inner(
-        crate::section::OriginalTrimSource::standalone(definition),
+        prepared.source_view()?,
         pose,
         world_direction,
         policy,
-        None,
+        Some(super::slab::remaining_scratch(prepared.retained_bytes())?),
         work,
         cancel,
     )
@@ -274,7 +374,7 @@ pub fn placed_bounds(
 /// Scratch allowance excludes the pinned source proof and every caller-owned
 /// buffer that coexists with this complete native directional support query.
 pub(super) fn placed_bounds_with_scratch_limit(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
@@ -384,7 +484,7 @@ impl PlacedBoundsFrame {
 }
 
 fn placed_bounds_inner(
-    source_context: crate::section::OriginalTrimSource<'_, '_>,
+    source_context: super::material_source::MaterialSourceView<'_, '_>,
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
@@ -396,7 +496,7 @@ fn placed_bounds_inner(
     let frame = PlacedBoundsFrame::new(pose, world_direction, policy, work, cancel)?;
     let source = match remaining_bytes {
         Some(bytes) => super::bounds::projected_bounds_with_scratch_limit(
-            source_context,
+            source_context.trim_source(),
             frame.nominal,
             frame.source_policy,
             bytes,
@@ -469,8 +569,11 @@ pub fn placed_material_bounds(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<PlacedMaterialProjectedBounds, GeometryError> {
+    let prepared = super::material_source::prepare_solid(
+        definition, crate::MAX_PREPARED_SECTION_BYTES, work, cancel,
+    )?;
     let remaining_bytes = super::slab::MAX_SLAB_SCRATCH_BYTES
-        .checked_sub(definition.retained_query_proof_bytes())
+        .checked_sub(prepared.retained_bytes())
         .ok_or_else(|| {
             error(
                 GeometryErrorCode::ResourceLimit,
@@ -478,7 +581,7 @@ pub fn placed_material_bounds(
             )
         })?;
     placed_material_bounds_with_scratch_limit(
-        crate::section::OriginalTrimSource::standalone(definition),
+        prepared.source_view()?,
         pose,
         world_direction,
         policy,
@@ -489,7 +592,7 @@ pub fn placed_material_bounds(
 }
 
 pub(super) fn placed_material_bounds_with_scratch_limit(
-    source_context: crate::section::OriginalTrimSource<'_, '_>,
+    source_context: super::material_source::MaterialSourceView<'_, '_>,
     pose: RigidPoseMm,
     world_direction: [f64; 3],
     policy: BoundsPolicy,
@@ -523,10 +626,12 @@ pub(super) fn placed_material_bounds_with_scratch_limit(
             "invalid source material realization error",
         ));
     }
-    // Quaternion/coefficient residuals must cover actual G, not just the raw
-    // source AABB. The physical source error enlarges each coordinate extent.
-    let extent = source_extent(definition)
-        .map(|extent| add(Interval::point(extent), Interval::point(source_error)).hi);
+    // Quaternion residuals act on actual selected F/C/V/G positions. A source
+    // deviation from F is not a proof of distance to the native candidate.
+    let extent_remaining = query_byte_limit.checked_sub(source.retained_bytes())
+        .ok_or_else(|| error(GeometryErrorCode::ResourceLimit,
+            "placed material support exhausts coexisting extent capacity"))?;
+    let extent = material_extent(source_context, extent_remaining, work, cancel)?;
     let bounds = frame.finish(source.bounds(), extent)?;
     let source_realization_error_mm = finite(mul(
         Interval::point(source_error),
@@ -557,7 +662,7 @@ struct HeightMap {
     residual_mm: f64,
 }
 impl HeightMap {
-    fn new(definition: &Definition, pose: RigidPoseMm) -> Result<Self, GeometryError> {
+    fn new(pose: RigidPoseMm, extent: [f64; 3]) -> Result<Self, GeometryError> {
         let matrix = rotation(pose)?;
         let nominal = matrix[2].map(Interval::mid);
         let frame = PlaneFrameMm::from_plane(PlaneMm {
@@ -580,7 +685,7 @@ impl HeightMap {
                 mul(Interval::point(scale), Interval::point(n[i])),
             )
         });
-        let residual_mm = coefficient_error(residual, [0.0; 3], source_extent(definition))?;
+        let residual_mm = coefficient_error(residual, [0.0; 3], extent)?;
         Ok(Self {
             pose,
             matrix,
@@ -717,8 +822,11 @@ pub fn analyze_placed_height_domain(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<HeightAnalysis, GeometryError> {
+    let prepared = super::material_source::prepare_solid(
+        definition, crate::MAX_PREPARED_SECTION_BYTES, work, cancel,
+    )?;
     let remaining_bytes = super::slab::MAX_SLAB_SCRATCH_BYTES
-        .checked_sub(definition.retained_query_proof_bytes())
+        .checked_sub(prepared.retained_bytes())
         .ok_or_else(|| {
             error(
                 GeometryErrorCode::ResourceLimit,
@@ -726,7 +834,7 @@ pub fn analyze_placed_height_domain(
             )
         })?;
     analyze_placed_height_domain_with_scratch_limit(
-        crate::section::OriginalTrimSource::standalone(definition),
+        prepared.source_view()?,
         pose,
         world_height_interval_mm,
         policy,
@@ -737,7 +845,7 @@ pub fn analyze_placed_height_domain(
 }
 
 pub(super) fn analyze_placed_height_domain_with_scratch_limit(
-    source_context: crate::section::OriginalTrimSource<'_, '_>,
+    source_context: super::material_source::MaterialSourceView<'_, '_>,
     pose: RigidPoseMm,
     world_height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
@@ -758,7 +866,7 @@ pub(super) fn analyze_placed_height_domain_with_scratch_limit(
             "placed analysis policies must be finite and positive",
         ));
     }
-    let map = HeightMap::new(definition, pose)?;
+    let map = HeightMap::new(pose, material_extent(source_context, query_byte_limit, work, cancel)?)?;
     let mut result = if map.residual_mm == 0.0 {
         let range = map.source_range(world_height_interval_mm)?;
         let source_uncertainty = div(
@@ -962,6 +1070,12 @@ fn transform_points(
             *point = actual;
         }
     }
+    for spans in &mut section.loop_spans {
+        for span in spans {
+            work.charge(1, cancel)?;
+            span.section_pose = pose;
+        }
+    }
     Ok((arithmetic, plane_error))
 }
 
@@ -992,6 +1106,17 @@ fn record_world_accuracy(
     }
     section.certificate.maximum_chord_error_mm = chord_error;
     section.certificate.maximum_plane_error_mm = plane_error;
+    for spans in &mut section.loop_spans {
+        for span in spans {
+            span.maximum_chord_error_mm = finite(add(
+                mul(Interval::point(sigma), Interval::point(span.maximum_chord_error_mm)),
+                Interval::point(arithmetic),
+            ))?.hi;
+            // The same whole-query covector bound applies to every retained
+            // exact native span; do not leave source-space metadata on world data.
+            span.maximum_plane_error_mm = plane_error;
+        }
+    }
     Ok(())
 }
 struct SamplePlacement<'a> {
@@ -1224,7 +1349,7 @@ fn place_endpoint_strata(
 /// through the opposite critical coface. These are independent CLOSED material
 /// products on their own domains, never whole-parent metrics or motion tubes.
 fn certify_endpoint_radial_products(
-    source: &crate::PreparedMaterialSource<'_>,
+    source: &super::material_source::PreparedSolid<'_>,
     map: &HeightMap,
     request: &PlacedSlabRequest,
     result: &mut SlabAnalysis,
@@ -1333,7 +1458,7 @@ fn certify_endpoint_radial_products(
         )?;
         result.endpoint_radial_products[side] =
             match super::critical::material_link::certify_closed_radial_material_product(
-                source.trim_source(),
+                source.source_view()?,
                 &source_request,
                 &coordinates,
                 remaining,
@@ -1357,7 +1482,7 @@ fn certify_endpoint_radial_products(
 }
 
 pub(crate) fn analyze_placed_slab(
-    source: &crate::PreparedMaterialSource<'_>,
+    source: &super::material_source::PreparedSolid<'_>,
     request: &PlacedSlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
@@ -1387,7 +1512,8 @@ pub(crate) fn analyze_placed_slab(
             "placed slab requires an interior finite sample and positive finite shape error",
         ));
     }
-    let map = HeightMap::new(source.definition(), request.pose)?;
+    let extent = material_extent(source.source_view()?, query_byte_limit, work, cancel)?;
+    let map = HeightMap::new(request.pose, extent)?;
     let range = map.source_range(request.world_height_interval_mm)?;
     let sample = div(
         sub(
@@ -1509,7 +1635,7 @@ pub(crate) fn analyze_placed_slab(
             Ok(None)
         } else {
             super::joint::certify_closed_radial_slab(
-                source.trim_source(),
+                source.source_view()?,
                 &source_request,
                 &coordinates,
                 &world_candidate.loops,
@@ -1676,7 +1802,7 @@ pub(crate) fn analyze_placed_slab(
             coexisting_bytes.saturating_add(result.retained_bytes()),
         )?;
         let actual = super::collar::place_native_collar_complex(
-            source.trim_source(),
+            source.source_view()?,
             super::collar::PlacedCollarComplexQuery {
                 seed,
                 pose: request.pose,
@@ -1689,7 +1815,6 @@ pub(crate) fn analyze_placed_slab(
         )?;
         result.collar_complex = Some(actual);
     }
-    let extent = source_extent(source.definition());
     let drift = axial_drift(&map, &result.section, range, extent)?;
     let section_byte_limit = query_byte_limit
         .checked_sub(
@@ -1774,7 +1899,7 @@ pub(crate) fn analyze_placed_slab(
         )?;
         if let Some(product) =
             super::critical::material_link::certify_closed_radial_material_product(
-                source.trim_source(),
+                source.source_view()?,
                 &source_request,
                 &coordinates,
                 remaining,
@@ -1905,7 +2030,7 @@ fn identical_functional(a: HeightFunctional, b: HeightFunctional) -> bool {
 }
 
 fn certify_plane_homotopy(
-    trim_source: crate::section::OriginalTrimSource<'_, '_>,
+    definition: &Definition,
     section: &NativeSection,
     target: HeightFunctional,
     query_byte_limit: usize,
@@ -1923,39 +2048,12 @@ fn certify_plane_homotopy(
         direction: std::array::from_fn(|i| source.direction[i].hull(target.direction[i])),
         offset: source.offset.hull(target.offset),
     };
-    let tolerance = spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM;
-    // The caller's query allowance already excludes every retained prepared
-    // source, including this definition's pinned continuation. Only the actual
-    // returned section still coexists with this homotopy's scratch buffers.
-    let remaining = query_byte_limit
-        .checked_sub(section.retained_bytes())
-        .ok_or_else(|| {
-            error(
-                GeometryErrorCode::ResourceLimit,
-                "placed section leaves no plane-homotopy capacity",
-            )
-        })?;
-    let analysis = super::slab::analyze_height_domain_enclosed_with_scratch_limit(
-        &super::slab::HeightDomainQuery {
-            source: trim_source,
-            frame: PlaneFrameMm::from_plane(section.plane)?,
-            functional: family,
-            height_interval_mm: [-tolerance, tolerance],
-            policy: AnalysisPolicy {
-                maximum_height_uncertainty_mm: tolerance,
-                maximum_shape_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
-            },
-        },
-        remaining,
-        work,
-        cancel,
+    let remaining = query_byte_limit.checked_sub(section.retained_bytes()).ok_or_else(|| {
+        error(GeometryErrorCode::ResourceLimit, "placed section leaves no plane-homotopy capacity")
+    })?;
+    crate::section::certify_plane_functional_family(
+        definition, family.direction, family.offset, remaining, work, cancel,
     )?;
-    if !analysis.event_brackets_mm.is_empty() {
-        return Err(error(
-            GeometryErrorCode::AnalysisIndeterminate,
-            "placed section plane homotopy meets a native critical stratum",
-        ));
-    }
     Ok(())
 }
 
@@ -1963,7 +2061,7 @@ fn certify_plane_homotopy(
 /// covector is pulled back; no assumed quaternion inverse transforms points.
 /// Stored output points remain actual transformed native intersection points.
 pub(crate) fn section_placed_with_work(
-    source: &PreparedSectionSource<'_>,
+    definition: &Definition,
     pose: RigidPoseMm,
     plane: PlaneMm,
     query_byte_limit: u32,
@@ -1971,22 +2069,19 @@ pub(crate) fn section_placed_with_work(
     cancel: &AtomicBool,
 ) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
-    let query_byte_limit = query_byte_limit.min(
-        crate::MAX_PREPARED_SECTION_BYTES
-            .checked_sub(source.retained_bytes())
-            .ok_or_else(|| {
-                error(
-                    GeometryErrorCode::ResourceLimit,
-                    "placed section source exceeds shared capacity",
-                )
-            })? as u32,
-    );
+    let query_byte_limit = query_byte_limit.min(crate::MAX_PREPARED_SECTION_BYTES as u32);
     plane.validate()?;
     let matrix = rotation(pose)?;
     let target = plane_functional(matrix, pose, plane)?;
     let local_plane = nominal_source_plane(target)?;
-    let mut section =
-        source.section_with_byte_limit(local_plane, cancel, query_byte_limit, work)?;
+    let query = crate::section::SectionQuery {
+        plane: local_plane,
+        maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
+        maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
+    };
+    let mut section = crate::section::section_for_query(
+        definition, &query, cancel, query_byte_limit, work,
+    )?;
     let declared_plane = plane.normalized()?;
     let declared_frame = PlaneFrameMm::from_plane(declared_plane)?;
     let declared_functional = plane_functional(matrix, pose, declared_plane)?;
@@ -1997,7 +2092,7 @@ pub(crate) fn section_placed_with_work(
         offset: target.offset.hull(declared_functional.offset),
     };
     certify_plane_homotopy(
-        source.trim_source(),
+        definition,
         &section,
         family,
         query_byte_limit as usize,
@@ -2005,7 +2100,7 @@ pub(crate) fn section_placed_with_work(
         cancel,
     )?;
     certify_orientation(matrix, section.frame, declared_frame)?;
-    let extent = source_extent(source.definition());
+    let extent = source_extent(definition);
     // Normalizing the public plane rounds its coefficients. Include residuals
     // against both the original query and the declared normalized metadata.
     let requested_error = world_plane_error(&section, target, extent)?;
@@ -2030,12 +2125,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn material_position_bounds_cover_selected_operators_without_another_owner() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"), &cancel,
+        ).unwrap();
+        let mut preparation = GeometryWorkBudget::new(20_000_000);
+        let owner = super::super::material_source::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_BYTES, &mut preparation, &cancel,
+        ).unwrap();
+        let source = owner.source_view().unwrap();
+        let retained = owner.retained_bytes();
+        let remaining = crate::MAX_PREPARED_SECTION_BYTES - retained;
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let positions = material_position_bounds(source, remaining, &mut work, &cancel).unwrap();
+        assert!(positions.iter().all(|value| value.lo.is_finite() && value.hi.is_finite()));
+        for coedge in &definition.original_source().coedges {
+            for point in coedge.vertex_points_mm {
+                for axis in 0..3 {
+                    assert!(positions[axis].lo <= point[axis] && point[axis] <= positions[axis].hi);
+                }
+            }
+        }
+        assert_eq!(owner.retained_bytes(), retained);
+        assert_eq!(material_position_bounds(source, 0, &mut work, &cancel).unwrap(), positions);
+        assert_eq!(material_position_bounds(source, 0, &mut GeometryWorkBudget::new(0), &cancel)
+            .unwrap_err().code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(material_position_bounds(source, remaining, &mut work, &AtomicBool::new(true))
+            .unwrap_err().code, GeometryErrorCode::Cancelled);
+    }
+
+    #[test]
     fn placed_material_bounds_retain_source_recipe_pose_and_terminal_brackets() {
         let cancel = AtomicBool::new(false);
-        let mut definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let mut definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [2.0, -3.0, 4.0],
@@ -2254,6 +2378,7 @@ mod tests {
                 ],
             }],
             loop_source_faces: vec![vec![0]],
+            loop_spans: Vec::new(),
             sampling_tolerance_mm: SECTION_SAMPLING_TOLERANCE_MM,
             boolean_tolerance_mm: spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM,
             certificate: crate::NativeSectionCertificate {
@@ -2511,19 +2636,10 @@ mod tests {
     #[test]
     fn arbitrary_placed_native_plane_reports_world_metrics_and_canonical_order() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
         let mut work = GeometryWorkBudget::new(40_000_000);
-        let source = crate::prepare_section_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
-        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [13.0, -7.0, 9.0],
             rotation_xyzw: [0.2, -0.3, 0.1, 0.86_f64.sqrt()],
@@ -2533,7 +2649,7 @@ mod tests {
             normal: [1.0, 2.0, 3.0],
         };
         let first = section_placed_with_work(
-            &source,
+            &definition,
             pose,
             plane,
             spiling_contracts::geometry::MAX_SECTION_BYTES,
@@ -2542,7 +2658,7 @@ mod tests {
         )
         .unwrap();
         let second = section_placed_with_work(
-            &source,
+            &definition,
             pose,
             plane,
             spiling_contracts::geometry::MAX_SECTION_BYTES,

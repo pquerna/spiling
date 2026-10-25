@@ -154,12 +154,13 @@ pub(crate) fn plan(
             cancel,
         )?);
     }
-    let prepared_sources = prepare_sources(
-        geometry_sources,
+    admit_source_captures(
+        &geometry_sources,
         admission.native_capture_proposal_bytes(),
         &mut admission.geometry_work,
         cancel,
     )?;
+    let prepared_sources = geometry_sources;
 
     // This is a proposal, not authorization. The streamed source stage below
     // commits each actual interval only after native metric/incidence and joint
@@ -1834,11 +1835,10 @@ fn native_error(
     error(code, format!("{context}: {e}"))
 }
 
-type PreparedGeometrySources<'a> =
-    BTreeMap<DefinitionId, spiling_geometry::PreparedGeometrySource<'a>>;
+type PreparedSources<'a> = BTreeMap<DefinitionId, spiling_geometry::PreparedSolid<'a>>;
 
 fn geometry_query_limit(
-    sources: &PreparedGeometrySources<'_>,
+    sources: &PreparedSources<'_>,
 ) -> Result<usize, ManufacturingError> {
     sources.values().try_fold(
         spiling_geometry::MAX_PREPARED_SECTION_BYTES,
@@ -1856,16 +1856,14 @@ fn geometry_query_limit(
     )
 }
 
-fn prepare_sources<'a>(
-    sources: PreparedGeometrySources<'a>,
+fn admit_source_captures(
+    sources: &PreparedSources<'_>,
     coexisting_bytes: usize,
     work: &mut spiling_geometry::GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<BTreeMap<DefinitionId, spiling_geometry::PreparedMaterialSource<'a>>, ManufacturingError>
-{
-    let mut prepared = BTreeMap::new();
-    // Source promotion may also use the fixed query headroom. Reserve the
-    // still-live proposal buffer before granting any replacement allowance.
+) -> Result<(), ManufacturingError> {
+    // Preflight and capture borrow the same prepared owners. There is no
+    // promotion/reconstruction phase; proposals must still coexist with them.
     let available = spiling_geometry::MAX_PREPARED_SECTION_SOURCE_BYTES
         .checked_sub(coexisting_bytes)
         .ok_or_else(|| {
@@ -1874,42 +1872,17 @@ fn prepare_sources<'a>(
                 "native capture proposals exhaust source preparation capacity",
             )
         })?;
-    let mut remaining = sources.values().try_fold(available, |remaining, source| {
-        remaining
-            .checked_sub(source.retained_bytes())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "aggregate original material geometry capacity exceeded",
-                )
-            })
+    sources.values().try_fold(available, |remaining, source| {
+        work.charge(1, cancel)
+            .map_err(|failure| native_error(failure, "native source capture admission"))?;
+        remaining.checked_sub(source.retained_bytes()).ok_or_else(|| {
+            error(
+                ManufacturingErrorCode::ResourceLimit,
+                "aggregate prepared native material capacity exceeded",
+            )
+        })
     })?;
-    for (definition_id, source) in sources {
-        check_cancel(cancel)?;
-        // Replace this owner's storage; all other original/prepared owners
-        // still coexist. Promotion moves its domains/plans without rebuilding.
-        let allowance = remaining
-            .checked_add(source.retained_bytes())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "material source replacement capacity overflow",
-                )
-            })?;
-        let source = source
-            .prepare_sections(allowance, cancel, work)
-            .map_err(|e| native_error(e, "native material preparation"))?;
-        remaining = allowance
-            .checked_sub(source.retained_bytes())
-            .ok_or_else(|| {
-                error(
-                    ManufacturingErrorCode::ResourceLimit,
-                    "aggregate prepared native material capacity exceeded",
-                )
-            })?;
-        prepared.insert(definition_id, source);
-    }
-    Ok(prepared)
+    Ok(())
 }
 
 struct LayerElevation {

@@ -8,7 +8,7 @@ mod analysis;
 mod exact_coefficient;
 mod import;
 mod kernel;
-mod parametric;
+pub mod parametric;
 mod section;
 mod tessellation;
 
@@ -34,35 +34,41 @@ pub use analysis::{
     NativeUnionCoverage, NativeUnionOccurrence, NativeUnionOccurrenceEvidence, NativeUnionPolicy,
     NativeUnionProofKind, NativeUnionSourceCapture, NativeVoidProjectionCapture,
     PendingNativeUnionProof, PlacedMaterialProjectedBounds, PlacedSlabRequest,
-    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedGeometrySource,
-    PreparedMaterialSource, ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy,
+    PlanarCapsuleClearance, PlanarCapsuleClearancePolicy, PlanarCapsuleMm, PreparedSolid,
+    ProjectedBounds, ProtectedVoidHeightScope, ProtectedVoidPolicy,
     SlabAnalysis, SlabRequest, SourceLeafRequest, analyze_height_domain,
     analyze_placed_height_domain, capture_projected_voids, certify_endpoint_ownership,
     certify_endpoint_stratum_ownership, certify_native_collar_incidence,
     certify_native_critical_collar, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union, certify_planar_capsule_clearance,
     certify_planar_capsule_pair_clearance, material_projected_bounds, placed_bounds,
-    placed_material_bounds, prepare_geometry_source, prepare_material_source, projected_bounds,
+    placed_material_bounds, prepare_solid, projected_bounds,
     projected_protected_void_envelopes,
 };
-pub use import::{from_step_bytes, from_step_bytes_with_cancel, from_step_file};
+pub use import::{
+    from_step_bytes, from_step_bytes_with_cancel, from_step_bytes_with_limits, from_step_file,
+};
 pub use kernel::{BBox3Mm, Definition, SurfaceParameterMap, make_kernel_context};
+pub use parametric::{Interval, IntervalVec2, IntervalVec3};
 pub use section::{
-    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, PreparedSectionSource,
+    MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES, NativeSection,
+    PreparedSectionSource, SectionCurve, SectionEndpoint, SectionLoopMm, SectionSpan,
     prepare_section_source,
 };
+pub(crate) use section::{NativeSectionCertificate, SectionAuthority};
 pub use spiling_contracts::display::EncodedMesh as MeshArtifact;
 pub use spiling_contracts::display::MeshBudget;
 use spiling_contracts::geometry::GeometryErrorCode;
 pub use spiling_contracts::geometry::{
     DisplayProfile, FaceId, FaceInfo, GeometryError, PlaneFrameMm, PlaneMm,
+    KERNEL_NAME,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Native adapter dependency version captured in persisted provenance.
-pub const KERNEL_VERSION: &str = "0.4.1";
+pub const KERNEL_VERSION: &str = "0.0.1";
 /// Exact published native dependency revision; changed with the workspace pin.
-pub const KERNEL_REVISION: &str = "bb7d6000af95e489ed76803bfd1ac5917da446f5";
+pub const KERNEL_REVISION: &str = "1fef444cbaad61c0f414fe126314c079175da046";
 
 /// Immutable native certificate for one full-height rectangular vertical wall.
 /// Coordinates and phase direction are source-local millimetres; the outward
@@ -89,150 +95,12 @@ pub struct VerticalCylinderFace {
     pub max_z_mm: f64,
 }
 
-/// One native section boundary, closed and canonically ordered in the plane frame.
-#[derive(Debug)]
-pub struct SectionLoopMm {
-    pub is_hole: bool,
-    pub points_mm: Vec<[f64; 3]>,
-}
-
-/// Owned native section; loop identities are local to this result, never source faces.
-/// This certifies geometric intersection correspondence or conservative
-/// projection, not a Jordan sampled polygon or closure of toleranced source
-/// material. Material reuse and support require separate descriptor-bound
-/// slab/leaf and completed-union authority on the actual returned polygon.
-#[derive(Debug)]
-pub struct NativeSection {
-    pub(crate) plane: PlaneMm,
-    pub(crate) frame: PlaneFrameMm,
-    pub(crate) loops: Vec<SectionLoopMm>,
-    /// Exact original source-face ordinals for each local native loop, in the
-    /// same canonical order. Derived conservative envelopes have no lineage.
-    pub(crate) loop_source_faces: Vec<Vec<usize>>,
-    pub(crate) sampling_tolerance_mm: f64,
-    pub(crate) boolean_tolerance_mm: f64,
-    certificate: NativeSectionCertificate,
-}
-
-#[derive(Debug, Clone)]
-struct NativeSectionCertificate {
-    definition_id: spiling_contracts::geometry::DefinitionId,
-    authority: SectionAuthority,
-    maximum_chord_error_mm: f64,
-    maximum_plane_error_mm: f64,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SectionAuthority {
-    NativeIntersection,
-    ConservativeSlabEnvelope,
-}
-impl NativeSection {
-    pub fn plane(&self) -> PlaneMm {
-        self.plane
-    }
-    pub fn frame(&self) -> PlaneFrameMm {
-        self.frame
-    }
-    pub fn loops(&self) -> &[SectionLoopMm] {
-        &self.loops
-    }
-    pub fn sampling_tolerance_mm(&self) -> f64 {
-        self.sampling_tolerance_mm
-    }
-    pub fn boolean_tolerance_mm(&self) -> f64 {
-        self.boolean_tolerance_mm
-    }
-    /// Consume the proof-bearing result when only untrusted geometric data is needed.
-    pub fn into_loops(self) -> Vec<SectionLoopMm> {
-        self.loops
-    }
-    pub fn definition_id(&self) -> &spiling_contracts::geometry::DefinitionId {
-        &self.certificate.definition_id
-    }
-    /// Occupied slab envelopes are conservative projection bounds, not native
-    /// intersections or material regions that can be promoted into layers.
-    pub fn is_native_intersection(&self) -> bool {
-        self.certificate.authority == SectionAuthority::NativeIntersection
-    }
-    pub fn achieved_chord_error_mm(&self) -> f64 {
-        self.certificate.maximum_chord_error_mm
-    }
-    pub fn achieved_plane_error_mm(&self) -> f64 {
-        self.certificate.maximum_plane_error_mm
-    }
-    /// Charge a completely bounded bidirectional reference-polyline Hausdorff
-    /// displacement in addition to the original native curve enclosure. This
-    /// neither promises topology of the old sampled PL loop nor grants material
-    /// authority: slab/leaf and actual-polygon qualification remain mandatory.
-    pub(crate) fn charge_reference_displacement(
-        &mut self,
-        displacement_mm: f64,
-    ) -> Result<(), GeometryError> {
-        let total = (self.certificate.maximum_chord_error_mm + displacement_mm).next_up();
-        if !self.is_native_intersection()
-            || !displacement_mm.is_finite()
-            || displacement_mm < 0.0
-            || !total.is_finite()
-            || total > spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM
-        {
-            return Err(GeometryError::new(
-                spiling_contracts::geometry::GeometryErrorCode::AnalysisIndeterminate,
-                "reference polyline displacement exceeds native sampling authority",
-            ));
-        }
-        self.certificate.maximum_chord_error_mm = total;
-        Ok(())
-    }
-    pub(crate) fn loop_source_face_ordinals(&self, index: usize) -> Option<&[usize]> {
-        if !self.is_native_intersection() || self.loop_source_faces.len() != self.loops.len() {
-            return None;
-        }
-        self.loop_source_faces
-            .get(index)
-            .filter(|owners| !owners.is_empty())
-            .map(Vec::as_slice)
-    }
-    /// Owned vector and identity-string capacities, excluding borrowed native
-    /// geometry and allocator bookkeeping. Use this for cumulative job caches.
-    pub fn retained_bytes(&self) -> usize {
-        let lineage = self.loop_source_faces.iter().fold(
-            self.loop_source_faces
-                .capacity()
-                .saturating_mul(std::mem::size_of::<Vec<usize>>()),
-            |bytes, faces| {
-                bytes.saturating_add(
-                    faces
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<usize>()),
-                )
-            },
-        );
-        self.loops.iter().fold(
-            self.loops
-                .capacity()
-                .saturating_mul(std::mem::size_of::<SectionLoopMm>())
-                .saturating_add(self.certificate.definition_id.allocated_bytes())
-                .saturating_add(lineage),
-            |bytes, boundary| {
-                bytes.saturating_add(
-                    boundary
-                        .points_mm
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<[f64; 3]>()),
-                )
-            },
-        )
-    }
-}
 
 impl PreparedSectionSource<'_> {
     /// Intersect the actual placed native source with an arbitrary world plane.
-    /// The query allowance bounds combined adapter proof and output buffers;
-    /// callers subtract every retained prepared source (including pinned
-    /// proofs) and every other coexisting owned query/output buffer first.
-    /// The shared 64 MiB admission and packed 16 MiB cap remain independent.
-    /// Native Boolean intermediate objects retain separate bounded admissions
-    /// and require an external host-memory limit; this is not an RSS cap.
+    /// The query allowance excludes every retained source and other coexisting
+    /// buffer. Direct native intersection owns its proof/output admission;
+    /// the 64 MiB query and packed 16 MiB output caps remain independent.
     pub fn section_placed_with_work(
         &self,
         pose: spiling_contracts::geometry::RigidPoseMm,
@@ -241,45 +109,10 @@ impl PreparedSectionSource<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<NativeSection, GeometryError> {
-        analysis::section_placed_with_work(self, pose, plane, query_byte_limit, work, cancel)
+        analysis::section_placed_with_work(self.definition(), pose, plane, query_byte_limit, work, cancel)
     }
 }
 
-/// Admission limits only narrow the frozen native face and retained-source/query
-/// proof caps. Storage includes pinned curves, continuation pieces, original
-/// coedge binding records/inline receipts and retained indices. Even explicit
-/// geometry owns such records; this is not an implicit-only auxiliary allowance,
-/// the complete BREP, or a process RSS cap.
-#[derive(Debug, Clone, Copy)]
-pub struct ImportLimits {
-    pub max_faces: u32,
-    pub max_query_proof_bytes: usize,
-}
-impl ImportLimits {
-    pub const FROZEN: Self = Self {
-        max_faces: spiling_contracts::geometry::MAX_NATIVE_FACES,
-        max_query_proof_bytes: import::MAX_QUERY_PROOF_BYTES,
-    };
-}
-
-pub fn import_step(bytes: &[u8], cancel: &AtomicBool) -> Result<Definition, GeometryError> {
-    import_step_with_limits(bytes, cancel, ImportLimits::FROZEN)
-}
-
-/// Admit within the caller's remaining face and retained-query-proof capacity.
-/// Both allowances are enforced before retaining native query-proof allocations.
-pub fn import_step_with_limits(
-    bytes: &[u8],
-    cancel: &AtomicBool,
-    limits: ImportLimits,
-) -> Result<Definition, GeometryError> {
-    import::import_step(
-        bytes,
-        cancel,
-        limits.max_faces,
-        limits.max_query_proof_bytes,
-    )
-}
 
 pub fn tessellate(
     definition: &Definition,

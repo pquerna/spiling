@@ -10,12 +10,15 @@ mod material_source;
 mod placed;
 mod planar;
 mod slab;
-mod source_incidence;
+pub(crate) mod source_incidence;
+pub(crate) mod source_restriction;
 mod voids;
+#[cfg(test)]
+pub(crate) mod test_source;
 
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, check_cancel};
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub use bounds::{MaterialProjectedBounds, material_projected_bounds, projected_bounds};
 pub use collar::{
@@ -37,10 +40,8 @@ pub use joint::{
     certify_native_collar_incidence, certify_native_one_sided_source_leaf,
     certify_native_source_leaf, certify_native_union,
 };
-pub use material_source::{
-    PreparedGeometrySource, PreparedMaterialSource, prepare_geometry_source,
-    prepare_material_source,
-};
+pub use material_source::{PreparedSolid, prepare_solid};
+pub(crate) use material_source::{MaterialSourceView, certify_zero_material_transport};
 pub use placed::{
     PlacedMaterialProjectedBounds, analyze_placed_height_domain, placed_bounds,
     placed_material_bounds,
@@ -62,21 +63,21 @@ pub use voids::{
 /// subdividing an interval never resets this counter.
 #[derive(Debug)]
 pub struct GeometryWorkBudget {
-    remaining: u64,
-    consumed: u64,
+    remaining: AtomicU64,
+    consumed: AtomicU64,
 }
 impl GeometryWorkBudget {
     pub fn new(maximum_work: u64) -> Self {
         Self {
-            remaining: maximum_work,
-            consumed: 0,
+            remaining: AtomicU64::new(maximum_work),
+            consumed: AtomicU64::new(0),
         }
     }
     pub fn consumed(&self) -> u64 {
-        self.consumed
+        self.consumed.load(Ordering::Acquire)
     }
-    pub(crate) fn remaining(&self) -> u64 {
-        self.remaining
+    pub fn remaining(&self) -> u64 {
+        self.remaining.load(Ordering::Acquire)
     }
     /// Add bounded, failure-only phase context without changing the error code or cause.
     pub(crate) fn annotate_error(
@@ -85,29 +86,43 @@ impl GeometryWorkBudget {
         before: u64,
         context: impl std::fmt::Display,
     ) -> GeometryError {
+        let consumed = self.consumed();
+        let remaining = self.remaining();
         GeometryError::new(
             error.code,
             format!(
-                "{context}: work_before={before} work_consumed={} work_delta={} work_remaining={}: {}",
-                self.consumed,
-                self.consumed.saturating_sub(before),
-                self.remaining,
+                "{context}: work_before={before} work_consumed={consumed} work_delta={} work_remaining={remaining}: {}",
+                consumed.saturating_sub(before),
                 error.message,
             ),
         )
     }
-    pub(crate) fn charge(&mut self, amount: u64, cancel: &AtomicBool) -> Result<(), GeometryError> {
-        if amount > self.remaining {
-            check_cancel(cancel)?;
-            return Err(GeometryError::new(
-                GeometryErrorCode::ResourceLimit,
-                "cumulative geometry work exhausted",
-            ));
+    pub fn charge(&self, amount: u64, cancel: &AtomicBool) -> Result<(), GeometryError> {
+        let mut current = self.remaining.load(Ordering::Acquire);
+        loop {
+            if amount > current {
+                check_cancel(cancel)?;
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "cumulative geometry work exhausted",
+                ));
+            }
+            match self.remaining.compare_exchange_weak(
+                current,
+                current - amount,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.consumed.fetch_add(amount, Ordering::AcqRel);
+                    // Debit completed native work even when cancellation arrived inside it.
+                    return check_cancel(cancel);
+                }
+                Err(actual) => {
+                    current = actual;
+                }
+            }
         }
-        self.remaining -= amount;
-        self.consumed += amount;
-        // Debit completed native work even when cancellation arrived inside it.
-        check_cancel(cancel)
     }
 }
 
@@ -553,85 +568,6 @@ impl SlabAnalysis {
     }
 }
 
-pub(crate) enum SectionRegularity {
-    Empty,
-    Regular,
-}
-
-/// Completeness is established independently of native Boolean search seeds.
-pub(crate) fn section_regularity(
-    source: crate::section::OriginalTrimSource<'_, '_>,
-    plane: &PlaneMm,
-    remaining_bytes: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<SectionRegularity, GeometryError> {
-    check_cancel(cancel)?;
-    let frame = PlaneFrameMm::from_plane(*plane)?;
-    // Emptiness needs only the import-proved whole-native enclosure, not fresh
-    // endpoint extrema and feasible witnesses for every section. Crossing and
-    // critical strata still require the complete literal census below.
-    work.charge(1, cancel)?;
-    let bounds = source.definition().bounds_mm();
-    let support = (0..3).fold(crate::parametric::Interval::point(0.0), |sum, axis| {
-        sum.add(
-            crate::parametric::Interval {
-                lo: bounds.min[axis],
-                hi: bounds.max[axis],
-            }
-            .mul(crate::parametric::Interval::point(plane.normal[axis])),
-        )
-    });
-    let offset = crate::parametric::dot_point(plane.origin_mm, plane.normal);
-    let tolerance = spiling_contracts::geometry::SECTION_BOOLEAN_TOLERANCE_MM;
-    let target = offset.add(crate::parametric::Interval {
-        lo: -tolerance,
-        hi: tolerance,
-    });
-    if support.lo > target.hi || support.hi < target.lo {
-        return Ok(SectionRegularity::Empty);
-    }
-    let height = slab::analyze_literal_native_height_domain(
-        source,
-        frame,
-        [-tolerance, tolerance],
-        AnalysisPolicy {
-            maximum_height_uncertainty_mm: tolerance,
-            maximum_shape_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
-        },
-        remaining_bytes,
-        work,
-        cancel,
-    )
-    .map_err(|mut error| {
-        error.message = format!(
-            "section regularity / height-event census: {}",
-            error.message
-        );
-        error
-    })?;
-    if height
-        .proved_event_brackets_mm
-        .iter()
-        .any(|event| event[0] >= -tolerance && event[1] <= tolerance)
-    {
-        return Err(GeometryError::new(
-            GeometryErrorCode::DegenerateSection,
-            "section plane meets a proved native critical stratum within native tolerance",
-        ));
-    }
-    if height
-        .event_brackets_mm
-        .iter()
-        .any(|event| event[0] <= tolerance && event[1] >= -tolerance)
-    {
-        return Err(GeometryError::new(
-            GeometryErrorCode::AnalysisIndeterminate,
-            "section intersects an unresolved or critical height bracket",
-        ));
-    }
-    Ok(SectionRegularity::Regular)
-}
 
 #[cfg(test)]
 mod work_tests {
@@ -652,6 +588,32 @@ mod work_tests {
         assert_eq!(work.consumed(), 6);
         assert_eq!(
             work.charge(5, &AtomicBool::new(false)).unwrap_err().code,
+            GeometryErrorCode::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn concurrent_atomic_debiting_preserves_total_accounting() {
+        use std::sync::Arc;
+        let budget = Arc::new(GeometryWorkBudget::new(100_000));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let b = Arc::clone(&budget);
+            let c = Arc::clone(&cancel);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    b.charge(10, &c).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(budget.consumed(), 100_000);
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(
+            budget.charge(1, &cancel).unwrap_err().code,
             GeometryErrorCode::ResourceLimit
         );
     }

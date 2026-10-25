@@ -4,12 +4,17 @@
 
 use super::Definition;
 use crate::{GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel};
-use monstertruck_modeling::base::ParametricCurve;
-use monstertruck_modeling::{Curve, Surface};
+use solidcore::curve::curve::{Curve, p2::CurveKind};
+use solidcore::surface::surface::p2::SurfaceKind;
+use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use solidcore::topology::{LoopuseStart, EdgeuseOwner, shell::ShellMembers};
 use spiling_contracts::geometry::{
     AnalyticSurfaceDescription, FaceId, GeometryErrorCode, SurfaceFamily,
 };
 use std::sync::atomic::AtomicBool;
+// Native B-Rep coefficients and original STEP operands are already millimetres.
+// A certificate uses the actual plane law and bounded coedge census; labels and
+// convenience Loop.edges never supply carrier, trim, or outward authority.
 
 // Admission/carrier residual tolerance, not a manufacturing approximation budget.
 const RESIDUAL_MM: f64 = 1e-7;
@@ -48,45 +53,24 @@ fn native_line_matches(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
-    let mut basis = curve;
-    let mut line = false;
-    for depth in 0..=32 {
-        work.charge(1, cancel)?;
-        match basis {
-            Curve::Line(_) => {
-                line = true;
-                break;
-            }
-            Curve::TrimmedCurve(wrapped) if depth < 32 => {
-                let m = wrapped.transform();
-                if !(0..4).all(|i| (0..4).all(|j| m[i][j].is_finite()))
-                    || m.x.w != 0.0
-                    || m.y.w != 0.0
-                    || m.z.w != 0.0
-                    || m.w.w != 1.0
-                {
-                    return Ok(false);
-                }
-                basis = wrapped.entity().curve().as_ref();
-            }
-            _ => break,
-        }
-    }
-    if !line {
+    work.charge(1, cancel)?;
+    if !matches!(curve.kind(), CurveKind::Line(line) if line.is_bounded()) {
         return Ok(false);
     }
-    let Some((a, b)) = curve.try_range_tuple() else {
-        return Ok(false);
-    };
+    let domain = curve.natural_interval();
+    let (a, b) = (domain.min(), domain.max());
     if !a.is_finite() || !b.is_finite() || a >= b {
         return Ok(false);
     }
+    let prepared = crate::parametric::PreparedValidatedCurve::new(
+        curve, [a, b], 1.0, usize::MAX, work, cancel,
+    )?;
     let parameters = if orientation { [a, b] } else { [b, a] };
     for (parameter, vertex) in parameters.into_iter().zip([front, back]) {
-        let jet = crate::parametric::curve_enclosure(curve, (parameter, parameter), work, cancel)?;
+        let position = prepared.position_bounds([parameter, parameter], work, cancel)?;
         let squared = (0..3).fold(crate::parametric::Interval::point(0.0), |sum, axis| {
             sum.add(
-                jet.position[axis]
+                position[axis]
                     .sub(crate::parametric::Interval::point(vertex[axis]))
                     .square(),
             )
@@ -148,35 +132,63 @@ impl Definition {
                 "surface finish requires an analytic planar source face",
             ));
         }
-        let Some(AnalyticSurfaceDescription::Plane {
-            origin_mm: source_origin,
-            normal: source_normal,
-        }) = &info.geometry.analytic
+        let Some(AnalyticSurfaceDescription::Plane { .. }) = &info.geometry.analytic
         else {
             return Err(unsupported(
                 "surface finish requires a vertical planar native face",
             ));
         };
-        let shells = self.solid.boundaries();
-        if shells.len() != 1 || shells[0].len() != self.faces.len() {
-            return Err(malformed("native source face-use mapping is inconsistent"));
+        let brep = self.brep();
+        let native_id = *self.face_ids().get(index)
+            .ok_or_else(|| malformed("native source face-use mapping is inconsistent"))?;
+        let original = self.original_source().face(native_id)?;
+        let solidcraft_step::geom::Surface::Plane { position: source_position } = original.carrier.as_ref() else {
+            return Err(unsupported("surface finish requires an original analytic planar carrier"));
+        };
+        let source_origin = &source_position.origin;
+        let source_normal = &source_position.axis;
+        if (original.same_sense == original.face_use_forward) != info.orientation {
+            return Err(malformed("native wall orientation disagrees with original source face use"));
         }
-        let face = &shells[0][index];
-        let (native_origin, native_normal) = face
-            .with_surface(|surface| match surface {
-                Surface::Plane(plane) => {
-                    let origin = plane.origin();
-                    let normal = plane.normal();
-                    Some((
-                        [origin.x, origin.y, origin.z],
-                        [normal.x, normal.y, normal.z],
-                    ))
-                }
-                _ => None,
-            })
-            .ok_or_else(|| malformed("source planar face mapped to a nonplanar native carrier"))?;
-        let raw_normal = unit(native_normal)?;
-        let outward = raw_normal.map(|v| if face.orientation() { v } else { -v });
+        let face = brep.face(native_id).map_err(|_| malformed("native source face is absent"))?;
+        let surface = self.face_surface(native_id)
+            .ok_or_else(|| malformed("native wall surface is absent"))?;
+        let SurfaceKind::Plane(plane) = surface.kind() else {
+            return Err(malformed("source planar face mapped to a nonplanar native carrier"));
+        };
+        let position = plane.position();
+        let p = position.origin();
+        let x = position.x_axis();
+        let y = position.y_axis();
+        let uv_scale = plane.uv_scale();
+        if ![uv_scale.x, uv_scale.y].iter().all(|v| v.is_finite() && *v != 0.0) {
+            return Err(malformed("native wall plane has invalid parameter scales"));
+        }
+        let native_origin = [p.x, p.y, p.z];
+        let raw_normal = unit([
+            x.y * y.z - x.z * y.y,
+            x.z * y.x - x.x * y.z,
+            x.x * y.y - x.y * y.x,
+        ])?.map(|v| v * if uv_scale.x.signum() == uv_scale.y.signum() { 1.0 } else { -1.0 });
+        let shell = brep.shell(face.shell).map_err(|_| malformed("native wall shell is absent"))?;
+        let ShellMembers::Faceuses(uses) = &shell.members else {
+            return Err(malformed("native wall shell has no oriented face uses"));
+        };
+        let mut orientation = None;
+        for &id in uses {
+            work.charge(1, cancel)?;
+            let use_ = brep.faceuse(id).map_err(|_| malformed("native wall faceuse is absent"))?;
+            if use_.face == Some(native_id) {
+                if orientation.is_some() { return Err(malformed("duplicate native wall face use")); }
+                orientation = Some(match use_.orientation {
+                    OrientType::Same => true,
+                    OrientType::Opposite => false,
+                    _ => return Err(malformed("native wall face use lacks orientation")),
+                });
+            }
+        }
+        let orientation = orientation.ok_or_else(|| malformed("native wall face use is absent"))?;
+        let outward = raw_normal.map(|v| if orientation { v } else { -v });
         let source_outward = unit(*source_normal)?.map(|v| if info.orientation { v } else { -v });
         if !native_origin
             .iter()
@@ -201,44 +213,62 @@ impl Definition {
         if horizontal[0] < 0.0 || (horizontal[0] == 0.0 && horizontal[1] < 0.0) {
             horizontal = horizontal.map(|v| -v);
         }
-        let wires = face.absolute_boundaries();
-        if wires.len() != 1 || wires[0].len() != 4 || !wires[0].is_closed() {
-            return Err(unsupported(
-                "surface finish requires one closed four-line rectangular trim without holes",
-            ));
+        if face.loops.len() != 1 {
+            return Err(unsupported("surface finish requires one closed four-line rectangular trim without holes"));
         }
-        let wire = &wires[0];
+        let loop_ = brep.loop_(face.loops[0]).map_err(|_| malformed("native wall loop is absent"))?;
+        let lu_id = loop_.loopuse.ok_or_else(|| malformed("native wall loopuse is absent"))?;
+        let lu = brep.loopuse(lu_id).map_err(|_| malformed("native wall loopuse is absent"))?;
+        let LoopuseStart::Edgeuse(Some(first)) = lu.start else {
+            return Err(unsupported("native wall requires an explicit coedge cycle"));
+        };
+        let mut current = first;
         let mut points = [[0.0; 3]; 4];
+        let mut edges = [None; 4];
+        let mut vertices = [None; 4];
+        let mut previous_back = None;
         for i in 0..4 {
             work.charge(1, cancel)?;
-            let edge = &wire[i];
-            if edge.back().id() != wire[(i + 1) % 4].front().id()
-                || (0..i)
-                    .any(|j| edge.id() == wire[j].id() || edge.front().id() == wire[j].front().id())
-            {
-                return Err(unsupported(
-                    "native wall trim does not have four distinct connected corners and edges",
-                ));
+            if i != 0 && current == first {
+                return Err(unsupported("native wall has fewer than four trim edges"));
             }
-            points[i] = edge.front().point().into();
-            let back: [f64; 3] = edge.back().point().into();
-            let line_matches = edge.with_curve(|curve| {
-                native_line_matches(curve, edge.orientation(), points[i], back, work, cancel)
-            })?;
-            if !line_matches {
-                return Err(unsupported(
-                    "native wall trim must consist of four exact bounded line edges",
-                ));
+            let eu = brep.edgeuse(current).map_err(|_| malformed("native wall coedge is absent"))?;
+            if eu.owner != EdgeuseOwner::Loopuse(Some(lu_id)) {
+                return Err(malformed("native wall coedge enters a foreign loopuse"));
+            }
+            let edge_id = eu.edge.ok_or_else(|| malformed("native wall coedge lacks an edge"))?;
+            let edge = brep.edge(edge_id).map_err(|_| malformed("native wall edge is absent"))?;
+            let forward = match eu.orientation {
+                OrientType::Same => true, OrientType::Opposite => false,
+                _ => return Err(malformed("native wall coedge lacks orientation")),
+            };
+            let [front_id, back_id] = if forward { edge.vertices } else { [edge.vertices[1], edge.vertices[0]] };
+            if previous_back.is_some_and(|id| id != front_id)
+                || edges[..i].contains(&Some(edge_id)) || vertices[..i].contains(&Some(front_id)) {
+                return Err(unsupported("native wall trim does not have four distinct connected corners and edges"));
+            }
+            edges[i] = Some(edge_id);
+            vertices[i] = Some(front_id);
+            previous_back = Some(back_id);
+            let p = brep.vertex(front_id).map_err(|_| malformed("native wall corner is absent"))?.point;
+            let b = brep.vertex(back_id).map_err(|_| malformed("native wall corner is absent"))?.point;
+            points[i] = [p.x, p.y, p.z];
+            let curve = self.edge_curve(edge_id).ok_or_else(|| malformed("native wall edge curve is absent"))?;
+            if !native_line_matches(curve, forward, points[i], [b.x, b.y, b.z], work, cancel)? {
+                return Err(unsupported("native wall trim must consist of four exact bounded line edges"));
             }
             let residual = dot(sub(points[i], native_origin), outward);
-            if !points[i].iter().all(|v| v.is_finite())
-                || !residual.is_finite()
-                || residual.abs() > RESIDUAL_MM
-            {
-                return Err(malformed(
-                    "native wall corner is nonfinite or off its supporting carrier",
-                ));
+            if !points[i].iter().all(|v| v.is_finite()) || !residual.is_finite() || residual.abs() > RESIDUAL_MM {
+                return Err(malformed("native wall corner is nonfinite or off its supporting carrier"));
             }
+            let next = eu.ccw.ok_or_else(|| malformed("native wall coedge cycle is open"))?;
+            if brep.edgeuse(next).map_err(|_| malformed("native wall successor is absent"))?.cw != Some(current) {
+                return Err(malformed("native wall coedge links are inconsistent"));
+            }
+            current = next;
+        }
+        if current != first || previous_back != vertices[0] {
+            return Err(unsupported("surface finish requires one closed four-line rectangular trim without holes"));
         }
         let coordinate = points.map(|p| [dot(sub(p, points[0]), horizontal), p[2]]);
         if !coordinate.iter().flatten().all(|v| v.is_finite()) {
@@ -319,7 +349,7 @@ impl Definition {
             e0[2] * e1[0] - e0[0] * e1[2],
             e0[0] * e1[1] - e0[1] * e1[0],
         ];
-        let winding = dot(cross, outward) * if face.orientation() { 1.0 } else { -1.0 };
+        let winding = dot(cross, outward) * if orientation { 1.0 } else { -1.0 };
         if !winding.is_finite() || winding < 1.0 - ANGULAR {
             return Err(unsupported(
                 "native rectangular trim is not the oriented outer material boundary",
@@ -338,16 +368,21 @@ impl Definition {
                 "selected native wall is recessed or is not an outward supporting material plane",
             ));
         }
-        for (other_index, other) in self.faces.iter().enumerate() {
+        for (other_index, &other_id) in self.face_ids().iter().enumerate() {
             work.charge(1, cancel)?;
             if other_index == index {
                 continue;
             }
-            if let Some(AnalyticSurfaceDescription::Plane { origin_mm, normal }) =
-                &other.geometry.analytic
-            {
-                let other_normal = unit(*normal)?;
-                let residual = dot(sub(*origin_mm, points[origin_index]), outward);
+            let other_surface = self.face_surface(other_id)
+                .ok_or_else(|| malformed("native supporting face has no carrier"))?;
+            if let SurfaceKind::Plane(other_plane) = other_surface.kind() {
+                let position = other_plane.position();
+                let p = position.origin();
+                let x = position.x_axis();
+                let y = position.y_axis();
+                let origin_mm = [p.x, p.y, p.z];
+                let other_normal = unit([x.y * y.z - x.z * y.y, x.z * y.x - x.x * y.z, x.x * y.y - x.y * y.x])?;
+                let residual = dot(sub(origin_mm, points[origin_index]), outward);
                 if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
                     return Err(malformed("native supporting-plane comparison is nonfinite"));
                 }
@@ -377,46 +412,20 @@ impl Definition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use monstertruck_modeling::{
-        Invertible, Line, Matrix4, Point3, Processor, TrimmedCurve, Vector3,
-    };
+    use solidcore::curve::line::Line;
+    use solidcore::geom::vector3d::Point3;
+
     #[test]
-    fn native_wrapped_line_uses_actual_bounded_range_pose_and_sense() {
-        let mut wrapped = Processor::with_transform(
-            TrimmedCurve::new(
-                Box::new(Curve::Line(Line(
-                    Point3::new(0.0, 0.0, 0.0),
-                    Point3::new(1.0, 0.0, 0.0),
-                ))),
-                (4.0, 6.0),
-            ),
-            Matrix4::from_translation(Vector3::new(2.0, 0.0, 0.0)),
-        );
-        wrapped.invert();
-        let curve = Curve::TrimmedCurve(wrapped);
+    fn native_line_uses_actual_bounded_range_endpoints_and_coedge_sense() {
+        let curve: Curve = Line::from_points(
+            Point3::new(6.0, 0.0, 0.0), Point3::new(8.0, 0.0, 0.0), 3,
+        ).into();
         let mut work = GeometryWorkBudget::new(100_000);
         let cancel = AtomicBool::new(false);
-        assert!(
-            native_line_matches(
-                &curve,
-                true,
-                [8.0, 0.0, 0.0],
-                [6.0, 0.0, 0.0],
-                &mut work,
-                &cancel
-            )
-            .unwrap()
-        );
-        assert!(
-            !native_line_matches(
-                &curve,
-                true,
-                [2.0, 0.0, 0.0],
-                [3.0, 0.0, 0.0],
-                &mut work,
-                &cancel
-            )
-            .unwrap()
-        );
+        assert!(native_line_matches(&curve, true, [6.0, 0.0, 0.0], [8.0, 0.0, 0.0], &mut work, &cancel).unwrap());
+        assert!(native_line_matches(&curve, false, [8.0, 0.0, 0.0], [6.0, 0.0, 0.0], &mut work, &cancel).unwrap());
+        assert!(!native_line_matches(&curve, true, [8.0, 0.0, 0.0], [6.0, 0.0, 0.0], &mut work, &cancel).unwrap());
+        assert!(!native_line_matches(&curve, true, [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], &mut work, &cancel).unwrap());
     }
 }
+

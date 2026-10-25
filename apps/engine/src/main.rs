@@ -660,7 +660,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         instance_id: instance_id.clone(),
         engine_build: spiling_contracts::ENGINE_BUILD_ID.into(),
         pid: std::process::id(),
-        kernel: "monstertruck".into(),
+        kernel: spiling_contracts::geometry::KERNEL_NAME.into(),
         geometry_capabilities: [
             "step_native_trimmed_v2",
             "native_geometry_queries_v2",
@@ -677,7 +677,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         session_id: session_id.as_str().to_owned(),
         kernel_identity: Some(
             spiling_contracts::geometry::KernelIdentity {
-                name: "monstertruck".into(),
+                name: spiling_contracts::geometry::KERNEL_NAME.into(),
                 version: spiling_geometry::KERNEL_VERSION.into(),
                 revision: spiling_geometry::KERNEL_REVISION.into(),
             }

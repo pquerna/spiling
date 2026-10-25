@@ -9,6 +9,8 @@
 use super::radial_product::RadialRegionKind;
 use super::*;
 use crate::analysis::placed::ActualMaterialCoordinates;
+use crate::analysis::material_source::MaterialSourceView;
+use crate::analysis::source_incidence::native_coedge;
 use crate::parametric::{
     SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES, SurfaceFirstEnclosure, SurfaceFunctional,
     SurfaceFunctionalEnclosure, surface_functional_enclosures, surface_functional_scratch_bytes,
@@ -16,6 +18,120 @@ use crate::parametric::{
 };
 
 type Box3 = [Interval; 3];
+/// Full retained UV connector/expression overcover, not joint ownership or
+/// physical collapse. It remains valid without trusting a nominal UV box to
+/// include a connector or a separate endpoint-expression enclosure.
+pub(super) const ORIGINAL_JOINT_UV_SCRATCH_BYTES: usize =
+    std::mem::size_of::<[[Interval; 3]; 4]>()
+        + 4 * std::mem::size_of::<[Interval; 2]>();
+
+pub(super) fn original_joint_uv_enclosure(
+    joint: &crate::kernel::trim::PreparedTrimJoint,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 2], GeometryError> {
+    use crate::parametric::CurveEvaluator as _;
+    work.charge(1, cancel)?;
+    let mut image = joint.enclosure;
+    for value in image { Interval::new(value.lo, value.hi)?; }
+    for endpoint in joint.endpoint_uv {
+        for axis in 0..2 {
+            image[axis] = image[axis].hull(Interval::new(
+                endpoint[axis][0], endpoint[axis][1],
+            )?);
+        }
+    }
+    let connector = joint.connector.tensor([0.0, 1.0], 0, work, cancel)?[0];
+    for axis in 0..2 { image[axis] = image[axis].hull(connector[axis]); }
+    if let crate::kernel::trim::TrimJointKind::SphericalPole {
+        connector, polar_axis, polar_coordinate, ..
+    } = &joint.kind {
+        if *polar_axis >= 2 {
+            return Err(GeometryError::new(
+                GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                "original pole joint has no valid selected polar axis",
+            ));
+        }
+        image[*polar_axis] = image[*polar_axis].hull(Interval::new(
+            polar_coordinate.lo, polar_coordinate.hi,
+        )?);
+        let connector = connector.tensor([0.0, 1.0], 0, work, cancel)?[0];
+        for axis in 0..2 { image[axis] = image[axis].hull(connector[axis]); }
+    }
+    Ok(image)
+}
+
+/// Fixed live storage for the actual original connector/world-image overcover.
+/// Callers must admit this before evaluating any joint, independently of source
+/// domain, vertex-link and cone ownership.
+pub(super) const ORIGINAL_JOINT_POSITION_SCRATCH_BYTES: usize =
+    (if SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
+        > crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES
+    { SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES }
+    else { crate::kernel::source_operand::SOURCE_OPERAND_SCRATCH_BYTES })
+        + ORIGINAL_JOINT_UV_SCRATCH_BYTES
+        + std::mem::size_of::<SurfaceFirstEnclosure>()
+        + std::mem::size_of::<[[Interval; 3]; 4]>()
+        + 4 * std::mem::size_of::<Box3>()
+        + 2 * std::mem::size_of::<[[f64; 2]; 2]>()
+        + std::mem::size_of::<crate::kernel::trim::PreparedTrimSurface<'_, '_>>();
+
+/// Positional overcover only: neither a joint's UV rectangle nor its pole label
+/// proves ownership. Keep the selected connector expressions, retained physical
+/// pole image and original declared endpoint points, even when those physical
+/// points are absent from S(joint.enclosure).
+pub(super) fn original_joint_position_enclosure(
+    domain: &PreparedFaceTrimDomain<'_>,
+    joint: &crate::kernel::trim::PreparedTrimJoint,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Box3, GeometryError> {
+    work.charge(1, cancel)?;
+    let surface = domain.surface_operand();
+    let joint_uv = original_joint_uv_enclosure(joint, work, cancel)?;
+    let mut image = crate::parametric::surface_position_enclosure(
+        &surface, joint_uv.map(|value| [value.lo, value.hi]), work, cancel,
+    )?;
+    let mut include = |position: Box3| -> Result<(), GeometryError> {
+        for value in position { Interval::new(value.lo, value.hi)?; }
+        image = std::array::from_fn(|axis| image[axis].hull(position[axis]));
+        Ok(())
+    };
+    if let crate::kernel::trim::TrimJointKind::SphericalPole {
+        world_enclosure, ..
+    } = &joint.kind {
+        include(*world_enclosure)?;
+    }
+    include(joint.vertex_point.map(Interval::point))?;
+    for (identity, incoming) in [(joint.incoming, true), (joint.outgoing, false)] {
+        let mut coedge = None;
+        for (index, candidate) in domain.coedges().iter().enumerate() {
+            work.charge(1, cancel)?;
+            if candidate.identity() == identity {
+                coedge = Some(index);
+                break;
+            }
+        }
+        let coedge = coedge.ok_or_else(|| GeometryError::new(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "original joint image lost its actual material coedge",
+        ))?;
+        let correspondence = domain.original_coedge_correspondence(coedge)?;
+        let binding = correspondence.binding().ok_or_else(|| GeometryError::new(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "original joint image lost its selected source endpoint binding",
+        ))?;
+        let spatial_high = binding.material_forward == incoming;
+        include(binding.source_vertex_points_mm[binding.native_endpoint_index(spatial_high)]
+            .map(Interval::point))?;
+    }
+    Ok(image)
+}
+
+fn position_boxes_disjoint(first: Box3, second: Box3) -> bool {
+    (0..3).any(|axis| first[axis].hi < second[axis].lo || second[axis].hi < first[axis].lo)
+}
+
 pub(super) type BoundaryVisitor<'a> = dyn for<'s> FnMut(
         BoundaryCell<'s>,
         bool,
@@ -42,7 +158,8 @@ const STACK_BYTES: usize = UV_EMBEDDING_STACK_BYTES
     + SURFACE_FIRST_ENCLOSURE_SCRATCH_BYTES
     + std::mem::size_of::<SurfaceFirstEnclosure>()
     + std::mem::size_of::<Option<source_chart::SphereChart>>()
-    + crate::analysis::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES;
+    + crate::analysis::slab::HEIGHT_CONTRACTION_SCRATCH_BYTES
+    + ORIGINAL_JOINT_POSITION_SCRATCH_BYTES;
 
 fn resource() -> GeometryError {
     GeometryError::new(
@@ -76,7 +193,10 @@ impl PairedTrace {
     fn qualify(
         first: &OriginalCollar<'_, '_>,
         second: &OriginalCollar<'_, '_>,
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
     ) -> Result<Option<Self>, GeometryError> {
+        work.charge(1, cancel)?;
         let a = first
             .domain
             .original_coedge_correspondence(first.use_.coedge)?;
@@ -86,16 +206,25 @@ impl PairedTrace {
         let (Some(a), Some(b)) = (a.binding(), b.binding()) else {
             return Ok(None);
         };
-        let first_face = first.domain.native().face();
-        let second_face = second.domain.native().face();
-        let first_edge = &first_face.absolute_boundaries()[first.use_.wire][first.use_.index];
-        let second_edge = &second_face.absolute_boundaries()[second.use_.wire][second.use_.index];
+        if !std::ptr::eq(first.domain.definition(), second.domain.definition()) {
+            return Ok(None);
+        }
+        let (first_use, first_edge) = native_coedge(
+            first.domain.definition(), first.use_.face, first.use_.wire, first.use_.index,
+        )?;
+        let (second_use, second_edge) = native_coedge(
+            second.domain.definition(), second.use_.face, second.use_.wire, second.use_.index,
+        )?;
         if a.edge != b.edge
             || first.range != second.range
             || first.use_.orientation == second.use_.orientation
-            || first_edge.id() != second_edge.id()
-            || first_edge.absolute_front().id() != second_edge.absolute_front().id()
-            || first_edge.absolute_back().id() != second_edge.absolute_back().id()
+            || first_use.edge != second_use.edge
+            || first_edge.vertices != second_edge.vertices
+            || a.native_interval != b.native_interval
+            || a.spatial_forward != b.spatial_forward
+            || !first.domain.same_original_spatial_trace(
+                first.use_.coedge, second.domain, second.use_.coedge, work, cancel,
+            )?
         {
             return Ok(None);
         }
@@ -105,7 +234,7 @@ impl PairedTrace {
                 // traversal. Otherwise the normal convention alone would
                 // silently reverse the physical material half-neighbourhood.
                 if (inward > 0.0)
-                    != (collar.use_.orientation == collar.domain.native().face().orientation())
+                    != (collar.spatial_orientation == collar.domain.orientation())
                 {
                     return Ok(None);
                 }
@@ -123,13 +252,14 @@ fn seam_transverse(
     cancel: &AtomicBool,
 ) -> Result<Box3, GeometryError> {
     let uv = chart_jet(collar.domain, collar.use_.coedge, range, work, cancel)?;
-    collar.domain.native().face().with_surface(|surface| {
+    let surface = &collar.domain.surface_operand();
+    (|| {
         let jet = surface_piecewise_first_enclosure(
             surface, uv_box(add_margin(uv.position, collar.margin)), work, cancel,
         )?;
         let (offset, correction) = match collar.transport {
             CarrierTransport::Exact => {
-                let sign = if collar.domain.native().face().orientation() { 1.0 } else { -1.0 };
+                let sign = if collar.domain.orientation() { 1.0 } else { -1.0 };
                 (rotate(uv.derivative, sign), [Interval::point(0.0); 3])
             }
             CarrierTransport::Collar { width, inward } => {
@@ -147,9 +277,9 @@ fn seam_transverse(
         let across = compose_first(&jet.du, &jet.dv, offset);
         let across: Box3 = std::array::from_fn(|i| across[i].sub(correction[i]));
         Ok(if matches!(collar.transport, CarrierTransport::Collar { .. })
-            && !collar.use_.orientation
+            && !collar.spatial_orientation
         { across.map(Interval::neg) } else { across })
-    })
+    })()
 }
 
 /// Both matrices have the SAME literal along-trace column, enclosing all its
@@ -169,7 +299,7 @@ fn paired_radial_form(normals: [Box3; 2], radial: Box3) -> Interval {
     dot(normals[0], radial).hull(dot(normals[1], radial))
 }
 impl<'a, 'd> OriginalCollar<'a, 'd> {
-    /// Complete source-only position cover, before borrowing any C3D mutex.
+    /// Complete source-only position cover, before preparing the shared C3D.
     /// The retained original forward receipt bounds delta=C3D-F(gamma).
     /// F(U) covers the full removed reference ribbon; padding by that residual
     /// covers every lambda*(1-w)*delta and hence all actual G homotopy points.
@@ -187,7 +317,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             .domain
             .original_coedge_correspondence(self.use_.coedge)?
             .provenance()
-            == crate::kernel::OriginalCorrespondenceProvenance::CompletedPoleGraph
+            == crate::kernel::trim::OriginalCorrespondenceProvenance::CompletedPoleGraph
         {
             // A completed physical pole graph is not a whole-forward receipt
             // for the literal UV expression used by this positional cover.
@@ -218,7 +348,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 })
             }
         };
-        self.domain.native().face().with_surface(|surface| {
+        let surface = &self.domain.surface_operand();
+        (|| {
             let position = surface_piecewise_first_enclosure(
                 surface,
                 uv_box(add_margin(tube, self.margin)),
@@ -235,7 +366,7 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     },
                 )
             })))
-        })
+        })()
     }
 
     fn reference_owned(
@@ -260,11 +391,11 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                 lo: 0.0,
                 hi: self.bubble(range)?.0.hi,
             };
-            for coedge in 0..self.domain.native().coedges().len() {
+            for coedge in 0..self.domain.coedges().len() {
                 raw_coedge = Some(coedge);
                 phase = "complete raw boundary cuts";
                 let correspondence = self.domain.original_coedge_correspondence(coedge)?;
-                let whole = correspondence.native_range();
+                let whole = correspondence.spatial_range();
                 let cuts = original_coedge_parameter_cuts(
                     [(self.domain, coedge); 2],
                     remaining_bytes,
@@ -342,14 +473,13 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     }
                 }
             }
-            // Native joint/completion images are not ordinary original coedges.
-            // Exclude every one explicitly from the full reference ribbon.
-            for joint in self.domain.native().joints() {
-                phase = "complete native joint exclusion";
-                let joint = joint.enclosure.map(|v| Interval {
-                    lo: v.lower,
-                    hi: v.upper,
-                });
+            // Original completion images are not ordinary original coedges.
+            // UV separation alone cannot exclude retained physical pole and
+            // declared endpoint points outside S(joint.enclosure).
+            for joint in self.domain.original_joints()? {
+                phase = "complete original connector/world image exclusion";
+                let joint_position =
+                    original_joint_position_enclosure(self.domain, joint, work, cancel)?;
                 let mut stack = [([0.0; 2], 0_u8); MAX_DEPTH as usize + 1];
                 stack[0] = (range, 0);
                 let mut pending = 1;
@@ -358,12 +488,18 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                     let (a, depth) = stack[pending];
                     work.charge(1, cancel)?;
                     let image = self.normal_image(a, normal, work, cancel)?;
-                    if (0..2).any(|i| image[i].hi < joint[i].lo || joint[i].hi < image[i].lo) {
+                    let reference_position = surface_piecewise_first_enclosure(
+                        &self.domain.surface_operand(), uv_box(image), work, cancel,
+                    )?.position;
+                    if position_boxes_disjoint(reference_position, joint_position) {
                         continue;
                     }
                     let mid = a[0] * 0.5 + a[1] * 0.5;
                     if depth >= MAX_DEPTH || mid <= a[0] || mid >= a[1] {
                         return Ok(None);
+                    }
+                    if pending + 2 > stack.len() {
+                        return Err(resource());
                     }
                     stack[pending] = ([mid, a[1]], depth + 1);
                     stack[pending + 1] = ([a[0], mid], depth + 1);
@@ -378,13 +514,9 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             let beta = self.bubble([t; 2])?.0;
             let point =
                 self.normal_image([t; 2], mul(beta, Interval::point(0.75)), work, cancel)?;
-            let inclusive = remaining_bytes
-                .checked_add(self.domain.retained_bytes())
-                .ok_or_else(resource)?
-                .min(MAX_SCRATCH_BYTES);
             if self.domain.classify_with_byte_limit(
                 uv_box(add_margin(point, self.margin)),
-                inclusive,
+                remaining_bytes.min(MAX_SCRATCH_BYTES),
                 work,
                 cancel,
             )? != TrimClassification::Inside
@@ -506,7 +638,7 @@ impl<'v, 'f> RadialInventory<'v, 'f> {
 }
 
 fn visit_original_faces(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     incidence: &SourceEdgeIncidence,
     links: &ClosedRadialLinks<'_>,
     coordinates: &ActualMaterialCoordinates<'_>,
@@ -545,35 +677,31 @@ fn visit_original_faces(
         origin: [Interval::point(0.0); 3],
         offset: height.offset,
     };
-    for (fi, _) in source.definition().solid.face_iter().enumerate() {
+    for (fi, _) in source.definition().face_ids().iter().enumerate() {
         let domain = source.face_domain(fi, remaining_bytes, work, cancel)?;
-        let face = domain.native().face();
+        let surface = &domain.surface_operand();
+        let orientation = domain.orientation();
         let before = work.consumed();
         let mut phase = "carrier continuity";
-        let mut active_uv = domain.uv_bounds();
+        let mut active_uv = domain.uv_domain();
         let mut active_depth = 0;
         let completed = (|| -> Result<bool, GeometryError> {
-            for (joint_index, joint) in domain.native().joints().iter().enumerate() {
-                phase = "native joint source image";
-                work.charge(1, cancel)?;
-                let uv = joint.enclosure.map(|v| [v.lower, v.upper]);
-                active_uv = uv;
-                let position = face.with_surface(|surface| {
-                    surface_piecewise_first_enclosure(surface, uv, work, cancel)
-                        .map(|jet| jet.position)
-                })?;
-                if outside(coordinates.position(position)?[2], interval) {
+            for (joint_index, joint) in domain.original_joints()?.iter().enumerate() {
+                phase = "original connector/world image closed-scope exclusion";
+                active_uv = joint.enclosure.map(|value| [value.lo, value.hi]);
+                let position = original_joint_position_enclosure(domain, joint, work, cancel)?;
+                // As for raw F, retain any original point that can reach the
+                // CLOSED scope under the admitted source displacement.
+                if outside(height.height(position), target) {
                     continue;
                 }
-                phase = "bound closed source/reference/G and whole native joint image";
+                phase = "bound closed source/reference/G and whole original joint image";
                 if !links.qualified_original_joint(
                     source,
                     incidence,
-                    &domain,
+                    domain,
                     joint_index,
-                    remaining_bytes
-                        .checked_sub(domain.owned_bytes())
-                        .ok_or_else(resource)?,
+                    remaining_bytes,
                     work,
                     cancel,
                 )? {
@@ -585,15 +713,17 @@ fn visit_original_faces(
             // before excluding any carrier by height. Discontinuous knots and
             // nested poles remain real Native errors. Only this immutable
             // coefficient proof is reusable; every partial jet below is fresh.
-            let whole = source.whole_face_first_enclosure(fi, &domain, work, cancel)?;
-            // Native joint enclosures need not be subsets of that domain, so
-            // their independent closed-image gates above must run first.
+            let whole = surface_piecewise_first_enclosure(
+                surface, domain.uv_domain(), work, cancel,
+            )?;
+            // Original connector/world images need not be subsets of S(domain),
+            // so their independent closed-image gates above must run first.
             if outside(height.height(whole.position), target) {
                 return Ok(true);
             }
-            face.with_surface(|surface| -> Result<bool, GeometryError> {
-                let sphere_chart = source_chart::SphereChart::new(surface, &domain, work, cancel)?;
-                for span in surface_parameter_boxes(surface, domain.uv_bounds(), work, cancel)? {
+            (|| -> Result<bool, GeometryError> {
+                let sphere_chart = source_chart::SphereChart::new(surface, domain, work, cancel)?;
+                for span in surface_parameter_boxes(surface, domain.uv_domain(), work, cancel)? {
                     let mut stack =
                         [([[0.0; 2]; 2], 0_u8, false, true, false); MAX_DEPTH as usize + 1];
                     stack[0] = (span, 0, false, true, false);
@@ -663,7 +793,7 @@ fn visit_original_faces(
                             chart.normal(jet.position)?
                         } else {
                             let n = cross(jet.du, jet.dv);
-                            if face.orientation() {
+                            if orientation {
                                 n
                             } else {
                                 n.map(Interval::neg)
@@ -672,7 +802,7 @@ fn visit_original_faces(
                         let included = inventory.include(
                             BoundaryCell {
                                 position: jet.position,
-                                original_face: Some((surface, uv)),
+                                original_face: Some((*surface, uv)),
                             },
                             n,
                             coordinates,
@@ -694,7 +824,9 @@ fn visit_original_faces(
                         // fibre census remain independent and mandatory.
                         phase = "raw F unresolved-cell trim exclusion";
                         if !trim_inside {
-                            let classification = domain.classify(uv, work, cancel);
+                            let classification = domain.classify_with_byte_limit(
+                                uv, remaining_bytes, work, cancel,
+                            );
                             match classification? {
                                 TrimClassification::Outside => continue,
                                 TrimClassification::Inside => trim_inside = true,
@@ -764,7 +896,7 @@ fn visit_original_faces(
                     }
                 }
                 Ok(true)
-            })
+            })()
         })();
         let completed = completed.map_err(|error| work.annotate_error(error, before, format_args!(
             "closed radial atlas original face={fi} phase={phase} uv={active_uv:?} depth={active_depth}"
@@ -778,7 +910,7 @@ fn visit_original_faces(
 
 #[allow(clippy::too_many_arguments)]
 fn visit_original_links(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     incidence: &SourceEdgeIncidence,
     coordinates: &ActualMaterialCoordinates<'_>,
     links: &mut ClosedRadialLinks<'_>,
@@ -790,7 +922,7 @@ fn visit_original_links(
     let before = work.consumed();
     let mut phase = "paired source domains";
     let mut owners = None;
-    let mut active_native = None;
+    let mut active_spatial = None;
     let mut last_geometry_refusal = None;
     let outcome = (|| {
         let allowance = source_allowance(source.definition())?;
@@ -811,41 +943,33 @@ fn visit_original_links(
                 .checked_sub(links.allocated_bytes())
                 .ok_or_else(resource)?;
             let first_domain = source.face_domain(uses.first.face, available, work, cancel)?;
-            let available = available
-                .checked_sub(first_domain.owned_bytes())
-                .ok_or_else(resource)?;
+            // Both domains are borrowed from the single prepared source owner;
+            // their retained buffers are not query-local allocations.
             let second_domain = source.face_domain(second.face, available, work, cancel)?;
-            let domain_bytes = first_domain
-                .owned_bytes()
-                .checked_add(second_domain.owned_bytes())
-                .ok_or_else(resource)?;
-            let available = available
-                .checked_sub(second_domain.owned_bytes())
-                .ok_or_else(resource)?;
             phase = "immutable collar operands";
             let Some(first) =
-                OriginalCollar::for_enclosure(&first_domain, uses.first, work, cancel)?
+                OriginalCollar::for_enclosure(first_domain, uses.first, work, cancel)?
             else {
                 return Ok(false);
             };
-            let Some(second) = OriginalCollar::for_enclosure(&second_domain, second, work, cancel)?
+            let Some(second) = OriginalCollar::for_enclosure(second_domain, second, work, cancel)?
             else {
                 return Ok(false);
             };
             phase = "literal common trace/directed halves";
-            let Some(_trace) = PairedTrace::qualify(&first, &second)? else {
+            let Some(_trace) = PairedTrace::qualify(&first, &second, work, cancel)? else {
                 return Ok(false);
             };
             let binding = first_domain
                 .original_coedge_correspondence(first.use_.coedge)?
                 .binding()
                 .expect("qualified paired original trace");
-            let central = links.central_native_range(
+            let central = links.central_spatial_range(
                 binding.edge,
                 first.range,
                 [first.use_.face, first.use_.wire, first.use_.index],
             )?;
-            active_native = Some((central, 0));
+            active_spatial = Some((central, 0));
             let inactive_pair = {
                 phase = "literal full gamma C1 jets";
                 let Some(first_gamma) = first_domain.original_coedge_uv_c1_jet(
@@ -924,8 +1048,8 @@ fn visit_original_links(
             phase = "complete original coedge cuts";
             let cuts = original_coedge_parameter_cuts(
                 [
-                    (&first_domain, first.use_.coedge),
-                    (&second_domain, second.use_.coedge),
+                    (first_domain, first.use_.coedge),
+                    (second_domain, second.use_.coedge),
                 ],
                 available,
                 work,
@@ -943,9 +1067,17 @@ fn visit_original_links(
                 work,
                 cancel,
                 |prepared, work, cancel| -> Result<bool, GeometryError> {
-                    // ONE retained literal curve supplies both trace derivatives.
-                    // Native includes both one-sided closed derivatives at every knot.
-                    prepared.jet((central[0], central[1]), work, cancel)?;
+                    // The identical original spatial operator supplies both
+                    // trace columns in SOURCE gauge, including every one-sided
+                    // closed derivative. A discontinuous trace cannot be glued.
+                    if !crate::parametric::curve_parameter_span_continuous(
+                        prepared, central, work, cancel,
+                    )? {
+                        return Ok(false);
+                    }
+                    crate::parametric::curve_enclosure(
+                        prepared, (central[0], central[1]), work, cancel,
+                    )?;
                     // A crossing terminal needs the EXACT qualified original
                     // NativeV/edge/absolute-germ/exit, not vertex activity. Its
                     // cone outer boundary is literally boundary_jet(exit,w)
@@ -956,10 +1088,12 @@ fn visit_original_links(
                     // common-FIRST seam below must still all pass.
                     for (germ, endpoint) in central.into_iter().enumerate() {
                         phase = "closed terminal exclusion or qualified literal cutover";
-                        active_native = Some(([endpoint; 2], 0));
-                        let curve = prepared.jet((endpoint, endpoint), work, cancel)?;
+                        active_spatial = Some(([endpoint; 2], 0));
+                        let curve = crate::parametric::curve_enclosure(
+                            prepared, (endpoint, endpoint), work, cancel,
+                        )?;
                         let qualified = links.qualified_closed_cutover(
-                            uses.vertices[germ],
+                            uses.vertices[binding.native_endpoint_index(germ == 1)],
                             binding.edge,
                             germ == 1,
                             endpoint,
@@ -991,12 +1125,14 @@ fn visit_original_links(
                         while pending != 0 {
                             pending -= 1;
                             let (range, depth) = stack[pending];
-                            active_native = Some((range, depth));
+                            active_spatial = Some((range, depth));
                             phase = "shared C3D and full reference/G support";
                             work.charge(1, cancel)?;
                             let mid = range[0] * 0.5 + range[1] * 0.5;
                             let can_refine = depth < MAX_DEPTH && range[0] < mid && mid < range[1];
-                            let curve = prepared.jet((range[0], range[1]), work, cancel)?;
+                            let curve = crate::parametric::curve_enclosure(
+                                prepared, (range[0], range[1]), work, cancel,
+                            )?;
                             let supports = [
                                 first.swept_enclosure(range, &curve, allowance, work, cancel)?,
                                 second.swept_enclosure(range, &curve, allowance, work, cancel)?,
@@ -1019,17 +1155,14 @@ fn visit_original_links(
                                         work,
                                         cancel,
                                     )?;
-                                    let face = collar.domain.native().face();
-                                    let jet = face.with_surface(|surface| {
-                                        surface_piecewise_first_enclosure(
-                                            surface,
-                                            uv_box(add_margin(uv.position, collar.margin)),
-                                            work,
-                                            cancel,
-                                        )
-                                    })?;
+                                    let jet = surface_piecewise_first_enclosure(
+                                        &collar.domain.surface_operand(),
+                                        uv_box(add_margin(uv.position, collar.margin)),
+                                        work,
+                                        cancel,
+                                    )?;
                                     let outward = cross(jet.du, jet.dv);
-                                    let outward = if face.orientation() {
+                                    let outward = if collar.domain.orientation() {
                                         outward
                                     } else {
                                         outward.map(Interval::neg)
@@ -1099,9 +1232,7 @@ fn visit_original_links(
                                 // including exits already retained by links. Record
                                 // removed references even when displacement cost is zero.
                                 let limit = remaining_bytes
-                                    .checked_sub(domain_bytes)
-                                    .and_then(|n| n.checked_sub(cut_bytes))
-                                    .and_then(|n| n.checked_sub(prepared.retained_bytes()))
+                                    .checked_sub(cut_bytes)
                                     .ok_or_else(resource)?;
                                 for (collar, support) in [&first, &second].into_iter().zip(supports)
                                 {
@@ -1133,7 +1264,7 @@ fn visit_original_links(
         Ok(true)
     })();
     outcome.map_err(|error| work.annotate_error(error, before, format_args!(
-        "closed radial atlas paired links owners={owners:?} phase={phase} native={active_native:?} last_geometry_refusal={last_geometry_refusal:?}"
+        "closed radial atlas paired links owners={owners:?} phase={phase} spatial={active_spatial:?} last_geometry_refusal={last_geometry_refusal:?}"
     )))
 }
 
@@ -1161,7 +1292,7 @@ fn cylinder_fiber(coordinates: &ActualMaterialCoordinates<'_>, alpha: f64) -> fi
 }
 
 pub(super) fn certify(
-    source: OriginalTrimSource<'_, '_>,
+    source: MaterialSourceView<'_, '_>,
     request: &SlabRequest,
     coordinates: &ActualMaterialCoordinates<'_>,
     remaining_bytes: usize,
@@ -1170,17 +1301,12 @@ pub(super) fn certify(
     visitor: &mut BoundaryVisitor<'_>,
 ) -> Result<Option<RadialRegionKind>, GeometryError> {
     let before = work.consumed();
-    let mut phase = "prepared original domains";
+    let mut phase = "borrowed prepared native source";
     let outcome = (|| {
         work.charge(1, cancel)?;
         let available = remaining_bytes
             .checked_sub(STACK_BYTES)
             .ok_or_else(resource)?;
-        let originals = source.prepare_domains_if_missing(available, work, cancel)?;
-        let available = available
-            .checked_sub(originals.as_ref().map_or(0, |owner| owner.retained_bytes()))
-            .ok_or_else(resource)?;
-        let source = source.borrowing_domains(originals.as_ref());
         phase = "original edge/vertex incidence";
         let mut incidence = SourceEdgeIncidence::new(source.definition(), available, work, cancel)?;
         incidence.prepare_vertices(available, work, cancel)?;
@@ -1409,6 +1535,24 @@ mod tests {
             },
             scope
         ));
+        // The UV surface image can miss the scope while a retained physical
+        // connector/world image touches its CLOSED cut.
+        let uv_image = Interval { lo: 0.0, hi: 1.0 };
+        let actual_world = uv_image.hull(Interval::point(scope[0]));
+        assert!(outside(uv_image, scope));
+        assert!(!outside(actual_world, scope));
+    }
+
+    #[test]
+    fn physical_joint_exclusion_keeps_closed_world_contacts() {
+        let reference = [Interval { lo: 0.0, hi: 1.0 }; 3];
+        let uv_surface_image = [Interval { lo: 2.0, hi: 3.0 }; 3];
+        assert!(position_boxes_disjoint(reference, uv_surface_image));
+        let retained_world = [Interval::point(1.0); 3];
+        let complete = std::array::from_fn(|axis| {
+            uv_surface_image[axis].hull(retained_world[axis])
+        });
+        assert!(!position_boxes_disjoint(reference, complete));
     }
 }
 
@@ -1424,7 +1568,7 @@ mod center_family_tests {
                 .join("../../fixtures/geometry/box-mm.step"),
         )
         .unwrap();
-        let definition = crate::import_step(&bytes, &cancel).unwrap();
+        let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
         let bounds = definition.bounds_mm();
         let z = bounds.min[2] * 0.5 + bounds.max[2] * 0.5;
         let frame = PlaneFrameMm {

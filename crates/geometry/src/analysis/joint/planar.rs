@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Geometry-only rejection and exact cycle identity. Neither supplies native
-//! material, topology, pose, or approximation authority.
+//! Geometry-only exact cycle identity, polygon clearance and actual pair collars.
+//! No result supplies native material, pose, or approximation authority.
 
 use super::*;
 
@@ -343,6 +343,611 @@ pub(super) fn exact_cycle_mapping(
     result
 }
 
+fn jordan_joints(
+    rings: &[Ring], work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<(), GeometryError> {
+    for ring in rings {
+        for i in 0..ring.points.len() {
+            work.charge(1, cancel)?;
+            let vertex = ring.points[i];
+            let incoming = delta(ring.points[(i + ring.points.len() - 1) % ring.points.len()], vertex);
+            let outgoing = delta(ring.points[(i + 1) % ring.points.len()], vertex);
+            if cross(incoming, outgoing).contains_zero()
+                && incoming[0].mul(outgoing[0]).add(incoming[1].mul(outgoing[1])).hi >= 0.0
+            {
+                return Err(error(GeometryErrorCode::AnalysisIndeterminate,
+                    "registered native cycle has unresolved adjacent-edge overlap"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Used only AFTER complete Jordan and distinct-boundary separation. A winding
+/// value labels one connected complementary component, hence the entire cycle;
+/// the selected vertex is not itself material/source or containment authority.
+fn jordan_parent(
+    rings: &[Ring], child: usize, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<usize>, GeometryError> {
+    let mut parent: Option<usize> = None;
+    for (candidate, ring) in rings.iter().enumerate() {
+        work.charge(1, cancel)?;
+        if candidate == child || !point_in_ring(ring, rings[child].points[0], work, cancel)? {
+            continue;
+        }
+        if let Some(previous) = parent {
+            if point_in_ring(&rings[previous], ring.points[0], work, cancel)? {
+                parent = Some(candidate);
+            } else if !point_in_ring(ring, rings[previous].points[0], work, cancel)? {
+                return Err(error(GeometryErrorCode::AnalysisIndeterminate,
+                    "separated native cycles have inconsistent Jordan nesting"));
+            }
+        } else {
+            parent = Some(candidate);
+        }
+    }
+    if parent.map_or(rings[child].hole, |p| rings[p].hole == rings[child].hole) {
+        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
+            "registered native cycle roots/parents disagree with material-left outer/hole roles"));
+    }
+    Ok(parent)
+}
+
+/// Conservative LOWER clearance of ALL distinct complete boundaries. The
+/// narrowphase is the existing interval segment predicate; dyadic endpoint
+/// boxes prune only when their lower gap cannot decrease the current bound.
+fn distinct_loop_clearance(
+    rings: &[Ring], work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    if rings.len() < 2 { return Ok(None); }
+    let mut minimum = f64::INFINITY;
+    for (i, ring) in rings.iter().enumerate() {
+        for other in &rings[i + 1..] {
+            for edge in 0..ring.points.len() {
+                let a = ring.points[edge];
+                let b = ring.points[(edge + 1) % ring.points.len()];
+                for next in 0..other.points.len() {
+                    work.charge(1, cancel)?;
+                    let c = other.points[next];
+                    let d = other.points[(next + 1) % other.points.len()];
+                    let lower = (0..2).fold(0.0_f64, |gap, axis| {
+                        gap.max(down(c[axis].min(d[axis]) - a[axis].max(b[axis])))
+                            .max(down(a[axis].min(b[axis]) - c[axis].max(d[axis])))
+                    });
+                    if lower >= minimum { continue; }
+                    let gap = segment_gap(a, b, c, d);
+                    if !gap.is_finite() || gap <= 0.0 {
+                        return Err(error(GeometryErrorCode::AnalysisIndeterminate,
+                            "registered complete native cycle boundaries have no positive clearance lower bound"));
+                    }
+                    minimum = minimum.min(gap);
+                }
+            }
+        }
+    }
+    Ok(Some(minimum))
+}
+
+/// Geometry part of a SOURCE-BOUND leaf registration. The caller has already
+/// proved the complete original/candidate correspondence and binds this result
+/// to the exact native sample, actual candidate, material realization and pose.
+/// `exact` is issued only by the preceding exact_cycle_mapping proof; it reuses
+/// its oriented whole-cycle identity, not scalar-zero source displacement.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn capture_loop_registration(
+    source: &[Ring], actual: &[Ring], registration: &mut [NativeLoopRegistration],
+    rounding: f64, exact: bool, scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<f64>, GeometryError> {
+    let unresolved = || error(GeometryErrorCode::AnalysisIndeterminate,
+        "native/candidate complete cycle registration changes oriented parent incidence");
+    if source.len() != actual.len() || registration.len() != actual.len() {
+        return Err(unresolved());
+    }
+    // FIRST prove complete Jordan boundaries and separation. Winding below
+    // only labels their complementary components; it cannot manufacture them.
+    jordan_joints(source, work, cancel)?;
+    feature_clearance(source, rounding, scratch, work, cancel)?;
+    if !exact {
+        jordan_joints(actual, work, cancel)?;
+        feature_clearance(actual, 0.0, scratch, work, cancel)?;
+    }
+    for (i, original) in registration.iter().enumerate() {
+        work.charge(1, cancel)?;
+        if original.native_index >= source.len()
+            || source[original.native_index].hole != actual[i].hole
+        {
+            return Err(unresolved());
+        }
+        for previous in &registration[..i] {
+            work.charge(1, cancel)?;
+            if previous.native_index == original.native_index { return Err(unresolved()); }
+        }
+    }
+    let clearance = distinct_loop_clearance(if exact { source } else { actual }, work, cancel)?;
+    for i in 0..registration.len() {
+        let native_parent = jordan_parent(source, registration[i].native_index, work, cancel)?;
+        let actual_parent = if exact {
+            let mut parent = None;
+            if let Some(native_parent) = native_parent {
+                for (j, original) in registration.iter().enumerate() {
+                    work.charge(1, cancel)?;
+                    if original.native_index == native_parent { parent = Some(j); break; }
+                }
+                if parent.is_none() { return Err(unresolved()); }
+            }
+            parent
+        } else {
+            jordan_parent(actual, i, work, cancel)?
+        };
+        if actual_parent.map(|parent| registration[parent].native_index) != native_parent {
+            return Err(unresolved());
+        }
+        registration[i].parent = actual_parent;
+    }
+    Ok(clearance)
+}
+
+/// An index-only exact view of ACTUAL footprint coordinates. Removing a
+/// duplicate or an exactly collinear between-vertex preserves the entire trace;
+/// no reference points, contour buffers or replacement material are constructed.
+struct ActualCycle<'a> {
+    points: &'a [[f64; 3]],
+    vertices: Vec<usize>,
+}
+impl ActualCycle<'_> {
+    fn len(&self) -> usize { self.vertices.len() }
+    fn point(&self, i: usize) -> [f64; 2] {
+        let p = self.points[self.vertices[i % self.len()]];
+        [p[0], p[1]]
+    }
+}
+
+pub(super) const PAIR_COLLAR_STACK_BYTES: usize =
+    8 * std::mem::size_of::<crate::exact_coefficient::ExactCoefficient>()
+    + 8 * std::mem::size_of::<CollarCell>();
+
+fn coefficient_sign(
+    a: [f64; 2], b: [f64; 2], c: [f64; 2], vector: bool,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<i8>, GeometryError> {
+    // vector=true: det(b,c-a). Otherwise det(b-a,c-a). Interval zero
+    // never establishes incidence: the shared bounded error-free coefficient
+    // adapter supplies the exact dyadic endpoint predicate.
+    let x = if vector { b.map(Interval::point) } else { delta(b, a) };
+    let enclosed = cross(x, delta(c, a));
+    if enclosed.lo > 0.0 { return Ok(Some(1)); }
+    if enclosed.hi < 0.0 { return Ok(Some(-1)); }
+    use crate::exact_coefficient::ExactCoefficient as E;
+    let (Some(x0), Some(x1), Some(y0), Some(y1)) = (
+        if vector { Some(E::point(b[0])) } else { E::difference(b[0], a[0]) },
+        if vector { Some(E::point(b[1])) } else { E::difference(b[1], a[1]) },
+        E::difference(c[0], a[0]), E::difference(c[1], a[1]),
+    ) else { return Ok(None); };
+    let (Some(mut p), Some(q)) = (x0.product(&y1, work, cancel)?, x1.product(&y0, work, cancel)?)
+        else { return Ok(None); };
+    if p.subtract(&q).is_none() { return Ok(None); }
+    Ok(Some(p.sign()))
+}
+
+fn actual_cycle<'a>(
+    input: &'a SectionLoopMm, scratch: &mut Scratch,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<ActualCycle<'a>>, GeometryError> {
+    let mut result = ActualCycle { points: &input.points_mm, vertices: Vec::new() };
+    scratch.reserve(&mut result.vertices, input.points_mm.len().saturating_sub(1), work, cancel)?;
+    for (i, p) in input.points_mm[..input.points_mm.len() - 1].iter().enumerate() {
+        work.charge(1, cancel)?;
+        if result.vertices.last().is_none_or(|&last| {
+            let previous = input.points_mm[last];
+            p[0] != previous[0] || p[1] != previous[1]
+        }) { result.vertices.push(i); }
+    }
+    let mut changed = true;
+    while changed && result.len() >= 3 {
+        changed = false;
+        for i in 0..result.len() {
+            work.charge(1, cancel)?;
+            let a = result.point((i + result.len() - 1) % result.len());
+            let b = result.point(i);
+            let c = result.point(i + 1);
+            if (0..2).all(|axis| between(b[axis], a[axis], c[axis]))
+                && coefficient_sign(a, b, c, false, work, cancel)? == Some(0)
+            {
+                work.charge(result.len() as u64,cancel)?;
+                result.vertices.remove(i);
+                changed = true;
+                break;
+            }
+        }
+    }
+    Ok((result.len() >= 3).then_some(result))
+}
+
+fn actual_cycle_identity(a: &ActualCycle<'_>, b: &ActualCycle<'_>) -> bool {
+    if a.len() != b.len() { return false; }
+    let first = |cycle: &ActualCycle<'_>| (0..cycle.len()).min_by(|&a, &b| {
+        let a = cycle.point(a); let b = cycle.point(b);
+        a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]))
+    }).unwrap();
+    let (i, j) = (first(a), first(b));
+    (0..a.len()).all(|k| a.point(i + k) == b.point(j + k))
+}
+
+#[derive(Clone, Copy)]
+struct CollarCell {
+    cycle: usize,
+    edge: usize,
+    p: [f64; 2],
+    next: [f64; 2],
+    q: [f64; 2],
+    next_q: [f64; 2],
+    width: f64,
+    // CCW: negative rim, right spoke, positive rim, left spoke.
+    quad: [[Interval; 2]; 4],
+}
+fn relative_quad(cell: &CollarCell, origin: [f64;2]) -> [[Interval;2];4] {
+    let offset=|p: [f64;2], q: [f64;2], t: f64| {
+        let p=delta(p,origin);
+        std::array::from_fn(|i|p[i].add(Interval::point(t).mul(Interval::point(q[i]))))
+    };
+    [offset(cell.p,cell.q,-cell.width),offset(cell.next,cell.next_q,-cell.width),
+        offset(cell.next,cell.next_q,cell.width),offset(cell.p,cell.q,cell.width)]
+}
+fn collar_halfplane(cell: &CollarCell, side: usize, relative: [Interval;2]) -> Interval {
+    let q=cell.q.map(Interval::point);
+    if side == 1 { return cross(cell.next_q.map(Interval::point),relative); }
+    if side == 3 { return cross(q,relative).neg(); }
+    let t=Interval::point(if side == 0 { -cell.width } else { cell.width });
+    let e=delta(cell.next,cell.p);
+    let dq=delta(cell.next_q,cell.q);
+    let edge=std::array::from_fn(|i|e[i].add(t.mul(dq[i])));
+    let point=std::array::from_fn(|i|relative[i].sub(t.mul(q[i])));
+    let side_value=cross(edge,point);
+    if side == 0 { side_value } else { side_value.neg() }
+}
+fn collar_cell(cycle: usize, edge: usize, p: [f64; 2], next: [f64; 2],
+    q: [f64; 2], next_q: [f64; 2], width: f64) -> Option<CollarCell> {
+    let e = delta(next, p);
+    let dq = delta(next_q, q);
+    // This is the WHOLE FIRST determinant, affine in s,t because the exact
+    // repeated column has det(dq,dq)=0. It is not a sampled normal test.
+    let determinant = cross(e, q.map(Interval::point))
+        .add(Interval { lo: 0.0, hi: 1.0 }.mul(cross(e, dq)))
+        .add(Interval { lo: -width, hi: width }.mul(cross(dq, q.map(Interval::point))));
+    if determinant.lo <= 0.0 { return None; }
+    let offset = |p: [f64; 2], q: [f64; 2], t: f64|
+        std::array::from_fn(|i| Interval::point(p[i]).add(Interval::point(t).mul(Interval::point(q[i]))));
+    let quad = [offset(p,q,-width), offset(next,next_q,-width),
+        offset(next,next_q,width), offset(p,q,width)];
+    // A strictly convex proper boundary and the signed whole first matrix
+    // certify a single embedded chart, not arbitrary full-rank injectivity.
+    let lower=std::array::from_fn(|i|e[i].sub(Interval::point(width).mul(dq[i])));
+    let upper=std::array::from_fn(|i|e[i].add(Interval::point(width).mul(dq[i])).neg());
+    let right=next_q.map(|q|Interval::point(2.0).mul(Interval::point(width)).mul(Interval::point(q)));
+    let left=q.map(|q|Interval::point(-2.0).mul(Interval::point(width)).mul(Interval::point(q)));
+    let edges=[lower,right,upper,left];
+    for i in 0..4 {
+        if cross(edges[i],edges[(i+1)%4]).lo <= 0.0 { return None; }
+    }
+    Some(CollarCell { cycle, edge, p, next, q, next_q, width, quad })
+}
+
+fn opposed_spoke(a: &CollarCell, b: &CollarCell) -> bool {
+    if a.next != b.p || a.next_q != b.q || a.width != b.width { return false; }
+    let origin = a.next;
+    let q = a.next_q.map(Interval::point);
+    // Literal common affine trace, and WHOLE convex halves on opposite
+    // sides. Index adjacency alone never permits a pair to be skipped.
+    let left = relative_quad(a,origin);
+    let right = relative_quad(b,origin);
+    [left[0],left[3]].into_iter().all(|p|cross(q,p).lo > 0.0)
+        && [right[1],right[2]].into_iter().all(|p|cross(q,p).hi < 0.0)
+}
+fn collar_cells_separated(a: &CollarCell, b: &CollarCell,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<bool,GeometryError> {
+    for axis in 0..2 {
+        work.charge(1,cancel)?;
+        let bounds = |cell: &CollarCell| [
+            cell.quad.iter().map(|p|p[axis].lo).fold(f64::INFINITY,f64::min),
+            cell.quad.iter().map(|p|p[axis].hi).fold(f64::NEG_INFINITY,f64::max),
+        ];
+        let (a,b)=(bounds(a),bounds(b));
+        if a[1] < b[0] || b[1] < a[0] { return Ok(true); }
+    }
+    for (left, right) in [(a,b),(b,a)] {
+        for i in 0..4 {
+            work.charge(4,cancel)?;
+            let origin=if i == 1 { left.next } else { left.p };
+            if relative_quad(right,origin).into_iter().all(|p|
+                collar_halfplane(left,i,p).hi < 0.0)
+            { return Ok(true); }
+        }
+    }
+    Ok(false)
+}
+
+#[derive(Clone, Copy)]
+struct SpokeCrossing {
+    edge: usize,
+    parameter: Interval,
+    transverse: Interval,
+}
+fn spoke_crossing(
+    cell: &CollarCell, upper: &ActualCycle<'_>, sides: &mut Vec<i8>,
+    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<SpokeCrossing>, GeometryError> {
+    sides.clear();
+    scratch.reserve(sides, upper.len(), work, cancel)?;
+    for i in 0..upper.len() {
+        work.charge(1, cancel)?;
+        let Some(side) = coefficient_sign(cell.p, cell.q, upper.point(i), true, work, cancel)?
+            else { return Ok(None); };
+        sides.push(side);
+    }
+    let axis = usize::from(cell.q[1].abs() > cell.q[0].abs());
+    let mut crossing = None;
+    for i in 0..upper.len() {
+        work.charge(1, cancel)?;
+        let (a,b) = (upper.point(i), upper.point(i+1));
+        let (sa,sb) = (sides[i], sides[(i+1)%upper.len()]);
+        let (parameter, t, positive) = if sa == 0 {
+            // A seam vertex belongs ONLY to its outgoing half-open edge.
+            let previous = sides[(i+upper.len()-1)%upper.len()];
+            let t=Interval::point(a[axis]).sub(Interval::point(cell.p[axis]))
+                .div(Interval::point(cell.q[axis]))?;
+            (Interval::point(0.0), t, previous > 0 && sb < 0)
+        } else if sb != 0 && sa != sb {
+            let denominator = cross(cell.q.map(Interval::point), delta(b,a));
+            if denominator.contains_zero() { return Ok(None); }
+            let parameter = cross(cell.q.map(Interval::point), delta(cell.p,a)).div(denominator)?;
+            // Exact opposite side predicates proved the root is in (0,1).
+            let parameter = Interval { lo: parameter.lo.max(0.0), hi: parameter.hi.min(1.0) };
+            if parameter.lo > parameter.hi { return Ok(None); }
+            let t=cross(delta(a,cell.p),delta(b,a)).div(denominator)?;
+            (parameter, t, sa > 0 && sb < 0)
+        } else { continue; };
+        if t.lo > cell.width || t.hi < -cell.width { continue; }
+        if !positive || t.lo <= -cell.width || t.hi >= cell.width || crossing.is_some() {
+            return Ok(None);
+        }
+        crossing = Some(SpokeCrossing { edge: i, parameter, transverse: t });
+    }
+    Ok(crossing)
+}
+
+fn strict_rims(cell: &CollarCell, point: [f64;2]) -> bool {
+    let relative=delta(point,cell.p);
+    collar_halfplane(cell,0,relative).lo > 0.0
+        && collar_halfplane(cell,2,relative).lo > 0.0
+}
+fn actual_vertex_in_cell(
+    cell: &CollarCell, point: [f64; 2],
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    Ok(strict_rims(cell, point)
+        && coefficient_sign(cell.p,cell.q,point,true,work,cancel)? == Some(-1)
+        && coefficient_sign(cell.next,cell.next_q,point,true,work,cancel)? == Some(1))
+}
+
+fn chart_covers_upper(
+    cell: &CollarCell, upper: &ActualCycle<'_>,
+    start: SpokeCrossing, end: SpokeCrossing, end_edge: usize,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    // The exact registered trace is p+t*q on each shared spoke. Its certified
+    // OPEN t interval and the proper convex chart give strict clearance from
+    // BOTH rims without subtracting independently rounded world coordinates.
+    if start.transverse.lo <= -cell.width || start.transverse.hi >= cell.width
+        || end.transverse.lo <= -cell.width || end.transverse.hi >= cell.width
+    { return Ok(false); }
+    for edge in start.edge..=end_edge {
+        work.charge(1,cancel)?;
+        if edge == end_edge && end.parameter.lo == 0.0 && end.parameter.hi == 0.0 { break; }
+        let tangent = delta(upper.point(edge+1),upper.point(edge));
+        // A straight piece inside this convex embedded chart cannot change
+        // the sign of det(tangent,q(s)): a zero would make its supporting
+        // line the literal s-spoke, so the entire piece would have constant s.
+        // For the first/last clipped piece, its registered endpoint supplies
+        // s=0/1 exactly. Testing the unused far column instead can reject a
+        // transverse corner piece that never reaches that part of the chart.
+        // Full interior pieces retain the whole-column sufficient test.
+        let transverse = if edge == start.edge {
+            cross(tangent,cell.q.map(Interval::point)).lo > 0.0
+        } else if edge == end_edge {
+            cross(tangent,cell.next_q.map(Interval::point)).lo > 0.0
+        } else {
+            cross(tangent,cell.q.map(Interval::point)).lo > 0.0
+                && cross(tangent,cell.next_q.map(Interval::point)).lo > 0.0
+        };
+        if !transverse { return Ok(false); }
+        if edge > start.edge
+            && !actual_vertex_in_cell(cell,upper.point(edge),work,cancel)?
+        { return Ok(false); }
+    }
+    // The endpoint traces are the literal registered spokes, in their OPEN
+    // rim intervals. Convexity then covers every full clipped straight piece;
+    // the common endpoints are reused, not rounded/re-cut independently.
+    Ok(true)
+}
+
+fn proposal_distance(a: &ActualCycle<'_>, b: &ActualCycle<'_>,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool) -> Result<f64,GeometryError> {
+    let mut maximum = 0.0_f64;
+    for i in 0..a.len() {
+        let p = a.point(i);
+        let mut nearest = f64::INFINITY;
+        for j in 0..b.len() {
+            work.charge(1,cancel)?;
+            let (a,b)=(b.point(j),b.point(j+1));
+            let e=[b[0]-a[0],b[1]-a[1]];
+            let square=e[0]*e[0]+e[1]*e[1];
+            if square <= 0.0 || !square.is_finite() { continue; }
+            let t=(((p[0]-a[0])*e[0]+(p[1]-a[1])*e[1])/square).clamp(0.0,1.0);
+            nearest=nearest.min((p[0]-(a[0]+t*e[0])).hypot(p[1]-(a[1]+t*e[1])));
+        }
+        maximum=maximum.max(nearest);
+    }
+    Ok(maximum)
+}
+
+/// A finite ACTUAL pair theorem, not a source-cut homotopy inferred from a
+/// Hausdorff scalar. Source/leaf/cut/role/parent matching is sealed by its caller.
+///
+/// Proper convex charts, opposed literal spokes and ALL global pair exclusions
+/// embed disjoint two-sided S1 collars. ONE complete oriented upper graph in
+/// each collar leaves the complementary cores unchanged. Material intersection
+/// is t>=max(0,g(s)) and union t>=min(0,g(s)); both are collar deformations of the
+/// same whole Jordan forest. This proves CONNECTED material AND void overlap,
+/// not just one shared point/cell, and excludes the two-patch extra-tunnel case.
+pub(super) fn actual_pair_collar(
+    lower: &[SectionLoopMm], upper: &[SectionLoopMm], matching: &[usize],
+    scratch: &mut Scratch, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<[u8;32]>,GeometryError> {
+    scratch.owned(PAIR_COLLAR_STACK_BYTES,work,cancel)?;
+    let mut a=Vec::new(); let mut b=Vec::new();
+    scratch.reserve(&mut a,lower.len(),work,cancel)?;
+    scratch.reserve(&mut b,upper.len(),work,cancel)?;
+    for loop_ in lower {
+        let Some(view)=actual_cycle(loop_,scratch,work,cancel)? else { return Ok(None); };
+        a.push(view);
+    }
+    for loop_ in upper {
+        let Some(view)=actual_cycle(loop_,scratch,work,cancel)? else { return Ok(None); };
+        b.push(view);
+    }
+    let mut digest=Sha256::new();
+    digest.update(b"spiling-actual-registered-pair-collar-1\0");
+    let mut exact=true;
+    for (i,&j) in matching.iter().enumerate() {
+        work.charge((2*a[i].len()+b[j].len()) as u64,cancel)?;
+        exact &= actual_cycle_identity(&a[i],&b[j]);
+    }
+    if exact {
+        // Whole oriented exact trace identity after exact between-vertex
+        // elimination, not small displacement or interval-zero promotion.
+        digest.update(b"exact-oriented-traces");
+        return Ok(Some(digest.finalize().into()));
+    }
+    let mut columns=Vec::new();
+    scratch.reserve(&mut columns,a.len(),work,cancel)?;
+    let mut proposal=0.0_f64; let mut cosine=1.0_f64; let mut shortest=f64::INFINITY;
+    for (i,&j) in matching.iter().enumerate() {
+        proposal=proposal.max(proposal_distance(&a[i],&b[j],work,cancel)?)
+            .max(proposal_distance(&b[j],&a[i],work,cancel)?);
+        let mut q=Vec::new();
+        scratch.reserve(&mut q,a[i].len(),work,cancel)?;
+        for vertex in 0..a[i].len() {
+            work.charge(1,cancel)?;
+            let p=a[i].point(vertex);
+            let previous=a[i].point((vertex+a[i].len()-1)%a[i].len());
+            let next=a[i].point(vertex+1);
+            let u=[p[0]-previous[0],p[1]-previous[1]];
+            let v=[next[0]-p[0],next[1]-p[1]];
+            let (lu,lv)=(u[0].hypot(u[1]),v[0].hypot(v[1]));
+            if lu <= 0.0 || lv <= 0.0 || !lu.is_finite() || !lv.is_finite() { return Ok(None); }
+            shortest=shortest.min(lu).min(lv);
+            let n=[-u[1]/lu-v[1]/lv,u[0]/lu+v[0]/lv];
+            let length=n[0].hypot(n[1]);
+            if length <= 0.0 || !length.is_finite() { return Ok(None); }
+            let direction=[n[0]/length,n[1]/length];
+            for edge in [delta(p,previous),delta(next,p)] {
+                let numerator=cross(edge,direction.map(Interval::point));
+                let length=edge[0].square().add(edge[1].square()).sqrt()?;
+                if numerator.lo <= 0.0 || length.lo <= 0.0 { return Ok(None); }
+                cosine=cosine.min(numerator.div(length)?.lo);
+            }
+            q.push(direction);
+        }
+        columns.push(q);
+    }
+    // Proposals select a chart width ONLY. Every closed chart, rim, trace,
+    // coverage and global embedding predicate below must still pass.
+    let width=if proposal > 0.0 { up(8.0*proposal/cosine) } else { shortest*0.125 };
+    if !width.is_finite() || width <= 0.0 { return Ok(None); }
+    let count=a.iter().try_fold(0usize,|n,cycle|n.checked_add(cycle.len()))
+        .ok_or_else(||error(GeometryErrorCode::ResourceLimit,"actual collar chart count overflow"))?;
+    let mut cells=Vec::new();
+    scratch.reserve(&mut cells,count,work,cancel)?;
+    for (cycle,view) in a.iter().enumerate() {
+        for edge in 0..view.len() {
+            work.charge(16,cancel)?;
+            let Some(cell)=collar_cell(cycle,edge,view.point(edge),view.point(edge+1),
+                columns[cycle][edge],columns[cycle][(edge+1)%view.len()],width)
+                else { return Ok(None); };
+            cells.push(cell);
+        }
+    }
+    drop(columns);
+    for (i,left) in cells.iter().enumerate() {
+        for right in &cells[i+1..] {
+            work.charge(1,cancel)?;
+            let accepted=if left.cycle == right.cycle
+                && (left.edge+1)%a[left.cycle].len() == right.edge
+            { work.charge(8,cancel)?; opposed_spoke(left,right) }
+            else if left.cycle == right.cycle
+                && (right.edge+1)%a[left.cycle].len() == left.edge
+            { work.charge(8,cancel)?; opposed_spoke(right,left) }
+            else { collar_cells_separated(left,right,work,cancel)? };
+            if !accepted { return Ok(None); }
+        }
+    }
+    // The midlines are the already registered COMPLETE Jordan parent forest.
+    // The proper, globally disjoint two-sided annuli above are an ambient
+    // collar of that entire forest: both rims retain its nesting, and removing
+    // the material/void-side boundary collars leaves each complementary cell
+    // with the SAME connected nonempty core. This global collar isotopy, not a
+    // point in one chart, supplies the common-core premise for the graph proof.
+    let mut offset=0;
+    for (cycle,&target) in matching.iter().enumerate() {
+        let charts=&cells[offset..offset+a[cycle].len()];
+        offset+=a[cycle].len();
+        let mut crossings=Vec::new(); let mut sides=Vec::new();
+        scratch.reserve(&mut crossings,charts.len(),work,cancel)?;
+        for cell in charts {
+            let Some(crossing)=spoke_crossing(cell,&b[target],&mut sides,scratch,work,cancel)?
+                else { return Ok(None); };
+            crossings.push(crossing);
+        }
+        let base=crossings[0];
+        let n=b[target].len();
+        let mut previous=base;
+        for i in 0..charts.len() {
+            work.charge(1,cancel)?;
+            let mut end=if i+1 == charts.len() { base } else { crossings[i+1] };
+            let end_edge=if i+1 == charts.len() { base.edge+n } else {
+                let mut edge=end.edge;
+                if edge < base.edge { edge+=n; }
+                else if edge == base.edge {
+                    if end.parameter.hi < base.parameter.lo { edge+=n; }
+                    else if end.parameter.lo <= base.parameter.hi { return Ok(None); }
+                }
+                edge
+            };
+            if end_edge < previous.edge || (end_edge == previous.edge
+                && end.parameter.lo <= previous.parameter.hi) { return Ok(None); }
+            if end_edge > base.edge+n { return Ok(None); }
+            if !chart_covers_upper(&charts[i],&b[target],previous,end,end_edge,work,cancel)? {
+                return Ok(None);
+            }
+            end.edge=end_edge;
+            previous=end;
+        }
+        // Complete coherent cyclic lift: exactly one turn, with the original
+        // first cut object reused at the closing seam. No segment is omitted.
+        if previous.edge != base.edge+n { return Ok(None); }
+    }
+    for cell in &cells {
+        work.charge(1,cancel)?;
+        digest.update((cell.cycle as u64).to_le_bytes());
+        digest.update((cell.edge as u64).to_le_bytes());
+        for value in cell.p.into_iter().chain(cell.q).chain([cell.width]) {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+    }
+    Ok(Some(digest.finalize().into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +965,101 @@ mod tests {
             points.reverse();
         }
         Ring { hole, points }
+    }
+
+    fn footprint(points: &[[f64;2]], hole: bool) -> SectionLoopMm {
+        let mut points_mm: Vec<_> = points.iter().map(|p|[p[0],p[1],0.0]).collect();
+        points_mm.push(points_mm[0]);
+        SectionLoopMm { is_hole: hole, points_mm }
+    }
+
+    #[test]
+    fn actual_pair_collar_proves_whole_material_void_core_and_rejects_two_patches() {
+        let cancel=AtomicBool::new(false);
+        let mut work=GeometryWorkBudget::new(1_000_000);
+        let concave=[
+            [0.0,0.0],[8.0,0.0],[8.0,8.0],[6.0,8.0],
+            [6.0,2.0],[2.0,2.0],[2.0,8.0],[0.0,8.0],
+        ];
+        let lower=[
+            footprint(&concave,false),
+            footprint(&[[0.5,3.0],[0.5,3.5],[1.0,3.5],[1.0,3.0]],true),
+        ];
+        let mut upper = lower.each_ref().map(|cycle| SectionLoopMm {
+            is_hole: cycle.is_hole,
+            points_mm: cycle.points_mm.clone(),
+        });
+        for cycle in &mut upper {
+            for point in &mut cycle.points_mm { point[0]+=0.001; }
+        }
+        assert!(actual_pair_collar(&lower,&upper,&[0,1],
+            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_some(),
+            "whole two-sided collars preserve the connected concave material core AND its void core");
+        let strip=[footprint(&[[0.0,0.0],[8.0,0.0],[8.0,0.01],[0.0,0.01]],false)];
+        let shifted=[footprint(&[[0.0,0.02],[8.0,0.02],[8.0,0.03],[0.0,0.03]],false)];
+        assert!(actual_pair_collar(&strip,&shifted,&[0],
+            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_none(),
+            "a regular translating thin strip does not certify disjoint ACTUAL prisms");
+        let inverted=[footprint(&[
+            [0.0,0.0],[2.0,0.0],[2.0,6.0],[6.0,6.0],
+            [6.0,0.0],[8.0,0.0],[8.0,8.0],[0.0,8.0],
+        ],false)];
+        assert!(actual_pair_collar(&lower[..1],&inverted,&[0],
+            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_none(),
+            "two Jordan disks sharing two disconnected patches must not create a printed tunnel");
+        let triangle=[footprint(&[[0.0,0.0],[4.0,0.0],[0.0,4.0]],false)];
+        let subdivided=[footprint(&[[0.0,0.0],[2.0,0.0],[4.0,0.0],[2.0,2.0],[0.0,4.0]],false)];
+        assert!(actual_pair_collar(&triangle,&subdivided,&[0],
+            &mut Scratch { bytes:0 },&mut work,&cancel).unwrap().is_some(),
+            "exact full trace identity is geometric, including nonaxis between-vertices");
+        assert_eq!(actual_pair_collar(&lower,&upper,&[0,1],
+            &mut Scratch { bytes:MAX_SCRATCH },&mut work,&cancel).unwrap_err().code,
+            GeometryErrorCode::ResourceLimit);
+        assert_eq!(actual_pair_collar(&lower,&upper,&[0,1],
+            &mut Scratch { bytes:0 },&mut work,&AtomicBool::new(true)).unwrap_err().code,
+            GeometryErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn registered_jordan_parent_census_uses_whole_boundaries_not_a_star_kernel() {
+        // Geometry-only controls: native material/pose/sample authority is
+        // supplied separately by the owning source-leaf constructor.
+        let source = [
+            polygon(&[
+                [0.0, 0.0], [8.0, 0.0], [8.0, 8.0], [6.0, 8.0],
+                [6.0, 2.0], [2.0, 2.0], [2.0, 8.0], [0.0, 8.0],
+            ], false),
+            square(0.5, 3.0, 0.5, true),
+            square(12.0, 0.0, 8.0, false),
+        ];
+        let mut actual = [1, 2, 0].map(|i| polygon(&source[i].points, source[i].hole));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let mut scratch = Scratch { bytes: 0 };
+        let mapping = exact_cycle_mapping(&source, &actual, &mut scratch, &mut work, &cancel)
+            .unwrap().unwrap();
+        let mut registration: Vec<_> = mapping.into_iter().map(|native_index|
+            NativeLoopRegistration { native_index, parent: None }).collect();
+        let lower = capture_loop_registration(&source, &actual, &mut registration,
+            0.0, true, &mut scratch, &mut work, &cancel).unwrap().unwrap();
+        assert_eq!(registration.iter().map(|cycle| cycle.parent).collect::<Vec<_>>(),
+            [Some(2), None, None]);
+        assert!(lower > Interval::point(0.1).mul(Interval::point(2.0)).hi);
+        assert!(lower <= Interval::point(0.25).mul(Interval::point(2.0)).hi,
+            "whole-boundary clearance is a conservative LOWER with a strict two-tube comparison");
+        for point in &mut actual[0].points { point[0] += 12.0; }
+        assert!(capture_loop_registration(&source, &actual, &mut registration,
+            0.0, false, &mut scratch, &mut work, &cancel).is_err(),
+            "the same loop/role bijection cannot silently change the original owning component");
+        let mut cancelled_work = GeometryWorkBudget::new(100_000);
+        assert_eq!(capture_loop_registration(&source, &source, &mut registration,
+            0.0, false, &mut Scratch { bytes: 0 }, &mut cancelled_work, &AtomicBool::new(true))
+            .unwrap_err().code, GeometryErrorCode::Cancelled);
+        let mut bounded_work = GeometryWorkBudget::new(1);
+        assert_eq!(capture_loop_registration(&source, &source, &mut registration,
+            0.0, false, &mut Scratch { bytes: 0 }, &mut bounded_work, &cancel)
+            .unwrap_err().code, GeometryErrorCode::ResourceLimit);
+        assert!(bounded_work.consumed() > 0);
     }
 
     // Independent exhaustive enumeration: no boxes, tree, ordinals or index

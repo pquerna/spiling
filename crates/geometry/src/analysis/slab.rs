@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: OSL-3.0
 // Licensed under the Open Software License version 3.0
 
-//! Stratified height exclusion and bounded native-section continuation. Search
-//! cells are not geometry: every accepted bound comes from complete native
-//! parameter intervals, and every returned sample is a native section.
+//! Stratified material height exclusion and bounded native-section continuation.
+//! Search cells are not geometry: material bounds use complete selected source
+//! coefficient intervals, and every returned sample is a native section.
 //!
 //! A regular core requires a proper stratified submersion of every retained
 //! original face, physical coedge and vertex over the whole slab. Exact
@@ -34,12 +34,12 @@ use super::{
 };
 use crate::kernel::{PreparedFaceTrimDomain, TrimClassification};
 use crate::parametric::{
-    Interval, PreparedCurveEnclosure, down, surface_crease_interfaces, surface_enclosure,
-    surface_parameter_boxes, up,
+    Interval, PreparedValidatedCurve, down, surface_crease_interfaces, surface_enclosure,
+    surface_parameter_boxes, up, SurfaceEvaluator, CurveEvaluator,
 };
 use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, SectionLoopMm};
-use monstertruck_modeling::{BoundedCurve, Curve, Point3, Surface};
-use monstertruck_topology::{EdgeId, VertexId};
+use solidcore::surface::surface::{Surface, SurfaceKind};
+use solidcore::{EdgeId, VertexId};
 use spiling_contracts::geometry::GeometryErrorCode;
 #[cfg(test)]
 use spiling_contracts::geometry::MAX_SECTION_BYTES;
@@ -77,13 +77,7 @@ fn remaining_scratch_with_limit(limit: usize, occupied: usize) -> Result<usize, 
 pub(super) fn trim_parameter_box(
     domain: &PreparedFaceTrimDomain<'_>,
 ) -> Result<[[f64; 2]; 2], GeometryError> {
-    let mut uv = domain.uv_bounds();
-    if let Some(certified) = domain.certified_uv_domain() {
-        for axis in 0..2 {
-            uv[axis][0] = uv[axis][0].max(certified[axis][0]);
-            uv[axis][1] = uv[axis][1].min(certified[axis][1]);
-        }
-    }
+    let uv = domain.uv_domain();
     if uv
         .iter()
         .any(|axis| !axis[0].is_finite() || !axis[1].is_finite() || axis[0] > axis[1])
@@ -100,10 +94,10 @@ struct SeamHeightLink {
     endpoints: [bool; 2],
     whole: Option<bool>,
 }
-struct HeightSourceLinks {
-    incidence: SourceEdgeIncidence,
-    edges: HashMap<EdgeId<Curve>, SeamHeightLink>,
-    vertices: HashMap<VertexId<Point3>, bool>,
+struct HeightSourceLinks<'d> {
+    incidence: SourceEdgeIncidence<'d>,
+    edges: HashMap<EdgeId, SeamHeightLink>,
+    vertices: HashMap<VertexId, bool>,
 }
 
 struct FaceHeightQuery<'q, 'a, 's> {
@@ -113,16 +107,16 @@ struct FaceHeightQuery<'q, 'a, 's> {
 }
 struct EdgeHeightQuery<'q, 'a, 's> {
     source: &'q FaceHeightQuery<'q, 'a, 's>,
-    edge: EdgeId<Curve>,
+    edge: EdgeId,
 }
 fn receipt_map_bytes<K, V>(map: &HashMap<K, V>) -> usize {
     map.capacity()
         .saturating_mul(std::mem::size_of::<(K, V)>() + 16)
         .saturating_mul(2)
 }
-impl HeightSourceLinks {
+impl<'d> HeightSourceLinks<'d> {
     fn new(
-        definition: &Definition,
+        definition: &'d Definition,
         max_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -139,7 +133,7 @@ impl HeightSourceLinks {
         self.incidence
             .owned_bytes()
             .saturating_add(
-                std::mem::size_of::<Self>() - std::mem::size_of::<SourceEdgeIncidence>(),
+                std::mem::size_of::<Self>() - std::mem::size_of::<SourceEdgeIncidence<'d>>(),
             )
             .saturating_add(receipt_map_bytes(&self.vertices))
     }
@@ -148,8 +142,8 @@ impl HeightSourceLinks {
             .saturating_add(receipt_map_bytes(&self.edges))
     }
     fn edge_link(
-        incidence: &SourceEdgeIncidence,
-        cache: &mut HashMap<EdgeId<Curve>, SeamHeightLink>,
+        incidence: &SourceEdgeIncidence<'d>,
+        cache: &mut HashMap<EdgeId, SeamHeightLink>,
         fixed_bytes: usize,
         query: &EdgeHeightQuery<'_, '_, '_>,
         max_bytes: usize,
@@ -193,8 +187,11 @@ impl HeightSourceLinks {
                 for endpoint in 0..2 {
                     let mut regular = true;
                     for occurrence in [uses.first.coedge, second.coedge] {
-                        let range = domain.native().coedges()[occurrence].curve.range_tuple();
-                        let parameter = if endpoint == 0 { range.0 } else { range.1 };
+                        let proof = domain.original_coedge_correspondence(occurrence)?;
+                        let binding = proof.binding().ok_or_else(|| indeterminate(
+                            "source seam endpoint lacks selected spatial/chart binding",
+                        ))?;
+                        let parameter = proof.uv_endpoint((endpoint != 0) == binding.spatial_forward);
                         let uv = domain.boundary_position_enclosure(
                             occurrence,
                             [parameter; 2],
@@ -214,7 +211,7 @@ impl HeightSourceLinks {
             cache
                 .len()
                 .saturating_add(16)
-                .saturating_mul(std::mem::size_of::<(EdgeId<Curve>, SeamHeightLink)>() + 16)
+                .saturating_mul(std::mem::size_of::<(EdgeId, SeamHeightLink)>() + 16)
                 .saturating_mul(4),
         );
         if prospective > max_bytes {
@@ -241,7 +238,7 @@ impl HeightSourceLinks {
     fn whole_edge_regular(
         &mut self,
         query: &FaceHeightQuery<'_, '_, '_>,
-        edge: EdgeId<Curve>,
+        edge: EdgeId,
         max_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -288,7 +285,7 @@ impl HeightSourceLinks {
         &mut self,
         definition: &Definition,
         query: &FaceHeightQuery<'_, '_, '_>,
-        vertex: VertexId<Point3>,
+        vertex: VertexId,
         max_bytes: usize,
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
@@ -330,15 +327,14 @@ impl HeightSourceLinks {
         if regular {
             // Complete original endpoint connectors, not nominal endpoint samples.
             for joint in domain
-                .native()
-                .joints()
+                .original_joints()?
                 .iter()
                 .filter(|joint| joint.vertex_id == vertex)
             {
                 work.charge(1, cancel)?;
                 if !source_height_transverse(
                     glued,
-                    joint.enclosure.map(|axis| [axis.lower, axis.upper]),
+                    joint.enclosure.map(|axis| [axis.lo, axis.hi]),
                     functional,
                     work,
                     cancel,
@@ -352,7 +348,7 @@ impl HeightSourceLinks {
             self.vertices
                 .len()
                 .saturating_add(16)
-                .saturating_mul(std::mem::size_of::<(VertexId<Point3>, bool)>() + 16)
+                .saturating_mul(std::mem::size_of::<(VertexId, bool)>() + 16)
                 .saturating_mul(4),
         );
         if prospective > max_bytes {
@@ -428,13 +424,13 @@ fn source_height_transverse(
     }
     Ok(true)
 }
-fn height_source_links<'a>(
-    slot: &'a mut Option<HeightSourceLinks>,
-    definition: &Definition,
+fn height_source_links<'a, 'd>(
+    slot: &'a mut Option<HeightSourceLinks<'d>>,
+    definition: &'d Definition,
     max_bytes: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<&'a mut HeightSourceLinks, GeometryError> {
+) -> Result<&'a mut HeightSourceLinks<'d>, GeometryError> {
     crate::check_cancel(cancel)?;
     if slot.is_none() {
         *slot = Some(HeightSourceLinks::new(definition, max_bytes, work, cancel)?);
@@ -449,20 +445,17 @@ fn height_source_links<'a>(
     Ok(links)
 }
 
-fn edge_scratch(face: &monstertruck_modeling::Face) -> Result<usize, GeometryError> {
-    face.absolute_boundaries()
-        .iter()
-        .try_fold(STACK_SCRATCH_BYTES, |sum, wire| {
-            wire.len()
-                .checked_mul(256)
-                .and_then(|bytes| sum.checked_add(bytes))
-                .ok_or_else(|| {
-                    error(
-                        GeometryErrorCode::ResourceLimit,
-                        "native edge incidence scratch capacity overflowed",
-                    )
-                })
-        })
+fn edge_scratch(definition: &Definition, ordinal: usize) -> Result<usize, GeometryError> {
+    let (_, face) = super::source_incidence::native_face(definition, ordinal)?;
+    (0..face.loops.len()).try_fold(STACK_SCRATCH_BYTES, |sum, wire| {
+        super::source_incidence::boundary_loop(definition, ordinal, wire)?
+            .edges.len().checked_mul(256)
+            .and_then(|bytes| sum.checked_add(bytes))
+            .ok_or_else(|| error(
+                GeometryErrorCode::ResourceLimit,
+                "native edge incidence scratch capacity overflowed",
+            ))
+    })
 }
 
 fn error(code: GeometryErrorCode, message: &'static str) -> GeometryError {
@@ -526,7 +519,7 @@ pub(super) const HEIGHT_CONTRACTION_SCRATCH_BYTES: usize =
 
 /// Contract the necessary height preimage, then return a complete spatial jet.
 pub(super) fn clip_height_box(
-    surface: &Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     uv: [[f64; 2]; 2],
     functional: HeightFunctional,
     heights: [f64; 2],
@@ -547,7 +540,7 @@ pub(super) fn clip_height_box(
 /// Continuous-source images and one-sided first derivatives suffice; this
 /// scalar mean-value bound grants no C1, Hessian, normal or regularity authority.
 pub(super) fn clip_height_parameter_box(
-    surface: &Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     mut uv: [[f64; 2]; 2],
     functional: HeightFunctional,
     heights: [f64; 2],
@@ -694,172 +687,100 @@ fn equal_coefficient_height(
         cancel,
     )
 }
-fn constant_spline_height(
-    surface: &Surface,
+pub(super) fn constant_spline_height(
+    surface: &(impl SurfaceEvaluator + ?Sized),
     functional: HeightFunctional,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
-    constant_surface_height_inner(surface, functional, 0, work, cancel)
+    if let Some(native) = surface.native_surface() {
+        return constant_surface_height_inner(native, functional, 0, work, cancel);
+    }
+    let original = surface.original_surface().ok_or_else(|| indeterminate(
+        "selected surface has no actual coefficient operand for height identity",
+    ))?;
+    constant_original_surface_height(original, functional, 0, work, cancel)
 }
 fn constant_surface_height_inner(
-    surface: &Surface,
+    surface: &solidcore::surface::surface::Surface,
     functional: HeightFunctional,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
+    use solidcore::surface::surface::SurfaceKind;
     work.charge(1, cancel)?;
     if depth >= MAX_DEPTH {
-        return Err(indeterminate(
-            "native carrier height identity nesting exhausted",
-        ));
+        return Err(indeterminate("native carrier height identity nesting exhausted"));
     }
-    match surface {
-        Surface::Plane(plane) => {
-            let u: [f64; 3] = plane.axis_u().into();
-            let v: [f64; 3] = plane.axis_v().into();
-            if !equal_coefficient_height(
-                [0.0, 0.0, 0.0, 1.0],
-                [u[0], u[1], u[2], 1.0],
-                functional,
-                work,
-                cancel,
-            )? || !equal_coefficient_height(
-                [0.0, 0.0, 0.0, 1.0],
-                [v[0], v[1], v[2], 1.0],
-                functional,
-                work,
-                cancel,
-            )? {
-                return Ok(None);
+    match surface.kind() {
+        SurfaceKind::Step(_) => {
+            if let Some(operand) = native_step_operand(surface)
+                && matches!(operand.kind(), SurfaceKind::Plane(_) | SurfaceKind::BSpline(_))
+            {
+                return constant_surface_height_inner(operand, functional, depth + 1, work, cancel);
             }
-            Ok(Some(functional.vertex(plane.origin().into())))
+            // STEP analytic operands and stored NURBS charts are distinct
+            // laws. Prove constancy in the actual wrapper's full active chart,
+            // never borrow a fitted control net from its analytic child.
+            let domain = surface.natural_uv_domain();
+            let lo = domain.min(); let hi = domain.max();
+            let [bound] = crate::parametric::surface_functional_enclosures(
+                surface, [[lo.x, hi.x], [lo.y, hi.y]],
+                &[crate::parametric::SurfaceFunctional {
+                    direction: functional.direction,
+                    origin: [Interval::point(0.0); 3],
+                    offset: functional.offset,
+                }], work, cancel,
+            )?;
+            return Ok((bound.du.lo == 0.0 && bound.du.hi == 0.0
+                && bound.dv.lo == 0.0 && bound.dv.hi == 0.0).then_some(bound.position));
         }
-        Surface::BsplineSurface(spline) => {
-            let Some(first) = spline.control_points().iter().flatten().next() else {
-                return Ok(None);
-            };
-            let a: [f64; 3] = (*first).into();
-            for point in spline.control_points().iter().flatten() {
-                work.charge(1, cancel)?;
-                let b: [f64; 3] = (*point).into();
-                if !equal_coefficient_height(
-                    [a[0], a[1], a[2], 1.0],
-                    [b[0], b[1], b[2], 1.0],
-                    functional,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(functional.vertex(a)))
-        }
-        Surface::NurbsSurface(spline) => {
-            let mut controls = spline.control_points().iter().flatten();
-            let Some(first) = controls.next() else {
-                return Err(error(
-                    GeometryErrorCode::InvalidGeometry,
-                    "rational surface has no control coefficients",
-                ));
-            };
-            if first.w == 0.0 {
-                return Ok(None);
-            }
-            let candidate = tight_add(
-                tight_div(
-                    functional.dot([first.x, first.y, first.z].map(Interval::point)),
-                    Interval::point(first.w),
-                )?,
-                functional.offset,
-            );
-            let positive = first.w > 0.0;
-            for point in spline.control_points().iter().flatten() {
-                work.charge(1, cancel)?;
-                // Positive (or all-negative) homogeneous weights prove that
-                // the partition-of-unity denominator never vanishes.
-                if point.w == 0.0 || (point.w > 0.0) != positive {
-                    return Ok(None);
-                }
-                if !equal_coefficient_height(
-                    [first.x, first.y, first.z, first.w],
-                    [point.x, point.y, point.z, point.w],
-                    functional,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(candidate))
-        }
-        Surface::ExtrusionSurface(extrusion) => {
-            let vector = extrusion.extruding_vector();
-            if !equal_coefficient_height(
-                [0.0, 0.0, 0.0, 1.0],
-                [vector.x, vector.y, vector.z, 1.0],
-                functional,
-                work,
-                cancel,
-            )? {
-                return Ok(None);
-            }
-            constant_native_curve_height_inner(
-                extrusion.entity_curve(),
-                functional,
-                depth + 1,
-                work,
-                cancel,
-            )
-        }
-        Surface::RevolutionSurface(revolution) => {
-            let matrix = revolution.transform();
-            if matrix.x.w != 0.0 || matrix.y.w != 0.0 || matrix.z.w != 0.0 || matrix.w.w != 1.0 {
-                return Ok(None);
-            }
-            let local = HeightFunctional {
-                direction: [matrix.x, matrix.y, matrix.z].map(|column| {
-                    functional.dot([column.x, column.y, column.z].map(Interval::point))
-                }),
-                offset: tight_add(
-                    functional.offset,
-                    functional.dot([matrix.w.x, matrix.w.y, matrix.w.z].map(Interval::point)),
-                ),
-            };
-            let axis = revolution.entity().axis();
-            let axis = [axis.x, axis.y, axis.z];
-            // Native axis-angle evaluation assumes a unit axis. A rounded
-            // near-unit vector is not an exact rotational-height identity.
-            if !super::critical::exact_unit_vector_identity(axis, work, cancel)? {
-                return Ok(None);
-            }
-            for index in 0..3 {
-                let i = (index + 1) % 3;
-                let j = (index + 2) % 3;
-                let mut perpendicular = [0.0, 0.0, 0.0, 1.0];
-                perpendicular[i] = axis[j];
-                perpendicular[j] = -axis[i];
+        SurfaceKind::CurveBounded(bound) => return constant_surface_height_inner(
+            bound.basis(), functional, depth + 1, work, cancel,
+        ),
+        SurfaceKind::Plane(plane) => {
+            let p = plane.position();
+            let u = p.x_axis();
+            let v = p.y_axis();
+            // Native scale multiplies these axes; exact perpendicularity to
+            // both axes proves constancy for every finite UV scale.
+            for axis in [u, v] {
                 if !equal_coefficient_height(
                     [0.0, 0.0, 0.0, 1.0],
-                    perpendicular,
-                    local,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(None);
-                }
+                    [axis.x, axis.y, axis.z, 1.0],
+                    functional, work, cancel,
+                )? { return Ok(None); }
             }
-            constant_native_curve_height_inner(
-                revolution.entity().entity_curve(),
-                local,
-                depth + 1,
-                work,
-                cancel,
-            )
+            let o = p.origin();
+            return Ok(Some(functional.vertex([o.x, o.y, o.z])));
         }
-        _ => Ok(None),
+        _ => {}
     }
+    let Some(spline) = crate::parametric::native_surface_nurbs(surface)? else {
+        return Ok(None);
+    };
+    let first = spline.cpt(0, 0).map_err(|_| indeterminate("native surface has no coefficients"))?;
+    let first_w = if spline.is_rational() { first.w } else { 1.0 };
+    if first_w == 0.0 { return Ok(None); }
+    let first_h = [first.x, first.y, first.z, first_w];
+    for i in 0..=spline.n() {
+        for j in 0..=spline.m() {
+            work.charge(1, cancel)?;
+            let c = spline.cpt(i, j).map_err(|_| indeterminate("native surface coefficient missing"))?;
+            let w = if spline.is_rational() { c.w } else { 1.0 };
+            if w == 0.0 || (w > 0.0) != (first_w > 0.0) {
+                return Ok(None);
+            }
+            if !equal_coefficient_height(
+                first_h, [c.x, c.y, c.z, w], functional, work, cancel,
+            )? { return Ok(None); }
+        }
+    }
+    Ok(Some(tight_add(tight_div(
+        functional.dot([first.x, first.y, first.z].map(Interval::point)),
+        Interval::point(first_w),
+    )?, functional.offset)))
 }
 /// Whole original carrier identity under the actual caller functional. This is
 /// also used by placed strata; a near-horizontal source frame is not authority.
@@ -871,135 +792,348 @@ pub(super) fn constant_source_face_height(
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
     work.charge(face_index as u64 + 1, cancel)?;
-    let face = definition
-        .solid
-        .face_iter()
-        .nth(face_index)
+    let face = *definition.face_ids().get(face_index)
         .ok_or_else(|| indeterminate("source face constancy mapping is incomplete"))?;
-    face.with_surface(|surface| constant_spline_height(surface, functional, work, cancel))
+    constant_original_surface_height(
+        definition.original_source().face(face)?.carrier.as_ref(),
+        functional, 0, work, cancel,
+    )
 }
 pub(super) fn constant_native_curve_height(
-    curve: &monstertruck_modeling::Curve,
+    curve: &(impl CurveEvaluator + ?Sized),
     functional: HeightFunctional,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
-    constant_native_curve_height_inner(curve, functional, 0, work, cancel)
+    if let Some(native) = curve.native_curve() {
+        return constant_native_curve_height_inner(native, functional, 0, work, cancel);
+    }
+    // The provider's selected operator may be S(gamma(t)), not curve_3d.
+    // Preserve affine identities using its unrounded composed coefficients.
+    if functional.direction.iter().all(|value| value.lo == value.hi)
+        && let Some(coefficients) = curve.exact_affine_coefficients(work, cancel)?
+    {
+        use crate::exact_coefficient::ExactCoefficient as E;
+        if coefficients.denominator.sign() == 0 { return Ok(None); }
+        let mut derivative = E::point(0.0);
+        let mut position = E::point(0.0);
+        for axis in 0..3 {
+            let direction = E::point(functional.direction[axis].lo);
+            let Some(d) = coefficients.derivative[axis].product(&direction, work, cancel)?
+                else { return Ok(None); };
+            let Some(p) = coefficients.position[axis].product(&direction, work, cancel)?
+                else { return Ok(None); };
+            for &term in &d.terms[..d.len] {
+                if derivative.push(term).is_none() { return Ok(None); }
+            }
+            for &term in &p.terms[..p.len] {
+                if position.push(term).is_none() { return Ok(None); }
+            }
+        }
+        if derivative.sign() != 0 { return Ok(None); }
+        let mut offset = functional.offset;
+        if offset.lo == offset.hi {
+            // Recenter before rounding the rational quotient; large absolute
+            // source positions must not destroy an exact relative height.
+            let Some(projected) = coefficients.denominator.product(
+                &E::point(offset.lo), work, cancel,
+            )? else { return Ok(None); };
+            for &term in &projected.terms[..projected.len] {
+                if position.push(term).is_none() { return Ok(None); }
+            }
+            offset = Interval::point(0.0);
+        }
+        let enclose = |coefficient: &E| -> Result<Interval, GeometryError> {
+            let mut result = Interval::point(0.0);
+            for &term in &coefficient.terms[..coefficient.len] {
+                work.charge(1, cancel)?;
+                result = tight_add(result, Interval::point(term));
+            }
+            Ok(result)
+        };
+        let denominator = enclose(&coefficients.denominator)?;
+        if denominator.contains_zero() { return Ok(None); }
+        let height = tight_add(tight_div(enclose(&position)?, denominator)?, offset);
+        if height.lo != height.hi && functional.offset.lo == functional.offset.hi {
+            let middle = height.lo * 0.5 + height.hi * 0.5;
+            for candidate in [middle, down(middle), up(middle)] {
+                if candidate.is_finite() && exact_affine_curve_height_at(
+                    curve, 0.0, functional, candidate, work, cancel,
+                )? { return Ok(Some(Interval::point(candidate))); }
+            }
+        }
+        return Ok(Some(height));
+    }
+    let original = curve.original_curve().ok_or_else(|| indeterminate(
+        "selected curve has no actual coefficient operand for height identity",
+    ))?;
+    constant_original_curve_height(original, functional, 0, work, cancel)
 }
 fn constant_native_curve_height_inner(
-    curve: &monstertruck_modeling::Curve,
+    curve: &solidcore::curve::curve::Curve,
     functional: HeightFunctional,
     depth: u8,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<Interval>, GeometryError> {
+    use solidcore::curve::curve::CurveKind;
     work.charge(1, cancel)?;
     if depth >= MAX_DEPTH {
-        return Err(indeterminate(
-            "native curve height identity nesting exhausted",
-        ));
+        return Err(indeterminate("native curve height identity nesting exhausted"));
     }
-    use monstertruck_modeling::Curve;
-    match curve {
-        Curve::Line(line) => {
-            let a: [f64; 3] = line.0.into();
-            let b: [f64; 3] = line.1.into();
+    match curve.kind() {
+        CurveKind::Line(line) => {
+            let c = line.canonical_unit();
             if !equal_coefficient_height(
-                [a[0], a[1], a[2], 1.0],
-                [b[0], b[1], b[2], 1.0],
-                functional,
-                work,
-                cancel,
-            )? {
-                return Ok(None);
-            }
-            Ok(Some(functional.vertex(a)))
+                [0.0, 0.0, 0.0, 1.0],
+                [c.vector.x, c.vector.y, c.vector.z, 1.0],
+                functional, work, cancel,
+            )? { return Ok(None); }
+            return Ok(Some(functional.vertex([c.point.x, c.point.y, c.point.z])));
         }
-        Curve::BsplineCurve(spline) => {
-            let Some(first) = spline.control_points().first() else {
-                return Ok(None);
-            };
-            let a: [f64; 3] = (*first).into();
-            for point in spline.control_points() {
-                work.charge(1, cancel)?;
-                let b: [f64; 3] = (*point).into();
-                if !equal_coefficient_height(
-                    [a[0], a[1], a[2], 1.0],
-                    [b[0], b[1], b[2], 1.0],
-                    functional,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(functional.vertex(a)))
-        }
-        Curve::NurbsCurve(spline) => {
-            let Some(first) = spline.control_points().first() else {
-                return Err(error(
-                    GeometryErrorCode::InvalidGeometry,
-                    "rational curve has no control coefficients",
-                ));
-            };
-            if first.w == 0.0 {
-                return Ok(None);
-            }
-            let candidate = tight_add(
-                tight_div(
-                    functional.dot([first.x, first.y, first.z].map(Interval::point)),
-                    Interval::point(first.w),
-                )?,
-                functional.offset,
-            );
-            for point in spline.control_points() {
-                work.charge(1, cancel)?;
-                if point.w == 0.0 || (point.w > 0.0) != (first.w > 0.0) {
-                    return Ok(None);
-                }
-                if !equal_coefficient_height(
-                    [first.x, first.y, first.z, first.w],
-                    [point.x, point.y, point.z, point.w],
-                    functional,
-                    work,
-                    cancel,
-                )? {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(candidate))
-        }
-        Curve::ParameterCurve(curve) => constant_surface_height_inner(
-            curve.surface().as_ref(),
-            functional,
-            depth + 1,
-            work,
-            cancel,
+        CurveKind::CrvOnSurf(curve) => return constant_surface_height_inner(
+            curve.surface(), functional, depth + 1, work, cancel,
         ),
-        Curve::TrimmedCurve(curve) => {
-            let matrix = curve.transform();
-            if matrix.x.w != 0.0 || matrix.y.w != 0.0 || matrix.z.w != 0.0 || matrix.w.w != 1.0 {
-                return Ok(None);
+        _ => {}
+    }
+    let Some(spline) = crate::parametric::native_curve_nurbs(curve)? else { return Ok(None); };
+    let first = spline.cpts().first().ok_or_else(|| indeterminate("native curve has no coefficients"))?;
+    let first_w = if spline.is_rational() { first.w } else { 1.0 };
+    if first_w == 0.0 { return Ok(None); }
+    for c in spline.cpts() {
+        work.charge(1, cancel)?;
+        let w = if spline.is_rational() { c.w } else { 1.0 };
+        if w == 0.0 || (w > 0.0) != (first_w > 0.0) { return Ok(None); }
+        if !equal_coefficient_height(
+            [first.x, first.y, first.z, first_w], [c.x, c.y, c.z, w],
+            functional, work, cancel,
+        )? { return Ok(None); }
+    }
+    Ok(Some(tight_add(tight_div(
+        functional.dot([first.x, first.y, first.z].map(Interval::point)),
+        Interval::point(first_w),
+    )?, functional.offset)))
+}
+
+pub(super) fn exact_affine_curve_height_at(
+    curve: &(impl CurveEvaluator + ?Sized), parameter: f64,
+    functional: HeightFunctional, target: f64,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    use crate::exact_coefficient::ExactCoefficient as E;
+    work.charge(1, cancel)?;
+    if functional.direction.iter().chain([&functional.offset]).any(|v| v.lo != v.hi) {
+        return Ok(false);
+    }
+    let Some(coefficients) = curve.exact_affine_coefficients(work, cancel)? else { return Ok(false); };
+    if coefficients.denominator.sign() == 0 { return Ok(false); }
+    let mut sum = E::point(0.0);
+    for ((mut position, derivative), direction) in coefficients.position.into_iter()
+        .zip(coefficients.derivative).zip(functional.direction)
+    {
+        let Some(delta) = derivative.product(&E::point(parameter), work, cancel)? else { return Ok(false); };
+        for &term in &delta.terms[..delta.len] {
+            if position.push(term).is_none() { return Ok(false); }
+        }
+        let Some(projected) = position.product(&E::point(direction.lo), work, cancel)? else { return Ok(false); };
+        if sum.subtract(&projected).is_none() { return Ok(false); }
+    }
+    let Some(offset) = E::difference(functional.offset.lo, target) else { return Ok(false); };
+    let Some(offset) = offset.product(&coefficients.denominator, work, cancel)? else { return Ok(false); };
+    if sum.subtract(&offset).is_none() { return Ok(false); }
+    Ok(sum.sign() == 0)
+}
+
+pub(super) fn original_endpoint_height(
+    curve: &(impl CurveEvaluator + ?Sized), parameter: f64, declared_point: [f64; 3],
+    functional: HeightFunctional,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Interval, GeometryError> {
+    let declared = functional.vertex(declared_point);
+    if declared.lo == declared.hi
+        && exact_affine_curve_height_at(curve, parameter, functional, declared.lo, work, cancel)?
+    {
+        return Ok(declared);
+    }
+    if declared.lo == declared.hi {
+        let mut exact = true;
+        for axis in 0..3 {
+            let direction = functional.direction[axis];
+            if direction.lo == 0.0 && direction.hi == 0.0 { continue; }
+            if !crate::parametric::curve_endpoint_coordinate_equal(
+                curve, parameter, axis, declared_point[axis], work, cancel,
+            )? {
+                exact = false;
+                break;
             }
-            let direction = [matrix.x, matrix.y, matrix.z]
-                .map(|column| functional.dot([column.x, column.y, column.z].map(Interval::point)));
-            let offset = tight_add(
-                functional.offset,
-                functional.dot([matrix.w.x, matrix.w.y, matrix.w.z].map(Interval::point)),
-            );
-            constant_native_curve_height_inner(
-                curve.entity().curve().as_ref(),
-                HeightFunctional { direction, offset },
-                depth + 1,
-                work,
-                cancel,
-            )
+        }
+        if exact { return Ok(declared); }
+    }
+    // Both actual C(t) and the bound original V remain CLOSED strata. A
+    // rounded endpoint tensor never becomes an exact scalar cap identity.
+    Ok(declared.hull(functional.height(curve.tensor([parameter; 2], 0, work, cancel)?[0])))
+}
+
+fn original_control_height(
+    mut controls: impl Iterator<Item = ([f64; 3], f64)>,
+    functional: HeightFunctional,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    let (first, first_weight) = controls.next()
+        .ok_or_else(|| indeterminate("original height identity has no control coefficients"))?;
+    for value in first.into_iter().chain([first_weight]) { Interval::new(value, value)?; }
+    if first_weight == 0.0 { return Ok(None); }
+    for (point, weight) in controls {
+        work.charge(1, cancel)?;
+        for value in point.into_iter().chain([weight]) { Interval::new(value, value)?; }
+        if weight == 0.0 || (weight > 0.0) != (first_weight > 0.0) { return Ok(None); }
+        // Original STEP spline controls are Euclidean, unlike native
+        // homogeneous controls. Do not round point*weight before the identity.
+        if !equal_coefficient_height(
+            [first[0], first[1], first[2], 1.0],
+            [point[0], point[1], point[2], 1.0], functional, work, cancel,
+        )? { return Ok(None); }
+    }
+    Ok(Some(functional.vertex(first)))
+}
+
+fn original_cross_height_zero(
+    a: [f64; 3], b: [f64; 3], functional: HeightFunctional,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    use crate::exact_coefficient::ExactCoefficient;
+    if functional.direction.iter().any(|v| v.lo != v.hi) { return Ok(false); }
+    let mut sum = ExactCoefficient::point(0.0);
+    for k in 0..3 {
+        let i = (k + 1) % 3; let j = (k + 2) % 3;
+        for (left, right, sign) in [(a[i], b[j], 1.0), (a[j], b[i], -1.0)] {
+            work.charge(1, cancel)?;
+            for value in [left, right, functional.direction[k].lo] { Interval::new(value, value)?; }
+            let Some(product) = ExactCoefficient::point(left)
+                .product(&ExactCoefficient::point(right), work, cancel)? else { return Ok(false); };
+            let Some(term) = product.product(
+                &ExactCoefficient::point(sign * functional.direction[k].lo), work, cancel,
+            )? else { return Ok(false); };
+            if sum.subtract(&term).is_none() { return Ok(false); }
+        }
+    }
+    Ok(sum.sign() == 0)
+}
+
+fn original_placement_height_constant(
+    placement: &solidcraft_step::geom::Placement, functional: HeightFunctional,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    let x = placement.ref_direction;
+    Ok(equal_coefficient_height(
+        [0.0, 0.0, 0.0, 1.0], [x[0], x[1], x[2], 1.0],
+        functional, work, cancel,
+    )? && original_cross_height_zero(placement.axis, x, functional, work, cancel)?)
+}
+
+fn constant_original_curve_height(
+    curve: &solidcraft_step::geom::Curve, functional: HeightFunctional, depth: u8,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    use solidcraft_step::geom::Curve;
+    work.charge(1, cancel)?;
+    if depth >= MAX_DEPTH { return Err(indeterminate("original curve height identity nesting exhausted")); }
+    match curve {
+        Curve::Line { origin, direction, .. } => {
+            let d = *direction;
+            Ok(equal_coefficient_height(
+                [0.0, 0.0, 0.0, 1.0], [d[0], d[1], d[2], 1.0],
+                functional, work, cancel,
+            )?.then(|| functional.vertex(*origin)))
+        }
+        Curve::Circle { position, .. } | Curve::Ellipse { position, .. }
+            | Curve::Parabola { position, .. } | Curve::Hyperbola { position, .. } => {
+            Ok(original_placement_height_constant(position, functional, work, cancel)?
+                .then(|| functional.vertex(position.origin)))
+        }
+        Curve::BSpline(spline) => {
+            if spline.weights.as_ref().is_some_and(|weights| weights.len() != spline.points.len()) {
+                return Err(indeterminate("original curve height coefficient census mismatch"));
+            }
+            original_control_height(spline.points.iter().enumerate().map(|(i, point)| {
+                (*point, spline.weights.as_ref().map_or(1.0, |weights| weights[i]))
+            }), functional, work, cancel)
+        }
+        Curve::Polyline(points) => original_control_height(
+            points.iter().map(|point| (*point, 1.0)), functional, work, cancel,
+        ),
+        Curve::Trimmed { basis, .. } => constant_original_curve_height(
+            basis, functional, depth + 1, work, cancel,
+        ),
+        Curve::SurfaceCurve { curve_3d, .. } => {
+            if let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(curve)? {
+                constant_original_surface_height(
+                    &pcurve.surface, functional, depth + 1, work, cancel,
+                )
+            } else {
+                constant_original_curve_height(
+                    curve_3d, functional, depth + 1, work, cancel,
+                )
+            }
         }
         _ => Ok(None),
     }
 }
+
+fn constant_original_surface_height(
+    surface: &solidcraft_step::geom::Surface, functional: HeightFunctional, depth: u8,
+    work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+) -> Result<Option<Interval>, GeometryError> {
+    use solidcraft_step::geom::Surface;
+    work.charge(1, cancel)?;
+    if depth >= MAX_DEPTH { return Err(indeterminate("original carrier height identity nesting exhausted")); }
+    match surface {
+        Surface::Plane { position } => Ok(
+            original_placement_height_constant(position, functional, work, cancel)?
+                .then(|| functional.vertex(position.origin))
+        ),
+        Surface::BSpline(spline) => {
+            if spline.weights.as_ref().is_some_and(|weights| weights.len() != spline.points.len()
+                || weights.iter().zip(&spline.points).any(|(a,b)| a.len() != b.len())) {
+                return Err(indeterminate("original surface height coefficient census mismatch"));
+            }
+            original_control_height(
+                spline.points.iter().enumerate().flat_map(|(i, row)| row.iter().enumerate().map(
+                    move |(j, point)| (*point, spline.weights.as_ref().map_or(1.0, |weights| weights[i][j])),
+                )), functional, work, cancel,
+            )
+        }
+        Surface::Extrusion { profile, direction, .. } => {
+            let d = *direction;
+            if !equal_coefficient_height(
+                [0.0, 0.0, 0.0, 1.0], [d[0], d[1], d[2], 1.0],
+                functional, work, cancel,
+            )? { return Ok(None); }
+            constant_original_curve_height(profile, functional, depth + 1, work, cancel)
+        }
+        Surface::Revolution { profile, axis } => {
+            if !super::critical::exact_unit_vector_identity(axis.direction, work, cancel)? {
+                return Ok(None);
+            }
+            for k in 0..3 {
+                let i = (k + 1) % 3; let j = (k + 2) % 3;
+                let mut perpendicular = [0.0, 0.0, 0.0, 1.0];
+                perpendicular[i] = axis.direction[j]; perpendicular[j] = -axis.direction[i];
+                if !equal_coefficient_height(
+                    [0.0, 0.0, 0.0, 1.0], perpendicular, functional, work, cancel,
+                )? { return Ok(None); }
+            }
+            constant_original_curve_height(profile, functional, depth + 1, work, cancel)
+        }
+        Surface::RectangularTrimmed { basis, .. } => constant_original_surface_height(
+            basis, functional, depth + 1, work, cancel,
+        ),
+        _ => Ok(None),
+    }
+}
 fn flat_native_surface_height(
-    surface: &Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     frame: PlaneFrameMm,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
@@ -1023,17 +1157,20 @@ fn vertex_height(point: [f64; 3], frame: PlaneFrameMm) -> Interval {
         )
     })
 }
-fn flat_native_plane_height(surface: &Surface, frame: PlaneFrameMm) -> Option<Interval> {
-    let Surface::Plane(plane) = surface else {
-        return None;
-    };
+fn flat_native_plane_height(surface: &(impl SurfaceEvaluator + ?Sized), frame: PlaneFrameMm) -> Option<Interval> {
+    let SurfaceKind::Plane(plane) = surface.native_surface()?.kind() else { return None; };
     let axis = (0..3).find(|&i| frame.z_axis[i].abs() == 1.0)?;
     if (0..3).any(|i| i != axis && frame.z_axis[i] != 0.0) {
         return None;
     }
-    let u: [f64; 3] = plane.axis_u().into();
-    let v: [f64; 3] = plane.axis_v().into();
-    (u[axis] == 0.0 && v[axis] == 0.0).then(|| vertex_height(plane.origin().into(), frame))
+    let position = plane.position();
+    let u = position.x_axis();
+    let v = position.y_axis();
+    let o = position.origin();
+    let u = [u.x, u.y, u.z];
+    let v = [v.x, v.y, v.z];
+    (u[axis] == 0.0 && v[axis] == 0.0)
+        .then(|| vertex_height([o.x, o.y, o.z], frame))
 }
 fn tight_dot(a: [f64; 3], b: [f64; 3]) -> Interval {
     (0..3).fold(Interval::point(0.0), |s, i| {
@@ -1044,48 +1181,66 @@ fn tight_dot(a: [f64; 3], b: [f64; 3]) -> Interval {
 /// An aligned height is c+a*sin(v). Its only interior critical values are
 /// c+-a, including the complete stationary circles.
 fn torus_stationary_values(
-    surface: &Surface,
+    surface: &(impl SurfaceEvaluator + ?Sized),
     frame: PlaneFrameMm,
 ) -> Option<([Interval; 2], usize)> {
-    let Surface::ToroidalSurface(torus) = surface else {
-        return None;
-    };
-    if torus.entity().large_radius() <= torus.entity().small_radius() {
+    if let Some(mut original) = surface.original_surface() {
+        for _ in 0..MAX_DEPTH {
+            match original {
+                solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => original = basis,
+                solidcraft_step::geom::Surface::Torus { position, major_radius, minor_radius } => {
+                    if major_radius <= minor_radius { return None; }
+                    let x = position.ref_direction; let z = position.axis;
+                    let y = tight_cross_points(z, x);
+                    let a = tight_dot(x, frame.z_axis);
+                    let b = (0..3).fold(Interval::point(0.0), |s, k|
+                        tight_add(s, tight_mul(y[k], Interval::point(frame.z_axis[k]))));
+                    if a.lo != 0.0 || a.hi != 0.0 || b.lo != 0.0 || b.hi != 0.0 { return None; }
+                    let c = tight_dot(z, frame.z_axis);
+                    if c.contains_zero() { return None; }
+                    let offset = vertex_height(position.origin, frame);
+                    let amplitude = tight_mul(c, Interval::point(*minor_radius));
+                    return Some(([tight_add(offset, amplitude), tight_add(offset, amplitude.neg())], 1));
+                }
+                _ => return None,
+            }
+        }
         return None;
     }
-    let m = torus.transform();
-    if m.x.w != 0.0 || m.y.w != 0.0 || m.z.w != 0.0 || m.w.w != 1.0 {
-        return None;
+    let surface = native_step_operand(surface.native_surface()?)?;
+    let SurfaceKind::Torus(torus) = surface.kind() else { return None; };
+    if torus.major_radius() <= torus.minor_radius() { return None; }
+    let p = torus.base().position();
+    let x = p.x_axis(); let y = p.y_axis(); let z = p.z_axis();
+    let a = tight_dot([x.x, x.y, x.z], frame.z_axis);
+    let b = tight_dot([y.x, y.y, y.z], frame.z_axis);
+    if a.lo != 0.0 || a.hi != 0.0 || b.lo != 0.0 || b.hi != 0.0 { return None; }
+    let c = tight_dot([z.x, z.y, z.z], frame.z_axis);
+    if c.contains_zero() { return None; }
+    let o = p.origin();
+    let offset = vertex_height([o.x, o.y, o.z], frame);
+    let amplitude = tight_mul(c, Interval::point(torus.minor_radius()));
+    // The literal STEP torus chart has its meridional sine on V. No
+    // descriptive family or NURBS parameter inversion establishes this index.
+    Some(([tight_add(offset, amplitude), tight_add(offset, amplitude.neg())], 1))
+}
+fn native_step_operand(mut surface: &Surface) -> Option<&Surface> {
+    let mut step = false;
+    for _ in 0..MAX_DEPTH {
+        match surface.kind() {
+            SurfaceKind::Step(wrapper) => { surface = wrapper.surface()?; step = true; }
+            SurfaceKind::CurveBounded(bound) => surface = bound.basis(),
+            _ => return step.then_some(surface),
+        }
     }
-    let a = tight_dot([m.x.x, m.x.y, m.x.z], frame.z_axis);
-    let b = tight_dot([m.y.x, m.y.y, m.y.z], frame.z_axis);
-    if a.lo != 0.0 || a.hi != 0.0 || b.lo != 0.0 || b.hi != 0.0 {
-        return None;
-    }
-    let c = tight_dot([m.z.x, m.z.y, m.z.z], frame.z_axis);
-    if c.contains_zero() {
-        return None;
-    }
-    let center: [f64; 3] = torus.entity().center().into();
-    let offset = (0..3).fold(vertex_height([m.w.x, m.w.y, m.w.z], frame), |s, i| {
-        let column = match i {
-            0 => [m.x.x, m.x.y, m.x.z],
-            1 => [m.y.x, m.y.y, m.y.z],
-            _ => [m.z.x, m.z.y, m.z.z],
-        };
-        tight_add(
-            s,
-            tight_mul(tight_dot(column, frame.z_axis), Interval::point(center[i])),
-        )
-    });
-    let amplitude = tight_mul(c, Interval::point(torus.entity().small_radius()));
-    Some((
-        [
-            tight_add(offset, amplitude),
-            tight_add(offset, amplitude.neg()),
-        ],
-        if torus.orientation() { 1 } else { 0 },
-    ))
+    None
+}
+fn tight_cross_points(a: [f64; 3], b: [f64; 3]) -> [Interval; 3] {
+    std::array::from_fn(|k| {
+        let i = (k + 1) % 3; let j = (k + 2) % 3;
+        tight_add(tight_mul(Interval::point(a[i]), Interval::point(b[j])),
+            tight_mul(Interval::point(a[j]), Interval::point(b[i])).neg())
+    })
 }
 fn cross(a: [Interval; 3], b: [Interval; 3]) -> [Interval; 3] {
     [
@@ -1188,33 +1343,12 @@ fn add_event(
     Ok(())
 }
 
-fn material_transport_height_padding(
-    definition: &Definition,
-    functional: HeightFunctional,
-) -> Result<f64, GeometryError> {
-    let allowance = definition.provenance().uncertainty_mm.ok_or_else(|| {
-        error(
-            GeometryErrorCode::ParameterCorrespondenceUnavailable,
-            "nonzero or unresolved material transport has no declared source allowance",
-        )
-    })?;
-    if !allowance.is_finite() || allowance < 0.0 {
-        return Err(error(
-            GeometryErrorCode::InvalidGeometry,
-            "invalid original material source allowance",
-        ));
-    }
-    Ok(Interval::point(allowance)
-        .mul(norm(functional.direction)?)
-        .hi)
-}
-
 /// Retain actual source-owned collar, edge-end and joint-star supports.
 /// The provider evaluates the full unnormalized scalar covector; only the
 /// affine height offset is applied here. No whole-face blanket or fabricated
 /// root subdivisions replace these physical supports.
 fn material_transport_height_cover(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     functional: HeightFunctional,
     height_interval_mm: [f64; 2],
     remaining_bytes: usize,
@@ -1285,7 +1419,7 @@ struct MaterialTransportExclusion<'d> {
     range: [f64; 2],
 }
 fn exclude_material_transport<'d>(
-    source: crate::section::OriginalTrimSource<'_, 'd>,
+    source: super::material_source::MaterialSourceView<'_, 'd>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     remaining_bytes: usize,
@@ -1312,10 +1446,10 @@ fn exclude_material_transport<'d>(
     }))
 }
 
-/// Complete conservative isolation of literal native critical-height strata.
-/// Source-material completeness additionally retains the entire possible
-/// transport support on HeightCapture. Such supports never become isolated
-/// root brackets or authorize a raw regular slab through their neighborhoods.
+/// Complete conservative isolation of selected original critical-height strata.
+/// Material completeness additionally retains the complete source realization's
+/// collar/cone transport support on HeightCapture. Those supports are not
+/// isolated roots and do not authorize regular continuation through their bands.
 pub fn analyze_height_domain(
     definition: &Definition,
     frame: PlaneFrameMm,
@@ -1344,12 +1478,13 @@ fn analyze_height_domain_with_total_limit(
     cancel: &AtomicBool,
 ) -> Result<HeightAnalysis, GeometryError> {
     work.charge(1, cancel)?;
+    let prepared = super::material_source::prepare_solid(definition, total_bytes, work, cancel)?;
     let remaining_bytes = remaining_scratch_with_limit(
         total_bytes.min(MAX_SLAB_SCRATCH_BYTES),
-        definition.retained_query_proof_bytes(),
+        prepared.retained_bytes(),
     )?;
     analyze_height_domain_with_scratch_limit(
-        crate::section::OriginalTrimSource::standalone(definition),
+        prepared.source_view()?,
         frame,
         height_interval_mm,
         policy,
@@ -1359,7 +1494,7 @@ fn analyze_height_domain_with_total_limit(
     )
 }
 pub(crate) struct HeightDomainQuery<'s, 'd> {
-    pub(crate) source: crate::section::OriginalTrimSource<'s, 'd>,
+    pub(crate) source: super::material_source::MaterialSourceView<'s, 'd>,
     pub(crate) frame: PlaneFrameMm,
     pub(crate) functional: HeightFunctional,
     pub(crate) height_interval_mm: [f64; 2],
@@ -1370,7 +1505,7 @@ pub(crate) struct HeightDomainQuery<'s, 'd> {
 /// other coexisting buffers. It covers event arrays, trim/curve captures,
 /// source incidence tables and subdivision stacks; never debit pinned twice.
 pub(crate) fn analyze_height_domain_with_scratch_limit(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     frame: PlaneFrameMm,
     height_interval_mm: [f64; 2],
     policy: AnalysisPolicy,
@@ -1390,37 +1525,9 @@ pub(crate) fn analyze_height_domain_with_scratch_limit(
         work,
         cancel,
         true,
-        HeightCensusScope::OriginalMaterial,
     )
 }
 
-/// Literal native-section regularity needs geometric candidate heights, not a
-/// source-material realization. Its private capture explicitly lacks material
-/// support completeness and cannot authorize material reuse.
-pub(super) fn analyze_literal_native_height_domain(
-    source: crate::section::OriginalTrimSource<'_, '_>,
-    frame: PlaneFrameMm,
-    height_interval_mm: [f64; 2],
-    policy: AnalysisPolicy,
-    remaining_bytes: usize,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<HeightAnalysis, GeometryError> {
-    analyze_height_functional(
-        &HeightDomainQuery {
-            source,
-            frame,
-            functional: HeightFunctional::from_frame(frame),
-            height_interval_mm,
-            policy,
-        },
-        remaining_bytes,
-        work,
-        cancel,
-        true,
-        HeightCensusScope::LiteralNative,
-    )
-}
 /// Scratch-only boundary: the caller has already reserved the pinned proof.
 pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
     query: &HeightDomainQuery<'_, '_>,
@@ -1444,13 +1551,7 @@ pub(crate) fn analyze_height_domain_enclosed_with_scratch_limit(
         work,
         cancel,
         exact_nominal,
-        HeightCensusScope::OriginalMaterial,
     )
-}
-#[derive(Clone, Copy)]
-enum HeightCensusScope {
-    LiteralNative,
-    OriginalMaterial,
 }
 fn analyze_height_functional(
     query: &HeightDomainQuery<'_, '_>,
@@ -1458,7 +1559,6 @@ fn analyze_height_functional(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
     nominal_fast_paths: bool,
-    scope: HeightCensusScope,
 ) -> Result<HeightAnalysis, GeometryError> {
     let HeightDomainQuery {
         source,
@@ -1501,31 +1601,9 @@ fn analyze_height_functional(
     // Only a full direct-query allowance enables this optional proof, but its
     // trim/curve captures still share the allowance remaining after pinning.
     let full_scratch = MAX_SLAB_SCRATCH_BYTES
-        .checked_sub(definition.retained_query_proof_bytes())
+        .checked_sub(source.retained_owner_bytes())
         .and_then(|bytes| bytes.checked_sub(definition.id().allocated_bytes()));
-    let material_scope = matches!(scope, HeightCensusScope::OriginalMaterial);
-    let material_transport_zero =
-        material_scope && definition.material_transport_is_proved_zero(work, cancel)?;
-    // Keep source-only preparation alive across support, all corner attempts
-    // and the native face census. Existing prepared sources lend their owner;
-    // query-dependent roots and frame proofs are still evaluated below.
-    let originals = if material_scope && !material_transport_zero {
-        source.prepare_domains_if_missing(
-            remaining_scratch_with_limit(
-                scratch_limit,
-                HEIGHT_EVENT_SCRATCH_BYTES + STACK_SCRATCH_BYTES,
-            )?,
-            work,
-            cancel,
-        )?
-    } else {
-        None
-    };
-    let source = source.borrowing_domains(originals.as_ref());
-    let scratch_limit = remaining_scratch_with_limit(
-        scratch_limit,
-        originals.as_ref().map_or(0, |owner| owner.retained_bytes()),
-    )?;
+    let material_transport_zero = source.material_transport_is_proved_zero(work, cancel)?;
     let invariance =
         if material_transport_zero && nominal_fast_paths && Some(scratch_limit) == full_scratch {
             narrow_invariance_with_scratch_limit(
@@ -1548,7 +1626,7 @@ fn analyze_height_functional(
     let mut events = Vec::new();
     let mut proved_events = Vec::new();
     let transport_before = work.consumed();
-    let transport_support = if !material_scope || material_transport_zero {
+    let transport_support = if material_transport_zero {
         Vec::new()
     } else {
         material_transport_height_cover(
@@ -1570,9 +1648,9 @@ fn analyze_height_functional(
         scratch_limit,
         transport_support.capacity() * std::mem::size_of::<super::SourceTransportCover>(),
     )?;
-    let raw_before = work.consumed();
+    let source_before = work.consumed();
     if let Some(round) = if nominal_fast_paths {
-        raw_round_continuation(
+        source_round_continuation(
             source,
             frame,
             remaining_scratch_with_limit(scratch_limit, HEIGHT_EVENT_SCRATCH_BYTES)?,
@@ -1582,8 +1660,8 @@ fn analyze_height_functional(
         .map_err(|error| {
             work.annotate_error(
                 error,
-                raw_before,
-                "raw height census round continuation after material transport",
+                source_before,
+                "material height census round continuation after source transport",
             )
         })?
     } else {
@@ -1619,21 +1697,21 @@ fn analyze_height_functional(
                 policy,
                 pose: None,
                 transport_support,
-                transport_support_complete: material_scope,
+                transport_support_complete: true,
             },
         });
     }
-    let mut source_links: Option<HeightSourceLinks> = None;
-    for (index, face) in definition.solid.face_iter().enumerate() {
+    let mut source_links: Option<HeightSourceLinks<'_>> = None;
+    for index in 0..definition.face_ids().len() {
         let face_before = work.consumed();
         work.charge(1, cancel).map_err(|error| {
             work.annotate_error(
                 error,
                 face_before,
-                format_args!("raw height census source_face={index} begin face"),
+                format_args!("material height census source_face={index} begin face"),
             )
         })?;
-        let face_reserved = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(face)?);
+        let face_reserved = HEIGHT_EVENT_SCRATCH_BYTES.saturating_add(edge_scratch(definition, index)?);
         let reserved = face_reserved.saturating_add(
             source_links
                 .as_ref()
@@ -1651,7 +1729,7 @@ fn analyze_height_functional(
                     error,
                     face_before,
                     format_args!(
-                        "raw height census source_face={index} prepare original trim domain"
+                        "material height census source_face={index} prepare original trim domain"
                     ),
                 )
             })?;
@@ -1740,7 +1818,7 @@ fn analyze_height_functional(
                         // critical circle. Artificial periodic seams need not
                         // themselves be classified as physical boundaries.
                         let phase = pi.mul(Interval::point(if event == 0 { 0.5 } else { 1.5 }));
-                        let bounds = domain.uv_bounds()[phase_axis];
+                        let bounds = domain.uv_domain()[phase_axis];
                         let first = ((bounds[0] - phase.hi) / std::f64::consts::TAU).floor() as i32;
                         let last = ((bounds[1] - phase.lo) / std::f64::consts::TAU).ceil() as i32;
                         if last.saturating_sub(first) > 8 { return Err(indeterminate("periodic critical-height branch ownership is unbounded")); }
@@ -1837,89 +1915,94 @@ fn analyze_height_functional(
                 }
             }
         }
-        let wires = face.absolute_boundaries();
-        let mut constant_heights = HashMap::new();
-        let references = definition.face_boundaries.get(index).ok_or_else(|| indeterminate("native trim correspondence is incomplete"))?;
-        for (wire_index, coedge_index, reference) in references.wires.iter().enumerate().flat_map(|(wire_index, wire)| {
-            wire.iter().enumerate().map(move |(coedge_index, reference)| (wire_index, coedge_index, reference))
-        }) {
-            stage = "source boundary witness";
-            curve_owner = Some((wire_index, coedge_index));
-            curve_window = None;
-            work.charge(1, cancel)?;
-            let witness = definition.boundary_curves.get(reference.witness).ok_or_else(|| indeterminate("native boundary witness is unavailable"))?;
-            if nominal_fast_paths
-                && let Some(h) = constant_boundary_height(witness, frame) { constant_heights.insert(reference.edge, h); }
-            prove_circle_stationary_heights(witness, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, work, cancel)?;
-        }
-        for (wire_index, wire) in wires.iter().enumerate() {
-            for (coedge_index, edge) in wire.iter().enumerate() {
+        for (flat, coedge) in domain.coedges().iter().enumerate() {
+                let identity = coedge.identity();
+                let source_proof = domain.original_coedge_correspondence(flat)?;
+                let binding = source_proof.binding().ok_or_else(|| indeterminate(
+                    "original coedge has no selected source vertex binding",
+                ))?;
+                let active = source_proof.spatial_range();
+                let curve_range = (active[0], active[1]);
+                let mut census = |curve: &dyn CurveEvaluator,
+                    work: &mut GeometryWorkBudget, cancel: &AtomicBool| -> Result<(), GeometryError> {
                 stage = "source coedge census";
-                curve_owner = Some((wire_index, coedge_index));
-                curve_window = Some(edge.with_curve(|curve| curve.range_tuple()));
+                curve_owner = Some((identity.wire_index, identity.coedge_index));
+                curve_window = Some(curve_range);
                 vertex_point = None;
                 work.charge(1, cancel)?;
-                let constant = match constant_heights.get(&edge.id()).copied() {
-                    Some(h) => Some(h),
-                    None => edge.with_curve(|curve| constant_native_curve_height(curve, functional, work, cancel))?,
-                };
+                let constant = constant_native_curve_height(curve, functional, work, cancel)?;
                 if let Some(h) = constant {
+                    let mut vertices_share_height = true;
+                    for point in binding.source_vertex_points_mm {
+                        work.charge(1, cancel)?;
+                        if functional.vertex(point) != h { vertices_share_height = false; break; }
+                    }
+                    let mut curve_regular = false;
                     let mut proved_physical_boundary = true;
                     if flat_height.is_none() && overlaps(h, height_interval_mm) {
                         let allowance = remaining_scratch_with_limit(scratch_limit,
-                            face_reserved.saturating_add(domain.owned_bytes()))?;
+                            face_reserved)?;
                         let links = height_source_links(&mut source_links, definition, allowance, work, cancel)?;
-                        if links.incidence.get(edge.id()).is_some_and(|uses| {
+                        if links.incidence.get(coedge.edge).is_some_and(|uses| {
                             uses.second.is_some_and(|second| uses.first.face == second.face)
                         }) {
                             // An unresolved chart-seam differential is only a
                             // candidate, never an asserted physical critical.
                             proved_physical_boundary = false;
                         }
-                        if links.whole_edge_regular(&FaceHeightQuery { face: index, glued: glued.as_ref().unwrap(), functional }, edge.id(), allowance, work, cancel)?
+                        if links.whole_edge_regular(&FaceHeightQuery { face: index, glued: glued.as_ref().unwrap(), functional }, coedge.edge, allowance, work, cancel)?
                         {
-                            continue;
+                            curve_regular = true;
                         }
                     }
-                    add_event(&mut events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
-                    if proved_physical_boundary {
-                        add_event(&mut proved_events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                    if !curve_regular {
+                        add_event(&mut events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                        if proved_physical_boundary {
+                            add_event(&mut proved_events, h, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
+                        }
                     }
-                    continue;
+                    if vertices_share_height { return Ok(()); }
                 }
-                for vertex in [edge.front(), edge.back()] {
+                for (endpoint, vertex) in coedge.vertices.into_iter().enumerate() {
                     stage = "source vertex census";
-                    vertex_point = Some(vertex.point().into());
-                    let height = functional.vertex(vertex.point().into());
+                    let parameter = source_proof.spatial_endpoint(endpoint != 0);
+                    let point = binding.source_vertex_points_mm[endpoint];
+                    vertex_point = Some(point);
+                    let height = original_endpoint_height(curve, parameter, point, functional, work, cancel)?;
                     if flat_height.is_none() && overlaps(height, height_interval_mm) {
                         let allowance = remaining_scratch_with_limit(scratch_limit,
-                            face_reserved.saturating_add(domain.owned_bytes()))?;
+                            face_reserved)?;
                         if height_source_links(&mut source_links, definition, allowance, work, cancel)?
-                            .vertex_regular(definition, &FaceHeightQuery { face: index, glued: glued.as_ref().unwrap(), functional }, vertex.id(), allowance, work, cancel)?
+                            .vertex_regular(definition, &FaceHeightQuery { face: index, glued: glued.as_ref().unwrap(), functional }, vertex, allowance, work, cancel)?
                         {
                             continue;
                         }
                     }
                     add_event(&mut events, height, height_interval_mm, policy.maximum_height_uncertainty_mm, work, cancel)?;
                 }
-                if flat_height.is_none() {
+                if flat_height.is_none() && constant.is_none() {
                     stage = "source coedge height isolation";
                     vertex_point = None;
-                    edge.with_curve(|curve| -> Result<(), GeometryError> {
-                        let occupied = face_reserved.saturating_add(domain.owned_bytes())
+                    (|| -> Result<(), GeometryError> {
+                        let occupied = face_reserved
                             .saturating_add(source_links.as_ref().map_or(0, HeightSourceLinks::owned_bytes));
-                        let prepared = definition.prepare_boundary_curve(edge.id(), curve, curve.range_tuple(), remaining_scratch_with_limit(scratch_limit, occupied)?, work, cancel)?;
-                        isolate_curve_events(&OriginalCurveSpan { curve: &prepared, range: curve.range_tuple() }, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, work, cancel)
-                    }).map_err(|error| height_face_context(error, index, "isolate original coedge heights"))?;
+                        let prepared = crate::parametric::prepare_curve_enclosure(curve, curve_range, remaining_scratch_with_limit(scratch_limit, occupied)?, work, cancel)?;
+                        isolate_curve_events(&OriginalCurveSpan { curve: &prepared, range: curve_range }, &HeightEventQuery { functional, heights: height_interval_mm, uncertainty: policy.maximum_height_uncertainty_mm }, &mut events, &mut proved_events, work, cancel)
+                    })().map_err(|error| height_face_context(error, index, "isolate original coedge heights"))?;
                 }
-            }
+                Ok(())
+                };
+                domain.with_original_spatial_curve(
+                    flat, remaining_scratch_with_limit(scratch_limit, face_reserved)?,
+                    work, cancel, &mut census,
+                )?;
         }
         if (0..2).any(|i| torus_candidates[i] && !torus_proved[i]) {
-            return Err(indeterminate("analytic critical-height value lacks a feasible native trim witness"));
+            return Err(indeterminate("analytic critical-height value lacks a feasible selected-source trim witness"));
         }
         Ok(())
         }).map_err(|error| work.annotate_error(error, face_before, format_args!(
-            "raw height census stage={stage} source_face={index} wire_coedge={curve_owner:?} native_curve_window={curve_window:?} uv_window={surface_window:?} vertex_mm={vertex_point:?} transport_work_before={transport_before}"
+            "material height census stage={stage} source_face={index} wire_coedge={curve_owner:?} original_curve_window={curve_window:?} uv_window={surface_window:?} vertex_mm={vertex_point:?} transport_work_before={transport_before}"
         )))?;
     }
     events.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
@@ -1940,38 +2023,11 @@ fn analyze_height_functional(
             policy,
             pose: None,
             transport_support,
-            transport_support_complete: material_scope,
+            transport_support_complete: true,
         },
     })
 }
 
-// These witnesses retain exact source analytic curves, not endpoint chords for
-// general native edges. Only exact coefficient identities grant constancy.
-fn constant_boundary_height(
-    witness: &crate::kernel::BoundaryCurveMm,
-    frame: PlaneFrameMm,
-) -> Option<Interval> {
-    use crate::kernel::BoundaryCurveMm;
-    let functional = HeightFunctional::from_frame(frame);
-    let zero = |value: Interval| value.lo == 0.0 && value.hi == 0.0;
-    match witness {
-        BoundaryCurveMm::Line { start_mm, end_mm } => {
-            let start = functional.dot(start_mm.map(Interval::point));
-            let end = functional.dot(end_mm.map(Interval::point));
-            (start.lo == start.hi && end.lo == end.hi && start.lo == end.lo)
-                .then(|| functional.vertex(*start_mm))
-        }
-        BoundaryCurveMm::CircleArc {
-            center_mm,
-            u_mm,
-            v_mm,
-            ..
-        } => (zero(functional.dot(u_mm.map(Interval::point)))
-            && zero(functional.dot(v_mm.map(Interval::point))))
-        .then(|| functional.vertex(*center_mm)),
-        BoundaryCurveMm::Native { .. } => None,
-    }
-}
 
 struct HeightEventQuery {
     functional: HeightFunctional,
@@ -1979,83 +2035,16 @@ struct HeightEventQuery {
     uncertainty: f64,
 }
 struct OriginalCurveSpan<'q, 'c> {
-    curve: &'q PreparedCurveEnclosure<'c>,
+    curve: &'q PreparedValidatedCurve<'c>,
     range: (f64, f64),
 }
 
-fn prove_circle_stationary_heights(
-    witness: &crate::kernel::BoundaryCurveMm,
-    query: &HeightEventQuery,
-    events: &mut Vec<[f64; 2]>,
-    proved: &mut Vec<[f64; 2]>,
-    work: &mut GeometryWorkBudget,
-    cancel: &AtomicBool,
-) -> Result<(), GeometryError> {
-    let HeightEventQuery {
-        functional,
-        heights,
-        uncertainty,
-    } = *query;
-    let crate::kernel::BoundaryCurveMm::CircleArc {
-        center_mm,
-        u_mm,
-        v_mm,
-        start_angle,
-        end_angle,
-    } = witness
-    else {
-        return Ok(());
-    };
-    let cosine = functional.dot(u_mm.map(Interval::point));
-    let sine = functional.dot(v_mm.map(Interval::point));
-    let zero = |value: Interval| value.lo == 0.0 && value.hi == 0.0;
-    let (coefficient, phases) = if zero(sine) && !zero(cosine) {
-        (cosine, [0.0, 1.0])
-    } else if zero(cosine) && !zero(sine) {
-        (sine, [0.5, 1.5])
-    } else {
-        return Ok(());
-    };
-    let range = [start_angle.min(*end_angle), start_angle.max(*end_angle)];
-    // This is only a bounded analytic proof shortcut. Longer native branches
-    // still go through the prepared interval curve owner below.
-    if !range[0].is_finite()
-        || !range[1].is_finite()
-        || range[0].abs().max(range[1].abs()) > 8.0 * std::f64::consts::TAU
-    {
-        return Ok(());
-    }
-    let pi = Interval {
-        lo: down(std::f64::consts::PI),
-        hi: up(std::f64::consts::PI),
-    };
-    let center = functional.height(center_mm.map(Interval::point));
-    for (index, phase) in phases.into_iter().enumerate() {
-        for turn in -9..=9 {
-            work.charge(1, cancel)?;
-            let root = tight_mul(pi, Interval::point(phase + 2.0 * f64::from(turn)));
-            if root.lo < range[0] || root.hi > range[1] {
-                continue;
-            }
-            let h = tight_add(
-                center,
-                tight_mul(
-                    coefficient,
-                    Interval::point(if index == 0 { 1.0 } else { -1.0 }),
-                ),
-            );
-            add_event(events, h, heights, uncertainty, work, cancel)?;
-            add_event(proved, h, heights, uncertainty, work, cancel)?;
-        }
-    }
-    Ok(())
-}
 
 /// Necessary height cover of derivative roots in a separately qualified C1
 /// original coedge span. Interval Newton contracts parameters, not the source
 /// support; no existence or endpoint-incidence claim follows from this bound.
 fn necessary_curve_critical_height(
-    curve: &PreparedCurveEnclosure<'_>,
+    curve: &PreparedValidatedCurve<'_>,
     range: (f64, f64),
     jet: &crate::parametric::CurveEnclosure,
     functional: HeightFunctional,
@@ -2069,13 +2058,13 @@ fn necessary_curve_critical_height(
         return Ok(Some(height));
     }
     let midpoint = range.0 * 0.5 + range.1 * 0.5;
-    let value = functional.dot(curve.jet((midpoint, midpoint), work, cancel)?.derivative);
+    let value = functional.dot(curve.jet([midpoint, midpoint], work, cancel)?.derivative);
     let newton = Interval::point(midpoint).sub(value.div(second)?);
     let root = (range.0.max(newton.lo), range.1.min(newton.hi));
     if root.0 > root.1 {
         return Ok(None);
     }
-    let root_height = functional.height(curve.jet(root, work, cancel)?.position);
+    let root_height = functional.height(curve.jet([root.0, root.1], work, cancel)?.position);
     let bound = Interval {
         lo: height.lo.max(root_height.lo),
         hi: height.hi.min(root_height.hi),
@@ -2105,15 +2094,15 @@ fn inventory_curve_joint_height(
         heights,
         uncertainty,
     } = *query;
-    let height = functional.height(curve.endpoint_position(knot, work, cancel)?);
+    let height = functional.height(curve.position_bounds([knot, knot], work, cancel)?);
     if !overlaps(height, heights) {
         return Ok(());
     }
     let (mut lower, mut upper) = neighbors;
     for depth in 0..=MAX_DEPTH {
         work.charge(1, cancel)?;
-        let left = curve.jet((lower, knot), work, cancel)?;
-        let right = curve.jet((knot, upper), work, cancel)?;
+        let left = curve.jet([lower, knot], work, cancel)?;
+        let right = curve.jet([knot, upper], work, cancel)?;
         let dl = functional.dot(left.derivative);
         let dr = functional.dot(right.derivative);
         if (dl.lo > 0. && dr.lo > 0.) || (dl.hi < 0. && dr.hi < 0.) {
@@ -2128,8 +2117,8 @@ fn inventory_curve_joint_height(
             left.position[axis].hull(right.position[axis])
         }));
         if cover.width() <= uncertainty {
-            let a = functional.height(curve.endpoint_position(lower, work, cancel)?);
-            let b = functional.height(curve.endpoint_position(upper, work, cancel)?);
+            let a = functional.height(curve.position_bounds([lower, lower], work, cancel)?);
+            let b = functional.height(curve.position_bounds([upper, upper], work, cancel)?);
             let turning =
                 (height.lo > a.hi && height.lo > b.hi) || (height.hi < a.lo && height.hi < b.lo);
             // A maximum/minimum exists inside the closed continuous joined
@@ -2185,10 +2174,10 @@ fn isolate_curve_events(
         heights,
         ..
     } = *query;
-    if curve.is_smooth_on(original_range, work, cancel)? {
+    if curve.is_smooth_on([original_range.0, original_range.1], work, cancel)? {
         for span in curve.parameter_intervals() {
             isolate_smooth_curve_span_events(
-                &OriginalCurveSpan { curve, range: span },
+                &OriginalCurveSpan { curve, range: (span[0], span[1]) },
                 query,
                 false,
                 events,
@@ -2201,7 +2190,7 @@ fn isolate_curve_events(
     }
     // Whole-position exclusion does not need a differentiability claim.
     if !overlaps(
-        functional.height(curve.position_bounds(original_range, work, cancel)?),
+        functional.height(curve.position_bounds([original_range.0, original_range.1], work, cancel)?),
         heights,
     ) {
         return Ok(());
@@ -2212,7 +2201,7 @@ fn isolate_curve_events(
     let mut lower = original_range.0;
     let mut pending = None;
     let complete =
-        curve.visit_explicit_knots(original_range, work, cancel, &mut |next, work, cancel| {
+        curve.visit_explicit_knots([original_range.0, original_range.1], work, cancel, &mut |next, work, cancel| {
             if let Some(knot) = pending {
                 inventory_curve_joint_height(
                     &OriginalCurveSpan {
@@ -2313,7 +2302,7 @@ fn isolate_smooth_curve_span_events(
         while let Some(((lo, hi), depth)) = stack.pop() {
             window = (lo, hi);
             work.charge(1, cancel)?;
-            let jet = curve.jet((lo, hi), work, cancel)?;
+            let jet = curve.jet([lo, hi], work, cancel)?;
             let h = functional.height(jet.position);
             if !overlaps(h, heights) || !functional.dot(jet.derivative).contains_zero() {
                 continue;
@@ -2349,10 +2338,10 @@ fn isolate_smooth_curve_span_events(
                 } else {
                     (expanded.1, expanded.1)
                 };
-                let left = functional.dot(curve.jet(left_range, work, cancel)?.derivative);
-                let right = functional.dot(curve.jet(right_range, work, cancel)?.derivative);
+                let left = functional.dot(curve.jet([left_range.0, left_range.1], work, cancel)?.derivative);
+                let right = functional.dot(curve.jet([right_range.0, right_range.1], work, cancel)?.derivative);
                 if (left.hi < 0.0 && right.lo > 0.0) || (left.lo > 0.0 && right.hi < 0.0) {
-                    let expanded_jet = curve.jet(expanded, work, cancel)?;
+                    let expanded_jet = curve.jet([expanded.0, expanded.1], work, cancel)?;
                     root_height = Some(
                     necessary_curve_critical_height(
                         curve,
@@ -2391,7 +2380,7 @@ fn isolate_smooth_curve_span_events(
         Ok(())
     })();
     result.map_err(|error| work.annotate_error(
-        error, before, format_args!("raw height census smooth original coedge native_parameter_bounds={span:?} curve_window={window:?}"),
+        error, before, format_args!("material height census smooth original coedge original_parameter_bounds={span:?} curve_window={window:?}"),
     ))
 }
 
@@ -2438,21 +2427,24 @@ pub(super) fn original_edge_uses(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<
-    HashMap<monstertruck_topology::EdgeId<monstertruck_modeling::Curve>, FlowEdgeUses>,
+    HashMap<EdgeId, FlowEdgeUses>,
     GeometryError,
 > {
     let mut edges: HashMap<_, FlowEdgeUses> = HashMap::new();
-    for (face_index, face) in definition.solid.face_iter().enumerate() {
-        for (wire_index, wire) in face.absolute_boundaries().iter().enumerate() {
-            for (index, edge) in wire.iter().enumerate() {
+    for face_index in 0..definition.face_ids().len() {
+        let (_, face) = super::source_incidence::native_face(definition, face_index)?;
+        let orientation = super::source_incidence::face_orientation(definition, face_index, work, cancel)?;
+        for wire_index in 0..face.loops.len() {
+            let wire = super::source_incidence::boundary_loop(definition, face_index, wire_index)?;
+            for (index, edge) in wire.edges.iter().enumerate() {
                 work.charge(1, cancel)?;
                 let use_ = FlowCoedgeUse {
                     face: face_index,
                     wire: wire_index,
                     index,
-                    orientation: edge.orientation() == face.orientation(),
+                    orientation: edge.forward == orientation,
                 };
-                if let Some(uses) = edges.get_mut(&edge.id()) {
+                if let Some(uses) = edges.get_mut(&edge.edge) {
                     if uses.second.is_some() || uses.first.orientation == use_.orientation {
                         return Err(error(
                             GeometryErrorCode::SingularGeometry,
@@ -2466,7 +2458,7 @@ pub(super) fn original_edge_uses(
                         .saturating_add(16)
                         .saturating_mul(4)
                         .saturating_mul(std::mem::size_of::<(
-                            monstertruck_topology::EdgeId<monstertruck_modeling::Curve>,
+                            EdgeId,
                             FlowEdgeUses,
                         )>());
                     if bytes > ENDPOINT_PROOF_BYTES {
@@ -2482,7 +2474,7 @@ pub(super) fn original_edge_uses(
                         )
                     })?;
                     edges.insert(
-                        edge.id(),
+                        edge.edge,
                         FlowEdgeUses {
                             first: use_,
                             second: None,
@@ -2506,7 +2498,7 @@ pub(super) fn original_edge_uses(
 /// Classify complete original horizontal faces at exact endpoints. Incoming
 /// faces belong to the core closure; only outgoing faces become extra strata.
 fn decompose_endpoint_faces(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     request: SlabRequest,
     resident_bytes: usize,
     work: &mut GeometryWorkBudget,
@@ -2520,10 +2512,9 @@ fn decompose_endpoint_faces(
     };
     let mut incidence = None;
     let functional = HeightFunctional::from_frame(request.frame);
-    for (face_index, face) in definition.solid.face_iter().enumerate() {
+    for (face_index, &face) in definition.face_ids().iter().enumerate() {
         work.charge(1, cancel)?;
-        let Some(h) =
-            face.with_surface(|surface| constant_spline_height(surface, functional, work, cancel))?
+        let Some(h) = constant_source_face_height(definition, face_index, functional, work, cancel)?
         else {
             continue;
         };
@@ -2554,10 +2545,12 @@ fn decompose_endpoint_faces(
             work,
             cancel,
         )?;
+        let surface = &domain.surface_operand();
+        let face_orientation = domain.orientation();
         let mut cover = Vec::new();
         let mut position: Option<[Interval; 3]> = None;
         let mut normal_sign = None;
-        let oriented = face.with_surface(|surface| -> Result<bool, GeometryError> {
+        let oriented = (|| -> Result<bool, GeometryError> {
             let mut spans =
                 surface_parameter_boxes(surface, trim_parameter_box(&domain)?, work, cancel)?;
             let mut stack = Vec::new();
@@ -2579,7 +2572,7 @@ fn decompose_endpoint_faces(
                 }
                 let jet = surface_enclosure(surface, uv, work, cancel)?;
                 let normal = cross(jet.du, jet.dv);
-                let vertical = functional.dot(if face.orientation() {
+                let vertical = functional.dot(if face_orientation {
                     normal
                 } else {
                     normal.map(Interval::neg)
@@ -2631,7 +2624,7 @@ fn decompose_endpoint_faces(
                 });
             }
             Ok(true)
-        })?;
+        })()?;
         if !oriented {
             continue;
         }
@@ -2639,19 +2632,32 @@ fn decompose_endpoint_faces(
             continue;
         };
         let mut conforming = true;
-        for coedge in domain.native().coedges() {
+        for (flat, coedge) in domain.coedges().iter().enumerate() {
             work.charge(1, cancel)?;
-            let identity = &coedge.identity;
-            let edge = &face.absolute_boundaries()[identity.wire_index][identity.coedge_index];
-            let edge_height = edge.with_curve(|curve| {
-                constant_native_curve_height(curve, functional, work, cancel)
-            })?;
+            let identity = coedge.identity();
+            let edge_height = domain.with_original_spatial_curve(
+                flat,
+                remaining_scratch(resident_bytes.saturating_add(2 * ENDPOINT_PROOF_BYTES + STACK_SCRATCH_BYTES))?,
+                work, cancel,
+                |curve, work, cancel| constant_native_curve_height(curve, functional, work, cancel),
+            )?;
             if edge_height
                 .is_none_or(|edge_height| edge_height.lo != h.lo || edge_height.hi != h.hi)
             {
                 conforming = false;
                 break;
             }
+            let binding = domain.original_coedge_correspondence(flat)?.binding()
+                .ok_or_else(|| indeterminate("endpoint coedge lacks original vertex binding"))?;
+            for point in binding.source_vertex_points_mm {
+                work.charge(1, cancel)?;
+                let vertex_height = functional.vertex(point);
+                if vertex_height.lo != h.lo || vertex_height.hi != h.hi {
+                    conforming = false;
+                    break;
+                }
+            }
+            if !conforming { break; }
             let uses = incidence.get(&identity.edge_id).ok_or_else(|| {
                 indeterminate("endpoint coedge is missing its original native incidence")
             })?;
@@ -2668,18 +2674,11 @@ fn decompose_endpoint_faces(
                     "endpoint coedge source-use correspondence is inconsistent",
                 ));
             }
-            if definition
-                .source_topology
-                .faces
-                .get(face_index)
-                .and_then(|face| face.wires.get(identity.wire_index))
-                .and_then(|wire| wire.coedges.get(identity.coedge_index))
-                .is_none()
-            {
-                return Err(indeterminate(
-                    "endpoint coedge original STEP lineage is unavailable",
-                ));
-            }
+            // Existence of the retained original face is only genealogy.
+            // The borrowed MaterialSourceView separately owns the complete
+            // geometric use correspondence; raw wire indices select no source
+            // pcurve branch or repaired-boundary association.
+            definition.original_source().face(face)?;
         }
         if !conforming {
             continue;
@@ -2782,7 +2781,10 @@ fn narrow_invariance(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<InvariantHeightDomain>, GeometryError> {
-    let source = crate::section::OriginalTrimSource::standalone(definition);
+    let prepared = super::material_source::prepare_solid(
+        definition, MAX_SLAB_SCRATCH_BYTES, work, cancel,
+    )?;
+    let source = prepared.source_view()?;
     work.charge(1, cancel)?;
     narrow_invariance_with_scratch_limit(
         source,
@@ -2790,14 +2792,14 @@ fn narrow_invariance(
         range,
         remaining_scratch_with_limit(
             MAX_SLAB_SCRATCH_BYTES,
-            definition.retained_query_proof_bytes(),
+            prepared.retained_bytes(),
         )?,
         work,
         cancel,
     )
 }
 fn narrow_invariance_with_scratch_limit(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     remaining_bytes: usize,
@@ -2807,7 +2809,7 @@ fn narrow_invariance_with_scratch_limit(
     if frame.z_axis != [0.0, 0.0, 1.0] && frame.z_axis != [0.0, 0.0, -1.0] {
         return Ok(None);
     }
-    match native_vertical_boundary_flow(source, frame, range, remaining_bytes, work, cancel) {
+    match source_vertical_boundary_flow(source, frame, range, remaining_bytes, work, cancel) {
         Err(e)
             if matches!(
                 e.code,
@@ -2833,9 +2835,10 @@ pub(super) struct FlowEdgeUses {
     pub(super) first: FlowCoedgeUse,
     pub(super) second: Option<FlowCoedgeUse>,
 }
-/// `remaining_bytes` excludes pinned proof and all caller-retained buffers.
-pub(super) fn native_vertical_boundary_flow(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+/// Complete selected source boundary flow; native IDs supply incidence only.
+/// `remaining_bytes` excludes the source owner and all caller-retained buffers.
+pub(super) fn source_vertical_boundary_flow(
+    source: super::material_source::MaterialSourceView<'_, '_>,
     frame: PlaneFrameMm,
     range: [f64; 2],
     remaining_bytes: usize,
@@ -2847,16 +2850,17 @@ pub(super) fn native_vertical_boundary_flow(
     work.charge(1, cancel)?;
     let scratch_limit = remaining_bytes.min(MAX_SLAB_SCRATCH_BYTES);
     remaining_scratch_with_limit(scratch_limit, EDGE_BYTES + STACK_SCRATCH_BYTES)?;
-    if !definition.material_transport_is_proved_zero(work, cancel)? {
+    if !source.material_transport_is_proved_zero(work, cancel)? {
         return Ok(None);
     }
-    use monstertruck_modeling::Curve;
-    use monstertruck_topology::EdgeId;
-    let mut edges: HashMap<EdgeId<Curve>, FlowEdgeUses> = HashMap::new();
+    let edges = original_edge_uses(definition, work, cancel)?;
+    if receipt_map_bytes(&edges) > EDGE_BYTES {
+        return Err(error(GeometryErrorCode::ResourceLimit, "native vertical-flow incidence capacity exhausted"));
+    }
     let functional = HeightFunctional::from_frame(frame);
     let mut cap_levels = [None, None];
     let mut side_cells = 0u64;
-    for (face_index, face) in definition.solid.face_iter().enumerate() {
+    for face_index in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
         let domain = source.face_domain(
             face_index,
@@ -2864,49 +2868,8 @@ pub(super) fn native_vertical_boundary_flow(
             work,
             cancel,
         )?;
-        for coedge in domain.native().coedges() {
-            work.charge(1, cancel)?;
-            let use_ = FlowCoedgeUse {
-                face: face_index,
-                wire: coedge.identity.wire_index,
-                index: coedge.identity.coedge_index,
-                orientation: coedge.identity.orientation,
-            };
-            if let Some(uses) = edges.get_mut(&coedge.identity.edge_id) {
-                if uses.second.is_some() || uses.first.orientation == use_.orientation {
-                    return Ok(None);
-                }
-                uses.second = Some(use_);
-            } else {
-                let bytes = edges
-                    .len()
-                    .checked_add(16)
-                    .and_then(|count| {
-                        count.checked_mul(std::mem::size_of::<(EdgeId<Curve>, FlowEdgeUses)>())
-                    })
-                    .and_then(|bytes| bytes.checked_mul(4));
-                if bytes.is_none_or(|bytes| bytes > EDGE_BYTES) {
-                    return Err(error(
-                        GeometryErrorCode::ResourceLimit,
-                        "native vertical-flow incidence capacity exhausted",
-                    ));
-                }
-                edges.try_reserve(1).map_err(|_| {
-                    error(
-                        GeometryErrorCode::ResourceLimit,
-                        "native vertical-flow incidence allocation refused",
-                    )
-                })?;
-                edges.insert(
-                    coedge.identity.edge_id,
-                    FlowEdgeUses {
-                        first: use_,
-                        second: None,
-                    },
-                );
-            }
-        }
-        let compatible = face.with_surface(|surface| -> Result<bool, GeometryError> {
+        let surface = &domain.surface_operand();
+        let compatible = (|| -> Result<bool, GeometryError> {
             if let Some(h) = flat_native_surface_height(surface, frame, work, cancel)? {
                 if h.lo != h.hi || !h.lo.is_finite() {
                     return Ok(false);
@@ -2962,7 +2925,7 @@ pub(super) fn native_vertical_boundary_flow(
                 }
             }
             Ok(true)
-        })?;
+        })()?;
         if !compatible {
             return Ok(None);
         }
@@ -2998,43 +2961,43 @@ pub(super) fn native_vertical_boundary_flow(
             return Ok(None);
         };
         let first = uses.first;
-        work.charge(first.face as u64 + second.face as u64 + 2, cancel)?;
-        let first_face = definition
-            .solid
-            .face_iter()
-            .nth(first.face)
-            .ok_or_else(|| indeterminate("native vertical-flow face mapping is incomplete"))?;
-        let second_face = definition
-            .solid
-            .face_iter()
-            .nth(second.face)
-            .ok_or_else(|| indeterminate("native vertical-flow face mapping is incomplete"))?;
-        // Artificial cuts cancel by original native edge identity and actual
-        // coefficient identity, never by proximity or approximate normal fit.
-        if first_face.orientation() == second_face.orientation() {
-            let same = if first_face.id() == second_face.id() {
-                first_face.with_surface(|surface| {
-                    crate::parametric::same_surface_coefficients(surface, surface, work, cancel)
-                })?
-            } else if first.face < second.face {
-                first_face.with_surface(|a| {
-                    second_face.with_surface(|b| {
-                        crate::parametric::same_surface_coefficients(a, b, work, cancel)
-                    })
-                })?
-            } else {
-                second_face.with_surface(|b| {
-                    first_face.with_surface(|a| {
-                        crate::parametric::same_surface_coefficients(a, b, work, cancel)
-                    })
-                })?
-            };
+        let remaining = remaining_scratch_with_limit(
+            scratch_limit, EDGE_BYTES + STACK_SCRATCH_BYTES,
+        )?;
+        let first_domain = source.face_domain(first.face, remaining, work, cancel)?;
+        let second_domain = source.face_domain(second.face, remaining, work, cancel)?;
+        let first_surface = first_domain.surface_operand();
+        let second_surface = second_domain.surface_operand();
+        // Native edge identity supplies incidence, not carrier equality.
+        // Artificial cuts cancel only by the selected original operands and
+        // their material sense, never a native proxy or approximate normal fit.
+        if first_domain.orientation() == second_domain.orientation()
+        {
+            let same = crate::parametric::same_surface_coefficients(
+                &first_surface, &second_surface, work, cancel,
+            )?;
             if same {
                 continue;
             }
         }
-        let edge = &first_face.absolute_boundaries()[first.wire][first.index];
-        let compatible = edge.with_curve(|curve| -> Result<bool, GeometryError> {
+        let mut first_flat = None;
+        for (flat, coedge) in first_domain.coedges().iter().enumerate() {
+            work.charge(1, cancel)?;
+            let identity = coedge.identity();
+            if identity.wire_index == first.wire && identity.coedge_index == first.index {
+                first_flat = Some(flat);
+                break;
+            }
+        }
+        let first_flat = first_flat.ok_or_else(|| error(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "source vertical-flow edge use has no selected original coedge",
+        ))?;
+        let active = first_domain.original_coedge_correspondence(first_flat)?.spatial_range();
+        let curve_range = (active[0], active[1]);
+        let compatible = first_domain.with_original_spatial_curve(
+            first_flat, remaining, work, cancel,
+            |curve, work, cancel| -> Result<bool, GeometryError> {
             if let Some(h) = constant_native_curve_height(curve, functional, work, cancel)?
                 && (h.hi <= interval[0] || h.lo >= interval[1])
             {
@@ -3045,10 +3008,9 @@ pub(super) fn native_vertical_boundary_flow(
             {
                 return Ok(true);
             }
-            let prepared = definition.prepare_boundary_curve(
-                edge.id(),
+            let prepared = crate::parametric::prepare_curve_enclosure(
                 curve,
-                curve.range_tuple(),
+                curve_range,
                 remaining_scratch_with_limit(scratch_limit, EDGE_BYTES + STACK_SCRATCH_BYTES)?,
                 work,
                 cancel,
@@ -3097,9 +3059,13 @@ pub(super) fn native_closed_disk_product<'a>(
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<NativeClosedDiskProduct<'a>>, GeometryError> {
-    let source = crate::section::OriginalTrimSource::standalone(definition);
+    let prepared = super::material_source::prepare_solid(
+        definition, remaining_bytes, work, cancel,
+    )?;
+    let source = prepared.source_view()?;
+    let remaining_bytes = remaining_scratch_with_limit(remaining_bytes, prepared.retained_bytes())?;
     work.charge(1, cancel)?;
-    if definition.solid.boundaries().len() != 1 {
+    if definition.brep().shells().len() != 1 {
         return Ok(None);
     }
     let frame = PlaneFrameMm {
@@ -3123,10 +3089,12 @@ pub(super) fn native_closed_disk_product<'a>(
         return Ok(None);
     };
     let mut caps = [false; 2];
-    for (index, face) in definition.solid.face_iter().enumerate() {
+    for index in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
-        let Some(height) =
-            face.with_surface(|surface| flat_native_surface_height(surface, frame, work, cancel))?
+        let (_, record) = super::source_incidence::native_face(definition, index)?;
+        let Some(height) = constant_source_face_height(
+            definition, index, HeightFunctional::from_frame(frame), work, cancel,
+        )?
         else {
             continue;
         };
@@ -3140,7 +3108,7 @@ pub(super) fn native_closed_disk_product<'a>(
         // A single original regular planar trim wire bounds a disk. An annular
         // cap, split cap complex or additional floor needs its own incidence
         // proof; neither a sample without Hole loops nor a genus guess suffices.
-        if caps[endpoint] || face.absolute_boundaries().len() != 1 {
+        if caps[endpoint] || record.loops.len() != 1 {
             return Ok(None);
         }
         let domain = source.face_domain(
@@ -3149,7 +3117,9 @@ pub(super) fn native_closed_disk_product<'a>(
             work,
             cancel,
         )?;
-        let accepted = face.with_surface(|surface| -> Result<bool, GeometryError> {
+        let surface = &domain.surface_operand();
+        let orientation = domain.orientation();
+        let accepted = (|| -> Result<bool, GeometryError> {
             let uv = trim_parameter_box(&domain)?;
             if !super::critical::critical_face_gluing(surface, uv, work, cancel)? {
                 return Ok(false);
@@ -3174,7 +3144,7 @@ pub(super) fn native_closed_disk_product<'a>(
                 }
                 let jet = surface_enclosure(surface, uv, work, cancel)?;
                 let mut normal = cross(jet.du, jet.dv)[2];
-                if !face.orientation() {
+                if !orientation {
                     normal = normal.neg();
                 }
                 if (endpoint == 0 && normal.hi < 0.0) || (endpoint == 1 && normal.lo > 0.0) {
@@ -3188,7 +3158,7 @@ pub(super) fn native_closed_disk_product<'a>(
                 }
             }
             Ok(true)
-        })?;
+        })()?;
         if !accepted {
             return Ok(None);
         }
@@ -3266,63 +3236,77 @@ impl<'a> RoundContinuation<'a> {
         }
     }
 }
-fn round_carrier(surface: &Surface) -> Option<(RoundCarrier, bool)> {
-    let (center, radius, major_radius, matrix, orientation) = match surface {
-        Surface::SphericalSurface(s) => (
-            s.entity().center(),
-            s.entity().radius(),
-            None,
-            s.transform(),
-            s.orientation(),
-        ),
-        Surface::ToroidalSurface(t) => (
-            t.entity().center(),
-            t.entity().small_radius(),
-            Some(t.entity().large_radius()),
-            t.transform(),
-            t.orientation(),
-        ),
-        _ => return None,
-    };
-    if matrix.x.w != 0.0 || matrix.y.w != 0.0 || matrix.z.w != 0.0 || matrix.w.w != 1.0 {
+fn round_carrier(surface: &(impl SurfaceEvaluator + ?Sized)) -> Option<(RoundCarrier, bool)> {
+    if let Some(mut original) = surface.original_surface() {
+        for _ in 0..MAX_DEPTH {
+            let (position, radius, major_radius) = match original {
+                solidcraft_step::geom::Surface::RectangularTrimmed { basis, .. } => {
+                    original = basis; continue;
+                }
+                solidcraft_step::geom::Surface::Sphere { position, radius } =>
+                    (position, *radius, None),
+                solidcraft_step::geom::Surface::Torus { position, major_radius, minor_radius } =>
+                    (position, *minor_radius, Some(*major_radius)),
+                _ => return None,
+            };
+            let y = tight_cross_points(position.axis, position.ref_direction);
+            // The retained affine carrier uses literal binary64 columns.
+            // An inexact original cross product cannot be rounded into one.
+            if y.iter().any(|value| value.lo != value.hi) { return None; }
+            let columns = [position.ref_direction, y.map(|value| value.lo), position.axis];
+            let determinant = dot(cross(columns[0].map(Interval::point),
+                columns[1].map(Interval::point)), columns[2]);
+            if determinant.contains_zero() { return None; }
+            return Some((RoundCarrier { center: [0.0; 3], radius, major_radius,
+                columns, translation: position.origin }, determinant.lo > 0.0));
+        }
         return None;
     }
-    Some((
-        RoundCarrier {
-            center: center.into(),
-            radius,
-            major_radius,
-            columns: [
-                [matrix.x.x, matrix.x.y, matrix.x.z],
-                [matrix.y.x, matrix.y.y, matrix.y.z],
-                [matrix.z.x, matrix.z.y, matrix.z.z],
-            ],
-            translation: [matrix.w.x, matrix.w.y, matrix.w.z],
-        },
-        orientation,
-    ))
+    let surface = native_step_operand(surface.native_surface()?)?;
+    let (radius, major_radius, placement) = match surface.kind() {
+        SurfaceKind::Sphere(s) => (s.radius(), None, s.base().position()),
+        SurfaceKind::Torus(t) => (t.minor_radius(), Some(t.major_radius()), t.base().position()),
+        _ => return None,
+    };
+    let x = placement.x_axis(); let y = placement.y_axis(); let z = placement.z_axis();
+    let columns = [[x.x, x.y, x.z], [y.x, y.y, y.z], [z.x, z.y, z.z]];
+    let determinant = dot(
+        cross(columns[0].map(Interval::point), columns[1].map(Interval::point)),
+        columns[2],
+    );
+    if determinant.contains_zero() { return None; }
+    let o = placement.origin();
+    Some((RoundCarrier {
+        center: [0.0; 3],
+        radius,
+        major_radius,
+        columns,
+        translation: [o.x, o.y, o.z],
+    }, determinant.lo > 0.0))
 }
-/// The admitted closed oriented shell, exact co-carrier equality, native trim
-/// feasibility and nonzero affine determinant establish a complete carrier,
+/// The admitted closed oriented shell, exact selected co-carrier equality,
+/// source trim feasibility and nonzero affine determinant establish a complete carrier,
 /// not permission from a family label. A regular closed same-carrier patch
 /// complex is open and closed in the connected carrier: opposite edge uses
 /// continue across chart/face subdivisions rather than leaving physical trims.
-fn raw_round_continuation<'a>(
-    source: crate::section::OriginalTrimSource<'_, 'a>,
+fn source_round_continuation<'a>(
+    source: super::material_source::MaterialSourceView<'_, 'a>,
     frame: PlaneFrameMm,
     scratch_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<RoundContinuation<'a>>, GeometryError> {
     let definition = source.definition();
-    if definition.solid.boundaries().len() != 1 {
+    if definition.brep().shells().len() != 1 {
         return Ok(None);
     }
     let mut capture = None;
     let mut source_face_count = 0;
-    for face in definition.solid.face_iter() {
+    for ordinal in 0..definition.face_ids().len() {
         work.charge(1, cancel)?;
-        let Some((carrier, orientation)) = face.with_surface(round_carrier) else {
+        let domain = source.face_domain(ordinal,
+            remaining_scratch_with_limit(scratch_limit, STACK_SCRATCH_BYTES)?, work, cancel)?;
+        let Some((carrier, orientation)) = round_carrier(&domain.surface_operand()) else {
             return Ok(None);
         };
         if carrier.radius <= 0.0 || carrier.major_radius.is_some_and(|r| r <= carrier.radius) {
@@ -3331,7 +3315,7 @@ fn raw_round_continuation<'a>(
                 "round continuation requires a regular sphere or ring torus",
             ));
         }
-        if orientation != face.orientation() {
+        if orientation != domain.orientation() {
             return Ok(None);
         }
         if capture.is_some_and(|previous| previous != carrier) {
@@ -3533,7 +3517,7 @@ fn round_slab_motion(
         .abs_upper();
     Ok(up(vertical.max(radial_return) + shear))
 }
-fn broad_height(definition: &Definition, frame: PlaneFrameMm) -> Interval {
+fn broad_height(bounds: &[Interval; 3], frame: PlaneFrameMm) -> Interval {
     (0..8).fold(
         Interval {
             lo: f64::INFINITY,
@@ -3542,9 +3526,9 @@ fn broad_height(definition: &Definition, frame: PlaneFrameMm) -> Interval {
         |range, mask| {
             let point = std::array::from_fn(|axis| {
                 if mask & (1 << axis) == 0 {
-                    definition.bounds.min[axis]
+                    bounds[axis].lo
                 } else {
-                    definition.bounds.max[axis]
+                    bounds[axis].hi
                 }
             });
             range.hull(vertex_height(point, frame))
@@ -3592,7 +3576,7 @@ pub(super) fn native_sample_height_band(
     })
 }
 struct SlabSourceQuery<'q, 's, 'd> {
-    source: crate::section::OriginalTrimSource<'s, 'd>,
+    source: super::material_source::MaterialSourceView<'s, 'd>,
     request: &'q SlabRequest,
     source_retained_bytes: usize,
 }
@@ -3756,7 +3740,7 @@ fn recover_critical_slab(
 /// complex as an interior event band. A regular core certificate alone cannot
 /// authorize a directed adjacent source-M leaf to cover departing CLOSED C.
 fn certify_endpoint_transition_complex(
-    source: crate::section::OriginalTrimSource<'_, '_>,
+    source: super::material_source::MaterialSourceView<'_, '_>,
     request: &SlabRequest,
     endpoints: &EndpointDecomposition,
     resident_bytes: usize,
@@ -3893,18 +3877,18 @@ impl SourceSlabProof {
 }
 
 /// One owned native sample, prepared once before selecting a sufficient proof.
-pub(super) struct PreparedSlabSample {
+pub(super) struct PreparedSlabSample<'s, 'd> {
+    source_owner: &'s super::material_source::PreparedSolid<'d>,
     pub(super) section: NativeSection,
     pub(super) request: SlabRequest,
     pub(super) source_retained_bytes: usize,
     pub(super) material_transport_zero: bool,
-    transport_height_padding: f64,
     origin_error: f64,
     norm_squared: Interval,
 }
 
 pub(crate) fn analyze_slab(
-    source: &crate::PreparedMaterialSource<'_>,
+    source: &super::material_source::PreparedSolid<'_>,
     request: SlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
@@ -3915,13 +3899,13 @@ pub(crate) fn analyze_slab(
     Ok(proof.into_analysis(sample.section))
 }
 
-pub(super) fn prepare_slab_sample(
-    source: &crate::PreparedMaterialSource<'_>,
+pub(super) fn prepare_slab_sample<'s, 'd>(
+    source: &'s super::material_source::PreparedSolid<'d>,
     request: SlabRequest,
     query_byte_limit: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
-) -> Result<PreparedSlabSample, GeometryError> {
+) -> Result<PreparedSlabSample<'s, 'd>, GeometryError> {
     validate(
         request.frame,
         request.height_interval_mm,
@@ -3938,12 +3922,7 @@ pub(super) fn prepare_slab_sample(
         ));
     }
     let definition = source.definition();
-    let material_transport_zero = definition.material_transport_is_proved_zero(work, cancel)?;
-    let transport_height_padding = if material_transport_zero {
-        0.0
-    } else {
-        material_transport_height_padding(definition, HeightFunctional::from_frame(request.frame))?
-    };
+    let material_transport_zero = source.source_view()?.material_transport_is_proved_zero(work, cancel)?;
     let n = request.frame.z_axis;
     let norm_squared = dot(n.map(Interval::point), n);
     let factor = Interval::point(request.sample_height_mm).div(norm_squared)?;
@@ -4010,43 +3989,36 @@ pub(super) fn prepare_slab_sample(
         section_bytes as u32,
         work,
     )?;
-    // The same bounded reference must reach source proof, world placement and
-    // returned planner material; simplifying only a proof polygon would diverge.
-    let section = crate::section::simplify_section_reference(
-        section,
-        spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
-        section_bytes as u32,
-        work,
-        cancel,
-    )?;
+    // This exact native reference reaches source proof, world placement and
+    // planner output; the native section owns its chord/plane/winding receipts.
     Ok(PreparedSlabSample {
+        source_owner: source,
         section,
         request,
         source_retained_bytes,
         material_transport_zero,
-        transport_height_padding,
         origin_error,
         norm_squared,
     })
 }
 
-pub(super) fn analyze_slab_sample(
-    source: &crate::PreparedMaterialSource<'_>,
-    sample: &PreparedSlabSample,
+pub(super) fn analyze_slab_sample<'d>(
+    source: &super::material_source::PreparedSolid<'d>,
+    sample: &PreparedSlabSample<'_, 'd>,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceSlabProof, GeometryError> {
     let PreparedSlabSample {
+        source_owner,
         ref section,
         request,
         source_retained_bytes,
         material_transport_zero,
-        transport_height_padding,
         origin_error,
         norm_squared,
     } = *sample;
     let definition = source.definition();
-    if section.definition_id() != definition.id() {
+    if !std::ptr::eq(source_owner, source) || section.definition_id() != definition.id() {
         return Err(error(
             GeometryErrorCode::InvalidGeometry,
             "prepared slab sample belongs to another original source",
@@ -4054,7 +4026,7 @@ pub(super) fn analyze_slab_sample(
     }
     let range = request.height_interval_mm;
     let n = request.frame.z_axis;
-    let source = source.trim_source();
+    let source = source.source_view()?;
     work.charge(
         section
             .loops
@@ -4063,24 +4035,19 @@ pub(super) fn analyze_slab_sample(
             .sum(),
         cancel,
     )?;
-    let broad = broad_height(definition, request.frame).add(Interval {
-        lo: -transport_height_padding,
-        hi: transport_height_padding,
-    });
-    if range[1] < broad.lo || range[0] > broad.hi {
-        return certified_empty_slab(
-            section,
-            definition,
-            request,
-            source_retained_bytes,
-            work,
-            cancel,
-        );
-    }
     let resident_bytes = source_retained_bytes
         .saturating_add(section.retained_bytes())
         .saturating_add(definition.id().allocated_bytes());
-    remaining_scratch(resident_bytes.saturating_add(STACK_SCRATCH_BYTES))?;
+    let remaining = remaining_scratch(resident_bytes.saturating_add(STACK_SCRATCH_BYTES))?;
+    if section.loops.is_empty() {
+        let positions = super::placed::material_position_bounds(source, remaining, work, cancel)?;
+        let broad = broad_height(&positions, request.frame);
+        if range[1] < broad.lo || range[0] > broad.hi {
+            return certified_empty_slab(
+                section, definition, request, source_retained_bytes, work, cancel,
+            );
+        }
+    }
     let transport_exclusion = if material_transport_zero {
         Some(MaterialTransportExclusion {
             definition_id: definition.id(),
@@ -4126,7 +4093,7 @@ pub(super) fn analyze_slab_sample(
         None
     };
     let round = if material_transport_zero && invariance.is_none() && endpoints.faces.is_empty() {
-        raw_round_continuation(
+        source_round_continuation(
             source,
             request.frame,
             remaining_scratch(resident_bytes.saturating_add(endpoints.retained_bytes()))?,
@@ -4514,7 +4481,7 @@ impl RegularContinuation<'_> {
     }
 }
 fn regular_boundary_speed<'a>(
-    source: crate::section::OriginalTrimSource<'_, 'a>,
+    source: super::material_source::MaterialSourceView<'_, 'a>,
     transport_exclusion: Option<&MaterialTransportExclusion<'_>>,
     endpoints: &EndpointDecomposition,
     resident_bytes: usize,
@@ -4548,16 +4515,10 @@ fn regular_boundary_speed<'a>(
     let mut cap_vertices = HashMap::new();
     for proof in &endpoints.faces {
         work.charge(proof.face as u64 + 1, cancel)?;
-        let face = definition
-            .solid
-            .face_iter()
-            .nth(proof.face)
-            .ok_or_else(|| indeterminate("proved endpoint face mapping is incomplete"))?;
-        let count = face
-            .absolute_boundaries()
-            .iter()
-            .map(|wire| wire.len())
-            .sum::<usize>();
+        let domain = source.face_domain(
+            proof.face, remaining_scratch(resident_bytes)?, work, cancel,
+        )?;
+        let count = domain.coedges().len();
         let reserved = resident_bytes
             .saturating_add(endpoints.retained_bytes())
             .saturating_add(STACK_SCRATCH_BYTES)
@@ -4595,30 +4556,23 @@ fn regular_boundary_speed<'a>(
                 "core endpoint vertex allocation refused",
             )
         })?;
-        cap_faces.insert(face.id());
-        for edge in face
-            .absolute_boundaries()
-            .iter()
-            .flat_map(|wire| wire.iter())
-        {
+        cap_faces.insert(domain.face());
+        for coedge in domain.coedges() {
             work.charge(1, cancel)?;
-            cap_edges.insert(edge.id());
-            for vertex in [edge.front(), edge.back()] {
-                let mask = cap_vertices.entry(vertex.id()).or_insert(0u8);
+            cap_edges.insert(coedge.edge);
+            for vertex in coedge.vertices {
+                let mask = cap_vertices.entry(vertex).or_insert(0u8);
                 *mask |= 1 << proof.endpoint;
             }
         }
         covered_face_cells += proof.covered_cells;
     }
-    for (index, face) in definition.solid.face_iter().enumerate() {
+    for (index, &face) in definition.face_ids().iter().enumerate() {
         work.charge(1, cancel)?;
-        if cap_faces.contains(&face.id()) {
+        if cap_faces.contains(&face) {
             continue;
         }
-        if face
-            .with_surface(|surface| {
-                constant_spline_height(surface, HeightFunctional::from_frame(frame), work, cancel)
-            })?
+        if constant_source_face_height(definition, index, HeightFunctional::from_frame(frame), work, cancel)?
             .is_some_and(|h| overlaps(h, range))
         {
             return Err(indeterminate(
@@ -4626,15 +4580,16 @@ fn regular_boundary_speed<'a>(
             ));
         }
         let reserved = resident_bytes
-            .saturating_add(edge_scratch(face)?)
+            .saturating_add(edge_scratch(definition, index)?)
             .saturating_add(endpoints.retained_bytes())
             .saturating_add(
                 (cap_faces.capacity() + cap_edges.capacity() + cap_vertices.capacity())
                     .saturating_mul(64),
             );
         let domain = source.face_domain(index, remaining_scratch(reserved)?, work, cancel)?;
+        let surface = &domain.surface_operand();
         let bounded_uv = trim_parameter_box(&domain)?;
-        face.with_surface(|surface| -> Result<(), GeometryError> {
+        (|| -> Result<(), GeometryError> {
             if !super::critical::critical_face_gluing(surface, bounded_uv, work, cancel)? {
                 if !overlaps(
                     height(
@@ -4764,27 +4719,37 @@ fn regular_boundary_speed<'a>(
                     }
                 }
             }
-            let wires = face.absolute_boundaries();
             let mut seen = HashSet::new();
-            seen.try_reserve(wires.iter().map(|wire| wire.len()).sum())
+            seen.try_reserve(domain.coedges().len())
                 .map_err(|_| {
                     error(
                         GeometryErrorCode::ResourceLimit,
                         "core original edge identity allocation refused",
                     )
                 })?;
-            for wire in wires {
-                for edge in wire {
+            for (flat, coedge) in domain.coedges().iter().enumerate() {
                     work.charge(1, cancel)?;
-                    if cap_edges.contains(&edge.id()) || !seen.insert(edge.id()) {
+                    if cap_edges.contains(&coedge.edge) || !seen.insert(coedge.edge) {
                         continue;
                     }
+                    let proof = domain.original_coedge_correspondence(flat)?;
+                    let binding = proof.binding().ok_or_else(|| indeterminate(
+                        "regular coedge lacks its selected source vertex binding",
+                    ))?;
+                    let curve_range = proof.spatial_range();
+                    domain.with_original_spatial_curve(
+                        flat, remaining_scratch(reserved)?, work, cancel,
+                        |curve, work, cancel| -> Result<(), GeometryError> {
                     // A paired periodic use is not automatically a smooth seam.
                     // Prove its actual 3D tangent flow as for every physical edge.
-                    for vertex in [edge.front(), edge.back()] {
-                        let h = vertex_height(vertex.point().into(), frame);
+                    for (endpoint, vertex) in coedge.vertices.into_iter().enumerate() {
+                        let h = original_endpoint_height(
+                            curve, proof.spatial_endpoint(endpoint != 0),
+                            binding.source_vertex_points_mm[endpoint],
+                            HeightFunctional::from_frame(frame), work, cancel,
+                        )?;
                         let terminal_vertex = h.lo == h.hi
-                            && cap_vertices.get(&vertex.id()).is_some_and(|mask| {
+                            && cap_vertices.get(&vertex).is_some_and(|mask| {
                                 (mask & 1 != 0 && h.lo == range[0])
                                     || (mask & 2 != 0 && h.lo == range[1])
                             });
@@ -4794,19 +4759,17 @@ fn regular_boundary_speed<'a>(
                             ));
                         }
                     }
-                    edge.with_curve(|curve| -> Result<(), GeometryError> {
-                        let prepared = definition.prepare_boundary_curve(
-                            edge.id(),
+                        let prepared = crate::parametric::prepare_curve_enclosure(
                             curve,
-                            curve.range_tuple(),
-                            remaining_scratch(reserved.saturating_add(domain.owned_bytes()))?,
+                            (curve_range[0], curve_range[1]),
+                            remaining_scratch(reserved)?,
                             work,
                             cancel,
                         )?;
-                        if !prepared.is_smooth_on(curve.range_tuple(), work, cancel)? {
+                        if !prepared.is_smooth_on(curve_range, work, cancel)? {
                             if !overlaps(
                                 height(
-                                    prepared.position_bounds(curve.range_tuple(), work, cancel)?,
+                                    prepared.position_bounds(curve_range, work, cancel)?,
                                     frame,
                                 ),
                                 range,
@@ -4827,12 +4790,12 @@ fn regular_boundary_speed<'a>(
                                     "core edge continuation stack allocation refused",
                                 )
                             })?;
-                        while let Some(((lo, hi), depth)) = curves
+                        while let Some(([lo, hi], depth)) = curves
                             .pop()
                             .or_else(|| spans.next().map(|range| (range, 0u8)))
                         {
                             work.charge(1, cancel)?;
-                            let jet = prepared.jet((lo, hi), work, cancel)?;
+                            let jet = prepared.jet([lo, hi], work, cancel)?;
                             if !overlaps(height(jet.position, frame), range) {
                                 continue;
                             }
@@ -4864,15 +4827,14 @@ fn regular_boundary_speed<'a>(
                                 ));
                             }
                             work.charge(2, cancel)?;
-                            curves.push(((lo, mid), depth + 1));
-                            curves.push(((mid, hi), depth + 1));
+                            curves.push(([lo, mid], depth + 1));
+                            curves.push(([mid, hi], depth + 1));
                         }
                         Ok(())
                     })?;
-                }
             }
             Ok(())
-        })?;
+        })()?;
     }
     Ok(RegularContinuation {
         definition_id: definition.id(),
@@ -5138,6 +5100,7 @@ fn occupied_envelope_with_position_boxes(
         frame,
         loops,
         loop_source_faces: Vec::new(),
+        loop_spans: Vec::new(),
         sampling_tolerance_mm: section.sampling_tolerance_mm,
         boolean_tolerance_mm: section.boolean_tolerance_mm,
         certificate,
@@ -5147,6 +5110,16 @@ fn occupied_envelope_with_position_boxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn native_test_curve(
+        controls: &[[f64; 4]], degree: usize, knots: &[f64],
+    ) -> solidcore::curve::curve::Curve {
+        use solidcore::nurbs::{b_spline_curve::BSplineCurve, math::CPoint, crv_basic};
+        let raw = crv_basic::Curve::new(
+            controls.iter().map(|p| CPoint::new(p[0], p[1], p[2], p[3])).collect(),
+            degree, knots.to_vec(),
+        ).unwrap();
+        BSplineCurve::from_nurb(raw, 3, true).into()
+    }
     fn frame() -> PlaneFrameMm {
         PlaneFrameMm {
             origin_mm: [0.0; 3],
@@ -5156,75 +5129,93 @@ mod tests {
         }
     }
     fn parity_definition(name: &str) -> Definition {
-        let (_, solid, _) = crate::parity_fixtures::recipes()
-            .into_iter()
-            .find(|(candidate, _, _)| *candidate == name)
-            .expect("native parity recipe");
-        let source = crate::parity_fixtures::original(name, solid);
-        crate::import_step(source.as_bytes(), &AtomicBool::new(false))
-            .expect("native source-backed definition")
+        super::super::test_source::recipe(name)
+    }
+    fn material_transport_zero(
+        definition: &Definition, work: &mut GeometryWorkBudget, cancel: &AtomicBool,
+    ) -> Result<bool, GeometryError> {
+        let prepared = super::super::material_source::prepare_solid(
+            definition, MAX_SLAB_SCRATCH_BYTES, work, cancel,
+        )?;
+        prepared.source_view()?.material_transport_is_proved_zero(work, cancel)
     }
     #[test]
     fn standalone_material_domains_borrow_one_definition_bound_owner() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
-        let other = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let other = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
-        let standalone = crate::section::OriginalTrimSource::standalone(&definition);
         let mut preparation = GeometryWorkBudget::new(20_000_000);
-        let originals = standalone
-            .prepare_domains_if_missing(MAX_SLAB_SCRATCH_BYTES, &mut preparation, &cancel)
-            .unwrap()
-            .expect("standalone query owns its original domains");
-        assert!(originals.retained_bytes() > 0);
-        let source = standalone.borrowing_domains(Some(&originals));
-        // Reborrowing consumes only binding work, not domain preparation or
-        // another retained allocation, even with no additional metadata space.
+        let prepared = super::super::material_source::prepare_solid(
+            &definition, MAX_SLAB_SCRATCH_BYTES, &mut preparation, &cancel,
+        ).unwrap();
+        let foreign = super::super::material_source::prepare_solid(
+            &other, MAX_SLAB_SCRATCH_BYTES, &mut preparation, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap();
+        assert!(std::ptr::eq(source.definition(), &definition));
+        assert!(std::ptr::eq(foreign.source_view().unwrap().definition(), &other));
+        let retained = prepared.retained_bytes();
         let mut work = GeometryWorkBudget::new(64);
-        assert!(
-            source
-                .prepare_domains_if_missing(0, &mut work, &cancel)
-                .unwrap()
-                .is_none()
-        );
         let first = source.face_domain(0, 0, &mut work, &cancel).unwrap();
-        assert_eq!(first.owned_bytes(), 0);
         for _ in 0..10 {
             let again = source.face_domain(0, 0, &mut work, &cancel).unwrap();
-            assert!(std::ptr::eq(&*first, &*again));
-            assert_eq!(again.owned_bytes(), 0);
+            assert!(std::ptr::eq(first, again));
+            assert_eq!(prepared.retained_bytes(), retained);
         }
-        let foreign = crate::section::OriginalTrimSource::standalone(&other)
-            .borrowing_domains(Some(&originals));
-        let error = foreign.face_domain(0, 0, &mut work, &cancel).err().unwrap();
-        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
-        let error = standalone
-            .prepare_domains_if_missing(0, &mut work, &cancel)
-            .err()
-            .unwrap();
+        let error = super::super::material_source::prepare_solid(
+            &definition, 0, &mut preparation, &cancel,
+        ).err().unwrap();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
-        assert!(
-            error
-                .message
-                .contains("standalone SourceOriginals preparation")
-        );
-        assert!(error.message.contains("work_before="));
-        assert!(error.message.contains("work_delta=0"));
-        assert!(error.message.contains("work_remaining="));
-        let error = standalone
-            .prepare_domains_if_missing(MAX_SLAB_SCRATCH_BYTES, &mut work, &AtomicBool::new(true))
-            .err()
-            .unwrap();
+        let error = source.face_domain(0, 0, &mut work, &AtomicBool::new(true))
+            .err().unwrap();
         assert_eq!(error.code, GeometryErrorCode::Cancelled);
-        assert!(error.message.contains("standalone SourceOriginals"));
-        assert!(error.message.contains("work_consumed="));
+    }
+
+    #[test]
+    fn slab_sample_cannot_cross_prepared_material_owners() {
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(
+            include_bytes!("../../../../fixtures/geometry/box-mm.step"), &cancel,
+        ).unwrap();
+        let mut work = GeometryWorkBudget::new(20_000_000);
+        let first = super::super::material_source::prepare_solid(
+            &definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let other = super::super::material_source::prepare_solid(
+            &definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let sample = prepare_slab_sample(
+            &first,
+            SlabRequest {
+                frame: frame(),
+                height_interval_mm: [2.0, 3.0],
+                sample_height_mm: 2.5,
+                native_shape_error_mm: 0.1,
+            },
+            MAX_SLAB_SCRATCH_BYTES - first.retained_bytes(),
+            &mut work, &cancel,
+        ).unwrap();
+        assert!(std::ptr::eq(first.definition(), other.definition()));
+        let error = analyze_slab_sample(&other, &sample, &mut work, &cancel)
+            .err().unwrap();
+        assert_eq!(error.code, GeometryErrorCode::InvalidGeometry);
+    }
+
+    #[test]
+    fn complete_position_box_preserves_one_sided_empty_height_exclusion() {
+        let bounds = [
+            Interval { lo: 2.0, hi: 3.0 },
+            Interval { lo: -5.0, hi: -4.0 },
+            Interval { lo: 10.0, hi: 12.0 },
+        ];
+        let height = broad_height(&bounds, frame());
+        assert_eq!([height.lo, height.hi], [10.0, 12.0]);
+        assert!(9.0 < height.lo);
+        assert!(!(10.0 < height.lo), "closed endpoint contact is not empty");
     }
 
     #[test]
@@ -5250,17 +5241,17 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut preparation_work = GeometryWorkBudget::new(30_000_000);
-            let source = crate::prepare_section_source(
+            let source = super::super::material_source::prepare_solid(
                 &definition,
-                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-                &cancel,
+                crate::MAX_PREPARED_SECTION_BYTES,
                 &mut preparation_work,
+                &cancel,
             )
             .unwrap();
             // Isolate census cost from import/Boolean-source preparation.
             let mut work = GeometryWorkBudget::new(1_000_000);
             let result = analyze_height_domain_with_scratch_limit(
-                source.trim_source(),
+                source.source_view().unwrap(),
                 frame,
                 [-1.0, 20.0],
                 policy,
@@ -5296,8 +5287,7 @@ mod tests {
             "implicit.step",
         );
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(source.as_bytes(), &cancel).unwrap();
-        assert!(definition.boundary_continuations.iter().flatten().count() > 0);
+        let definition = crate::from_step_bytes_with_cancel(source.as_bytes(), &cancel).unwrap();
         let pinned = definition.retained_query_proof_bytes();
         assert!(pinned > 0);
         let policy = AnalysisPolicy {
@@ -5330,7 +5320,7 @@ mod tests {
         )
         .unwrap();
         let nested = analyze_height_domain_with_scratch_limit(
-            crate::section::OriginalTrimSource::standalone(&definition),
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [3.99, 4.01],
             policy,
@@ -5346,18 +5336,11 @@ mod tests {
     #[test]
     fn prepared_slab_rejects_exhausted_caller_capacity_before_query_growth() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!("../../../../fixtures/geometry/box-mm.step"),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!("../../../../fixtures/geometry/box-mm.step"),
+        &cancel,)
         .unwrap();
         let mut work = GeometryWorkBudget::new(5_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let request = SlabRequest {
             frame: frame(),
@@ -5393,12 +5376,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(20_000_000);
-            let prepared = crate::prepare_material_source(
-                &definition,
-                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-                &cancel,
-                &mut work,
-            )
+            let prepared = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
             .unwrap();
             let result = analyze_slab(
                 &prepared,
@@ -5451,17 +5429,12 @@ mod tests {
     }
     #[test]
     fn stationary_original_coedge_endpoint_does_not_become_a_search_cell_height_event() {
-        use monstertruck_modeling::{BsplineCurve, Curve, KnotVector, Point3};
         // Actual z=t² on the original closed [0,1] span. Its only derivative
         // root is the endpoint at height zero, not a micrometre search band.
-        let original = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::bezier_knot(2),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.5, 0.0, 0.0),
-                Point3::new(1.0, 0.0, 1.0),
-            ],
-        ));
+        let original = native_test_curve(
+            &[[0.0, 0.0, 0.0, 1.0], [0.5, 0.0, 0.0, 1.0], [1.0, 0.0, 1.0, 1.0]],
+            2, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
         let prepared = crate::parametric::prepare_curve_enclosure(
@@ -5507,15 +5480,10 @@ mod tests {
     }
     #[test]
     fn height_only_coedge_census_cannot_drop_an_internal_v_height_knot() {
-        use monstertruck_modeling::{BsplineCurve, Curve, KnotVector, Point3};
-        let original = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.0, 0.0, 0.5, 1.0, 1.0]),
-            vec![
-                Point3::new(0.0, 0.0, 0.0),
-                Point3::new(0.5, 0.0, 1.0),
-                Point3::new(1.0, 0.0, 0.0),
-            ],
-        ));
+        let original = native_test_curve(
+            &[[0.0, 0.0, 0.0, 1.0], [0.5, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]],
+            1, &[0.0, 0.0, 0.5, 1.0, 1.0],
+        );
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(100_000);
         let prepared = crate::parametric::prepare_curve_enclosure(
@@ -5530,7 +5498,7 @@ mod tests {
         let mut proved = Vec::new();
         assert!(
             !prepared
-                .is_smooth_on((0.0, 1.0), &mut work, &cancel)
+                .is_smooth_on([0.0, 1.0], &mut work, &cancel)
                 .unwrap()
         );
         isolate_curve_events(
@@ -5579,25 +5547,15 @@ mod tests {
     }
     #[test]
     fn parameter_c0_joint_with_same_sign_height_limits_is_not_a_critical_event() {
-        use monstertruck_modeling::{
-            BsplineCurve, Curve, KnotVector, Processor, TrimmedCurve, base::*,
-        };
         let cancel = AtomicBool::new(false);
         for reflected in [false, true] {
-            let original = Curve::BsplineCurve(BsplineCurve::new(
-                KnotVector::from(vec![2., 2., 3., 7., 7.]),
-                vec![
-                    Point3::new(0., 0., 0.),
-                    Point3::new(1., 0., 1.),
-                    Point3::new(2., 0., 3.),
-                ],
-            ));
-            let mut original =
-                Processor::<_, Matrix4>::new(TrimmedCurve::new(Box::new(original), (2., 7.)));
-            if reflected {
-                original.invert();
-            }
-            let original = Curve::TrimmedCurve(original);
+            let controls = if reflected {
+                [[2., 0., 3., 1.], [1., 0., 1., 1.], [0., 0., 0., 1.]]
+            } else {
+                [[0., 0., 0., 1.], [1., 0., 1., 1.], [2., 0., 3., 1.]]
+            };
+            let knot = if reflected { 6. } else { 3. };
+            let original = native_test_curve(&controls, 1, &[2., 2., knot, 7., 7.]);
             let mut work = GeometryWorkBudget::new(1_000_000);
             let prepared = crate::parametric::prepare_curve_enclosure(
                 &original,
@@ -5607,7 +5565,7 @@ mod tests {
                 &cancel,
             )
             .unwrap();
-            assert!(!prepared.is_smooth_on((2., 7.), &mut work, &cancel).unwrap());
+            assert!(!prepared.is_smooth_on([2., 7.], &mut work, &cancel).unwrap());
             let mut events = Vec::new();
             let mut proved = Vec::new();
             isolate_curve_events(
@@ -5635,28 +5593,17 @@ mod tests {
 
     #[test]
     fn original_c0_joint_inventory_preserves_nonsymmetric_reflection_anchors_and_pose() {
-        use monstertruck_modeling::{
-            BsplineCurve, Curve, KnotVector, Processor, TrimmedCurve, base::*,
-        };
         let cancel = AtomicBool::new(false);
         for reflected in [false, true] {
-            let original = Curve::BsplineCurve(BsplineCurve::new(
-                KnotVector::from(vec![2., 2., 3., 7., 7.]),
-                vec![
-                    Point3::new(0., 0., 0.),
-                    Point3::new(1., 0., 1.),
-                    Point3::new(2., 0., 0.),
-                ],
-            ));
-            let mut inner =
-                Processor::<_, Matrix4>::new(TrimmedCurve::new(Box::new(original), (2., 7.)));
-            if reflected {
-                inner.invert();
-            }
-            let original = Curve::TrimmedCurve(Processor::with_transform(
-                TrimmedCurve::new(Box::new(Curve::TrimmedCurve(inner)), (2.5, 6.25)),
-                Matrix4::from_translation(Vector3::new(0., 0., 4.)),
-            ));
+            // Native import stores the actual reflected coefficient law. Its
+            // original 2+7 anchor must survive the narrower query restriction.
+            let controls = if reflected {
+                [[2., 0., 4., 1.], [1., 0., 5., 1.], [0., 0., 4., 1.]]
+            } else {
+                [[0., 0., 4., 1.], [1., 0., 5., 1.], [2., 0., 4., 1.]]
+            };
+            let knot = if reflected { 6. } else { 3. };
+            let original = native_test_curve(&controls, 1, &[2., 2., knot, 7., 7.]);
             let mut work = GeometryWorkBudget::new(1_000_000);
             let prepared = crate::parametric::prepare_curve_enclosure(
                 &original,
@@ -5668,13 +5615,13 @@ mod tests {
             .unwrap();
             assert!(
                 !prepared
-                    .is_smooth_on((2.5, 6.25), &mut work, &cancel)
+                    .is_smooth_on([2.5, 6.25], &mut work, &cancel)
                     .unwrap()
             );
             let mut knots = Vec::new();
             assert!(
                 prepared
-                    .visit_explicit_knots((2.5, 6.25), &mut work, &cancel, &mut |knot, _, _| {
+                    .visit_explicit_knots([2.5, 6.25], &mut work, &cancel, &mut |knot, _, _| {
                         knots.push(knot);
                         Ok(())
                     })
@@ -5708,7 +5655,7 @@ mod tests {
             assert_eq!(
                 prepared
                     .visit_explicit_knots(
-                        (2.5, 6.25),
+                        [2.5, 6.25],
                         &mut GeometryWorkBudget::new(0),
                         &cancel,
                         &mut |_, _, _| Ok(())
@@ -5720,7 +5667,7 @@ mod tests {
             assert_eq!(
                 prepared
                     .visit_explicit_knots(
-                        (2.5, 6.25),
+                        [2.5, 6.25],
                         &mut work,
                         &AtomicBool::new(true),
                         &mut |_, _, _| Ok(())
@@ -5734,61 +5681,63 @@ mod tests {
 
     #[test]
     fn uncertain_mapped_original_c0_knot_band_is_not_rounded_into_incidence() {
-        use monstertruck_modeling::{
-            BsplineCurve, Curve, KnotVector, Processor, TrimmedCurve, base::*,
-        };
-        let original = Curve::BsplineCurve(BsplineCurve::new(
-            KnotVector::from(vec![0.1, 0.1, 0.2, 0.4, 0.4]),
-            vec![
-                Point3::new(0., 0., 0.),
-                Point3::new(1., 0., 1.),
-                Point3::new(2., 0., 0.),
-            ],
-        ));
-        let mut reflected =
-            Processor::<_, Matrix4>::new(TrimmedCurve::new(Box::new(original), (0.1, 0.4)));
-        reflected.invert();
-        let original = Curve::TrimmedCurve(reflected);
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        let original = Curve::BSpline(std::sync::Arc::new(BSplineCurve {
+            degree: 1,
+            points: vec![[0., 0., 0.], [1., 0., 1.], [2., 0., 0.]],
+            weights: None,
+            knots: vec![0.1, 0.2, 0.4],
+            multiplicities: vec![2, 1, 2],
+            form: CurveForm::PolylineForm,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        }));
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(1_000_000);
+        let source = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &original, [0.1, 0.4], MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
         let prepared = crate::parametric::prepare_curve_enclosure(
-            &original,
-            (0.1, 0.4),
-            MAX_SLAB_SCRATCH_BYTES,
-            &mut work,
-            &cancel,
-        )
-        .unwrap();
+            &source, (0.1, 0.4), MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        assert!(!prepared.is_smooth_on([0.1, 0.4], &mut work, &cancel).unwrap());
         let mut knots = Vec::new();
-        assert!(
-            !prepared
-                .visit_explicit_knots((0.1, 0.4), &mut work, &cancel, &mut |knot, _, _| {
-                    knots.push(knot);
-                    Ok(())
-                })
-                .unwrap()
-        );
-        assert!(knots.is_empty());
+        assert!(prepared.visit_explicit_knots(
+            [0.1, 0.4], &mut work, &cancel,
+            &mut |knot, _, _| { knots.push(knot); Ok(()) },
+        ).unwrap());
+        assert_eq!(knots, vec![0.2], "source knots stay in the actual original gauge");
         let mut events = Vec::new();
         let mut proved = Vec::new();
-        let error = isolate_curve_events(
-            &OriginalCurveSpan {
-                curve: &prepared,
-                range: (0.1, 0.4),
-            },
+        isolate_curve_events(
+            &OriginalCurveSpan { curve: &prepared, range: (0.1, 0.4) },
             &HeightEventQuery {
                 functional: HeightFunctional::from_frame(frame()),
                 heights: [-0.1, 1.1],
                 uncertainty: 0.01,
             },
-            &mut events,
-            &mut proved,
-            &mut work,
-            &cancel,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
-        assert!(error.message.contains("internal C0 knot incidence"));
+            &mut events, &mut proved, &mut work, &cancel,
+        ).unwrap();
+        assert!(events.iter().any(|height| height[0] <= 1.0 && height[1] >= 1.0));
+        assert!(proved.iter().any(|height| height[0] <= 1.0 && height[1] >= 1.0));
+
+        // A different, actual native coefficient chart has its own literal
+        // knot. It is not an original source operator or an established gauge.
+        let native = native_test_curve(
+            &[[2., 0., 0., 1.], [1., 0., 1., 1.], [0., 0., 0., 1.]],
+            1, &[0.1, 0.1, 0.3, 0.4, 0.4],
+        );
+        assert!(native.source_parameter_image([0.1, 0.4], &mut work, &cancel).unwrap().is_none());
+        let reflected = Interval::point(0.1).add(Interval::point(0.4)).sub(Interval::point(0.2));
+        assert!(reflected.lo < reflected.hi && reflected.lo <= 0.3 && reflected.hi >= 0.3,
+            "the inverse expression is an enclosure, never rounded original incidence");
+        assert_eq!(prepared.visit_explicit_knots(
+            [0.1, 0.4], &mut GeometryWorkBudget::new(0), &cancel, &mut |_, _, _| Ok(()),
+        ).unwrap_err().code, GeometryErrorCode::ResourceLimit);
+        assert_eq!(prepared.visit_explicit_knots(
+            [0.1, 0.4], &mut work, &AtomicBool::new(true), &mut |_, _, _| Ok(()),
+        ).unwrap_err().code, GeometryErrorCode::Cancelled);
     }
 
     #[test]
@@ -5796,13 +5745,15 @@ mod tests {
         let definition = parity_definition("native-parity-nurbs-torus.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let source = crate::section::OriginalTrimSource::standalone(&definition);
+        let prepared_source = super::super::material_source::prepare_solid(
+            &definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared_source.source_view().unwrap();
         let domain = source
             .face_domain(0, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
-        let allowance = MAX_SLAB_SCRATCH_BYTES - domain.owned_bytes();
+        let allowance = MAX_SLAB_SCRATCH_BYTES - prepared_source.retained_bytes();
         let mut links = HeightSourceLinks::new(&definition, allowance, &mut work, &cancel).unwrap();
-        let face = domain.native().face();
         let functional = HeightFunctional::from_frame(frame());
         let mut constant = 0;
         super::super::critical::with_original_source_face(&domain, trim_parameter_box(&domain).unwrap(),
@@ -5814,13 +5765,14 @@ mod tests {
             assert_eq!(crossing.code, GeometryErrorCode::SingularGeometry);
             assert!(crossing.message.contains("NonSmooth"),
                 "a positive-width query crossing both original knot interiors never borrows a one-sided normal");
-            for edge in face.absolute_boundaries().iter().flatten() {
-                if edge.with_curve(|curve| constant_native_curve_height(curve, functional, &mut work, &cancel))?.is_some() {
-                    assert!(links.whole_edge_regular(&FaceHeightQuery { face: 0, glued: &glued, functional }, edge.id(), allowance, &mut work, &cancel)?);
+            for coedge in domain.coedges() {
+                if constant_native_curve_height(definition.edge_curve(coedge.edge)
+                    .expect("imported native seam edge has a carrier"), functional, &mut work, &cancel)?.is_some() {
+                    assert!(links.whole_edge_regular(&FaceHeightQuery { face: 0, glued: &glued, functional }, coedge.edge, allowance, &mut work, &cancel)?);
                     constant += 1;
                 }
-                for vertex in [edge.front(), edge.back()] {
-                    assert!(links.vertex_regular(&definition, &FaceHeightQuery { face: 0, glued: &glued, functional }, vertex.id(),
+                for vertex in coedge.vertices {
+                    assert!(links.vertex_regular(&definition, &FaceHeightQuery { face: 0, glued: &glued, functional }, vertex,
                         allowance, &mut work, &cancel)?,
                         "all original incident uses, actual closed vertex cycle and local UV/joint tubes qualify");
                 }
@@ -5831,7 +5783,7 @@ mod tests {
                 assert!(!source_height_transverse(&glued, [[0., 4.], [parameter, parameter]],
                     functional, &mut work, &cancel)?);
             }
-            let vertex = face.absolute_boundaries()[0][0].front().id();
+            let vertex = domain.coedges()[0].vertices[0];
             assert_eq!(links.vertex_regular(&definition, &FaceHeightQuery { face: 0, glued: &glued, functional }, vertex,
                 allowance, &mut work, &AtomicBool::new(true)).unwrap_err().code, GeometryErrorCode::Cancelled);
             Ok(())
@@ -5844,7 +5796,10 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-blind-pocket.step");
         let mut work = GeometryWorkBudget::new(5_000_000);
-        let source = crate::section::OriginalTrimSource::standalone(&definition);
+        let prepared_source = super::super::material_source::prepare_solid(
+            &definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared_source.source_view().unwrap();
         let policy = AnalysisPolicy {
             maximum_height_uncertainty_mm: 1.0e-7,
             maximum_shape_error_mm: 0.1,
@@ -5853,7 +5808,7 @@ mod tests {
             source,
             HeightFunctional::from_frame(frame()),
             [-1.0, 9.0],
-            MAX_SLAB_SCRATCH_BYTES - definition.retained_query_proof_bytes(),
+            MAX_SLAB_SCRATCH_BYTES - prepared_source.retained_bytes(),
             &mut work,
             &cancel,
         )
@@ -5869,20 +5824,20 @@ mod tests {
         );
         let retained =
             covers.capacity() * std::mem::size_of::<super::super::SourceTransportCover>();
-        let literal = analyze_literal_native_height_domain(
+        let material = analyze_height_domain_with_scratch_limit(
             source,
             frame(),
             [5.9, 6.1],
             policy,
-            MAX_SLAB_SCRATCH_BYTES - definition.retained_query_proof_bytes() - retained,
+            MAX_SLAB_SCRATCH_BYTES - prepared_source.retained_bytes() - retained,
             &mut work,
             &cancel,
         )
         .unwrap();
-        assert!(literal.event_brackets_mm.is_empty());
-        assert!(literal.capture.transport_support.is_empty());
-        assert!(!literal.capture.transport_support_complete);
-        assert!(literal.requires_closed_material_capture([5.9, 6.1]));
+        assert!(material.event_brackets_mm.is_empty());
+        assert!(!material.capture.transport_support.is_empty());
+        assert!(material.capture.transport_support_complete);
+        assert!(material.requires_closed_material_capture([5.9, 6.1]));
     }
 
     #[test]
@@ -5911,10 +5866,9 @@ mod tests {
         );
         assert_eq!(
             census.requires_closed_material_capture([-0.01, 0.01]),
-            !definition
-                .material_transport_is_proved_zero(&mut work, &cancel)
+            !material_transport_zero(&definition, &mut work, &cancel)
                 .unwrap(),
-            "an empty literal event list alone never certifies a transported material band",
+            "an empty critical-event list alone never certifies a transported material band",
         );
     }
 
@@ -5930,14 +5884,12 @@ mod tests {
         incidence
             .prepare_vertices(MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
-        for edge in definition.solid.edge_iter() {
-            for vertex in [edge.front(), edge.back()] {
+        for &vertex in definition.brep().vertex_list() {
                 assert!(
                     incidence
-                        .vertex_link_is_cycle(&definition, vertex.id(), &mut work, &cancel)
+                        .vertex_link_is_cycle(&definition, vertex, &mut work, &cancel)
                         .unwrap()
                 );
-            }
         }
         assert!(work.consumed() > before && incidence.owned_bytes() < MAX_SLAB_SCRATCH_BYTES);
         assert_eq!(
@@ -5948,14 +5900,15 @@ mod tests {
             GeometryErrorCode::ResourceLimit
         );
         let before = work.consumed();
-        definition.face_boundaries[0].wires[0][0].orientation =
-            !definition.face_boundaries[0].wires[0][0].orientation;
+        let loop_id = definition.brep().face(definition.face_ids()[0]).unwrap().loops[0];
+        let edge = &mut definition.brep.loop_mut(loop_id).unwrap().edges[0];
+        edge.forward = !edge.forward;
         assert_eq!(
             SourceEdgeIncidence::new(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel)
                 .err()
                 .unwrap()
                 .code,
-            GeometryErrorCode::ParameterCorrespondenceUnavailable
+            GeometryErrorCode::SingularGeometry
         );
         assert!(work.consumed() > before);
         assert_eq!(
@@ -5980,29 +5933,25 @@ mod tests {
         let functional = HeightFunctional::from_frame(frame());
         let mut observed = false;
         let mut covered = Vec::new();
-        for face in definition.solid.face_iter() {
-            for edge in face
-                .absolute_boundaries()
-                .iter()
-                .flat_map(|wire| wire.iter())
-            {
-                let varying = edge
-                    .with_curve(|curve| -> Result<bool, GeometryError> {
+        for &edge_id in definition.brep().edge_list() {
+                let edge = definition.brep().edge(edge_id).unwrap();
+                let curve = definition.edge_curve(edge_id).unwrap();
+                let curve_range = (edge.interval.min(), edge.interval.max());
+                let varying = (|| -> Result<bool, GeometryError> {
                         if constant_native_curve_height(curve, functional, &mut work, &cancel)?
                             .is_some()
                         {
                             return Ok(false);
                         }
-                        let prepared = definition.prepare_boundary_curve(
-                            edge.id(),
+                        let prepared = crate::parametric::prepare_curve_enclosure(
                             curve,
-                            curve.range_tuple(),
+                            curve_range,
                             MAX_SLAB_SCRATCH_BYTES,
                             &mut work,
                             &cancel,
                         )?;
                         assert!(
-                            !prepared.is_smooth_on(curve.range_tuple(), &mut work, &cancel)?,
+                            !prepared.is_smooth_on([curve_range.0, curve_range.1], &mut work, &cancel)?,
                             "geometric circle/G1 does not erase an actual C0 parameter-speed jump"
                         );
                         let mut events = Vec::new();
@@ -6010,7 +5959,7 @@ mod tests {
                         isolate_curve_events(
                             &OriginalCurveSpan {
                                 curve: &prepared,
-                                range: curve.range_tuple(),
+                                range: curve_range,
                             },
                             &HeightEventQuery {
                                 functional,
@@ -6024,7 +5973,7 @@ mod tests {
                         )?;
                         covered.extend(events);
                         Ok(true)
-                    })
+                    })()
                     .unwrap();
                 if varying {
                     observed = true;
@@ -6032,7 +5981,6 @@ mod tests {
                     // source intervals; inventory the actual union, not a
                     // fictitious full-circle extension of the first half.
                 }
-            }
         }
         assert!(
             observed,
@@ -6076,12 +6024,10 @@ mod tests {
     #[test]
     fn rounded_housing_height_census_retains_caps_and_pocket_floor_with_frozen_work() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-            ),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &cancel,)
         .expect("unchanged independently exported housing");
         let mut work = GeometryWorkBudget::new(20_000_000);
         let result = analyze_height_domain(
@@ -6108,12 +6054,10 @@ mod tests {
     #[test]
     fn rounded_housing_compile_policy_does_not_schedule_near_pole_search_cell_heights() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
-            ),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ),
+        &cancel,)
         .unwrap();
         let mut work = GeometryWorkBudget::new(20_000_000);
         let result = analyze_height_domain(
@@ -6154,12 +6098,7 @@ mod tests {
         let definition = parity_definition("native-parity-blind-pocket.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(70_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let slab = analyze_slab(
             &source,
@@ -6183,8 +6122,7 @@ mod tests {
                 .regular_flow_speed_mm_per_height()
                 .is_some_and(|speed| speed.is_finite())
         }));
-        if !definition
-            .material_transport_is_proved_zero(&mut work, &cancel)
+        if !source.source_view().unwrap().material_transport_is_proved_zero(&mut work, &cancel)
             .unwrap()
         {
             assert!(
@@ -6205,11 +6143,15 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(30_000_000);
-            let zero = definition
-                .material_transport_is_proved_zero(&mut work, &cancel)
-                .unwrap();
-            let certificate =
-                narrow_invariance(&definition, frame(), [-1.0, 9.0], &mut work, &cancel).unwrap();
+            let owner = super::super::material_source::prepare_solid(
+                &definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+            ).unwrap();
+            let source = owner.source_view().unwrap();
+            let remaining = MAX_SLAB_SCRATCH_BYTES - owner.retained_bytes();
+            let zero = source.material_transport_is_proved_zero(&mut work, &cancel).unwrap();
+            let certificate = narrow_invariance_with_scratch_limit(
+                source, frame(), [-1.0, 9.0], remaining, &mut work, &cancel,
+            ).unwrap();
             assert_eq!(
                 certificate.is_some(),
                 zero,
@@ -6218,8 +6160,9 @@ mod tests {
             if let Some(certificate) = certificate {
                 assert_eq!(certificate.height_interval_mm, [0.0, 8.0], "{name}");
             }
-            let inner =
-                narrow_invariance(&definition, frame(), [2.0, 6.0], &mut work, &cancel).unwrap();
+            let inner = narrow_invariance_with_scratch_limit(
+                source, frame(), [2.0, 6.0], remaining, &mut work, &cancel,
+            ).unwrap();
             assert_eq!(inner.is_some(), zero, "{name}");
             if let Some(inner) = inner {
                 assert_eq!(inner.height_interval_mm, [2.0, 6.0], "{name}");
@@ -6231,12 +6174,7 @@ mod tests {
         let definition = parity_definition("native-parity-nurbs-cylinder.step");
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(70_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let slab = analyze_slab(
             &source,
@@ -6251,8 +6189,7 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let zero = definition
-            .material_transport_is_proved_zero(&mut work, &cancel)
+        let zero = source.source_view().unwrap().material_transport_is_proved_zero(&mut work, &cancel)
             .unwrap();
         assert_eq!(slab.invariance.is_some(), zero);
         let proof = slab
@@ -6299,8 +6236,8 @@ mod tests {
         let definition = parity_definition("native-parity-nurbs-cylinder.step");
         let mut work = GeometryWorkBudget::new(1000);
         let before = work.consumed();
-        let error = native_vertical_boundary_flow(
-            crate::section::OriginalTrimSource::standalone(&definition),
+        let error = source_vertical_boundary_flow(
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [2.0, 6.0],
             0,
@@ -6310,8 +6247,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         assert!(work.consumed() > before);
-        let error = native_vertical_boundary_flow(
-            crate::section::OriginalTrimSource::standalone(&definition),
+        let error = source_vertical_boundary_flow(
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [2.0, 6.0],
             0,
@@ -6337,8 +6274,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let zero = definition
-            .material_transport_is_proved_zero(&mut work, &AtomicBool::new(false))
+        let zero = material_transport_zero(&definition, &mut work, &AtomicBool::new(false))
             .unwrap();
         assert_eq!(result.invariance.is_some(), zero);
         assert_eq!(result.requires_closed_material_capture([2.0, 6.0]), !zero);
@@ -6388,12 +6324,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(90_000_000);
-            let source = crate::prepare_material_source(
-                &definition,
-                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-                &cancel,
-                &mut work,
-            )
+            let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
             .unwrap();
             let above = analyze_slab(
                 &source,
@@ -6446,11 +6377,12 @@ mod tests {
             assert_eq!(floor.outward_height_sign, 1);
             assert!(!floor.patch_cover.is_empty());
             assert_eq!(floor.face_id, definition.faces[floor.face_index].face_id);
-            let original_face = definition.solid.face_iter().nth(floor.face_index).unwrap();
+            let (_, original_face) = super::super::source_incidence::native_face(&definition, floor.face_index).unwrap();
             let incidence = original_edge_uses(&definition, &mut work, &cancel).unwrap();
-            for (wire_index, wire) in original_face.absolute_boundaries().iter().enumerate() {
-                for (coedge_index, edge) in wire.iter().enumerate() {
-                    let uses = &incidence[&edge.id()];
+            for wire_index in 0..original_face.loops.len() {
+                let wire = super::super::source_incidence::boundary_loop(&definition, floor.face_index, wire_index).unwrap();
+                for (coedge_index, edge) in wire.edges.iter().enumerate() {
+                    let uses = &incidence[&edge.edge];
                     let second = uses.second.unwrap();
                     assert_ne!(uses.first.orientation, second.orientation);
                     assert!(
@@ -6460,10 +6392,13 @@ mod tests {
                                 && use_.wire == wire_index
                                 && use_.index == coedge_index)
                     );
-                    let source = &definition.source_topology.faces[floor.face_index].wires
-                        [wire_index]
-                        .coedges[coedge_index];
-                    assert!(source.source_edge.is_some() && source.source_coedge.is_some());
+                    let native_face = definition.face_ids()[floor.face_index];
+                    let original = definition.original_source().face(native_face).unwrap();
+                    assert!(!original.wires.is_empty());
+                    for &source_index in original.wires.iter().flat_map(|wire| &wire.coedges) {
+                        let source = definition.original_source().coedge(source_index).unwrap();
+                        assert_eq!(source.source_face, original.source_face);
+                    }
                 }
             }
             let occupied = above.occupied.as_ref().unwrap();
@@ -6544,12 +6479,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(50_000_000);
-            let source = crate::prepare_material_source(
-                &definition,
-                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-                &cancel,
-                &mut work,
-            )
+            let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
             .unwrap();
             let slab = analyze_slab(
                 &source,
@@ -6604,12 +6534,7 @@ mod tests {
         ] {
             let definition = parity_definition(name);
             let mut work = GeometryWorkBudget::new(70_000_000);
-            let source = crate::prepare_material_source(
-                &definition,
-                crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-                &cancel,
-                &mut work,
-            )
+            let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
             .unwrap();
             let slab = analyze_slab(
                 &source,
@@ -6660,12 +6585,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-blind-pocket-nurbs-floor.step");
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let reversed = PlaneFrameMm {
             y_axis: [0.0, -1.0, 0.0],
@@ -6698,20 +6618,13 @@ mod tests {
     #[test]
     fn independent_original_narrow_pocket_preserves_its_exact_endpoint_floor() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
-            ),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-narrow-pocket-mm.step"
+        ),
+        &cancel,)
         .unwrap();
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let source = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let source = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let slab = analyze_slab(
             &source,
@@ -6742,7 +6655,7 @@ mod tests {
         };
         let mut work = GeometryWorkBudget::new(20_000_000);
         let error = analyze_height_domain_with_scratch_limit(
-            crate::section::OriginalTrimSource::standalone(&definition),
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [-2.1, 2.1],
             policy,
@@ -6753,7 +6666,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, GeometryErrorCode::ResourceLimit);
         let result = analyze_height_domain_with_scratch_limit(
-            crate::section::OriginalTrimSource::standalone(&definition),
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [-2.1, 2.1],
             policy,
@@ -6772,7 +6685,7 @@ mod tests {
             );
         }
         let error = analyze_height_domain_with_scratch_limit(
-            crate::section::OriginalTrimSource::standalone(&definition),
+            super::super::material_source::prepare_solid(&definition, MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel).unwrap().source_view().unwrap(),
             frame(),
             [-2.1, 2.1],
             policy,
@@ -6788,24 +6701,15 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-full-sphere.step");
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let prepared = crate::prepare_section_source(
+        let mut section = crate::section::section_for_query(
             &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
-        .unwrap();
-        let mut section = prepared
-            .section_with_byte_limit(
-                PlaneMm {
-                    origin_mm: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
-                },
-                &cancel,
-                MAX_SECTION_BYTES,
-                &mut work,
-            )
-            .unwrap();
+            &crate::section::SectionQuery {
+                plane: PlaneMm { origin_mm: [0.0; 3], normal: [0.0, 0.0, 1.0] },
+                maximum_chord_error_mm: spiling_contracts::geometry::SECTION_SAMPLING_TOLERANCE_MM,
+                maximum_plane_error_mm: spiling_contracts::geometry::SECTION_PLANE_TOLERANCE_MM,
+            },
+            &cancel, MAX_SECTION_BYTES, &mut work,
+        ).unwrap();
         // Math regression on a real captured source: the perturbation's
         // functional is centered at this plane origin, not the source origin.
         section.plane = PlaneMm {
@@ -6819,31 +6723,18 @@ mod tests {
     }
     #[test]
     fn homogeneous_constancy_preserves_a_nonrepresentable_actual_height_interval() {
-        use monstertruck_modeling::{
-            BsplineCurve, BsplineSurface, Curve, KnotVector, NurbsCurve, NurbsSurface, Vector4,
-        };
-        let knots = KnotVector::bezier_knot(1);
+        use solidcore::nurbs::{b_spline_surface::BSplineSurface, math::CPoint, srf_basic};
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
         let controls = vec![
-            vec![
-                Vector4::new(0.0, 0.0, 1.0, 3.0),
-                Vector4::new(0.0, 6.0, 2.0, 6.0),
-            ],
-            vec![
-                Vector4::new(6.0, 0.0, 2.0, 6.0),
-                Vector4::new(12.0, 12.0, 4.0, 12.0),
-            ],
+            vec![CPoint::new(0.0, 0.0, 1.0, 3.0), CPoint::new(0.0, 6.0, 2.0, 6.0)],
+            vec![CPoint::new(6.0, 0.0, 2.0, 6.0), CPoint::new(12.0, 12.0, 4.0, 12.0)],
         ];
-        let surface = Surface::NurbsSurface(NurbsSurface::new(BsplineSurface::new(
-            (knots.clone(), knots.clone()),
-            controls,
-        )));
-        let curve = Curve::NurbsCurve(NurbsCurve::new(BsplineCurve::new(
-            knots,
-            vec![
-                Vector4::new(0.0, 0.0, 1.0, 3.0),
-                Vector4::new(6.0, 0.0, 2.0, 6.0),
-            ],
-        )));
+        let raw = srf_basic::Surface::new(controls, 1, 1, knots.clone(), knots).unwrap();
+        let surface = Surface::new(SurfaceKind::BSpline(BSplineSurface::from_nurb(raw, true)));
+        let curve = native_test_curve(
+            &[[0.0, 0.0, 1.0, 3.0], [6.0, 0.0, 2.0, 6.0]],
+            1, &[0.0, 0.0, 1.0, 1.0],
+        );
         let mut work = GeometryWorkBudget::new(10_000);
         let cancel = AtomicBool::new(false);
         let functional = HeightFunctional::from_frame(frame());
@@ -6912,15 +6803,145 @@ mod tests {
         assert!(height.lo <= 4.1 && height.hi >= 4.1);
     }
     #[test]
-    fn affine_trimmed_original_curve_retains_exact_constant_height_identity() {
-        use monstertruck_modeling::{
-            Curve, Line, Matrix4, Point3, Processor, TrimmedCurve, Vector3,
+    fn original_coefficient_identity_keeps_large_origin_relative_height_exact() {
+        let curve = solidcraft_step::geom::Curve::Line {
+            origin: [3.0, -4.0, 1.0e12],
+            direction: [1.0, 0.0, 0.0],
+            magnitude: 17.0,
         };
-        let basis = Curve::Line(Line(Point3::new(0.0, 0.0, 2.0), Point3::new(1.0, 0.0, 2.0)));
-        let curve = Curve::TrimmedCurve(Processor::with_transform(
-            TrimmedCurve::new(Box::new(basis), (0.2, 0.8)),
-            Matrix4::from_translation(Vector3::new(3.0, -4.0, 3.0)),
-        ));
+        let functional = HeightFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(-1.0e12),
+        };
+        let mut work = GeometryWorkBudget::new(100);
+        let cancel = AtomicBool::new(false);
+        let height = constant_original_curve_height(
+            &curve, functional, 0, &mut work, &cancel,
+        ).unwrap().unwrap();
+        assert_eq!([height.lo, height.hi], [0.0, 0.0]);
+        assert_eq!(constant_original_curve_height(
+            &curve, functional, 0, &mut work, &AtomicBool::new(true),
+        ).unwrap_err().code, GeometryErrorCode::Cancelled);
+    }
+    #[test]
+    fn source_constancy_follows_selected_pcurve_not_unselected_spatial_line() {
+        use solidcraft_step::geom::{
+            Associated, Curve, Pcurve, Placement, PreferredRep, Surface, SurfaceCurveKind,
+        };
+        use std::sync::Arc;
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(1_000_000);
+        let plane = Arc::new(Surface::Plane { position: Placement {
+            origin: [0.0, 0.0, 1.0e12 + 4.0],
+            axis: [0.0, 1.0, 0.0],
+            ref_direction: [1.0, 0.0, 0.0],
+        } });
+        let functional = HeightFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(-1.0e12),
+        };
+        for (chart_direction, spatial_direction, preferred_height, spatial_height) in [
+            ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], Some(4.0), None),
+            ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], None, Some(123.0)),
+        ] {
+            let chart = Arc::new(Curve::Line {
+                origin: [0.0; 3], direction: chart_direction, magnitude: 1.0,
+            });
+            let spatial = Arc::new(Curve::Line {
+                origin: [0.0, 0.0, 1.0e12 + 123.0],
+                direction: spatial_direction, magnitude: 1.0,
+            });
+            for (master, expected) in [
+                (PreferredRep::PcurveS1, preferred_height),
+                (PreferredRep::Curve3d, spatial_height),
+            ] {
+                let source = Curve::SurfaceCurve {
+                    kind: SurfaceCurveKind::Surface,
+                    curve_3d: spatial.clone(),
+                    associated: vec![Associated::Pcurve(Pcurve {
+                        surface: plane.clone(), curve: chart.clone(),
+                    })],
+                    master,
+                };
+                let prepared = crate::kernel::source_operand::PreparedOriginalCurve::new(
+                    &source, [0.0, 1.0], MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+                ).unwrap();
+                let actual = constant_native_curve_height(
+                    &prepared, functional, &mut work, &cancel,
+                ).unwrap().map(|height| [height.lo, height.hi]);
+                assert_eq!(actual, expected.map(|height| [height, height]));
+                if expected.is_none() {
+                    assert!(constant_original_curve_height(
+                        &source, functional, 0, &mut work, &cancel,
+                    ).unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_original_endpoint_uses_exact_projection_not_rounded_raw_parameter() {
+        let curve = solidcraft_step::geom::Curve::Line {
+            origin: [0.0, 0.0, 1.0e12],
+            direction: [0.0, 0.0, 1.0],
+            magnitude: 0.1,
+        };
+        let vertices = [[0.0, 0.0, 1.0e12], [0.0, 0.0, 1.0e12 + 1.0]];
+        let functional = HeightFunctional {
+            direction: [0.0, 0.0, 1.0].map(Interval::point),
+            offset: Interval::point(-1.0e12),
+        };
+        let mut work = GeometryWorkBudget::new(100_000);
+        let cancel = AtomicBool::new(false);
+        let raw = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &curve, [0.0, 10.0], MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        assert!(!exact_affine_curve_height_at(
+            &raw, 10.0, functional, 1.0, &mut work, &cancel,
+        ).unwrap(), "binary64 0.1 times 10 is not the exact scalar one");
+        let selected = super::super::source_restriction::SourceLineRestriction::new(
+            &curve, &vertices, true, 1.0e-6, &mut work, &cancel,
+        ).unwrap().unwrap();
+        let height = original_endpoint_height(
+            &selected, 1.0, vertices[1], functional, &mut work, &cancel,
+        ).unwrap();
+        assert_eq!([height.lo, height.hi], [1.0, 1.0]);
+    }
+    #[test]
+    fn original_rational_endpoint_identity_does_not_snap_an_interior_parameter() {
+        use solidcraft_step::geom::{BSplineCurve, Curve, CurveForm, KnotSpec, Logical};
+        let curve = Curve::BSpline(std::sync::Arc::new(BSplineCurve {
+            degree: 1,
+            points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
+            weights: Some(vec![2.0, 3.0]),
+            knots: vec![0.0, 1.0],
+            multiplicities: vec![2, 2],
+            form: CurveForm::PolylineForm,
+            closed: Logical::False,
+            self_intersect: Logical::False,
+            knot_spec: KnotSpec::Unspecified,
+        }));
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100_000);
+        let prepared = crate::kernel::source_operand::PreparedOriginalCurve::new(
+            &curve, [0.0, 1.0], MAX_SLAB_SCRATCH_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let functional = HeightFunctional::from_frame(frame());
+        let end = original_endpoint_height(
+            &prepared, 1.0, [1.0, 0.0, 1.0], functional, &mut work, &cancel,
+        ).unwrap();
+        assert_eq!([end.lo, end.hi], [1.0, 1.0]);
+        let interior = original_endpoint_height(
+            &prepared, 0.5, [1.0, 0.0, 1.0], functional, &mut work, &cancel,
+        ).unwrap();
+        assert!(interior.lo <= 0.6 && interior.hi >= 1.0 && interior.lo < interior.hi);
+    }
+    #[test]
+    fn native_affine_trim_coefficients_retain_exact_constant_height_identity() {
+        let curve = native_test_curve(
+            &[[3.2, -4.0, 5.0, 1.0], [3.8, -4.0, 5.0, 1.0]],
+            1, &[0.2, 0.2, 0.8, 0.8],
+        );
         let mut work = GeometryWorkBudget::new(100);
         let result = constant_native_curve_height(
             &curve,
@@ -6937,12 +6958,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-full-sphere.step");
         let mut work = GeometryWorkBudget::new(50_000_000);
-        let prepared = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let prepared = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         for range in [[-7.0, -6.0], [6.0, 7.0]] {
             let result = analyze_slab(
@@ -6984,12 +7000,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-ring-torus.step");
         let mut work = GeometryWorkBudget::new(20_000_000);
-        let prepared = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let prepared = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let result = analyze_slab(
             &prepared,
@@ -7017,12 +7028,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let definition = parity_definition("native-parity-full-sphere.step");
         let mut work = GeometryWorkBudget::new(30_000_000);
-        let prepared = crate::prepare_material_source(
-            &definition,
-            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
-            &cancel,
-            &mut work,
-        )
+        let prepared = super::super::material_source::prepare_solid(&definition, crate::MAX_PREPARED_SECTION_BYTES, &mut work, &cancel)
         .unwrap();
         let request = SlabRequest {
             frame: frame(),
@@ -7125,6 +7131,7 @@ mod tests {
             sampling_tolerance_mm: 0.001,
             boolean_tolerance_mm: 0.001,
             loop_source_faces: Vec::new(),
+            loop_spans: Vec::new(),
             certificate: crate::NativeSectionCertificate {
                 definition_id: spiling_contracts::geometry::DefinitionId::from_source_sha256(
                     &[0; 32],

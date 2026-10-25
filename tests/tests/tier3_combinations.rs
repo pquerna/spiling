@@ -12,7 +12,6 @@ use spiling_contracts::geometry::*;
 use spiling_geometry::*;
 use spiling_e2e_tests::fixtures::*;
 use spiling_e2e_tests::helpers::*;
-use spiling_e2e_tests::parametric::*;
 
 // =========================================================================
 // 1. Multi-feature interplay: Cylinder + Section + Tessellation
@@ -572,9 +571,9 @@ fn test_comb_36_box_stock_sizing_envelope() {
 
 #[test]
 fn test_comb_37_interval_bounding_box_algebra() {
-    let iv_x = Interval::new(0.0, 20.0);
-    let iv_y = Interval::new(0.0, 10.0);
-    let iv_z = Interval::new(0.0, 8.0);
+    let iv_x = Interval::new(0.0, 20.0).unwrap();
+    let iv_y = Interval::new(0.0, 10.0).unwrap();
+    let iv_z = Interval::new(0.0, 8.0).unwrap();
     let bbox = IntervalVec3::new(iv_x, iv_y, iv_z);
     let vol = bbox.x.diameter() * bbox.y.diameter() * bbox.z.diameter();
     assert_close(vol, 1600.0, 1e-4, "bounding box volume");

@@ -6,17 +6,17 @@ Licensed under the Open Software License version 3.0
 
 # Native geometry parity: trimmed BREP through manufacturing
 
-Status: interface cutover implemented; operation qualification incomplete. Generic native faces and independent display availability use `step-native-trimmed-v2` and `mesh-trimmed-mm-0.05-v2`; executable project/manufacturing constants identify the current strict storage generation. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) records exercised flows and explicit fitting/housing limits. No alternate kernel, mesh slicing fallback or physical printer qualification is introduced.
+Status: SolidCore kernel cutover in development; operation qualification incomplete. Generic native faces and independent display availability retain `step-native-trimmed-v2` and `mesh-trimmed-mm-0.05-v2`; executable project/manufacturing constants identify the strict storage generation. Earlier Monstertruck evidence does not automatically qualify SolidCore operations. This RFC's full G0–G3 gates remain targets, not a claim that every declared family can manufacture. [Current evidence](../quality/geometry-evidence.md) owns exercised flows and explicit limits. No mesh slicing fallback or physical printer qualification is introduced.
 
 ## 1. Decision and user outcome
 
-Make Spiling consume the practical geometry families of its pinned Monstertruck kernel through one native pipeline: source import, faithful inspection/picking, native sections, planar manufacturing, emitted program and independent replay. A rounded housing, tapered fitting or spline-trimmed bracket should not fail solely because its exporter chose a different exact surface representation.
+Make Spiling consume bounded native geometry through one SolidCore pipeline: source import, faithful inspection/picking, native sections, planar manufacturing, emitted program and independent replay. A rounded housing, tapered fitting or spline-trimmed bracket should not fail solely because its exporter chose a different exact surface representation.
 
 The target is **operation parity on bounded, valid trimmed geometry**, not an enum checklist. Representing a sphere does not establish sphere-plane intersections, trim correctness, global bounds or layer fidelity. Coverage is recorded per operation and numerical envelope. A difficult but valid instance can exceed resource/conditioning limits; it must receive a specific diagnostic rather than a successful approximation with missing geometry.
 
 Decisions:
 
-1. Keep one geometry crate/facade. Monstertruck owns native geometry; Spiling owns admission policy, provenance, query contracts, approximation certification and consumer-facing diagnostics. Changes to general STEP conversion, native intersections or topology belong in the public kernel fork, not a second implementation in the planner.
+1. Keep one geometry crate/facade and one runtime kernel. SolidCore owns native BREP geometry; SolidCraft decodes original STEP operands; Spiling owns admission policy, source/native correspondence, query contracts, approximation certification and diagnostics. Required native query controls belong in the public SolidCore fork, not a second planner-side kernel. Declared tolerances and generated native pcurves are not original-source certificates.
 2. Replace the plane/cylinder-only source model with generic trimmed-face records and optional analytic descriptions. Classification is descriptive; it is never permission to slice, texture or reuse a slab.
 3. Implement one bounded parametric/interval substrate inside geometry, with analytic specializations for exact or tighter results. Native sections remain authoritative. Auxiliary boxes, patch tessellations and search meshes never become the slicing representation.
 4. Distinguish source conversion, display, native section queries, slab fidelity, manufacturing and surface-finish eligibility. One unsupported operation must not masquerade as an invalid STEP file.
@@ -27,7 +27,7 @@ Non-goals: a general CAD editor/healer; arbitrary nonmanifold mesh repair; alter
 
 ## 2. Historical design baseline and qualification gaps
 
-Current native dependency identity is owned by all five workspace Monstertruck declarations in [Cargo.toml](../../Cargo.toml), their lockfile Git sources and `crates/geometry::KERNEL_REVISION`; these must agree. The source-inspection baseline for the family table and links below remains `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e`; its restrictions describe the pre-cutover design baseline, not current generic admission. Pins are provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates measured producers and remaining numerical/manufacturing limits.
+Current runtime dependency identity is owned by the SolidCore/solidcore-mesh and SolidCraft declarations in [Cargo.toml](../../Cargo.toml), their lockfile Git sources and `crates/geometry::KERNEL_REVISION`. Both SolidCore packages must share that exact published revision. The Monstertruck family table and links below describe the historical `5a4ddb7582c3d7f75a39e800a9fef345cdfe435e` design baseline, not current SolidCore admission or a runtime fallback. Pins establish provenance, not operation acceptance. [Geometry evidence](../quality/geometry-evidence.md) separates exercised producers and remaining limits.
 
 | Family | Kernel path at the design baseline, from source inspection | Pre-cutover Spiling restriction | Work identified by the design |
 | --- | --- | --- | --- |
@@ -58,7 +58,7 @@ Historical integration seams at that baseline:
 
 Pinned kernel references: [surface representations](https://github.com/pquerna/monstertruck/blob/5a4ddb7582c3d7f75a39e800a9fef345cdfe435e/monstertruck-modeling/src/geometry/surface.rs), [STEP-to-modeling conversion](https://github.com/pquerna/monstertruck/blob/5a4ddb7582c3d7f75a39e800a9fef345cdfe435e/monstertruck-io/src/step/load/step_geometry/geom_impls/to_modeling.rs), [native bounds](https://github.com/pquerna/monstertruck/blob/5a4ddb7582c3d7f75a39e800a9fef345cdfe435e/monstertruck-modeling/src/bounding/mod.rs), [curve subdivision](https://github.com/pquerna/monstertruck/blob/5a4ddb7582c3d7f75a39e800a9fef345cdfe435e/monstertruck-traits/src/algo/curve/mod.rs) and [native plane-cut composition](https://github.com/pquerna/monstertruck/blob/5a4ddb7582c3d7f75a39e800a9fef345cdfe435e/monstertruck-solid/src/transversal/integrate/mod.rs).
 
-Reuse available kernel ingredients rather than rebuilding them: bounded patch evaluation/derivatives, positive-weight structural bounds, strict mesh refusal, periodic meshing and prepared Boolean budgets. Their limits matter: the current generic curve divider uses sampled interior deviation, native bounds may be loose and need a roundoff audit, and public plane-cut helpers lack the full prepared/cancellation/provenance contract of Spiling's current section adapter. None is automatically an all-domain certificate.
+At that historical baseline, available ingredients included bounded patch evaluation/derivatives, positive-weight structural bounds, strict mesh refusal, periodic meshing and prepared Boolean budgets. Sampled curve division, loose native bounds and public plane-cut helpers did not supply Spiling's complete cancellation/provenance or all-domain certificates. The SolidCore adapter likewise qualifies each operation rather than inheriting authority from native labels or candidate construction.
 
 The baseline CLI investigation imported/sectioned the box and refused the rational B-spline fixture at the former importer profile gate. It is historical behavior, not a current support statement or a general NURBS numerical test. Current acceptance belongs in the linked evidence.
 
@@ -73,14 +73,14 @@ No new crate is justified by primitive families. Introduce private modules only 
 | `geometry::kernel` | Immutable native objects, trim/edge-use correspondence, kernel adaptation | RPC/session identity or printer policy |
 | Private `geometry::parametric` | Patch/curve domains, chart transitions, interval evaluation, span subdivision, conservative derivative bounds | Planner roles, storage, alternate solids |
 | Private `geometry::analysis` | Tight directional support bounds, section events, slab fidelity and invariance certificates | Layer recipe selection or manufacturing mutation |
-| `geometry::section` | Native intersections/Boolean adapter, trim classification, oriented closed loops, source witnesses | Polygonized-display slicing or source-face remapping guesses |
+| `geometry::section` | Direct bounded native surface/plane intersections, exact span/root identity, oriented closed loops and independent approximation bounds | Polygonized-display slicing or source-face remapping guesses |
 | `geometry::tessellation` | Trim-aware display approximation/certification and packed mesh preparation | Manufacturing accuracy authority |
 | `core` | Original immutable assets, authoring/undo, durable source/face references | Native caches or numerical capability truth |
 | `manufacturing` | Recipe scheduling, process admission, M/C/D realization, ordinary walls/fill/skin/support; narrow existing finish-certificate dispatch | General source-surface dispatch or kernel object ownership |
 | `engine` | Capture/composition, worker limits, artifact/RPC publication, revision checks | Independent source parsing or planning |
 | CLI / workbench / viewport | Intent/diagnostics, source-face picking, explicit Apply/Compile/export | Geometry classification heuristics, local slicing or repair |
 
-The parametric substrate is private and concrete. Use ordinary functions and existing kernel interfaces; do not export a `SurfacePlugin`, build a second trait hierarchy or serialize native control nets to clients. A stable facade method should correspond to a real consumer query.
+The parametric substrate is private. Shared evaluator interfaces distinguish actual original STEP operators from native chart laws; they are not plugins, another kernel or a serialized expression protocol. `PreparedSolid` owns borrowed source preparation once; raw inspection remains independent of material admission. Source preparation retains realization operands, while actual slab/leaf/union queries and the consumed ledger establish manufacturing authority. A stable facade method corresponds to a real consumer query.
 
 ## 4. Source model, identity and capabilities
 

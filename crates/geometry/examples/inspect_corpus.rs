@@ -5,7 +5,7 @@
 //! Native-only smoke surface. No engine session or occurrence semantics are simulated.
 use serde_json::json;
 use spiling_geometry::{
-    BoundsPolicy, DisplayProfile, GeometryWorkBudget, NativeSection, PlaneMm, import_step,
+    BoundsPolicy, DisplayProfile, GeometryWorkBudget, NativeSection, PlaneMm, from_step_bytes_with_cancel,
     inspect_face, projected_bounds, section, tessellate,
 };
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Instant};
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in paths {
         let bytes = std::fs::read(&path)?;
         let started = Instant::now();
-        let definition = import_step(&bytes, &cancel)?;
+        let definition = from_step_bytes_with_cancel(&bytes, &cancel)?;
         let import_us = started.elapsed().as_micros();
         let started = Instant::now();
         let mesh = tessellate(&definition, DisplayProfile::MeshTrimmedMm005V2, &cancel)?;

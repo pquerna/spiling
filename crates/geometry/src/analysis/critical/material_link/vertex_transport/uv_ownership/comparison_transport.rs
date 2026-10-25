@@ -15,7 +15,7 @@ pub(super) struct GermTransport {
 
 pub(super) const STACK_BYTES: usize =
     std::mem::size_of::<[([f64; 2], u8); MAX_DEPTH as usize + 1]>()
-        + std::mem::size_of::<crate::parametric::PreparedCurveEnclosure<'static>>()
+        + std::mem::size_of::<crate::kernel::source_operand::PreparedOriginalCurve<'static>>()
         + std::mem::size_of::<Vec<f64>>();
 
 /// Certify BOTH literal original endpoint-to-exit germs. The Native joint only
@@ -152,7 +152,7 @@ fn certify_spans(
     index: usize,
     allowance: f64,
     cuts: &[f64],
-    spatial: &crate::parametric::PreparedCurveEnclosure<'_>,
+    spatial: &(impl crate::parametric::CurveEvaluator + ?Sized),
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<Option<GermTransport>, GeometryError> {
@@ -176,7 +176,7 @@ fn certify_spans(
             allowance,
             work,
             cancel,
-            |range, work, cancel| spatial.jet((range[0], range[1]), work, cancel),
+            |range, work, cancel| crate::parametric::curve_enclosure(spatial, (range[0], range[1]), work, cancel),
         )?
         else {
             return Ok(None);
@@ -221,10 +221,10 @@ fn certify_end(
     ) -> Result<CurveEnclosure, GeometryError>,
 ) -> Result<Option<GermTransport>, GeometryError> {
     let proof = domain.original_coedge_correspondence(end.use_.coedge)?;
-    let native_range = proof.native_range();
+    let spatial_range = proof.spatial_range();
     if support[0] >= support[1]
-        || support[0] < native_range[0]
-        || support[1] > native_range[1]
+        || support[0] < spatial_range[0]
+        || support[1] > spatial_range[1]
         || end.delta_t.lo <= 0.0 && end.delta_t.hi >= 0.0
     {
         return Ok(None);
@@ -241,7 +241,7 @@ fn certify_end(
         pending -= 1;
         let (range, depth) = stack[pending];
         let queried = (|| {
-            // t is restricted to the SAME literal native endpoints. The
+            // t is restricted to the SAME literal spatial-provider endpoints. The
             // independently known affine image lies in [0,1]; intersection
             // only removes outward arithmetic spill, never extends a domain.
             let s = Interval {
@@ -264,7 +264,7 @@ fn certify_end(
                     .add(correction.derivative[i])
             });
             let source_s = source.derivative.map(|v| v.mul(end.delta_t));
-            domain.native().face().with_surface(|surface| {
+            { let surface = &domain.surface_operand(); (|| {
                 // The entire straight UV homotopy, not its endpoint samples,
                 // bounds F(completed)-F(original) by the integral first jet.
                 let homotopy_jet = surface_enclosure(surface, uv_box(homotopy), work, cancel)?;
@@ -286,7 +286,7 @@ fn certify_end(
                     position_error_mm,
                     relative_derivative_error,
                 }))
-            })
+            })() }
         })();
         match queried {
             Ok(Some(cell)) => {
@@ -323,33 +323,26 @@ mod properties {
     #[test]
     fn actual_fitting_coefficients_replace_requested_quarter_bound_at_zero_margin() {
         let cancel = AtomicBool::new(false);
-        let definition = crate::import_step(
-            include_bytes!(
-                "../../../../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
-            ),
-            &cancel,
-        )
+        let definition = crate::from_step_bytes_with_cancel(include_bytes!(
+            "../../../../../../../../fixtures/geometry/independent-exporters/occt-tapered-fitting-mm.step"
+        ),
+        &cancel,)
         .unwrap();
-        let original = serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap();
+        let original = format!("{:?}", definition.brep());
         let mut work = GeometryWorkBudget::new(20_000_000);
         let mut incidence =
             SourceEdgeIncidence::new(&definition, MAX_SCRATCH_BYTES, &mut work, &cancel).unwrap();
         incidence
             .prepare_vertices(MAX_SCRATCH_BYTES, &mut work, &cancel)
             .unwrap();
-        let source = OriginalTrimSource::standalone(&definition);
+        let prepared = crate::analysis::prepare_solid(
+            &definition, crate::MAX_PREPARED_SECTION_SOURCE_BYTES, &mut work, &cancel,
+        ).unwrap();
+        let source = prepared.source_view().unwrap().with_vertex_plans(None);
         let allowance = source_allowance(&definition).unwrap();
         let mut vertices = Vec::new();
-        for face in definition.solid.face_iter() {
-            for wire in face.absolute_boundaries() {
-                for edge in wire {
-                    for vertex in [edge.front(), edge.back()] {
-                        if !vertices.contains(&vertex.id()) {
-                            vertices.push(vertex.id());
-                        }
-                    }
-                }
-            }
+        for vertex in incidence.vertices().unwrap() {
+            vertices.push(vertex);
         }
         let mut fresh = 0;
         let mut zero_margin_requested_quarter = 0;
@@ -382,7 +375,7 @@ mod properties {
                     )
                     .unwrap();
                 let scratch = MAX_SCRATCH_BYTES
-                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES + domain.owned_bytes())
+                    .checked_sub(plan.retained_bytes() + CONICAL_STACK_BYTES)
                     .unwrap();
                 let bounds = certify(
                     &domain,
@@ -410,7 +403,7 @@ mod properties {
                     }
                     let range = [end.endpoint.min(end.exit), end.endpoint.max(end.exit)];
                     let native = domain
-                        .original_coedge_jets(end.use_.coedge, range, scratch, &mut work, &cancel)
+                        .original_coedge_jets(end.use_.coedge, range, &mut work, &cancel)
                         .unwrap()
                         .0;
                     let source_s = native.derivative.map(|v| v.mul(end.delta_t));
@@ -440,8 +433,7 @@ mod properties {
                 // Move toward this actual source chart's interior, rather than
                 // leaving a bounded carrier domain and testing an unrelated
                 // parameter/arithmetic error. This is still the SAME allowance.
-                let target = domain
-                    .uv_bounds()
+                let target = domain.uv_domain()
                     .map(|range| Interval::point(range[0] * 0.5 + range[1] * 0.5));
                 let mut excessive = comparison;
                 excessive.correction = std::array::from_fn(|end| {
@@ -464,7 +456,7 @@ mod properties {
             "the original zero-margin/.25 receipt is not an achieved derivative proof"
         );
         assert_eq!(
-            serde_json::to_vec(&definition.solid.boundaries()[0].compress()).unwrap(),
+            format!("{:?}", definition.brep()),
             original,
             "comparison proof must never modify original curve/carrier geometry",
         );
