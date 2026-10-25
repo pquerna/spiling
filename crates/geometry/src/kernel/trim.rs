@@ -5291,7 +5291,11 @@ fn make_original_joint(
     let p = incoming.curve.tensor([ti; 2], 0, work, cancel)?[0];
     let q = outgoing.curve.tensor([to; 2], 0, work, cancel)?[0];
     let endpoints = [[p[0], p[1]], [q[0], q[1]]];
-    let collapsed = exact_uv_endpoint_equal(incoming, ti, outgoing, to, work, cancel)?;
+    // Equal singleton outward enclosures prove actual UV identity. Overlap
+    // or a small interval does not; nonzero physical residuals stay below.
+    let singleton_identity = (0..2).all(|axis| p[axis].is_point() && p[axis] == q[axis]);
+    let collapsed =
+        singleton_identity || exact_uv_endpoint_equal(incoming, ti, outgoing, to, work, cancel)?;
     let zero = collapsed
         && ir.provenance() == OriginalCorrespondenceProvenance::ExactCoefficients
         && or.provenance() == OriginalCorrespondenceProvenance::ExactCoefficients

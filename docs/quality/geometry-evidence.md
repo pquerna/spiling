@@ -204,6 +204,20 @@ Original source operands retain literal coefficients, trim restrictions,
 preferred-master selection and PCurve association order. Source restriction
 preparation must prove a complete correspondence to the actual retained native
 use; endpoint proximity and native labels cannot replace whole-range evidence.
+
+Untrimmed nonperiodic selected PCurve LINEs reuse the finite source-coefficient
+window provider with the edge's captured original vertices. A search cover stays
+in that declared master's gauge; it does not borrow the independently gauged 3D
+reference or generated native UV. Endpoint uniqueness, whole correspondence,
+relative derivatives and chart/joint qualification remain separate obligations.
+Finite authored trims and periodic selectors retain their own branch inventory.
+
+An exactly isolated stationary parameter is not exact vertex coincidence.
+Its nonzero physical source residual remains charged to the source allowance.
+A joint collapses only with coefficient identity or equal singleton outward UV
+enclosures; overlapping or merely small uncertainty boxes are not identity and
+do not erase displacement or correspondence obligations.
+
 Source edge/vertex census checks complete original-use ownership against native
 incidence, including opposed uses, rather than matching stars by coordinates.
 `FACE_OUTER_BOUND` is an explicit outer marker; generic `FACE_BOUND` is not a

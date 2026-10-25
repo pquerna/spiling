@@ -38,6 +38,29 @@ fn available(limit: usize, live: usize) -> Result<usize, GeometryError> {
     limit.checked_sub(live).ok_or_else(capacity)
 }
 
+/// A search cover in the declared master's own gauge, not endpoint incidence
+/// or permission to reuse the spatial reference's parameter values.
+pub(super) fn selected_master_window(
+    source: &OriginalCoedgeSource,
+    pcurve: &solidcraft_step::geom::Pcurve,
+    same_sense: bool,
+    allowance: f64,
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<super::selection::SourceSelection, GeometryError> {
+    let window = window::select_operand(source, pcurve, allowance, remaining, work, cancel)?;
+    Ok(super::selection::SourceSelection {
+        active: window.raw,
+        search: window.raw,
+        declared_endpoints: window.declared_endpoints,
+        endpoint_targets: None,
+        declared_turns: window.declared_turns,
+        periodic: window.period,
+        increasing: same_sense,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum RawEndpoint {
     Literal { value: f64, turns: i32 },

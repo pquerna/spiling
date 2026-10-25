@@ -129,10 +129,49 @@ fn spline_domain(
 
 pub(super) fn select(
     source: &OriginalCoedgeSource,
+    allowance: f64,
+    remaining: usize,
     work: &mut GeometryWorkBudget,
     cancel: &AtomicBool,
 ) -> Result<SourceSelection, GeometryError> {
-    select_curve(&source.spatial_curve, source.same_sense, work, cancel)
+    select_spatial_curve(
+        source,
+        &source.spatial_curve,
+        source.same_sense,
+        allowance,
+        remaining,
+        work,
+        cancel,
+    )
+}
+
+pub(super) fn select_spatial_curve(
+    source: &OriginalCoedgeSource,
+    curve: &Curve,
+    same_sense: bool,
+    allowance: f64,
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<SourceSelection, GeometryError> {
+    // An untrimmed, nonperiodic selected PCurve LINE has no natural spatial
+    // window. Reuse its existing source-coefficient cover, rather than assign
+    // the independently gauged 3D reference's parameters or use native UV.
+    if matches!(curve, Curve::SurfaceCurve { .. }) {
+        if let Some(pcurve) = crate::kernel::source_operand::preferred_source_pcurve(curve)? {
+            if matches!(pcurve.curve.as_ref(), Curve::Line { .. })
+                && crate::kernel::source_operand::original_curve_parameter_period(
+                    curve, work, cancel,
+                )?
+                .is_none()
+            {
+                return super::pcurve::selected_master_window(
+                    source, pcurve, same_sense, allowance, remaining, work, cancel,
+                );
+            }
+        }
+    }
+    select_curve(curve, same_sense, work, cancel)
 }
 
 /// Inventory a literal reference operand in its own raw parameter gauge.

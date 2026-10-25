@@ -284,6 +284,37 @@ pub(super) fn isolate_endpoint(
                 continue;
             }
 
+            // Exact stationarity is weaker than exact vertex coincidence:
+            // a captured vertex may have a nonzero normal source residual.
+            // The whole tube already proves g' > 0. Test reference zero only
+            // as a candidate; a singleton outward g enclosure proves its root.
+            let (candidate, candidate_delta, candidate_g) =
+                if point_g != Interval::point(0.0) && range.contains(0.0) {
+                    let zero = curve.tensor([0.0; 2], 1, work, cancel)?;
+                    let delta = displacement(zero[0], vertex);
+                    (0.0, delta, finite(dot(delta, zero[1]))?)
+                } else {
+                    (midpoint, point_delta, point_g)
+                };
+            if candidate_g == Interval::point(0.0) {
+                let error_mm = distance(candidate_delta)?.hi;
+                if error_mm <= maximum_source_error_mm {
+                    retain(
+                        &mut roots,
+                        EndpointRoot {
+                            parameter: Interval::point(candidate),
+                            tube: range,
+                            exact: Some(candidate),
+                            error_mm,
+                        },
+                        retained_bytes,
+                        work,
+                        cancel,
+                    )?;
+                    continue;
+                }
+            }
+
             let newton = finite(Interval::point(midpoint).sub(point_g.div(derivative)?))?;
             if range.lo < newton.lo && newton.hi < range.hi {
                 // Strict interval Newton inclusion establishes existence as well
@@ -390,6 +421,28 @@ mod tests {
             },
             radius: 2.0,
         }
+    }
+
+    #[test]
+    fn exact_stationary_parameter_preserves_nonzero_source_residual() {
+        let source = circle();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(10_000_000);
+        let range = [-0.2, 0.3];
+        let curve = PreparedOriginalCurve::new(&source, range, BYTES, &mut work, &cancel).unwrap();
+        let vertex = [2.0000001, 0.0, 0.0];
+        let roots =
+            isolate_endpoint(&curve, vertex, range, 1.0e-6, BYTES, &mut work, &cancel).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].enclosure(), Interval::point(0.0));
+        assert_eq!(roots[0].exact_parameter(), Some(0.0));
+        assert!(roots[0].source_error_mm() >= vertex[0] - 2.0);
+        assert!(roots[0].source_error_mm() <= 1.0e-6);
+        assert!(
+            isolate_endpoint(&curve, vertex, range, 1.0e-9, BYTES, &mut work, &cancel,)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

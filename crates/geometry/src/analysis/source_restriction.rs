@@ -125,7 +125,9 @@ impl<'a> OriginalSpatialReference<'a> {
         )? {
             Self::Affine(operator, None)
         } else {
-            let selection = selection::select_curve(curve, sense, work, cancel)?;
+            let selection = selection::select_spatial_curve(
+                source, curve, sense, allowance, available, work, cancel,
+            )?;
             let budget = available
                 .checked_sub(std::mem::size_of::<Self>())
                 .and_then(|n| n.checked_add(std::mem::size_of::<EndpointRestrictedOriginal<'a>>()))
@@ -717,7 +719,7 @@ impl<'a> EndpointRestrictedOriginal<'a> {
             source,
             source.spatial_curve.as_ref(),
             source.same_sense,
-            selection::select(source, work, cancel)?,
+            selection::select(source, allowance, remaining, work, cancel)?,
             reference,
             allowance,
             remaining,
@@ -1567,6 +1569,51 @@ mod tests {
         }
     }
     #[test]
+    fn selected_nonperiodic_pcurve_line_keeps_its_finite_source_restriction() {
+        let definition = crate::from_step_bytes(include_bytes!(
+            "../../../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"
+        ))
+        .unwrap();
+        let source = definition
+            .original_source()
+            .coedges
+            .iter()
+            .find(|source| {
+                let Some(pcurve) =
+                    crate::kernel::source_operand::preferred_source_pcurve(&source.spatial_curve)
+                        .unwrap()
+                else {
+                    return false;
+                };
+                matches!(
+                    pcurve.surface.as_ref(),
+                    solidcraft_step::geom::Surface::Cylinder { .. }
+                ) && matches!(pcurve.curve.as_ref(), Curve::Line { direction, .. }
+                    if direction[0] == 0.0 && direction[1] != 0.0)
+            })
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(2_000_000);
+        let operator =
+            SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
+                .unwrap();
+        for parameter in [0.0, 0.5, 1.0] {
+            let jet = operator
+                .tensor([parameter; 2], 1, &mut work, &cancel)
+                .unwrap();
+            for axis in 0..3 {
+                let expected = source.vertex_points_mm[0][axis] * (1.0 - parameter)
+                    + source.vertex_points_mm[1][axis] * parameter;
+                let error = jet[0][axis].sub(Interval::point(expected));
+                assert!(error.lo.abs().max(error.hi.abs()) < 1.0e-7);
+                let expected_velocity =
+                    source.vertex_points_mm[1][axis] - source.vertex_points_mm[0][axis];
+                let error = jet[1][axis].sub(Interval::point(expected_velocity));
+                assert!(error.lo.abs().max(error.hi.abs()) < 1.0e-7);
+            }
+        }
+    }
+    #[test]
     fn preferred_opposite_pcurve_gauge_keeps_the_declared_3d_half_circle() {
         use solidcraft_step::geom as s;
         use std::sync::Arc;
@@ -1687,59 +1734,55 @@ mod tests {
         }
     }
     #[test]
-    fn selected_rational_circle_keeps_original_knots_and_normalized_cover_distinct() {
-        let definition = crate::analysis::test_source::original_definition(
-            crate::analysis::test_source::circular_prism([0.0, 0.0], 4.0, 3.0),
-        );
+    fn rational_source_knot_keeps_its_normalized_cover_and_original_position() {
+        use spiling_contracts::geometry::StepEntityId;
+        use std::sync::Arc;
+        let record = crate::analysis::test_source::nurbs_cylinder();
+        let edge = &record.edges[0];
+        // Restrict the genuine rational edge, independently of whole-surface
+        // seam admission. No literal CIRCLE or fitted analytic replacement.
+        let source = OriginalCoedgeSource {
+            source_face: StepEntityId(1),
+            bound_id: StepEntityId(2),
+            loop_id: StepEntityId(3),
+            oriented_edge_id: StepEntityId(4),
+            edge_curve_id: StepEntityId(5),
+            curve_id: StepEntityId(6),
+            vertex_ids: [StepEntityId(7), StepEntityId(8)],
+            vertex_points_mm: edge
+                .vertices
+                .map(|index| record.vertices[index as usize].point),
+            forward: true,
+            same_sense: true,
+            spatial_curve: Arc::new(solidcraft_step::write::topology::curve(&edge.curve).unwrap()),
+            pcurves: Vec::new(),
+        };
         let cancel = AtomicBool::new(false);
         let mut work = GeometryWorkBudget::new(4_000_000);
-        let mut inspected = false;
-        for source in &definition.original_source().coedges {
-            let operator =
-                SourceSpatialRestriction::new(source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
-                    .unwrap();
-            if operator.original_knots().is_empty() {
-                continue;
-            }
-            inspected = true;
-            assert_eq!(operator.original_knots().len(), operator.knot_bands().len());
-            assert!(
-                operator
-                    .original_knots()
-                    .windows(2)
-                    .all(|pair| pair[0] < pair[1])
-            );
-            let image = operator
-                .source_parameter_image([0.0, 1.0], &mut work, &cancel)
-                .unwrap()
+        let operator =
+            SourceSpatialRestriction::new(&source, 1.0e-7, 2 * 1024 * 1024, &mut work, &cancel)
                 .unwrap();
-            let endpoints = operator.endpoint_parameters().unwrap();
-            assert!(image.contains_interval(endpoints[0]));
-            assert!(image.contains_interval(endpoints[1]));
-            for (index, (&knot, band)) in operator
-                .original_knots()
-                .iter()
-                .zip(operator.knot_bands())
-                .enumerate()
-            {
-                assert!(
-                    operator
-                        .source_parameter_image([band.lo, band.hi], &mut work, &cancel)
-                        .unwrap()
-                        .unwrap()
-                        .contains(knot)
-                );
-                let jet = operator
-                    .original_knot_jet(index, 0, &mut work, &cancel)
-                    .unwrap();
-                assert!(
-                    jet[0]
-                        .iter()
-                        .all(|coordinate| coordinate.lo.is_finite() && coordinate.hi.is_finite())
-                );
-            }
+        let index = operator
+            .original_knots()
+            .iter()
+            .position(|&knot| knot == 1.0)
+            .unwrap();
+        let band = operator.knot_bands()[index];
+        assert!(band.contains(0.5));
+        assert!(
+            operator
+                .source_parameter_image([band.lo, band.hi], &mut work, &cancel)
+                .unwrap()
+                .unwrap()
+                .contains(1.0)
+        );
+        let jet = operator
+            .original_knot_jet(index, 0, &mut work, &cancel)
+            .unwrap();
+        for (coordinate, expected) in jet[0].iter().zip([0.0, 5.0, 0.0]) {
+            let residual = coordinate.sub(Interval::point(expected));
+            assert!(residual.lo.abs().max(residual.hi.abs()) < 1.0e-7);
         }
-        assert!(inspected);
     }
     #[test]
     fn original_line_restriction_retains_nonrepresentable_source_parameters() {

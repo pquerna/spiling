@@ -203,6 +203,21 @@ pub(super) fn select(
             "original PCURVE does not name this original face carrier",
         ));
     }
+    select_operand(coedge, &pcurve.operands, allowance, remaining, work, cancel)
+}
+
+/// The selected spatial master can belong to another declared face. Its finite
+/// cover uses that actual operand and the edge's captured source vertices;
+/// face-specific PCurve ownership remains checked by `select`.
+pub(super) fn select_operand(
+    coedge: &OriginalCoedgeSource,
+    pcurve: &solidcraft_step::geom::Pcurve,
+    allowance: f64,
+    remaining: usize,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<PcurveWindow, GeometryError> {
+    work.charge(1, cancel)?;
     if !allowance.is_finite() || allowance < 0.0 {
         return Err(unavailable(
             "original PCURVE allowance is not finite and nonnegative",
@@ -210,8 +225,8 @@ pub(super) fn select(
     }
     let fixed = std::mem::size_of::<PcurveWindow>();
     let available = remaining.checked_sub(fixed).ok_or_else(capacity)?;
-    let curve = pcurve.operands.curve.as_ref();
-    let (carrier, natural) = carrier_domain(&pcurve.operands.surface, work, cancel)?;
+    let curve = pcurve.curve.as_ref();
+    let (carrier, natural) = carrier_domain(&pcurve.surface, work, cancel)?;
     let (raw, period, declared_endpoints, declared_turns) = if let Curve::Line {
         origin,
         direction,
@@ -306,13 +321,8 @@ pub(super) fn select(
             // Evaluate the actual affine S(gamma) law at raw zero. This is a
             // coefficient reference point, not an arbitrary search interval.
             let uv = [[origin[0]; 2], [origin[1]; 2]];
-            let surface = PreparedOriginalSurface::new(
-                &pcurve.operands.surface,
-                uv,
-                available,
-                work,
-                cancel,
-            )?;
+            let surface =
+                PreparedOriginalSurface::new(&pcurve.surface, uv, available, work, cancel)?;
             let jet = surface.evaluate_order(uv, 1, work, cancel)?;
             let velocity =
                 std::array::from_fn(|i| jet[1][0][i].mul(slope[0]).add(jet[0][1][i].mul(slope[1])));
@@ -368,7 +378,7 @@ pub(super) fn select(
         .checked_sub(chart.retained_bytes())
         .ok_or_else(capacity)?;
     PreparedOriginalSurface::new(
-        &pcurve.operands.surface,
+        &pcurve.surface,
         surface_domain,
         surface_budget,
         work,
