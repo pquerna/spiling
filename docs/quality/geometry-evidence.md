@@ -499,10 +499,12 @@ Inspect `DefinitionDisplay` as well as the command status: an explicit unavailab
 display is not proof of a working mesh. The CLI validates transferred mesh and
 section payloads; raw inspection does not qualify manufacturing.
 
-The broader fitting/housing scene uses actual rendered-interior pointer targeting.
-Native source-face picking is exercised on the local AMD/CEF surface; the next
-whole-scene section still reaches the cumulative geometry-work cap. Picking does
-not qualify that native query or the complete scene workflow:
+The fitting/housing scene exercises shared-definition instances, actual rendered
+native-face picking, world section overlays, cancellation/resume and engine/window
+lifecycle on the local AMD/CEF surface. Raw section jobs prepare the existing
+`PreparedSectionSource` once per definition, not unused manufacturing-material
+charts and source-vertex plans. Native correspondence, fresh roots/loops and the
+unchanged shared work/source/output caps remain independent of material admission:
 
 ```sh
 node tools/smoke-desktop.mjs --executable "$PWD/target/debug/spiling-desktop" \

@@ -418,8 +418,10 @@ The default native box also exercises the actual local AMD/CEF production panel:
 physical native-face picking, consumed maximum-width Apply/Undo/Redo/recompile,
 fresh actual-program report/preview, export/save and source-deleted fresh read-only
 reopen. Historical artifacts do not regain fresh authority through Undo.
-This bounded workbench result is not qualification of the broader multi-part
-geometry section, arbitrary GPU/platforms, packaging or physical deposition.
+The fitting/housing scene's native picking, world section and lifecycle have their
+own [geometry qualification](geometry-evidence.md#minimal-user-flows). Neither
+bounded workbench result qualifies arbitrary GPUs/platforms, packaging or physical
+deposition.
 
 The tapered-fitting CLI uses the same source/query authority and independent
 replay, not a fitting-specific planner. A geometry-only restored scene may

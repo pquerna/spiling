@@ -18,7 +18,7 @@ use spiling_core::{
 };
 use spiling_geometry::{
     Definition, GeometryWorkBudget, MAX_PREPARED_SECTION_BYTES, MAX_PREPARED_SECTION_SOURCE_BYTES,
-    MeshArtifact, PreparedSolid,
+    MeshArtifact, PreparedSectionSource,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -878,7 +878,7 @@ fn section(
     let mut builder = SectionChunkBuilder::new(session, artifact, revision, plane)?;
     let mut work = GeometryWorkBudget::new(50_000_000);
     let source_limit = MAX_PREPARED_SECTION_SOURCE_BYTES;
-    let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSolid<'_>>)>::new();
+    let mut sources = BTreeMap::<DefinitionId, (usize, Option<PreparedSectionSource<'_>>)>::new();
     for occurrence in &occurrences {
         sources
             .entry(occurrence.definition_id.clone())
@@ -898,7 +898,9 @@ fn section(
             .get_mut(&occurrence.definition_id)
             .expect("section occurrence was counted");
         if source.is_none() {
-            let prepared = spiling_geometry::prepare_solid(
+            // Raw sections need native coefficient correspondence, not material
+            // charts/vertex plans or their independent manufacturing admission.
+            let prepared = spiling_geometry::prepare_section_source(
                 &definition.definition,
                 (source_limit - prepared_bytes).min(
                     remaining_section_capacity(prepared_bytes, builder.retained_bytes())?
@@ -910,8 +912,8 @@ fn section(
                             )
                         })?,
                 ),
-                &mut work,
                 cancel,
+                &mut work,
             )?;
             prepared_bytes = prepared_bytes
                 .checked_add(prepared.retained_bytes())
