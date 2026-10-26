@@ -398,12 +398,16 @@ SolidCore parity. The unchanged original fixtures and operator workflows remain
 the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
 
-Prepared native housing sections preserve the pocket and material under plane
-reversal through the rounded cap. The unchanged ordinary housing exercises
-SolidCore placement, Preflight, Compile, independent saved-byte Verify/export/save
-and source-deleted fresh-engine recovery under the frozen operator policies.
-This does not qualify general STEP, the plate/H1 or fitting/bracket journeys.
-Source metrics, material/void topology and the union guard remain independent.
+Prepared native housing sections preserve material before/after the corner event
+and the pocket through the rounded cap under plane reversal. A necessary root
+overcover is not existence authority: a face without trim incidences is empty
+only after complete whole-coefficient exclusion, never from missing crossings.
+The unchanged ordinary housing, source-zoned centered physical plate and paired
+fine/genuine combined H1 exercise SolidCore placement, Preflight, Compile,
+independent saved-byte Verify/export/save and byte-identical source-deleted
+fresh-engine recovery. This does not qualify general STEP, fitting/bracket or
+affected workbench journeys. Source metrics, material/void topology and the
+union guard remain independent.
 
 Standalone raw inspection retains whole-coedge correspondence-work refusals,
 including the housing upper cap, tapered fitting and selected cylinder/bracket

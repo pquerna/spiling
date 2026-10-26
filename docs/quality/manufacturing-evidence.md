@@ -13,10 +13,11 @@ executable [contracts](../../crates/contracts/src/manufacturing/mod.rs) and
 [native-material contract](../adr/004-native-geometry-parity.md) define authority.
 
 The **SolidCore development cutover is not general manufacturing parity**.
-Native box/protected-bore and unchanged ordinary rounded-housing journeys have
-real CLI evidence through placement, Preflight, Compile, fresh saved-byte
-verification/export and source-deleted recovery. This does not requalify the
-zoned plate, genuine H1, fitting, bracket or broader mechanical-part journeys.
+Native box/protected-bore, unchanged ordinary rounded housing, source-zoned
+centered physical plate and paired fine/genuine combined H1 journeys have real
+CLI evidence through placement, Preflight, Compile, independent saved-byte
+verification/export/save and source-deleted recovery. This does not qualify
+fitting, bracket, affected workbench or broader mechanical-part journeys.
 Missing declared PCurves may use a checked inverse of the actual original plane
 or admitted cylinder family; generated native UV curves and failed declared
 associations cannot substitute. Historical Monstertruck evidence below retains
@@ -381,12 +382,22 @@ The SolidCore software controls include native box/protected bore with
 Verify/export/save and source-deleted fresh-engine recovery are exercised.
 Recovered program/replay bytes remain identical; box/bore outputs also preserve
 the preceding main programs. Housing uses the existing variable-radius source
-sweep, complete local native section charts and conservative boundary-contact
-classification without increasing source/error/work limits. These constructions
-do not waive source metrics, void topology or the union gate.
+sweep, complete local native section charts, conservative boundary-contact
+classification and complete coefficient exclusion of potential carrier roots
+without increasing source/error/work limits. A necessary zero-set overcover
+does not establish that a root exists. These constructions do not waive source
+metrics, void topology or the union gate.
+
+The source-zoned ordinary job retains lower0.20/upper0.60 and the centered0.23mm
+plate at sourceZ5.03. Independent replay checks its actual slab intervals,
+protected pocket, lower anchors, upper landing and separate wall attachment.
+Paired H1 exercises genuine coarse SparseFill and Bridge, fine walls/skins and
+separator, native inner-material and actual-anchor/core-bond obligations.
+Both jobs retain byte-identical fresh source-deleted recovery; CombineEligible
+selection or an all-fine result alone is not H1 qualification.
 
 Fitting closed-source metrics, original spline-carrier gauge/correspondence,
-closed-spline seams, the explicit plate and genuine H1 remain cutover obligations.
+closed-spline seams, original bracket and affected workbench remain obligations.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader
@@ -416,11 +427,11 @@ process edits, then author the lighter lower0.20/upper0.60 interior and centered
 plate without changing the ordinary axes:
 
 ```sh
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=12 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RAYON_NUM_THREADS=1 target/debug/spiling-cli project create NEW_PROJECT \
   --import OWNED_SOURCE.step --intent fixtures/manufacturing/housing-ordinary.intent.json --center-on-bed 1 \
   --process-set 1 definition 0.60 \
   --process-set-box 1 definition -1 -1 -1 25 19 5.03 0.20 horizontal-diaphragm:0.23 \
-  --preflight --compile --verify --manufacturing-out NEW_EXPORT --replay-out NEW_REPLAY.splr \
+  --preflight --compile --verify --manufacturing-out NEW_EXPORT --replay-out NEW_REPLAY.splr --save \
   --engine target/debug/spiling-engine
 ```
 

@@ -276,7 +276,7 @@ fn unchanged_housing_near_floor_preserves_trimmed_material_under_plane_reversal(
     }
 }
 #[test]
-fn unchanged_housing_pocket_and_rounded_cap_preserve_hole_under_plane_reversal() {
+fn unchanged_housing_corner_pocket_and_cap_preserve_material_under_plane_reversal() {
     let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
     let cancel = AtomicBool::new(false);
     let mut work = GeometryWorkBudget::new(512_000_000);
@@ -287,14 +287,24 @@ fn unchanged_housing_pocket_and_rounded_cap_preserve_hole_under_plane_reversal()
         &mut work,
     )
     .unwrap();
-    for height in [6.1_f64, 8.05, 9.4] {
-        let radius = if height > 8.0 {
+    // The physical-plate schedule cuts just above the original corner event.
+    // Keep the actual prepared consumer and its unchanged cumulative allowance.
+    for (height, holes) in [
+        (1.98485_f64, 0),
+        (2.01515, 0),
+        (6.1, 1),
+        (8.05, 1),
+        (9.4, 1),
+    ] {
+        let radius = if height < 2.0 {
+            (4.0 - (2.0 - height).powi(2)).sqrt()
+        } else if height > 8.0 {
             (4.0 - (height - 8.0).powi(2)).sqrt()
         } else {
             2.0
         };
-        let expected = 280.0 + 68.0 * radius + PI * radius * radius - 9.0 * PI;
-        let perimeter = 68.0 + 2.0 * PI * radius + 6.0 * PI;
+        let expected = 280.0 + 68.0 * radius + PI * radius * radius - holes as f64 * 9.0 * PI;
+        let perimeter = 68.0 + 2.0 * PI * radius + holes as f64 * 6.0 * PI;
         for normal_z in [1.0, -1.0] {
             let result = prepared
                 .section_with_byte_limit(
@@ -308,14 +318,14 @@ fn unchanged_housing_pocket_and_rounded_cap_preserve_hole_under_plane_reversal()
                 )
                 .unwrap();
             assert_provenance(&definition, &result);
-            assert_eq!(result.loops().len(), 2);
+            assert_eq!(result.loops().len(), 1 + holes);
             assert_eq!(
                 result
                     .loops()
                     .iter()
                     .filter(|boundary| boundary.is_hole)
                     .count(),
-                1
+                holes
             );
             let material_area: f64 = result
                 .loops()

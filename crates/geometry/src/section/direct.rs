@@ -331,8 +331,14 @@ pub(super) fn intersect(
             event.crossing *= dependent_sign * if axis == 1 { 1 } else { -1 };
         }
         if events.is_empty() {
+            // A necessary root overcover is not root-existence authority. Before
+            // requiring trim incidences, try complete coefficient exclusion at
+            // finer parameter resolution; absent crossings alone grants nothing.
+            if exclude_carrier_roots(surface, root_domain, scale, plane, 0, work, cancel)? {
+                continue;
+            }
             return Err(indeterminate(format!(
-                "native section face={ordinal} has an interior/periodic plane root but no certified trim incidences"
+                "native section face={ordinal} cannot exclude an interior/periodic plane root without certified trim incidences: chart={domain:?}, root_cover={root_domain:?}, dependent_axis={axis}"
             )));
         }
         let independent = 1 - axis;
@@ -481,6 +487,42 @@ pub(super) fn intersect(
         ));
     }
     Ok(result)
+}
+
+/// Empty only after every possible carrier root is excluded by whole
+/// coefficients. No root sample, absent incidence or subdivision limit grants
+/// emptiness. The same finite depth and cumulative work policy remain in force.
+fn exclude_carrier_roots(
+    surface: &Surface,
+    uv: [[f64; 2]; 2],
+    scale: f64,
+    plane: PlaneMm,
+    depth: u8,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<bool, GeometryError> {
+    work.charge(1, cancel)?;
+    let position = p::surface_position_enclosure(surface, uv, work, cancel)?
+        .map(|value| value.mul(Interval::point(scale)));
+    if sign(functional(position, plane)) != 0 {
+        return Ok(true);
+    }
+    if depth >= 16 {
+        return Ok(false);
+    }
+    let axis = usize::from(depth % 2 != 0);
+    let middle = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+    if middle <= uv[axis][0] || middle >= uv[axis][1] {
+        return Ok(false);
+    }
+    let mut left = uv;
+    left[axis][1] = middle;
+    let mut right = uv;
+    right[axis][0] = middle;
+    Ok(
+        exclude_carrier_roots(surface, left, scale, plane, depth + 1, work, cancel)?
+            && exclude_carrier_roots(surface, right, scale, plane, depth + 1, work, cancel)?,
+    )
 }
 
 /// Uniform dependent derivative proves no hidden closed component, tangency or
