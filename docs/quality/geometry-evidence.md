@@ -160,6 +160,15 @@ boundary, so only `t` needs adaptive search. Feasible boundary/apex witnesses
 tighten achieved endpoints without clipping the complete original comparison
 inventory or changing the selected G. They assert no global Original-F/G distance.
 
+Central-ribbon endpoint witnesses bind the same definition/coedge, both frozen
+endpoint-germ cuts and an admitted owned UV embedding. Only the strictly retained
+central interval at zero transverse coordinate supplies actual C3D material
+points. Whole-original-edge overcovers, unused endpoint portions and position-only
+correspondence cannot establish feasible contact. Missing optional ownership
+supplies no witness; work exhaustion and cancellation remain terminal. Witnesses
+tighten only feasible endpoints, never the outward RANGE/BASE, displacement,
+physical source error or query allowance.
+
 [`tessellation/mod.rs`](../../crates/geometry/src/tessellation/mod.rs) obtains
 bounded SolidCore mesh candidates. Its `audit` and `trim` modules independently
 check whole-triangle carriers, normals, native trim/triangle coverage and packed

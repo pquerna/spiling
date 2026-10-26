@@ -352,6 +352,54 @@ pub(crate) fn source_transport_supports(
                     "source support collar has a different original spatial/native binding",
                 ));
             }
+            // Full-edge binding above authorizes only the conservative RANGE.
+            // Feasible M points require this exact use's retained central ribbon,
+            // between BOTH frozen source-only corner exits, to be boundary-owned.
+            let witness_owner_bytes =
+                std::mem::size_of::<Option<([f64; 2], OwnedUvRibbon<'_, '_>)>>();
+            let witness_owner = if scalar_refinement.is_some() {
+                let ownership: Result<_, GeometryError> = (|| {
+                    let Some(plans) = source.vertex_plans() else {
+                        return Ok(None);
+                    };
+                    let spatial_vertices = [false, true]
+                        .map(|high| edge.vertices[binding.native_endpoint_index(high)]);
+                    let Some(central) = plans.central_spatial_range(
+                        definition,
+                        edge_use.edge,
+                        spatial_vertices,
+                        collar.range,
+                        work,
+                        cancel,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    let scratch = working
+                        .checked_sub(witness_owner_bytes)
+                        .and_then(|bytes| bytes.checked_sub(UV_EMBEDDING_STACK_BYTES))
+                        .ok_or_else(resource)?;
+                    Ok(collar
+                        .owned_embedding(central, scratch, work, cancel)?
+                        .map(|embedding| (central, embedding)))
+                })();
+                match ownership {
+                    Ok(owner) => owner,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            GeometryErrorCode::ResourceLimit | GeometryErrorCode::Cancelled
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    // Optional ownership failure grants no feasible point.
+                    // In particular there is no full-original-range fallback.
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             let before = work.consumed();
             let crate::kernel::PreparedTrimSurface::Original(surface) = domain.surface_operand()
             else {
@@ -359,8 +407,11 @@ pub(crate) fn source_transport_supports(
                     "source support lost its captured original coefficient carrier",
                 ));
             };
+            let curve_working = working
+                .checked_sub(witness_owner_bytes)
+                .ok_or_else(resource)?;
             domain.with_original_spatial_curve(
-                use_.coedge, working, work, cancel,
+                use_.coedge, curve_working, work, cancel,
                 |prepared, work, cancel| {
                     // The selected source provider owns this gauge and its literal
                     // coefficients. Native edge intervals above bind identity only.
@@ -397,11 +448,44 @@ pub(crate) fn source_transport_supports(
                             }
                             let scalar_scratch = available.checked_sub(output_bytes(&output))
                                 .and_then(|bytes| bytes.checked_sub(EVALUATION_SCRATCH_BYTES))
+                                .and_then(|bytes| bytes.checked_sub(witness_owner_bytes))
                                 .ok_or_else(resource)?;
                             let scalar_base = collar_scalar_support(&collar, surface, range, direction,
                                 scalar_refinement, scalar_scratch, work, cancel)?;
                             let scalar_delta = mul(Interval { lo: 0.0, hi: 1.0 }, dot(direction, displacement));
                             let scalar_corrected = add(scalar_base, scalar_delta);
+                            let realized_endpoint_witnesses =
+                                if let (Some((central, embedding)), Some((_, tolerance))) =
+                                    (&witness_owner, scalar_refinement)
+                                {
+                                    let retained = [range[0].max(central[0]), range[1].min(central[1])];
+                                    if retained[0] < retained[1]
+                                        && embedding.covers(&collar, retained, [0.0, 0.0])
+                                    {
+                                        // At across=0 the actual owned G equals
+                                        // its original C3D law. Search only the
+                                        // retained, coefficient-clipped interval;
+                                        // unused original endpoints are not M.
+                                        let bounds = crate::analysis::bounds::source_recipe_curve_bounds(
+                                            retained, tolerance, scalar_scratch, work, cancel,
+                                            |part, work, cancel, _| {
+                                                let curve = crate::parametric::curve_enclosure(
+                                                    prepared, (part[0], part[1]), work, cancel,
+                                                )?;
+                                                let middle = part[0] * 0.5 + part[1] * 0.5;
+                                                let point = crate::parametric::curve_enclosure(
+                                                    prepared, (middle, middle), work, cancel,
+                                                )?;
+                                                Ok((dot(direction, curve.position), dot(direction, point.position)))
+                                            },
+                                        )?;
+                                        Some([bounds.minimum[1], bounds.maximum[0]])
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
                             // Retain the complete lambda homotopy, including raw and
                             // corrected images at both CLOSED height cuts.
                             let support = SourceTransportSupport {
@@ -410,10 +494,11 @@ pub(crate) fn source_transport_supports(
                                 corrected_interval: [scalar_corrected.lo, scalar_corrected.hi],
                                 displacement_interval: [scalar_delta.lo, scalar_delta.hi],
                                 realized_witness_interval: None,
-                                realized_endpoint_witnesses: None,
+                                realized_endpoint_witnesses,
                                 source_error_mm: error,
                             };
                             let output_limit = available.checked_sub(EVALUATION_SCRATCH_BYTES)
+                                .and_then(|bytes| bytes.checked_sub(witness_owner_bytes))
                                 .ok_or_else(resource)?;
                             push(&mut output, support, output_limit)
                         })();

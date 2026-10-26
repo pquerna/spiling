@@ -194,6 +194,41 @@ impl<'d> PreparedSourceVertexPlans<'d> {
         Ok(())
     }
 
+    /// Read the two frozen source-only endpoint cuts in the original spatial
+    /// gauge. This partitions the selected recipe; it does NOT prove that a
+    /// face-side ribbon is retained material. The caller must admit ownership.
+    pub(in crate::analysis::critical::material_link) fn central_spatial_range(
+        &self,
+        definition: &Definition,
+        edge: EdgeId,
+        spatial_vertices: [VertexId; 2],
+        original: [f64; 2],
+        work: &mut GeometryWorkBudget,
+        cancel: &AtomicBool,
+    ) -> Result<Option<[f64; 2]>, GeometryError> {
+        self.validate_source(definition, work, cancel)?;
+        let mut exits = [None; 2];
+        for (index, vertex) in spatial_vertices.into_iter().enumerate() {
+            let plan = self.plan(definition, vertex, work, cancel)?;
+            plan.visit_spatial_exits(work, cancel, &mut |found, high, parameter, work| {
+                work.charge(1, cancel)?;
+                if found != edge || usize::from(high) != index {
+                    return Ok(());
+                }
+                if !parameter.is_finite()
+                    || exits[index].is_some_and(|previous| previous != parameter)
+                {
+                    return Err(refusal(
+                        "frozen source endpoint recipes disagree on their spatial exit",
+                    ));
+                }
+                exits[index] = Some(parameter);
+                Ok(())
+            })?;
+        }
+        Ok(strict_central_range(original, exits))
+    }
+
     pub(in crate::analysis::critical::material_link) fn validate_source(
         &self,
         definition: &Definition,
@@ -235,6 +270,20 @@ impl<'d> PreparedSourceVertexPlans<'d> {
             "prepared source vertex inventory has no matching original vertex",
         ))
     }
+}
+
+fn strict_central_range(original: [f64; 2], exits: [Option<f64>; 2]) -> Option<[f64; 2]> {
+    let [Some(front), Some(back)] = exits else {
+        return None;
+    };
+    (original
+        .into_iter()
+        .chain([front, back])
+        .all(f64::is_finite)
+        && original[0] < front
+        && front < back
+        && back < original[1])
+        .then_some([front, back])
 }
 
 /// A retained plan has already been charged at its source owner; a query-local
@@ -279,5 +328,36 @@ impl<'s, 'd> SourceVertexPlan<'s, 'd> {
             Self::Retained(_) => 0,
             Self::Local(plan) => plan.retained_bytes(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strict_central_range;
+
+    #[test]
+    fn frozen_central_range_requires_both_strict_source_endpoint_cuts() {
+        assert_eq!(
+            strict_central_range([0.0, 1.0], [Some(0.1), Some(0.9)]),
+            Some([0.1, 0.9])
+        );
+        for exits in [
+            [None, Some(0.9)],
+            [Some(0.1), None],
+            [Some(0.0), Some(0.9)],
+            [Some(0.1), Some(1.0)],
+            [Some(-0.1), Some(0.9)],
+            [Some(0.1), Some(1.1)],
+            [Some(0.9), Some(0.1)],
+            [Some(0.5), Some(0.5)],
+            [Some(f64::NAN), Some(0.9)],
+            [Some(0.1), Some(f64::INFINITY)],
+        ] {
+            assert_eq!(strict_central_range([0.0, 1.0], exits), None);
+        }
+        assert_eq!(
+            strict_central_range([f64::NEG_INFINITY, 1.0], [Some(0.1), Some(0.9)]),
+            None
+        );
     }
 }
