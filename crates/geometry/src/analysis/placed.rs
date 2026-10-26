@@ -2118,7 +2118,7 @@ fn certify_plane_homotopy(
 /// covector is pulled back; no assumed quaternion inverse transforms points.
 /// Stored output points remain actual transformed native intersection points.
 pub(crate) fn section_placed_with_work(
-    definition: &Definition,
+    source: &crate::section::PreparedSectionSource<'_>,
     pose: RigidPoseMm,
     plane: PlaneMm,
     query_byte_limit: u32,
@@ -2126,6 +2126,7 @@ pub(crate) fn section_placed_with_work(
     cancel: &AtomicBool,
 ) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
+    let definition = source.definition();
     let query_byte_limit = query_byte_limit.min(crate::MAX_PREPARED_SECTION_BYTES as u32);
     plane.validate()?;
     let matrix = rotation(pose)?;
@@ -2136,8 +2137,7 @@ pub(crate) fn section_placed_with_work(
         maximum_chord_error_mm: SECTION_SAMPLING_TOLERANCE_MM,
         maximum_plane_error_mm: SECTION_PLANE_TOLERANCE_MM,
     };
-    let mut section =
-        crate::section::section_for_query(definition, &query, cancel, query_byte_limit, work)?;
+    let mut section = source.section_for_query(&query, cancel, query_byte_limit, work)?;
     let declared_plane = plane.normalized()?;
     let declared_frame = PlaneFrameMm::from_plane(declared_plane)?;
     let declared_functional = plane_functional(matrix, pose, declared_plane)?;
@@ -2721,6 +2721,13 @@ mod tests {
         )
         .unwrap();
         let mut work = GeometryWorkBudget::new(40_000_000);
+        let source = crate::prepare_section_source(
+            &definition,
+            crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+            &cancel,
+            &mut work,
+        )
+        .unwrap();
         let pose = RigidPoseMm {
             translation_mm: [13.0, -7.0, 9.0],
             rotation_xyzw: [0.2, -0.3, 0.1, 0.86_f64.sqrt()],
@@ -2730,7 +2737,7 @@ mod tests {
             normal: [1.0, 2.0, 3.0],
         };
         let first = section_placed_with_work(
-            &definition,
+            &source,
             pose,
             plane,
             spiling_contracts::geometry::MAX_SECTION_BYTES,
@@ -2739,7 +2746,7 @@ mod tests {
         )
         .unwrap();
         let second = section_placed_with_work(
-            &definition,
+            &source,
             pose,
             plane,
             spiling_contracts::geometry::MAX_SECTION_BYTES,

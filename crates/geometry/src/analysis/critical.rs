@@ -555,6 +555,40 @@ fn normal(jet: &SurfaceEnclosure, orientation: bool) -> [Interval; 3] {
     let n = cross(jet.du, jet.dv);
     if orientation { n } else { n.map(Interval::neg) }
 }
+
+/// Oriented carrier normal with independent complete source-pole qualification.
+/// A spherical chart's parameter cross product collapses at its pole; the
+/// already-qualified affine sphere carrier still has a nonsingular normal.
+/// This grants neither trim membership nor constructed-material incidence.
+pub(in crate::analysis) fn qualified_face_normal(
+    surface: &dyn SurfaceEvaluator,
+    domain: &PreparedFaceTrimDomain<'_>,
+    uv: [[f64; 2]; 2],
+    position: Option<[Interval; 3]>,
+    work: &mut GeometryWorkBudget,
+    cancel: &AtomicBool,
+) -> Result<[Interval; 3], GeometryError> {
+    if let Some(chart) = source_chart::SphereChart::new(surface, domain, work, cancel)? {
+        let position = match position {
+            Some(position) => position,
+            None => crate::parametric::surface_position_enclosure(surface, uv, work, cancel)?,
+        };
+        let normal = chart.normal(position)?;
+        if length(normal)?.lo > 0.0 {
+            return Ok(normal);
+        }
+        return Err(GeometryError::new(
+            GeometryErrorCode::AnalysisIndeterminate,
+            "qualified source sphere normal has no nonsingular enclosure",
+        ));
+    }
+    let normal = crate::parametric::surface_geometric_normal_enclosure(surface, uv, work, cancel)?;
+    Ok(if domain.orientation() {
+        normal
+    } else {
+        normal.map(Interval::neg)
+    })
+}
 fn overlaps(height: Interval, range: [f64; 2]) -> bool {
     height.lo <= range[1] && height.hi >= range[0]
 }

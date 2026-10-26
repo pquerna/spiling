@@ -81,7 +81,7 @@ specified by the [RFC](../adr/004-native-geometry-parity.md) and
 | Owner / operation | Invariant and navigation |
 | --- | --- |
 | `PreparedSolid` / `prepare_solid` | [`analysis/material_source.rs`](../../crates/geometry/src/analysis/material_source.rs): one definition-borrowed owner for original domains, source-vertex plans and query preparation. No promotion to a second material owner or native Boolean seed phase. |
-| `PreparedSectionSource` | Raw native inspection wrapper in the facade; [`section/mod.rs`](../../crates/geometry/src/section/mod.rs) constructs direct native surface/plane intersection graphs. Raw inspection does not require material admission. |
+| `PreparedSectionSource` | Definition-borrowed raw inspection owner in [`section/mod.rs`](../../crates/geometry/src/section/mod.rs), retained by `PreparedSolid`; direct native surface/plane graphs do not require original-material admission. |
 | Placed queries | [`analysis/placed.rs`](../../crates/geometry/src/analysis/placed.rs): actual accepted quaternion-polynomial transforms, not an assumed exactly orthogonal transpose. |
 
 `NativeSection` in the facade carries plane/frame, original-face lineage and
@@ -102,6 +102,19 @@ secant slope. This produces no source-relative tangent receipt. Chart/spatial
 roots still require independent complete inventories, ordered bijection and
 actual endpoint-gap checks. Original-source calibration retains its stronger
 relative-tangent contract and cannot consume the weaker native position proof.
+
+The prepared section owner retains successful whole-coedge native position
+correspondence proofs by immutable definition/edge-use and admitted error bound.
+Only an equal or looser allowance reuses them; errors and partial proofs do not.
+Actual vector capacity is admitted and reported in retained bytes. Native chart
+validation, plane-specific roots, ordered crossings, endpoint gaps, section
+sampling and cancellation remain fresh. Standalone inspection uses the same
+algorithm without retained proofs; no process-global or persistent cache is added.
+
+Graph isolation contracts each transverse search leaf to a necessary zero-set
+enclosure while retaining conservative endpoint slack. The midpoint is not an
+existence witness. Closed knot coverage, final whole-hull derivative direction
+and whole-independent-interval root existence remain mandatory.
 
 Raw section success does not establish source-material occupancy. Material slabs
 bind their actual reference to original-domain analysis, placed-world proof and
@@ -262,6 +275,13 @@ must never be converted into display unavailability.
   original relative-cut side. The native joint is not padded. Strict outward
   world normals can bound one material-facing crossing shadow, not regular
   boundary speed; target selection and retained cells use that same shadow.
+  At a spherical parameter pole, an independently qualified original sphere
+  chart can supply the oriented nonsingular carrier normal. Literal coefficients,
+  actual source joints and their complete strips qualify the chart; a sphere
+  label or radial fit cannot. This normal grants no trim, constructed-material,
+  vertex-link or height-continuation authority. An already sealed ribbon
+  embedding may exclude its own zero-margin original boundary only within that
+  same map and parameter scope; foreign boundaries retain independent exclusion.
 - **Final composition:** [`analysis/joint.rs`](../../crates/geometry/src/analysis/joint.rs)
   owns source leaves, union captures and `NativeUnionBindingLedger`. Receipts
   bind source/realization, occurrence, pose, interval/reference, policy and actual
@@ -361,6 +381,17 @@ Monstertruck fitting/housing CLI and hardware-workbench journeys do not establis
 SolidCore parity. The unchanged original fixtures and operator workflows remain
 the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
+
+Rounded-housing raw sections and incoming cap incidence have bounded native
+coverage, but complete ordinary-housing manufacturing still refuses at the
+nonplanar source-vertex critical band around Z=2 mm. A closed-source shape bound
+does not discharge joined height-continuation or actual coface/root incidence.
+The union guard remains required; no singleton waiver is available.
+
+The raw section matrix also retains unresolved correspondence-work refusals for
+the tapered fitting and selected cylinder/bracket cuts under its existing work
+allowance. Those positives are not qualified by nearby successful sections;
+their tests and limits remain unchanged.
 
 The workspace has no Monstertruck runtime, development, test or tooling dependency.
 Retained historical STEP provenance may name that producer; the data is not a

@@ -3632,8 +3632,13 @@ fn critical_face_boundary_star(
                 "critical-strip necessary-root contraction",
             )
         })?;
-        let mut normal = match crate::parametric::surface_geometric_normal_enclosure(
-            surface, strip, work, cancel,
+        let normal = match super::critical::qualified_face_normal(
+            surface,
+            domain,
+            strip,
+            Some(jet.position),
+            work,
+            cancel,
         ) {
             Ok(normal) => normal,
             Err(error)
@@ -3656,9 +3661,6 @@ fn critical_face_boundary_star(
         let Some(root) = root else {
             return Ok(Some(None));
         };
-        if !domain.orientation() {
-            normal = normal.map(Interval::neg);
-        }
         let direction = functional.dot(normal);
         let sign = if direction.lo > 0.0 {
             1
@@ -3857,15 +3859,17 @@ fn critical_face_boundary_star(
             {
                 continue;
             }
-            let mut connection_normal = crate::parametric::surface_geometric_normal_enclosure(
-                surface, envelope, work, cancel,
+            let connection_normal = super::critical::qualified_face_normal(
+                surface,
+                domain,
+                envelope,
+                Some(connection_jet.position),
+                work,
+                cancel,
             )
             .map_err(|error| {
                 critical_geometry_error(error, face_index, "root-to-pole geometric normal")
             })?;
-            if !domain.orientation() {
-                connection_normal = connection_normal.map(Interval::neg);
-            }
             let connection_direction = functional.dot(connection_normal);
             if (sign < 0 && connection_direction.hi >= 0.0)
                 || (sign > 0 && connection_direction.lo <= 0.0)
@@ -4181,15 +4185,17 @@ fn critical_face_boundary_star(
                 );
                 continue;
             }
-            let mut connection_normal = crate::parametric::surface_geometric_normal_enclosure(
-                surface, connection, work, cancel,
+            let connection_normal = super::critical::qualified_face_normal(
+                surface,
+                domain,
+                connection,
+                Some(connection_jet.position),
+                work,
+                cancel,
             )
             .map_err(|error| {
                 critical_geometry_error(error, face_index, "root-to-port geometric normal")
             })?;
-            if !domain.orientation() {
-                connection_normal = connection_normal.map(Interval::neg);
-            }
             let connection_direction = functional.dot(connection_normal);
             if (sign < 0 && connection_direction.hi >= 0.0)
                 || (sign > 0 && connection_direction.lo <= 0.0)
@@ -4481,8 +4487,13 @@ fn critical_coedge_normal_sign(
                         continue;
                     }
                     active_patch = true;
-                    let normal = match crate::parametric::surface_geometric_normal_enclosure(
-                        surface, patch, work, cancel,
+                    let normal = match super::critical::qualified_face_normal(
+                        surface,
+                        domain,
+                        patch,
+                        Some(jet.position),
+                        work,
+                        cancel,
                     ) {
                         Ok(normal) => normal,
                         Err(error)
@@ -4498,10 +4509,7 @@ fn critical_coedge_normal_sign(
                             break;
                         }
                     };
-                    let mut direction = functional.dot(normal);
-                    if !domain.orientation() {
-                        direction = direction.neg();
-                    }
+                    let direction = functional.dot(normal);
                     if (sign < 0 && direction.hi >= 0.0) || (sign > 0 && direction.lo <= 0.0) {
                         accepted = false;
                         break;
@@ -5031,9 +5039,14 @@ fn critical_vertex_projection_degree_one(
                         }
                     }
                 }
-                let normal = (|surface| {
-                    crate::parametric::surface_geometric_normal_enclosure(surface, uv, work, cancel)
-                })(domain.surface_evaluator())
+                let normal = super::critical::qualified_face_normal(
+                    domain.surface_evaluator(),
+                    domain,
+                    uv,
+                    None,
+                    work,
+                    cancel,
+                )
                 .map_err(|error| {
                     critical_geometry_error(
                         error,
@@ -5041,10 +5054,7 @@ fn critical_vertex_projection_degree_one(
                         "critical-vertex joint geometric normal",
                     )
                 })?;
-                let mut direction = functional.dot(normal);
-                if !domain.orientation() {
-                    direction = direction.neg();
-                }
+                let direction = functional.dot(normal);
                 if (sign < 0 && direction.hi >= 0.0) || (sign > 0 && direction.lo <= 0.0) {
                     return Ok(false);
                 }

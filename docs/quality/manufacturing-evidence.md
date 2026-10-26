@@ -381,10 +381,13 @@ The SolidCore software Compile/fresh Verify/export/save controls are the native
 box and protected bore with `solid-fill.intent.json`; source-deleted read-only
 reopen independently verifies and preserves their program/replay bytes. Unchanged
 fitting and ordinary housing import, bed preparation, Preflight, save and
-source-deleted reopen are exercised, not manufacturing completion. Fitting
-closed-source metric coverage and housing spherical critical incidence remain
-open operator gates. Original spline-carrier gauge/correspondence and closed-spline
-seam controls also remain cutover obligations, not newly waived input classes.
+source-deleted reopen are exercised, not manufacturing completion. Housing's
+incoming cap incidence and raw rounded sections do not close its nonplanar
+source-vertex band around Z=2 mm: the actual coface/root or joined height-flow
+proof remains missing. The union guard refuses even with a closed-source shape
+bound. Fitting closed-source metric coverage remains open. Original spline-carrier
+gauge/correspondence and closed-spline seam controls also remain cutover
+obligations, not newly waived input classes.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader

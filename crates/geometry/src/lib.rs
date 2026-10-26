@@ -105,14 +105,7 @@ impl PreparedSectionSource<'_> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<NativeSection, GeometryError> {
-        analysis::section_placed_with_work(
-            self.definition(),
-            pose,
-            plane,
-            query_byte_limit,
-            work,
-            cancel,
-        )
+        analysis::section_placed_with_work(self, pose, plane, query_byte_limit, work, cancel)
     }
 }
 

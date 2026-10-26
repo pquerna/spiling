@@ -86,6 +86,7 @@ struct Arc {
 
 pub(super) fn intersect(
     definition: &Definition,
+    prepared: Option<&PreparedSectionSource<'_>>,
     query: &SectionQuery,
     byte_limit: usize,
     packed_byte_limit: usize,
@@ -93,6 +94,11 @@ pub(super) fn intersect(
     cancel: &AtomicBool,
 ) -> Result<NativeSection, GeometryError> {
     work.charge(1, cancel)?;
+    if prepared.is_some_and(|source| !std::ptr::eq(source.definition(), definition)) {
+        return Err(indeterminate(
+            "native section receipt belongs to another definition",
+        ));
+    }
     if !query.maximum_chord_error_mm.is_finite()
         || query.maximum_chord_error_mm <= 0.0
         || query.maximum_chord_error_mm > SECTION_SAMPLING_TOLERANCE_MM
@@ -193,22 +199,34 @@ pub(super) fn intersect(
                 )?;
                 let binding =
                     Boundary::new(definition, surface, eu_id, edge_id, scale, work, cancel)?;
-                binding
-                    .prove_correspondence(
-                        correspondence_allowance,
-                        admission.limit.checked_sub(admission.used).ok_or_else(|| {
-                            resource_error("native trim correspondence exceeds live query allowance")
-                        })?,
-                        work,
-                        cancel,
-                    )
-                    .map_err(|mut error| {
-                        error.message = format!(
-                            "native section face={face_id:?} edge={edge_id:?} edgeuse={eu_id:?}: {}",
-                            error.message
-                        );
-                        error
-                    })?;
+                let accepted = prepared
+                    .map(|source| source.native_correspondence_allowance(eu_id))
+                    .transpose()?;
+                if accepted.is_none_or(|bound| correspondence_allowance < bound.get()) {
+                    binding
+                        .prove_correspondence(
+                            correspondence_allowance,
+                            admission.limit.checked_sub(admission.used).ok_or_else(|| {
+                                resource_error("native trim correspondence exceeds live query allowance")
+                            })?,
+                            work,
+                            cancel,
+                        )
+                        .map_err(|mut error| {
+                            error.message = format!(
+                                "native section face={face_id:?} edge={edge_id:?} edgeuse={eu_id:?}: {}",
+                                error.message
+                            );
+                            error
+                        })?;
+                    // This exact immutable native coedge's complete positional
+                    // correspondence is plane independent. Reuse only a bound
+                    // at least as strict as the current caller's allowance;
+                    // roots, crossings, endpoint gaps and sections stay fresh.
+                    if let Some(bound) = accepted {
+                        bound.set(bound.get().min(correspondence_allowance));
+                    }
+                }
                 let chart_roots = roots::isolate(
                     std::iter::once([0.0, 1.0]),
                     &mut |range, work, cancel| {
@@ -491,7 +509,8 @@ fn classify_graph(
         root_domain[axis] = [range.lo, range.hi];
         for box_ in p::surface_parameter_boxes(surface, root_domain, work, cancel)? {
             let j = surface_jet(surface, box_, scale, work, cancel)?;
-            if sign(dot(if axis == 0 { j.du } else { j.dv }, plane.normal)) != derivative_sign {
+            let derivative = dot(if axis == 0 { j.du } else { j.dv }, plane.normal);
+            if sign(derivative) != derivative_sign {
                 qualified = false;
                 break;
             }
@@ -519,25 +538,57 @@ fn cover_graph(
 ) -> Result<(), GeometryError> {
     work.charge(1, cancel)?;
     let j = surface_jet(surface, uv, scale, work, cancel)?;
-    if sign(functional(j.position, plane)) != 0 {
+    let height = functional(j.position, plane);
+    if sign(height) != 0 {
         return Ok(());
     }
-    let s = sign(dot(if axis == 0 { j.du } else { j.dv }, plane.normal));
+    let derivative = dot(if axis == 0 { j.du } else { j.dv }, plane.normal);
+    let s = sign(derivative);
     if s != 0 {
+        // Retain a necessary zero-set interval, not the entire search leaf.
+        // For every fixed independent parameter, the whole-cell derivative
+        // bounds the mean-value slope from this midpoint to ANY actual root.
+        // No midpoint is promoted to a root or used as existence evidence.
+        let midpoint = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
+        let mut middle = uv;
+        middle[axis] = [midpoint; 2];
+        let position = p::surface_position_enclosure(surface, middle, work, cancel)?
+            .map(|value| value.mul(Interval::point(scale)));
+        let necessary = Interval::point(midpoint).sub(functional(position, plane).div(derivative)?);
+        let lo = necessary.lo.max(uv[axis][0]);
+        let hi = necessary.hi.min(uv[axis][1]);
+        if lo > hi {
+            return Ok(());
+        }
         if *derivative_sign != 0 && *derivative_sign != s {
-            return Err(indeterminate(
-                "native face-plane roots have incompatible directed graph sheets",
-            ));
+            return Err(indeterminate(format!(
+                "native face-plane roots have incompatible directed graph sheets: cell={uv:?} height={height:?} derivative={derivative:?}"
+            )));
         }
         *derivative_sign = s;
-        let r = Interval::new(uv[axis][0], uv[axis][1])?;
+        // A necessary root enclosure may end AT a root. Retain half of each
+        // excluded strip so later whole-interval existence checks can still
+        // obtain strict endpoint signs; those checks remain mandatory.
+        let half = Interval::point(0.5);
+        let r = Interval::new(
+            Interval::point(uv[axis][0])
+                .add(Interval::point(lo))
+                .mul(half)
+                .lo
+                .max(uv[axis][0]),
+            Interval::point(hi)
+                .add(Interval::point(uv[axis][1]))
+                .mul(half)
+                .hi
+                .min(uv[axis][1]),
+        )?;
         *retained = Some(retained.map_or(r, |old| old.hull(r)));
         return Ok(());
     }
     if depth >= 16 {
-        return Err(indeterminate(
-            "native critical/coplanar face cell has no transverse root graph proof",
-        ));
+        return Err(indeterminate(format!(
+            "native critical/coplanar face cell has no transverse root graph proof: cell={uv:?} height={height:?} derivative={derivative:?}"
+        )));
     }
     let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
     if mid <= uv[axis][0] || mid >= uv[axis][1] {

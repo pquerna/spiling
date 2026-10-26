@@ -14,23 +14,32 @@ pub(crate) use direct::{canonicalize_section_in_place, certify_plane_functional_
 use spiling_contracts::geometry::{
     GeometryErrorCode, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
 };
-use std::sync::atomic::AtomicBool;
+use std::{cell::Cell, sync::atomic::AtomicBool};
 pub use types::{NativeSection, SectionCurve, SectionEndpoint, SectionLoopMm, SectionSpan};
 pub(crate) use types::{NativeSectionCertificate, SectionAuthority};
 
 pub const MAX_PREPARED_SECTION_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PREPARED_SECTION_SOURCE_BYTES: usize = MAX_PREPARED_SECTION_BYTES - 4 * 1024 * 1024;
 
+struct NativeCorrespondenceReceipt {
+    edgeuse: solidcore::topology::EdgeuseId,
+    allowance_mm: Cell<f64>,
+}
 /// Preparation borrows the one immutable BREP; it creates no second source owner.
 pub struct PreparedSectionSource<'a> {
     definition: &'a Definition,
+    native_correspondence: Vec<NativeCorrespondenceReceipt>,
 }
 impl<'a> PreparedSectionSource<'a> {
     pub(crate) fn definition(&self) -> &'a Definition {
         self.definition
     }
     pub fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        std::mem::size_of::<Self>().saturating_add(
+            self.native_correspondence
+                .capacity()
+                .saturating_mul(std::mem::size_of::<NativeCorrespondenceReceipt>()),
+        )
     }
     pub fn section_with_byte_limit(
         &self,
@@ -48,7 +57,25 @@ impl<'a> PreparedSectionSource<'a> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        section_for_query(self.definition, query, cancel, byte_limit, work)
+        direct::intersect(
+            self.definition,
+            Some(self),
+            query,
+            byte_limit as usize,
+            byte_limit as usize,
+            work,
+            cancel,
+        )
+    }
+
+    fn native_correspondence_allowance(
+        &self,
+        edgeuse: solidcore::topology::EdgeuseId,
+    ) -> Result<&Cell<f64>, GeometryError> {
+        self.native_correspondence
+            .binary_search_by_key(&edgeuse, |receipt| receipt.edgeuse)
+            .map(|index| &self.native_correspondence[index].allowance_mm)
+            .map_err(|_| indeterminate("native correspondence lost its immutable coedge owner"))
     }
 }
 pub fn prepare_section_source<'a>(
@@ -58,14 +85,49 @@ pub fn prepare_section_source<'a>(
     work: &mut GeometryWorkBudget,
 ) -> Result<PreparedSectionSource<'a>, GeometryError> {
     work.charge(1, cancel)?;
-    if remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES)
-        < std::mem::size_of::<PreparedSectionSource<'a>>()
-    {
+    let count = definition.brep().edgeuses().len();
+    let limit = remaining_prepared_bytes.min(MAX_PREPARED_SECTION_SOURCE_BYTES);
+    let required = count
+        .checked_mul(std::mem::size_of::<NativeCorrespondenceReceipt>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<PreparedSectionSource<'a>>()))
+        .ok_or_else(|| resource_error("native section receipt capacity overflow"))?;
+    if required > limit {
         return Err(resource_error(
             "native section preparation exceeds source allowance",
         ));
     }
-    Ok(PreparedSectionSource { definition })
+    let mut native_correspondence = Vec::new();
+    native_correspondence
+        .try_reserve_exact(count)
+        .map_err(|_| resource_error("native section correspondence receipt allocation failed"))?;
+    if native_correspondence
+        .capacity()
+        .checked_mul(std::mem::size_of::<NativeCorrespondenceReceipt>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<PreparedSectionSource<'a>>()))
+        .is_none_or(|bytes| bytes > limit)
+    {
+        return Err(resource_error(
+            "native section allocated receipt capacity exceeds allowance",
+        ));
+    }
+    for (edgeuse, _) in definition.brep().edgeuses().iter() {
+        work.charge(1, cancel)?;
+        native_correspondence.push(NativeCorrespondenceReceipt {
+            edgeuse,
+            allowance_mm: Cell::new(f64::INFINITY),
+        });
+    }
+    let sort_work = (count as u64)
+        .checked_mul(u64::from(count.max(1).ilog2()) + 1)
+        .and_then(|work| work.checked_mul(4))
+        .ok_or_else(|| resource_error("native section receipt sort work overflow"))?;
+    work.charge(sort_work, cancel)?;
+    native_correspondence.sort_unstable_by_key(|receipt| receipt.edgeuse);
+    work.charge(1, cancel)?;
+    Ok(PreparedSectionSource {
+        definition,
+        native_correspondence,
+    })
 }
 pub(crate) struct SectionQuery {
     pub(crate) plane: PlaneMm,
@@ -90,6 +152,7 @@ pub(crate) fn section(
 ) -> Result<NativeSection, GeometryError> {
     direct::intersect(
         definition,
+        None,
         &SectionQuery::standard(plane),
         MAX_PREPARED_SECTION_BYTES,
         byte_limit as usize,
@@ -108,6 +171,7 @@ pub(crate) fn section_for_query(
 ) -> Result<NativeSection, GeometryError> {
     direct::intersect(
         definition,
+        None,
         query,
         byte_limit as usize,
         byte_limit as usize,

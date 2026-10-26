@@ -460,6 +460,18 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
                         active_pair = Some((a, b, depth));
                         phase = "reference/raw original position pair";
                         work.charge(1, cancel)?;
+                        if coedge == self.use_.coedge
+                            && self.margin == [0.0; 2]
+                            && embedding.covers(self, a, [0.0, 1.0])
+                            && embedding.covers(self, b, [0.0, 0.0])
+                        {
+                            // The exact same owned boundary is U(b,0). Its
+                            // parameters and this complete ribbon are already
+                            // inside one sealed injective chart, so no open
+                            // ribbon point can equal it. Foreign/unused source
+                            // pieces and nonzero uncertainty keep their proofs.
+                            continue;
+                        }
                         let image = self.normal_image(a, normal, work, cancel)?;
                         // Literal original coefficients and their ORIGINAL native
                         // parameter map, never a source/prepared-UV chart alias.
@@ -570,8 +582,8 @@ impl<'a, 'd> OriginalCollar<'a, 'd> {
             Ok(Some(ReferenceRibbon { embedding }))
         })();
         outcome.map_err(|error| work.annotate_error(error, before, format_args!(
-            "closed radial reference ribbon owner={:?} phase={phase} raw_coedge={raw_coedge:?} pair={active_pair:?}",
-            [self.use_.face, self.use_.wire, self.use_.index]
+            "closed radial reference ribbon owner={:?} phase={phase} raw_coedge={raw_coedge:?} pair={active_pair:?} margin={:?}",
+            [self.use_.face, self.use_.wire, self.use_.index], self.margin
         )))
     }
 }

@@ -4711,8 +4711,19 @@ pub fn certify_native_union(
                             index,
                             index,
                             &format!(
-                                "native critical band requires original coface/root incidence or a sealed whole-source convex proof; closed_world_interval_mm={interval:?} native_reference_z_mm={z} critical_sides={:?} native_endpoint_closures={:?}",
-                                leaf.critical_interfaces, leaf.native_endpoint_closure,
+                                "native critical band requires original coface/root incidence or a sealed whole-source convex proof; closed_world_interval_mm={interval:?} native_reference_z_mm={z} critical_sides={:?} native_endpoint_closures={:?} source_event_count={} first_source_event_mm={:?} last_source_event_mm={:?} closed_source_shape_error_mm={:?}",
+                                leaf.critical_interfaces,
+                                leaf.native_endpoint_closure,
+                                analysis.event_neighborhoods().len(),
+                                analysis
+                                    .event_neighborhoods()
+                                    .first()
+                                    .map(|event| event.height_bracket_mm()),
+                                analysis
+                                    .event_neighborhoods()
+                                    .last()
+                                    .map(|event| event.height_bracket_mm()),
+                                analysis.closed_shape_error_mm(),
                             ),
                         ),
                     ));

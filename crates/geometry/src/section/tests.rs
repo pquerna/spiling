@@ -257,7 +257,7 @@ fn unchanged_fitting_near_cap_section_preserves_original_back_root_and_material(
 #[test]
 fn unchanged_housing_near_floor_preserves_trimmed_material_under_plane_reversal() {
     let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
-    for height in [0.0125_f64, 0.4249999535616466] {
+    for height in [0.0125_f64, 0.4249999535616466, 0.54999985] {
         let radius = (4.0 - (2.0 - height).powi(2)).sqrt();
         let expected = 280.0 + 68.0 * radius + PI * radius * radius;
         let perimeter = 68.0 + 2.0 * PI * radius;
@@ -303,6 +303,60 @@ fn critical_plane_refuses_instead_of_fabricating_an_empty_section() {
     )
     .unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::AnalysisIndeterminate);
+}
+#[test]
+fn prepared_pocket_queries_keep_plane_topology_and_material_orientation_fresh() {
+    let cancel = AtomicBool::new(false);
+    let definition =
+        from_step_bytes_with_cancel(crate::test_sources::BLIND_POCKET, &cancel).unwrap();
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let prepared = prepare_section_source(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut work,
+    )
+    .unwrap();
+    // Cross the real blind floor and return below it with the opposite
+    // plane normal. Only geometry correspondence is reusable, not roots,
+    // sections, hole classification or material-left orientation.
+    for (z, normal, expected_holes) in [
+        (3.9, [0.0, 0.0, 1.0], 0),
+        (4.1, [0.0, 0.0, 1.0], 1),
+        (3.9, [0.0, 0.0, -1.0], 0),
+    ] {
+        let result = prepared
+            .section_with_byte_limit(
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, z],
+                    normal,
+                },
+                &cancel,
+                MAX_SECTION_BYTES,
+                &mut work,
+            )
+            .unwrap();
+        assert_provenance(&definition, &result);
+        assert_eq!(result.loops().len(), 1 + expected_holes);
+        assert_eq!(
+            result
+                .loops()
+                .iter()
+                .filter(|boundary| boundary.is_hole)
+                .count(),
+            expected_holes,
+        );
+        for point in result
+            .loops()
+            .iter()
+            .flat_map(|boundary| &boundary.points_mm)
+        {
+            assert!(
+                (point[2] - z).abs() <= result.achieved_plane_error_mm() + 1e-10,
+                "section point {point:?} belongs to the fresh query at z={z}",
+            );
+        }
+    }
 }
 #[test]
 fn prepared_queries_keep_shared_admission_and_cancellation() {

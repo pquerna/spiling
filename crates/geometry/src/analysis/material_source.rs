@@ -23,6 +23,7 @@ pub struct PreparedSolid<'d> {
     plans: Option<PreparedSourceVertexPlans<'d>>,
     material_position_bounds: Option<[Interval; 3]>,
     material_unavailable: Option<GeometryError>,
+    sections: crate::section::PreparedSectionSource<'d>,
 }
 
 /// Internal borrowed query operands. This is not another prepared-source owner:
@@ -115,8 +116,24 @@ pub fn prepare_solid<'d>(
     let base = size_of::<PreparedSolid<'d>>()
         .checked_add(definition.retained_query_proof_bytes())
         .ok_or_else(capacity_error)?;
+    let sections = crate::section::prepare_section_source(
+        definition,
+        limit
+            .checked_sub(base)
+            .and_then(|bytes| {
+                bytes.checked_add(size_of::<crate::section::PreparedSectionSource<'d>>())
+            })
+            .ok_or_else(capacity_error)?,
+        cancel,
+        work,
+    )?;
     let allowance = limit
         .checked_sub(base)
+        .and_then(|bytes| {
+            bytes.checked_sub(
+                sections.retained_bytes() - size_of::<crate::section::PreparedSectionSource<'d>>(),
+            )
+        })
         .and_then(|bytes| bytes.checked_add(size_of::<PreparedNativeTrimSource<'d>>()))
         .ok_or_else(capacity_error)?;
     let charts = PreparedNativeTrimSource::prepare_originals(definition, allowance, work, cancel);
@@ -131,6 +148,7 @@ pub fn prepare_solid<'d>(
         plans: None,
         material_position_bounds: None,
         material_unavailable: None,
+        sections,
     };
     if let Ok(trims) = &solid.charts {
         // This validates selected ORIGINAL coedges, domains, joints and their
@@ -213,6 +231,11 @@ impl<'d> PreparedSolid<'d> {
         size_of::<Self>()
             .saturating_add(self.definition.retained_query_proof_bytes())
             .saturating_add(charts)
+            .saturating_add(
+                self.sections
+                    .retained_bytes()
+                    .saturating_sub(size_of::<crate::section::PreparedSectionSource<'_>>()),
+            )
             .saturating_add(self.plans.as_ref().map_or(0, |plans| {
                 plans
                     .retained_bytes()
@@ -282,7 +305,8 @@ impl<'d> PreparedSolid<'d> {
         byte_limit: u32,
         work: &mut GeometryWorkBudget,
     ) -> Result<NativeSection, GeometryError> {
-        crate::section::section_for_query(self.definition, query, cancel, byte_limit, work)
+        self.sections
+            .section_for_query(query, cancel, byte_limit, work)
     }
     /// Raw posed inspection uses the same geometry-owned affine pullback and
     /// world-space metric checks without borrowing manufacturing admission.
@@ -294,14 +318,8 @@ impl<'d> PreparedSolid<'d> {
         work: &mut GeometryWorkBudget,
         cancel: &AtomicBool,
     ) -> Result<NativeSection, GeometryError> {
-        super::placed::section_placed_with_work(
-            self.definition,
-            pose,
-            world_plane,
-            query_byte_limit,
-            work,
-            cancel,
-        )
+        self.sections
+            .section_placed_with_work(pose, world_plane, query_byte_limit, work, cancel)
     }
     pub fn analyze_slab(
         &self,
