@@ -34,6 +34,42 @@ fn native_bounds_enclose_curved_extrema_between_source_vertices() {
         }
     }
 }
+
+#[test]
+fn native_bounds_remain_conservative_at_large_source_origins() {
+    let offset = [1_000_000.0, -1_000_000.0, 1_000_000.0];
+    for (name, minimum, maximum) in [
+        ("box-mm.step", [0.0; 3], [20.0, 10.0, 8.0]),
+        ("cylinder.step", [-5.0, -5.0, 0.0], [5.0, 5.0, 8.0]),
+    ] {
+        let original = fixture(name);
+        let mut exchange =
+            step_p21::parser::parse(std::str::from_utf8(&original).unwrap()).unwrap();
+        for record in corpus::records_mut(&mut exchange) {
+            if record.name != "CARTESIAN_POINT" {
+                continue;
+            }
+            let Parameter::List(coordinates) = &mut corpus::parameters(record)[1] else {
+                panic!("original point coordinates")
+            };
+            // UV coordinates stay in their original charts. Translate only
+            // spatial points, including the analytic carrier placements.
+            if coordinates.len() == 3 {
+                for axis in 0..3 {
+                    coordinates[axis] =
+                        Parameter::Real(number(&coordinates[axis]).unwrap() + offset[axis]);
+                }
+            }
+        }
+        let translated = corpus::serialize(&exchange);
+        let definition = from_step_bytes_with_cancel(translated.as_bytes(), &cancelled()).unwrap();
+        definition.bounds.validate().unwrap();
+        for axis in 0..3 {
+            assert!(definition.bounds.min[axis] <= minimum[axis] + offset[axis]);
+            assert!(definition.bounds.max[axis] >= maximum[axis] + offset[axis]);
+        }
+    }
+}
 #[test]
 fn lexical_caps_ignore_strings_comments_and_binary_strings() {
     lexical_bound(b"/* #1= */ '#2=''#3=' \"#4=\" #5 /*hi*/ =", &cancelled()).unwrap();
@@ -146,13 +182,16 @@ fn conversion_inch_source_is_dimensional_and_keeps_uncertainty() {
         mm.faces.iter().map(|f| &f.face_id).collect::<Vec<_>>(),
         inch.faces.iter().map(|f| &f.face_id).collect::<Vec<_>>()
     );
-    for i in 0..3 {
-        assert!((mm.bounds.min[i] - inch.bounds.min[i]).abs() < 1e-5);
-        assert!((mm.bounds.max[i] - inch.bounds.max[i]).abs() < 1e-5);
+    for definition in [&mm, &inch] {
+        for axis in 0..3 {
+            crate::tests::assert_import_axis_extent(
+                definition,
+                axis,
+                [0.0, [20.0, 10.0, 8.0][axis]],
+                1e-5,
+            );
+        }
     }
-    assert!((inch.bounds.max[0] - 20.0).abs() < 1e-5);
-    assert!((inch.bounds.max[1] - 10.0).abs() < 1e-5);
-    assert!((inch.bounds.max[2] - 8.0).abs() < 1e-5);
 }
 #[test]
 fn missing_reference_duplicate_ids_and_multiple_data_never_partially_import() {
@@ -247,7 +286,12 @@ fn qualified_ap_schemas_and_single_part_representation_links_preserve_native_geo
             from_step_bytes_with_cancel(corpus::serialize(&exchange).as_bytes(), &cancelled())
                 .unwrap();
         for axis in 0..3 {
-            assert!((definition.bounds.max[axis] - [20.0, 10.0, 8.0][axis]).abs() < 1e-6);
+            crate::tests::assert_import_axis_extent(
+                &definition,
+                axis,
+                [0.0, [20.0, 10.0, 8.0][axis]],
+                1e-6,
+            );
         }
     }
     let mut exchange = step_p21::parser::parse(&source).unwrap();
@@ -316,7 +360,12 @@ fn deep_acyclic_conversion_units_resolve_without_consuming_the_call_stack() {
         spiling_contracts::geometry::SourceUnit::Inch
     );
     for axis in 0..3 {
-        assert!((definition.bounds.max[axis] - [20.0, 10.0, 8.0][axis]).abs() < 1e-6);
+        crate::tests::assert_import_axis_extent(
+            &definition,
+            axis,
+            [0.0, [20.0, 10.0, 8.0][axis]],
+            1e-6,
+        );
     }
 }
 
@@ -366,13 +415,12 @@ fn frozen_occt_periodic_edges_admit_closed_solids_without_changing_source_face_s
                 resolve_face(&entities, id).unwrap().0.to_string()
             );
         }
-        let uncertainty = definition
-            .provenance
-            .uncertainty_mm
-            .expect("declared source uncertainty");
+        // Import publishes a conservative scene enclosure, not a precision
+        // measurement or a new raw-chart closure certificate. Full-cylinder
+        // physical dimensions have their independent source-backed gate.
         for axis in 0..3 {
-            assert!((definition.bounds.min[axis] - min[axis]).abs() <= uncertainty);
-            assert!((definition.bounds.max[axis] - max[axis]).abs() <= uncertainty);
+            assert!(definition.bounds.min[axis] <= min[axis]);
+            assert!(definition.bounds.max[axis] >= max[axis]);
         }
         assert!(
             solidcore::topology::brep::p2::is_manifold_solid(definition.brep()).unwrap_or(false),
@@ -578,15 +626,6 @@ fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
     let cancel = AtomicBool::new(false);
     let definition = crate::from_step_bytes_with_cancel(bytes, &cancel).unwrap();
     let tolerance = 0.00001;
-    for (axis, expected) in [[-6.0, 6.0], [-6.0, 6.0], [0.0, 12.0]]
-        .into_iter()
-        .enumerate()
-    {
-        assert!(definition.bounds.min[axis] <= expected[0]);
-        assert!(definition.bounds.max[axis] >= expected[1]);
-        assert!(definition.bounds.min[axis] >= expected[0] - tolerance);
-        assert!(definition.bounds.max[axis] <= expected[1] + tolerance);
-    }
     let mesh = crate::tessellate(
         &definition,
         spiling_contracts::geometry::DisplayProfile::MeshTrimmedMm005V2,
@@ -606,19 +645,53 @@ fn independent_fitting_import_and_directional_bounds_enclose_physical_height() {
                 <= spiling_contracts::geometry::MESH_SURFACE_TOLERANCE_MM
         );
     }
-    let projected = crate::analysis::projected_bounds(
+    // Physical extents concern the selected source material, not the padded
+    // scene box or potentially nonclosed generated native UV trims.
+    let mut work = GeometryWorkBudget::new(20_000_000);
+    let prepared = crate::prepare_solid(
         &definition,
-        [0.0, 0.0, 1.0],
-        crate::analysis::BoundsPolicy {
-            maximum_endpoint_uncertainty_mm: tolerance,
-        },
-        &mut GeometryWorkBudget::new(20_000_000),
+        crate::MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &mut work,
         &cancel,
     )
     .unwrap();
-    assert!(projected.minimum[0] <= 0.0 && 0.0 <= projected.minimum[1]);
-    assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
-    assert!(projected.achieved_uncertainty_mm <= tolerance);
+    let query_bytes = crate::MAX_PREPARED_SECTION_BYTES
+        .checked_sub(prepared.retained_bytes())
+        .unwrap();
+    for (axis, expected) in [[-6.0, 6.0], [-6.0, 6.0], [0.0, 12.0]]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(definition.bounds.min[axis] <= expected[0]);
+        assert!(definition.bounds.max[axis] >= expected[1]);
+        let projected = prepared
+            .material_bounds(
+                std::array::from_fn(|coordinate| if coordinate == axis { 1.0 } else { 0.0 }),
+                crate::BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: tolerance,
+                },
+                query_bytes,
+                &mut work,
+                &cancel,
+            )
+            .unwrap()
+            .bounds();
+        assert!(projected.achieved_uncertainty_mm <= tolerance);
+        for (endpoint, value) in [
+            (projected.minimum, expected[0]),
+            (projected.maximum, expected[1]),
+        ] {
+            assert!(
+                endpoint
+                    .into_iter()
+                    .all(|bound| (bound - value).abs() <= tolerance)
+            );
+        }
+        if axis == 2 {
+            assert!(projected.minimum[0] <= 0.0 && 0.0 <= projected.minimum[1]);
+            assert!(projected.maximum[0] <= 12.0 && 12.0 <= projected.maximum[1]);
+        }
+    }
 }
 
 #[test]

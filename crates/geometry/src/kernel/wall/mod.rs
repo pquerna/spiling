@@ -4,7 +4,7 @@
 
 use super::Definition;
 use crate::{GeometryError, GeometryWorkBudget, VerticalWallFace, check_cancel};
-use solidcore::curve::curve::{Curve, p2::CurveKind};
+use solidcore::curve::curve::Curve;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::surface::p2::SurfaceKind;
 use solidcore::topology::{EdgeuseOwner, LoopuseStart, shell::ShellMembers};
@@ -47,6 +47,8 @@ fn unit(a: [f64; 3]) -> Result<[f64; 3], GeometryError> {
 
 fn native_line_matches(
     curve: &Curve,
+    range: [f64; 2],
+    allowance: usize,
     orientation: bool,
     front: [f64; 3],
     back: [f64; 3],
@@ -54,11 +56,7 @@ fn native_line_matches(
     cancel: &AtomicBool,
 ) -> Result<bool, GeometryError> {
     work.charge(1, cancel)?;
-    if !matches!(curve.kind(), CurveKind::Line(line) if line.is_bounded()) {
-        return Ok(false);
-    }
-    let domain = curve.natural_interval();
-    let (a, b) = (domain.min(), domain.max());
+    let [a, b] = range;
     if !a.is_finite() || !b.is_finite() || a >= b {
         return Ok(false);
     }
@@ -66,7 +64,7 @@ fn native_line_matches(
         curve,
         [a, b],
         1.0,
-        usize::MAX,
+        allowance,
         work,
         cancel,
     )?;
@@ -264,7 +262,66 @@ impl Definition {
         let LoopuseStart::Edgeuse(Some(first)) = lu.start else {
             return Err(unsupported("native wall requires an explicit coedge cycle"));
         };
+        for edge in &self.original_source().coedges {
+            work.charge(1, cancel)?;
+            for point in edge.vertex_points_mm {
+                let residual = dot(sub(point, native_origin), outward);
+                if !residual.is_finite() {
+                    return Err(malformed("nonfinite original supporting-plane witness"));
+                }
+                if residual > RESIDUAL_MM {
+                    return Err(unsupported(
+                        "selected wall has original source material beyond its supporting plane",
+                    ));
+                }
+            }
+        }
+        for (other_index, &other_id) in self.face_ids().iter().enumerate() {
+            work.charge(1, cancel)?;
+            if other_index == index {
+                continue;
+            }
+            let other_surface = self
+                .face_surface(other_id)
+                .ok_or_else(|| malformed("native supporting face has no carrier"))?;
+            if let SurfaceKind::Plane(other_plane) = other_surface.kind() {
+                let position = other_plane.position();
+                let p = position.origin();
+                let x = position.x_axis();
+                let y = position.y_axis();
+                let origin_mm = [p.x, p.y, p.z];
+                let other_normal = unit([
+                    x.y * y.z - x.z * y.y,
+                    x.z * y.x - x.x * y.z,
+                    x.x * y.y - x.y * y.x,
+                ])?;
+                let residual = dot(sub(origin_mm, native_origin), outward);
+                if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
+                    return Err(malformed("native supporting-plane comparison is nonfinite"));
+                }
+                if dot(other_normal, outward).abs() >= 1.0 - ANGULAR
+                    && residual.abs() <= RESIDUAL_MM
+                {
+                    return Err(unsupported(
+                        "selected supporting plane has ambiguous additional native face trims",
+                    ));
+                }
+            }
+        }
         let mut current = first;
+        let source = super::prepare_finish_source(self, work, cancel)?;
+        let remaining = crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES
+            .checked_sub(self.retained_query_proof_bytes())
+            .and_then(|bytes| bytes.checked_sub(source.retained_bytes()))
+            .ok_or_else(|| {
+                GeometryError::new(
+                    GeometryErrorCode::ResourceLimit,
+                    "original wall source exhausts endpoint allocation cap",
+                )
+            })?;
+        let domain = source
+            .face_domain(index)
+            .ok_or_else(|| malformed("original wall face domain is absent"))?;
         let mut points = [[0.0; 3]; 4];
         let mut edges = [None; 4];
         let mut vertices = [None; 4];
@@ -319,9 +376,35 @@ impl Definition {
             let curve = self
                 .edge_curve(edge_id)
                 .ok_or_else(|| malformed("native wall edge curve is absent"))?;
-            if !native_line_matches(curve, forward, points[i], [b.x, b.y, b.z], work, cancel)? {
-                return Err(unsupported(
-                    "native wall trim must consist of four exact bounded line edges",
+            let coedge = domain
+                .coedges()
+                .iter()
+                .position(|coedge| coedge.edgeuse == current)
+                .ok_or_else(|| malformed("original wall coedge binding is absent"))?;
+            if crate::parametric::CurveEvaluator::exact_affine_coefficients(
+                domain.original_spatial_restriction(coedge)?,
+                work,
+                cancel,
+            )?
+            .is_none()
+            {
+                return Err(GeometryError::new(
+                    GeometryErrorCode::ParameterCorrespondenceUnavailable,
+                    "original wall edge lacks bounded exact affine authority",
+                ));
+            }
+            if !native_line_matches(
+                curve,
+                [edge.interval.min(), edge.interval.max()],
+                remaining,
+                forward,
+                points[i],
+                [b.x, b.y, b.z],
+                work,
+                cancel,
+            )? {
+                return Err(malformed(
+                    "native wall line disagrees with its bounded source edge",
                 ));
             }
             let residual = dot(sub(points[i], native_origin), outward);
@@ -436,6 +519,7 @@ impl Definition {
                 "native rectangular trim is not the oriented outer material boundary",
             ));
         }
+        drop(source);
         let z_span = super::finish_support_extent(self, [0.0, 0.0, 1.0], work, cancel)?;
         if (min_z - z_span[0]).abs() > RESIDUAL_MM || (max_z - z_span[1]).abs() > RESIDUAL_MM {
             return Err(unsupported(
@@ -448,38 +532,6 @@ impl Definition {
             return Err(unsupported(
                 "selected native wall is recessed or is not an outward supporting material plane",
             ));
-        }
-        for (other_index, &other_id) in self.face_ids().iter().enumerate() {
-            work.charge(1, cancel)?;
-            if other_index == index {
-                continue;
-            }
-            let other_surface = self
-                .face_surface(other_id)
-                .ok_or_else(|| malformed("native supporting face has no carrier"))?;
-            if let SurfaceKind::Plane(other_plane) = other_surface.kind() {
-                let position = other_plane.position();
-                let p = position.origin();
-                let x = position.x_axis();
-                let y = position.y_axis();
-                let origin_mm = [p.x, p.y, p.z];
-                let other_normal = unit([
-                    x.y * y.z - x.z * y.y,
-                    x.z * y.x - x.x * y.z,
-                    x.x * y.y - x.y * y.x,
-                ])?;
-                let residual = dot(sub(origin_mm, points[origin_index]), outward);
-                if !origin_mm.iter().all(|v| v.is_finite()) || !residual.is_finite() {
-                    return Err(malformed("native supporting-plane comparison is nonfinite"));
-                }
-                if dot(other_normal, outward).abs() >= 1.0 - ANGULAR
-                    && residual.abs() <= RESIDUAL_MM
-                {
-                    return Err(unsupported(
-                        "selected supporting plane has ambiguous additional native face trims",
-                    ));
-                }
-            }
         }
         let mut origin = points[origin_index];
         origin[2] = z_span[0];
@@ -510,6 +562,11 @@ mod tests {
         assert!(
             native_line_matches(
                 &curve,
+                [
+                    curve.natural_interval().min(),
+                    curve.natural_interval().max()
+                ],
+                crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
                 [6.0, 0.0, 0.0],
                 [8.0, 0.0, 0.0],
@@ -521,6 +578,11 @@ mod tests {
         assert!(
             native_line_matches(
                 &curve,
+                [
+                    curve.natural_interval().min(),
+                    curve.natural_interval().max()
+                ],
+                crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 false,
                 [8.0, 0.0, 0.0],
                 [6.0, 0.0, 0.0],
@@ -532,6 +594,11 @@ mod tests {
         assert!(
             !native_line_matches(
                 &curve,
+                [
+                    curve.natural_interval().min(),
+                    curve.natural_interval().max()
+                ],
+                crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
                 [8.0, 0.0, 0.0],
                 [6.0, 0.0, 0.0],
@@ -543,9 +610,27 @@ mod tests {
         assert!(
             !native_line_matches(
                 &curve,
+                [
+                    curve.natural_interval().min(),
+                    curve.natural_interval().max()
+                ],
+                crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
                 true,
                 [2.0, 0.0, 0.0],
                 [3.0, 0.0, 0.0],
+                &mut work,
+                &cancel
+            )
+            .unwrap()
+        );
+        assert!(
+            native_line_matches(
+                &curve,
+                [0.25, 0.75],
+                crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES,
+                true,
+                [6.5, 0.0, 0.0],
+                [7.5, 0.0, 0.0],
                 &mut work,
                 &cancel
             )

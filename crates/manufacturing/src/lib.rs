@@ -19,8 +19,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-/// Binds source-only realization, including constrained PCurve endpoint selection.
-pub const PLANNER_VERSION: &str = "21";
+/// Binds source realization and selected-master finish-support admission.
+pub const PLANNER_VERSION: &str = "22";
 pub const EMITTER_VERSION: &str = "7";
 pub const VERIFIER_VERSION: &str = "9";
 

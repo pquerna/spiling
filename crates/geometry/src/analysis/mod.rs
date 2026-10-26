@@ -20,6 +20,7 @@ use crate::{Definition, GeometryError, NativeSection, PlaneFrameMm, PlaneMm, che
 use spiling_contracts::geometry::{DefinitionId, GeometryErrorCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub(crate) use bounds::MAX_SCRATCH_ALLOCATION_BYTES;
 pub use bounds::{MaterialProjectedBounds, material_projected_bounds, projected_bounds};
 pub use collar::{
     NativeCollarHeightSpace, NativeCollarPort, NativeCriticalCollar, NativeCriticalCollarCell,

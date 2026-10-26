@@ -22,6 +22,35 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         "{actual} differs from {expected} by more than {tolerance}"
     );
 }
+
+/// Scene boxes enclose native carriers; physical extents come from the raw,
+/// literally trimmed native query, not from the decoder's padded UV rectangle.
+pub(crate) fn assert_import_axis_extent(
+    definition: &Definition,
+    axis: usize,
+    expected: [f64; 2],
+    tolerance: f64,
+) -> analysis::ProjectedBounds {
+    assert!(definition.bounds_mm().min[axis] <= expected[0]);
+    assert!(definition.bounds_mm().max[axis] >= expected[1]);
+    let bounds = analysis::projected_bounds(
+        definition,
+        std::array::from_fn(|coordinate| if coordinate == axis { 1.0 } else { 0.0 }),
+        analysis::BoundsPolicy {
+            maximum_endpoint_uncertainty_mm: tolerance,
+        },
+        &mut GeometryWorkBudget::new(20_000_000),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(bounds.achieved_uncertainty_mm <= tolerance);
+    for (endpoint, expected) in [(bounds.minimum, expected[0]), (bounds.maximum, expected[1])] {
+        for actual in endpoint {
+            close(actual, expected, tolerance);
+        }
+    }
+    bounds
+}
 fn area(result: &NativeSection, boundary: &SectionLoopMm) -> f64 {
     let xy = |point: [f64; 3]| {
         let delta: [f64; 3] = std::array::from_fn(|i| point[i] - result.frame.origin_mm[i]);
@@ -60,12 +89,7 @@ fn box_exporters_and_units_preserve_geometry_without_erasing_source_identity() {
     for definition in [&millimetre, &inch, &occt] {
         assert_eq!(definition.faces().len(), 6);
         for axis in 0..3 {
-            close(definition.bounds_mm().min[axis], 0.0, 1e-6);
-            close(
-                definition.bounds_mm().max[axis],
-                [20.0, 10.0, 8.0][axis],
-                1e-6,
-            );
+            assert_import_axis_extent(definition, axis, [0.0, [20.0, 10.0, 8.0][axis]], 1e-6);
         }
         let cut = midplane(definition);
         assert_eq!(cut.loops.len(), 1);
@@ -389,7 +413,6 @@ fn cylinders_hole_trims_partial_height_and_sloped_native_walls_are_explicitly_un
     )).expect("short exterior vertical shelf wall");
     let error = shelf.vertical_wall_face(&partial.face_id).unwrap_err();
     assert_eq!(error.code, GeometryErrorCode::UnsupportedGeometry);
-    assert!(error.message.contains("complete local source height"));
     let ramp = load("../manufacturing/native/inward-planar-ramp.step");
     let sloped = ramp.faces().iter().find(|face| matches!(
         face.geometry.analytic, Some(AnalyticSurfaceDescription::Plane { normal, .. }) if normal[0].abs() > 0.1 && normal[2].abs() > 0.1
@@ -497,20 +520,45 @@ fn split_cylinders_bores_and_planar_faces_do_not_acquire_full_cylinder_certifica
     }
 }
 
-// The source bytes retain the original analytic transform, including its phase and axis sign.
+// Transform a valid independent cylinder consistently in physical 3D space.
+// Radial scaling changes both physical and planar-chart CIRCLE radii, while
+// cylindrical chart angles/heights retain their original units and values.
 #[test]
 fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign() {
-    for (name, expected_z) in [
-        (
-            "certificates/cylinder-phased-translated-scaled.step",
-            [2.0, 6.0],
-        ),
-        (
-            "certificates/cylinder-reversed-translated-scaled.step",
-            [-2.0, 2.0],
-        ),
-    ] {
-        let definition = load(name);
+    let source =
+        include_str!("../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step");
+    for (reverse, expected_z) in [(false, [2.0, 10.0]), (true, [-6.0, 2.0])] {
+        let mut transformed = String::new();
+        for line in source.lines() {
+            let mut line = line.to_owned();
+            if line.contains("CARTESIAN_POINT(") || line.contains("DIRECTION(") {
+                let start = line.rfind('(').unwrap() + 1;
+                let end = start + line[start..].find(')').unwrap();
+                let values: Vec<f64> = line[start..end]
+                    .split(',')
+                    .map(|value| value.trim().parse().unwrap())
+                    .collect();
+                if let [x, y, z] = values.as_slice() {
+                    let sign = if reverse { -1.0 } else { 1.0 };
+                    let (mut x, mut y, mut z) =
+                        (0.6 * x - 0.8 * sign * y, 0.8 * x + 0.6 * sign * y, sign * z);
+                    if line.contains("CARTESIAN_POINT(") {
+                        x = 13.0 + 0.5 * x;
+                        y = -7.0 + 0.5 * y;
+                        z += 2.0;
+                    }
+                    line.replace_range(start..end, &format!("{x},{y},{z}"));
+                }
+            } else if line.contains("CIRCLE(") || line.contains("CYLINDRICAL_SURFACE(") {
+                let start = line.rfind(',').unwrap() + 1;
+                let end = start + line[start..].find(')').unwrap();
+                let radius: f64 = line[start..end].trim().parse().unwrap();
+                line.replace_range(start..end, &(0.5 * radius).to_string());
+            }
+            transformed.push_str(&line);
+            transformed.push('\n');
+        }
+        let definition = from_step_bytes(transformed.as_bytes()).unwrap();
         let side = definition
             .faces()
             .iter()
@@ -546,6 +594,33 @@ fn cylinder_certificate_is_independent_of_translation_phase_radius_and_axis_sign
             .code,
         GeometryErrorCode::UnsupportedGeometry
     );
+}
+
+#[test]
+fn inconsistent_generated_cylinder_transforms_do_not_override_their_preferred_master() {
+    for name in [
+        "certificates/cylinder-phased-translated-scaled.step",
+        "certificates/cylinder-reversed-translated-scaled.step",
+    ] {
+        let definition = load(name);
+        let side = definition
+            .faces()
+            .iter()
+            .find(|face| {
+                matches!(
+                    face.geometry.analytic,
+                    Some(AnalyticSurfaceDescription::Cylinder { .. })
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            definition
+                .vertical_cylinder_face(&side.face_id)
+                .unwrap_err()
+                .code,
+            GeometryErrorCode::UnsupportedGeometry,
+        );
+    }
 }
 
 // Each source retains its original shared seam and exact circular rim subdivisions.

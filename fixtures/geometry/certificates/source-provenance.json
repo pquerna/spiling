@@ -6,18 +6,14 @@
       "file": "notched-wall.step"
     },
     {
-      "construction": "translation(13,-7,2) * rotation_z(0.713 radians) * uniform_scale(0.5)",
-      "expected_center_mm": [13, -7],
-      "expected_radius_mm": 2.5,
-      "expected_z_mm": [2, 6],
+      "construction": "Intended translation(13,-7,2) * rotation_z(0.713 radians) * uniform_scale(0.5); generated physical geometry was scaled but nested preferred PCurve heights were not",
+      "expected": "full-cylinder certificate refused: preferred master rim Z=10 disagrees with physical reference rim Z=6",
       "file": "cylinder-phased-translated-scaled.step",
       "source": "../independent-exporters/occt-cylinder-mm.step"
     },
     {
-      "construction": "translation(13,-7,2) * rotation_x(pi radians) * uniform_scale(0.5)",
-      "expected_center_mm": [13, -7],
-      "expected_radius_mm": 2.5,
-      "expected_z_mm": [-2, 2],
+      "construction": "Intended translation(13,-7,2) * rotation_x(pi radians) * uniform_scale(0.5); generated physical geometry was scaled but nested preferred PCurve heights were not",
+      "expected": "full-cylinder certificate refused: normalized-axis preferred master rim Z=-6 disagrees with physical reference rim Z=-2",
       "file": "cylinder-reversed-translated-scaled.step",
       "source": "../independent-exporters/occt-cylinder-mm.step"
     },

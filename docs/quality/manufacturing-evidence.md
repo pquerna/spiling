@@ -369,7 +369,7 @@ Read-only inspection/export is allowed; compilation publication is not.
 
 ## Current support and refusal boundary
 
-Current identities are project10/manufacturing11/process3/surface3, planner21,
+Current identities are project10/manufacturing11/process3/surface3, planner22,
 emitter7/verifier9 and SPLR5; executable constants and exact native pin remain authoritative.
 Native geometry admission, actual wall/skin/support construction, independent
 emitted-byte verification and source-backed recovery are separate obligations.
@@ -382,9 +382,9 @@ The SolidCore software controls include native box/protected bore with
 `solid-fill.intent.json` and unchanged rounded housing with
 `housing-ordinary.intent.json`. Placement/Preflight/Compile, independent saved-byte
 Verify/export/save and source-deleted fresh-engine recovery are exercised.
-Recovered program/replay bytes remain identical; box/bore outputs also preserve
-the preceding main programs. Housing uses the existing variable-radius source
-sweep, complete local native section charts, conservative boundary-contact
+Recovered program/replay bytes remain identical within the qualified producer.
+Housing uses the existing variable-radius source sweep, complete local native
+section charts, conservative boundary-contact
 classification and complete coefficient exclusion of potential carrier roots
 without increasing source/error/work limits. A necessary zero-set overcover
 does not establish that a root exists. These constructions do not waive source
@@ -397,6 +397,22 @@ Paired H1 exercises genuine coarse SparseFill and Bridge, fine walls/skins and
 separator, native inner-material and actual-anchor/core-bond obligations.
 Both jobs retain byte-identical fresh source-deleted recovery; CombineEligible
 selection or an all-fine result alone is not H1 qualification.
+
+The unchanged full OCCT cylinder with `solid-fill.intent.json` and source-owned
+cylindrical ribs exercises Compile, independent Verify/export, Undo/Redo, save
+and fresh source-deleted recovery. Actual extrusion changes while the full-height
+XY finish preserves the baseline's placed physical Z schedule. Finish bounds
+expand XY only under the exact admitted zero-world-Z displacement witness;
+native conservative Z, genuine penetration and XY obstacle refusals remain.
+Placed closed-endpoint translation uses the same directed arithmetic as bed
+placement; exact contact is not a downward-rounding artifact.
+
+Planar finish certificates do not establish complete planar-rib manufacturing:
+the canonical box still refuses its unchanged source-local wall-overlap budget.
+Partial finite-turn contraction preserves endpoint recovery constraints, but does
+not establish recovery across arbitrary source-cell boundaries. The split-cylinder
+baseline's material-bound precision gate also remains separate from full-cylinder
+finish qualification.
 
 The tapered-fitting CLI uses the same source/query authority and independent
 replay, not a fitting-specific planner. A geometry-only restored scene may

@@ -963,11 +963,15 @@ pub(super) fn certify_first_wall(
     Ok(())
 }
 
+/// Enclose final D using native M's captured placed support and XY additions.
+/// Whole-native finish admission proves exact zero world-Z displacement, so D
+/// has M's vertical support. Field construction endpoints are independently
+/// rounded carrier enclosures, not new material heights or contact witnesses.
 pub(super) fn expanded(bounds: AabbMm, fields: &[PreparedFinish]) -> AabbMm {
     let mut result = bounds;
     for field in fields {
         let bounds = field.bounds();
-        for a in 0..3 {
+        for a in 0..2 {
             result.min[a] = result.min[a].min(bounds.min[a]);
             result.max[a] = result.max[a].max(bounds.max[a]);
         }

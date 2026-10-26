@@ -680,25 +680,25 @@ fn compensate_corner(
     }
     let cosine = (dot(rays[0], rays[1]) / (lengths[0] * lengths[1])).clamp(-1.0, 1.0);
     let nominal = contour_width(widths, event.parameter);
-    let proposed = (nominal * ((1.0 - cosine) * 0.5).sqrt())
+    let mut proposed = (nominal * ((1.0 - cosine) * 0.5).sqrt())
         .max(admitted_width_range(request)?[0])
         .min(nominal);
+    let travel = lengths[0].min(lengths[1]) * program_coordinates::MAX_WALL_WIDTH_GRADIENT * 0.9;
+    // Present ports keep their incoming width. Project the preferred finite-turn
+    // contraction onto their recovery cones: a short source cell can admit a
+    // partial contraction even when the full half-angle objective cannot fit.
+    // Discarding that feasible interval would emit the uncompensated turn.
+    for end in 0..2 {
+        let t = end as f64;
+        let depth = (event.ordinal as f64 + 0.5) * widths[end];
+        if curve.supports[0].radius(curve.endpoints[end]) >= depth {
+            proposed = proposed.max((widths[end] - travel * (t - event.parameter).abs()).next_up());
+        }
+    }
     let deficit = (nominal - proposed) * 0.5;
     let extent = request.nozzle_diameter_mm * 0.25 - super::super::OFFSET_TOLERANCE_MM * 0.5;
     if deficit <= 0.0 || deficit + event.position_error_mm + FIT_ERROR_MM >= extent {
         return Ok(());
-    }
-    let travel = lengths[0].min(lengths[1]) * program_coordinates::MAX_WALL_WIDTH_GRADIENT * 0.9;
-    // Present ports keep their incoming width. The absent side of a birth
-    // has no lane; the present side must recover before another source cell.
-    for end in 0..2 {
-        let t = end as f64;
-        let depth = (event.ordinal as f64 + 0.5) * widths[end];
-        if curve.supports[0].radius(curve.endpoints[end]) >= depth
-            && proposed + travel * (t - event.parameter).abs() < widths[end]
-        {
-            return Ok(());
-        }
     }
     let cap = (event.cap_radius_mm - deficit).next_down();
     if cap > 0.0 {
@@ -3243,7 +3243,9 @@ mod corner_width_tests {
                         [edge.points_mm[1][0], edge.points_mm[1][1]],
                     )
                 };
-                assert!(Euclidean.distance(&line(&a), &line(&b)) >= (a.width_mm + b.width_mm) * 0.5);
+                assert!(
+                    Euclidean.distance(&line(&a), &line(&b)) >= (a.width_mm + b.width_mm) * 0.5
+                );
             }
         }
     }
@@ -3389,73 +3391,85 @@ mod corner_width_tests {
 
     #[test]
     fn inner_turn_compensation_keeps_nominal_birth_and_recovers_source_ports() {
-        let material = MultiPolygon(vec![geo::polygon![
-            (x: 0.0, y: 0.0), (x: 20.0, y: 0.0),
-            (x: 20.0, y: 20.0), (x: 0.0, y: 20.0),
-            (x: 0.0, y: 0.0),
-        ]]);
-        let mut recipe = crate::planner::tests::recipe(0.25);
-        recipe.bead_width_mm = 0.45;
-        recipe.perimeter_count = 2;
-        let limits = DepositionLimits {
-            min_bead_width_mm: 0.30,
-            max_bead_width_mm: 0.70,
-            min_bead_height_mm: 0.000001,
-            max_bead_height_mm: 0.30,
-        };
-        let required = region::RequiredMaterial::from_section(&material);
-        let request = WallRequest {
-            material: &material,
-            required: &required,
-            recipe: &recipe,
-            limits: &limits,
-            nozzle_diameter_mm: 0.4,
-            lower_z: 0.0,
-            upper_z: 0.066667,
-            retained_points: region::point_count(&material),
-            owned_bytes: 0,
-        };
-        let cancel = AtomicBool::new(false);
-        let mut work = 0;
-        let graph =
-            skeleton::construct(&material, request.retained_points, 0, &mut work, &cancel).unwrap();
-        let depth = 1.5 * recipe.bead_width_mm;
-        let curve = graph
-            .edges
-            .iter()
-            .find(|curve| {
-                curve.supports.iter().all(|site| site.point.is_none())
-                    && curve.supports[0].radius(curve.endpoints[0]) > depth
-                    && curve.supports[0].radius(curve.endpoints[1]) < depth
-            })
+        // The short cell cannot recover the ideal half-angle contraction before
+        // its incoming port. It still has a nonempty feasible contraction range.
+        for side_mm in [2.0, 20.0] {
+            let material = MultiPolygon(vec![geo::polygon![
+                (x: 0.0, y: 0.0), (x: side_mm, y: 0.0),
+                (x: side_mm, y: side_mm), (x: 0.0, y: side_mm),
+                (x: 0.0, y: 0.0),
+            ]]);
+            let mut recipe = crate::planner::tests::recipe(0.25);
+            recipe.bead_width_mm = 0.45;
+            recipe.perimeter_count = 2;
+            let limits = DepositionLimits {
+                min_bead_width_mm: 0.30,
+                max_bead_width_mm: 0.70,
+                min_bead_height_mm: 0.000001,
+                max_bead_height_mm: 0.30,
+            };
+            let required = region::RequiredMaterial::from_section(&material);
+            let request = WallRequest {
+                material: &material,
+                required: &required,
+                recipe: &recipe,
+                limits: &limits,
+                nozzle_diameter_mm: 0.4,
+                lower_z: 0.0,
+                upper_z: 0.2,
+                retained_points: region::point_count(&material),
+                owned_bytes: 0,
+            };
+            let cancel = AtomicBool::new(false);
+            let mut work = 0;
+            let graph =
+                skeleton::construct(&material, request.retained_points, 0, &mut work, &cancel)
+                    .unwrap();
+            let depth = 1.5 * recipe.bead_width_mm;
+            let curve = graph
+                .edges
+                .iter()
+                .find(|curve| {
+                    curve.supports.iter().all(|site| site.point.is_none())
+                        && curve.supports[0].radius(curve.endpoints[0]) > depth
+                        && curve.supports[0].radius(curve.endpoints[1]) < depth
+                })
+                .unwrap();
+            let values = curve.endpoints.map(|p| curve.supports[0].radius(p) - depth);
+            let mut event = corner_birth(
+                curve,
+                contours::OuterWidth::new([0.45; 2], 0.45, None),
+                1,
+                [0.0, 1.0],
+                values,
+                &mut work,
+                &cancel,
+            )
             .unwrap();
-        let values = curve.endpoints.map(|p| curve.supports[0].radius(p) - depth);
-        let mut event = corner_birth(
-            curve,
-            contours::OuterWidth::new([0.45; 2], 0.45, None),
-            1,
-            [0.0, 1.0],
-            values,
-            &mut work,
-            &cancel,
-        )
-        .unwrap();
-        let parameter = event.parameter;
-        let prior_cap = event.cap_radius_mm;
-        compensate_corner(curve, [0.45; 2], &mut event, &request).unwrap();
-        assert!(event.compensation.is_some());
-        assert_eq!(event.parameter, parameter);
-        assert!((curve.supports[0].radius(curve.at(parameter)) - depth).abs() <= FIT_ERROR_MM);
-        let width = inner_contour_width([0.45; 2], &[event], 1, parameter);
-        assert!(width >= 0.30 && width < 0.45);
-        assert!(event.cap_radius_mm < prior_cap);
-        assert_eq!(inner_contour_width([0.45; 2], &[event], 1, 0.0), 0.45);
-        assert_eq!(inner_contour_width([0.45; 2], &[event], 0, parameter), 0.45);
-        let [_, travel] = event.compensation.unwrap();
-        for t in compensation_knots([0.45; 2], &event) {
-            let actual = inner_contour_width([0.45; 2], &[event], 1, t);
-            assert!(actual >= width && actual <= 0.45);
-            assert!((actual - width).abs() <= travel * (t - parameter).abs() + f64::EPSILON);
+            let parameter = event.parameter;
+            let prior_cap = event.cap_radius_mm;
+            compensate_corner(curve, [0.45; 2], &mut event, &request).unwrap();
+            assert!(event.compensation.is_some());
+            assert_eq!(event.parameter, parameter);
+            assert!((curve.supports[0].radius(curve.at(parameter)) - depth).abs() <= FIT_ERROR_MM);
+            let width = inner_contour_width([0.45; 2], &[event], 1, parameter);
+            let ideal = 0.45 * 0.5_f64.sqrt();
+            assert!(width >= ideal && width < 0.45);
+            if side_mm == 2.0 {
+                assert!(
+                    width > ideal,
+                    "the short cell must retain its incoming port"
+                );
+            }
+            assert!(event.cap_radius_mm < prior_cap);
+            assert_eq!(inner_contour_width([0.45; 2], &[event], 1, 0.0), 0.45);
+            assert_eq!(inner_contour_width([0.45; 2], &[event], 0, parameter), 0.45);
+            let [_, travel] = event.compensation.unwrap();
+            for t in compensation_knots([0.45; 2], &event) {
+                let actual = inner_contour_width([0.45; 2], &[event], 1, t);
+                assert!(actual >= width && actual <= 0.45);
+                assert!((actual - width).abs() <= travel * (t - parameter).abs() + f64::EPSILON);
+            }
         }
     }
 }

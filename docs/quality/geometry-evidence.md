@@ -58,8 +58,10 @@ Import bounds are complete, conservative native enclosures for scene fitting
 and coarse exclusion. The importer evaluates retained face-carrier domains,
 edge restrictions and vertices with one cancellable coefficient-work allowance;
 it neither invokes the native tight-box solver nor substitutes a vertex hull.
-Whole carrier rectangles can over-enclose complex trims. These bounds are not
-precision measurements, source uncertainty claims or material receipts:
+Whole carrier rectangles include the decoder's UV padding and can over-enclose
+even planar trimmed faces. These bounds are not precision measurements, source
+uncertainty claims or material receipts. Physical-extent controls use certified
+`projected_bounds` on literal native trims at their declared endpoint uncertainty;
 placement and manufacturing retain their independent source-material queries.
 
 [`parametric.rs`](../../crates/geometry/src/parametric.rs) and its coefficient
@@ -363,10 +365,11 @@ stationary-root uniqueness remain required at both ends; different winding is
 not the same branch. A carrier's world periodicity does not make a UV LINE
 periodic. Preserve selector search separately from a wider evaluable turn cover.
 
-Realization identity 5 and planner21 bind this selectable source recipe.
-Admitting an earlier PCurve can change the chosen chart and joint costs even
-when a later candidate previously succeeded; persisted planner20 artifacts
-therefore cannot retain current inspection/export authority.
+Realization identity 5 binds this selectable source recipe. Admitting an earlier
+PCurve can change the chosen chart and joint costs even when a later candidate
+previously succeeded. Planner22 additionally binds selected-master-preserving
+finish-support admission; earlier programs cannot retain current inspection/export
+authority.
 
 Endpoint proposals include finite coefficient fences, midpoints and reference
 zero. Recheck representable candidates after Newton contraction: an initial
@@ -468,10 +471,14 @@ Retained historical STEP provenance may name that producer; the data is not a
 linked backend or fallback. Immutable hashes/licenses are checked independently of
 current geometry acceptance.
 
-Rectangular-wall and full-cylinder finish-certificate positives remain unqualified
-where exact original line/carrier or closed-chart correspondence prerequisites
-refuse. Retained consumer tests preserve those obligations; raw face descriptors
-and historical positive results do not enable the operations.
+Bounded original-source rectangular-wall and full-cylinder finish certificates
+retain finite edge intervals, selected-master authority, source frames and
+orientation/refusal checks. Source-only support exclusion does not require a
+native LINE enum or raw UV-chart qualification; it also does not supply a raw
+directional-bounds receipt or waive separate exact-arithmetic/domain refusals.
+The full-cylinder rib operator has independent emitted-program and source-deleted
+recovery evidence. Complete planar-rib manufacturing remains a separate
+[wall-allocation gate](manufacturing-evidence.md#current-support-and-refusal-boundary).
 
 General STEP documents/assemblies, unproved charts, arbitrary freeform finishes,
 singular/nonmanifold material and unqualified critical interfaces remain outside

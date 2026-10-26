@@ -58,47 +58,244 @@ impl SurfaceParameterMap {
     }
 }
 
-/// Supporting extrema for narrow finish certificates use the same native
-/// all-family proof as other consumers, with the caller's cumulative work.
+fn prepare_finish_source<'d>(
+    definition: &'d Definition,
+    work: &mut crate::GeometryWorkBudget,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<PreparedNativeTrimSource<'d>, crate::GeometryError> {
+    let remaining = crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES
+        .checked_sub(definition.retained_query_proof_bytes())
+        .ok_or_else(|| {
+            crate::GeometryError::new(
+                spiling_contracts::geometry::GeometryErrorCode::ResourceLimit,
+                "retained native proof exhausts finish source allocation cap",
+            )
+        })?;
+    PreparedNativeTrimSource::prepare_originals(definition, remaining, work, cancel)
+}
+
+/// Exclusion-only support for the narrow plane/cylinder finish envelope.
+/// A linear functional on a bounded plane or cylinder attains its extrema on
+/// the spatial boundary (follow an axial generator for a cylinder). Whole
+/// circles deliberately enclose all branches; this does not select a trim,
+/// prove UV embedding, or mint a raw/material directional-bounds receipt.
 fn finish_support_extent(
     definition: &Definition,
     direction: [f64; 3],
     work: &mut crate::GeometryWorkBudget,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<[f64; 2], crate::GeometryError> {
-    use crate::parametric::Interval;
-    let magnitude = direction
-        .into_iter()
-        .fold(Interval::point(0.0), |sum, value| {
-            sum.add(Interval::point(value).square())
-        })
-        .sqrt()?;
-    let proof = crate::projected_bounds(
-        definition,
-        direction,
-        crate::BoundsPolicy {
-            maximum_endpoint_uncertainty_mm: 1.0e-8 / magnitude.hi,
-        },
-        work,
-        cancel,
-    )?;
-    let minimum = Interval {
-        lo: proof.minimum[0],
-        hi: proof.minimum[1],
+    use crate::{exact_coefficient::ExactCoefficient, parametric::Interval};
+    use solidcraft_step::geom::{Curve, Surface};
+    use spiling_contracts::geometry::GeometryErrorCode;
+    let unavailable = || {
+        crate::GeometryError::new(
+            GeometryErrorCode::ParameterCorrespondenceUnavailable,
+            "finish support requires original plane/cylinder faces with analytic line/circle boundaries",
+        )
+    };
+    let remaining = crate::analysis::MAX_SCRATCH_ALLOCATION_BYTES
+        .checked_sub(definition.retained_query_proof_bytes())
+        .ok_or_else(|| {
+            crate::GeometryError::new(
+                GeometryErrorCode::ResourceLimit,
+                "retained native proof exhausts finish support allocation cap",
+            )
+        })?;
+    let coefficient = |value: &ExactCoefficient| {
+        value.terms[..value.len]
+            .iter()
+            .fold(Interval::point(0.0), |sum, &term| {
+                sum.add(Interval::point(term))
+            })
+    };
+    let mut extent = [f64::INFINITY, f64::NEG_INFINITY];
+    for face in &definition.original_source().faces {
+        work.charge(1, cancel)?;
+        if !matches!(
+            face.carrier.as_ref(),
+            Surface::Plane { .. } | Surface::Cylinder { .. }
+        ) {
+            return Err(unavailable());
+        }
+        for wire in &face.wires {
+            for &index in &wire.coedges {
+                work.charge(1, cancel)?;
+                let edge = definition.original_source().coedge(index)?;
+                let mut curve = edge.spatial_curve.as_ref();
+                let mut selected_master = None;
+                for depth in 0..=32 {
+                    work.charge(1, cancel)?;
+                    match curve {
+                        Curve::Trimmed { basis, .. } => curve = basis,
+                        Curve::SurfaceCurve { curve_3d, .. } => {
+                            if let Some(pcurve) = source_operand::preferred_source_pcurve(curve)? {
+                                selected_master = Some(pcurve);
+                                break;
+                            }
+                            curve = curve_3d;
+                        }
+                        _ => break,
+                    }
+                    if depth == 32 {
+                        return Err(unavailable());
+                    }
+                }
+                let project = |position: [Interval; 3]| {
+                    (0..3).fold(Interval::point(0.0), |sum, axis| {
+                        sum.add(position[axis].mul(Interval::point(direction[axis])))
+                    })
+                };
+                let projection = if let Some(pcurve) = selected_master {
+                    let finite = source_operand::original_curve_parameter_restriction(curve)?
+                        .map(|[a, b]| [a.min(b), a.max(b)]);
+                    let range = match finite {
+                        Some(range) => Some(range),
+                        None => {
+                            source_operand::original_curve_parameter_period(curve, work, cancel)?
+                                .map(|period| [0.0, period.hi])
+                        }
+                    };
+                    if let Some(range) = range {
+                        let selected = source_operand::PreparedOriginalCurve::new(
+                            curve, range, remaining, work, cancel,
+                        )?;
+                        if let Some(affine) = selected.exact_affine_coefficients(work, cancel)? {
+                            let denominator = coefficient(&affine.denominator);
+                            let position = project(std::array::from_fn(|axis| {
+                                coefficient(&affine.position[axis])
+                            }))
+                            .div(denominator)?;
+                            let velocity = project(std::array::from_fn(|axis| {
+                                coefficient(&affine.derivative[axis])
+                            }))
+                            .div(denominator)?;
+                            let a = position.add(velocity.mul(Interval::point(range[0])));
+                            let b = position.add(velocity.mul(Interval::point(range[1])));
+                            Interval {
+                                lo: a.lo.min(b.lo),
+                                hi: a.hi.max(b.hi),
+                            }
+                        } else {
+                            project(selected.position_bounds(range, work, cancel)?)
+                        }
+                    } else {
+                        let selected = source_operand::PreparedOriginalCurve::new(
+                            curve,
+                            [0.0, 1.0],
+                            remaining,
+                            work,
+                            cancel,
+                        )?;
+                        let affine = selected.exact_affine_coefficients(work, cancel)?;
+                        let (origin, velocity) = if let Some(affine) = affine {
+                            let denominator = coefficient(&affine.denominator);
+                            let mut origin = [Interval::point(0.0); 3];
+                            let mut velocity = [Interval::point(0.0); 3];
+                            for axis in 0..3 {
+                                origin[axis] =
+                                    coefficient(&affine.position[axis]).div(denominator)?;
+                                velocity[axis] =
+                                    coefficient(&affine.derivative[axis]).div(denominator)?;
+                            }
+                            (origin, velocity)
+                        } else {
+                            // A literal zero-angular-velocity LINE on a cylinder
+                            // is an affine spatial generator, for every parameter.
+                            let Curve::Line {
+                                direction: chart_direction,
+                                magnitude,
+                                ..
+                            } = pcurve.curve.as_ref()
+                            else {
+                                return Err(unavailable());
+                            };
+                            if !matches!(pcurve.surface.as_ref(), Surface::Cylinder { .. })
+                                || chart_direction[0] != 0.0
+                                || chart_direction[1] == 0.0
+                                || *magnitude == 0.0
+                            {
+                                return Err(unavailable());
+                            }
+                            let jet = selected.jet([0.0, 0.0], work, cancel)?.jet;
+                            (jet.position, jet.derivative)
+                        };
+                        let norm = velocity
+                            .iter()
+                            .fold(Interval::point(0.0), |sum, value| sum.add(value.square()));
+                        let origin_projection = project(origin);
+                        let velocity_projection = project(velocity);
+                        let mut result = Interval {
+                            lo: f64::INFINITY,
+                            hi: f64::NEG_INFINITY,
+                        };
+                        for point in edge.vertex_points_mm {
+                            let parameter = (0..3)
+                                .fold(Interval::point(0.0), |sum, axis| {
+                                    sum.add(
+                                        Interval::point(point[axis])
+                                            .sub(origin[axis])
+                                            .mul(velocity[axis]),
+                                    )
+                                })
+                                .div(norm)?;
+                            let value = origin_projection.add(velocity_projection.mul(parameter));
+                            result.lo = result.lo.min(value.lo);
+                            result.hi = result.hi.max(value.hi);
+                        }
+                        result
+                    }
+                } else {
+                    match curve {
+                        Curve::Line { .. } => {
+                            let affine = source_operand::exact_source_line_projection_coefficients(
+                                curve,
+                                &edge.vertex_points_mm,
+                                work,
+                                cancel,
+                            )?
+                            .ok_or_else(unavailable)?;
+                            let denominator = coefficient(&affine.denominator);
+                            let start = project(std::array::from_fn(|axis| {
+                                coefficient(&affine.position[axis])
+                            }))
+                            .div(denominator)?;
+                            let delta = project(std::array::from_fn(|axis| {
+                                coefficient(&affine.derivative[axis])
+                            }))
+                            .div(denominator)?;
+                            let end = start.add(delta);
+                            Interval {
+                                lo: start.lo.min(end.lo),
+                                hi: start.hi.max(end.hi),
+                            }
+                        }
+                        Curve::Circle { .. } => {
+                            let circle = source_operand::PreparedOriginalCurve::new(
+                                curve,
+                                [0.0, std::f64::consts::TAU],
+                                remaining,
+                                work,
+                                cancel,
+                            )?;
+                            project(circle.position_bounds(
+                                [0.0, std::f64::consts::TAU],
+                                work,
+                                cancel,
+                            )?)
+                        }
+                        _ => return Err(unavailable()),
+                    }
+                };
+                extent[0] = extent[0].min(projection.lo);
+                extent[1] = extent[1].max(projection.hi);
+            }
+        }
     }
-    .mul(magnitude);
-    let maximum = Interval {
-        lo: proof.maximum[0],
-        hi: proof.maximum[1],
+    if !extent.iter().all(|value| value.is_finite()) {
+        return Err(unavailable());
     }
-    .mul(magnitude);
-    if minimum.width() > 2.5e-8 || maximum.width() > 2.5e-8 {
-        return Err(crate::GeometryError::new(
-            spiling_contracts::geometry::GeometryErrorCode::ConditioningFailure,
-            "native finish support cannot meet its fixed residual under coordinate conditioning",
-        ));
-    }
-    Ok([minimum.lo, maximum.hi])
+    Ok(extent)
 }
 
 /// Immutable native definition. Kernel representation never leaves this crate.
@@ -550,5 +747,131 @@ mod zero_material_transport_tests {
             definition.material_transport_is_proved_zero(&mut work, &cancel),
             Ok(true)
         ));
+    }
+}
+
+#[cfg(test)]
+mod finish_support_tests {
+    use super::*;
+    use solidcraft_step::geom::{Associated, Curve, PreferredRep, Surface};
+    use std::{
+        fmt::Write,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    #[test]
+    fn cylinder_certificate_cannot_ignore_another_faces_preferred_master_extent() {
+        for preferred in [PreferredRep::PcurveS1, PreferredRep::PcurveS2] {
+            let cancel = AtomicBool::new(false);
+            let mut definition = crate::from_step_bytes_with_cancel(
+                include_bytes!(
+                    "../../../../fixtures/geometry/independent-exporters/occt-cylinder-mm.step"
+                ),
+                &cancel,
+            )
+            .unwrap();
+            let side = definition
+                .faces
+                .iter()
+                .position(|face| {
+                    matches!(
+                        face.geometry.analytic,
+                        Some(
+                            spiling_contracts::geometry::AnalyticSurfaceDescription::Cylinder { .. }
+                        )
+                    )
+                })
+                .unwrap();
+            let side_id = definition.faces[side].face_id.clone();
+            let other = definition
+                .original_source
+                .faces
+                .iter()
+                .enumerate()
+                .find(|(index, _)| *index != side)
+                .unwrap()
+                .1;
+            let index = other.wires[0].coedges[0];
+            let original =
+                Arc::make_mut(&mut definition.original_source.coedges[index].spatial_curve);
+            let Curve::SurfaceCurve {
+                master, associated, ..
+            } = original
+            else {
+                panic!("independent cap retains its original SURFACE_CURVE");
+            };
+            *master = preferred;
+            let selected = match preferred {
+                PreferredRep::PcurveS1 => 0,
+                PreferredRep::PcurveS2 => 1,
+                _ => unreachable!(),
+            };
+            let Associated::Pcurve(pcurve) = &mut associated[selected] else {
+                panic!("declared master is an original PCURVE");
+            };
+            match Arc::make_mut(&mut pcurve.surface) {
+                Surface::Plane { position } | Surface::Cylinder { position, .. } => {
+                    position.origin[2] += 16.0;
+                }
+                _ => panic!("analytic original carrier"),
+            }
+            let support = finish_support_extent(
+                &definition,
+                [0.0, 0.0, 1.0],
+                &mut crate::GeometryWorkBudget::new(1_000_000),
+                &cancel,
+            )
+            .unwrap();
+            assert!(
+                support[1] >= 16.0,
+                "selected master must not use the unchanged 3D reference"
+            );
+            assert_eq!(
+                definition
+                    .vertical_cylinder_face(&side_id)
+                    .unwrap_err()
+                    .code,
+                spiling_contracts::geometry::GeometryErrorCode::UnsupportedGeometry,
+            );
+        }
+    }
+
+    #[test]
+    fn source_z_rotated_affine_bounds_preserve_support_projection_correlation() {
+        let source = include_str!("../../../../fixtures/geometry/box-mm.step");
+        let mut rotated = String::new();
+        for line in source.lines() {
+            let mut line = line.to_owned();
+            if line.contains("CARTESIAN_POINT(") || line.contains("DIRECTION(") {
+                let start = line.rfind('(').unwrap() + 1;
+                let end = start + line[start..].find(')').unwrap();
+                let values: Vec<f64> = line[start..end]
+                    .split(',')
+                    .map(|value| value.trim().parse().unwrap())
+                    .collect();
+                if let [x, y, z] = values.as_slice() {
+                    let tuple = format!("{},{},{}", 0.6 * x - 0.8 * y, 0.8 * x + 0.6 * y, z);
+                    line.replace_range(start..end, &tuple);
+                }
+            }
+            writeln!(rotated, "{line}").unwrap();
+        }
+        let definition = crate::from_step_bytes(rotated.as_bytes()).unwrap();
+        // The independent box is [0, 20] × [0, 10] × [0, 8]. Projecting
+        // its rotated affine edges must retain correlation before hulling;
+        // projecting their world-axis boxes invents material outside a wall.
+        let cancel = AtomicBool::new(false);
+        let mut work = crate::GeometryWorkBudget::new(1_000_000);
+        for (direction, expected) in [
+            ([0.6, 0.8, 0.0], [0.0, 20.0]),
+            ([-0.6, -0.8, 0.0], [-20.0, 0.0]),
+            ([-0.8, 0.6, 0.0], [0.0, 10.0]),
+            ([0.8, -0.6, 0.0], [-10.0, 0.0]),
+        ] {
+            let actual = finish_support_extent(&definition, direction, &mut work, &cancel).unwrap();
+            for (bound, expected) in actual.into_iter().zip(expected) {
+                assert!((bound - expected).abs() <= 1e-7);
+            }
+        }
     }
 }

@@ -84,6 +84,50 @@ fn material() -> MultiPolygon<f64> {
 }
 
 #[test]
+fn finished_bounds_preserve_native_vertical_support_without_waiving_intrusion() {
+    let native = AabbMm {
+        min: [0.0, 0.0, 0.0],
+        max: [10.0, 5.0, 3.0],
+    };
+    let bed = AabbMm {
+        min: [-20.0, -20.0, -4.0],
+        max: [20.0, 20.0, 0.0],
+    };
+    let mut field = planar();
+    let PreparedShape::Planar(planar) = &mut field.shape else {
+        unreachable!()
+    };
+    // A carrier's independently conservative height enclosure can extend past
+    // the placed support even though the admitted construction moves only XY.
+    planar.bounds.min[2] = -0.0001;
+    planar.bounds.max[2] = 3.0001;
+    let fields = [field];
+    let finished = expanded(native, &fields);
+    assert_eq!(finished.min, [0.0, -0.81, 0.0]);
+    assert_eq!(finished.max, native.max);
+    assert!(!intersects(finished, bed));
+    assert!(intersects(fields[0].bounds(), bed));
+
+    // Preserve the captured native uncertainty, including an unresolved
+    // below-bed sliver. Neither contact nor a true penetration is snapped away.
+    for minimum in [-f64::MIN_POSITIVE, -0.0001, -0.1] {
+        let penetrating = AabbMm {
+            min: [0.0, 0.0, minimum],
+            ..native
+        };
+        let finished = expanded(penetrating, &fields);
+        assert_eq!(finished.min[2], minimum);
+        assert!(intersects(finished, bed));
+    }
+    let obstacle = AabbMm {
+        min: [2.0, -0.5, 1.0],
+        max: [3.0, -0.25, 2.0],
+    };
+    assert!(!intersects(native, obstacle));
+    assert!(intersects(finished, obstacle));
+}
+
+#[test]
 fn native_island_ownership_is_exact_cancellable_and_never_exempts_other_ribs() {
     use geo::MapCoords;
     let cancel = AtomicBool::new(false);

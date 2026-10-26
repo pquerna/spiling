@@ -18,6 +18,7 @@ use crate::{
 };
 use spiling_contracts::geometry::{
     GeometryErrorCode, RigidPoseMm, SECTION_PLANE_TOLERANCE_MM, SECTION_SAMPLING_TOLERANCE_MM,
+    rounded_sum_interval,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -487,13 +488,16 @@ impl PlacedBoundsFrame {
     ) -> Result<ProjectedBounds, GeometryError> {
         let residual = coefficient_error(self.coefficients, self.nominal, extent)?;
         let transform = |bracket: [f64; 2]| -> Result<Interval, GeometryError> {
-            finite(add(
-                add(
-                    mul(self.norm, Interval::new(bracket[0], bracket[1])?),
-                    self.offset,
-                ),
-                symmetric(residual),
-            ))
+            let scaled = mul(self.norm, Interval::new(bracket[0], bracket[1])?);
+            // Bed preparation translates the certified outer endpoint with
+            // this same directed sum. Transport both closed bracket endpoints
+            // independently: a wide interval addition must not round an exact
+            // lower-endpoint cancellation below its certified contact plane.
+            let translated = Interval {
+                lo: rounded_sum_interval(scaled.lo, self.offset.lo)[0],
+                hi: rounded_sum_interval(scaled.hi, self.offset.hi)[1],
+            };
+            finite(add(translated, symmetric(residual)))
         };
         let minimum = transform(source.minimum)?;
         let maximum = transform(source.maximum)?;
@@ -2301,6 +2305,103 @@ mod tests {
             Some(0.0)
         };
         assert!(!material.is_compatible_with_definition(&definition));
+    }
+
+    #[test]
+    fn placed_support_translation_preserves_closed_contact_and_real_penetration() {
+        let cancel = AtomicBool::new(false);
+        let mut work = GeometryWorkBudget::new(100);
+        for offset in [2.0_f64.powi(-40), f64::from_bits(1)] {
+            let frame = PlacedBoundsFrame::new(
+                RigidPoseMm {
+                    translation_mm: [0.0, 0.0, offset],
+                    ..RigidPoseMm::IDENTITY
+                },
+                [0.0, 0.0, 1.0],
+                BoundsPolicy {
+                    maximum_endpoint_uncertainty_mm: 0.000001,
+                },
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let source = ProjectedBounds {
+                minimum: [-offset, 0.0],
+                maximum: [8.0, 8.0],
+                achieved_uncertainty_mm: offset,
+            };
+            let placed = frame.finish(source, [5.0, 5.0, 8.0]).unwrap();
+            assert_eq!(placed.minimum, [0.0, offset]);
+            // A closed bracket is never replaced by its feasible upper end.
+            let penetrating = frame
+                .finish(
+                    ProjectedBounds {
+                        minimum: [-2.0 * offset, 0.0],
+                        ..source
+                    },
+                    [5.0, 5.0, 8.0],
+                )
+                .unwrap();
+            assert_eq!(penetrating.minimum, [-offset, offset]);
+        }
+        let frame = PlacedBoundsFrame::new(
+            RigidPoseMm {
+                translation_mm: [0.0, 0.0, f64::EPSILON * 0.5],
+                ..RigidPoseMm::IDENTITY
+            },
+            [0.0, 0.0, 1.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: 0.000001,
+            },
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        let rounded = frame
+            .finish(
+                ProjectedBounds {
+                    minimum: [1.0, 1.0],
+                    maximum: [8.0, 8.0],
+                    achieved_uncertainty_mm: 0.0,
+                },
+                [5.0, 5.0, 8.0],
+            )
+            .unwrap();
+        assert_eq!(rounded.minimum, [1.0, 1.0_f64.next_up()]);
+    }
+
+    #[test]
+    fn placed_support_translation_retains_pose_coefficient_residual() {
+        let frame = PlacedBoundsFrame::new(
+            RigidPoseMm {
+                rotation_xyzw: [0.3_f64.sin(), 0.0, 0.0, 0.3_f64.cos()],
+                ..RigidPoseMm::IDENTITY
+            },
+            [0.0, 0.0, 1.0],
+            BoundsPolicy {
+                maximum_endpoint_uncertainty_mm: 0.000001,
+            },
+            &mut GeometryWorkBudget::new(100),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let extent = [5.0, 5.0, 8.0];
+        let residual = coefficient_error(frame.coefficients, frame.nominal, extent).unwrap();
+        assert!(residual > 0.0);
+        let placed = frame
+            .finish(
+                ProjectedBounds {
+                    minimum: [0.0, 0.0],
+                    maximum: [0.0, 0.0],
+                    achieved_uncertainty_mm: 0.0,
+                },
+                extent,
+            )
+            .unwrap();
+        // Endpoint-wise translation is not permission to discard uncertainty
+        // from the actual accepted pose's non-singleton coefficient boxes.
+        assert_eq!(placed.minimum, [-residual, residual]);
+        assert_eq!(placed.maximum, [-residual, residual]);
     }
 
     #[test]
