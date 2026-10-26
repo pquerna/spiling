@@ -276,6 +276,55 @@ fn unchanged_housing_near_floor_preserves_trimmed_material_under_plane_reversal(
     }
 }
 #[test]
+fn unchanged_housing_pocket_interior_preserves_hole_under_plane_reversal() {
+    let definition = fixture("independent-exporters/occt-rounded-housing-mm.step");
+    let cancel = AtomicBool::new(false);
+    let mut work = GeometryWorkBudget::new(512_000_000);
+    let prepared = prepare_section_source(
+        &definition,
+        MAX_PREPARED_SECTION_SOURCE_BYTES,
+        &cancel,
+        &mut work,
+    )
+    .unwrap();
+    let expected = 416.0 - 5.0 * PI;
+    let perimeter = 68.0 + 10.0 * PI;
+    for normal_z in [1.0, -1.0] {
+        let result = prepared
+            .section_with_byte_limit(
+                PlaneMm {
+                    origin_mm: [0.0, 0.0, 6.1],
+                    normal: [0.0, 0.0, normal_z],
+                },
+                &cancel,
+                MAX_SECTION_BYTES,
+                &mut work,
+            )
+            .unwrap();
+        assert_provenance(&definition, &result);
+        assert_eq!(result.loops().len(), 2);
+        assert_eq!(
+            result
+                .loops()
+                .iter()
+                .filter(|boundary| boundary.is_hole)
+                .count(),
+            1
+        );
+        let material_area: f64 = result
+            .loops()
+            .iter()
+            .map(|boundary| area(boundary, result.frame()))
+            .sum();
+        assert!(
+            (material_area - expected).abs()
+                <= perimeter * SECTION_SAMPLING_TOLERANCE_MM
+                    + 2.0 * PI * SECTION_SAMPLING_TOLERANCE_MM.powi(2)
+                    + 1e-7
+        );
+    }
+}
+#[test]
 fn original_bracket_relevant_cuts_have_closed_native_span_incidence() {
     let definition = fixture("independent-exporters/occt-ribbed-bracket-mm.step");
     let bounds = definition.bounds_mm();

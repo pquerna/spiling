@@ -585,21 +585,26 @@ fn cover_graph(
         *retained = Some(retained.map_or(r, |old| old.hull(r)));
         return Ok(());
     }
-    if depth >= 16 {
+    if depth >= 16 || derivative.lo == 0.0 && derivative.hi == 0.0 {
         return Err(indeterminate(format!(
             "native critical/coplanar face cell has no transverse root graph proof: cell={uv:?} height={height:?} derivative={derivative:?}"
         )));
     }
-    let mid = uv[axis][0] * 0.5 + uv[axis][1] * 0.5;
-    if mid <= uv[axis][0] || mid >= uv[axis][1] {
+    // Independent-parameter uncertainty can prevent both height exclusion and
+    // a dependent derivative sign (for example on a broad spherical chart).
+    // Refining only the dependent coordinate need not tighten either bound.
+    // Alternate coordinates while retaining the same complete cover and cap.
+    let split_axis = if depth % 2 == 0 { axis } else { 1 - axis };
+    let mid = uv[split_axis][0] * 0.5 + uv[split_axis][1] * 0.5;
+    if mid <= uv[split_axis][0] || mid >= uv[split_axis][1] {
         return Err(indeterminate(
             "native graph isolation exhausted representable parameters",
         ));
     }
     let mut left = uv;
-    left[axis][1] = mid;
+    left[split_axis][1] = mid;
     let mut right = uv;
-    right[axis][0] = mid;
+    right[split_axis][0] = mid;
     cover_graph(
         surface,
         left,

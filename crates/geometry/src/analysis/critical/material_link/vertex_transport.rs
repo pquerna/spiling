@@ -1087,7 +1087,10 @@ impl<'d> SourceVertexTransportPlan<'d> {
         if required > remaining_bytes {
             return Err(super::transport::resource());
         }
-        let allowance = source_allowance(self.definition)?.min(domain.source_chart_error_mm());
+        // Measured chart error is evidence, not an admissible ceiling.
+        // Independent outward enclosures need not reproduce its exact bound;
+        // both image checks use the unchanged captured source allowance.
+        let allowance = source_allowance(self.definition)?;
         if !allowance.is_finite() || allowance <= 0.0 {
             return Ok(false);
         }

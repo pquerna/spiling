@@ -246,8 +246,10 @@ must never be converted into display unavailability.
 - **Radial products:** [`critical/material_link/radial_product.rs`](../../crates/geometry/src/analysis/critical/material_link/radial_product.rs)
   and [`joint/radial_metric.rs`](../../crates/geometry/src/analysis/joint/radial_metric.rs)
   pair closed topology with a complete filled-material metric and calibrate the
-  actual used polygon in matching physical coordinates. Boundary nearness,
-  directed/core-only metrics and separately isotopic annuli are insufficient.
+  actual used polygon in matching physical coordinates. The complete glued atlas
+  permits radius to vary with angle and actual height; it is not an XY-invariance
+  certificate. Boundary nearness, directed/core-only metrics and separately
+  isotopic annuli are insufficient.
 - **Original corner cuts:** [`vertex_transport/uv_ownership/source_cut.rs`](../../crates/geometry/src/analysis/critical/material_link/vertex_transport/uv_ownership/source_cut.rs)
   proves fixed-exit relative surgery against the actual original germs,
   retained central continuations and foreign sources. Original classification
@@ -334,6 +336,13 @@ A joint collapses only with coefficient identity or equal singleton outward UV
 enclosures; overlapping or merely small uncertainty boxes are not identity and
 do not erase displacement or correspondence obligations.
 
+Selected-original chart errors are measured upper bounds, not admission ceilings.
+Independent original-joint image checks use the immutable admitted source
+uncertainty while retaining exact source cuts, closed cutovers, whole-image
+containment and projection qualification. A looser outward recomputation cannot
+turn a tighter earlier enclosure into a new tolerance policy. Metric sealing
+remains independent of this topology qualification.
+
 Numerical knot/cut leaves are not new source endpoints. A leaf can use its
 complete boundary's exact shared C0 anchor only after opposite monotone germs
 are certified over both entire leaf-to-anchor parameter hulls. This preserves
@@ -382,11 +391,13 @@ SolidCore parity. The unchanged original fixtures and operator workflows remain
 the reproduction inputs; report the SolidCore paths actually exercised and their
 explicit refusals before expanding support claims.
 
-Rounded-housing raw sections and incoming cap incidence have bounded native
-coverage, but complete ordinary-housing manufacturing still refuses at the
-nonplanar source-vertex critical band around Z=2 mm. A closed-source shape bound
-does not discharge joined height-continuation or actual coface/root incidence.
-The union guard remains required; no singleton waiver is available.
+Rounded-housing source-corner disk sweeps and raw pocket-interior sections have
+bounded native coverage, but complete ordinary-housing manufacturing remains
+unqualified. The current Compile reaches the upper rounded-cap section near
+Z=8.05 mm, where the whole-face uniform-coordinate graph gate refuses. Native
+root coverage refines both parameters; independent-parameter uncertainty cannot
+be eliminated by dependent-only subdivision. A closed-source shape bound alone
+still grants no topology authority. The union guard remains required.
 
 The raw section matrix also retains unresolved correspondence-work refusals for
 the tapered fitting and selected cylinder/bracket cuts under its existing work

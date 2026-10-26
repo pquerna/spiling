@@ -297,6 +297,65 @@ mod tests {
     }
 
     #[test]
+    fn housing_corner_has_a_disk_sweep_but_pocket_birth_is_not_a_product() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/geometry/independent-exporters/occt-rounded-housing-mm.step"),
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let definition = crate::from_step_bytes_with_cancel(&bytes, &cancel).unwrap();
+        let mut request = request(&definition);
+        let rows = ActualMaterialCoordinates::source_rows(&request.frame).unwrap();
+        let mut work = GeometryWorkBudget::new(512_000_000);
+        let owner = crate::analysis::material_source::prepare_solid(
+            &definition,
+            MAX_SCRATCH_BYTES,
+            &mut work,
+            &cancel,
+        )
+        .unwrap();
+        for (band, sample, expected) in [
+            ([2.0, 2.1], 2.05, Some(RadialRegionKind::Disk)),
+            ([4.1, 4.2], 4.15, None),
+        ] {
+            request.height_interval_mm = band;
+            request.sample_height_mm = sample;
+            let coordinates = ActualMaterialCoordinates::source(
+                &definition,
+                &request.frame,
+                &rows,
+                band,
+                sample,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            let product = certify_closed_radial_material_product(
+                owner.source_view().unwrap(),
+                &request,
+                &coordinates,
+                MAX_SCRATCH_BYTES,
+                &mut work,
+                &cancel,
+            )
+            .unwrap();
+            match expected {
+                Some(kind) => assert_eq!(
+                    product
+                        .expect("the closed rounded corner preserves a disk")
+                        .kind(),
+                    kind
+                ),
+                None => assert!(
+                    product.is_none(),
+                    "a pocket born inside the closed band cannot be a disk or annulus product"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn product_refuses_closed_vertex_cut_and_propagates_terminal_errors() {
         let definition = original_box();
         let mut request = request(&definition);
