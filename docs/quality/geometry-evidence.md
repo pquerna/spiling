@@ -402,12 +402,13 @@ Prepared native housing sections preserve material before/after the corner event
 and the pocket through the rounded cap under plane reversal. A necessary root
 overcover is not existence authority: a face without trim incidences is empty
 only after complete whole-coefficient exclusion, never from missing crossings.
-The unchanged ordinary housing, source-zoned centered physical plate and paired
-fine/genuine combined H1 exercise SolidCore placement, Preflight, Compile,
-independent saved-byte Verify/export/save and byte-identical source-deleted
-fresh-engine recovery. This does not qualify general STEP, fitting/bracket or
-affected workbench journeys. Source metrics, material/void topology and the
-union guard remain independent.
+The unchanged ordinary housing, source-zoned centered physical plate, paired
+fine/genuine combined H1 and tapered fitting exercise SolidCore placement,
+Preflight, Compile, independent saved-byte Verify/export/save and byte-identical
+source-deleted fresh-engine recovery. Fitting recovery may retain a geometry-only
+scene with its immutable program; this does not create a source display mesh.
+General STEP, bracket and affected workbench remain unqualified. Source metrics,
+material/void topology and the union guard remain independent.
 
 Standalone raw inspection retains whole-coedge correspondence-work refusals,
 including the housing upper cap, tapered fitting and selected cylinder/bracket

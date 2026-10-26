@@ -65,6 +65,12 @@ Diagnostics generate synthetic triangle chunks with optional explicitly syntheti
 
 Native results are staged privately. Cancellation/staleness checks and source-pin reservations precede the worker promotion decision; only its ACK permits core/scene publication. Immutable operation bytes and terminal output references then commit together in SQLite. A cancellation request arriving after ACK or after a save manifest replacement cannot turn committed success into cancelled rollback. A ledger failure after native/disk commit interrupts the engine and requires explicit reconciliation, never automatic retry. Saved sources and manufacturing bundles are reopened/replayed in a fresh native session; unfinished native operations are not resumed.
 
+A geometry-only Scene result has no display artifacts, but Open may republish its
+immutable saved manufacturing bundle. Validate those bundle descriptors and
+their independent budgets even when `unique_mesh_bytes` is zero; lack of a
+display mesh does not remove saved-program authority. Fresh verification still
+decodes the stored bytes independently and does not trust a saved verified flag.
+
 ## Incremental artifacts and binary reads
 
 Each available descriptor names complete immutable bytes as `artifacts/{sha256}`, with size, checksum and media type. Availability is published in the same SQLite transaction as its bytes. Diagnostic descriptors are append-only and bounded to 64; repeated identical outputs may share content. Native outputs are published only after their promoted result, not at worker stage time. Overall diagnostic success is distinct from partial availability. Manufacturing exports require a complete independently verified bundle; an incomplete program is never a verified build.

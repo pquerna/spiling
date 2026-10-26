@@ -56,7 +56,7 @@ fn native_snapshots_validate_identity_state_timestamps_and_terminal_details() {
     assert!(native_operation_view(&op).is_err());
 }
 #[test]
-fn geometry_only_native_scene_succeeds_without_fabricated_display_outputs() {
+fn geometry_only_scene_accepts_saved_programs_but_rejects_display_outputs() {
     let mut op = operation();
     let mut meta = native_metadata(&op).unwrap();
     meta.state = rpc::NativeOperationState::NativeSucceeded as i32;
@@ -85,6 +85,17 @@ fn geometry_only_native_scene_succeeds_without_fabricated_display_outputs() {
     let view = native_operation_view(&op).unwrap();
     assert!(view.outputs.is_empty());
     assert!(matches!(view.result, Some(JobResult::Scene { summary: actual }) if actual == summary));
+    meta.outputs.push(rpc::Artifact {
+        name: format!("artifacts/{}", "b".repeat(64)),
+        sha256: "b".repeat(64),
+        size_bytes: 152,
+        media_type: "application/x-spiling-manufacturing-bundle".into(),
+    });
+    op.metadata.as_mut().unwrap().value = meta.encode_to_vec();
+    let restored = native_operation_view(&op).unwrap();
+    assert_eq!(restored.status, JobStatus::Completed);
+    assert!(matches!(restored.result, Some(JobResult::Scene { summary: actual })
+        if actual.unique_mesh_bytes == 0 && actual.occurrence_count == 1));
     meta.outputs.push(rpc::Artifact {
         name: format!("artifacts/{}", "a".repeat(64)),
         sha256: "a".repeat(64),

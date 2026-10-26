@@ -297,8 +297,14 @@ pub fn native_operation_view(
                 if summary.session_id != session_id {
                     return Err("scene result session mismatch".into());
                 }
-                if summary.unique_mesh_bytes == 0 && !meta.outputs.is_empty() {
-                    return Err("geometry-only scene must not publish display artifacts".into());
+                // Open republishes the immutable saved program independently
+                // of whether native geometry has a display mesh.
+                if summary.unique_mesh_bytes == 0
+                    && meta.outputs.iter().any(|output| {
+                        output.media_type != "application/x-spiling-manufacturing-bundle"
+                    })
+                {
+                    return Err("geometry-only scene may publish saved manufacturing bundles, not display artifacts".into());
                 }
             }
             JobResult::ManufacturingCompiled { resource, .. }

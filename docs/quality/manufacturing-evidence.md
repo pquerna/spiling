@@ -16,8 +16,10 @@ The **SolidCore development cutover is not general manufacturing parity**.
 Native box/protected-bore, unchanged ordinary rounded housing, source-zoned
 centered physical plate and paired fine/genuine combined H1 journeys have real
 CLI evidence through placement, Preflight, Compile, independent saved-byte
-verification/export/save and source-deleted recovery. This does not qualify
-fitting, bracket, affected workbench or broader mechanical-part journeys.
+verification/export/save and source-deleted recovery. The unchanged tapered
+fitting also completes that journey with `complete-sparse.intent.json`, including
+fresh recovery of a geometry-only scene and its saved program. This does not
+qualify original bracket, affected workbench or broader mechanical-part journeys.
 Missing declared PCurves may use a checked inverse of the actual original plane
 or admitted cylinder family; generated native UV curves and failed declared
 associations cannot substitute. Historical Monstertruck evidence below retains
@@ -396,8 +398,13 @@ separator, native inner-material and actual-anchor/core-bond obligations.
 Both jobs retain byte-identical fresh source-deleted recovery; CombineEligible
 selection or an all-fine result alone is not H1 qualification.
 
-Fitting closed-source metrics, original spline-carrier gauge/correspondence,
-closed-spline seams, original bracket and affected workbench remain obligations.
+The tapered-fitting CLI uses the same source/query authority and independent
+replay, not a fitting-specific planner. A geometry-only restored scene may
+publish its saved manufacturing bundle without a source display mesh; native
+operation validation still rejects display artifacts in that case.
+
+Original spline-carrier gauge/correspondence, closed-spline seams, original
+bracket, remaining native-query controls and affected workbench remain obligations.
 
 Broader STEP conversion still has explicit closed-edge refusals. Mixed-source
 contact, tilted-placement/critical collars, inward-ramp conditioning and broader

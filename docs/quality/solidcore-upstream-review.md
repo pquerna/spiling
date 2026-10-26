@@ -18,14 +18,22 @@ violation before they become upstream bug candidates.
 
 | Role | Exact identity |
 | --- | --- |
-| Upstream and fast-forwarded fork `main` | [`694ab1f821289a97fba21f70512a8dc2ea8bd908`](https://github.com/tangency-labs/solidcore/commit/694ab1f821289a97fba21f70512a8dc2ea8bd908) |
-| Maintained integration tip | [`b33839745a29950af2db81dd6b6c30251fec55ce`](https://github.com/pquerna/solidcore/commit/b33839745a29950af2db81dd6b6c30251fec55ce), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
+| Upstream and fast-forwarded fork `main` | [`33e84a760ddc1e978fd957c1e91b4c4c819a42f7`](https://github.com/tangency-labs/solidcore/commit/33e84a760ddc1e978fd957c1e91b4c4c819a42f7) |
+| Maintained integration tip | [`3fcf367d56970414a505d75a584546b52658e61d`](https://github.com/pquerna/solidcore/commit/3fcf367d56970414a505d75a584546b52658e61d), branch [`pquerna/integration-spiling-tracking`](https://github.com/pquerna/solidcore/tree/pquerna/integration-spiling-tracking) |
 | Qualified Spiling consumer pin | [`ee4d9c3feefb3c702ca53b190b7fe4516714c841`](https://github.com/pquerna/solidcore/commit/ee4d9c3feefb3c702ca53b190b7fe4516714c841); both declarations in [`Cargo.toml`](../../Cargo.toml), their lockfile sources and `geometry::KERNEL_REVISION` agree |
 
 Refreshing the fork does not automatically promote its moving tip into Spiling.
 The refreshed mesher follows upstream's mutable BREP property API without copying
-the model. Mesher controls and native primitive runs do not establish imported
+the model and explicitly refuses the optional backend's unsupported BadPlanar
+case. Mesher controls, native primitive runs, owned-copy position/derivatives
+and current STEP-bridge BREP construction do not establish imported
 manufacturing parity; promotion still requires the real engine/CLI consumer gate.
+
+The standalone native tight-box query on imported housing reaches an unported
+trimmed-face cache handle binding. This query is not the current Spiling
+coefficient-enclosure import path; never replace that path with a vertex hull or
+a failed tight-box fallback. The query remains unqualified, not evidence for a
+consumer-pin promotion or an independently established upstream regression.
 
 The integration contains inherited tessellator work plus the separate Spiling
 budget and STEP-copy overlays. Preserve the tessellator's original authors and
@@ -57,7 +65,7 @@ GitHub session and is not implied by their publication.
 | --- | --- | --- |
 | Independent copies of `StepSurface` wrappers | Upstream [`Surface::copy`](https://github.com/tangency-labs/solidcore/blob/2d37267fea023715d4e15e3baf59bef7b4e399f9/crates/solidcore/src/surface/surface/p2.rs#L1317-L1330) and `copy_and_add_analytics` intentionally route `Step` to the failing base implementation. The identical native consumer refuses on upstream and succeeds on the rebased patch. The original [owned-copy overlay](https://github.com/pquerna/solidcore/commit/18ad8bd1b9d6a1db5e51cf0439bb3db5df31dcd4) is small and independent of the unmerged mesher. | **Yes: a narrow capability issue/proposal.** Do not describe it as corruption in a successful copy or as a demonstrated C++-parity regression. Confirm maintainers want this Rust-owned-wrapper behavior before proposing a PR. |
 | Cumulative work, cooperative cancellation and visible-storage admission for meshing | The [resource-control overlay](https://github.com/pquerna/solidcore/commit/1fef444cbaad61c0f414fe126314c079175da046) extends inherited `solidcore-mesh`, which is absent from the reviewed upstream `main`. It also controls optional grid/deviation work. Its backend trait changes are not purely additive. | **Feature/API discussion, not a proven correctness bug.** Coordinate with [draft mesher PR #636](https://github.com/tangency-labs/solidcore/pull/636); keep the large implementation in the fork until the contract and dependency path are agreed. |
-| Housing spherical quotient-cut qualification | The coefficient-sheet position overcovers are Spiling-owned. The remaining central/shared-exit exclusion must prove actual original operand ownership; interval overlap is not an exact identity. | **Do not file upstream.** No independently established native primitive violation is demonstrated. |
+| Housing source/domain/section qualification | Source allowance provenance, complete native zero-set coverage and original operand/material correspondence are Spiling-owned. Existing variable-radius source authority plus bounded local charts qualify the current ordinary/plate/H1 CLI flows, not arbitrary quotient cuts. | **Do not file upstream.** No independently established native primitive violation is demonstrated. |
 | Source corner reference-star construction | A linear radial ribbon can fold at opposed curved germs. Spiling owns the quadratic comparison, complete closed-apex proof, source-only cost admission and whole-original cap enclosure. | **Spiling change, not a kernel bug.** The source-backed bore now has real Compile/fresh-verification/export/replay evidence; this does not qualify spherical quotient cuts. |
 
 ### Existing related upstream work
